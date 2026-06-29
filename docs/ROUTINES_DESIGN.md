@@ -192,8 +192,10 @@ as operational-prompt directives and shown for legibility, until enforcement is 
 multi-select is legible + enforced-where-it-maps now, with mechanical coverage growing over time;
 "every capability hard-gated" is a larger gate project, not part of this page.
 
-**OPEN-PERMS:** confirm the two-axis model + the initial capability list + the AI-proposes /
-template-locks behavior. Only blocks Phase 3 (the create form).
+**Permissions (resolved 2026-06-29):** two-axis model adopted (write cascade + capability
+multi-select), AI proposes the capability set from intent for custom routines, templates lock
+theirs, enforcement is gate-mapped where it maps and advisory otherwise. Build with the Phase 3
+create form.
 
 ### 5.4 Templates (gallery + preview)
 The collapsible "Start from a template" gallery stays, but each card gains a **preview** (expand to

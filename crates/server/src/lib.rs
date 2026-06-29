@@ -6108,11 +6108,42 @@ async fn list_children(
 }
 
 /// Routines for the active project. No active project → empty list.
-async fn list_routines(State(state): State<AppState>) -> Json<Vec<Routine>> {
+/// A routine plus COMPUTED scheduling metadata for the dashboard (next fire + due-soon). Not
+/// stored on the routine; recomputed from its schedule on each list. Flattened so existing clients
+/// that read the routine fields keep working and just gain the extra fields.
+#[derive(serde::Serialize)]
+struct RoutineWithMeta {
+    #[serde(flatten)]
+    routine: Routine,
+    /// Next fire (naive-local ISO), or None for manual/unrecognized schedules and past one-offs.
+    next_fire: Option<String>,
+    /// Human label for the next fire ("Jun 30, 09:00"), for direct display.
+    next_fire_label: Option<String>,
+    /// True when the next fire is within the next 24 hours (drives the "due soon" status metric).
+    due_soon: bool,
+}
+
+async fn list_routines(State(state): State<AppState>) -> Json<Vec<RoutineWithMeta>> {
     let Some(p) = state.projects.active() else {
         return Json(vec![]);
     };
-    Json(state.routines.list_for_project(&p.id))
+    let now = chrono::Local::now().naive_local();
+    let soon = now + chrono::Duration::hours(24);
+    let with_meta = state
+        .routines
+        .list_for_project(&p.id)
+        .into_iter()
+        .map(|r| {
+            let nf = crate::schedule::next_fire(&r.schedule, now);
+            RoutineWithMeta {
+                next_fire: nf.map(|dt| dt.format("%Y-%m-%dT%H:%M:%S").to_string()),
+                next_fire_label: nf.map(|dt| dt.format("%b %d, %H:%M").to_string()),
+                due_soon: nf.map(|dt| dt <= soon).unwrap_or(false),
+                routine: r,
+            }
+        })
+        .collect();
+    Json(with_meta)
 }
 
 /// Create a routine.

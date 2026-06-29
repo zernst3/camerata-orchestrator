@@ -178,6 +178,61 @@ fn most_recent_slot(sched: &Schedule, now: NaiveDateTime) -> Option<NaiveDateTim
     }
 }
 
+/// The next scheduled occurrence STRICTLY AFTER `now`, if any. `None` for `Manual`/unrecognized,
+/// or a `once` whose time has already passed. Symmetric to [`most_recent_slot`]; drives the
+/// dashboard's next-fire column and the "due soon" status metric.
+fn next_slot(sched: &Schedule, now: NaiveDateTime) -> Option<NaiveDateTime> {
+    match sched {
+        Schedule::Manual => None,
+        Schedule::Daily { h, m } => {
+            let today = at(now.date(), *h, *m)?;
+            if today > now {
+                Some(today)
+            } else {
+                at(now.date().succ_opt()?, *h, *m)
+            }
+        }
+        Schedule::Weekly { days, h, m } => {
+            // Walk forward up to 8 days (so a scheduled weekday whose time today has already
+            // passed rolls to the same weekday next week).
+            let mut date = now.date();
+            for _ in 0..8 {
+                if days.contains(&date.weekday()) {
+                    if let Some(slot) = at(date, *h, *m) {
+                        if slot > now {
+                            return Some(slot);
+                        }
+                    }
+                }
+                date = date.succ_opt()?;
+            }
+            None
+        }
+        Schedule::Monthly { day, h, m } => {
+            let (y, mo) = (now.year(), now.month());
+            let this_day = (*day).min(last_day_of_month(y, mo));
+            let this = NaiveDate::from_ymd_opt(y, mo, this_day).and_then(|d| at(d, *h, *m))?;
+            if this > now {
+                return Some(this);
+            }
+            // Next month.
+            let (ny, nm) = if mo == 12 { (y + 1, 1) } else { (y, mo + 1) };
+            let next_day = (*day).min(last_day_of_month(ny, nm));
+            NaiveDate::from_ymd_opt(ny, nm, next_day).and_then(|d| at(d, *h, *m))
+        }
+        Schedule::Once { date, h, m } => {
+            let slot = at(*date, *h, *m)?;
+            (slot > now).then_some(slot)
+        }
+    }
+}
+
+/// The next time this routine will fire after `now` (parsing the human schedule string). `None`
+/// for a manual / unrecognized schedule, or a one-off already in the past. Pure + deterministic.
+pub fn next_fire(schedule: &str, now: NaiveDateTime) -> Option<NaiveDateTime> {
+    next_slot(&parse(schedule), now)
+}
+
 /// Is this routine due to fire at `now`, given when it last fired?
 ///
 /// Due when there is a scheduled slot at/before `now` that is strictly newer than the
@@ -199,6 +254,57 @@ mod tests {
             .unwrap()
             .and_hms_opt(h, mi, 0)
             .unwrap()
+    }
+
+    // ── next_fire: the next scheduled slot strictly after `now` ────────────────
+
+    #[test]
+    fn next_fire_daily_rolls_to_tomorrow_when_today_passed() {
+        let now = dt(2026, 6, 29, 10, 0);
+        assert_eq!(next_fire("daily 09:00", now).unwrap(), dt(2026, 6, 30, 9, 0));
+        assert_eq!(next_fire("daily 14:00", now).unwrap(), dt(2026, 6, 29, 14, 0));
+    }
+
+    #[test]
+    fn next_fire_monthly_rolls_to_next_month_when_day_passed() {
+        let now = dt(2026, 6, 29, 10, 0);
+        assert_eq!(next_fire("monthly day 15 09:00", now).unwrap(), dt(2026, 7, 15, 9, 0));
+        assert_eq!(next_fire("monthly day 30 09:00", now).unwrap(), dt(2026, 6, 30, 9, 0));
+    }
+
+    #[test]
+    fn next_fire_once_future_vs_past() {
+        let now = dt(2026, 6, 29, 10, 0);
+        assert_eq!(next_fire("once 2026-07-04 12:00", now).unwrap(), dt(2026, 7, 4, 12, 0));
+        assert!(next_fire("once 2026-06-01 12:00", now).is_none());
+    }
+
+    #[test]
+    fn next_fire_manual_and_unrecognized_are_none() {
+        let now = dt(2026, 6, 29, 10, 0);
+        assert!(next_fire("manual", now).is_none());
+        assert!(next_fire("garbage input", now).is_none());
+    }
+
+    #[test]
+    fn next_fire_weekly_same_day_rolls_to_next_week_when_passed() {
+        use chrono::{Datelike, Duration, Weekday};
+        let now = dt(2026, 6, 29, 10, 0);
+        let day = match now.weekday() {
+            Weekday::Mon => "Mon",
+            Weekday::Tue => "Tue",
+            Weekday::Wed => "Wed",
+            Weekday::Thu => "Thu",
+            Weekday::Fri => "Fri",
+            Weekday::Sat => "Sat",
+            Weekday::Sun => "Sun",
+        };
+        // Today at 09:00 already passed -> same weekday next week (+7 days).
+        let passed = next_fire(&format!("weekly {day} 09:00"), now).unwrap();
+        assert_eq!(passed, (now.date() + Duration::days(7)).and_hms_opt(9, 0, 0).unwrap());
+        // Today at 14:00 still ahead -> today.
+        let ahead = next_fire(&format!("weekly {day} 14:00"), now).unwrap();
+        assert_eq!(ahead, dt(2026, 6, 29, 14, 0));
     }
 
     #[test]
