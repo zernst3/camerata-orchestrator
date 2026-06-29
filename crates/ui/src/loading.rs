@@ -104,3 +104,46 @@ pub fn is_loading() -> bool {
         None => false,
     }
 }
+
+/// The Bombe's effective running state, as a pure function so it can be unit-tested and stays the
+/// single definition shared with [`crate::bombe_bg`].
+///
+/// The Bombe is RESERVED for genuine AI / heavy work — it is the visual "the machine is doing
+/// real thinking" signal, and its gravitas only holds if it is not spent on trivial loads. A
+/// [`LoadingGuard`] is therefore created ONLY around AI / long-running operations (chat turns,
+/// authoring, investigation/development runs, scans, audits), never around a quick list fetch.
+/// The guard's RAII drop is what stops the animation when the work finishes (including at the end
+/// of a streamed reply, where the guard lives for the whole stream).
+///
+/// `running = enabled && (count > 0 || preview)` — animations fire when the Bombe is enabled AND
+/// either real AI work is in flight OR Settings is previewing it.
+pub fn bombe_running(enabled: bool, count: usize, preview: bool) -> bool {
+    enabled && (count > 0 || preview)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bombe_running;
+
+    #[test]
+    fn idle_and_enabled_is_not_running() {
+        assert!(!bombe_running(true, 0, false));
+    }
+
+    #[test]
+    fn in_flight_ai_work_runs_when_enabled() {
+        assert!(bombe_running(true, 1, false));
+        assert!(bombe_running(true, 3, false));
+    }
+
+    #[test]
+    fn disabled_never_runs_even_with_work_or_preview() {
+        assert!(!bombe_running(false, 5, true));
+        assert!(!bombe_running(false, 0, true));
+    }
+
+    #[test]
+    fn preview_runs_with_no_real_work_when_enabled() {
+        assert!(bombe_running(true, 0, true));
+    }
+}

@@ -70,9 +70,10 @@ pub fn BombeBg() -> Element {
         None => false,
     };
 
-    // The effective running state: animations only fire when the bombe is
-    // enabled AND either real work is in-flight OR the preview is active.
-    let running = enabled && (count > 0 || preview);
+    // The effective running state (shared, unit-tested formula): animations only fire when the
+    // bombe is enabled AND either real AI work is in-flight OR the preview is active. The count is
+    // driven solely by LoadingGuards around AI/heavy work, so the Bombe stays reserved for it.
+    let running = crate::loading::bombe_running(enabled, count, preview);
 
     let machine_class = if running {
         "bombe-bg-machine bombe-running"

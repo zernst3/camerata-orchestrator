@@ -1295,6 +1295,10 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                     let finding_send = finding_kd.clone();
                                     let pis_send = pis_kd.clone();
                                     spawn(async move {
+                                        // The Bombe is reserved for AI work: hold a loading guard
+                                        // for the whole chat turn so the machine runs while the
+                                        // assistant is thinking and stops when the reply returns.
+                                        let _guard = crate::loading::LoadingGuard::new();
                                         // Per-turn refetch: pull the LIVE dev state + project context
                                         // (scan results, selected rules, project name) so the prompt
                                         // reflects the user's CURRENT selection / project / story state
@@ -1351,6 +1355,10 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                     let finding_send = finding_btn.clone();
                                     let pis_send = pis_btn.clone();
                                     spawn(async move {
+                                        // The Bombe is reserved for AI work: hold a loading guard
+                                        // for the whole chat turn so the machine runs while the
+                                        // assistant is thinking and stops when the reply returns.
+                                        let _guard = crate::loading::LoadingGuard::new();
                                         // Per-turn refetch: pull the LIVE dev state + project context
                                         // (scan results, selected rules, project name) so the prompt
                                         // reflects the user's CURRENT selection / project / story state
