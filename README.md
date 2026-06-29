@@ -151,7 +151,7 @@ cargo run -p camerata -- deploy-demo        # the draft->publish gate, a local d
 - **Agent layer:** short-lived agents, one per role, scoped by prompt, allowed tools, path boundaries, and rule subset. Each gets read access to all of the project's repos; writes are jailed to its worktree. Two drivers: `ClaudeCliDriver` (subscription path, drives `claude -p`) and `ApiAgentDriver` (in-process, owns the MCP tool-use loop, works with any OpenRouter-listed or Anthropic API provider).
 - **Model registry:** Claude static entries merged with live OpenRouter discovery. Each entry is flagged for free tier, tool-use support, prompt caching, vision capability, and pricing. Fleet routing is domain-first (visual work to the Designer band) then by difficulty within the Strongest / Balanced / Fast logic ladder.
 - **Persistence:** a versioned store (SQLite now, Postgres later behind the same trait seam) so every user/AI edit is saved with full history.
-- **UI:** a Dioxus desktop app with a Bombe machine background animation; tabular surfaces dogfood [Chorale](../rust-chorale).
+- **UI:** a Dioxus desktop app whose Bletchley Bombe background is an AI-activity indicator: it powers up (lights up, rotors spin) only while genuine AI / heavy work is in flight (chat turns, authoring, investigation/live-run, scans/audits) and powers down to a dim idle the rest of the time, with the rotor knobs freezing in place between runs. Trivial fetches never animate it. Tabular surfaces dogfood [Chorale](../rust-chorale).
 
 ## The crate dependency graph
 

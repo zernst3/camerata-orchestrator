@@ -678,7 +678,14 @@ Key design points:
 - **Provider selection**: the driver is initialized with a provider URL + API key.
   An OpenRouter key routes through `https://openrouter.ai/api/v1`; an Anthropic
   key routes directly. The Messages API shape is identical; only the base URL and
-  `Authorization` header differ.
+  `Authorization` header differ. For the Claude vendor specifically, the transport
+  is chosen by `CAMERATA_LLM_BACKEND` (default `cli`): set `CAMERATA_LLM_BACKEND=api`
+  with `ANTHROPIC_API_KEY` to run Camerata's Claude agents over the Anthropic Messages
+  API directly, with no Claude CLI installed (issue #110); otherwise the `ClaudeCliDriver`
+  drives `claude -p`.
+- **Per-model provider coupling**: a model always runs on its own provider's transport.
+  When the fleet mixes models from different providers, each model is dispatched through
+  the provider it belongs to rather than being forced onto one shared transport.
 - **Model registry**: `crates/agent/src/model_registry.rs` combines a static
   list of Claude model entries with live OpenRouter discovery
   (`GET /api/v1/models`). Each entry is tagged with capability flags:
@@ -914,9 +921,18 @@ sorted for deterministic order), parsing each into a `Rule`. The corpus lives at
 is self-contained); override with the `CAMERATA_CORPUS_PATH` env var.
 
 Each corpus file has fields: `id`, `title`, `enforcement`, `domain`,
-`qualifies` (optional summary), `[decision]` (question + why + default), and
+`qualifies` (optional summary), `[decision]` (question + why + optional default), and
 `[[option]]` blocks. Unknown fields are silently ignored (no
 `deny_unknown_fields`) so future corpus fields don't break the loader.
+
+**Decision rules present options neutrally (issue #81).** The corpus was audited and rebalanced to
+be **project-independent**: context-dependent architecture / approach rules no longer ship an
+adopted `[decision].default` or biased prose. Each option states its own legitimate fit so the
+architect chooses on the merits for their project rather than inheriting Camerata's own choice.
+(The Rust rules were likewise made portable rather than Camerata-specific; `RUST-DOMAIN-6` got a
+surgical split that neutralizes its error-org axis while keeping the type-erasure floor.) Rules with
+a genuine always-correct answer keep their default; only the genuinely context-dependent ones were
+neutralized.
 
 ### Two opt-in/tier schema flags (`opt_in_only`, `layer3_only`)
 
@@ -2594,8 +2610,12 @@ would write the old files. The **Regenerate CI workflow** button also only wrote
 
 `POST /api/projects/:id/emit-local` (`emit_project_local` in `crates/server/src/lib.rs`)
 regenerates `AGENTS.md` and `CONVENTIONS.md` (and the check manifest `.camerata/checks.toml` and
-CI workflow `.github/workflows/camerata-gates.yml`) **directly into the repo's local clone**,
-with no commit and no PR.
+CI workflow `.github/workflows/camerata-gates.yml`) **directly into the repo's local clone**.
+By default it writes locally with no commit; an `EmitLocalReq` body carries three cascading flags
+(`branch` → `push` → `open_pr`) that escalate to a governance-branch commit, a push, and a PR.
+`normalize_emit_cascade(branch, push, open_pr)` enforces the cascade server-side (a PR implies a
+push implies a branch) so a malformed request can never push or PR without the prerequisite step;
+`crate::workspace::apply_local` performs the local write. A push or PR requires a GitHub token.
 
 ### What it does
 
@@ -2611,8 +2631,15 @@ descriptive message when no local workspace is configured.
 
 ### UI surface
 
-The **"Emit ruleset to repos (re-emit)"** button in the **Rules view** (`crates/ui/src/cockpit/rules.rs`)
-calls `POST /api/projects/:id/emit-local`. The label switches to "Emitting…" while in flight.
+The single **"Emit rules locally"** button in the **Rules view** (`crates/ui/src/cockpit/rules.rs`)
+calls `POST /api/projects/:id/emit-local`, sending the three cascading toggles (Save emits on a new
+branch → Push to GitHub → Open a PR). The old separate "Emit ruleset to repos (re-emit)" PR button
+is removed. The label switches to "Emitting…" while in flight.
+
+The Rules view also exposes **"Reconcile with repos"** (`GET /api/projects/:id/reconcile`,
+`reconcile_project`), which reads each repo's emitted gate config (local working copy first, then
+the GitHub governance branch) via `crate::reconcile::reconcile_repos_local`, then `adopt_from_applied`
+mirrors the discovered base selections and merges custom rules back into project state.
 
 ---
 
@@ -2795,35 +2822,57 @@ table, proposed-rules table, and the work-item table share the same warm palette
 homage to the Bletchley Park Bombe codebreaking machine. It renders as a fixed-position
 background layer (`pointer-events: none`) so it never interferes with interactions.
 
+**The Bombe is an AI-activity indicator.** It is RESERVED for genuine AI / heavy work: it is the
+visual "the machine is doing real thinking" signal, and its gravitas only holds if it is not spent
+on trivial loads. A `LoadingGuard` is therefore created ONLY around AI / long-running operations,
+never around a quick list fetch. The guard call sites are the only things that animate it:
+
+- **Chat turns** (`crates/ui/src/chat.rs`): the guard lives for the whole streamed reply.
+- **Authoring / investigation / live-run** (`crates/ui/src/cockpit/uow.rs`,
+  `crates/ui/src/cockpit/live_run.rs`).
+- **Scans / audits** (`crates/ui/src/cockpit/scan.rs`).
+
+Trivial fetches (project lists, settings, corpus) deliberately do NOT hold a guard, so the Bombe
+stays still during everyday navigation.
+
 **Appearance:**
-- **Idle:** dark and subtle (low opacity, dim glow). Text is always readable against the overlay.
-- **Run active:** brighter (higher opacity, more vivid animation). The obscuring overlay lifts
-  slightly to reveal more of the machine, signaling that work is in flight.
+- **Idle (powered down):** dim and desaturated. The machine carries a `filter: brightness(0.72)
+  saturate(0.5)` and lower opacity, and the rotors are paused. Text is always readable.
+- **Run active (powered up):** the `.bombe-running` state brightens and re-saturates the machine
+  (`filter: brightness(1.06) saturate(1.1)`) and raises its opacity. `opacity` + `filter`
+  transitions make it LIGHT UP and GO DIM smoothly (it powers on and fades off instead of
+  snapping in with the spin).
+- **Knob persistence:** the rotor spin animation is ALWAYS applied but PAUSED when idle via
+  `animation-play-state: paused` (running flips it to `running`). CSS preserves an animation's
+  progress across pause/resume, so each rotor FREEZES at its current angle when work stops and
+  RESUMES from exactly there next time, rather than snapping back to its start angle.
 
 The animation is driven by a **global ref-counted loading state** (`crates/ui/src/loading.rs`):
 
-- `provide_loading_context()` — call once at the root to install the `Signal<u32>` into the
-  Dioxus context. Called in `App` (`crates/ui/src/main.rs`) before `BombeBg` mounts.
-- `LoadingGuard::new()` — a RAII guard that increments the count on creation and decrements on
-  drop. Any async operation that should drive the Bombe holds one while in-flight.
-- `is_loading() -> bool` — true when count > 0.
+- `provide_loading_context()`: call once at the root to install the `Signal<usize>` (plus the
+  `BombeEnabled` / `BombePreview` control signals) into the Dioxus context. Called in `App` before
+  `BombeBg` mounts.
+- `LoadingGuard::new()`: a RAII guard that increments the count on creation and decrements on
+  drop. Created only around AI / heavy work (the call sites above).
+- `bombe_running(enabled, count, preview) -> bool`: the single pure (unit-tested) formula shared
+  by the guard model and `BombeBg`, namely `enabled && (count > 0 || preview)`.
 
-`BombeBg` reads `is_loading()` and toggles the `.bombe-running` CSS class on the machine
-element. When running, CSS animations bring the Bombe "to life" at higher opacity; when idle,
-the machine is dim (opacity 0.38 vs 0.72 running). The net effect: the background subtly
-animates whenever ANY async operation is in flight across the entire cockpit.
+`BombeBg` computes `bombe_running(...)` and toggles the `.bombe-running` CSS class on the machine
+element. The net effect: the background powers up only while real AI / heavy work is in flight.
 
 **Settings controls (in Settings → Cross-project):**
 
-- **Global ON/OFF**: a boolean stored in `SettingsStore` (`bombe_enabled: bool`, default `true`).
-  When off, `BombeBg` is not rendered at all; the background is a plain dark surface.
-- **Play/Pause preview**: a per-session in-memory toggle (does not persist) that lets the user
-  preview the Bombe in motion or freeze it without waiting for a real run. The preview overrides
-  the loading-state drive: `is_loading()` is bypassed, and the `.bombe-running` class is forced
-  on or off by the preview flag while the preview is active.
+- **Global ON/OFF**: `BombeEnabled`, persisted to `localStorage` under `camerata.bombe.enabled`
+  (default `true`). When off, the Bombe never animates regardless of work or preview.
+- **Play/Pause preview**: `BombePreview`, a transient in-memory flag (does not persist) that lets
+  Settings fire the animation without touching real loading state, so the user can preview the
+  Bombe in motion without waiting for a real run.
 
-`GET /api/settings` and `POST /api/settings` carry the `bombe_enabled` field alongside
-`workspace_root`; the UI reads it on mount to decide whether to render `BombeBg`.
+**Letting the Bombe show through.** The chat panel and the in-app terminal are slightly translucent
+(frosted): each uses an `rgba` background plus a `backdrop-filter: blur(...)` so the machine glows
+behind them while text stays legible. The terminal additionally sets xterm `allowTransparency` with
+a matching `rgba` theme background (`crates/ui/src/terminal.rs`) so its canvas does not paint over
+the Bombe.
 
 ---
 
@@ -2886,6 +2935,34 @@ These are separate ports — do not conflate them:
 `crates/worktracker/src/clarify_bridge.rs` posts the lead engineer's clarifying
 questions to the PO's board and polls for the PO's answer. Provider-agnostic;
 adapters implement it per tracker.
+
+---
+
+## 13. Test tiers
+
+The workspace has three tiers of automated tests, all run by `cargo test` and all hermetic
+(no real LLM, no network, no `claude`/process spawn):
+
+- **Unit tests (in-crate `#[cfg(test)]`)**: pure-logic and per-function coverage living
+  next to the code (for example `bombe_running` in `crates/ui/src/loading.rs`, the gate's
+  `check_*` functions, the emit-cascade `normalize_emit_cascade`).
+- **Integration tests (`crates/*/tests/`)**: exercise a seam end-to-end across a crate's
+  public surface (for example `onboarding_flow_e2e.rs` and `uow_lifecycle_e2e.rs` cover the
+  onboarding pieces and the per-transition UoW state machine in isolation; `vcs_action_gate_e2e.rs`
+  covers the VCS-action gate's config→rules→decision pipeline).
+- **Full-flow E2E integration tests**: hermetic whole-pipeline walks that thread ONE scenario
+  through the seams the other suites prove in isolation, in order, together. These are NOT browser
+  tests; they drive the in-process native `AppState`, never a real model:
+  - `crates/server/tests/governed_dev_run_e2e.rs`, a full governed-dev run. It asserts the gate
+    invariants the whole way through: `delegate`/`fan_out` are orchestrator-only and depth-1;
+    children are `gated_write`-only and worktree-jailed; Camerata is the sole committer; the
+    security floor is always-on. It also covers reconcile + adopt and fan-out partitioning, with a
+    no-spawn `ChildDriverFactory` test double so delegation exercises the real gating without
+    spending a token.
+  - `crates/server/tests/onboarding_full_e2e.rs`, the full onboarding walk:
+    scan → propose → apply → mark onboarded → development gate → suppressions registry, asserting
+    the arm-file set matches the emit-partitioning contract and that a prose-only apply omits the
+    CI-tier files.
 
 ---
 

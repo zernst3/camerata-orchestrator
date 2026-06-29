@@ -26,10 +26,14 @@ assistant that describes a feature that doesn't exist undercuts the whole point.
 > Custom), and individually selectable **helper-agent models** (audit, calibration, research chat,
 > story authoring, decomposition, escalation, clarification). L3 AI code review has its own model
 > selector (defaults to Balanced). The **Rules page** is rules-only (model config moved to Settings).
-> The **Rules view** has a **"Re-emit rules"** button that regenerates governance files directly into
-> local repo clones with no commit. The UI theme is **Bletchley industrial amber** with a background
-> **Bombe machine** animation (idle: dark and subtle; run active: brighter; text always readable);
-> Settings exposes a global ON/OFF and a Play/Pause preview. The **Intake page** renders the whole
+> The **Rules view** has an **"Emit rules locally"** button that regenerates governance files directly
+> into local repo clones. Emit is **local-only by default**, with three **cascading** toggles (each
+> requires the previous): **Save emits on a new branch → Push to GitHub → Open a PR**. The UI theme
+> is **Bletchley industrial amber** with a background **Bombe machine** that is an **AI-activity
+> indicator**: it powers up (lights up, rotors spin) only while genuine AI / heavy work runs (chat
+> turns, authoring, investigation, live runs, scans, audits) and powers down to a dim idle otherwise;
+> the rotor knobs freeze in place between runs and resume from there. Trivial fetches never animate
+> it. Settings exposes a global ON/OFF and a Play/Pause preview. The **Intake page** renders the whole
 > story inline (no separate modal) with a large **"Context for the investigation agent"** field that
 > is editable and deletable after it is added. The **Rules page** groups rule tables by domain,
 > collapsed by default; clicking a row opens a rule-detail modal. **Blank UoWs you author with AI**,
@@ -394,42 +398,83 @@ default. Clicking a group header expands it; clicking a row opens a **rule-detai
 decision question, all options and their rationale, the sources the rule is grounded in, and the
 enforcement kind. Tables use the dark Bletchley amber theme.
 
-The Rules view also hosts re-emit, suppressions, custom rules, and the repo-path **health check** (§5).
+The Rules view also hosts emit, reconcile, suppressions, custom rules, import/export, and the
+repo-path **health check** (§5).
 
-### Re-emit rules button (issue #106)
+### Emit rules locally (with optional escalation to a branch / push / PR)
 
-The **"Emit ruleset to repos (re-emit)"** button in the Rules view regenerates `AGENTS.md`,
-`CONVENTIONS.md`, `.camerata/checks.toml`, and `.github/workflows/camerata-gates.yml` **directly
-into each repo's local clone** — with no commit and no PR. This is the fix for a gap where
-editing rules after onboarding had no local-first path: only a GitHub push was available.
+The **"Emit rules locally"** button in the Rules view regenerates `AGENTS.md`, `CONVENTIONS.md`,
+`.camerata/checks.toml`, and `.github/workflows/camerata-gates.yml` from the current ruleset.
+Emit is **local-only by default**: it writes the governance files straight into each repo's local
+clone with no commit. Three **cascading** toggles escalate from there, each one requiring the
+previous to be checked:
+
+1. **Save emits on a new branch**: commit the emitted files onto the managed governance branch.
+2. **Push to GitHub**: push that branch to origin.
+3. **Open a PR**: open a pull request for it.
+
+Unchecking a level clears the deeper ones, so a request can never push without a branch or PR
+without a push. **Push and Open-a-PR require a connected GitHub token**; local-only and branch-only
+emits do not. Custom rules are always carried through. (There is no longer a separate
+"Emit ruleset to repos (re-emit)" PR button; this single button covers local writes through PRs.)
 
 Click it after editing rules (adding/removing rules, switching options, adding custom rules) to
-bring the governance files on your local branches up to date before committing. The button is
-always safe to re-run (it regenerates from the current ruleset each time). It requires at least
-one repo to have a resolved local path; if no local workspace is configured it reports an error
-rather than silently doing nothing.
+bring the governance files up to date. It is always safe to re-run (it regenerates from the current
+ruleset each time). It requires at least one repo to have a resolved local path; if no local
+workspace is configured it reports an error rather than silently doing nothing.
+
+### Reconcile with repos
+
+The **"Reconcile with repos"** button reads what is **actually applied in the repos** and pulls it
+back into the project. It reads each repo's emitted gate config (the **local working copy first**,
+falling back to the **GitHub governance branch** for repos without a local clone) and matches every
+rule id back to its source in the rule-bank, so you see each rule's alternatives and context, not
+just the adopted directive. Reconcile then **adopts** the repos' rules into project state: base
+selections are mirrored and **custom rules are merged in**, so after reconciling the project
+reflects what the repos really enforce (including custom rules). Rules found in the repos that are
+not in the corpus are flagged as **"not in rule-bank"** (drift).
 
 **Opt-in rules are not pre-checked.** Rules with the `opt_in_only` flag (currently the two security-
 scan rules) appear in rule tables as **"Available"** only — no pre-checked checkbox, no recommended
 badge. You opt in deliberately by checking them.
 
-**Custom rules.** Beyond the built-in corpus you can author your own rules in two scopes:
-- **Custom** — a rule that applies to a single repo (it joins that repo's selected set).
-- **Custom Global** — a project-level rule that applies to every repo, alongside the built-in
-  project-level rules.
+**Custom rules.** Beyond the built-in corpus you can author your own rules. A custom rule is a
+**free-text directive**, not a corpus-shaped rule: it carries a short **name**, a **directive body**,
+and a **repo multiselect** ("Applies to:") that scopes which of the project's repos it targets.
+**Leaving every repo unchecked applies it to all repos** (a project-level custom rule). Adding a name
+that already exists edits it.
 
-A custom rule is a **free-text directive**, not a corpus-shaped rule: it carries only a short
-**name**, a **directive body**, and its **scope** (the domain it routes to). It has none of the
-corpus decision/options/enforcement-kind shape, so there is no alternative to choose and no amber
-needs-choice gate — it simply emits as a `### CUSTOM-{name}` block alongside the selected rules. You
-can **create, edit, and delete** custom rules from the Rules view; deleting one removes it from any
-repo it was on.
+It has none of the corpus decision/options/enforcement-kind shape, so there is no alternative to
+choose and no amber needs-choice gate; it simply emits as a `### CUSTOM-{name}` block alongside the
+selected rules in each repo it applies to. You can **create, edit, and delete** custom rules from the
+Rules view; deleting one removes it from any repo it was on.
 
 **In practice a custom rule is always a prose or structured rule** — an advisory directive the agent
 follows and a human reviews. It can never be `mechanical` or `architectural`, because Camerata has no
 off-the-shelf linter mapping or bespoke checker for a rule you just invented. To make a custom rule
 deterministically enforced, you would open a story / development task to build that enforcement (a
 linter mapping or a custom AST checker); until then it is guidance, not a gate. (See §13.)
+
+### Suppressions registry (read-only)
+
+The Rules view hosts a **central suppressions registry**: an informational, **read-only** listing of
+every finding the team has waived across the project's repos (inline `// camerata:allow` waivers and
+baseline entries). It is **hidden by default**: nothing is fetched until you press **Refresh**,
+which **fast-forward-pulls each repo first and then lists** what is waived. The table has a **Repo**
+column (alongside Rule, Source, Location, Reason, Accepted by, Status) and an internal scroll so a
+long list stays capped. A waiver is flagged **"stale"** when it no longer matches any live finding
+(a dead waiver that is safe to remove).
+
+### Export / import the ruleset
+
+The ruleset JSON is the source of truth and can move between projects or machines:
+
+- **Export** shows the full ruleset JSON and a **"Save JSON…"** button to download it to disk.
+- **Import** updates the **project only** (the repos are unchanged until you emit). Paste a ruleset
+  JSON; an **"Apply imported rules to:"** repo multiselect lets you re-scope the imported rules
+  (leave it empty to keep the scoping baked into the JSON). Custom rules are preserved. Because the
+  import does not touch the repos, you must **"Emit rules locally"** afterward to apply it (the UI
+  warns you of exactly that on a successful import).
 
 ---
 
