@@ -1,8 +1,23 @@
 # Routines page: design document
 
-> **Status: DRAFT v0.1 (2026-06-29).** For review and iteration with Zach. This consolidates the
+> **Status: DRAFT v0.2 (2026-06-29).** For review and iteration with Zach. This consolidates the
 > three routine ADRs, audits what is built today, and proposes the visual + functional target so we
-> can build the rest deliberately. Sections marked **OPEN** are decisions to settle before building.
+> can build the rest deliberately. The §10 decisions are now **RESOLVED** (Zach, 2026-06-29).
+
+### Resolved decisions (v0.2)
+- **Scope vocabulary (D):** adopt the emit-cascade language. Read-only base; a Write routine
+  escalates through cascading toggles (Save on a branch, Push to GitHub, Open a PR), each requiring
+  the previous, mirroring the Rules emit control.
+- **Run records (F):** a bounded per-routine run history (last N runs, FIFO). Not a shared
+  story/run substrate.
+- **Placement (B/C/G/H):** INLINE panels (no drawers). Create/edit below the table; run history as a
+  row-expand; escalation/review inline. Single sectioned create form (no wizard).
+- **Templates (E):** ship bug-triage + security-scan (exist) plus dependency-and-license sweep,
+  stale-PR nudge, docs-drift check, and **daily digest**.
+- **Create flow (C):** single sectioned form. Templates **prefill** the whole form (editable). A
+  custom routine is intent-first: free-text intent, the AI drafts the operational prompt, both
+  fields editable; raw intent is never executed.
+- **Status strip (A):** total, enabled, running, blocked, due-in-24h; segments filter the table.
 
 Companion ADRs (the functional decisions, already made):
 - [`2026-06-15_routine_dashboard.md`](decisions/2026-06-15_routine_dashboard.md): a routine is a scheduled governed run; the dashboard manages them.
@@ -145,20 +160,23 @@ Keep the intent-first flow, in this order:
 5. **Project** (Global or a specific project) and **Model**.
 6. **Save** (Add / Save changes) + Cancel (edit mode).
 
-**OPEN-C:** single long form (today) vs a light two-step (author the prompt, then schedule + scope).
-I lean single-form with clear sections; a routine is not complex enough to warrant a wizard.
+**Create flow (resolved):** a single sectioned form (no wizard). Picking a template **prefills every
+field** (name, intent, prompt, schedule, scope, model), fully editable. A custom routine is
+intent-first: free-text intent, the AI drafts the operational prompt, both editable; raw intent is
+never executed. (A "paste exact prompt, skip the draft" escape hatch is a possible later addition.)
 
-**OPEN-D (scope vocabulary):** today the scope levels are "read-only", "write (gated)", "write +
-open PR". We just reworked the Rules emit cascade into "save on a branch -> push -> open PR". Should
-routine scope adopt the same three-step branch/push/PR language for consistency? I recommend yes:
-Read-only / Write to a branch / Write + push / Write + open PR, mirroring the emit cascade.
+**Scope (resolved): emit-cascade language.** Mirror the Rules emit control: a Read-only base
+(inspect + report, no writes), or a Write routine that escalates through cascading toggles, each
+requiring the previous: **Save on a branch** then **Push to GitHub** then **Open a PR**. Same
+vocabulary and component feel as the emit cascade, so "what a routine can do" reads the same as
+"what an emit does". Nothing auto-merges. The serialized `scope` string maps to these levels.
 
 ### 5.4 Templates (gallery + preview)
 The collapsible "Start from a template" gallery stays, but each card gains a **preview** (expand to
 see the full operational prompt + the preset schedule/scope) before "Use this template", which
-prefills the create form fully editably. **OPEN-E:** which templates to ship beyond bug-triage and
-security-scan (candidates: dependency-and-license sweep, stale-PR nudge, docs-drift check, nightly
-digest). Templates are data, so adding them is cheap.
+prefills the create form fully editably. **Templates to ship (resolved):** bug-triage and
+security-scan (exist), plus dependency-and-license sweep, stale-PR nudge, docs-drift check, and
+**daily digest**. Templates are data, so adding them is cheap.
 
 ### 5.5 Run now + verdict
 "Run now" executes through the real gate immediately and records the run. The result shows outcome +
@@ -259,18 +277,18 @@ All hermetic, matching the existing suites' style (scripted gate, deterministic 
 
 ---
 
-## 10. Open decisions (let's settle these first)
+## 10. Decisions (RESOLVED 2026-06-29)
 
-- **OPEN-A:** Status-strip metrics + do segments filter the table?
-- **OPEN-B:** Run history as row-expand vs a right drawer?
-- **OPEN-C:** Create as a single sectioned form (my lean) vs a two-step author-then-schedule?
-- **OPEN-D:** Scope vocabulary: keep "read-only / write / write+PR", or adopt the emit-cascade
-  language (branch -> push -> PR)? (My lean: adopt it, for consistency with Rules.)
-- **OPEN-E:** Which templates to ship beyond the two existing?
-- **OPEN-F:** Run-record: bounded per-routine list (my lean) vs shared substrate with stories?
-- **OPEN-G:** Escalation panel inline (today) vs drawer?
-- **OPEN-H (placement):** Create/edit + history as inline panels (today's feel) vs right-side drawers
-  (cleaner, less reflow). This ties B/C/G together; one decision.
+All settled; see the "Resolved decisions (v0.2)" block at the top for the canonical list.
+- **A** status strip: total / enabled / running / blocked / due-in-24h; segments filter the table.
+- **B/C/G/H** placement: INLINE panels throughout (create/edit below the table, run history as a
+  row-expand, escalation inline); single sectioned create form (no wizard).
+- **D** scope: emit-cascade language (Read-only base; Write -> branch -> push -> open PR, cascading).
+- **E** templates: bug-triage, security-scan, dependency-and-license sweep, stale-PR nudge,
+  docs-drift check, daily digest.
+- **F** run records: bounded per-routine history (FIFO), not a shared substrate.
 
-Tell me your calls on these (or "your judgment" where you do not care), and I will fold them into v0.2
-and we can start with phase 1.
+One micro-question still open (does not block phase 1): a true "paste an exact prompt, skip the AI
+draft" escape hatch for power users, or keep authoring strictly intent-first? Default: intent-first.
+
+Next: build **phase 1 (run history: data + endpoint + tests)**, the load-bearing addition.
