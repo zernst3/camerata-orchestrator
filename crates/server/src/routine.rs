@@ -76,6 +76,33 @@ pub struct RoutineRunSummary {
     pub denied_rules: Vec<String>,
 }
 
+/// What triggered a routine run, recorded in its run history.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunTrigger {
+    /// Fired by the auto-fire scheduler on its schedule.
+    Scheduled,
+    /// Run on demand from the dashboard ("Run now").
+    Manual,
+}
+
+/// One entry in a routine's bounded run history: when it ran, what triggered it, the gate
+/// outcome, and the escalation it raised if it blocked.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct RoutineRun {
+    /// RFC3339 timestamp of the run.
+    pub ts: String,
+    pub trigger: RunTrigger,
+    pub summary: RoutineRunSummary,
+    /// The escalation raised by this run when the gate blocked it (so a history row can link to the
+    /// review). `None` for a clean run.
+    #[serde(default)]
+    pub escalation_id: Option<String>,
+}
+
+/// How many runs of history each routine retains (FIFO; the oldest is dropped past this).
+pub const ROUTINE_RUN_HISTORY_CAP: usize = 20;
+
 /// A scheduled governed routine.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Routine {
@@ -123,6 +150,11 @@ pub struct Routine {
     /// ready-to-run rather than absent.
     #[serde(default)]
     pub status: RoutineStatus,
+    /// Bounded run history (oldest first), capped at [`ROUTINE_RUN_HISTORY_CAP`]. Each run records
+    /// its trigger, gate outcome, and any escalation it raised. Serde-default so routines persisted
+    /// before this field rehydrate with an empty history.
+    #[serde(default)]
+    pub runs: Vec<RoutineRun>,
 }
 
 fn default_true() -> bool {
@@ -294,6 +326,7 @@ pub fn instantiate_from_template(template: &RoutineTemplate) -> Routine {
         project_id: None, // Architect assigns to a project if desired
         model,
         status: RoutineStatus::Idle,
+            runs: Vec::new(),
     }
 }
 
@@ -419,6 +452,7 @@ impl RoutineStore {
                     project_id: None,
                     model: default_model(),
                     status: RoutineStatus::Idle,
+            runs: Vec::new(),
                 }
             };
         let seed = vec![
@@ -482,6 +516,7 @@ impl RoutineStore {
             project_id: req.project_id.clone(),
             model: resolve_model(&req.model),
             status: RoutineStatus::Idle,
+            runs: Vec::new(),
         };
         if let Ok(mut guard) = self.items.lock() {
             guard.push(routine.clone());
@@ -515,6 +550,7 @@ impl RoutineStore {
             project_id: Some(project_id.to_string()),
             model: resolve_model(&req.model),
             status: RoutineStatus::Idle,
+            runs: Vec::new(),
         };
         if let Ok(mut guard) = self.items.lock() {
             guard.push(routine.clone());
@@ -638,9 +674,22 @@ impl RoutineStore {
         Some(updated)
     }
 
-    /// Run a routine now: execute a governed run via the REAL gate script and record
-    /// the summary. Token-free and instant (the pure script, not the timed executor).
+    /// Run a routine now ON DEMAND ("Run now"): execute a governed run via the REAL gate script,
+    /// record the summary + a Manual run-history entry. Token-free and instant.
     pub fn run_now(&self, id: &str) -> Option<Routine> {
+        self.run_now_inner(id, RunTrigger::Manual, chrono::Local::now().to_rfc3339())
+    }
+
+    /// Like [`run_now`](Self::run_now) but records the run as Scheduler-triggered at `ts` (the
+    /// auto-fire path). `ts` is the scheduler tick's wall-clock, so the run-history timestamp lines
+    /// up with `last_fired`.
+    pub fn run_now_scheduled(&self, id: &str, ts: &str) -> Option<Routine> {
+        self.run_now_inner(id, RunTrigger::Scheduled, ts.to_string())
+    }
+
+    /// Shared body: execute the gate script, set last_run + lifecycle status, and append a bounded
+    /// run-history entry (FIFO, capped at [`ROUTINE_RUN_HISTORY_CAP`]).
+    fn run_now_inner(&self, id: &str, trigger: RunTrigger, ts: String) -> Option<Routine> {
         let events = crate::run::run_event_script();
         let denies = events.iter().filter(|e| e.verdict == "deny").count();
         let allows = events.iter().filter(|e| e.verdict == "allow").count();
@@ -663,7 +712,7 @@ impl RoutineStore {
         };
         let mut guard = self.items.lock().ok()?;
         let r = guard.iter_mut().find(|r| r.id == id)?;
-        r.last_run = Some(summary);
+        r.last_run = Some(summary.clone());
         // Drive the lifecycle status from the run (issue #43): a run the gate blocked needs
         // a human, so it lands `BlockedNeedsReview` (the escalation hook then raises the
         // review); an unblocked run lands `Done`.
@@ -672,16 +721,134 @@ impl RoutineStore {
         } else {
             RoutineStatus::Done
         };
+        // Append to the bounded run history (oldest first); drop the oldest past the cap.
+        r.runs.push(RoutineRun {
+            ts,
+            trigger,
+            summary,
+            escalation_id: None,
+        });
+        if r.runs.len() > ROUTINE_RUN_HISTORY_CAP {
+            let overflow = r.runs.len() - ROUTINE_RUN_HISTORY_CAP;
+            r.runs.drain(0..overflow);
+        }
         let updated = r.clone();
         drop(guard);
         self.flush();
         Some(updated)
+    }
+
+    /// Link an escalation to the routine's MOST RECENT run (called after an escalation is raised for
+    /// a blocked run), so a history row can jump to the review. No-op if there is no run yet.
+    pub fn link_last_run_escalation(&self, id: &str, escalation_id: &str) -> Option<Routine> {
+        let mut guard = self.items.lock().ok()?;
+        let r = guard.iter_mut().find(|r| r.id == id)?;
+        if let Some(run) = r.runs.last_mut() {
+            run.escalation_id = Some(escalation_id.to_string());
+        }
+        let updated = r.clone();
+        drop(guard);
+        self.flush();
+        Some(updated)
+    }
+
+    /// The routine's run history, NEWEST FIRST (for display). `None` for an unknown id.
+    pub fn runs(&self, id: &str) -> Option<Vec<RoutineRun>> {
+        let guard = self.items.lock().ok()?;
+        let r = guard.iter().find(|r| r.id == id)?;
+        let mut runs = r.runs.clone();
+        runs.reverse();
+        Some(runs)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── run history (bounded per-routine record) ──────────────────────────────
+
+    fn mk_routine(store: &RoutineStore, name: &str) -> Routine {
+        store.create(&CreateRoutineReq {
+            name: name.to_string(),
+            schedule: "manual".to_string(),
+            intent: "do a thing".to_string(),
+            prompt: "P".to_string(),
+            scope: "read-only".to_string(),
+            project_id: None,
+            model: None,
+        })
+    }
+
+    #[test]
+    fn run_now_records_a_manual_run_in_history() {
+        let store = RoutineStore::new();
+        let r = mk_routine(&store, "R");
+        let updated = store.run_now(&r.id).unwrap();
+        assert_eq!(updated.runs.len(), 1);
+        let run = &updated.runs[0];
+        assert_eq!(run.trigger, RunTrigger::Manual);
+        assert_eq!(run.summary.denies, 2); // scripted gate: 2 denies + 1 allow
+        assert!(run.escalation_id.is_none());
+        assert!(!run.ts.is_empty());
+    }
+
+    #[test]
+    fn run_now_scheduled_records_a_scheduled_run_with_the_given_ts() {
+        let store = RoutineStore::new();
+        let r = mk_routine(&store, "R");
+        let updated = store
+            .run_now_scheduled(&r.id, "2026-06-29T09:00:00+00:00")
+            .unwrap();
+        assert_eq!(updated.runs.len(), 1);
+        assert_eq!(updated.runs[0].trigger, RunTrigger::Scheduled);
+        assert_eq!(updated.runs[0].ts, "2026-06-29T09:00:00+00:00");
+    }
+
+    #[test]
+    fn run_history_is_bounded_fifo() {
+        let store = RoutineStore::new();
+        let r = mk_routine(&store, "R");
+        for i in 0..(ROUTINE_RUN_HISTORY_CAP + 5) {
+            store.run_now_scheduled(&r.id, &format!("ts-{i}")).unwrap();
+        }
+        let runs = store.runs(&r.id).unwrap(); // newest first
+        assert_eq!(runs.len(), ROUTINE_RUN_HISTORY_CAP);
+        // The 5 oldest were dropped; newest leads, earliest retained is ts-5.
+        assert_eq!(runs[0].ts, format!("ts-{}", ROUTINE_RUN_HISTORY_CAP + 4));
+        assert_eq!(runs.last().unwrap().ts, "ts-5");
+    }
+
+    #[test]
+    fn runs_returns_newest_first() {
+        let store = RoutineStore::new();
+        let r = mk_routine(&store, "R");
+        store.run_now_scheduled(&r.id, "a").unwrap();
+        store.run_now_scheduled(&r.id, "b").unwrap();
+        let runs = store.runs(&r.id).unwrap();
+        assert_eq!(runs[0].ts, "b");
+        assert_eq!(runs[1].ts, "a");
+        assert!(store.runs("nope").is_none());
+    }
+
+    #[test]
+    fn link_last_run_escalation_sets_id_on_the_latest_run() {
+        let store = RoutineStore::new();
+        let r = mk_routine(&store, "R");
+        store.run_now(&r.id).unwrap();
+        store.link_last_run_escalation(&r.id, "esc-9").unwrap();
+        let runs = store.runs(&r.id).unwrap();
+        assert_eq!(runs[0].escalation_id.as_deref(), Some("esc-9"));
+    }
+
+    #[test]
+    fn runs_field_rehydrates_empty_for_pre_history_json() {
+        // A routine persisted before the `runs` field rehydrates with an empty history.
+        let json = r#"{"id":"rt-1","name":"Old","schedule":"manual","intent":"i",
+            "prompt":"p","scope":"read-only","enabled":true,"last_run":null}"#;
+        let r: Routine = serde_json::from_str(json).unwrap();
+        assert!(r.runs.is_empty());
+    }
 
     #[test]
     fn seeded_lists_three_routines() {
@@ -1042,6 +1209,7 @@ mod tests {
             project_id: None,
             model: default_model(),
             status: RoutineStatus::Idle,
+            runs: Vec::new(),
         };
 
         // Serialize both and verify they match (id is already empty, so this is direct).

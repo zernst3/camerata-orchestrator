@@ -418,12 +418,17 @@ pub fn blocked_run_escalation_req(routine: &Routine, denies: usize) -> RaiseEsca
 
 /// Raise a blocked-run escalation for `routine` if its last run had gate denials (the
 /// signal that it stopped and needs a human). Deduped, so a routine has at most one open
-/// review. Called by both the interactive run handler and the auto-fire scheduler.
-pub fn raise_if_blocked(store: &EscalationStore, routine: &Routine) {
+/// review. Called by both the interactive run handler and the auto-fire scheduler. Returns the
+/// escalation id when one is raised (or the existing open one), so the caller can link it to the
+/// routine's run-history entry; `None` when the run was clean.
+pub fn raise_if_blocked(store: &EscalationStore, routine: &Routine) -> Option<String> {
     let denies = routine.last_run.as_ref().map(|s| s.denies).unwrap_or(0);
     if denies > 0 {
         let req = blocked_run_escalation_req(routine, denies);
-        store.raise_deduped(req, &routine.name);
+        let esc = store.raise_deduped(req, &routine.name);
+        Some(esc.id)
+    } else {
+        None
     }
 }
 

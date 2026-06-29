@@ -658,6 +658,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/routines/:id/enable", post(set_routine_enabled))
         .route("/api/routines/:id/provision", post(provision_routine))
         .route("/api/routines/:id/run", post(run_routine_now))
+        .route("/api/routines/:id/runs", get(routine_runs))
         // Routine escalations: a blocked routine awaiting human review.
         .route(
             "/api/escalations",
@@ -6226,8 +6227,23 @@ async fn run_routine_now(
         .routines
         .run_now(&id)
         .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))?;
-    crate::escalation::raise_if_blocked(&state.escalations, &routine);
+    // If the run blocked, raise a review and link it to this run's history entry.
+    if let Some(esc_id) = crate::escalation::raise_if_blocked(&state.escalations, &routine) {
+        let _ = state.routines.link_last_run_escalation(&id, &esc_id);
+    }
     Ok(Json(routine))
+}
+
+/// `GET /api/routines/:id/runs` — the routine's bounded run history, newest first.
+async fn routine_runs(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<crate::routine::RoutineRun>>, AppError> {
+    state
+        .routines
+        .runs(&id)
+        .map(Json)
+        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
 }
 
 /// Query for `GET /api/escalations`: `?open=true` returns only open reviews.
@@ -10356,6 +10372,63 @@ mod tests {
         assert_eq!(n(false, true, false), (true, true, false)); // push implies branch
         assert_eq!(n(false, false, true), (true, true, true)); // PR implies push + branch
         assert_eq!(n(true, true, true), (true, true, true)); // already consistent
+    }
+
+    /// `GET /api/routines/:id/runs` returns the routine's run history after a run-now, newest
+    /// first, with the gate summary recorded (Phase 1 of the Routines design: run history).
+    #[tokio::test]
+    async fn routine_runs_endpoint_returns_history_after_run_now() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let r = state.routines.create(&crate::routine::CreateRoutineReq {
+            name: "Nightly".to_string(),
+            schedule: "manual".to_string(),
+            intent: "scan".to_string(),
+            prompt: "P".to_string(),
+            scope: "read-only".to_string(),
+            model: None,
+            project_id: None,
+        });
+        let app = router(state);
+        // No runs yet.
+        let empty = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/routines/{}/runs", r.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(empty.status(), StatusCode::OK);
+        assert!(body_json(empty).await.as_array().unwrap().is_empty());
+        // Run it, then the history has one entry.
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/routines/{}/run", r.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let runs = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/routines/{}/runs", r.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(runs.status(), StatusCode::OK);
+        let arr = body_json(runs).await;
+        let arr = arr.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "one run recorded after run-now");
+        assert_eq!(arr[0]["trigger"], "manual");
+        assert_eq!(arr[0]["summary"]["denies"], 2); // scripted gate
     }
 
     /// Regression test for issue #106: `POST /api/projects/:id/emit-local` must run

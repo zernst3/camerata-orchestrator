@@ -288,7 +288,8 @@ All settled; see the "Resolved decisions (v0.2)" block at the top for the canoni
   docs-drift check, daily digest.
 - **F** run records: bounded per-routine history (FIFO), not a shared substrate.
 
-One micro-question still open (does not block phase 1): a true "paste an exact prompt, skip the AI
-draft" escape hatch for power users, or keep authoring strictly intent-first? Default: intent-first.
+Authoring (resolved): intent-first is the default AND a true "paste an exact prompt, skip the AI
+draft" escape hatch is available for power users. Free-text editing of the prompt is always
+available either way. The form offers both: draft-from-intent, or paste-your-own.
 
 Next: build **phase 1 (run history: data + endpoint + tests)**, the load-bearing addition.

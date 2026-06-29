@@ -62,12 +62,16 @@ fn tick(routines: &RoutineStore, escalations: &EscalationStore) {
             // Run via the existing governed path, then stamp the fire so the same slot
             // isn't re-run on the next tick. Both are best-effort: a routine deleted
             // mid-tick simply no-ops.
-            let ran = routines.run_now(&r.id);
-            let _ = routines.mark_fired(&r.id, &now_local.to_rfc3339());
+            let now_ts = now_local.to_rfc3339();
+            let ran = routines.run_now_scheduled(&r.id, &now_ts);
+            let _ = routines.mark_fired(&r.id, &now_ts);
             // If the unattended run was blocked (gate denials), raise a human-review
-            // escalation so the architect can resolve it whenever they next look.
+            // escalation so the architect can resolve it whenever they next look, and link it to
+            // this run's history entry.
             if let Some(routine) = ran {
-                crate::escalation::raise_if_blocked(escalations, &routine);
+                if let Some(esc_id) = crate::escalation::raise_if_blocked(escalations, &routine) {
+                    let _ = routines.link_last_run_escalation(&r.id, &esc_id);
+                }
             }
         }
     }
