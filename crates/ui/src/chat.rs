@@ -1235,9 +1235,11 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
 
                 // ── transcript ──────────────────────────────────────────────
                 div {
+                    // flex/min-height/overflow-y are owned by .research-chat-log (GLOBAL_CSS) — the
+                    // inline style here is LAYOUT ONLY. A leftover inline `min-height:8rem` used to
+                    // win over the class and pin the pane open, which is why it never scrolled.
                     class: "research-chat-log",
-                    style: "flex:1;min-height:0;overflow-y:auto;padding:.75rem 1rem;display:flex;\
-                            flex-direction:column;gap:.5rem;min-height:8rem;",
+                    style: "padding:.75rem 1rem;display:flex;flex-direction:column;gap:.5rem;",
                     if turns().is_empty() {
                         p {
                             style: "color:#94a3b8;font-size:.85rem;text-align:center;\
