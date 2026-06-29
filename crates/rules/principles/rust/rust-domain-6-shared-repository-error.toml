@@ -1,10 +1,10 @@
 id = "RUST-DOMAIN-6"
-title = "Errors are category-scoped, one shared enum per failure category at the crate boundary"
+title = "Crate-boundary error types: typed enums organized by category or by aggregate"
 tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "structured"
-default = true
+default = false
 verification = "grounded"
 
 [[sources]]
@@ -16,36 +16,35 @@ url = "https://doc.rust-lang.org/book/ch09-02-recoverable-errors-with-result.htm
 title = "The Rust Book — Ch 9.2: Recoverable Errors with Result"
 
 [decision]
-question = "What position does the project take on: Errors are category-scoped, one shared enum per failure category at the crate boundary?"
-default = "errors-are-category-scoped-one-shared-enum-per-f"
-why = "Per-function or per-aggregate error proliferation forces callers to handle near-identical variants in many places, which pushes consumers toward type-erasure (Box of dyn Error, anyhow Error) and lossy error handling. Category-shaped errors stay coherent: callers exhaustive-match within a category, and the boundary between categories (persistence versus business rule versus validation versus parsing) is preserved in types rather than collapsed into a single grab-bag enum or scattered across dozens of per-call types. Mapping framework or driver errors into the category at the boundary keeps the crate's public surface stable when the underlying framework changes. Per-function or per-aggregate error enums make duplication scale with the API surface: callers handle the same NotFound shape in twenty places, and refactoring across aggregates touches every error type. A single error enum per crate that mixes all failure categories collapses orthogonal concerns; callers cannot distinguish a validation failure from a persistence failure without inspecting the variant string. Re-exporting framework or driver errors directly from the public API breaks the boundary entirely, because the crate inherits the framework's error semantics and its public surface breaks every time the framework upgrades. Type erasure via Box of dyn Error or anyhow Error in a library's public API eliminates exhaustive matching; consumers cannot recover specific failure modes and the type system stops helping with error handling, which is the entire reason a typed error enum exists at the boundary."
+question = "How does the project organize the typed error enums a crate exposes at its public boundary?"
+why = "A crate's public boundary should expose typed, crate-owned error enums that callers can exhaustive-match on, with framework or driver errors mapped into them at the boundary rather than leaked through. Within that, how the enums are grouped is a genuine organizational choice. One shared enum per failure CATEGORY (persistence, validation, business rule, parsing, and so on) keeps callers matching a small, stable set and is a natural fit for larger crates whose failure surfaces recur across many operations. One enum per MODULE or AGGREGATE keeps each error type next to the code it describes and is a natural fit for crates organized around independent aggregates, where co-locating the error with its owner aids cohesion. The choice follows from the crate's size and how its failures cluster, not from a presumed winner. Two shapes are not organizational choices but boundary failures, and are called out as the options to avoid regardless of which organization is chosen: collapsing every category into one grab-bag enum, and erasing types through Box of dyn Error / anyhow or re-exporting a framework's error type — both defeat exhaustive matching and a stable public surface."
 
 [[option]]
 id = "errors-are-category-scoped-one-shared-enum-per-f"
-label = "Errors are category-scoped, one shared enum per failure category at the crate boundary"
-directive = "Each Rust crate exposes errors organized by failure category at its public boundary, with one shared enum per category. The categories are whatever distinct failure surfaces the crate exposes; examples include persistence and IO failures, input validation, business rule violations, parsing, and networking, but the actual set depends on what the crate does. Variants within an enum enumerate the distinct failure modes for that category. Driver-specific or framework-specific errors map into the appropriate category enum at the boundary; they do not leak through the public API directly. Per-function or per-aggregate error types are not used."
-why = "Per-function or per-aggregate error proliferation forces callers to handle near-identical variants in many places, which pushes consumers toward type-erasure (Box of dyn Error, anyhow Error) and lossy error handling."
+label = "Errors are organized by failure category, one shared enum per category"
+directive = "Each Rust crate exposes errors organized by failure category at its public boundary, with one shared enum per category. The categories are whatever distinct failure surfaces the crate exposes; examples include persistence and IO failures, input validation, business rule violations, parsing, and networking, but the actual set depends on what the crate does. Variants within an enum enumerate the distinct failure modes for that category. Driver-specific or framework-specific errors map into the appropriate category enum at the boundary; they do not leak through the public API directly."
+why = "Keeps callers matching a small, stable set of category enums even as the crate grows: failure modes that recur across many operations (a NotFound, a constraint violation) are defined once per category rather than restated per operation. The natural fit for larger crates whose failure surfaces are shared across many entry points."
 
 [[option]]
 id = "each-function-or-aggregate-defines-its-own-error"
-label = "each function or aggregate defines its own error enum, …"
-directive = "each function or aggregate defines its own error enum, so the crate's public surface exposes many small per-call error types rather than a small number of shared category enums"
-why = "Forces callers to handle near-identical variants in many places, which pushes consumers toward type-erasure (Box of dyn Error, anyhow Error) and lossy error handling; the error surface grows linearly with the API surface, making refactors across aggregates a multi-type edit."
+label = "Errors are organized by module or aggregate, one enum per aggregate"
+directive = "Each module or aggregate owns its error enum, so an error type lives next to the code whose failures it describes, rather than being centralized into a small number of shared per-category enums. Driver-specific or framework-specific errors still map into the aggregate's own enum at the boundary; they do not leak through the public API directly."
+why = "Keeps each error type local to its aggregate: the failures of one bounded context are defined and evolve alongside that context, so a change to one aggregate's failure modes stays contained rather than touching a shared type. The natural fit for crates organized around independent aggregates whose failure surfaces do not heavily overlap."
 
 [[option]]
 id = "the-crate-exposes-a-single-error-enum-that-mixes"
 label = "the crate exposes a single error enum that mixes …"
-directive = "the crate exposes a single error enum that mixes every failure category (persistence, validation, business rule, parsing, networking) into one type, rather than splitting failures into one enum per category"
-why = "Collapses orthogonal concerns: callers cannot distinguish a validation failure from a persistence failure without inspecting the variant string, the single enum's arms accumulate without bound as the crate grows, and match arms that handle only one failure category must either wildcard or exhaustively name unrelated variants."
+directive = "the crate exposes a single error enum that mixes every failure category (persistence, validation, business rule, parsing, networking) into one type, rather than splitting failures into category enums or per-aggregate enums"
+why = "Collapses orthogonal concerns regardless of how the rest of the crate is organized: callers cannot distinguish a validation failure from a persistence failure without inspecting the variant, the single enum's arms accumulate without bound as the crate grows, and a match that handles only one failure surface must either wildcard or exhaustively name unrelated variants."
 
 [[option]]
 id = "the-crate-re-exports-the-underlying-framework-s"
 label = "the crate re-exports the underlying framework's or driver's error …"
-directive = "the crate re-exports the underlying framework's or driver's error type from its public API directly, rather than mapping framework errors into a crate-owned category enum at the boundary"
-why = "Breaks the boundary entirely: the crate's public surface inherits the framework's error semantics and breaks every caller every time the framework upgrades, defeating the purpose of having a crate boundary between them."
+directive = "the crate re-exports the underlying framework's or driver's error type from its public API directly, rather than mapping framework errors into a crate-owned enum at the boundary"
+why = "Breaks the boundary entirely: the crate's public surface inherits the framework's error semantics and breaks every caller every time the framework upgrades, defeating the purpose of having a crate boundary between them — a problem under any error organization."
 
 [[option]]
 id = "the-crate-s-public-functions-return-box-of-dyn-e"
 label = "the crate's public functions return Box of dyn Error …"
 directive = "the crate's public functions return Box of dyn Error or anyhow Error as their error type, rather than typed enums callers can match on"
-why = "Eliminates exhaustive matching: consumers cannot recover specific failure modes and the type system stops helping with error handling, which is the entire reason a typed error enum exists at the boundary."
+why = "Eliminates exhaustive matching: consumers cannot recover specific failure modes and the type system stops helping with error handling, which is the entire reason a typed error enum exists at the boundary — independent of whether errors are grouped by category or by aggregate."
