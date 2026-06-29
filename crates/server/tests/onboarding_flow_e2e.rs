@@ -244,6 +244,7 @@ fn scope3_apply_writes_the_expected_arm_files_set() {
         name: "house-style".to_string(),
         body: "Prefer explicit.".to_string(),
         domain: "*".to_string(),
+        repos: Vec::new(),
     };
     let customs: Vec<&CustomRule> = vec![&custom];
 

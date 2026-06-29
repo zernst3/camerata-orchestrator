@@ -2206,8 +2206,6 @@ mod tests {
         record
     }
 
-    use crate::evidence::ScopedScanSummary;
-
     #[test]
     fn attach_evidence_stores_record_and_appends_history() {
         let store = UowStore::new();

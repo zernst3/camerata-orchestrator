@@ -20,7 +20,7 @@
 use camerata_server::project::{
     default_max_iterations, export_ruleset, parse_ruleset, CustomRule, L3ReviewConfig,
     ModelProfile, Project, ProjectImport, ProjectRuleset, ProjectStore, RuleSelection,
-    StallThresholds, StepKind, StepModels,
+    StallThresholds, StepKind,
 };
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -52,6 +52,7 @@ fn rich_source_project(store: &ProjectStore) -> Project {
                     name: "house-style".to_string(),
                     body: "Prefer explicit over terse.".to_string(),
                     domain: "*".to_string(),
+                    repos: Vec::new(),
                 }],
             };
             // onboarded set.
@@ -276,6 +277,7 @@ fn scope3_custom_rules_preserved_on_a_base_rules_import() {
                 name: "house-style".to_string(),
                 body: "Prefer explicit.".to_string(),
                 domain: "*".to_string(),
+                repos: Vec::new(),
             }];
         })
         .unwrap();
