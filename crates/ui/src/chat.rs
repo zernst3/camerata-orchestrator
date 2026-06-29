@@ -897,6 +897,9 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
     let mut turns = use_signal(Vec::<Turn>::new);
     let mut draft = use_signal(String::new);
     let mut sending = use_signal(|| false);
+    // Collapsed by default: the "what this assistant can see" strip shows the top few items + a
+    // see-more/less toggle so it doesn't eat a chunk of the transcript's vertical space.
+    let mut ctx_expanded = use_signal(|| false);
 
     // Layer 2: rules catalog — fetched once per session, fed into the static
     // prefix of the unified system prompt.
@@ -1093,6 +1096,8 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                 }
                             }
                         }
+                        // The rest of the context items collapse behind "see more".
+                        if ctx_expanded() {
                         {
                             let uow_label = if !uow_snaps.is_empty() {
                                 format!("Development state ({} stories, live)", uow_snaps.len())
@@ -1197,6 +1202,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                 }
                             }
                         }
+                        }
                         // Layer 4: only shown when a finding is focused.
                         if let Some(ref f) = *active_finding.read() {
                             if !f.rule_id.is_empty() {
@@ -1214,6 +1220,13 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                     span { style: "color:#64748b;", " {f.path}:{f.line}" }
                                 }
                             }
+                        }
+                        button {
+                            style: "align-self:flex-start;margin-top:.3rem;background:none;border:none;\
+                                    color:#0369a1;font-size:.72rem;font-weight:600;cursor:pointer;\
+                                    padding:0;text-decoration:underline;",
+                            onclick: move |_| ctx_expanded.toggle(),
+                            if ctx_expanded() { "see less" } else { "see more (5 more)" }
                         }
                     }
                 }
