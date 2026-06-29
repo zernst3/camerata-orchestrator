@@ -367,6 +367,10 @@ struct OptionToml {
     directive: String,
     #[serde(default)]
     why: String,
+    /// Optional `escalation = { condition = "…", severity = "…" }` inline table: present when
+    /// choosing this option calls for escalation. Absent → this option does not escalate.
+    #[serde(default)]
+    escalation: Option<EscalationSpec>,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -384,6 +388,41 @@ pub struct RuleOption {
     pub directive: String,
     /// Why this alternative (the rationale; the default option says so).
     pub why: String,
+    /// Present when CHOOSING this option calls for escalation: it carries a condition the agent
+    /// watches for + a severity. `None` means this option does NOT escalate (the agent proceeds, or
+    /// the gate denies + bounces as normal). Option-scoped so a rule can offer an escalating option
+    /// alongside non-escalating ones, and only the selected option's spec is active.
+    pub escalation: Option<EscalationSpec>,
+}
+
+/// How a rule's escalation condition is handled when an agent's work meets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum EscalationSeverity {
+    /// Log a warning and let the run CONTINUE (advisory). For non-guard conditions.
+    SoftFlag,
+    /// STOP the run for human review (the AwaitingReview pause + checkpoint/resume). The default,
+    /// and the only safe choice for guard-area conditions.
+    #[default]
+    HardPause,
+}
+
+/// Declares that a chosen OPTION carries a CONDITION that, when met by an agent's work, calls for
+/// escalation. First-class (an `escalation` field on a `[[option]]`) so "does this choice escalate?"
+/// is a queryable property rather than a prose/option-id guess — and so it is OPTION-SCOPED: a rule
+/// may offer an escalating option AND non-escalating ones, and only the selected option's spec is
+/// active. The governed agent is grounded with the escalation conditions of its selected options and
+/// self-escalates when its work meets one; the deterministic backstop fires only when the selected
+/// (or default) option carries a spec. A met `HardPause` condition pauses the run for human review;
+/// a `SoftFlag` logs + continues.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EscalationSpec {
+    /// The condition the agent watches for, in plain language (e.g. "the change would modify or
+    /// delete an existing test"). This is what the agent is grounded with and self-reports against.
+    pub condition: String,
+    /// How a met condition is handled. Absent → `HardPause`.
+    #[serde(default)]
+    pub severity: EscalationSeverity,
 }
 
 /// A single camerata principle loaded from the corpus.
@@ -433,6 +472,27 @@ pub struct Rule {
 }
 
 impl Rule {
+    /// The option this rule resolves to given the project's `chosen_option` (or its default when
+    /// none is chosen). `None` when neither is present (the architect must choose and hasn't).
+    pub fn resolved_option(&self, chosen_option: Option<&str>) -> Option<&RuleOption> {
+        let target = chosen_option.or(self.default_option.as_deref())?;
+        self.options.iter().find(|o| o.id == target)
+    }
+
+    /// The ACTIVE escalation spec for this rule given the project's `chosen_option`: the SELECTED
+    /// (or default) option's `escalation`, if it carries one. This is the single source of truth for
+    /// "should this rule escalate, given what was selected" — used by BOTH the agent grounding and
+    /// the deterministic backstop, so selecting a non-escalating option correctly disables it.
+    pub fn selected_escalation(&self, chosen_option: Option<&str>) -> Option<&EscalationSpec> {
+        self.resolved_option(chosen_option)?.escalation.as_ref()
+    }
+
+    /// Whether ANY option on this rule can escalate (for listing / "is this an escalation rule"),
+    /// independent of what's selected. Activation still depends on the selected option.
+    pub fn has_escalating_option(&self) -> bool {
+        self.options.iter().any(|o| o.escalation.is_some())
+    }
+
     /// Whether this rule is OPT-IN ONLY — a grounded rule that must NEVER be
     /// auto-recommended / pre-checked in the onboarding proposal. It is still
     /// listed (so the architect can opt in), just never pre-ticked. The propose
@@ -785,6 +845,7 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
             label: o.label,
             directive: o.directive,
             why: o.why,
+            escalation: o.escalation,
         })
         .collect();
 
@@ -1088,9 +1149,19 @@ mod tests {
             domain: raw.domain.unwrap_or_else(|| "rust".to_string()),
             summary: String::new(),
             decision_question: None,
-            decision_why: None,
-            options: Vec::new(),
-            default_option: None,
+            decision_why: raw.decision.as_ref().and_then(|d| d.why.clone()),
+            default_option: raw.decision.as_ref().and_then(|d| d.default.clone()),
+            options: raw
+                .options
+                .into_iter()
+                .map(|o| RuleOption {
+                    id: o.id,
+                    label: o.label,
+                    directive: o.directive,
+                    why: o.why,
+                    escalation: o.escalation,
+                })
+                .collect(),
             verification: raw.verification,
             sources: raw.sources,
             verified: raw.verified,
@@ -1967,6 +2038,66 @@ mod tests {
         let rule = parse_rule(src);
         assert!(rule.is_opt_in_only(), "opt_in_only = true parses");
         assert!(rule.is_layer3_only(), "layer3_only = true parses");
+    }
+
+    #[test]
+    fn escalation_is_option_scoped_and_respects_the_selection() {
+        let src = r#"
+            id = "AGENTIC-EXAMPLE-1"
+            title = "Example: an escalating option alongside a non-escalating one"
+            enforcement = "prose"
+            domain = "agentic"
+            [decision]
+            question = "How are test edits handled?"
+            default = "escalate-on-test-edit"
+
+            [[option]]
+            id = "escalate-on-test-edit"
+            label = "Escalate before editing tests"
+            directive = "Stop and escalate to a human."
+            why = "A human should confirm the edit is legitimate."
+            escalation = { condition = "the change would modify or delete an existing test", severity = "hard-pause" }
+
+            [[option]]
+            id = "allow-test-edits"
+            label = "Allow test edits"
+            directive = "Proceed without escalation."
+            why = "Trusted team."
+        "#;
+        let rule = parse_rule(src);
+        assert!(rule.has_escalating_option(), "the rule offers an escalating option");
+
+        // Default (no explicit selection) → resolves to the escalate option → spec is active.
+        let by_default = rule.selected_escalation(None).expect("default option escalates");
+        assert_eq!(by_default.severity, EscalationSeverity::HardPause);
+        assert!(by_default.condition.contains("existing test"));
+
+        // Explicitly choosing the escalate option → active.
+        assert!(rule.selected_escalation(Some("escalate-on-test-edit")).is_some());
+
+        // THE KEY CORRECTNESS POINT: choosing the NON-escalating option → no escalation.
+        assert!(
+            rule.selected_escalation(Some("allow-test-edits")).is_none(),
+            "selecting a non-escalating option must NOT escalate"
+        );
+
+        // Severity defaults to hard-pause when omitted from the inline table.
+        let src2 = r#"
+            id = "X-1"
+            title = "t"
+            enforcement = "prose"
+            domain = "agentic"
+            [[option]]
+            id = "o1"
+            label = "l"
+            escalation = { condition = "c" }
+        "#;
+        let r2 = parse_rule(src2);
+        assert_eq!(
+            r2.selected_escalation(Some("o1")).unwrap().severity,
+            EscalationSeverity::HardPause,
+            "severity defaults to hard-pause"
+        );
     }
 
     #[test]
