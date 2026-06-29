@@ -24,6 +24,7 @@ pub mod connections;
 pub mod decompose;
 pub mod draft;
 pub mod enforcement_ledger;
+pub mod checkpoint;
 pub mod escalation;
 pub mod eval;
 pub mod evidence;
@@ -118,6 +119,8 @@ pub struct AppState {
     draft: crate::draft::DraftStore,
     uow: crate::uow::UowStore,
     escalations: crate::escalation::EscalationStore,
+    /// Persisted, resumable checkpoints for governed dev runs paused on a review-needed denial.
+    checkpoints: crate::checkpoint::CheckpointStore,
     /// Per-project incremental-scan cache (file fingerprints + last AI findings) so a
     /// re-scan only pays the AI bill for files that changed. Best-effort; losing it just
     /// means the next scan is a full scan.
@@ -199,6 +202,7 @@ impl AppState {
             draft: crate::draft::DraftStore::new(),
             uow: crate::uow::UowStore::new(),
             escalations: crate::escalation::EscalationStore::new(),
+            checkpoints: crate::checkpoint::CheckpointStore::new(),
             scan_cache: crate::scan_cache::ScanCacheStore::new(),
             last_scan: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             recent_scan: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -512,6 +516,8 @@ impl AppState {
             // silently un-blocked by quitting the app.
             state.escalations =
                 crate::escalation::EscalationStore::at(dir.join("escalations.json"));
+            state.checkpoints =
+                crate::checkpoint::CheckpointStore::at(dir.join("checkpoints.json"));
             // Incremental-scan cache: per-project file fingerprints + last AI findings, so a
             // re-scan only re-audits changed files. Survives restarts; safe to delete.
             state.scan_cache =
