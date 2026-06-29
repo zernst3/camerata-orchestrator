@@ -1,11 +1,20 @@
 # Human-in-the-loop escalation + resume: design
 
-> **Status: DRAFT v0.1 (2026-06-29).** TOP PRIORITY. The escalation REVIEW surface is partly built
-> (routines), but the load-bearing half — a paused agent that RESUMES from your decision — is not.
-> Today a Governed Development run that hits a review-needed denial (e.g. the test-tamper guard)
-> simply FAILS and leaves the worktree; there is no review surface and no resume. This doc designs
-> the durable loop for BOTH pages, and answers: where it lives in the UI, the affordances, and the
-> user's flow. Tracking: issue #43.
+> **Status: BUILT (2026-06-29).** The durable loop is implemented end to end. A Governed Development
+> run that hits a review-needed denial (the test-tamper guard) now PAUSES, persists a resumable
+> checkpoint, raises a UoW review escalation, and parks at `RunStatus::AwaitingReview`; resolving the
+> review **RESUMES** the run from the checkpoint (Approve/Amend) or reverts + stops it (Reject). The
+> review is discoverable in the Governed Development **NEEDS YOU** queue. Tracking: issue #43.
+>
+> **Shipped:** Engine A escalation `{routine|uow}` subject (`fca37b9`) · B `CheckpointStore`
+> (`fe346ed`) · C pause-not-fail + checkpoint at the test-tamper site (`2802ef2`) · D resume
+> re-spawn + Approve/Amend/Reject + shared `spawn_brownfield_dev_run` (`3ca5ff1`) · F approve/reject
+> E2E tests (`0170965`) · E UI NEEDS YOU + `UowReviewPanel` (`261290b`).
+>
+> The §6 open decisions are RESOLVED per Zach's calls: discovery = NEEDS YOU count (toast = later
+> polish); Reject stops cleanly; per-rule escalate-vs-harddeny disposition stays a follow-up (only
+> test-tamper escalates today, security floor hard-denies); the real engine was built first (no
+> interim). The design below documents the as-built system.
 
 ## The gap, stated plainly
 A governed agent's whole value is that it can stop, ask you, and continue. Today:
