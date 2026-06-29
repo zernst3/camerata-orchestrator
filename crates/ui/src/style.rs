@@ -1785,7 +1785,7 @@ html, body {
    grows to content instead of scrolling — which is exactly what was happening (panel kept getting
    taller, no scrollbar). A concrete max-height makes overflow-y engage reliably; the panel still
    grows to fit small chats and the pane scrolls once it passes the cap. */
-.research-chat-log { max-height: 55vh !important; overflow-y: auto !important; min-height: 0 !important; }
+.research-chat-log { max-height: 420px !important; overflow-y: auto !important; min-height: 0 !important; }
 
 .chat-ai-md { overflow-wrap: anywhere; word-break: break-word; min-width: 0; }
 .chat-ai-md pre {
