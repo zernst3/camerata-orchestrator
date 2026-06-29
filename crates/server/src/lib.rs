@@ -1140,6 +1140,250 @@ pub fn ensure_development_gate(state: &AppState, story_id: &str) -> Result<(), S
 /// bounce) so a brownfield repo can install the tooling layer-2 needs. It skips ONLY
 /// layer 2: layer 1 (the deny-before-write gate) and the no-code-first decisions gate
 /// (`ensure_development_gate`, already enforced in the caller) are unchanged. The scripted
+/// Revert a paused run's uncommitted work in `worktree_dir` (used on Reject). Best-effort:
+/// discards tracked changes (`git checkout -- .`) and removes new untracked files (`git clean
+/// -fd`), leaving the branch at its committed state. Errors are swallowed (the worktree may be
+/// gone); the caller records the outcome regardless.
+async fn revert_worktree(worktree_dir: &str) {
+    let dir = std::path::Path::new(worktree_dir);
+    if !dir.exists() {
+        return;
+    }
+    let _ = tokio::process::Command::new("git")
+        .args(["checkout", "--", "."])
+        .current_dir(dir)
+        .output()
+        .await;
+    let _ = tokio::process::Command::new("git")
+        .args(["clean", "-fd"])
+        .current_dir(dir)
+        .output()
+        .await;
+}
+
+/// Resume a governed dev run that PAUSED on a review escalation (Approve / Amend). Re-spawns the
+/// implement run from the checkpoint's worktree (the agent's partial work is still on disk) with
+/// the human's `directive` injected into the grounding, so the agent continues from where it
+/// stopped. Marks the checkpoint resumed so it can't be consumed twice. Returns the new run id +
+/// mode, or an error when the checkpoint was already resumed.
+async fn resume_governed_run(
+    state: &AppState,
+    checkpoint: &crate::checkpoint::Checkpoint,
+    directive: &str,
+) -> Result<(String, &'static str), &'static str> {
+    // Guard: a checkpoint resumes at most once.
+    if state.checkpoints.mark_resumed(&checkpoint.id).is_none() {
+        return Err("checkpoint already resumed or unknown");
+    }
+    let live = live_mode_enabled();
+    let mode = if live { "live" } else { "scripted" };
+    let story_id = checkpoint.story_id.clone();
+    let (title, desc) = match state.stories.get(&story_id).await {
+        Ok(Some(s)) => (s.title, s.description),
+        _ => (story_id.clone(), String::new()),
+    };
+    let run_id = state.runs.create(&story_id, mode, crate::run::RunKind::Watched);
+
+    if !live {
+        // Scripted mode has no live agent to re-spawn; record the decision honestly and stop.
+        state
+            .runs
+            .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
+        state.uow.append_history(
+            &story_id,
+            "dev_implement",
+            &format!("Resume requested (scripted mode — no live agent to continue): {directive}"),
+        );
+        return Ok((run_id, mode));
+    }
+
+    let directive_grounding = format!(
+        "## RESUMED AFTER HUMAN REVIEW\n\nThis run PAUSED for human review by \
+         AGENTIC-NO-TEST-TAMPER-1 (it modified or deleted an existing test). A human has now \
+         reviewed it and responded. Continue from the CURRENT worktree state (your prior work is \
+         still here) and apply this decision exactly:\n\n{directive}"
+    );
+    spawn_brownfield_dev_run(
+        state,
+        run_id.clone(),
+        story_id,
+        title,
+        desc,
+        checkpoint.repo.clone(),
+        std::path::PathBuf::from(&checkpoint.worktree_dir),
+        checkpoint.branch.clone(),
+        checkpoint.model.clone(),
+        checkpoint.max_iterations,
+        None,  // resume uses the checkpoint's single model, not a tier map
+        false, // resume runs the full gates (no skip_layer2)
+        Some(directive_grounding),
+    )
+    .await;
+    Ok((run_id, mode))
+}
+
+/// Shared brownfield "derive project inputs + spawn the implement run", used by BOTH a fresh
+/// governed run ([`start_governed_run`]) and a RESUMED one ([`resume_governed_run`]). Given the run
+/// IDENTITY (run id, story text, worktree, model, iteration budget), it derives everything that
+/// comes from the active project + UoW — grounding (plus any `extra_grounding`, e.g. a resume
+/// directive), the read scope, the L3 + integration-gate bundles, the multi-repo worktrees, and the
+/// test-tamper enforcement flag — then spawns `execute_dev_implement_run`. Keeping this in one place
+/// is what stops the fresh-start and resume paths from drifting.
+#[allow(clippy::too_many_arguments)]
+async fn spawn_brownfield_dev_run(
+    state: &AppState,
+    run_id: String,
+    story_id: String,
+    title: String,
+    desc: String,
+    repo: String,
+    dir: std::path::PathBuf,
+    branch: String,
+    impl_model: String,
+    max_iterations: usize,
+    tier_map: Option<crate::model_tier::TierMap>,
+    skip_layer2: bool,
+    // Extra context appended to the project grounding. `None` for a fresh run; for a RESUME this is
+    // the human's directive (approve / amend / reject) so the re-spawned agent knows the decision.
+    extra_grounding: Option<String>,
+) {
+    let store = state.runs.clone();
+    let uow_store = state.uow.clone();
+    let uow_data = state.uow.get_or_create(&story_id);
+    let decisions = state.uow.decisions_for(&story_id);
+    let token = state.github_token();
+
+    // GROUNDING (the invariant): rule + repo digest for the implementer, plus any resume directive.
+    let base_grounding = state.project_grounding().await;
+    let grounding = match extra_grounding {
+        Some(extra) if !extra.trim().is_empty() => Some(match base_grounding {
+            Some(g) => format!("{g}\n\n{extra}"),
+            None => extra,
+        }),
+        _ => base_grounding,
+    };
+    // MULTI-REPO READ scope: ALL the active project's local repo clones (added READ-ONLY).
+    let read_dirs = state.active_repo_dirs();
+    // Layer-3 agentic code review (R7): built when the active project has L3 enabled.
+    let l3_bundle: Option<crate::dev_implement_run::L3ReviewBundle> = {
+        state.projects.active().and_then(|proj| {
+            if !proj.l3_review.enabled {
+                return None;
+            }
+            let l3_model = proj.l3_model().to_string();
+            let rules_prose = grounding.clone().unwrap_or_default();
+            let story_text = format!("{title}\n\n{desc}");
+            let llm: Arc<dyn crate::llm::Completer> = Arc::new(state.llm());
+            Some(crate::dev_implement_run::L3ReviewBundle {
+                story_text,
+                rules_prose,
+                model: l3_model,
+                llm,
+            })
+        })
+    };
+    // Integration gate bundle (R3.e): only when the UoW crosses a boundary and has a contract.
+    let integration_gate_bundle: Option<crate::dev_implement_run::IntegrationGateBundle> = {
+        if uow_data.investigation.crosses_boundary
+            && !uow_data.investigation.contract.trim().is_empty()
+        {
+            let gate_model = match &tier_map {
+                Some(map) => map.balanced_primary().to_string(),
+                None => impl_model.clone(),
+            };
+            let llm: Arc<dyn crate::llm::Completer> = Arc::new(state.llm());
+            Some(crate::dev_implement_run::IntegrationGateBundle {
+                contract: uow_data.investigation.contract.clone(),
+                model: gate_model,
+                llm,
+            })
+        } else {
+            None
+        }
+    };
+    // Multi-repo worktree setup (R3.f / R6): a worktree + story branch per in-scope repo.
+    let repo_worktrees: Vec<crate::dev_implement_run::RepoWorktree> = {
+        let intake_repos = uow_data.intake.repos.clone();
+        if intake_repos.len() <= 1 {
+            Vec::new()
+        } else {
+            let workspace_root = state.settings.workspace_root();
+            let mut worktrees = Vec::new();
+            for scope in &intake_repos {
+                let scope_branch = derive_scope_branch(&scope.branch, &story_id);
+                let override_path = state.settings.repo_path(&scope.repo);
+                if let Some(wt_dir) = crate::workspace::resolve_uow_worktree(
+                    override_path.as_deref(),
+                    workspace_root.as_deref(),
+                    &scope.repo,
+                    &scope_branch,
+                )
+                .await
+                {
+                    let base = tokio::process::Command::new("git")
+                        .args(["rev-parse", "HEAD"])
+                        .current_dir(&wt_dir)
+                        .output()
+                        .await
+                        .ok()
+                        .filter(|o| o.status.success())
+                        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .unwrap_or_default();
+                    worktrees.push(crate::dev_implement_run::RepoWorktree {
+                        repo: scope.repo.clone(),
+                        branch: scope_branch,
+                        dir: wt_dir,
+                        base_commit: base,
+                    });
+                }
+            }
+            worktrees
+        }
+    };
+    // Test-tamper guard (AGENTIC-NO-TEST-TAMPER-1): enforced when the project selected it on the
+    // (default) escalate option.
+    let enforce_test_tamper_guard = state
+        .projects
+        .active()
+        .map(|p| crate::test_tamper::test_tamper_guard_active(&p.ruleset.selections))
+        .unwrap_or(false);
+    let impl_escalations = state.escalations.clone();
+    let impl_checkpoints = state.checkpoints.clone();
+    let impl_registry = state.model_registry.clone();
+    let impl_creds = state.credential_store.clone();
+    let impl_limiter = state.rate_limiter.clone();
+    tokio::spawn(async move {
+        crate::dev_implement_run::execute_dev_implement_run(
+            store,
+            uow_store,
+            run_id,
+            story_id,
+            title,
+            desc,
+            repo,
+            dir,
+            branch,
+            decisions,
+            token,
+            impl_model,
+            max_iterations,
+            skip_layer2,
+            grounding,
+            read_dirs,
+            l3_bundle,
+            integration_gate_bundle,
+            repo_worktrees,
+            impl_registry,
+            impl_creds,
+            impl_limiter,
+            impl_escalations,
+            impl_checkpoints,
+            enforce_test_tamper_guard,
+        )
+        .await
+    });
+}
+
 /// path has no layer-2 bounce, so the flag is a no-op there.
 async fn start_governed_run(
     state: &AppState,
@@ -1209,7 +1453,6 @@ async fn start_governed_run(
             .as_deref()
             .filter(|b| !b.trim().is_empty())
             .map(|b| b.to_string());
-        let decisions = state.uow.decisions_for(story_id);
 
         // Try to resolve the UoW's worktree from the active project's settings.
         // We require an active project to have a resolvable workspace root / repo override.
@@ -1238,13 +1481,11 @@ async fn start_governed_run(
         if crate::dev_implement_run::is_brownfield(worktree.as_deref()) {
             // Brownfield: implement in-place in the UoW's worktree.
             let dir = worktree.expect("is_brownfield guarantees Some");
-            let uow_store = state.uow.clone();
             let repo = story_id
                 .rsplit_once('#')
                 .map(|(r, _)| r.to_string())
                 .unwrap_or_else(|| story_id.to_string());
             let branch = uow_branch.unwrap_or_else(|| format!("camerata/{story_id}"));
-            let token = state.github_token();
             // For the tiered path we pick the strongest model for the implementer; for
             // the single-model path we use the caller's model (or the default).
             let impl_model = match &tier_map {
@@ -1253,166 +1494,24 @@ async fn start_governed_run(
                     .clone()
                     .unwrap_or_else(crate::model_tier::default_strongest_model),
             };
-            // GROUNDING (the invariant): rule + repo digest for the implementer (computed
-            // before the spawn so it can move into the task).
-            let grounding = state.project_grounding().await;
-            // MULTI-REPO READ scope: ALL the active project's local repo clones. The
-            // implementer writes only to its worktree; these are added READ-ONLY so it can
-            // read sibling repos.
-            let read_dirs = state.active_repo_dirs();
-            // Layer-3 agentic code review (R7): build the bundle when the active project
-            // has L3 enabled. The bundle captures the LLM + model + story text + rules
-            // prose BEFORE the spawn; the reviewer is BLIND to other-agent transcripts.
-            let l3_bundle: Option<crate::dev_implement_run::L3ReviewBundle> = {
-                state.projects.active().and_then(|proj| {
-                    if !proj.l3_review.enabled {
-                        return None;
-                    }
-                    let l3_model = proj.l3_model().to_string();
-                    let rules_prose = grounding.clone().unwrap_or_default();
-                    let story_text = format!("{title}\n\n{desc}");
-                    let llm: Arc<dyn crate::llm::Completer> = Arc::new(state.llm());
-                    Some(crate::dev_implement_run::L3ReviewBundle {
-                        story_text,
-                        rules_prose,
-                        model: l3_model,
-                        llm,
-                    })
-                })
-            };
-            // Integration gate bundle (R3.e): only when the UoW crosses a boundary and
-            // has a non-empty contract. The gate runs after L2/L3 in the bounce loop.
-            let integration_gate_bundle: Option<crate::dev_implement_run::IntegrationGateBundle> = {
-                if uow_data.investigation.crosses_boundary
-                    && !uow_data.investigation.contract.trim().is_empty()
-                {
-                    let gate_model = match &tier_map {
-                        Some(map) => map.balanced_primary().to_string(),
-                        None => model
-                            .clone()
-                            .unwrap_or_else(crate::model_tier::default_strongest_model),
-                    };
-                    let llm: Arc<dyn crate::llm::Completer> = Arc::new(state.llm());
-                    Some(crate::dev_implement_run::IntegrationGateBundle {
-                        contract: uow_data.investigation.contract.clone(),
-                        model: gate_model,
-                        llm,
-                    })
-                } else {
-                    None
-                }
-            };
-
-            // ── Multi-repo worktree setup (R3.f / R6) ────────────────────────────────
-            //
-            // When the UoW's intake.repos has entries, set up a worktree + story branch
-            // PER in-scope repo and capture each repo's base commit. The integration gate
-            // then computes diffs from ALL repos (run_multi_repo_integration_gate).
-            //
-            // Single in-scope repo (or no intake.repos): repo_worktrees stays empty and
-            // execute_dev_implement_run falls back to the single-repo path (unchanged).
-            //
-            // Base-commit capture: HEAD in each worktree before any agent work. Used by
-            // worktree_diff_from_base after the agent commits to get the exact per-repo diff.
-            //
-            // TODO(#105-live): When fan_out wires per-worker worktrees on the live-fleet
-            // side, extend this to also validate that each worker's jail matches its repo
-            // worktree dir. For now, repo_worktrees feeds only the integration gate.
-            let repo_worktrees: Vec<crate::dev_implement_run::RepoWorktree> = {
-                let intake_repos = uow_data.intake.repos.clone();
-                if intake_repos.len() <= 1 {
-                    // Single-repo path (or no intake selection): handled by the primary
-                    // dir + base_commit in execute_dev_implement_run. No extra setup.
-                    Vec::new()
-                } else {
-                    // Multi-repo path: resolve + set up each in-scope repo's worktree.
-                    let workspace_root = state.settings.workspace_root();
-                    let mut worktrees = Vec::new();
-                    for scope in &intake_repos {
-                        // Derive the story branch for this repo from its BranchMode.
-                        let scope_branch = derive_scope_branch(&scope.branch, &story_id_owned);
-                        let override_path = state.settings.repo_path(&scope.repo);
-                        // Resolve and ensure the per-repo worktree (same machinery as the
-                        // primary repo path above). Skip repos that don't resolve locally —
-                        // the primary repo's worktree is always present from the outer resolve.
-                        // TODO(#105-live): surface unresolved sibling repos as run events.
-                        if let Some(wt_dir) = crate::workspace::resolve_uow_worktree(
-                            override_path.as_deref(),
-                            workspace_root.as_deref(),
-                            &scope.repo,
-                            &scope_branch,
-                        )
-                        .await
-                        {
-                            // Capture the base commit for this repo's worktree.
-                            let base = tokio::process::Command::new("git")
-                                .args(["rev-parse", "HEAD"])
-                                .current_dir(&wt_dir)
-                                .output()
-                                .await
-                                .ok()
-                                .filter(|o| o.status.success())
-                                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                                .unwrap_or_default();
-                            worktrees.push(crate::dev_implement_run::RepoWorktree {
-                                repo: scope.repo.clone(),
-                                branch: scope_branch,
-                                dir: wt_dir,
-                                base_commit: base,
-                            });
-                        }
-                    }
-                    worktrees
-                }
-            };
-
-            // Test-tamper guard (AGENTIC-NO-TEST-TAMPER-1): enforce on TWO conditions —
-            // the rule is SELECTED (active) in the project AND the chosen option is the
-            // (default) escalate option. A project that selected an "allow" option, or has
-            // not selected the rule, is not blocked. `test_tamper_guard_active` is the pure
-            // decision over the project's ruleset selections.
-            let enforce_test_tamper_guard = state
-                .projects
-                .active()
-                .map(|p| crate::test_tamper::test_tamper_guard_active(&p.ruleset.selections))
-                .unwrap_or(false);
-            let impl_escalations = state.escalations.clone();
-            let impl_checkpoints = state.checkpoints.clone();
-
-            // Clone the provider-dispatch context before the move closure captures it.
-            let impl_registry = state.model_registry.clone();
-            let impl_creds = state.credential_store.clone();
-            let impl_limiter = state.rate_limiter.clone();
-            tokio::spawn(async move {
-                crate::dev_implement_run::execute_dev_implement_run(
-                    store,
-                    uow_store,
-                    rid,
-                    story_id_owned,
-                    title,
-                    desc,
-                    repo,
-                    dir,
-                    branch,
-                    decisions,
-                    token,
-                    impl_model,
-                    max_iterations,
-                    skip_layer2,
-                    grounding,
-                    read_dirs,
-                    l3_bundle,
-                    integration_gate_bundle,
-                    repo_worktrees,
-                    impl_registry,
-                    impl_creds,
-                    impl_limiter,
-                    impl_escalations,
-                    impl_checkpoints,
-                    enforce_test_tamper_guard,
-                )
-                .await
-            });
+            // Derive the project inputs + spawn the implement run. SHARED with the resume path
+            // (`spawn_brownfield_dev_run`), so a fresh run and a resumed run never drift.
+            spawn_brownfield_dev_run(
+                state,
+                rid,
+                story_id_owned,
+                title,
+                desc,
+                repo,
+                dir,
+                branch,
+                impl_model,
+                max_iterations,
+                tier_map,
+                skip_layer2,
+                None,
+            )
+            .await;
         } else {
             // Greenfield fallback: scaffold a new app from the plan in a throwaway dir.
             match tier_map {
@@ -6421,12 +6520,53 @@ async fn answer_escalation(
         .escalations
         .resolve_with_payload(&id, &req.answer, &payload)
         .ok_or_else(|| AppError(anyhow::anyhow!("no open escalation: {id}")))?;
-    // The block is cleared: return the routine to Idle so the scheduler can run its next
-    // slot (the directive is recorded on the resolved escalation for the resumed run to
-    // consult).
-    let _ = state
-        .routines
-        .set_status(&resolved.routine_id, crate::routine::RoutineStatus::Idle);
+    // Act on the resolution by subject. A ROUTINE review returns the routine to Idle so the
+    // scheduler can run its next slot. A UoW (Governed Development) review RESUMES the paused run
+    // from its checkpoint (Approve/Amend) — or, on Reject, reverts the worktree and stops cleanly.
+    match resolved.subject_kind {
+        crate::escalation::SubjectKind::Routine => {
+            let _ = state
+                .routines
+                .set_status(&resolved.routine_id, crate::routine::RoutineStatus::Idle);
+        }
+        crate::escalation::SubjectKind::Uow => {
+            if let Some(ckpt) = resolved
+                .checkpoint_id
+                .as_deref()
+                .and_then(|cid| state.checkpoints.get(cid))
+            {
+                // The agent-facing directive is the translated payload (Amend carries the
+                // correction); fall back to the raw answer if translation produced nothing.
+                let directive = resolved
+                    .resume_payload
+                    .as_ref()
+                    .map(|p| p.directive.clone())
+                    .filter(|d| !d.trim().is_empty())
+                    .unwrap_or_else(|| req.answer.clone());
+                match req.action {
+                    crate::escalation::EscalationAction::Reject => {
+                        // Stop cleanly: discard the agent's uncommitted work, consume the
+                        // checkpoint, and record the abandonment on the UoW (routine_id holds the
+                        // story_id for a UoW escalation).
+                        let _ = state.checkpoints.mark_resumed(&ckpt.id);
+                        revert_worktree(&ckpt.worktree_dir).await;
+                        state.uow.append_history(
+                            &resolved.routine_id,
+                            "dev_implement",
+                            &format!(
+                                "Run REJECTED at review; reverted the worktree's uncommitted \
+                                 changes. {directive}"
+                            ),
+                        );
+                    }
+                    _ => {
+                        // Approve / Amend: re-spawn from the checkpoint with the directive.
+                        let _ = resume_governed_run(&state, &ckpt, &directive).await;
+                    }
+                }
+            }
+        }
+    }
     Ok(Json(resolved))
 }
 

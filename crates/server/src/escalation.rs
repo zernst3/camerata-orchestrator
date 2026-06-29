@@ -126,6 +126,22 @@ pub struct RaiseEscalationReq {
 #[derive(Deserialize)]
 pub struct AnswerEscalationReq {
     pub answer: String,
+    /// What the human chose. Only meaningful for UoW (Governed Development) review escalations;
+    /// the routine path ignores it. Defaults to `Approve` for back-compat with existing callers.
+    #[serde(default)]
+    pub action: EscalationAction,
+}
+
+/// What the human chose when resolving a UoW review escalation. `Approve` and `Amend` both RESUME
+/// the paused run with the translated directive (Amend's directive carries the correction);
+/// `Reject` reverts the worktree's uncommitted work and stops the run cleanly (no resume).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalationAction {
+    #[default]
+    Approve,
+    Amend,
+    Reject,
 }
 
 /// The structured resume payload a routine needs to continue: the AI-translation step's
