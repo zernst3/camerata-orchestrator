@@ -1860,7 +1860,10 @@ html, body {
   position: fixed; right: 76px; bottom: 86px; z-index: 1000;
   width: 640px; max-width: calc(100vw - 96px); height: 420px; max-height: calc(100vh - 130px);
   display: flex; flex-direction: column;
-  background: #1b1a18; border: 1px solid #2e2d2a; border-radius: var(--r-md);
+  /* Slightly translucent + frosted so the Bombe shows through (the xterm canvas uses a matching
+     rgba background with allowTransparency; see terminal.rs). */
+  background: rgba(27,26,24,0.86); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border: 1px solid #2e2d2a; border-radius: var(--r-md);
   box-shadow: var(--shadow-pop); overflow: hidden;
 }
 /* Hidden state for a closed-but-mounted panel. visibility:hidden (NOT display:none)
@@ -3821,10 +3824,15 @@ html, body {
   align-items: center;
   pointer-events: none;
   opacity: 0.5;        /* Bletchley raised value */
-  transition: opacity 0.5s ease;
+  /* Idle: dimmed + drained of colour so the machine reads as "powered down". The .bombe-running
+     state (below) brightens + re-saturates it. The transitions make the machine LIGHT UP and GO
+     DIM smoothly (powering on/off) instead of snapping on with the spin. */
+  filter: brightness(0.72) saturate(0.5);
+  transition: opacity 0.8s ease, filter 0.9s ease;
 }
 .bombe-bg-machine.bombe-running {
   opacity: 0.72;       /* Bletchley raised value */
+  filter: brightness(1.06) saturate(1.1);
 }
 
 /* ── Cabinet body ── */
@@ -4102,16 +4110,25 @@ html, body {
     transparent;
 }
 
-/* ── Rotor spin animation — ONLY active under .bombe-running ── */
+/* ── Rotor spin animation ──
+   The animation is ALWAYS applied but PAUSED when idle via animation-play-state. CSS preserves an
+   animation's progress across pause/resume, so each rotor FREEZES at its current angle when
+   processing stops and RESUMES from that exact position when it starts again — the knob positions
+   persist across run/stop cycles instead of snapping back to the start angle. .bombe-running only
+   flips the play-state to running. */
 @keyframes rotor-clicking-spin {
   from { transform: rotate(var(--start-angle, 0deg)); }
   to   { transform: rotate(calc(var(--start-angle, 0deg) + 360deg)); }
 }
-.bombe-running .rotor-drum {
+.rotor-drum {
   animation-name: rotor-clicking-spin;
   animation-timing-function: steps(26, end);
   animation-iteration-count: infinite;
+  animation-play-state: paused;
   /* animation-duration is set inline (0.9s / 26s / 78s per row) */
+}
+.bombe-running .rotor-drum {
+  animation-play-state: running;
 }
 
 /* ── Status LEDs ── */

@@ -1005,14 +1005,16 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
             div {
                 style: "position:fixed;bottom:5rem;right:1.5rem;z-index:999;\
                         width:28rem;max-height:80vh;display:flex;flex-direction:column;\
-                        background:#fff;border:1px solid #e2e8f0;border-radius:.75rem;\
+                        background:rgba(255,255,255,0.90);backdrop-filter:blur(10px);\
+                        -webkit-backdrop-filter:blur(10px);\
+                        border:1px solid #e2e8f0;border-radius:.75rem;\
                         box-shadow:0 8px 32px rgba(0,0,0,.18);overflow:hidden;",
 
                 // ── header ──────────────────────────────────────────────────
                 div {
                     style: "display:flex;align-items:center;justify-content:space-between;\
                             padding:.75rem 1rem;border-bottom:1px solid #e2e8f0;\
-                            background:#f8fafc;",
+                            background:rgba(248,250,252,0.82);",
                     span {
                         style: "font-weight:600;font-size:.95rem;color:#1e293b;",
                         "Camerata assistant"

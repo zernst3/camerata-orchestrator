@@ -130,8 +130,11 @@ fn make_session_script(id: usize, ws_url: &str) -> String {
     cursorBlink: true,
     fontSize: 13,
     fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+    // Slightly translucent so the Bombe shows through (paired with the .term-panel
+    // backdrop-blur in style.rs for legibility). allowTransparency lets the rgba background blend.
+    allowTransparency: true,
     theme: {{
-      background: '#1b1a18',
+      background: 'rgba(27,26,24,0.86)',
       foreground: '#faf9f6',
       cursor: '#b35636',
     }},
