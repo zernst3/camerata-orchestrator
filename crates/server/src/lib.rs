@@ -2315,6 +2315,9 @@ struct CustomRuleReq {
     body: String,
     #[serde(default)]
     domain: String,
+    /// The repos this custom rule applies to (the UI multiselect). Empty = all repos.
+    #[serde(default)]
+    repos: Vec<String>,
 }
 
 async fn add_custom_rule(
@@ -2328,11 +2331,16 @@ async fn add_custom_rule(
     let rule = crate::project::CustomRule {
         name: req.name.trim().to_string(),
         body: req.body,
-        domain: if req.domain.trim().is_empty() {
+        // Keep `domain` in sync for back-compat: `*` when scoped to all repos, else the first
+        // selected repo. The authoritative scoping is `repos`.
+        domain: if req.repos.is_empty() {
             "*".to_string()
+        } else if req.domain.trim().is_empty() {
+            req.repos.first().cloned().unwrap_or_else(|| "*".to_string())
         } else {
             req.domain.trim().to_string()
         },
+        repos: req.repos.clone(),
     };
     match state
         .projects
@@ -2881,14 +2889,44 @@ async fn reconcile_project(
     let Some(project) = state.projects.get(&id) else {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
+    // Local-first: read each repo's working copy (where emit writes by default); the token only
+    // enables the GitHub governance-branch fallback for repos that aren't cloned locally.
     let token = std::env::var("CAMERATA_GITHUB_TOKEN")
         .ok()
-        .filter(|v| !v.is_empty());
-    let Some(token) = token else {
-        return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to reconcile." }));
+        .filter(|v| !v.is_empty())
+        .unwrap_or_default();
+    let workspace_root = state.settings.workspace_root();
+    let sources: Vec<(String, Option<std::path::PathBuf>)> = project
+        .repos
+        .iter()
+        .map(|r| {
+            let override_path = state.settings.repo_path(r);
+            let dir = crate::workspace::resolve_repo_dir(
+                override_path.as_deref(),
+                workspace_root.as_deref(),
+                r,
+            );
+            (r.clone(), dir)
+        })
+        .collect();
+    let applied = crate::reconcile::reconcile_repos_local(&sources, &token).await;
+    // Adopt: mirror the repo-local selections into project state and pull custom rules back in,
+    // so the selected-rules table reflects what is actually in the repos. cross_repo + process
+    // are project-level (not in repo gate configs) and are left untouched. Only mutate when we
+    // actually read rules — an empty read (nothing armed / no local clones) must not wipe state.
+    let project = if applied.is_empty() {
+        project
+    } else {
+        let (selections, custom) = crate::reconcile::adopt_from_applied(&applied);
+        state
+            .projects
+            .update(&id, |p| {
+                p.ruleset.selections = selections.clone();
+                p.merge_custom(&custom);
+            })
+            .unwrap_or(project)
     };
-    let applied = crate::reconcile::reconcile_repos(&project.repos, &token).await;
-    Json(serde_json::json!({ "ok": true, "applied": applied }))
+    Json(serde_json::json!({ "ok": true, "applied": applied, "project": project }))
 }
 
 /// Connection health for the optional integrations (GitHub, Claude). Probes
@@ -4028,7 +4066,7 @@ fn apply_files_per_repo(
             .collect();
         let repo_custom: Vec<&crate::project::CustomRule> = custom
             .iter()
-            .filter(|c| c.domain.trim().is_empty() || c.domain.trim() == "*" || &c.domain == repo)
+            .filter(|c| c.applies_to_repo(repo))
             .collect();
         if repo_rules.is_empty() && repo_custom.is_empty() {
             continue;
@@ -4203,7 +4241,7 @@ async fn onboard_apply(
             .collect();
         let repo_custom: Vec<&crate::project::CustomRule> = custom
             .iter()
-            .filter(|c| c.domain.trim().is_empty() || c.domain.trim() == "*" || &c.domain == repo)
+            .filter(|c| c.applies_to_repo(repo))
             .collect();
         if repo_rules.is_empty() && repo_custom.is_empty() {
             continue;
@@ -5498,7 +5536,7 @@ async fn emit_to_repos(
             .collect();
         let repo_custom: Vec<&crate::project::CustomRule> = custom
             .iter()
-            .filter(|c| c.domain.trim().is_empty() || c.domain.trim() == "*" || &c.domain == repo)
+            .filter(|c| c.applies_to_repo(repo))
             .collect();
         if repo_rules.is_empty() && repo_custom.is_empty() {
             continue;
@@ -5687,7 +5725,7 @@ async fn emit_project_local(
             .collect();
         let repo_custom: Vec<&crate::project::CustomRule> = custom
             .iter()
-            .filter(|c| c.domain.trim().is_empty() || c.domain.trim() == "*" || &c.domain == repo)
+            .filter(|c| c.applies_to_repo(repo))
             .collect();
         if repo_rules.is_empty() && repo_custom.is_empty() {
             continue;
@@ -10284,6 +10322,7 @@ mod tests {
                 name: "house".into(),
                 body: "Prefer X.".into(),
                 domain: "*".into(),
+                repos: Vec::new(),
             }]);
         });
         // Arming (saving base rules) must keep the custom rule.

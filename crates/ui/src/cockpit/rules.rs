@@ -63,19 +63,64 @@ pub(super) async fn emit_project_local(
     (all_ok, lines.join(" · "))
 }
 
-/// Add or edit (by name) a custom rule on a project.
-pub(super) async fn add_custom_rule(project_id: &str, name: &str, body: &str, domain: &str) -> bool {
+/// Add or edit (by name) a custom rule on a project, scoped to `repos` (empty = all repos).
+pub(super) async fn add_custom_rule(
+    project_id: &str,
+    name: &str,
+    body: &str,
+    repos: &[String],
+) -> bool {
     reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/custom",
             crate::BFF_URL,
             project_id
         ))
-        .json(&serde_json::json!({ "name": name, "body": body, "domain": domain }))
+        .json(&serde_json::json!({ "name": name, "body": body, "repos": repos }))
         .send()
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false)
+}
+
+/// Pop a native save dialog and write `content` to disk. Returns true on success, false if the
+/// user cancelled or the write failed.
+pub(super) async fn save_json_file(default_name: &str, content: String) -> bool {
+    match rfd::AsyncFileDialog::new()
+        .set_file_name(default_name)
+        .save_file()
+        .await
+    {
+        Some(file) => file.write(content.as_bytes()).await.is_ok(),
+        None => false,
+    }
+}
+
+/// Rewrite a ruleset JSON so every base selection and custom rule targets `repos`. Used by import
+/// so the architect can re-scope an imported ruleset to the repos they pick. On any parse problem
+/// the original text is returned unchanged (the server still validates it).
+pub(super) fn apply_repos_to_ruleset(json: &str, repos: &[String]) -> String {
+    let Ok(mut v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return json.to_string();
+    };
+    let repos_json = serde_json::json!(repos);
+    for key in ["selections", "cross_repo", "process"] {
+        if let Some(arr) = v.get_mut(key).and_then(|x| x.as_array_mut()) {
+            for item in arr.iter_mut() {
+                if let Some(obj) = item.as_object_mut() {
+                    obj.insert("repos".to_string(), repos_json.clone());
+                }
+            }
+        }
+    }
+    if let Some(arr) = v.get_mut("custom").and_then(|x| x.as_array_mut()) {
+        for item in arr.iter_mut() {
+            if let Some(obj) = item.as_object_mut() {
+                obj.insert("repos".to_string(), repos_json.clone());
+            }
+        }
+    }
+    serde_json::to_string_pretty(&v).unwrap_or_else(|_| json.to_string())
 }
 
 /// Delete a custom rule by name (the only way a custom rule leaves a project).
@@ -2425,8 +2470,12 @@ pub(super) fn RulesView() -> Element {
     let mut applied = use_signal(|| Option::<Vec<AppliedRuleView>>::None);
     let mut reconciling = use_signal(|| false);
     let mut cr_name = use_signal(String::new);
-    let mut cr_domain = use_signal(String::new);
     let mut cr_body = use_signal(String::new);
+    // Custom-rule repo scoping (multiselect). Empty = all repos.
+    let mut cr_repos = use_signal(Vec::<String>::new);
+    // Import repo scoping (multiselect): which repos the imported rules target. Empty = keep the
+    // imported scoping as-is.
+    let mut import_repos = use_signal(Vec::<String>::new);
     let mut emitting_local = use_signal(|| false);
     // Emit cascade toggles (each requires the previous): commit to a managed branch → push it →
     // open a PR. All off = write the ruleset into the local working copy only.
@@ -2699,7 +2748,21 @@ pub(super) fn RulesView() -> Element {
                                 let id = pid_rec.clone();
                                 reconciling.set(true);
                                 spawn(async move {
-                                    applied.set(fetch_reconcile(&id).await);
+                                    let res = fetch_reconcile(&id).await;
+                                    let n = res.as_ref().map(|v| v.len()).unwrap_or(0);
+                                    applied.set(res);
+                                    // Reconcile adopts the repos' rules into the project; refresh
+                                    // the resources so the selected-rules table reflects it.
+                                    refresh += 1;
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        if n > 0 { crate::toast::ToastKind::Info } else { crate::toast::ToastKind::Warning },
+                                        if n > 0 {
+                                            format!("Reconciled {n} rule(s) from the repos into this project's selections.")
+                                        } else {
+                                            "No rules found in the repos (nothing emitted locally yet, or no local clones).".to_string()
+                                        },
+                                    );
                                     reconciling.set(false);
                                 });
                             },
@@ -2708,7 +2771,7 @@ pub(super) fn RulesView() -> Element {
                         if let Some(rules) = applied() {
                             div { class: "applied-list",
                                 if rules.is_empty() {
-                                    p { class: "section-hint", "No rules found in the repos yet (none armed, or GitHub not connected)." }
+                                    p { class: "section-hint", "No rules found in the repos (nothing emitted locally yet, or no local clones to read)." }
                                 }
                                 for r in rules.iter() {
                                     div { class: "applied-rule",
@@ -2751,24 +2814,58 @@ pub(super) fn RulesView() -> Element {
                             let pid_add = p_owned.id.clone();
                             let custom_rules = p_owned.ruleset.custom.clone();
                             let project_id_cr = p_owned.id.clone();
+                            let cr_repo_opts = p_owned.repos.clone();
                             rsx! {
                                 div { class: "routine-create-row",
                                     input { class: "addressee-input", placeholder: "name", value: "{cr_name}", oninput: move |e| cr_name.set(e.value()) }
-                                    input { class: "addressee-input", placeholder: "domain (e.g. api-layer, or * for all)", value: "{cr_domain}", oninput: move |e| cr_domain.set(e.value()) }
+                                }
+                                // Repo scoping: which repos this custom rule applies to. None checked = all repos.
+                                div { class: "repo-multiselect",
+                                    span { class: "repo-multiselect-label", "Applies to:" }
+                                    if cr_repo_opts.is_empty() {
+                                        span { class: "section-hint", "no repos in this project yet" }
+                                    }
+                                    for repo in cr_repo_opts.iter() {
+                                        {
+                                            let repo = repo.clone();
+                                            let checked = cr_repos().contains(&repo);
+                                            rsx! {
+                                                label { class: "emit-toggle",
+                                                    input {
+                                                        r#type: "checkbox",
+                                                        checked,
+                                                        onchange: move |e| {
+                                                            let mut v = cr_repos();
+                                                            if e.checked() {
+                                                                if !v.contains(&repo) { v.push(repo.clone()); }
+                                                            } else {
+                                                                v.retain(|r| r != &repo);
+                                                            }
+                                                            cr_repos.set(v);
+                                                        },
+                                                    }
+                                                    "{repo}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if cr_repos().is_empty() {
+                                        span { class: "repo-multiselect-hint", "(all repos)" }
+                                    }
                                 }
                                 textarea { class: "routine-intent-input", rows: "3", placeholder: "the directive the agent should follow…", value: "{cr_body}", oninput: move |e| cr_body.set(e.value()) }
                                 button {
                                     class: "btn-run",
                                     onclick: move |_| {
-                                        let (name, domain, body) = (cr_name(), cr_domain(), cr_body());
+                                        let (name, body, repos) = (cr_name(), cr_body(), cr_repos());
                                         if name.trim().is_empty() || body.trim().is_empty() { return; }
                                         let pid = pid_add.clone();
                                         spawn(async move {
-                                            if add_custom_rule(&pid, &name, &body, &domain).await { refresh += 1; }
+                                            if add_custom_rule(&pid, &name, &body, &repos).await { refresh += 1; }
                                         });
                                         cr_name.set(String::new());
-                                        cr_domain.set(String::new());
                                         cr_body.set(String::new());
+                                        cr_repos.set(Vec::new());
                                     },
                                     "Save custom rule"
                                 }
@@ -2780,7 +2877,24 @@ pub(super) fn RulesView() -> Element {
 
                         p { class: "section-label", "Export ruleset (source of truth)" }
                         textarea { class: "routine-prompt-input", rows: "8", readonly: true, value: "{export}" }
-                        p { class: "section-label", "Import ruleset (upsert base; preserves custom)" }
+                        {
+                            let export_dl = export.clone();
+                            rsx! {
+                                button {
+                                    class: "btn-restart",
+                                    onclick: move |_| {
+                                        let json = export_dl.clone();
+                                        spawn(async move {
+                                            if save_json_file("ruleset.json", json).await {
+                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Ruleset saved to disk.");
+                                            }
+                                        });
+                                    },
+                                    "Save JSON…"
+                                }
+                            }
+                        }
+                        p { class: "section-label", "Import ruleset (updates the project only — re-emit to apply)" }
                         textarea {
                             class: "routine-prompt-input",
                             rows: "6",
@@ -2788,20 +2902,60 @@ pub(super) fn RulesView() -> Element {
                             value: "{import_text}",
                             oninput: move |e| import_text.set(e.value()),
                         }
+                        // Repo scoping for the import: which repos the imported rules target.
+                        // None checked = keep the scoping that's in the imported JSON.
+                        {
+                            let import_repo_opts = p_owned.repos.clone();
+                            rsx! {
+                                div { class: "repo-multiselect",
+                                    span { class: "repo-multiselect-label", "Apply imported rules to:" }
+                                    for repo in import_repo_opts.iter() {
+                                        {
+                                            let repo = repo.clone();
+                                            let checked = import_repos().contains(&repo);
+                                            rsx! {
+                                                label { class: "emit-toggle",
+                                                    input {
+                                                        r#type: "checkbox",
+                                                        checked,
+                                                        onchange: move |e| {
+                                                            let mut v = import_repos();
+                                                            if e.checked() {
+                                                                if !v.contains(&repo) { v.push(repo.clone()); }
+                                                            } else {
+                                                                v.retain(|r| r != &repo);
+                                                            }
+                                                            import_repos.set(v);
+                                                        },
+                                                    }
+                                                    "{repo}"
+                                                }
+                                            }
+                                        }
+                                    }
+                                    if import_repos().is_empty() {
+                                        span { class: "repo-multiselect-hint", "(keep imported scoping)" }
+                                    }
+                                }
+                            }
+                        }
                         button {
                             class: "btn-run",
                             onclick: move |_| {
-                                let (id, json) = (pid.clone(), import_text());
-                                if json.trim().is_empty() { return; }
+                                let (id, raw, repos) = (pid.clone(), import_text(), import_repos());
+                                if raw.trim().is_empty() { return; }
+                                // Re-scope to the chosen repos client-side (no-op when none chosen).
+                                let json = if repos.is_empty() { raw } else { apply_repos_to_ruleset(&raw, &repos) };
                                 spawn(async move {
                                     if import_ruleset(&id, json).await {
-                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Ruleset imported (custom rules preserved).");
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Ruleset imported into the project (custom rules preserved). These are NOT in the repos yet — use 'Emit rules locally' to apply them.");
                                         refresh += 1;
                                     } else {
                                         crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Import failed — check the JSON shape.");
                                     }
                                 });
                                 import_text.set(String::new());
+                                import_repos.set(Vec::new());
                             },
                             "Import ruleset"
                         }
@@ -4628,14 +4782,38 @@ pub(super) fn SingleRuleEditor(
 #[cfg(test)]
 mod tests {
     use super::{
-        domain_from_rule_id, is_inline_only_rule_id, selection_key, AppliedRuleRow,
-        ProposedRuleView, RuleOptionView, RuleSelectionView, SelectionBucket,
+        apply_repos_to_ruleset, domain_from_rule_id, is_inline_only_rule_id, selection_key,
+        AppliedRuleRow, ProposedRuleView, RuleOptionView, RuleSelectionView, SelectionBucket,
         SINGLE_REPO_SELECTION_KEY,
     };
 
     #[test]
     fn selection_key_empty_returns_sentinel() {
         assert_eq!(selection_key(""), SINGLE_REPO_SELECTION_KEY);
+    }
+
+    #[test]
+    fn apply_repos_to_ruleset_rescopes_selections_and_custom() {
+        let json = r#"{
+            "selections": [{"rule_id": "R-1", "chosen_option": null, "repos": ["old/repo"]}],
+            "cross_repo": [],
+            "process": [],
+            "custom": [{"name": "house", "body": "Prefer X.", "domain": "*"}]
+        }"#;
+        let out = apply_repos_to_ruleset(json, &["me/api".to_string(), "me/web".to_string()]);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["selections"][0]["repos"][0], "me/api");
+        assert_eq!(v["selections"][0]["repos"][1], "me/web");
+        assert_eq!(v["custom"][0]["repos"][0], "me/api");
+        // The rule id + body are preserved (only scoping is rewritten).
+        assert_eq!(v["selections"][0]["rule_id"], "R-1");
+        assert_eq!(v["custom"][0]["body"], "Prefer X.");
+    }
+
+    #[test]
+    fn apply_repos_to_ruleset_returns_input_on_invalid_json() {
+        let bad = "not json";
+        assert_eq!(apply_repos_to_ruleset(bad, &["me/api".to_string()]), bad);
     }
 
     #[test]

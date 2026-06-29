@@ -1163,6 +1163,9 @@ html, body {
 .emit-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--ink-soft); cursor: pointer; user-select: none; }
 .emit-toggle.disabled { opacity: 0.45; cursor: not-allowed; }
 .emit-toggle input { cursor: inherit; }
+.repo-multiselect { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 8px 0 6px; }
+.repo-multiselect-label { font-size: 12px; font-weight: 700; color: var(--ink-soft); }
+.repo-multiselect-hint { font-size: 11px; color: var(--ink-faint); font-style: italic; }
 .rule-count { display: flex; flex-direction: column; min-width: 150px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 .rule-count-n { font-size: 22px; font-weight: 700; color: var(--ink); }
 .rule-count-l { font-size: 12px; color: var(--ink-soft); }

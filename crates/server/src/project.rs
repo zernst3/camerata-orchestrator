@@ -180,9 +180,25 @@ pub struct CustomRule {
     pub name: String,
     /// Free-text directive body.
     pub body: String,
-    /// Domain it applies to (routes it to the matching repos; `*` = all).
+    /// Legacy single-domain field (`*` = all). Superseded by `repos` below; kept for back-compat
+    /// with projects saved before per-repo scoping and as the fallback in [`Self::applies_to_repo`].
     #[serde(default)]
     pub domain: String,
+    /// The repos this custom rule applies to (the multiselect). Empty = all repos (the `*` case).
+    #[serde(default)]
+    pub repos: Vec<String>,
+}
+
+impl CustomRule {
+    /// Whether this custom rule applies to `repo`. Prefers the explicit `repos` list; when it is
+    /// empty, falls back to the legacy `domain` (`*`/empty = all, else an exact repo match).
+    pub fn applies_to_repo(&self, repo: &str) -> bool {
+        if !self.repos.is_empty() {
+            return self.repos.iter().any(|r| r == repo);
+        }
+        let d = self.domain.trim();
+        d.is_empty() || d == "*" || d == repo
+    }
 }
 
 /// One selected BASE rule: which corpus/gate rule, the chosen alternative (if it
@@ -863,6 +879,7 @@ mod tests {
                     name: "house-style".into(),
                     body: "Prefer X.".into(),
                     domain: "*".into(),
+                    repos: Vec::new(),
                 }],
             },
         };
@@ -880,6 +897,7 @@ mod tests {
             name: name.to_string(),
             body: body.to_string(),
             domain: "*".to_string(),
+            repos: Vec::new(),
         }
     }
 
