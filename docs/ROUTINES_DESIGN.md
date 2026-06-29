@@ -171,6 +171,30 @@ requiring the previous: **Save on a branch** then **Push to GitHub** then **Open
 vocabulary and component feel as the emit cascade, so "what a routine can do" reads the same as
 "what an emit does". Nothing auto-merges. The serialized `scope` string maps to these levels.
 
+### 5.3a Permissions model (PROPOSED, decide before Phase 3)
+A routine's "what it can do" is **two axes**, both shown for legibility (the dashboard ADR's
+explicit-governance promise):
+
+1. **Write reach** (ordered cascade, §5.3): read-only -> branch -> push -> open PR. **Mechanically
+   enforced** today (git tool gating).
+2. **Capabilities** (a discrete multi-select): create issues, comment on PRs, modify CI/workflow
+   files, touch dependency manifests, call external services, etc. Not ordered.
+
+**Where capabilities come from:** the AI draft step reads the intent to author the operational
+prompt, so it **proposes the capability set at the same time**. For a custom routine the user
+reviews and adjusts the multi-select; for a **template the set is FIXED and locked** (shown, not
+editable), because the template's job has specific requirements.
+
+**Enforcement (the honest split):** capabilities that map to a gate constraint are enforced now
+(write-reach via the cascade; CI/workflow + dependency-manifest writes via path rules;
+external-service calls via the existing gate). Capabilities without a mechanical mapping are carried
+as operational-prompt directives and shown for legibility, until enforcement is wired. So the
+multi-select is legible + enforced-where-it-maps now, with mechanical coverage growing over time;
+"every capability hard-gated" is a larger gate project, not part of this page.
+
+**OPEN-PERMS:** confirm the two-axis model + the initial capability list + the AI-proposes /
+template-locks behavior. Only blocks Phase 3 (the create form).
+
 ### 5.4 Templates (gallery + preview)
 The collapsible "Start from a template" gallery stays, but each card gains a **preview** (expand to
 see the full operational prompt + the preset schedule/scope) before "Use this template", which
