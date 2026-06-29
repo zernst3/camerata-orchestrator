@@ -193,23 +193,25 @@ html, body {
 }
 .page-wide { max-width: 90%; width: 90%; }
 
-/* NOTE: the `to` frame deliberately omits `transform`. With `animation-fill-mode:
-   both`, a `transform: translateY(0)` here would PERSIST at rest, and any non-`none`
-   transform on `.page` makes it the containing block for `position: fixed` descendants —
-   which pushed modals to center on `.page` instead of the viewport. Omitting it lets the
-   resting transform fall back to `none`, so `.rule-modal-overlay { position: fixed }`
-   centers on the window. */
+/* Page/content ENTRANCE animations are disabled for now. They introduced an inconsistent page-
+   navigation "pop" (some views animated on mount via `.page { animation: rise }`, others didn't,
+   so navigating to/from the Rules page flashed a transient dark layer as the content faded in).
+   These four keyframes are kept as NO-OPS — every `animation: rise/fade/slideIn/pop` call site
+   stays valid and simply renders instantly. Re-enable later by restoring the from/to states.
+   Continuous/functional animations (spinners, the Bombe machine, toasts, LEDs, pulses) are NOT
+   affected. (Bonus: a no-op `rise` also has no transform, so it can't make `.page` a containing
+   block for fixed-position modals — preserving the modal viewport-centering fix.) */
 @keyframes rise {
-  from { opacity: 0; transform: translateY(14px); }
+  from { opacity: 1; }
   to   { opacity: 1; }
 }
 @keyframes fade {
-  from { opacity: 0; }
+  from { opacity: 1; }
   to   { opacity: 1; }
 }
 @keyframes slideIn {
-  from { opacity: 0; transform: translateY(10px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from { opacity: 1; }
+  to   { opacity: 1; }
 }
 
 /* ---- type ------------------------------------------------------------- */
@@ -520,10 +522,11 @@ html, body {
   animation: pop .5s var(--ease) both;
 }
 .build-stage.active .stage-mark { border-color: var(--accent); }
+/* Disabled for now (see the entrance-animation note above): no-op so `animation: pop` call
+   sites render instantly. Restore the scale/opacity frames to re-enable. */
 @keyframes pop {
-  0% { transform: scale(.4); opacity: 0; }
-  60% { transform: scale(1.12); }
-  100% { transform: scale(1); opacity: 1; }
+  from { transform: none; opacity: 1; }
+  to   { transform: none; opacity: 1; }
 }
 /* the active spinner: a slow, calm ring */
 .spinner {
