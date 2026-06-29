@@ -99,6 +99,39 @@ impl ModelsResp {
     }
 }
 
+/// Build the option groups for the in-chatbox model selector. This ALWAYS returns at least one
+/// option, so the `<select>` can never render empty/invisible — the recurring "the chat model
+/// selector disappeared" regression. When the model registry has not loaded yet (resource `None`)
+/// or comes back empty, it falls back to the currently-selected model id as a single self-named
+/// option, so the selector stays visible and usable. Pure + owned strings so it is unit-tested
+/// without a Dioxus runtime (see `chat_model_groups_*` tests). Whenever the header rsx changes,
+/// those tests keep the selector from silently vanishing again.
+fn chat_model_groups(models: &Option<ModelsResp>, current: &str) -> Vec<(String, Vec<ModelOption>)> {
+    if let Some(m) = models {
+        let grouped = m.grouped();
+        if !grouped.is_empty() {
+            return grouped
+                .into_iter()
+                .map(|(label, opts)| (label.to_string(), opts.into_iter().cloned().collect()))
+                .collect();
+        }
+    }
+    // Registry absent or empty: never leave the selector without an option.
+    let id = if current.trim().is_empty() {
+        "default".to_string()
+    } else {
+        current.to_string()
+    };
+    vec![(
+        "Current".to_string(),
+        vec![ModelOption {
+            label: id.clone(),
+            id,
+            provider: String::new(),
+        }],
+    )]
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct ChatResp {
     text: String,
@@ -1045,12 +1078,14 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                     save_app_chat_model(&chosen).await;
                                 });
                             },
-                            if let Some(m) = &models {
-                                for (group_label , opts) in m.grouped().into_iter() {
-                                    optgroup { label: "{group_label}",
-                                        for opt in opts.into_iter() {
-                                            option { key: "{opt.id}", value: "{opt.id}", "{opt.label}" }
-                                        }
+                            // Resilient: chat_model_groups ALWAYS yields at least the current
+                            // model, so this selector can never render empty/invisible (the
+                            // recurring "model selector disappeared" bug). Guarded by the
+                            // chat_model_groups_* unit tests.
+                            for (group_label , opts) in chat_model_groups(&models, &model()).into_iter() {
+                                optgroup { label: "{group_label}",
+                                    for opt in opts.into_iter() {
+                                        option { key: "{opt.id}", value: "{opt.id}", "{opt.label}" }
                                     }
                                 }
                             }
@@ -1456,10 +1491,73 @@ fn rules_catalog_loaded(catalog: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        chat_reply_text, render_uow_section, unified_system_prompt, ChatResp,
-        DevelopmentContextResponse, FindingContext, GateProvenanceLite, ModelsResp, UowSnapshot,
-        TECHNICAL_DOC, UNIFIED_NOT_COVERED_PHRASE, USER_GUIDE,
+        chat_model_groups, chat_reply_text, render_uow_section, unified_system_prompt, ChatResp,
+        DevelopmentContextResponse, FindingContext, GateProvenanceLite, ModelOption, ModelsResp,
+        UowSnapshot, TECHNICAL_DOC, UNIFIED_NOT_COVERED_PHRASE, USER_GUIDE,
     };
+
+    // ── in-chatbox model selector: it must NEVER render empty/invisible ────────
+    // (this selector has regressed away repeatedly; these guard the option-building logic).
+
+    fn opt(id: &str, provider: &str) -> ModelOption {
+        ModelOption {
+            label: id.to_string(),
+            id: id.to_string(),
+            provider: provider.to_string(),
+        }
+    }
+
+    fn total_options(groups: &[(String, Vec<ModelOption>)]) -> usize {
+        groups.iter().map(|(_, o)| o.len()).sum()
+    }
+
+    #[test]
+    fn chat_model_groups_never_empty_when_registry_not_loaded() {
+        // Resource None (still loading or fetch failed): the selector must still show the current
+        // model, never render with zero options (which reads as "the selector disappeared").
+        let groups = chat_model_groups(&None, "claude-opus-4-8");
+        assert!(total_options(&groups) >= 1, "selector must always have an option");
+        assert!(groups
+            .iter()
+            .any(|(_, o)| o.iter().any(|m| m.id == "claude-opus-4-8")));
+    }
+
+    #[test]
+    fn chat_model_groups_never_empty_when_registry_is_empty() {
+        let empty = ModelsResp {
+            models: vec![],
+            default: String::new(),
+            backend: String::new(),
+        };
+        let groups = chat_model_groups(&Some(empty), "sonnet-x");
+        assert!(total_options(&groups) >= 1);
+        assert!(groups.iter().any(|(_, o)| o.iter().any(|m| m.id == "sonnet-x")));
+    }
+
+    #[test]
+    fn chat_model_groups_falls_back_to_default_when_current_is_blank() {
+        // Even with no current model and no registry, offer a placeholder so the <select> renders.
+        let groups = chat_model_groups(&None, "");
+        assert!(total_options(&groups) >= 1);
+    }
+
+    #[test]
+    fn chat_model_groups_uses_registry_when_present() {
+        let resp = ModelsResp {
+            models: vec![opt("claude-opus-4-8", "claude"), opt("gpt-x", "openrouter")],
+            default: "claude-opus-4-8".into(),
+            backend: String::new(),
+        };
+        let groups = chat_model_groups(&Some(resp), "claude-opus-4-8");
+        let ids: Vec<String> = groups
+            .iter()
+            .flat_map(|(_, o)| o.iter().map(|m| m.id.clone()))
+            .collect();
+        assert!(ids.contains(&"claude-opus-4-8".to_string()));
+        assert!(ids.contains(&"gpt-x".to_string()));
+        // Two providers -> two groups (not the single "Current" fallback).
+        assert!(groups.len() >= 2, "registry models should be grouped by provider");
+    }
 
     // ── chat_reply_text: backend errors are surfaced, not hidden ──────────────
 
