@@ -1776,6 +1776,12 @@ html, body {
 /* The floating ChatBubble's rendered-markdown AI reply (inline-styled bubble; this class targets
    the injected HTML so long lines + fenced code blocks WRAP instead of forcing a horizontal
    scroll out of the chat box). */
+/* The floating research chat panel. Translucency + scroll live HERE (a global rule, the same path
+   the terminal's .term-panel uses and which provably applies) because an inline backdrop-filter
+   rendered opaque in the wry/WebKit webview. !important so nothing inline/legacy overrides them. */
+.research-chat-panel { background: rgba(255,255,255,0.6) !important; }
+.research-chat-log { flex: 1 1 auto !important; min-height: 0 !important; overflow-y: auto !important; }
+
 .chat-ai-md { overflow-wrap: anywhere; word-break: break-word; min-width: 0; }
 .chat-ai-md pre {
   white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;

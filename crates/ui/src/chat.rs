@@ -1006,10 +1006,12 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
 
         if open() {
             div {
+                // Background + translucency live in GLOBAL_CSS (.research-chat-panel) — inline
+                // backdrop-filter rendered opaque in the wry webview, and a global rule reliably
+                // applies (it is the same path the terminal's .term-panel uses).
+                class: "research-chat-panel",
                 style: "position:fixed;bottom:5rem;right:1.5rem;z-index:999;\
                         width:28rem;max-height:80vh;display:flex;flex-direction:column;\
-                        background:rgba(255,255,255,0.76);backdrop-filter:blur(12px);\
-                        -webkit-backdrop-filter:blur(12px);\
                         border:1px solid rgba(226,232,240,0.7);border-radius:.75rem;\
                         box-shadow:0 8px 32px rgba(0,0,0,.18);overflow:hidden;",
 
@@ -1233,7 +1235,8 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
 
                 // ── transcript ──────────────────────────────────────────────
                 div {
-                    style: "flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;padding:.75rem 1rem;display:flex;\
+                    class: "research-chat-log",
+                    style: "flex:1;min-height:0;overflow-y:auto;padding:.75rem 1rem;display:flex;\
                             flex-direction:column;gap:.5rem;min-height:8rem;",
                     if turns().is_empty() {
                         p {
