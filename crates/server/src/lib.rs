@@ -10610,6 +10610,111 @@ mod tests {
         assert_eq!(arr[0]["summary"]["denies"], 2); // scripted gate
     }
 
+    /// Helper: simulate a PAUSED governed run (what Engine C does at the test-tamper site) by
+    /// raising a UoW review escalation + creating + linking its checkpoint. Returns (esc_id,
+    /// ckpt_id).
+    fn seed_paused_uow_run(state: &AppState, story_id: &str) -> (String, String) {
+        let esc = state.escalations.raise(
+            crate::escalation::RaiseEscalationReq {
+                subject_kind: crate::escalation::SubjectKind::Uow,
+                checkpoint_id: None,
+                routine_id: story_id.to_string(),
+                reason: "AGENTIC-NO-TEST-TAMPER-1 — agent modified an existing test".to_string(),
+                stopped_for: "Confirm the test edit is a legit refactor.".to_string(),
+                suggestions: vec![],
+                raw_context: String::new(),
+            },
+            "Add login",
+        );
+        let ckpt = state.checkpoints.create(crate::checkpoint::NewCheckpoint {
+            story_id: story_id.to_string(),
+            run_id: "run-orig".to_string(),
+            escalation_id: esc.id.clone(),
+            pause_reason: "test-tamper".to_string(),
+            repo: "me/api".to_string(),
+            branch: "camerata/me-api-7".to_string(),
+            worktree_dir: "/camerata/nonexistent-wt".to_string(),
+            base_commit: "abc123".to_string(),
+            iteration: 0,
+            max_iterations: 1,
+            model: "claude-opus-4-8".to_string(),
+            project_id: None,
+        });
+        state.escalations.set_checkpoint(&esc.id, &ckpt.id);
+        (esc.id, ckpt.id)
+    }
+
+    /// E2E of the Governed Development review loop, APPROVE path (scripted): a paused run's
+    /// escalation, resolved with Approve, RESUMES from its checkpoint (consuming it once-only) and
+    /// records the decision on the UoW trail. Drives the real `answer_escalation` handler.
+    #[tokio::test]
+    async fn uow_escalation_approve_resumes_and_consumes_checkpoint() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let (esc_id, ckpt_id) = seed_paused_uow_run(&state, "me/api#7");
+        // The UoW review is discoverable in the NEEDS YOU surface before resolution.
+        assert_eq!(state.escalations.list_open_uow().len(), 1, "open UoW review -> NEEDS YOU");
+
+        let resolved = answer_escalation(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(esc_id.clone()),
+            axum::Json(crate::escalation::AnswerEscalationReq {
+                answer: "Approved: the test change is a legitimate refactor; proceed.".to_string(),
+                action: crate::escalation::EscalationAction::Approve,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("answer_escalation should succeed"))
+        .0;
+        assert_eq!(resolved.status, crate::escalation::EscalationStatus::Resolved);
+        // Approve RESUMES: the checkpoint is consumed (enforcing once-only resume) and no longer
+        // shows in NEEDS YOU.
+        assert!(
+            state.checkpoints.get(&ckpt_id).unwrap().resumed.is_some(),
+            "approve resumes -> checkpoint consumed"
+        );
+        assert_eq!(state.escalations.list_open_uow().len(), 0, "resolved -> off NEEDS YOU");
+        // The decision is recorded on the UoW's durable history.
+        let uow = state.uow.get_or_create("me/api#7");
+        assert!(
+            uow.history.iter().any(|h| h.text.contains("Resume requested")),
+            "approve records the resume on the UoW trail"
+        );
+    }
+
+    /// E2E of the REJECT path (scripted): resolving with Reject does NOT resume — it consumes the
+    /// checkpoint (so the run can't be re-spawned) and records the abandonment. Drives the real
+    /// `answer_escalation` handler.
+    #[tokio::test]
+    async fn uow_escalation_reject_stops_and_consumes_checkpoint() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let (esc_id, ckpt_id) = seed_paused_uow_run(&state, "me/api#8");
+
+        let resolved = answer_escalation(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(esc_id.clone()),
+            axum::Json(crate::escalation::AnswerEscalationReq {
+                answer: "Reject: the agent weakened a real assertion to make it pass. Fix the code."
+                    .to_string(),
+                action: crate::escalation::EscalationAction::Reject,
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("answer_escalation should succeed"))
+        .0;
+        assert_eq!(resolved.status, crate::escalation::EscalationStatus::Resolved);
+        // Reject consumes the checkpoint (stop cleanly; no resume).
+        assert!(
+            state.checkpoints.get(&ckpt_id).unwrap().resumed.is_some(),
+            "reject consumes the checkpoint -> not resumable"
+        );
+        // The rejection is recorded on the UoW trail.
+        let uow = state.uow.get_or_create("me/api#8");
+        assert!(
+            uow.history.iter().any(|h| h.text.contains("REJECTED")),
+            "reject records the abandonment on the UoW trail"
+        );
+    }
+
     /// Regression test for issue #106: `POST /api/projects/:id/emit-local` must run
     /// unconditionally for an already-onboarded project (no onboarding-state gate).
     ///
