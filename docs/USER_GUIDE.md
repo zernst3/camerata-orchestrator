@@ -332,7 +332,16 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    | `.camerata/rules.json` | Armed rule ids — the gate config read by Layer 1. |
    | `.camerata/baseline.json` | Accepted pre-existing debt (the full active-finding set at apply time). |
    | **`.camerata/checks.toml`** | **The SSOT check manifest** read by both Layer 2 (dev-loop runner) and Layer 3 (CI). Each applied CI-tier rule becomes one `[[check]]` entry; mechanical rules carry a concrete command, architectural rules carry a TODO placeholder for the team to fill in. This is the single file you edit to add, remove, or change a custom gate check — one edit covers both the dev loop and CI. |
-   | **`.github/workflows/camerata-gates.yml`** | **The generated CI workflow** — the real Layer-3 CI gate, not a placeholder. It is derived directly from `.camerata/checks.toml`, so it is always consistent with the manifest. Regenerate it any time by clicking **Regenerate CI workflow** in the Rules view. |
+   | **`.github/workflows/camerata-gates.yml`** | **The generated CI workflow** (a real, runnable workflow file, not a placeholder). It is derived directly from `.camerata/checks.toml`, so it is always consistent with the manifest. Regenerate it any time by clicking **Regenerate CI workflow** in the Rules view. |
+
+   **Apply scaffolds the CI layer; it does not turn CI enforcement on for you.** The two files above
+   (the workflow and the `checks.toml` manifest) are *generated and committed to the branch*, and
+   onboarding files wiring stories (step 6) for what's left. But the CI layer (Layer 3) is **not
+   enforced automatically on apply**: mechanical rules still need their linter provisioned and their
+   manifest command filled in where missing, and architectural rules carry only a commented TODO
+   placeholder until the team writes the bespoke checker. The workflow runs on your CI only once your
+   team reviews it, provisions the linters, and merges it. The *file* is generated; *enforcement* is
+   opt-in and manually wired.
 
    The apply loop is now closed end-to-end: apply writes `.camerata/checks.toml` → Layer 2 reads it →
    Layer 3 is generated from it, all from the same file. See §14 for the full SSOT picture.
@@ -389,9 +398,11 @@ Two tables:
 - **Project rules** — the rules the project has selected, in one table, **filterable by repo** (a repo
   single-select), with project-level rules shown too. Click a rule to switch its chosen option; remove
   a rule from a repo. Edits persist to the project's ruleset.
-- **All rules** — the full corpus, viewable even when unassigned. Each row shows **which repos it's
-  applied to**, with **"Add to repo"** (add a rule to any repo it's not yet on — directly here) and a
-  jump to the project-rules table for editing.
+- **All rules** — the full corpus (**350+ rules across many language and framework stacks**: Rust,
+  Python, Go, JS/TS and its frameworks, Java/Spring, C#/ASP.NET, Ruby/Rails, SQL, fullstack, plus the
+  always-on security floor and the agentic governance rules), viewable even when unassigned. Each row
+  shows **which repos it's applied to**, with **"Add to repo"** (add a rule to any repo it's not yet
+  on — directly here) and a jump to the project-rules table for editing.
 
 **Rule tables are grouped by domain** (derived from the rule's folder in the corpus), collapsed by
 default. Clicking a group header expands it; clicking a row opens a **rule-detail modal** showing the
@@ -1339,8 +1350,9 @@ itself (Strongest tier). There is no separate escalation tier.
 
 #### Designer (vision) band
 
-An optional, project-wide **Designer** band sits orthogonal to the logic ladder. When enabled (a
-toggle in Settings), it intercepts visual work before the ladder applies:
+An optional, project-wide **Designer** band sits orthogonal to the logic ladder. It is a real fleet
+agent the lead/orchestrator can hand visual / UI work to (reachable internally as a gated `"vision"`
+delegate tier), and it intercepts visual work before the ladder applies:
 
 - Only **vision-capable (multimodal)** models are listed in the Designer selector.
 - The designer agent receives the existing in-code layout and styling as context, then produces an
@@ -1349,6 +1361,14 @@ toggle in Settings), it intercepts visual work before the ladder applies:
   writes Rust directly.
 - Routing is domain-first: any task classified as visual work goes to the Designer; the Strongest /
   Balanced / Fast ladder handles everything else.
+
+**When the Designer is reachable (the gate).** The band is available to a run ONLY when both hold:
+the project's **Designer toggle is ON** in Settings **and** a **vision-capable model is configured**
+for it. The toggle controls availability, not just configuration: with the toggle off (or no vision
+model set), the orchestrator simply cannot route to the Designer, and any attempt to hand off visual
+work is declined the same way an unknown tier would be (no error, no half-configured run). When the
+band does run, the Designer agent is governed exactly like every other agent in the fleet: its only
+write path is the gate, it is jailed to the single shared worktree, and it cannot delegate further.
 
 > The **in-hierarchy designer agent** (above) is distinct from a planned, separate **designer
 > module** (an interactive mockup tool for end users). They do not overlap.

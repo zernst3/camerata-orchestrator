@@ -1738,10 +1738,21 @@ Both consumers read from the same `ManifestCheck` structs that `arm_files_for_re
 `toml::to_string`. Round-trip fidelity is structural: `ManifestCheck` and `CheckManifest` both
 `#[derive(Serialize)]` (added to `crates/checks/src/manifest.rs`), so a serialization error is a
 compile-time or immediate runtime error rather than a silently malformed TOML that `load_manifest`
-would reject. Any rule an architect applies in the UI is immediately reflected in the Layer-2 dev-loop
-gate and the Layer-3 CI backstop without a manual wiring step. The architect still fills in real
-commands for TODO placeholders, but the manifest entry exists and is registered from the moment of
-apply.
+would reject. Any rule an architect applies in the UI is immediately reflected in the manifest the
+Layer-2 dev-loop gate reads and in the generated Layer-3 CI workflow file. The *registration* (a
+`[[check]]` entry exists from the moment of apply) is what is automatic, **not the CI enforcement
+itself**.
+
+**Apply SCAFFOLDS the CI layer; it does not auto-enforce it.** The distinction matters for accuracy:
+`arm_files_for_repo` *generates* the workflow file (`camerata-gates.yml`) and the `checks.toml`
+manifest, and onboarding *files wiring stories* (the two GitHub issues above), but Layer-3 CI is
+**not enforced on apply**. Mechanical rules get a runnable `command` from the conformance hint;
+**architectural rules emit a commented TODO placeholder** with no executable check until the team
+defines one. Adoption is a deliberate team step: review and commit the workflow, provision the
+linters, and write the bespoke architectural checkers. The workflow FILE is generated (true); CI
+enforcement is opt-in and manually wired (the correction). Layer 2 picks up a filled-in check
+automatically because it runs the same manifest, but a TODO-placeholder architectural check enforces
+nothing at either layer until a real command is supplied.
 
 See `docs/decisions/2026-06-23_ssot_emit_reconciliation.md` for the full rationale and
 alternatives considered.
@@ -2005,7 +2016,21 @@ model from the `TierMap` via `tier::model_for_task`, then:
 orchestrator mode (i.e. for the lead stage's gateway process). Non-lead gateways refuse `delegate`
 calls at the handler level.
 
-**Input:** `{ "subtask": "<instruction>", "tier": "fast" | "balanced" }`.
+**Input:** `{ "subtask": "<instruction>", "tier": "fast" | "balanced" | "vision" }`.
+
+**The Designer (vision) tier.** Beyond the logic ladder (`fast` / `balanced` / `strongest`),
+`delegate` accepts an OPTIONAL `"vision"` tier (alias `"designer"`) that hands visual / UI work to
+the Designer band. This tier is **gated**: it is reachable ONLY when the active project's
+`vision_enabled` toggle is ON **and** a vision-capable model is configured for the band. The fleet
+emits the `"vision"` key into the gateway's per-tier model map (`DelegateModels`) only when both
+conditions hold (`delegate_models_json` in `crates/fleet/src/orchestrator.rs`); otherwise the key is
+omitted, `DelegateModels::resolve("vision")` returns `None`, and `delegate {tier:"vision"}` is
+**refused cleanly, exactly like an unknown tier** (no new authority, no panic). The toggle controls
+availability, not just configuration: a populated vision model with the toggle OFF still emits no key
+and the band stays unreachable. The lead/orchestrator detects visual work and routes it here with the
+HTML/Tailwind IR handoff described under [Designer (vision) band](#designer-vision-band-designerband)
+below. A Designer child is spawned under the SAME gate contract as every other delegate child
+(`gated_write`-only, worktree-jailed, depth-1, non-orchestrator).
 
 **What the handler does** (`crates/gateway/src/delegate.rs::run_delegated`):
 1. Checks the explicit **depth guard** (`depth < max_depth`; default `max_depth = 1`). Refuses with
@@ -2285,6 +2310,17 @@ When `enabled = true`:
 `DesignerBand` is orthogonal to the `TierMap` logic ladder. Both are stored on the
 same `Project`; a `tier_map` change never overwrites `designer_band`, and vice versa.
 The in-hierarchy designer agent is distinct from any planned end-user designer module.
+
+**Gating (where availability is decided).** The Designer is reachable by the orchestrator
+ONLY as the gated `"vision"` delegate tier, and only when `DesignerBand::enabled` is `true`
+**and** a non-empty vision model is configured. The fleet writes the `"vision"` key into the
+gateway's `DelegateModels` map exactly when both hold; otherwise the key is omitted and
+`resolve("vision")` returns `None`, so a `delegate {tier:"vision"}` is refused like an unknown
+tier (see [Governed `delegate` MCP tool](#governed-delegate-mcp-tool-mcp__camerata__delegate)).
+The `enabled` toggle controls availability, not merely configuration: a configured model with the
+toggle off keeps the band unreachable. When it does run, a Designer child is gated identically to
+every other delegate child: `gated_write`-only, jailed to the shared worktree, depth-1, and
+non-orchestrator (it can never re-delegate).
 
 #### Per-project per-step model config (`StepModels`)
 

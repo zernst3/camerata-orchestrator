@@ -52,7 +52,7 @@ The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a
 
 Point Camerata at one or more existing GitHub repositories and it runs the full onboarding flow, in-app, front to back:
 
-- **Per-repo stack detection** (languages and frameworks) and a **per-repo proposed ruleset** drawn from a **348-rule corpus**. Each repo is scanned against its own selected rules plus an always-on deterministic security floor.
+- **Per-repo stack detection** (languages and frameworks) and a **per-repo proposed ruleset** drawn from a corpus of **350+ rules across many language and framework stacks** (Rust/Axum/SeaORM/Dioxus, Python/Django/Flask/FastAPI, Go, JS/TS/React/Vue/Angular/Next/Nest, Java/Spring, C#/ASP.NET, Ruby/Rails, SQL, fullstack, plus the always-on security floor and the agentic governance rules). Each repo is scanned against its own selected rules plus an always-on deterministic security floor.
 - **A two-tier audit:** a deterministic mechanical scan (hardcoded secrets, raw-SQL concatenation, path escapes, plus clippy/ruff/semgrep/osv preview) and an AI architectural audit (missing auth on a write path, a service bypassing the repository layer, N+1, cross-boundary imports, and the like), with severity/authority calibration, cross-rule dedup, and snippet-to-line resolution. CI/runtime-context rules are deliberately routed to CI, where they can actually be checked.
 - **Three triage tables** (Unresolved / Ignored / Tech debt) with free re-bucketing, then a **Process** step that turns each disposition into a durable artifact: ignores become reasoned baseline waivers, and every tech-debt item is filed as a real **GitHub issue** (the story).
 - **Apply:** the chosen governance files (`AGENTS.md`, `CONVENTIONS.md`, a CI workflow for the mechanical rules, and `.camerata/baseline.json`) are written to a governance branch and pushed, with the PR opened as a separate, deliberate step.
@@ -87,6 +87,14 @@ Rules are the single source of truth, but the layers consume them differently: *
 rule as prose instantly, while L2/L4 only enforce rules you wire into the pipeline** (mechanical
 rules need wiring; architectural rules need defining *then* wiring). That difference is why the
 layers can drift — the full model is in [`docs/ENFORCEMENT_MODEL.md`](docs/ENFORCEMENT_MODEL.md):
+
+**The CI layer (L4) is scaffolded and suggested, not auto-enforced.** Apply *generates the files*
+(the CI workflow `.github/workflows/camerata-gates.yml` and the `.camerata/checks.toml` manifest,
+where mechanical rules get a runnable command from the rule's conformance hint and architectural
+rules get a commented TODO placeholder), and onboarding files wiring stories (GitHub issues) for both
+tiers. But generating the workflow file is not the same as enforcing it: the team reviews and commits
+the workflow, provisions the linters, and writes the bespoke checkers for architectural rules. CI
+enforcement is opt-in and manually wired, never switched on automatically by apply.
 
 ![Camerata enforcement model — rule sources feeding the check layers](docs/enforcement-model.svg)
 
@@ -227,7 +235,7 @@ The orchestrator makes zero model calls; it prepares a session and spawns an age
 
 ## Family
 
-- [camerata-ai](../camerata-ai): the conventions engine the corpus format originates from. The corpus is vendored into this repo at `crates/rules/principles/` (348 TOML rules), so the workspace is self-contained; override with `CAMERATA_CORPUS_PATH`.
+- [camerata-ai](../camerata-ai): the conventions engine the corpus format originates from. The corpus is vendored into this repo at `crates/rules/principles/` (350+ TOML rules), so the workspace is self-contained; override with `CAMERATA_CORPUS_PATH`.
 - [rust-chorale](../rust-chorale): the headless, virtualized Dioxus / Leptos table library used for tabular surfaces.
 - this repo: the conductor that leads the ensemble.
 
