@@ -1010,8 +1010,12 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                 // backdrop-filter rendered opaque in the wry webview, and a global rule reliably
                 // applies (it is the same path the terminal's .term-panel uses).
                 class: "research-chat-panel",
+                // Translucency is INLINE rgba (NO backdrop-filter — that rendered opaque in wry and
+                // also masked earlier alpha changes). Inline styles demonstrably apply here (the
+                // panel is positioned/sized/clipped exactly per this string); the class is a backup.
                 style: "position:fixed;bottom:5rem;right:1.5rem;z-index:999;\
                         width:28rem;max-height:80vh;display:flex;flex-direction:column;\
+                        background:rgba(255,255,255,0.62);\
                         border:1px solid rgba(226,232,240,0.7);border-radius:.75rem;\
                         box-shadow:0 8px 32px rgba(0,0,0,.18);overflow:hidden;",
 
@@ -1239,7 +1243,12 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                     // inline style here is LAYOUT ONLY. A leftover inline `min-height:8rem` used to
                     // win over the class and pin the pane open, which is why it never scrolled.
                     class: "research-chat-log",
-                    style: "padding:.75rem 1rem;display:flex;flex-direction:column;gap:.5rem;",
+                    // Scroll is INLINE (max-height + overflow) — the class apparently is not
+                    // applying in the running build, but inline styles on this same element DO
+                    // (the messages lay out per the inline flex/gap/padding here). max-height caps
+                    // the pane so overflow-y engages; the panel still grows to fit short chats.
+                    style: "max-height:55vh;overflow-y:auto;overflow-x:hidden;\
+                            padding:.75rem 1rem;display:flex;flex-direction:column;gap:.5rem;",
                     if turns().is_empty() {
                         p {
                             style: "color:#94a3b8;font-size:.85rem;text-align:center;\
