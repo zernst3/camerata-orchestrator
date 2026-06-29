@@ -608,7 +608,7 @@ impl UowStore {
 
     /// Attach the post-story documentation hook **gated on the project's ruleset**
     /// (PROC-STORY-DOCS-1), mirroring how the test-tamper guard consults
-    /// [`crate::test_tamper::test_tamper_guard_active`] before it acts.
+    /// [`crate::test_tamper::test_tamper_escalation`] before it acts.
     ///
     /// The hook is attached only when `PROC-STORY-DOCS-1` is SELECTED in the
     /// project's rule selections, and the emitter is built with the chosen

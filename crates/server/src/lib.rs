@@ -1340,13 +1340,23 @@ async fn spawn_brownfield_dev_run(
             worktrees
         }
     };
-    // Test-tamper guard (AGENTIC-NO-TEST-TAMPER-1): enforced when the project selected it on the
-    // (default) escalate option.
-    let enforce_test_tamper_guard = state
-        .projects
-        .active()
-        .map(|p| crate::test_tamper::test_tamper_guard_active(&p.ruleset.selections))
-        .unwrap_or(false);
+    // Test-tamper DETERMINISTIC BACKSTOP (AGENTIC-NO-TEST-TAMPER-1): field-driven, not hardcoded.
+    // We resolve the rule's ACTIVE escalation spec from the project's selected option against the
+    // corpus — `Some` only when the selected (or default) option carries an `escalation`, so an
+    // "allow" selection yields `None` and the backstop never fires. The spec's condition/severity
+    // then drive the escalation in the run. (The agent-driven path covers all OTHER rules; this is
+    // the one rule that also has a mechanical detector, kept as a safety net.)
+    let test_tamper_escalation = {
+        let corpus = camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path())
+            .await
+            .0;
+        state
+            .projects
+            .active()
+            .and_then(|p| {
+                crate::test_tamper::test_tamper_escalation(&corpus, &p.ruleset.selections).cloned()
+            })
+    };
     let impl_escalations = state.escalations.clone();
     let impl_checkpoints = state.checkpoints.clone();
     let impl_registry = state.model_registry.clone();
@@ -1378,7 +1388,7 @@ async fn spawn_brownfield_dev_run(
             impl_limiter,
             impl_escalations,
             impl_checkpoints,
-            enforce_test_tamper_guard,
+            test_tamper_escalation,
         )
         .await
     });

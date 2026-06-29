@@ -22,6 +22,10 @@ id = "escalate-before-modifying-or-deleting-an-existin"
 label = "Escalate before modifying/deleting an existing test (add-new is always allowed)"
 directive = "An agent must escalate to a human reviewer before modifying or deleting any existing test or fixture, with a justification on why the test needs to change; the change is blocked until a human approves it. Adding entirely new tests (new test files, or new test functions appended to an existing test file as pure additions) is always allowed and encouraged. The per-diff check inspects the unified diff: a deleted test file, or any hunk in a test/fixture file that removes or changes an existing line, raises a human escalation and blocks the change; a brand-new test file or a pure-addition hunk passes freely."
 why = "An existing test is the one artifact in the diff the agent cannot be trusted to rewrite, because the cheapest way to make a failing suite go green is to edit the test that caught the broken code."
+# CHOOSING THIS OPTION calls for escalation: the agent self-escalates (and the deterministic
+# per-diff backstop fires) when its work meets the condition below. The other two options carry no
+# `escalation`, so selecting them does NOT escalate. See docs/RULE_AUTHORING.md.
+escalation = { condition = "the change would modify or delete an existing test or fixture (adding a brand-new test file, or pure-addition hunks, is always fine)", severity = "hard-pause" }
 
 [[option]]
 id = "allow-modifying-tests-within-the-same-change-whe"

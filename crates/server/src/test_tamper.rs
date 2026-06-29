@@ -145,28 +145,28 @@ fn parse_diff_git_path(rest: &str) -> String {
     a.trim().to_string()
 }
 
-/// The rule id this guard enforces.
+/// The rule id this deterministic backstop checks.
 pub const TEST_TAMPER_RULE_ID: &str = "AGENTIC-NO-TEST-TAMPER-1";
-/// Option ids that DISABLE blocking (the project accepted agent test edits).
-const OPT_ALLOW_JUSTIFIED: &str = "allow-modifying-tests-within-the-same-change-whe";
-const OPT_NO_RESTRICTION: &str = "no-restriction-on-test-edits";
 
-/// Whether the test-tamper guard should BLOCK for this project, derived from its
-/// ruleset. The guard enforces on TWO conditions, both required:
-///   1. the rule `AGENTIC-NO-TEST-TAMPER-1` is **selected** (active), and
-///   2. the **chosen option** is the (default) escalate option.
+/// The ACTIVE escalation spec for the test-tamper rule, given the project's selections + the loaded
+/// corpus. This is the FIELD-DRIVEN replacement for the old hardcoded option-id matching: the
+/// backstop fires only when the test-tamper rule is SELECTED and its selected (or default) option
+/// carries an `escalation` spec, and the spec's `condition` / `severity` then drive the escalation.
 ///
-/// A project that selected the "allow-with-justification" or "no-restriction" option,
-/// or that has not selected the rule at all, is NOT enforced. A selection with no
-/// explicit option falls to the rule's default (escalate), so it enforces.
-pub fn test_tamper_guard_active(selections: &[crate::project::RuleSelection]) -> bool {
-    selections.iter().any(|s| {
-        s.rule_id == TEST_TAMPER_RULE_ID
-            && match s.chosen_option.as_deref() {
-                None => true, // no explicit option -> the rule's default (escalate)
-                Some(o) => o != OPT_ALLOW_JUSTIFIED && o != OPT_NO_RESTRICTION,
-            }
-    })
+/// A project that selected an "allow" option (which carries NO escalation spec) gets `None` → no
+/// backstop — exactly Zach's correctness point that selecting a non-escalating option must not
+/// escalate. The rule's own corpus TOML (`[[option]].escalation`) is the single source of truth, so
+/// changing the corpus changes the behavior with no code edit. Returns `None` when the rule is not
+/// selected, the corpus lacks it, or the selected option does not escalate.
+pub fn test_tamper_escalation<'a>(
+    corpus: &'a camerata_rules::RuleSet,
+    selections: &[crate::project::RuleSelection],
+) -> Option<&'a camerata_rules::EscalationSpec> {
+    let sel = selections
+        .iter()
+        .find(|s| s.rule_id == TEST_TAMPER_RULE_ID)?;
+    let rule = corpus.get_by_id(TEST_TAMPER_RULE_ID)?;
+    rule.selected_escalation(sel.chosen_option.as_deref())
 }
 
 #[cfg(test)]
@@ -182,25 +182,50 @@ mod tests {
         }
     }
 
-    #[test]
-    fn guard_inactive_when_rule_not_selected() {
-        assert!(!test_tamper_guard_active(&[sel("SOME-OTHER-RULE", None)]));
-        assert!(!test_tamper_guard_active(&[]));
+    /// Load the real corpus; skip the test gracefully when it isn't bundled.
+    async fn corpus() -> Option<camerata_rules::RuleSet> {
+        let p = camerata_rules::corpus_path();
+        if !p.exists() {
+            return None;
+        }
+        Some(camerata_rules::load_corpus_lenient(&p).await.0)
     }
 
-    #[test]
-    fn guard_active_when_selected_default_or_escalate_option() {
-        assert!(test_tamper_guard_active(&[sel(TEST_TAMPER_RULE_ID, None)]));
-        assert!(test_tamper_guard_active(&[sel(
-            TEST_TAMPER_RULE_ID,
-            Some("escalate-before-modifying-or-deleting-an-existin")
-        )]));
+    #[tokio::test]
+    async fn escalation_inactive_when_rule_not_selected() {
+        let Some(c) = corpus().await else { return };
+        assert!(test_tamper_escalation(&c, &[sel("SOME-OTHER-RULE", None)]).is_none());
+        assert!(test_tamper_escalation(&c, &[]).is_none());
     }
 
-    #[test]
-    fn guard_inactive_when_selected_with_an_allow_option() {
-        assert!(!test_tamper_guard_active(&[sel(TEST_TAMPER_RULE_ID, Some(OPT_ALLOW_JUSTIFIED))]));
-        assert!(!test_tamper_guard_active(&[sel(TEST_TAMPER_RULE_ID, Some(OPT_NO_RESTRICTION))]));
+    #[tokio::test]
+    async fn escalation_active_when_selected_default_or_escalate_option() {
+        let Some(c) = corpus().await else { return };
+        // Selected with no explicit option -> the rule's default (escalate) -> hard-pause spec.
+        let s = test_tamper_escalation(&c, &[sel(TEST_TAMPER_RULE_ID, None)])
+            .expect("default option escalates");
+        assert_eq!(s.severity, camerata_rules::EscalationSeverity::HardPause);
+        assert!(test_tamper_escalation(
+            &c,
+            &[sel(TEST_TAMPER_RULE_ID, Some("escalate-before-modifying-or-deleting-an-existin"))]
+        )
+        .is_some());
+    }
+
+    #[tokio::test]
+    async fn escalation_inactive_when_selected_with_an_allow_option() {
+        let Some(c) = corpus().await else { return };
+        // The KEY correctness point: an "allow" option carries no escalation spec -> no backstop.
+        assert!(test_tamper_escalation(
+            &c,
+            &[sel(TEST_TAMPER_RULE_ID, Some("allow-modifying-tests-within-the-same-change-whe"))]
+        )
+        .is_none());
+        assert!(test_tamper_escalation(
+            &c,
+            &[sel(TEST_TAMPER_RULE_ID, Some("no-restriction-on-test-edits"))]
+        )
+        .is_none());
     }
 
     /// (a) Adding a brand-new test file → no finding (all `+`, `new file mode`).

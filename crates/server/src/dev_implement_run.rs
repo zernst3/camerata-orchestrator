@@ -637,11 +637,12 @@ pub async fn execute_dev_implement_run(
     // guard), its resumable state is persisted here and linked to the escalation, so resolving
     // the escalation can RE-SPAWN the run from where it stopped instead of starting over.
     checkpoints: crate::checkpoint::CheckpointStore,
-    // Whether the test-tamper guard is enforced for this run. The caller computes this
-    // from the active project's selected ruleset (DEFAULT-ON when no project / selection
-    // cannot be determined — the rule's stated intent is deny + escalate). When false,
-    // the guard is skipped (the project deselected AGENTIC-NO-TEST-TAMPER-1).
-    enforce_test_tamper_guard: bool,
+    // The ACTIVE escalation spec for the test-tamper rule (the deterministic backstop), resolved
+    // from the project's SELECTED option against the corpus. `Some` only when the selected option
+    // carries an `escalation` — so an "allow" selection is `None` and the backstop is skipped. The
+    // spec's `condition` + `severity` drive the escalation (hard-pause -> pause; soft-flag -> log +
+    // continue). Field-driven, so the corpus is the source of truth, not hardcoded option ids.
+    test_tamper_escalation: Option<camerata_rules::EscalationSpec>,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -1068,10 +1069,11 @@ pub async fn execute_dev_implement_run(
     // or deleting an existing test requires a human to review first. Adding NEW tests
     // is always allowed and never flagged.
     //
-    // Selection gate: enforced when the active project selected this rule. When the
-    // selection could not be determined (no active project), the caller passes
-    // DEFAULT-ON — the rule's stated intent is deny + escalate.
-    if enforce_test_tamper_guard {
+    // FIELD-DRIVEN: this deterministic backstop runs only when the project's SELECTED option for
+    // AGENTIC-NO-TEST-TAMPER-1 carries an `escalation` spec (`test_tamper_escalation` is `Some`).
+    // An "allow" selection is `None` and skips the backstop entirely. The spec's `severity` decides
+    // hard-pause (stop for review) vs soft-flag (log + continue), and its `condition` is the message.
+    if let Some(esc_spec) = &test_tamper_escalation {
         let guard_diff = worktree_diff_from_base(&dir, &base_commit).await;
         let tamper_findings = crate::test_tamper::detect_test_tampering(&guard_diff);
 
@@ -1093,10 +1095,7 @@ pub async fn execute_dev_implement_run(
         let guard_detail = if tamper_findings.is_empty() {
             "AGENTIC-NO-TEST-TAMPER-1: no existing tests modified or deleted.".to_string()
         } else {
-            format!(
-                "AGENTIC-NO-TEST-TAMPER-1: existing test(s) modified/deleted — \
-                 a human must review before this can proceed: {listed}"
-            )
+            format!("AGENTIC-NO-TEST-TAMPER-1: {} — {listed}", esc_spec.condition)
         };
         runs.push_event(
             &run_id,
@@ -1111,83 +1110,107 @@ pub async fn execute_dev_implement_run(
         );
 
         if !tamper_findings.is_empty() {
-            // Raise a human-review escalation. The work is NOT committed; the worktree is
-            // left in place for the architect to inspect. Resolving the escalation is the
-            // human go-ahead for the test edit.
-            let raise_req = crate::escalation::RaiseEscalationReq {
-                subject_kind: crate::escalation::SubjectKind::Uow,
-                checkpoint_id: None,
-                routine_id: story_id.clone(),
-                reason: "AGENTIC-NO-TEST-TAMPER-1 — agent modified or deleted existing tests"
-                    .to_string(),
-                stopped_for: format!(
-                    "An agent must not modify or delete existing tests without human review \
-                     (the cheapest way to make a failing suite go green is to edit the test that \
-                     caught the broken code). The implementation for story `{story_id}` on \
-                     `{target_branch}` changed these existing test(s): {listed}. Confirm the test \
-                     edits are legitimate (a real refactor, not masking broken code) before this \
-                     proceeds. Adding new tests is always allowed — only edits/deletions of \
-                     existing tests are blocked."
-                ),
-                suggestions: vec![
-                    "Review the test diff: is each change a legitimate refactor, or does it weaken \
-                     the assertion that was catching a real failure?"
-                        .to_string(),
-                    "If legitimate, resolve this escalation to authorize the change and re-run."
-                        .to_string(),
-                    "If the agent edited a test to mask broken code, reject and send it back to \
-                     fix the code instead."
-                        .to_string(),
-                ],
-                raw_context: format!("story_id={story_id}; branch={target_branch}; tampered={listed}"),
-            };
-            // PAUSE (do NOT fail): persist the run's resumable state as a checkpoint, raise a
-            // deduped UoW review escalation, link the two, and park the run at AwaitingReview.
-            // The worktree is left intact (the agent's partial work stays on disk). Resolving the
-            // escalation RE-SPAWNS the run from this checkpoint with the human's directive.
-            let esc = escalations.raise_deduped(raise_req, "dev-implement test-tamper guard");
-            // Idempotent: a re-run that hits the same still-open escalation reuses its checkpoint
-            // rather than piling up duplicates.
-            if esc.checkpoint_id.is_none() {
-                let ckpt = checkpoints.create(crate::checkpoint::NewCheckpoint {
-                    story_id: story_id.clone(),
-                    run_id: run_id.clone(),
-                    escalation_id: esc.id.clone(),
-                    pause_reason: "test-tamper".to_string(),
-                    repo: repo.clone(),
-                    branch: target_branch.clone(),
-                    worktree_dir: dir.to_string_lossy().to_string(),
-                    base_commit: base_commit.clone(),
-                    iteration,
-                    max_iterations,
-                    model: model.clone(),
-                    project_id: None,
-                });
-                escalations.set_checkpoint(&esc.id, &ckpt.id);
-            }
+            match esc_spec.severity {
+                // SOFT-FLAG: the selected option is advisory — record a warning and CONTINUE.
+                camerata_rules::EscalationSeverity::SoftFlag => {
+                    let flag = format!(
+                        "SOFT-FLAG AGENTIC-NO-TEST-TAMPER-1: {} — {listed}. Logged for review; the \
+                         run continues (the selected option is advisory, not a hard pause).",
+                        esc_spec.condition
+                    );
+                    runs.push_event(
+                        &run_id,
+                        GateEvent {
+                            seq: next_seq(),
+                            layer: "test-tamper-guard".to_string(),
+                            verdict: "soft-flag".to_string(),
+                            rule: Some("AGENTIC-NO-TEST-TAMPER-1".to_string()),
+                            detail: flag.clone(),
+                            content_hash: None,
+                        },
+                    );
+                    uow.append_history(&story_id, "dev_implement", &flag);
+                    // Fall through: no pause, the run proceeds to commit.
+                }
+                // HARD-PAUSE: stop for human review. Persist the run's resumable state as a
+                // checkpoint, raise a deduped UoW review escalation, link the two, and park the
+                // run at AwaitingReview. The worktree is left intact (the agent's partial work
+                // stays on disk). Resolving the escalation RE-SPAWNS the run from this checkpoint.
+                camerata_rules::EscalationSeverity::HardPause => {
+                    let raise_req = crate::escalation::RaiseEscalationReq {
+                        subject_kind: crate::escalation::SubjectKind::Uow,
+                        checkpoint_id: None,
+                        routine_id: story_id.clone(),
+                        reason: format!("AGENTIC-NO-TEST-TAMPER-1 — {}", esc_spec.condition),
+                        stopped_for: format!(
+                            "An agent must not modify or delete existing tests without human \
+                             review (the cheapest way to make a failing suite go green is to edit \
+                             the test that caught the broken code). The implementation for story \
+                             `{story_id}` on `{target_branch}` changed these existing test(s): \
+                             {listed}. Confirm the test edits are legitimate (a real refactor, not \
+                             masking broken code) before this proceeds. Adding new tests is always \
+                             allowed — only edits/deletions of existing tests are blocked."
+                        ),
+                        suggestions: vec![
+                            "Review the test diff: is each change a legitimate refactor, or does \
+                             it weaken the assertion that was catching a real failure?"
+                                .to_string(),
+                            "If legitimate, Approve to resume the run from where it stopped."
+                                .to_string(),
+                            "If the agent edited a test to mask broken code, Reject to revert and \
+                             stop."
+                                .to_string(),
+                        ],
+                        raw_context: format!(
+                            "story_id={story_id}; branch={target_branch}; tampered={listed}"
+                        ),
+                    };
+                    let esc =
+                        escalations.raise_deduped(raise_req, "dev-implement test-tamper guard");
+                    // Idempotent: a re-run hitting the same still-open escalation reuses its
+                    // checkpoint rather than piling up duplicates.
+                    if esc.checkpoint_id.is_none() {
+                        let ckpt = checkpoints.create(crate::checkpoint::NewCheckpoint {
+                            story_id: story_id.clone(),
+                            run_id: run_id.clone(),
+                            escalation_id: esc.id.clone(),
+                            pause_reason: "test-tamper".to_string(),
+                            repo: repo.clone(),
+                            branch: target_branch.clone(),
+                            worktree_dir: dir.to_string_lossy().to_string(),
+                            base_commit: base_commit.clone(),
+                            iteration,
+                            max_iterations,
+                            model: model.clone(),
+                            project_id: None,
+                        });
+                        escalations.set_checkpoint(&esc.id, &ckpt.id);
+                    }
 
-            let pause_detail = format!(
-                "PAUSED for human review by AGENTIC-NO-TEST-TAMPER-1: existing test(s) \
-                 modified/deleted — {listed}. Not committed; the worktree is left intact and a \
-                 review escalation ({esc_id}) is open. Resolve it to resume from where the run \
-                 stopped.",
-                esc_id = esc.id
-            );
-            runs.push_event(
-                &run_id,
-                GateEvent {
-                    seq: next_seq(),
-                    layer: "dev-implement".to_string(),
-                    verdict: "paused".to_string(),
-                    rule: Some("AGENTIC-NO-TEST-TAMPER-1".to_string()),
-                    detail: pause_detail.clone(),
-                    content_hash: None,
-                },
-            );
-            uow.append_history(&story_id, "dev_implement", &pause_detail);
-            // Parked, NOT done — waiting on the human's review of the test edit.
-            runs.set_status(&run_id, RunStatus::AwaitingReview, false);
-            return;
+                    let pause_detail = format!(
+                        "PAUSED for human review by AGENTIC-NO-TEST-TAMPER-1: existing test(s) \
+                         modified/deleted — {listed}. Not committed; the worktree is left intact \
+                         and a review escalation ({esc_id}) is open. Resolve it to resume from \
+                         where the run stopped.",
+                        esc_id = esc.id
+                    );
+                    runs.push_event(
+                        &run_id,
+                        GateEvent {
+                            seq: next_seq(),
+                            layer: "dev-implement".to_string(),
+                            verdict: "paused".to_string(),
+                            rule: Some("AGENTIC-NO-TEST-TAMPER-1".to_string()),
+                            detail: pause_detail.clone(),
+                            content_hash: None,
+                        },
+                    );
+                    uow.append_history(&story_id, "dev_implement", &pause_detail);
+                    // Parked, NOT done — waiting on the human's review of the test edit.
+                    runs.set_status(&run_id, RunStatus::AwaitingReview, false);
+                    return;
+                }
+            }
         }
     }
 
@@ -1546,7 +1569,7 @@ mod tests {
             std::sync::Arc::new(crate::rate_limit::ProviderRateLimiter::new()),
             crate::escalation::EscalationStore::new(),
             crate::checkpoint::CheckpointStore::new(),
-            true, // test-tamper guard default-on (unreached here: live mode is off)
+            None, // no active test-tamper escalation (unreached here: live mode is off)
         )
         .await;
 

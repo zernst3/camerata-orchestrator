@@ -3,7 +3,7 @@
 //!
 //! The post-story hook (`PostStoryHook` / `StoryDocEmitter`, wired into
 //! [`crate::uow::UowStore::sign_off`]) emits per-story documentation at sign-off.
-//! Like the test-tamper guard (see [`crate::test_tamper::test_tamper_guard_active`]),
+//! Like the test-tamper guard (see [`crate::test_tamper::test_tamper_escalation`]),
 //! the hook must only act when the project actually opted into it — otherwise a
 //! hook attached for one project would emit docs for a project that selected a
 //! different documentation strategy (or no per-story docs at all).
