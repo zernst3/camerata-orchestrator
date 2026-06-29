@@ -1111,6 +1111,8 @@ pub async fn execute_dev_implement_run(
             // left in place for the architect to inspect. Resolving the escalation is the
             // human go-ahead for the test edit.
             let raise_req = crate::escalation::RaiseEscalationReq {
+                subject_kind: crate::escalation::SubjectKind::Uow,
+                checkpoint_id: None,
                 routine_id: story_id.clone(),
                 reason: "AGENTIC-NO-TEST-TAMPER-1 — agent modified or deleted existing tests"
                     .to_string(),

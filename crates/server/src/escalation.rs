@@ -42,12 +42,30 @@ pub struct EscalationMsg {
     pub ts: String,
 }
 
-/// A blocked routine awaiting (or having received) human review.
+/// What an escalation is ABOUT: a scheduled routine, or a Unit of Work's governed dev run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubjectKind {
+    /// A scheduled routine (reviewed on the Routines dashboard).
+    #[default]
+    Routine,
+    /// A Unit of Work's governed development run (reviewed in Governed Development).
+    Uow,
+}
+
+/// A blocked routine OR a paused Governed Development run awaiting (or having received) human review.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Escalation {
     pub id: String,
+    /// What this escalation is about. Defaults to `Routine` so escalations persisted before this
+    /// field rehydrate as routine reviews (the only kind that existed then).
+    #[serde(default)]
+    pub subject_kind: SubjectKind,
+    /// The subject's id: the routine id for a routine review, or the UoW's `story_id` for a UoW
+    /// review. (Field named `routine_id` for serde back-compat with persisted routine escalations.)
     pub routine_id: String,
-    /// Denormalized so the review panel reads standalone even if the routine is renamed.
+    /// Denormalized subject name so the review panel reads standalone even if the subject is
+    /// renamed (the routine name, or the story title for a UoW).
     pub routine_name: String,
     /// Why it stopped — which rule / governance reason.
     pub reason: String,
@@ -71,6 +89,10 @@ pub struct Escalation {
     /// resolved before this field existed.
     #[serde(default)]
     pub resume_payload: Option<ResumePayload>,
+    /// For a UoW escalation: the checkpoint to resume from when this resolves (links the review to
+    /// the paused run's persisted state). `None` for routine escalations.
+    #[serde(default)]
+    pub checkpoint_id: Option<String>,
     pub created: String,
     #[serde(default)]
     pub resolved: Option<String>,
@@ -83,6 +105,9 @@ pub struct Escalation {
 /// Request to raise an escalation against a routine.
 #[derive(Deserialize)]
 pub struct RaiseEscalationReq {
+    /// The kind of subject (defaults to `Routine` for back-compat with existing callers).
+    #[serde(default)]
+    pub subject_kind: SubjectKind,
     pub routine_id: String,
     #[serde(default)]
     pub reason: String,
@@ -92,6 +117,9 @@ pub struct RaiseEscalationReq {
     pub suggestions: Vec<String>,
     #[serde(default)]
     pub raw_context: String,
+    /// For a UoW escalation: the checkpoint to resume from on resolve.
+    #[serde(default)]
+    pub checkpoint_id: Option<String>,
 }
 
 /// Request body for resolving an escalation with a human answer.
@@ -399,6 +427,8 @@ pub fn blocked_run_escalation_req(routine: &Routine, denies: usize) -> RaiseEsca
         raw_context.push_str(&format!("\ndenied rules: {}", denied_rules.join(", ")));
     }
     RaiseEscalationReq {
+        subject_kind: SubjectKind::Routine,
+        checkpoint_id: None,
         routine_id: routine.id.clone(),
         reason: format!(
             "The governed run was blocked by {denies} gate denial(s){rules_clause} — an action \
@@ -495,15 +525,41 @@ impl EscalationStore {
             .unwrap_or_default()
     }
 
-    /// The open escalation for a routine, if one exists (a routine has at most one open
-    /// review at a time — raising is deduped on this).
-    pub fn open_for_routine(&self, routine_id: &str) -> Option<Escalation> {
+    /// The open escalation for a specific SUBJECT (kind + id), if any. Dedup keys off this, so a
+    /// subject has at most one open review at a time.
+    pub fn open_for_subject(&self, kind: SubjectKind, id: &str) -> Option<Escalation> {
         self.items
             .lock()
             .ok()?
             .iter()
-            .find(|e| e.routine_id == routine_id && e.status == EscalationStatus::Open)
+            .find(|e| e.subject_kind == kind && e.routine_id == id && e.status == EscalationStatus::Open)
             .cloned()
+    }
+
+    /// The open escalation for a routine, if one exists.
+    pub fn open_for_routine(&self, routine_id: &str) -> Option<Escalation> {
+        self.open_for_subject(SubjectKind::Routine, routine_id)
+    }
+
+    /// The open escalation for a UoW (its `story_id`), if one exists.
+    pub fn open_for_uow(&self, story_id: &str) -> Option<Escalation> {
+        self.open_for_subject(SubjectKind::Uow, story_id)
+    }
+
+    /// All open UoW escalations for a story (normally 0 or 1; a Vec for the NEEDS YOU surface).
+    pub fn list_open_for_uow(&self, story_id: &str) -> Vec<Escalation> {
+        self.list_open()
+            .into_iter()
+            .filter(|e| e.subject_kind == SubjectKind::Uow && e.routine_id == story_id)
+            .collect()
+    }
+
+    /// All open UoW escalations across every story (drives the global NEEDS YOU count).
+    pub fn list_open_uow(&self) -> Vec<Escalation> {
+        self.list_open()
+            .into_iter()
+            .filter(|e| e.subject_kind == SubjectKind::Uow)
+            .collect()
     }
 
     /// One escalation by id.
@@ -544,6 +600,7 @@ impl EscalationStore {
         let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
         let esc = Escalation {
             id: format!("esc-{n}"),
+            subject_kind: req.subject_kind,
             routine_id: req.routine_id,
             routine_name: routine_name.to_string(),
             reason: req.reason,
@@ -554,6 +611,7 @@ impl EscalationStore {
             human_answer: None,
             translated_directive: None,
             resume_payload: None,
+            checkpoint_id: req.checkpoint_id,
             created: Self::now_rfc3339(),
             resolved: None,
             conversation: Vec::new(),
@@ -569,7 +627,7 @@ impl EscalationStore {
     /// existing open) escalation. Used by the run path so a blocked routine doesn't pile
     /// up duplicate reviews.
     pub fn raise_deduped(&self, req: RaiseEscalationReq, routine_name: &str) -> Escalation {
-        if let Some(existing) = self.open_for_routine(&req.routine_id) {
+        if let Some(existing) = self.open_for_subject(req.subject_kind, &req.routine_id) {
             return existing;
         }
         self.raise(req, routine_name)
@@ -622,12 +680,47 @@ mod tests {
 
     fn req(routine_id: &str) -> RaiseEscalationReq {
         RaiseEscalationReq {
+            subject_kind: SubjectKind::Routine,
+            checkpoint_id: None,
             routine_id: routine_id.to_string(),
             reason: "blocked by an architectural-decision rule".to_string(),
             stopped_for: "which storage backend to use".to_string(),
             suggestions: vec!["Postgres".to_string(), "SQLite".to_string()],
             raw_context: String::new(),
         }
+    }
+
+    fn uow_req(story_id: &str, ckpt: &str) -> RaiseEscalationReq {
+        RaiseEscalationReq {
+            subject_kind: SubjectKind::Uow,
+            checkpoint_id: Some(ckpt.to_string()),
+            routine_id: story_id.to_string(),
+            reason: "test-tamper".to_string(),
+            stopped_for: "approve the test edit?".to_string(),
+            suggestions: vec![],
+            raw_context: String::new(),
+        }
+    }
+
+    #[test]
+    fn uow_escalations_are_scoped_separately_from_routines() {
+        let store = EscalationStore::new();
+        // A routine escalation and a UoW escalation that share the same id string do NOT collide;
+        // subject_kind disambiguates.
+        let routine_esc = store.raise(req("x"), "Nightly");
+        let uow_esc = store.raise_deduped(uow_req("x", "ckpt-1"), "Story x");
+        assert_ne!(routine_esc.id, uow_esc.id, "routine + uow with same id are distinct");
+        assert_eq!(uow_esc.subject_kind, SubjectKind::Uow);
+        assert_eq!(uow_esc.checkpoint_id.as_deref(), Some("ckpt-1"));
+        // open_for_* is subject-scoped.
+        assert_eq!(store.open_for_routine("x").map(|e| e.id.clone()), Some(routine_esc.id));
+        assert_eq!(store.open_for_uow("x").map(|e| e.id.clone()), Some(uow_esc.id.clone()));
+        assert_eq!(store.list_open_for_uow("x").len(), 1);
+        assert_eq!(store.list_open_uow().len(), 1);
+        // Dedup per subject: raising the same UoW again returns the existing open one.
+        let again = store.raise_deduped(uow_req("x", "ckpt-2"), "Story x");
+        assert_eq!(again.id, uow_esc.id, "uow dedup returns the open one");
+        assert_eq!(store.list_open_uow().len(), 1);
     }
 
     #[test]
