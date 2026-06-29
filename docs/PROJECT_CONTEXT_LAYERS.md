@@ -1,6 +1,6 @@
 # Soft context layers: product brief, operating principles, project memory
 
-> **Status: DRAFT v0.1 (2026-06-29).** Design proposal. Tracking issue: TBD.
+> **Status: DRAFT v0.1 (2026-06-29).** Design proposal. Tracking issue: #112.
 >
 > Origin: a conversation about why a well-context-loaded human + model pair "just gets it," and what
 > repo-independent context Camerata's agents are missing. The rules are Camerata's HARD constraints
