@@ -21,8 +21,10 @@ them separate in your head and in this doc.
 
 - **The in-loop gate (the differentiator).** Enforcement that runs DURING a governed
   Camerata run: Layer 1 denies a tool call *before it executes* (real-time,
-  pre-execution, at the MCP tool boundary), Layer 2 bounces a task's diff, Layer 3
-  (planned) checks the cross-agent seam before the branch ships. Layer 1's
+  pre-execution, at the MCP tool boundary), Layer 2 bounces a task's diff, and the
+  cross-agent integration gate (planned; an orchestrator-level concern, not one of the
+  four numbered verification layers) checks the cross-agent seam before the branch
+  ships. Layer 1's
   pre-execution deny is the thirty-second moment that converts a skeptic: "watch it
   deny the write before it hits disk." This is the hard, novel real-time part.
 - **The deployed CI gate (the safety net, commodity-adjacent).** The CI/CD workflow
@@ -151,7 +153,7 @@ derived from the registry, so a newly added arm is applied everywhere with no ed
 | Layer-1 (gateway, path) | `GOV-1`, `SEC-NO-PATH-ESCAPE-1`, `SEC-NO-SECRET-FILES-1` | **Implemented, unit-tested, and live in every fleet/demo subset.** GOV-1 is the rule the live `claude -p` denial triggers; `SEC-NO-SECRET-FILES-1` denies writing a secret-bearing file by name (a real `.env`, a private-key file, a keystore). |
 | Layer-1 (gateway, content) | `SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`, `ARCH-NO-SECRETS-IN-URL-1` | Implemented, unit-tested, and live in every fleet/demo subset; each fires on matching file content. |
 | Layer-2 (checks) | `RUST-FMT`, `RUST-CLIPPY`, `RUST-TEST`; `LAYER2-JS-CHECKS-1`; `LAYER2-PY-CHECKS-1`; `LAYER2-GO-CHECKS-1` | Cross-language polyglot runners (`crates/checks/src/multilang.rs`): Rust via `cargo fmt`/`cargo clippy`/`cargo test`; JS/TS via lockfile-pinned npm; Python via ruff + pytest in an isolated venv; Go via gofmt/vet/test. The runner is selected per worktree language, fail-closed, repo-pinned. |
-| Layer-3 (cross-agent, **planned**) | `INTEGRATION-*` family | NOT built. The integration gate that checks any invariant spanning AGENTS on the assembled tree before the branch ships: contract conformance (API contracts are one example), wiring completeness (events/config/DI/migrations with no dangling ends), convention coherence (casing, naming, dates, money), and cross-cutting policy (e.g. every UI-gated action maps to a guarded endpoint). Both tiers above are per-agent and cannot see between agents. See ADR `cross_agent_integration_gate`. |
+| Cross-agent integration gate (**planned**; orchestrator-level concern, not one of the four numbered verification layers) | `INTEGRATION-*` family | NOT built. The integration gate that checks any invariant spanning AGENTS on the assembled tree before the branch ships: contract conformance (API contracts are one example), wiring completeness (events/config/DI/migrations with no dangling ends), convention coherence (casing, naming, dates, money), and cross-cutting policy (e.g. every UI-gated action maps to a guarded endpoint). Both tiers above are per-agent and cannot see between agents. See ADR `cross_agent_integration_gate`. |
 | Prose (`AGENTS.md`) | `ORCH-*`, `SPIRIT-*`, `PROC-*` families | Agent-judgment only; no mechanical teeth by design. |
 
 **Everything else in the 71-rule subset is a no-op today** — carried, loaded,

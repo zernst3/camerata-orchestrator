@@ -331,12 +331,12 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    | `CONVENTIONS.md` | Structured, mechanical, and architectural rules — conventions + CI conformance notes. |
    | `.camerata/rules.json` | Armed rule ids — the gate config read by Layer 1. |
    | `.camerata/baseline.json` | Accepted pre-existing debt (the full active-finding set at apply time). |
-   | **`.camerata/checks.toml`** | **The SSOT check manifest** read by both Layer 2 (dev-loop runner) and Layer 3 (CI). Each applied CI-tier rule becomes one `[[check]]` entry; mechanical rules carry a concrete command, architectural rules carry a TODO placeholder for the team to fill in. This is the single file you edit to add, remove, or change a custom gate check — one edit covers both the dev loop and CI. |
+   | **`.camerata/checks.toml`** | **The SSOT check manifest** read by both Layer 2 (dev-loop runner) and Layer 4 (CI). Each applied CI-tier rule becomes one `[[check]]` entry; mechanical rules carry a concrete command, architectural rules carry a TODO placeholder for the team to fill in. This is the single file you edit to add, remove, or change a custom gate check — one edit covers both the dev loop and CI. |
    | **`.github/workflows/camerata-gates.yml`** | **The generated CI workflow** (a real, runnable workflow file, not a placeholder). It is derived directly from `.camerata/checks.toml`, so it is always consistent with the manifest. Regenerate it any time by clicking **Regenerate CI workflow** in the Rules view. |
 
    **Apply scaffolds the CI layer; it does not turn CI enforcement on for you.** The two files above
    (the workflow and the `checks.toml` manifest) are *generated and committed to the branch*, and
-   onboarding files wiring stories (step 6) for what's left. But the CI layer (Layer 3) is **not
+   onboarding files wiring stories (step 6) for what's left. But the CI layer (Layer 4) is **not
    enforced automatically on apply**: mechanical rules still need their linter provisioned and their
    manifest command filled in where missing, and architectural rules carry only a commented TODO
    placeholder until the team writes the bespoke checker. The workflow runs on your CI only once your
@@ -344,7 +344,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    opt-in and manually wired.
 
    The apply loop is now closed end-to-end: apply writes `.camerata/checks.toml` → Layer 2 reads it →
-   Layer 3 is generated from it, all from the same file. See §14 for the full SSOT picture.
+   Layer 4 is generated from it, all from the same file. See §14 for the full SSOT picture.
 
 6. **Wire CI rules (two separate stories)** — the final step files **two GitHub-issue stories** per
    repo, one per CI enforcement tier:
@@ -364,7 +364,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    blocked on the architectural design phase.
 
    **CI-wiring covers both gate layers, not just CI.** Each story instructs wiring the check into
-   `.camerata/checks.toml`, which the Layer-2 dev-loop runner AND the Layer-3 CI workflow both read.
+   `.camerata/checks.toml`, which the Layer-2 dev-loop runner AND the Layer-4 CI workflow both read.
    One entry serves both; there is no "wire it twice" step.
 
    **Optional CI security rules (opt-in, never auto-recommended).** Two CI/CD-domain rules can
@@ -377,7 +377,7 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    - **`CICD-CODEQL-SECURITY-SCAN-1`** — **public-repo (free)** **vs.** **GitHub Advanced Security
      (paid, per active committer, for private repos)**. CodeQL's free entitlement is **public/open-
      source repos only**; private code requires the paid GHAS license. Either way its whole-program
-     database build is heavy, so CodeQL is **CI / layer-3 ONLY** — it never runs at the scan preview
+     database build is heavy, so CodeQL is **CI / layer-4 ONLY** — it never runs at the scan preview
      or in the dev loop (which is also why CodeQL never appears in the scan-time preview).
 
    Both rules have **no default option** — selecting one immediately shows the amber "must choose"
@@ -826,11 +826,12 @@ and one (L3) is AI-driven:
 | **Integration gate** | the assembled per-repo outputs vs. the prose contract | API contract between repo A and repo B agrees; live check in progress (#105-followup) |
 | **VCS-action gate** | commit/PR/branch metadata | the PR title + commit subject carry the ticket id |
 
-> **Layer numbering note:** the canonical stages are **L1** Security · **L2** Mechanical ·
-> **L3** AI code review · **L4** Origin/CI. Some older parts of the docs and the `layer3_only`
-> rule-corpus flag use "Layer 3" to mean CI (now **L4**) — the flag predates the L3 reviewer.
-> The flag is NOT being renamed in code; the canonical model in `ENFORCEMENT_MODEL.md` is the
-> reference.
+> **Layer numbering note — reconciled.** The canonical stages are **L1** Security · **L2** Mechanical ·
+> **L3** AI code review · **L4** Origin/CI, and this guide is now reconciled to them: every prose
+> reference that means CI reads **L4**, and **L3** is the AI reviewer. The one remaining legacy is
+> the `layer3_only` rule-corpus flag in **code**, which means "CI-only (L4)" despite its name; it is
+> intentionally NOT renamed to avoid a code migration, so grepping the source for "layer3" finds the
+> CI tier. The canonical model in `ENFORCEMENT_MODEL.md` is the reference.
 
 **Layer 2 is cross-language and polyglot — across all seven supported languages.** It is no longer
 Rust-only: for each worktree it runs the checks for every **supported** language present — **Rust,
@@ -1036,11 +1037,11 @@ Every rule in Camerata's corpus carries an `enforcement` field that answers one 
 
 The diagram above is the canonical **stage** model — L1 Security · L2 Mechanical · L3 AI code review · L4 Origin/CI — and how rules feed each layer (full write-up: [`ENFORCEMENT_MODEL.md`](ENFORCEMENT_MODEL.md)). The table just below is a **different, related axis**: the rule *enforcement modalities* (how objectively a rule can be checked), which determine *what kind of wiring* a rule needs.
 
-> **Numbering note:** this section (and §14, and the `layer3_only` rule flag) still use "Layer 3"
-> in some places to mean **CI**, which is **L4** in the canonical stage model above. The AI code
-> reviewer (§6a) is the actual **L3**. The `layer3_only` flag is a legacy name that predates the
-> L3 reviewer — it means "CI-only (L4)"; the flag is not renamed in code. See §7 for the canonical
-> enforcement table.
+> **Numbering note — reconciled.** This section and §14 now follow the canonical stage model above:
+> any reference that means **CI** reads **L4**, and the AI code reviewer (§6a) is the actual **L3**.
+> The one remaining legacy is the `layer3_only` rule flag in **code**, which means "CI-only (L4)"
+> despite its name; it is intentionally not renamed to avoid a code migration, so grepping the source
+> for "layer3" finds the CI tier. See §7 for the canonical enforcement table.
 
 ### The four-layer model
 
@@ -1126,11 +1127,11 @@ The mechanical rules in the current corpus are grounded (each maps to a real, na
 
 When you click the onboarding buttons to create CI stories (§3 step 6), the stories teach a single
 wiring model: **one entry in `.camerata/checks.toml` enforces a check at BOTH the in-loop dev gate
-(Layer 2) and the generated CI workflow (Layer 3).** There is no "wire it twice" step.
+(Layer 2) and the generated CI workflow (Layer 4).** There is no "wire it twice" step.
 
 ### Why a single source of truth matters
 
-Without a shared definition, Layer 2 and Layer 3 can drift: a custom linter you add to CI never
+Without a shared definition, Layer 2 and Layer 4 can drift: a custom linter you add to CI never
 reaches the dev loop, so the agent gets no early feedback and can produce code that passes locally
 but fails in CI. The manifest eliminates this structurally — both consumers read the same file.
 
@@ -1143,7 +1144,7 @@ id       = "ARCH-API-LAYERING-1"         # stable rule id; used as the violation
 name     = "API layering"                 # short human label shown in bounce-back messages
 command  = "scripts/check_layering.sh"   # shell command, runs from the repo root (sh -c)
 severity = "high"                         # "high" | "medium" | "low" — informational; all severities block
-in_loop  = true                           # true = run at Layer 2 AND Layer 3; false = CI-only
+in_loop  = true                           # true = run at Layer 2 AND Layer 4; false = CI-only
 ```
 
 All five fields are required. A missing field is a parse error, not a silent misconfiguration. A
@@ -1154,8 +1155,8 @@ are always unaffected.
 
 | `in_loop` | Runs at | Use when |
 |---|---|---|
-| `true` | Layer 2 (dev loop) AND Layer 3 (CI) | Check is fast (under 30s), needs no external secrets or services. The agent gets early feedback. |
-| `false` | Layer 3 (CI) only | Check needs secrets, an external service, or takes too long to run mid-loop. CI is always the authoritative backstop. |
+| `true` | Layer 2 (dev loop) AND Layer 4 (CI) | Check is fast (under 30s), needs no external secrets or services. The agent gets early feedback. |
+| `false` | Layer 4 (CI) only | Check needs secrets, an external service, or takes too long to run mid-loop. CI is always the authoritative backstop. |
 
 **The manifest is agent-protected.** The gate rule `SEC-NO-CAMERATA-CONFIG-1` blocks any agent write
 to the `.camerata/` directory. Editing the manifest is always a human/operator commit. This prevents
@@ -1178,7 +1179,7 @@ a four-step process:
    a dependency-cruiser config — anything that exits 0 for clean and nonzero for a violation).
 2. Add the manifest entry with pinned tool + version + install command.
 3. Regenerate the CI workflow.
-4. Verify the check at both Layer 2 and Layer 3.
+4. Verify the check at both Layer 2 and Layer 4.
 
 The story includes a worked example for API-layering enforcement via `dependency-cruiser`, as this
 is the most common architectural check pattern.
@@ -1189,7 +1190,7 @@ phase.
 ### What apply writes — the closed loop
 
 When you click **Add rules to repo(s)** (§3 step 5), the apply step is now the upstream source for
-everything Layer 2 and Layer 3 consume. The loop that was previously open is now closed:
+everything Layer 2 and Layer 4 consume. The loop that was previously open is now closed:
 
 ```
 Apply (Camerata UI)
@@ -1197,7 +1198,7 @@ Apply (Camerata UI)
                  |
        +---------+---------+
        |                   |
-  Layer 2               Layer 3
+  Layer 2               Layer 4
   (dev loop)             (CI)
   ManifestCheckRunner    camerata-gates.yml
   reads checks.toml      generated from checks.toml
@@ -1211,7 +1212,7 @@ produces). There is no "wire it twice" step and no divergence between what the a
 what the runtime executes.
 
 **`.camerata/checks.toml` is the single file you edit to manage custom gate checks.** One change
-there is automatically reflected in both Layer 2 (next dev run) and Layer 3 (next CI run after
+there is automatically reflected in both Layer 2 (next dev run) and Layer 4 (next CI run after
 commit). The `camerata-gates.yml` workflow is regenerated from it on demand — it is never the
 authoritative source, only the derived output.
 
@@ -1225,7 +1226,7 @@ The workflow is derived entirely from the manifest, so regenerating it is always
 
 ## 15. Tool-version pinning and the drift error
 
-Even with a single manifest definition, a check can still disagree between Layer 2 and Layer 3 if
+Even with a single manifest definition, a check can still disagree between Layer 2 and Layer 4 if
 the two environments run **different versions of the same tool**. For example, a `dependency-cruiser`
 rule that was valid under version 5.x may emit different findings under 6.x. The manifest solves
 this with three optional pinning fields:
@@ -1246,7 +1247,7 @@ in_loop  = true
 two environments to land on different patch releases and disagree. Pinning an exact version is what
 makes the SSOT property hold end-to-end.
 
-### What happens at Layer 3 (CI)
+### What happens at Layer 4 (CI)
 
 The generated CI workflow emits a **dedicated install step immediately before the check step**:
 

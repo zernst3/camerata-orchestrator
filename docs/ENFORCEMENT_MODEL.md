@@ -43,12 +43,16 @@ intent** — exactly as a human reviewer reads the ticket before the diff. It do
 isolation — **from the other agents, not from the story** — is what keeps it from rubber-stamping
 the implementer's own rationalizations. Spec-grounded, implementer-blind.
 
-> **Numbering note (reconciliation pending).** This is the canonical **stage** model:
-> **L1** Security · **L2** Mechanical · **L3** Code review (AI) · **L4** Origin/CI. Some older docs
-> and the `layer3_only` rule flag use "Layer 3" to mean **CI** (which is now **L4**) — the AI
-> code reviewer is the *new* L3. (Separately, `crates/ui/src/chat.rs` uses "Layer 3" for an
-> unrelated chat-grounding concept — not an enforcement stage.) These references are being
-> reconciled to the numbering above.
+> **Numbering note (reconciled).** This is the canonical **stage** model:
+> **L1** Security · **L2** Mechanical · **L3** Code review (AI) · **L4** Origin/CI. The docs
+> (TECHNICAL.md, USER_GUIDE.md, ENFORCEMENT.md, README.md) are now reconciled to it: every prose
+> reference that means **CI** reads **L4**, and **L3** is reserved for the AI code reviewer. The
+> ONLY remaining legacy is the **code** flag name `layer3_only` (`Rule::is_layer3_only()`), which
+> means **CI-only (L4)** despite its name; it is intentionally NOT renamed to avoid a corpus-wide
+> code migration, so a reader who greps the source for "layer3" finds the CI tier, not the AI
+> reviewer. (Separately, `crates/ui/src/chat.rs` uses "Layer 3" for an unrelated chat-grounding
+> concept, and `crates/server` uses "Layer 3 — API contract" for the run-liveness subsystem —
+> neither is an enforcement stage.)
 
 ## Rule types & the wiring cost (the part that's easy to miss)
 

@@ -168,15 +168,16 @@ the wiring cost, and why the layers drift) is [`ENFORCEMENT_MODEL.md`](ENFORCEME
 
 ![Camerata enforcement model](enforcement-model.svg)
 
-> **Numbering note — layer naming collision.** Camerata's canonical four-stage model is
+> **Numbering note — reconciled.** Camerata's canonical four-stage model is
 > **L1** Security (MCP gate) · **L2** Mechanical (post-task check runner) · **L3** AI code
-> review (the agentic reviewer) · **L4** Origin/CI (the repo's own pipeline). Some sections
-> below and the `layer3_only` rule-metadata flag use "Layer 3" to mean **CI**, because they
-> were written before the L3 AI reviewer existed. **The `layer3_only` flag means L4 (CI) —
-> the flag name is a legacy artefact; it predates the L3 reviewer and has not been renamed
-> in code.** Never rename it without a corpus-wide migration. The canonical ENFORCEMENT_MODEL.md
-> is the authoritative stage reference; this file and USER_GUIDE.md follow that numbering and
-> note divergence inline where it occurs.
+> review (the agentic reviewer) · **L4** Origin/CI (the repo's own pipeline). The prose in
+> this file and in USER_GUIDE.md is now reconciled to that numbering: every reference that
+> means CI reads **L4** (or "Layer 4"), and **L3** is reserved for the AI code reviewer. The
+> ONLY remaining legacy is the **code** flag name `layer3_only` (`Rule::is_layer3_only()`),
+> which means **CI-only (L4)** despite its name. **The flag name is intentionally not renamed
+> in code** to avoid a corpus-wide migration, so a reader who greps the source for "layer3"
+> finds the CI tier, not the AI reviewer. The canonical ENFORCEMENT_MODEL.md is the
+> authoritative stage reference.
 
 ## 2. Layer-1 MCP gate
 
@@ -310,7 +311,7 @@ polyglot, repo-pinned, and fail-closed** — no longer Rust-only-hardcoded.
 ### The SSOT manifest (`.camerata/checks.toml`)
 
 `.camerata/checks.toml` is the **single source of truth** for custom deterministic
-gate checks. Both Layer 2 and Layer 3 derive from this file; drift between them is
+gate checks. Both Layer 2 and Layer 4 derive from this file; drift between them is
 structurally impossible. See
 `docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
 
@@ -322,7 +323,7 @@ id       = "ARCH-API-LAYERING-1"          # rule id; violation id on nonzero exi
 name     = "API layering"                  # human-readable label
 command  = "scripts/check_layering.sh"     # shell command; cwd = repo root
 severity = "high"                          # "high" | "medium" | "low" (all severities block)
-in_loop  = true                            # true = Layer 2 + Layer 3; false = CI-only (Layer 3)
+in_loop  = true                            # true = Layer 2 + Layer 4; false = CI-only (Layer 4)
 
 # Optional pinning fields (see §3 "Tool-version pinning" below)
 tool     = "dependency-cruiser"
@@ -339,16 +340,16 @@ are unaffected.
 
 | `in_loop` | Runs at | Use when |
 |---|---|---|
-| `true` | Layer 2 AND Layer 3 | Check is fast (< 30 s), needs no external secrets or services; the agent gets early feedback. |
-| `false` | Layer 3 (CI) only | Check needs secrets, external services, or a long runtime that would stall the agent loop. |
+| `true` | Layer 2 AND Layer 4 | Check is fast (< 30 s), needs no external secrets or services; the agent gets early feedback. |
+| `false` | Layer 4 (CI) only | Check needs secrets, external services, or a long runtime that would stall the agent loop. |
 
 **Parity guarantee — structural, not conventional.** Both the Layer-2
-`ManifestCheckRunner` and the Layer-3 CI workflow generator in
+`ManifestCheckRunner` and the Layer-4 CI workflow generator in
 `crates/server/src/workflow_gen.rs` call the SAME shared functions:
 
 - `layer2_commands(stack, manifest)` — exact commands Layer 2 runs: built-in
   stack commands + `in_loop = true` manifest entries.
-- `all_ci_commands(stack, manifest)` — superset Layer 3 runs: built-in stack
+- `all_ci_commands(stack, manifest)` — superset Layer 4 runs: built-in stack
   commands + ALL manifest entries (in_loop + ci-only).
 
 `layer2_commands ⊆ all_ci_commands` holds by construction (same built-ins, same
@@ -378,7 +379,7 @@ path segment. Only operator commits (human, not agent) can change the manifest.
 **The problem.** The manifest SSOT eliminates rule-definition drift. But an
 external linter at the wrong version (e.g. `dependency-cruiser` 5.x vs 6.x, or
 Semgrep 1.x vs 1.y) can return DIFFERENT results on the same ruleset — producing
-"green at Layer 2, red at Layer 3" even with a stable rule definition. The SSOT
+"green at Layer 2, red at Layer 4" even with a stable rule definition. The SSOT
 breaks at the tool-version boundary.
 
 **The fix.** Three optional fields on `ManifestCheck` (all `#[serde(default)]` for
@@ -390,7 +391,7 @@ back-compat with existing manifests):
 | `version` | `Option<String>` | EXACT pinned version string (`"6.3.0"`). No ranges, no carets — determinism requires an exact match. |
 | `install` | `Option<String>` | Exact install command (`"npm install -g dependency-cruiser@6.3.0"`). Explicit because install mechanisms span pip/npm/cargo/go; guessing is fragile. |
 
-**Layer 3 installs; Layer 2 verifies.** For a pinned check the generated CI
+**Layer 4 installs; Layer 2 verifies.** For a pinned check the generated CI
 workflow emits a dedicated install step IMMEDIATELY before the check's run step:
 
 ```yaml
@@ -425,7 +426,7 @@ mismatch (its output would be untrustworthy). The violation message always inclu
 the `install` command so the operator knows exactly how to resolve it.
 
 **Layer 2 does NOT install tools.** Installing tools in the agent dev loop is too
-heavy and side-effectful. This division — Layer 2 verifies the version, Layer 3
+heavy and side-effectful. This division — Layer 2 verifies the version, Layer 4
 installs it — is the deliberate design. The repo's `rust-toolchain` / `go.mod`
 already pin the repo's toolchain; version-pinning in the manifest closes the
 "SSOT is only as deterministic as its least-pinned external dependency" gap for
@@ -487,7 +488,7 @@ Python, Go, Ruby, Java, C#). See
 lockfile/manifest, never baked into Camerata: `npm run lint` resolves the repo's
 `node_modules` binaries, `ruff`/`pytest` are the venv-local ones, Go and Rust are
 pinned by `go.mod` / `rust-toolchain`. The effect is that layer-2 runs the SAME
-toolchain as the repo's CI (layer-3). See
+toolchain as the repo's CI (layer-4). See
 `docs/decisions/2026-06-21_layer2_repo_pinned_toolchain.md`.
 
 **Polyglot composition.** `runner_for_worktree(worktree)` is the single
@@ -793,7 +794,7 @@ For onboarding scan jobs, `JobMeta.last_activity_ms` is updated by
 `det_tool_running` and `det_tool_done`, so scan jobs carry the same liveness
 tracking.
 
-### Layer 3 — API contract
+### Layer 3 — API contract (liveness layer)
 
 `GET /api/runs/:id` returns a `RunStatusResponse` that includes computed stall
 fields alongside the run's normal state:
@@ -968,10 +969,10 @@ choose" state):
   OSS CLI, runs on any repo incl. private, ~3,000 community rules, SARIF) |
   `semgrep-appsec-platform-pro` (paid cross-file taint analysis, ~20,000 Pro rules,
   managed platform). `linter = "semgrep"`.
-- **`CICD-CODEQL-SECURITY-SCAN-1`** — "Run the CodeQL security suite in CI (layer-3
+- **`CICD-CODEQL-SECURITY-SCAN-1`** — "Run the CodeQL security suite in CI (layer-4
   only)". `layer3_only = true` (whole-program DB build is too heavy for scan/in-loop).
   Options: `codeql-public-free` (free ONLY on public/OSS repos; private requires
-  GitHub Advanced Security, paid per active committer; CI / layer-3 ONLY) |
+  GitHub Advanced Security, paid per active committer; CI / layer-4 ONLY) |
   `codeql-ghas-paid` (GHAS for private repos, per-committer). `linter = "codeql"`.
 
 See `docs/decisions/2026-06-22_ci_security_rules_partA.md` and
@@ -1116,16 +1117,16 @@ Axis B is a deployment fact, not a corpus field. The same rule can be enforced a
    is missing or no check is defined. See
    `docs/decisions/2026-06-22_layer2_ruby_java_csharp_runners.md`.
 
-   Layer-2 is **fast and in-loop** (runs against the agent's draft, before commit). Layer-3 is the
+   Layer-2 is **fast and in-loop** (runs against the agent's draft, before commit). Layer-4 is the
    authoritative backstop. This is intentional redundancy: client-side validation (layer-2) catches
-   violations immediately so the agent can self-correct; server-side validation (layer-3) catches
+   violations immediately so the agent can self-correct; server-side validation (layer-4) catches
    anything that bypassed the agent, including human commits and other tools. Neither substitutes
    for the other.
 
-3. **Layer-3 CI — the target repo's own pipeline.** Language-agnostic. Onboarding grounds each
+3. **Layer-4 CI — the target repo's own pipeline.** Language-agnostic. Onboarding grounds each
    mechanical rule to the repo's real linter and files a GitHub issue to wire it into CI. The CI
    config itself is not generated — Camerata files the story; the dev layer does the wiring work.
-   Layer-3 persists even if Camerata is removed from the project.
+   Layer-4 persists even if Camerata is removed from the project.
 
 4. **Agent directive — in-context.** prose + structured rules are injected into the agent's context
    at spawn. The agent follows them. Drift is low with concise directives but not zero; PR review is
@@ -1139,7 +1140,7 @@ Axis B is a deployment fact, not a corpus field. The same rule can be enforced a
 This table is the canonical summary of which enforcement tier covers which rule kind at
 which point. It is the conceptual backbone of the entire enforcement model.
 
-| Rule tier | Layer 1 gate | Layer 2 in-loop checks | Layer 3 CI | Scan |
+| Rule tier | Layer 1 gate | Layer 2 in-loop checks | Layer 4 CI | Scan |
 |---|---|---|---|---|
 | **Deterministic floor** (the 7 SEC/ARCH content+path rules) | YES — regex/path arms, each with `TestScopePolicy` (Waive/Downgrade) | No — `ManifestCheckRunner` does not re-run these | No dedicated job emitted | YES — deterministic preview (floor `audit_content`) + AI review |
 | **Mechanical** (maps to an off-the-shelf linter) | Some content rules only | YES — built-in language runners + manifest `in_loop` checks | YES — generated from the SSOT manifest (`all_ci_commands`) | YES — deterministic preview when the linter is provisioned + AI review |
@@ -1147,7 +1148,7 @@ which point. It is the conceptual backbone of the entire enforcement model.
 | **Prose / structured** (advisory or binary-human-reviewable) | No | No | No | AI review |
 
 Key corollaries:
-- The floor NEVER runs at Layer 2 or Layer 3 (it lives in the gate and the scan, not the
+- The floor NEVER runs at Layer 2 or Layer 4 (it lives in the gate and the scan, not the
   runner). A floor rule in a role's subset is enforced at write time; the SSOT manifest
   is separate.
 - `layer2_commands ⊆ all_ci_commands` is a structural guarantee (shared functions in
@@ -1619,11 +1620,11 @@ See `docs/decisions/2026-06-21_ci_story_tier_split.md` and
 `docs/decisions/2026-06-23_ci_gate_story_howto_enrichment.md`.
 
 **CI-wiring targets the repo's canonical check command (serves both layers).** Layer 2
-(Camerata's in-loop post-task check during a governed run) and layer 3 (the repo's own CI on
+(Camerata's in-loop post-task check during a governed run) and layer 4 (the repo's own CI on
 every PR) run the SAME checks — the repo's lint/test commands — differing only in where/when. So
 the wiring stories instruct wiring each check into the repo's **canonical check command**
 (the lint/test command layer 2 runs) **and** the CI workflow. One wiring covers both: layer 2
-picks it up automatically (it runs the repo's lint/test), layer 3 runs the same command on every
+picks it up automatically (it runs the repo's lint/test), layer 4 runs the same command on every
 PR (catching non-Camerata changes too). See
 `docs/decisions/2026-06-22_ci_wiring_both_layers_and_layer2_bootstrap_bypass.md`.
 
@@ -1713,12 +1714,12 @@ to the `camerata/onboard-governance` branch. The complete set of emitted files i
 | `.camerata/rules.json` | Gate config: the list of armed rule ids. A separate concern from the executable check manifest. |
 | `.camerata/baseline.json` | Accepted pre-existing debt snapshot (written once at first apply). |
 | **`.camerata/checks.toml`** | **The real `CheckManifest` / `ManifestCheck` TOML** that `manifest::load_manifest` (`crates/checks/src/manifest.rs`) round-trips. Each applied CI-tier rule (mechanical or architectural) becomes one `[[check]]` entry. Mechanical rules populate the `command` field from the rule's conformance hint; architectural rules emit a commented TODO placeholder for the team to fill in. |
-| **`.github/workflows/camerata-gates.yml`** | **The real CI workflow**, generated by `workflow_gen::generate_gates_workflow(&manifest, stack)` — the same function the `/api/projects/active/generate-ci-workflow` endpoint uses. Not a stub; this is the actual Layer-3 CI gate. |
+| **`.github/workflows/camerata-gates.yml`** | **The real CI workflow**, generated by `workflow_gen::generate_gates_workflow(&manifest, stack)` — the same function the `/api/projects/active/generate-ci-workflow` endpoint uses. Not a stub; this is the actual Layer-4 CI gate. |
 
 **What was removed.** An earlier version of `arm_files_for_repo` emitted `.camerata/ci-checks.json`
 (a JSON array of CI-tier rule metadata consumed by nothing in the runtime) and
 `.github/workflows/camerata-governance.yml` (a placeholder scaffold that printed rule names with
-the message "wire each rule's enforcement manually"). Neither was consumed by Layer 2 or Layer 3;
+the message "wire each rule's enforcement manually"). Neither was consumed by Layer 2 or Layer 4;
 they are replaced by the files above and are no longer emitted.
 
 **The closed loop.** Before this change, the apply step and the runtime consumed different files in
@@ -1729,7 +1730,7 @@ arm_files_for_repo()   produces   .camerata/checks.toml
                                           |
                      +-----------+--------+
                      |                    |
-            Layer 2 (in-loop)      Layer 3 (CI)
+            Layer 2 (in-loop)      Layer 4 (CI)
        manifest::load_manifest()  generate_gates_workflow()
           ManifestCheckRunner       camerata-gates.yml
 ```
@@ -1739,13 +1740,13 @@ Both consumers read from the same `ManifestCheck` structs that `arm_files_for_re
 `#[derive(Serialize)]` (added to `crates/checks/src/manifest.rs`), so a serialization error is a
 compile-time or immediate runtime error rather than a silently malformed TOML that `load_manifest`
 would reject. Any rule an architect applies in the UI is immediately reflected in the manifest the
-Layer-2 dev-loop gate reads and in the generated Layer-3 CI workflow file. The *registration* (a
+Layer-2 dev-loop gate reads and in the generated Layer-4 CI workflow file. The *registration* (a
 `[[check]]` entry exists from the moment of apply) is what is automatic, **not the CI enforcement
 itself**.
 
 **Apply SCAFFOLDS the CI layer; it does not auto-enforce it.** The distinction matters for accuracy:
 `arm_files_for_repo` *generates* the workflow file (`camerata-gates.yml`) and the `checks.toml`
-manifest, and onboarding *files wiring stories* (the two GitHub issues above), but Layer-3 CI is
+manifest, and onboarding *files wiring stories* (the two GitHub issues above), but Layer-4 CI is
 **not enforced on apply**. Mechanical rules get a runnable `command` from the conformance hint;
 **architectural rules emit a commented TODO placeholder** with no executable check until the team
 defines one. Adoption is a deliberate team step: review and commit the workflow, provision the
@@ -3029,7 +3030,7 @@ The workspace has three tiers of automated tests, all run by `cargo test` and al
    `Downgrade` findings are kept but down-ranked to `low`/`in_test=true`; `Waive`
    findings are dropped. No ambiguity carries through.
 9. **`layer2_commands ⊆ all_ci_commands` parity is structural.** Both the
-   Layer-2 runner and the Layer-3 CI workflow generator in `workflow_gen.rs` call
+   Layer-2 runner and the Layer-4 CI workflow generator in `workflow_gen.rs` call
    the same shared functions. The subset invariant cannot drift by convention; it
    is enforced by construction and confirmed by a unit test.
 10. **The SSOT manifest is gate-protected.** `SEC-NO-CAMERATA-CONFIG-1` in
