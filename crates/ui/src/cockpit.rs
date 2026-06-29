@@ -1639,6 +1639,14 @@ pub fn CockpitApp() -> Element {
     let active_audit_job = use_signal(|| Option::<String>::None);
     use_context_provider(|| active_audit_job);
 
+    // Governed-Development sub-view selection lifted to app scope so it SURVIVES leaving the
+    // Stories tab and returning: navigating to Settings/Rules and back lands you on the same
+    // UoW (or Issue Management) you left, instead of resetting to Issue Management.
+    // GovernedDevPage reads this via use_context instead of owning a local signal that
+    // unmounts (and resets) every time the page leaves the tree.
+    let govdev_sel = use_signal(|| uow::GovDevSel::IssueManagement);
+    use_context_provider(|| govdev_sel);
+
     // Routines + Onboard live inside the cockpit (architect tools). All hooks above
     // have run, so branching here is safe.
     if view() == CockpitView::Onboard {

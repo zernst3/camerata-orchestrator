@@ -193,9 +193,15 @@ html, body {
 }
 .page-wide { max-width: 90%; width: 90%; }
 
+/* NOTE: the `to` frame deliberately omits `transform`. With `animation-fill-mode:
+   both`, a `transform: translateY(0)` here would PERSIST at rest, and any non-`none`
+   transform on `.page` makes it the containing block for `position: fixed` descendants —
+   which pushed modals to center on `.page` instead of the viewport. Omitting it lets the
+   resting transform fall back to `none`, so `.rule-modal-overlay { position: fixed }`
+   centers on the window. */
 @keyframes rise {
   from { opacity: 0; transform: translateY(14px); }
-  to   { opacity: 1; transform: translateY(0); }
+  to   { opacity: 1; }
 }
 @keyframes fade {
   from { opacity: 0; }
@@ -3671,7 +3677,7 @@ html, body {
 
 /* Work-item detail */
 .wi-detail {
-  margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface);
+  margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; background: rgba(26,24,22,0.55);
   padding: 14px 16px;
 }
 .wi-detail-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
@@ -3693,7 +3699,7 @@ html, body {
 .uow-dev-num { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-faint); }
 .uow-dev-title { font-size: 17px; font-weight: 700; color: var(--ink); margin: 0 0 14px; }
 .uow-dev-pull-row { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
-.uow-comment { margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 14px 16px; }
+.uow-comment { margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; background: rgba(26,24,22,0.55); padding: 14px 16px; }
 /* The Post-comment button sits below the composer with breathing room (TASK 2). */
 .uow-comment .btn-run { margin-top: 12px; }
 
@@ -3754,7 +3760,7 @@ html, body {
 .wi-comments { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
 .wi-comments-h { font-size: 12px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-faint); margin: 0 0 10px; }
 .wi-comments-empty { font-style: italic; }
-.wi-comment { border: 1px solid var(--line-soft); border-radius: 8px; background: var(--paper); padding: 9px 11px; margin-bottom: 8px; }
+.wi-comment { border: 1px solid var(--line-soft); border-radius: 8px; background: rgba(26,24,22,0.5); padding: 9px 11px; margin-bottom: 8px; }
 .wi-comment:last-child { margin-bottom: 0; }
 .wi-comment-meta { display: flex; align-items: center; gap: 10px; margin-bottom: 5px; }
 .wi-comment-author { font-size: 12.5px; font-weight: 700; color: var(--ink); }

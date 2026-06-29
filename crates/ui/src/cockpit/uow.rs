@@ -1810,8 +1810,10 @@ pub(super) enum GovDevSel {
 /// Right (main): the issue-management panel, or the selected UoW's dev controls.
 #[component]
 pub(super) fn GovernedDevPage() -> Element {
-    // Selection in the left nav. Defaults to the Issue Management panel.
-    let mut sel = use_signal(|| GovDevSel::IssueManagement);
+    // Selection in the left nav. Lifted to app scope (provided by CockpitApp) so it persists
+    // across tab navigation — leaving Stories and returning lands on the same UoW instead of
+    // resetting. Defaults to the Issue Management panel on first app load.
+    let mut sel = use_context::<Signal<GovDevSel>>();
 
     // The UoW list (left-nav cards). Re-fetched whenever this tick bumps (e.g. after a
     // UoW is created from a work item).
