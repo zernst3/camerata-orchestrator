@@ -71,6 +71,14 @@ pub const GATE_EVENTS_FILE_ENV: &str = "CAMERATA_GATE_EVENTS_FILE";
 /// agent→run channel; it carries STRUCTURED questions, never writes to the repo.
 pub const CLARIFY_REQUESTS_FILE_ENV: &str = "CAMERATA_CLARIFY_REQUESTS_FILE";
 
+/// Optional env override for the escalation-request JSONL sink path (the agent-driven escalation
+/// channel). When set, every `raise_escalation` call is appended (one JSON object per line) to this
+/// file. When unset, the path is an `escalation-requests.jsonl` sibling of the per-session rules
+/// file (same derivation as the clarify sink), so the run that wrote the rules file knows where to
+/// read escalations from. This is the agent→run channel for rule-driven escalation; it never writes
+/// to the repo.
+pub const ESCALATION_REQUESTS_FILE_ENV: &str = "CAMERATA_ESCALATION_REQUESTS_FILE";
+
 /// One structured gate-decision record, appended as a single JSONL line to the sink.
 ///
 /// Recording-only: this mirrors what [`Gateway::gated_write`] already decided, so the
@@ -143,6 +151,46 @@ fn default_true() -> bool {
     true
 }
 
+/// One escalation the GATED agent raises mid-run when its work meets the escalation CONDITION of a
+/// rule the project selected (the rule-agnostic, agent-driven half of the escalation gate). Wire
+/// shape between the gateway subprocess and the server: the server reads these back, resolves the
+/// rule's AUTHORITATIVE severity from the corpus (the agent cannot downgrade a hard-pause), and
+/// either pauses the run for human review or logs + continues. Recording-only — raising an
+/// escalation is not a repo write and cannot change a gate verdict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EscalationRequestRecord {
+    /// The rule id whose escalation condition was met (e.g. "ORCH-ONE-WAY-DOOR-1").
+    pub rule_id: String,
+    /// The agent's account of WHAT met the condition (the specific action or decision).
+    pub condition_met: String,
+    /// The agent's justification / the recommendation it would make, for the human reviewing.
+    #[serde(default)]
+    pub justification: String,
+    /// Unix-epoch milliseconds when the escalation was recorded.
+    pub ts_ms: u128,
+}
+
+/// Append an escalation-request record to the escalation JSONL sink (best-effort, recording-only).
+/// Mirrors [`append_clarify_request`]: appends to the per-session sink (a sibling of the rules file,
+/// OUTSIDE the worktree jail); a write failure is ignored; never touches the repo.
+fn append_escalation_request(record: &EscalationRequestRecord) {
+    let Some(path) = escalation_requests_sink_path() else {
+        return;
+    };
+    let Ok(mut line) = serde_json::to_string(record) else {
+        return;
+    };
+    line.push('\n');
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write as _;
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 /// Append a clarification-request record to the clarify-request JSONL sink (best-effort).
 ///
 /// The agent→run channel for Phase 3b. RECORDING-ONLY: a write failure is ignored. This
@@ -196,6 +244,19 @@ pub fn clarify_requests_sink_path() -> Option<std::path::PathBuf> {
     let rules_path = std::path::PathBuf::from(rules);
     let dir = rules_path.parent()?;
     Some(dir.join("clarify-requests.jsonl"))
+}
+
+/// Resolve the escalation-request sink path: [`ESCALATION_REQUESTS_FILE_ENV`] if set, else an
+/// `escalation-requests.jsonl` sibling of the per-session rules file. A RECORDING channel only,
+/// like the clarify sink. Returns `None` when nothing is configured (standalone/test runs).
+pub fn escalation_requests_sink_path() -> Option<std::path::PathBuf> {
+    if let Some(explicit) = std::env::var_os(ESCALATION_REQUESTS_FILE_ENV) {
+        return Some(std::path::PathBuf::from(explicit));
+    }
+    let rules = std::env::var_os(RULES_FILE_ENV)?;
+    let rules_path = std::path::PathBuf::from(rules);
+    let dir = rules_path.parent()?;
+    Some(dir.join("escalation-requests.jsonl"))
 }
 
 /// SHA-256 hash of `s`, returned as a 64-char lowercase hex string. Matches
@@ -359,6 +420,18 @@ pub struct AskClarificationArgs {
     /// Whether the "Other" free-text escape is offered. Default true.
     #[serde(default = "default_true")]
     pub allow_free_text: bool,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct RaiseEscalationArgs {
+    /// The id of the rule whose escalation condition your work meets (from the ESCALATION
+    /// CONDITIONS list in your task), e.g. "ORCH-ONE-WAY-DOOR-1".
+    pub rule_id: String,
+    /// What SPECIFICALLY met the condition — the action or decision you are about to make.
+    pub condition_met: String,
+    /// Your justification / the recommendation you would make, for the human reviewing.
+    #[serde(default)]
+    pub justification: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -594,6 +667,42 @@ impl Gateway {
              human for an answer. STOP now and end your turn — the run will pause and you \
              will be resumed with the answer appended to your context. Do not attempt to \
              proceed past this decision."
+        )
+    }
+
+    /// Raise an escalation when the agent's work meets the escalation CONDITION of a selected rule
+    /// (the rule-agnostic, agent-driven half of the escalation gate). Records the escalation to the
+    /// per-session sink (outside the worktree jail) so the server can resolve the rule's severity
+    /// from the corpus and either PAUSE the run for human review (hard-pause) or log it and let the
+    /// run CONTINUE (soft-flag). Raising an escalation is not a write; the gate is unaffected.
+    #[tool(
+        name = "raise_escalation",
+        description = "Raise an escalation when your work meets the escalation CONDITION of one of the rules listed under 'ESCALATION CONDITIONS' in your task. Give the rule_id, what specifically met the condition, and your justification. This does NOT write any files. For a HARD-PAUSE rule, STOP and end your turn after calling it — the run pauses for human review and you will be resumed with the decision. For a SOFT-FLAG rule you may continue. When unsure whether a rule's condition is met, raise it rather than proceed past it."
+    )]
+    pub async fn raise_escalation(&self, args: Parameters<RaiseEscalationArgs>) -> String {
+        let RaiseEscalationArgs {
+            rule_id,
+            condition_met,
+            justification,
+        } = args.0;
+
+        let record = EscalationRequestRecord {
+            rule_id: rule_id.clone(),
+            condition_met,
+            justification,
+            ts_ms: now_ms(),
+        };
+
+        eprintln!("[gateway] raise_escalation recorded for rule {rule_id}");
+
+        // Record to the agent→run channel. RECORDING-ONLY: writes to the per-session sink outside
+        // the worktree jail; touches no repo file; cannot change a gate verdict.
+        append_escalation_request(&record);
+
+        format!(
+            "ESCALATION RECORDED for rule `{rule_id}`. The run's reviewer will resolve it. If this \
+             rule is a HARD-PAUSE, STOP now and end your turn — the run will pause for human review \
+             and you will be resumed with the decision. If it is a SOFT-FLAG, you may continue."
         )
     }
 

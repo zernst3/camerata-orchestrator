@@ -216,6 +216,13 @@ pub const FAN_OUT_TOOL: &str = "mcp__camerata__fan_out";
 /// [`ClaudeCliDriver::with_clarification`]; the disallowed-builtins denylist is unchanged.
 pub const ASK_CLARIFICATION_TOOL: &str = "mcp__camerata__ask_clarification";
 
+/// The READ-CLASS escalation tool: the agent raises an escalation when its work meets the
+/// escalation CONDITION of a selected rule (the rule-agnostic, agent-driven escalation gate). Like
+/// [`ASK_CLARIFICATION_TOOL`] it records to a per-session sink and creates NO new write path, so the
+/// deny-before-write gate is intact. Added to `--allowedTools` only for drivers that opt in via
+/// [`ClaudeCliDriver::with_escalation`].
+pub const RAISE_ESCALATION_TOOL: &str = "mcp__camerata__raise_escalation";
+
 /// Read-only built-ins an agent always needs (they cannot mutate the worktree,
 /// so they are safe to allow alongside the governed write path).
 pub const READONLY_BUILTINS: &[&str] = &["Read", "Glob", "Grep", "LS"];
@@ -303,6 +310,10 @@ pub struct ClaudeCliDriver {
     /// does not write to the repo), so the deny-before-write gate is unchanged; the
     /// disallowed-builtins denylist (`Task`/`Write`/`Bash`/…) is unchanged either way.
     pub clarification: bool,
+    /// Whether this agent may raise rule-driven escalations: when `true`, the READ-CLASS
+    /// [`RAISE_ESCALATION_TOOL`] is added to `--allowedTools`. Default `false`. Adds NO write path
+    /// (the tool records an escalation, it does not write), so the gate posture is unchanged.
+    pub escalation: bool,
     /// Optional heartbeat callback fired once per stdout line received from the subprocess.
     /// Callers that track run activity (e.g. the server's RunStore) wire this to update
     /// `last_activity_ms`. `None` = no callback (all existing callers that don't set it).
@@ -323,6 +334,7 @@ impl ClaudeCliDriver {
             resume_session_id: None,
             orchestrator: false,
             clarification: false,
+            escalation: false,
             on_activity: None,
         }
     }
@@ -349,6 +361,15 @@ impl ClaudeCliDriver {
     /// stays on the disallowed denylist.
     pub fn with_clarification(mut self, clarification: bool) -> Self {
         self.clarification = clarification;
+        self
+    }
+
+    /// Allow this agent to raise rule-driven escalations: adds the READ-CLASS
+    /// [`RAISE_ESCALATION_TOOL`] to `--allowedTools`. Builder form. Used by the brownfield
+    /// implementer. Does NOT loosen the gate: `raise_escalation` records to a per-session sink (no
+    /// repo write, no spawn), and every write/exec/spawn built-in stays on the denylist.
+    pub fn with_escalation(mut self, escalation: bool) -> Self {
+        self.escalation = escalation;
         self
     }
 
@@ -396,6 +417,9 @@ impl ClaudeCliDriver {
         let mut allowed = allowed_tools_for_role_with_mode(role, self.orchestrator);
         if self.clarification {
             allowed.push(ASK_CLARIFICATION_TOOL.to_string());
+        }
+        if self.escalation {
+            allowed.push(RAISE_ESCALATION_TOOL.to_string());
         }
         let mut args: Vec<String> = vec![
             "-p".to_string(),
