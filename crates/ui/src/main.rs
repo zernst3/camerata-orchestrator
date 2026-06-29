@@ -376,6 +376,13 @@ fn App() -> Element {
     let ask_finding = use_signal(|| Option::<chat::FindingContext>::None);
     use_context_provider(|| ask_finding);
 
+    // Governance rules catalog (the chat assistant's Layer-2 context) fetched ONCE at app scope
+    // and shared via context, so it is available to the chat anywhere in the app and SURVIVES
+    // the ChatBubble mounting/unmounting. Previously each ChatBubble fetched its own copy, so it
+    // re-loaded on every open and could sit stuck on "Governance rules catalog (loading…)".
+    let rules_catalog = use_resource(chat::fetch_rules_catalog);
+    use_context_provider(|| rules_catalog);
+
     rsx! {
         // Global stylesheet, injected as a raw <style> so it works identically on
         // desktop without the asset pipeline. Keeps the whole look in one place.

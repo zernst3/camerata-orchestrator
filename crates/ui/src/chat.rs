@@ -137,7 +137,7 @@ struct CorpusOptLite {
 
 /// Fetch the whole rule corpus and render it as a compact catalog (one line per
 /// rule). This is Layer 2 of the system prompt. Fetched once per session.
-async fn fetch_rules_catalog() -> Option<String> {
+pub(crate) async fn fetch_rules_catalog() -> Option<String> {
     let mut rules: Vec<CorpusRuleLite> =
         reqwest::get(format!("{}/api/corpus-rules", crate::BFF_URL))
             .await
@@ -853,18 +853,41 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
     // when unset) and persists changes back via `POST /api/settings/chat-model`. The per-request
     // `model` sent in the chat body remains the explicit, highest-precedence override server-side.
     let app_chat_model_res = use_resource(fetch_app_chat_model);
-    let app_chat_model = app_chat_model_res.read().clone().flatten();
+    // The registry default, used only as a placeholder while the app-level model loads.
+    let default_model = models
+        .as_ref()
+        .map(|m| m.default.clone())
+        .filter(|d| !d.is_empty());
 
     let mut model = use_signal(String::new);
-    // Seed the model selection once: prefer the app-level chat_model, else the registry default.
-    if model().is_empty() {
-        if let Some(m) = &app_chat_model {
-            model.set(m.clone());
-        } else if let Some(m) = &models {
-            if !m.default.is_empty() {
-                model.set(m.default.clone());
+    // True once the user picks a model in this chat session, so the seeding effect below
+    // stops overriding their choice.
+    let mut user_override = use_signal(|| false);
+    // Seed via an effect (NOT during render) so it runs AFTER the app-level `chat_model`
+    // resource resolves. The previous render-body seed raced the resource: it set the
+    // registry default on the first paint (while the fetch was pending), then skipped
+    // re-seeding because `model` was no longer empty — so the SAVED app-level model was
+    // never adopted and the in-box selector appeared not to reflect / apply the chosen model.
+    // Now: adopt the app-level model whenever it is known (unless the user has picked since),
+    // falling back to the registry default only as a placeholder while the fetch is pending.
+    {
+        let default_model = default_model.clone();
+        use_effect(move || {
+            let app = app_chat_model_res
+                .read()
+                .clone()
+                .flatten()
+                .filter(|m| !m.trim().is_empty());
+            if let Some(m) = app {
+                if !user_override() {
+                    model.set(m);
+                }
+            } else if model().is_empty() {
+                if let Some(d) = &default_model {
+                    model.set(d.clone());
+                }
             }
-        }
+        });
     }
     let backend = models
         .as_ref()
@@ -877,7 +900,9 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
 
     // Layer 2: rules catalog — fetched once per session, fed into the static
     // prefix of the unified system prompt.
-    let rules_res = use_resource(fetch_rules_catalog);
+    // The rules catalog is fetched once at app scope (main.rs) and shared via context, so it is
+    // available here regardless of how often this bubble mounts. See the provider in App.
+    let rules_res = use_context::<Resource<Option<String>>>();
     let rules_catalog = rules_res.read().clone().flatten().unwrap_or_default();
 
     // Layer 3: UoW snapshot — fetched per turn (when the panel is open and a
@@ -1001,6 +1026,9 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                             onchange: move |e| {
                                 let chosen = e.value();
                                 model.set(chosen.clone());
+                                // Mark a manual choice so the seeding effect stops re-applying
+                                // the app-level value over the user's selection this session.
+                                user_override.set(true);
                                 // Persist the choice as the app-level (cross-project) chat model.
                                 spawn(async move {
                                     save_app_chat_model(&chosen).await;
