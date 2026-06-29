@@ -135,6 +135,14 @@ struct RoutineView {
     /// don't send it render a sensible badge.
     #[serde(default = "default_status")]
     status: String,
+    /// Human label for the next scheduled fire ("Jun 30, 09:00"), computed server-side from the
+    /// schedule. None for manual/unrecognized schedules or a one-off already past.
+    #[serde(default)]
+    next_fire_label: Option<String>,
+    /// True when the next fire is within the next 24 hours (drives the due-soon highlight + the
+    /// status-strip "due soon" metric).
+    #[serde(default)]
+    due_soon: bool,
 }
 
 fn default_status() -> String {
@@ -560,6 +568,16 @@ async fn draft_prompt(intent: &str, scope: &str, model: &str) -> Option<(String,
     Some((prompt, authored_by))
 }
 
+/// The status-strip filter: which routines the dashboard table shows. Clicking a pill toggles it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RoutineFilter {
+    All,
+    Enabled,
+    Running,
+    Blocked,
+    DueSoon,
+}
+
 #[component]
 pub fn RoutineDashboard() -> Element {
     let mut refresh = use_signal(|| 0u32);
@@ -633,6 +651,20 @@ pub fn RoutineDashboard() -> Element {
     // Open escalations: keyed by routine_id for O(1) lookup when rendering rows.
     let escalations: Vec<EscalationView> =
         escalations_res.read().clone().flatten().unwrap_or_default();
+    let mut filter = use_signal(|| RoutineFilter::All);
+    // Open-escalation routine ids (drive the Blocked filter + count).
+    let blocked_ids: std::collections::HashSet<String> = escalations
+        .iter()
+        .filter(|e| e.status == "open")
+        .map(|e| e.routine_id.clone())
+        .collect();
+    // Status-at-a-glance counts (the dashboard ADR's headline promise: see enabled / running /
+    // blocked / due-soon without opening anything).
+    let count_total = routines.len();
+    let count_enabled = routines.iter().filter(|r| r.enabled).count();
+    let count_running = routines.iter().filter(|r| r.status == "running").count();
+    let count_blocked = blocked_ids.len();
+    let count_due = routines.iter().filter(|r| r.due_soon).count();
     let projects: Vec<ProjectView> = projects_res.read().clone().flatten().unwrap_or_default();
     let models_resp = models_res.read().clone().flatten();
     let model_default = models_resp
@@ -672,7 +704,18 @@ pub fn RoutineDashboard() -> Element {
             None => ("\u{7f}global".to_string(), "Global".to_string()),
         }
     };
-    let mut sorted: Vec<RoutineView> = routines.clone();
+    let active_filter = filter();
+    let mut sorted: Vec<RoutineView> = routines
+        .iter()
+        .filter(|r| match active_filter {
+            RoutineFilter::All => true,
+            RoutineFilter::Enabled => r.enabled,
+            RoutineFilter::Running => r.status == "running",
+            RoutineFilter::Blocked => blocked_ids.contains(&r.id),
+            RoutineFilter::DueSoon => r.due_soon,
+        })
+        .cloned()
+        .collect();
     // "\u{7f}global" sorts after real project names (DEL is a high code point), so the
     // Global group lands last; ties break by routine name for stable order.
     sorted.sort_by(|a, b| {
@@ -694,6 +737,34 @@ pub fn RoutineDashboard() -> Element {
             p { class: "eyebrow", "Automation" }
             h1 { class: "h1", "Routines" }
             p { class: "lede", "Scheduled governed runs. Each runs through the same gate as an interactive run; run one now to see its real verdicts summarized." }
+
+            // Status-at-a-glance strip: count pills that double as table filters.
+            div { class: "routine-status-strip",
+                for (f , label , n , modifier) in [
+                    (RoutineFilter::All, "total", count_total, ""),
+                    (RoutineFilter::Enabled, "enabled", count_enabled, ""),
+                    (RoutineFilter::Running, "running", count_running, "running"),
+                    (RoutineFilter::Blocked, "blocked", count_blocked, "blocked"),
+                    (RoutineFilter::DueSoon, "due <24h", count_due, "due"),
+                ] {
+                    {
+                        let active = filter() == f;
+                        let cls = if active {
+                            format!("routine-stat-pill {modifier} on")
+                        } else {
+                            format!("routine-stat-pill {modifier}")
+                        };
+                        rsx! {
+                            button {
+                                class: "{cls}",
+                                onclick: move |_| filter.set(if active { RoutineFilter::All } else { f }),
+                                span { class: "routine-stat-n", "{n}" }
+                                span { class: "routine-stat-label", "{label}" }
+                            }
+                        }
+                    }
+                }
+            }
 
             div { class: "routine-table",
                 div { class: "routine-row routine-head",
@@ -792,6 +863,12 @@ pub fn RoutineDashboard() -> Element {
                                     "{r.schedule}"
                                     if !provisioned {
                                         span { class: "routine-needs-setup", "needs setup" }
+                                    }
+                                    if let Some(nf) = &r.next_fire_label {
+                                        span {
+                                            class: if r.due_soon { "routine-next-fire due-soon" } else { "routine-next-fire" },
+                                            "next: {nf}"
+                                        }
                                     }
                                 }
                                 span { class: "routine-scope", "{r.scope}" }

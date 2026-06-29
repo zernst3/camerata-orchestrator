@@ -1625,7 +1625,20 @@ html, body {
 
 /* Routine dashboard (third surface). */
 .routines-page { max-width: 980px; }
-.routine-table { margin-top: 18px; border: 1px solid var(--line); border-radius: 11px; overflow: hidden; background: var(--surface); }
+/* Status-at-a-glance strip: count pills above the table that double as filters. */
+.routine-status-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 4px; }
+.routine-stat-pill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--ink-soft); cursor: pointer; transition: border-color .15s var(--ease), background .15s var(--ease); }
+.routine-stat-pill:hover { border-color: var(--accent); }
+.routine-stat-pill.on { border-color: var(--accent); background: var(--accent-wash); color: var(--accent-ink); }
+.routine-stat-n { font-weight: 800; font-size: 13px; }
+.routine-stat-label { text-transform: uppercase; letter-spacing: .03em; font-size: 10.5px; }
+.routine-stat-pill.blocked .routine-stat-n { color: #c0392b; }
+.routine-stat-pill.blocked.on { border-color: #e3b7ac; background: rgba(192,57,43,0.1); color: #c0392b; }
+.routine-stat-pill.due .routine-stat-n { color: var(--accent-ink); }
+/* Next-fire subline in the schedule cell. */
+.routine-next-fire { display: block; font-size: 11px; color: var(--ink-faint); margin-top: 2px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.routine-next-fire.due-soon { color: var(--accent-ink); font-weight: 600; }
+.routine-table { margin-top: 14px; border: 1px solid var(--line); border-radius: 11px; overflow: hidden; background: var(--surface); }
 .routine-row {
   display: grid; grid-template-columns: 2.4fr 1fr 1.4fr 1.4fr auto; gap: 14px;
   align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--line-soft);
