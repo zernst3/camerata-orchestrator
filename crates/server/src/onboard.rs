@@ -417,7 +417,12 @@ pub async fn suppression_registry(
                 snippet: f.snippet,
             })
             .collect();
-        out.extend(registry(&inline, &baseline, &findings));
+        // Tag each record with its repo so the registry view can show which repo it came from.
+        let mut recs = registry(&inline, &baseline, &findings);
+        for r in &mut recs {
+            r.repo = spec.to_string();
+        }
+        out.extend(recs);
     }
     out
 }

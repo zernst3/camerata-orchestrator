@@ -1980,6 +1980,16 @@ html, body {
 .sup-stale-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; color: #c0392b; border: 1px solid #e3b7ac; border-radius: 5px; padding: 2px 6px; }
 .ignore-reason { flex: 1; min-width: 160px; }
 .ignore-ticket { width: 130px; flex: none; }
+/* Suppressions registry — read-only table with its OWN scroll (so it never stretches the page),
+   a sticky header, and a table-row override for .sup-row (which is flex in the legacy list view). */
+.sups-scroll { max-height: 320px; overflow-y: auto; margin-top: 10px; border: 1px solid var(--line); border-radius: 8px; }
+.sups-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.sups-table thead th { position: sticky; top: 0; background: var(--surface); text-align: left; padding: 6px 9px; font-size: 10.5px; font-weight: 800; text-transform: uppercase; letter-spacing: .03em; color: var(--ink-faint); border-bottom: 1px solid var(--line); }
+.sups-table tbody td { padding: 6px 9px; border-top: 1px solid var(--line-soft); vertical-align: top; color: var(--ink-soft); }
+.sups-table tr.sup-row { display: table-row; }
+.sups-table tr.sup-row.stale { opacity: .65; }
+.sup-repo { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; color: var(--ink-faint); }
+.sup-active-tag { font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--ink-faint); border: 1px solid var(--line); border-radius: 5px; padding: 2px 6px; }
 
 /* ---- projects home (the gate) --------------------------------------------- */
 .project-gate { flex: 1; width: 100%; overflow-y: auto; display: flex; justify-content: center; background: var(--paper); }

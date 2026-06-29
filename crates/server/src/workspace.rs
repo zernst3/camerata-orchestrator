@@ -1201,6 +1201,21 @@ pub async fn push_branch(dir: &Path, repo: &str, branch: &str, token: &str) -> a
     anyhow::bail!("git push {branch}: {}", stderr_of(&out));
 }
 
+/// Best-effort fast-forward pull of the repo's CURRENT branch from its configured origin. Used by
+/// read-only refreshes (e.g. the suppressions registry) so the data reflects the latest remote
+/// state, without touching the working copy beyond a clean fast-forward. Returns true on success;
+/// false on any failure (diverged history, no upstream, offline, not a clone) — callers treat it
+/// as best-effort and read whatever is on disk regardless.
+pub async fn pull_local_ff(dir: &Path) -> bool {
+    if !is_git_repo(dir) {
+        return false;
+    }
+    match git(Some(dir), &["pull", "--ff-only"]).await {
+        Ok(out) => out.status.success(),
+        Err(_) => false,
+    }
+}
+
 /// Fast-forward `branch` from origin using an authenticated transient URL.
 pub async fn pull_branch(
     dir: &Path,

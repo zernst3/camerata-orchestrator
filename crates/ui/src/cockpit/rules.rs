@@ -298,6 +298,9 @@ pub(super) struct SuppressionView {
     #[serde(default)]
     pub accepted_by: Option<String>,
     pub stale: bool,
+    /// The repo (`owner/repo`) the suppression was found in.
+    #[serde(default)]
+    pub repo: String,
 }
 
 pub(super) async fn fetch_suppressions(project_id: &str) -> Option<Vec<SuppressionView>> {
@@ -313,61 +316,101 @@ pub(super) async fn fetch_suppressions(project_id: &str) -> Option<Vec<Suppressi
     .ok()
 }
 
-/// The central suppression audit view: everything waived across the project's repos
-/// (inline waivers + baseline), with stale ones flagged. The require-indexing invariant.
+/// The central suppression audit view: an INFORMATIONAL, read-only listing of everything waived
+/// across the project's repos (inline waivers + baseline), with stale ones flagged. Hidden until
+/// the user hits Refresh, which fast-forward-pulls each repo and then lists.
 #[component]
 pub(super) fn SuppressionsPanel(project_id: String) -> Element {
     let pid = project_id.clone();
-    let mut loaded = use_signal(|| false);
+    // Hidden by default: nothing is fetched until Refresh is pressed. `requested` gates the
+    // fetch; `refresh_tick` re-runs it on each subsequent press.
+    let mut requested = use_signal(|| false);
+    let mut refresh_tick = use_signal(|| 0u32);
     let sups = use_resource(move || {
         let pid = pid.clone();
-        let _ = loaded();
-        async move { fetch_suppressions(&pid).await }
+        let req = requested();
+        let _ = refresh_tick();
+        async move {
+            if !req {
+                return None;
+            }
+            fetch_suppressions(&pid).await
+        }
     });
-    let list = sups.read().clone().flatten();
+    let state = sups.read().clone();
 
     rsx! {
         div { class: "sups-panel",
             div { class: "sups-head",
-                p { class: "section-label", "Suppressions — everything waived" }
+                p { class: "section-label", "Suppressions (waived findings)" }
                 button {
                     class: "btn-edit-sm",
-                    onclick: move |_| loaded.toggle(),
+                    onclick: move |_| {
+                        requested.set(true);
+                        refresh_tick += 1;
+                    },
                     "Refresh"
                 }
             }
-            p { class: "section-hint", "Inline waivers + baseline entries across this project's repos. Stale ones (no live violation) should be removed." }
-            match list {
-                None => rsx! { p { class: "section-hint", "Loading… (needs GitHub connected)" } },
-                Some(v) if v.is_empty() => rsx! { p { class: "section-hint", "No suppressions recorded." } },
-                Some(v) => rsx! {
-                    div { class: "sups-list",
-                        for (i , s) in v.iter().enumerate() {
-                            div { key: "{i}", class: if s.stale { "sup-row stale" } else { "sup-row" },
-                                span { class: "sup-rule", "{s.rule_id}" }
-                                span { class: "sup-source {s.source}", "{s.source}" }
-                                span { class: "sup-loc",
-                                    {
-                                        match s.line {
-                                            Some(l) => format!("{}:{}", s.path, l),
-                                            None => s.path.clone(),
+            p { class: "section-hint",
+                "Informational and read-only. Findings the team has waived across this project's repos — inline waivers (// camerata:allow) and baseline entries. Refresh fast-forward-pulls each repo, then lists what's waived. \"stale\" = the waiver no longer matches any live finding (a dead waiver, safe to remove)."
+            }
+            if !requested() {
+                p { class: "section-hint", "Press Refresh to pull the repos and list their waivers." }
+            } else {
+                match state {
+                    None => rsx! { p { class: "section-hint", "Refreshing… (pulling repos)" } },
+                    Some(None) => rsx! { p { class: "section-hint", "Couldn't read suppressions (no local clones, or repos unreadable)." } },
+                    Some(Some(v)) if v.is_empty() => rsx! { p { class: "section-hint", "No suppressions recorded." } },
+                    Some(Some(v)) => rsx! {
+                        div { class: "sups-scroll",
+                            table { class: "sups-table",
+                                thead {
+                                    tr {
+                                        th { "Rule" }
+                                        th { "Repo" }
+                                        th { "Source" }
+                                        th { "Location" }
+                                        th { "Reason" }
+                                        th { "Accepted by" }
+                                        th { "Status" }
+                                    }
+                                }
+                                tbody {
+                                    for (i , s) in v.iter().enumerate() {
+                                        tr { key: "{i}", class: if s.stale { "sup-row stale" } else { "sup-row" },
+                                            td { class: "sup-rule", "{s.rule_id}" }
+                                            td { class: "sup-repo", "{s.repo}" }
+                                            td { span { class: "sup-source {s.source}", "{s.source}" } }
+                                            td { class: "sup-loc",
+                                                {
+                                                    match s.line {
+                                                        Some(l) => format!("{}:{}", s.path, l),
+                                                        None => s.path.clone(),
+                                                    }
+                                                }
+                                            }
+                                            td { class: "sup-reason",
+                                                {s.reason.clone().unwrap_or_default()}
+                                                if let Some(t) = &s.ticket {
+                                                    span { class: "sup-ticket", " ({t})" }
+                                                }
+                                            }
+                                            td { class: "sup-who", {s.accepted_by.clone().unwrap_or_default()} }
+                                            td {
+                                                if s.stale {
+                                                    span { class: "sup-stale-tag", title: "The waiver no longer matches any live finding — safe to remove.", "stale" }
+                                                } else {
+                                                    span { class: "sup-active-tag", "active" }
+                                                }
+                                            }
                                         }
                                     }
                                 }
-                                span { class: "sup-reason", {s.reason.clone().unwrap_or_default()} }
-                                if let Some(t) = &s.ticket {
-                                    span { class: "sup-ticket", "{t}" }
-                                }
-                                if let Some(who) = &s.accepted_by {
-                                    span { class: "sup-who", "{who}" }
-                                }
-                                if s.stale {
-                                    span { class: "sup-stale-tag", "stale" }
-                                }
                             }
                         }
-                    }
-                },
+                    },
+                }
             }
         }
     }

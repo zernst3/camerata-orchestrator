@@ -4558,6 +4558,12 @@ async fn project_suppressions(
         .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
     // Local-first: the waiver registry reads each repo's local working tree, not GitHub.
     let (sources, _notes) = resolve_local_sources(&state, &project.repos);
+    // Refresh = best-effort fast-forward pull of each local repo so the listing reflects the
+    // latest remote state, THEN read. A pull failure (diverged/offline/dirty) is non-fatal: we
+    // still read whatever is on disk. This endpoint is informational and read-only.
+    for (_spec, dir) in &sources {
+        let _ = crate::workspace::pull_local_ff(dir).await;
+    }
     Ok(Json(crate::onboard::suppression_registry(&sources).await))
 }
 

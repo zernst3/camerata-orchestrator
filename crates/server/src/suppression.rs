@@ -114,6 +114,10 @@ pub struct SuppressionRecord {
     pub accepted_at: Option<String>,
     /// True when this suppression no longer matches a live violation (dead directive).
     pub stale: bool,
+    /// The repo (`owner/repo`) this suppression was found in. Set by the orchestration layer
+    /// ([`crate::onboard::suppression_registry`]); the per-source builders leave it empty.
+    #[serde(default)]
+    pub repo: String,
 }
 
 // ── fingerprinting ──────────────────────────────────────────────────────────
@@ -304,6 +308,7 @@ pub fn registry(
             accepted_by: None,
             accepted_at: None,
             stale: stale_in.contains(&w.line),
+            repo: String::new(),
         })
         .collect();
     let stale_bl: Vec<String> = stale_baseline(baseline, findings)
@@ -320,6 +325,7 @@ pub fn registry(
         accepted_by: Some(e.accepted_by.clone()),
         accepted_at: Some(e.accepted_at.clone()),
         stale: stale_bl.contains(&e.fingerprint),
+        repo: String::new(),
     }));
     out
 }
