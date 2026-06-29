@@ -1780,7 +1780,12 @@ html, body {
    the terminal's .term-panel uses and which provably applies) because an inline backdrop-filter
    rendered opaque in the wry/WebKit webview. !important so nothing inline/legacy overrides them. */
 .research-chat-panel { background: rgba(255,255,255,0.6) !important; }
-.research-chat-log { flex: 1 1 auto !important; min-height: 0 !important; overflow-y: auto !important; }
+/* Scroll on the message pane directly via max-height + overflow, NOT flex:1. A flex child inside a
+   max-height (not fixed-height) flex column resolves against an INDEFINITE height in WebKit, so it
+   grows to content instead of scrolling — which is exactly what was happening (panel kept getting
+   taller, no scrollbar). A concrete max-height makes overflow-y engage reliably; the panel still
+   grows to fit small chats and the pane scrolls once it passes the cap. */
+.research-chat-log { max-height: 55vh !important; overflow-y: auto !important; min-height: 0 !important; }
 
 .chat-ai-md { overflow-wrap: anywhere; word-break: break-word; min-width: 0; }
 .chat-ai-md pre {
