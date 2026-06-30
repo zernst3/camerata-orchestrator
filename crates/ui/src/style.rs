@@ -1346,6 +1346,19 @@ html, body {
 .uow-review-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 .uow-review-actions button { font-size: 12px; }
 .uow-review-status { font-size: 11.5px; color: var(--ink-faint); font-style: italic; margin: 0; }
+.uow-review-chat-log {
+  display: flex; flex-direction: column; gap: 5px; max-height: 180px; overflow-y: auto;
+  padding: 6px; border-radius: 8px; background: rgba(255,255,255,0.5);
+}
+.uow-review-msg { font-size: 12px; line-height: 1.4; padding: 5px 8px; border-radius: 7px; white-space: pre-wrap; }
+.uow-review-msg.user { background: rgba(202,138,4,0.14); color: var(--ink); align-self: flex-end; max-width: 88%; }
+.uow-review-msg.ai { background: rgba(255,255,255,0.85); color: var(--ink); align-self: flex-start; max-width: 88%; }
+.uow-review-chat { display: flex; gap: 6px; align-items: flex-end; }
+.uow-review-chat-input {
+  flex: 1; box-sizing: border-box; resize: vertical; border-radius: 8px; border: 1px solid var(--line);
+  padding: 6px 8px; font-size: 12px; color: var(--ink); background: rgba(255,255,255,0.7); font-family: inherit;
+}
+.uow-review-ask { flex: none; font-size: 12px; }
 
 /* AskUserQuestion-style structured clarification card (reusable). */
 .clarify-q-card {

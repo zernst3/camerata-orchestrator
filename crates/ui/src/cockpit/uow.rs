@@ -4593,7 +4593,7 @@ pub(super) fn DevelopmentPhaseView(
                                 spawn(async move {
                                     match start_dev_run(&sid, &tm, skip_l2).await {
                                         StartRunOutcome::Started(rid) => {
-                                            poll_run_to_done(rid, active_run, uow_refresh).await
+                                            poll_run_to_done(rid, active_run, uow_refresh, Some(toasts)).await
                                         }
                                         StartRunOutcome::Blocked(reason) => crate::toast::push_toast(
                                             toasts,
@@ -4770,7 +4770,7 @@ pub(super) fn DevelopmentPhaseView(
                                         // the bug report in the UoW transcript via the history).
                                         match start_dev_run(&sid, &tm, false).await {
                                             StartRunOutcome::Started(rid) => {
-                                                poll_run_to_done(rid, active_run, uow_refresh).await;
+                                                poll_run_to_done(rid, active_run, uow_refresh, Some(toasts)).await;
                                             }
                                             StartRunOutcome::Blocked(reason) => crate::toast::push_toast(
                                                 toasts,
@@ -5432,16 +5432,33 @@ pub(super) async fn poll_run_to_done(
     run_id: String,
     mut active_run: Signal<Option<RunView>>,
     mut uow_refresh: Signal<u32>,
+    // Optional toast surface, so a pause-for-review is noticed even when the architect is on another
+    // tab. `Some` for governed dev runs (which can pause at AwaitingReview); `None` for run paths
+    // that never reach that state.
+    toasts: Option<Signal<Vec<crate::toast::Toast>>>,
 ) {
     // Loading guard for the entire poll loop — Bombe machine stays active
     // for the full duration of the live run (investigation or development).
     let _guard = crate::loading::LoadingGuard::new();
     let mut misses = 0u32;
+    let mut prev_status = String::new();
     loop {
         match fetch_run(&run_id).await {
             Some(rv) => {
                 misses = 0;
                 let done = rv.done;
+                // Fire ONCE on the transition into AwaitingReview (a run paused for human review),
+                // so it surfaces even if the architect has navigated away from this UoW.
+                if rv.status == "awaiting_review" && prev_status != "awaiting_review" {
+                    if let Some(toasts) = toasts {
+                        crate::toast::push_toast(
+                            toasts,
+                            crate::toast::ToastKind::Info,
+                            "A run paused for your review — see NEEDS YOU.",
+                        );
+                    }
+                }
+                prev_status = rv.status.clone();
                 active_run.set(Some(rv));
                 if done {
                     uow_refresh += 1;
@@ -5582,7 +5599,7 @@ pub(super) fn UowUpdateBranchControl(
                             spawn(async move {
                                 match start_update_branch_run(&sid, &branch, &source, &md).await {
                                     StartRunOutcome::Started(rid) => {
-                                        poll_run_to_done(rid, active_run, uow_refresh).await;
+                                        poll_run_to_done(rid, active_run, uow_refresh, None).await;
                                     }
                                     StartRunOutcome::Blocked(reason) => crate::toast::push_toast(
                                         toasts,
@@ -5841,7 +5858,7 @@ pub(super) fn UowPrControl(
                         spawn(async move {
                             match start_pr_resolve_run(&sid, &md).await {
                                 StartRunOutcome::Started(rid) => {
-                                    poll_run_to_done(rid, active_run, uow_refresh).await;
+                                    poll_run_to_done(rid, active_run, uow_refresh, None).await;
                                 }
                                 StartRunOutcome::Blocked(reason) => crate::toast::push_toast(
                                     toasts, crate::toast::ToastKind::Warning, reason,
@@ -6330,7 +6347,7 @@ pub(super) fn UowStepRunControls(
                                             // this immediate bump the stale Intake button stayed up
                                             // and a second click 409'd. Then stream the run.
                                             uow_refresh += 1;
-                                            poll_run_to_done(rid, active_run, uow_refresh).await;
+                                            poll_run_to_done(rid, active_run, uow_refresh, None).await;
                                         }
                                         // The UoW was not at Intake (e.g. a prior begin already
                                         // advanced it but the displayed button was stale). Surface

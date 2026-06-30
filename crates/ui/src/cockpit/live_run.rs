@@ -102,6 +102,25 @@ pub(super) async fn answer_uow_escalation(
         .ok()
 }
 
+/// Discuss a UoW review with the lead-engineer agent (`POST /api/escalations/:id/chat`). Chatting
+/// NEVER decides the review (only Approve/Amend/Reject does); it returns the escalation with the
+/// human turn + the agent's reply appended, so the panel can show the thread.
+pub(super) async fn chat_uow_escalation(
+    id: &str,
+    message: &str,
+    model: &str,
+) -> Option<crate::routines::EscalationView> {
+    reqwest::Client::new()
+        .post(format!("{}/api/escalations/{}/chat", crate::BFF_URL, id))
+        .json(&serde_json::json!({ "message": message, "model": model }))
+        .send()
+        .await
+        .ok()?
+        .json::<crate::routines::EscalationView>()
+        .await
+        .ok()
+}
+
 /// Resolve a UoW review (free fn so each action button can call it without moving a shared
 /// closure). Fills a sensible default decision for a bare Approve/Reject; Amend requires text.
 fn submit_uow_review(
@@ -147,36 +166,93 @@ pub(super) fn UowReviewPanel(
     esc: crate::routines::EscalationView,
     on_resolved: EventHandler<()>,
 ) -> Element {
+    // Local copy so a chat reply updates the displayed thread immediately (the prop is immutable).
+    let esc0 = esc.clone();
+    let mut esc_view = use_signal(move || esc0);
     let mut decision = use_signal(String::new);
     let submitting = use_signal(|| false);
-    let id_approve = esc.id.clone();
-    let id_amend = esc.id.clone();
-    let id_reject = esc.id.clone();
+    let mut chat_input = use_signal(String::new);
+    let mut chatting = use_signal(|| false);
+    // The app-wide chat-assistant model (the lead engineer the review chats with).
+    let chat_model = use_resource(|| super::fetch_app_chat_model());
+
+    let e = esc_view();
+    let id_approve = e.id.clone();
+    let id_amend = e.id.clone();
+    let id_reject = e.id.clone();
+    let id_chat = e.id.clone();
+    let model_default = chat_model
+        .read()
+        .clone()
+        .flatten()
+        .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
 
     rsx! {
         div { class: "uow-review-card",
             div { class: "uow-review-head",
                 span { class: "uow-review-badge", "NEEDS YOUR REVIEW" }
-                span { class: "uow-review-rule", "{esc.reason}" }
+                span { class: "uow-review-rule", "{e.reason}" }
             }
-            p { class: "uow-review-stopped", "{esc.stopped_for}" }
-            if !esc.raw_context.is_empty() {
-                p { class: "uow-review-context", "{esc.raw_context}" }
+            p { class: "uow-review-stopped", "{e.stopped_for}" }
+            if !e.raw_context.is_empty() {
+                p { class: "uow-review-context", "{e.raw_context}" }
             }
-            if !esc.suggestions.is_empty() {
+            if !e.suggestions.is_empty() {
                 ul { class: "uow-review-suggestions",
-                    for s in esc.suggestions.iter() {
+                    for s in e.suggestions.iter() {
                         li { key: "{s}", "{s}" }
                     }
                 }
             }
+            // ── Discuss with the lead engineer (chatting NEVER decides) ────────────────
+            if !e.conversation.is_empty() {
+                div { class: "uow-review-chat-log",
+                    for (i, m) in e.conversation.iter().enumerate() {
+                        div {
+                            key: "{i}",
+                            class: if m.role == "assistant" { "uow-review-msg ai" } else { "uow-review-msg user" },
+                            "{m.text}"
+                        }
+                    }
+                }
+            }
+            div { class: "uow-review-chat",
+                textarea {
+                    class: "uow-review-chat-input",
+                    rows: 2,
+                    placeholder: "Ask the lead engineer about this (does NOT decide)\u{2026}",
+                    value: "{chat_input}",
+                    disabled: chatting(),
+                    oninput: move |ev| chat_input.set(ev.value()),
+                }
+                button {
+                    class: "btn-restart uow-review-ask",
+                    disabled: chat_input().trim().is_empty() || chatting(),
+                    onclick: move |_| {
+                        let id = id_chat.clone();
+                        let msg = chat_input();
+                        let md = model_default.clone();
+                        if msg.trim().is_empty() { return; }
+                        chatting.set(true);
+                        spawn(async move {
+                            if let Some(updated) = chat_uow_escalation(&id, &msg, &md).await {
+                                esc_view.set(updated);
+                                chat_input.set(String::new());
+                            }
+                            chatting.set(false);
+                        });
+                    },
+                    if chatting() { "Asking\u{2026}" } else { "Ask" }
+                }
+            }
+            // ── Decide ─────────────────────────────────────────────────────────────────
             textarea {
                 class: "uow-review-input",
                 rows: 3,
                 placeholder: "Your decision (optional for Approve/Reject; required to Amend)\u{2026}",
                 value: "{decision}",
                 disabled: submitting(),
-                oninput: move |e| decision.set(e.value()),
+                oninput: move |ev| decision.set(ev.value()),
             }
             div { class: "uow-review-actions",
                 button {
