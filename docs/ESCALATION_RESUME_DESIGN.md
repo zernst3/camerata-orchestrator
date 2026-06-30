@@ -1,20 +1,46 @@
 # Human-in-the-loop escalation + resume: design
 
-> **Status: BUILT (2026-06-29).** The durable loop is implemented end to end. A Governed Development
-> run that hits a review-needed denial (the test-tamper guard) now PAUSES, persists a resumable
-> checkpoint, raises a UoW review escalation, and parks at `RunStatus::AwaitingReview`; resolving the
-> review **RESUMES** the run from the checkpoint (Approve/Amend) or reverts + stops it (Reject). The
-> review is discoverable in the Governed Development **NEEDS YOU** queue. Tracking: issue #43.
+> **Status: BUILT + RULE-AGNOSTIC (2026-06-30).** The durable loop is implemented end to end AND the
+> trigger is now field-driven, not test-tamper-specific. A Governed Development run PAUSES when ANY
+> selected rule whose selected option calls for escalation has its condition met; it persists a
+> resumable checkpoint, raises a UoW review escalation, and parks at `RunStatus::AwaitingReview`.
+> Resolving the review **RESUMES** the run from the checkpoint (Approve/Amend) or reverts + stops it
+> (Reject), with a discuss-the-decision chat alongside. The review is discoverable in the **NEEDS
+> YOU** queue and a toast fires on the pause. Tracking: issue #43.
 >
-> **Shipped:** Engine A escalation `{routine|uow}` subject (`fca37b9`) · B `CheckpointStore`
-> (`fe346ed`) · C pause-not-fail + checkpoint at the test-tamper site (`2802ef2`) · D resume
-> re-spawn + Approve/Amend/Reject + shared `spawn_brownfield_dev_run` (`3ca5ff1`) · F approve/reject
-> E2E tests (`0170965`) · E UI NEEDS YOU + `UowReviewPanel` (`261290b`).
+> **Shipped — the resume engine:** A escalation `{routine|uow}` subject (`fca37b9`) · B
+> `CheckpointStore` (`fe346ed`) · C pause-not-fail + checkpoint (`2802ef2`) · D resume re-spawn +
+> Approve/Amend/Reject + shared `spawn_brownfield_dev_run` (`3ca5ff1`) · F approve/reject E2E
+> (`0170965`) · E UI NEEDS YOU + `UowReviewPanel` (`261290b`).
 >
-> The §6 open decisions are RESOLVED per Zach's calls: discovery = NEEDS YOU count (toast = later
-> polish); Reject stops cleanly; per-rule escalate-vs-harddeny disposition stays a follow-up (only
-> test-tamper escalates today, security floor hard-denies); the real engine was built first (no
-> interim). The design below documents the as-built system.
+> **Shipped — the rule-agnostic trigger (RA):** RA-1 first-class, OPTION-SCOPED `escalation` field
+> (`df2edc8`) · RA-2/3 field-driven test-tamper backstop, no hardcoded option-ids (`b4fb2ab`) · RA-4
+> agent-driven `raise_escalation` tool + grounding + authoritative-severity handler (`10c463c`,
+> `a755b1c`) · UI-1/UI-2 pause toast + review chat (`e6887f8`) · the developer guide
+> `docs/RULE_AUTHORING.md` (`a9b5521`).
+>
+> See **§7 (below)** for the as-built trigger. The original §6 open decisions are resolved: discovery
+> = NEEDS YOU count + toast; Reject stops cleanly; escalate-vs-deny is real (escalation = human
+> decides; deny/bounce = agent fixes); the real engine was built first.
+
+## 7. The trigger, as built (rule-agnostic)
+
+A rule calls for escalation by carrying an `escalation = { condition, severity }` on a `[[option]]`
+(option-scoped: selecting a non-escalating option does NOT escalate). `Rule::selected_escalation`
+resolves the ACTIVE spec from the project's selected option. Two mechanisms honor it, both
+severity-aware (`hard-pause` = pause for a human; `soft-flag` = log + continue):
+
+1. **Agent-driven (primary, covers EVERY escalating rule).** The implementer is grounded with its
+   selected options' conditions (an `## ESCALATION CONDITIONS` block) and given the READ-CLASS
+   `raise_escalation` gateway tool. When its work meets a condition it calls the tool; the server
+   resolves severity AUTHORITATIVELY from the corpus (the agent cannot downgrade a hard-pause; an
+   unknown rule id fails safe to hard-pause) and runs the pause-or-continue path.
+2. **Deterministic backstop (optional, per-rule).** For a mechanically-detectable condition you may
+   ALSO wire a detector as a safety net. Only test-tamper has one today (`detect_test_tampering` +
+   `test_tamper_escalation`, which reads the rule's own spec — field-driven, not hardcoded).
+
+Adding a new escalation rule therefore needs only the TOML option field for the agent-driven path; a
+backstop is extra. The full authoring guidance is in `docs/RULE_AUTHORING.md`.
 
 ## The gap, stated plainly
 A governed agent's whole value is that it can stop, ask you, and continue. Today:
