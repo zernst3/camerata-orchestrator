@@ -99,6 +99,8 @@ mod tests {
             l3_review: crate::project::L3ReviewConfig::default(),
             model_profile: crate::project::ModelProfile::default(),
             vision_enabled: false,
+            product_brief: String::new(),
+            operating_principles: Vec::new(),
             ruleset: ProjectRuleset::default(),
         };
         let json = serde_json::to_string(&original).unwrap();

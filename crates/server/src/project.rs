@@ -319,6 +319,92 @@ pub struct Project {
     /// migration required.
     #[serde(default)]
     pub vision_enabled: bool,
+    /// A free-text PRODUCT BRIEF: what this product is, who it's for, the quality bar, the
+    /// non-negotiables. The SOFT context (distinct from the rules) that lets an agent make a
+    /// judgment call the per-story spec didn't anticipate. Woven into agent grounding under a
+    /// `## Product context` heading. Travels with the project export. Serde default = empty for
+    /// projects persisted before this field existed (no migration).
+    #[serde(default)]
+    pub product_brief: String,
+    /// How a good engineer works on THIS project: the agent OPERATING PRINCIPLES (conduct, not the
+    /// artifact). Seeded with [`default_operating_principles`]; the architect can disable a default
+    /// or add custom ones. Woven into the agent's role/system context under `## How to work here`.
+    /// Travels with the project export. Serde default seeds the defaults for projects persisted
+    /// before this field existed (so everyone gets them until they customize); an explicitly-saved
+    /// empty list stays empty.
+    #[serde(default = "default_operating_principles")]
+    pub operating_principles: Vec<OperatingPrinciple>,
+}
+
+/// One agent operating principle: a single imperative line the governed agent is held to (about
+/// HOW it works, e.g. "report failures honestly"), with a stable id (for the shipped defaults) and
+/// an `enabled` toggle so the architect can switch a default off without deleting it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OperatingPrinciple {
+    /// Stable id (kebab-case for the shipped defaults; a custom one may use any non-empty string).
+    pub id: String,
+    /// The imperative the agent sees, e.g. "Prefer explicit, robust code over terse cleverness."
+    pub text: String,
+    /// Whether this principle is active. Absent → `true` (back-compat for any partial blob).
+    #[serde(default = "default_true_principle")]
+    pub enabled: bool,
+}
+
+fn default_true_principle() -> bool {
+    true
+}
+
+/// The shipped DEFAULT operating principles — distilled from the standards this project's architect
+/// and Claude have converged on. New projects get these; existing projects inherit them via the
+/// serde default until they customize. All enabled by default; each can be toggled off in settings.
+pub fn default_operating_principles() -> Vec<OperatingPrinciple> {
+    let p = |id: &str, text: &str| OperatingPrinciple {
+        id: id.to_string(),
+        text: text.to_string(),
+        enabled: true,
+    };
+    vec![
+        p(
+            "explicit-over-clever",
+            "Prefer explicit, robust, readable code over terse cleverness; the cost of verbosity is \
+             paid by AI, the benefit of context is paid back at debug time.",
+        ),
+        p(
+            "confirm-irreversible",
+            "Confirm or escalate before hard-to-reverse or structural changes; do not auto-apply \
+             them.",
+        ),
+        p(
+            "report-honestly",
+            "Report outcomes faithfully. If tests fail, say so with the output. Never fake a \
+             resolution or paper over a failure.",
+        ),
+        p(
+            "match-surrounding-style",
+            "Write code that reads like the code around it: match its naming, comment density, and \
+             idioms.",
+        ),
+        p(
+            "escalate-when-blocked",
+            "Stop and escalate on a genuine blocking decision or a rule that calls for it. Do not \
+             guess past it; do not escalate to dodge a judgment you can make.",
+        ),
+        p(
+            "test-what-you-change",
+            "Add tests for new behavior; keep existing tests passing; never weaken a test to make \
+             it go green.",
+        ),
+        p(
+            "performant-by-default",
+            "Reach for the performant pattern by default: index the FK + WHERE columns, avoid N+1, \
+             parallelize independent async.",
+        ),
+        p(
+            "minimal-blast-radius",
+            "Make the minimal correct change. Do not touch unrelated files or expand scope beyond \
+             the story.",
+        ),
+    ]
 }
 
 /// The shipped default for [`Project::max_iterations`]: one bounce-and-revise pass,
@@ -509,6 +595,10 @@ pub struct ProjectImport {
     pub model_profile: ModelProfile,
     /// Whether the Designer (vision/multimodal) band is enabled.
     pub vision_enabled: bool,
+    /// The free-text product brief (soft context).
+    pub product_brief: String,
+    /// The agent operating principles (conduct).
+    pub operating_principles: Vec<OperatingPrinciple>,
 }
 
 /// Outcome of a [`ProjectStore::import_or_overwrite`] call.
@@ -648,6 +738,8 @@ impl ProjectStore {
                 l3_review: L3ReviewConfig::default(),
                 model_profile: ModelProfile::default(),
                 vision_enabled: false,
+                product_brief: String::new(),
+                operating_principles: default_operating_principles(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -717,6 +809,8 @@ impl ProjectStore {
                 existing.l3_review = import.l3_review;
                 existing.model_profile = import.model_profile;
                 existing.vision_enabled = import.vision_enabled;
+                existing.product_brief = import.product_brief;
+                existing.operating_principles = import.operating_principles;
                 let updated = existing.clone();
                 s.active = Some(updated.id.clone());
                 ImportOutcome::Overwritten(updated)
@@ -737,6 +831,8 @@ impl ProjectStore {
                     l3_review: import.l3_review,
                     model_profile: import.model_profile,
                     vision_enabled: import.vision_enabled,
+                    product_brief: import.product_brief,
+                    operating_principles: import.operating_principles,
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -871,6 +967,8 @@ mod tests {
             l3_review: L3ReviewConfig::default(),
             model_profile: ModelProfile::default(),
             vision_enabled: false,
+            product_brief: String::new(),
+            operating_principles: Vec::new(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -915,6 +1013,8 @@ mod tests {
             l3_review: L3ReviewConfig::default(),
             model_profile: ModelProfile::Balanced,
             vision_enabled: false,
+            product_brief: String::new(),
+            operating_principles: Vec::new(),
             ruleset: ProjectRuleset {
                 selections: vec![],
                 cross_repo: vec![],
@@ -958,6 +1058,8 @@ mod tests {
             l3_review: L3ReviewConfig::default(),
             model_profile: ModelProfile::default(),
             vision_enabled: false,
+            product_brief: String::new(),
+            operating_principles: Vec::new(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -995,6 +1097,8 @@ mod tests {
             l3_review: L3ReviewConfig::default(),
             model_profile: ModelProfile::default(),
             vision_enabled: false,
+            product_brief: String::new(),
+            operating_principles: Vec::new(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -1035,6 +1139,8 @@ mod tests {
             l3_review: L3ReviewConfig::default(),
             model_profile: ModelProfile::default(),
             vision_enabled: false,
+            product_brief: String::new(),
+            operating_principles: Vec::new(),
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -1087,6 +1193,8 @@ mod tests {
             l3_review: L3ReviewConfig::default(),
             model_profile: ModelProfile::default(),
             vision_enabled: false,
+            product_brief: String::new(),
+            operating_principles: Vec::new(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
@@ -1106,6 +1214,55 @@ mod tests {
             selections: vec![sel(rule)],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn create_seeds_default_operating_principles_and_empty_brief() {
+        let store = ProjectStore::new();
+        let p = store.create("Acme", vec![]).unwrap();
+        assert!(p.product_brief.is_empty(), "brief starts empty");
+        assert!(
+            !p.operating_principles.is_empty(),
+            "a new project is seeded with the default operating principles"
+        );
+        assert!(
+            p.operating_principles.iter().all(|x| x.enabled),
+            "the shipped defaults are all enabled"
+        );
+        assert!(
+            p.operating_principles
+                .iter()
+                .any(|x| x.id == "escalate-when-blocked"),
+            "the escalate-when-blocked default is present"
+        );
+    }
+
+    #[test]
+    fn import_round_trips_brief_and_principles() {
+        let store = ProjectStore::new();
+        let import = ProjectImport {
+            product_brief: "An app for X; users care about Y; never compromise Z.".to_string(),
+            operating_principles: vec![OperatingPrinciple {
+                id: "custom-1".to_string(),
+                text: "Ship the smallest correct thing.".to_string(),
+                enabled: true,
+            }],
+            ..Default::default()
+        };
+        let p = match store.import_or_overwrite("Imported", import, false) {
+            Some(ImportOutcome::Created(p)) => p,
+            _ => panic!("expected a Created outcome"),
+        };
+        assert_eq!(
+            p.product_brief,
+            "An app for X; users care about Y; never compromise Z."
+        );
+        assert_eq!(
+            p.operating_principles.len(),
+            1,
+            "imported custom principles replace the defaults, not append"
+        );
+        assert_eq!(p.operating_principles[0].id, "custom-1");
     }
 
     #[test]
@@ -1386,6 +1543,8 @@ mod tests {
             l3_review: L3ReviewConfig::default(),
             model_profile: ModelProfile::default(),
             vision_enabled: false,
+            product_brief: String::new(),
+            operating_principles: Vec::new(),
             ruleset: ProjectRuleset::default(),
         };
         original.set_model_for_step(StepKind::Decomposition, "claude-opus-4-8".into());

@@ -135,6 +135,8 @@ fn import_via_handler_path(
         l3_review: field_or_default(export, "l3_review"),
         model_profile: field_or_default(export, "model_profile"),
         vision_enabled: field_or_default(export, "vision_enabled"),
+        product_brief: field_or_default(export, "product_brief"),
+        operating_principles: field_or_default(export, "operating_principles"),
     };
     store
         .import_or_overwrite(&name, import, overwrite)

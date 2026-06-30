@@ -337,7 +337,36 @@ impl AppState {
             .unwrap_or_default()
         };
 
-        crate::grounding::assemble(rule_section, &repo_digests, &unresolved)
+        // ── Soft context (#112): the product brief + the enabled operating principles. The brief
+        // is the "why/for-whom/quality-bar" that lets an agent make a judgment call the spec did
+        // not anticipate; the principles are how-we-work conduct. Woven in ABOVE the rules so the
+        // agent reads the why before the what. Both travel with the project export.
+        let mut soft = String::new();
+        if !project.product_brief.trim().is_empty() {
+            soft.push_str("## Product context\n");
+            soft.push_str(project.product_brief.trim());
+            soft.push_str("\n\n");
+        }
+        let enabled: Vec<&crate::project::OperatingPrinciple> = project
+            .operating_principles
+            .iter()
+            .filter(|p| p.enabled && !p.text.trim().is_empty())
+            .collect();
+        if !enabled.is_empty() {
+            soft.push_str("## How to work here\n");
+            for p in enabled {
+                soft.push_str(&format!("- {}\n", p.text.trim()));
+            }
+            soft.push('\n');
+        }
+        let soft = if soft.trim().is_empty() { None } else { Some(soft) };
+
+        let base = crate::grounding::assemble(rule_section, &repo_digests, &unresolved);
+        match (soft, base) {
+            (Some(s), Some(b)) => Some(format!("{s}\n{b}")),
+            (Some(s), None) => Some(s),
+            (None, b) => b,
+        }
     }
 
     /// Resolve the active project's PRIMARY local repo clone — the first of the active
@@ -590,6 +619,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/tier-map", post(set_tier_map))
         // Designer (vision) band toggle: enable/disable the vision band for this project.
         .route("/api/projects/:id/vision-enabled", post(set_vision_enabled))
+        .route("/api/projects/:id/product-brief", post(set_product_brief))
+        .route(
+            "/api/projects/:id/operating-principles",
+            post(set_operating_principles),
+        )
         // Per-step model config: set the model for one NON-FLEET AI step on this project.
         .route("/api/projects/:id/step-models", post(set_step_model))
         // Stall-detection thresholds: per-project idle timeout config.
@@ -2283,6 +2317,12 @@ struct ImportProjectReq {
     /// Whether the Designer (vision/multimodal) band is enabled. Transferable config (#111).
     #[serde(default)]
     vision_enabled: bool,
+    /// The free-text product brief (soft context, #112). Transferable.
+    #[serde(default)]
+    product_brief: String,
+    /// The agent operating principles (#112). Transferable.
+    #[serde(default)]
+    operating_principles: Vec<crate::project::OperatingPrinciple>,
     /// When `false` (the default) a name collision returns `conflict: true` so the UI
     /// can ask before overwriting. Pass `true` to overwrite in place (same id, same
     /// name, replacing the full transferable config — repos/ruleset/onboarded plus
@@ -2365,6 +2405,8 @@ async fn import_project(
         l3_review: req.l3_review,
         model_profile: req.model_profile,
         vision_enabled: req.vision_enabled,
+        product_brief: req.product_brief,
+        operating_principles: req.operating_principles,
     };
     match state
         .projects
@@ -2624,6 +2666,49 @@ async fn set_vision_enabled(
 ) -> Json<serde_json::Value> {
     match state.projects.update(&id, |p| {
         p.vision_enabled = req.enabled;
+    }) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Body for `POST /api/projects/:id/product-brief`.
+#[derive(serde::Deserialize)]
+struct SetProductBriefReq {
+    product_brief: String,
+}
+
+/// `POST /api/projects/:id/product-brief` — set the project's free-text product brief (#112).
+/// Persists `Project::product_brief`; it then flows into agent grounding + travels with the export.
+async fn set_product_brief(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetProductBriefReq>,
+) -> Json<serde_json::Value> {
+    match state.projects.update(&id, |p| {
+        p.product_brief = req.product_brief.trim().to_string();
+    }) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Body for `POST /api/projects/:id/operating-principles`.
+#[derive(serde::Deserialize)]
+struct SetOperatingPrinciplesReq {
+    operating_principles: Vec<crate::project::OperatingPrinciple>,
+}
+
+/// `POST /api/projects/:id/operating-principles` — replace the project's operating principles (#112).
+/// The full list is sent (toggled defaults + any custom). Persists `Project::operating_principles`;
+/// the enabled ones flow into agent grounding + travel with the export.
+async fn set_operating_principles(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetOperatingPrinciplesReq>,
+) -> Json<serde_json::Value> {
+    match state.projects.update(&id, |p| {
+        p.operating_principles = req.operating_principles.clone();
     }) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
@@ -10584,6 +10669,36 @@ mod tests {
 
     /// `GET /api/routines/:id/runs` returns the routine's run history after a run-now, newest
     /// first, with the gate summary recorded (Phase 1 of the Routines design: run history).
+    #[tokio::test]
+    async fn project_grounding_includes_brief_and_enabled_principles() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec![]).expect("project created");
+        state.projects.update(&p.id, |pr| {
+            pr.product_brief = "Acme builds X for Y; never ship without tests.".to_string();
+            pr.operating_principles = vec![
+                crate::project::OperatingPrinciple {
+                    id: "a".to_string(),
+                    text: "Be explicit.".to_string(),
+                    enabled: true,
+                },
+                crate::project::OperatingPrinciple {
+                    id: "b".to_string(),
+                    text: "SECRET-DISABLED-PRINCIPLE.".to_string(),
+                    enabled: false,
+                },
+            ];
+        });
+        let g = state.project_grounding().await.expect("grounding present");
+        assert!(g.contains("## Product context"), "brief heading present");
+        assert!(g.contains("Acme builds X for Y"), "brief body present");
+        assert!(g.contains("## How to work here"), "principles heading present");
+        assert!(g.contains("Be explicit."), "enabled principle present");
+        assert!(
+            !g.contains("SECRET-DISABLED-PRINCIPLE"),
+            "a DISABLED principle must NOT reach grounding"
+        );
+    }
+
     #[tokio::test]
     async fn routine_runs_endpoint_returns_history_after_run_now() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
