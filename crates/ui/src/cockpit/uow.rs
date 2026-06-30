@@ -7870,7 +7870,10 @@ mod bff_tests {
 // ════════════════════════════════════════════════════════════════════════════════
 #[cfg(test)]
 mod render_tests {
-    use super::{CiRuleItem, CiRulesPanel};
+    use super::{
+        CiRuleItem, CiRulesPanel, CreateOrOpenUow, GovDevSel, NewAuthoredUowButton, UowListEntry,
+        UowStage, WorkItem,
+    };
     use dioxus::prelude::*;
 
     // CiRulesPanel takes plain props (Vec<String> repos + Vec<CiRuleItem> rules) and uses
@@ -7950,5 +7953,137 @@ mod render_tests {
         assert!(!html.contains("Create mechanical-rules CI story"));
         assert!(!html.contains("Create architectural-rules CI story"));
         assert!(!html.contains("Create VCS-metadata CI story"));
+    }
+
+    // CreateOrOpenUow + NewAuthoredUowButton read the toast signal off context (use_context)
+    // and take Signal props, so they must be mounted inside a root that PROVIDES the toast
+    // context and creates the signals via use_signal — render_element() alone would panic.
+    fn provide_toasts() {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+    }
+
+    #[test]
+    fn create_or_open_uow_full_variant_shows_create_label_and_run_class() {
+        // No existing UoW + compact=false → the "Create …" label on the .btn-run variant.
+        fn harness() -> Element {
+            provide_toasts();
+            let uows_refresh = use_signal(|| 0u32);
+            let sel = use_signal(|| GovDevSel::IssueManagement);
+            rsx! {
+                CreateOrOpenUow {
+                    item: WorkItem { id: "github:o/r#1".into(), ..Default::default() },
+                    existing: None,
+                    uows_refresh,
+                    sel,
+                    compact: false,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        // Full (non-compact) variant uses the btn-run class, never the compact btn-edit-sm.
+        assert!(html.contains("btn-run"), "full variant uses btn-run");
+        assert!(
+            !html.contains("btn-edit-sm"),
+            "full variant must not use the compact class"
+        );
+        // No existing UoW → the create-from-issue label (asserts on the unescaped leading
+        // words to dodge any future special chars; the apostrophe-free label is stable).
+        assert!(
+            html.contains("Create Unit of Work from this issue"),
+            "create label renders when no UoW exists"
+        );
+        assert!(
+            !html.contains("Open Unit of Work"),
+            "open label must not render when no UoW exists"
+        );
+    }
+
+    #[test]
+    fn create_or_open_uow_compact_existing_shows_open_label_and_edit_class() {
+        // An existing UoW + compact=true → the "Open …" label on the .btn-edit-sm variant.
+        fn harness() -> Element {
+            provide_toasts();
+            let uows_refresh = use_signal(|| 0u32);
+            let sel = use_signal(|| GovDevSel::IssueManagement);
+            rsx! {
+                CreateOrOpenUow {
+                    item: WorkItem { id: "github:o/r#2".into(), ..Default::default() },
+                    existing: Some(UowListEntry {
+                        id: "uow-9".into(),
+                        work_item: None,
+                        stage: UowStage::default(),
+                        authoring: false,
+                    }),
+                    uows_refresh,
+                    sel,
+                    compact: true,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        // Compact variant swaps to the small edit-button class.
+        assert!(html.contains("btn-edit-sm"), "compact variant uses btn-edit-sm");
+        assert!(
+            !html.contains("btn-run"),
+            "compact variant must not use the full btn-run class"
+        );
+        // Existing UoW → the open label, not the create label.
+        assert!(
+            html.contains("Open Unit of Work"),
+            "open label renders when a UoW already exists"
+        );
+        assert!(
+            !html.contains("Create Unit of Work from this issue"),
+            "create label must not render when a UoW exists"
+        );
+    }
+
+    #[test]
+    fn new_authored_uow_button_renders_nav_structure_and_labels() {
+        fn harness() -> Element {
+            provide_toasts();
+            let uows_refresh = use_signal(|| 0u32);
+            let sel = use_signal(|| GovDevSel::IssueManagement);
+            rsx! {
+                NewAuthoredUowButton { uows_refresh, sel }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        // Stable structural classes for the nav card + its button + the two text spans.
+        assert!(
+            html.contains("govdev-new-uow-area"),
+            "nav card shell present"
+        );
+        assert!(
+            html.contains("govdev-nav-top"),
+            "top-level nav button present"
+        );
+        assert!(
+            html.contains("govdev-nav-top-title"),
+            "title span present"
+        );
+        assert!(html.contains("govdev-nav-top-sub"), "subtitle span present");
+        // The idle title + subtitle copy (unescaped words only — the title has an em-space
+        // and a sparkle glyph, the subtitle a middot, all of which we sidestep by matching
+        // stable plain words).
+        assert!(
+            html.contains("New Unit of Work"),
+            "idle title copy renders"
+        );
+        assert!(
+            html.contains("Draft a story with AI"),
+            "subtitle copy renders"
+        );
+        // The button is enabled on first render (working=false), so no disabled attr.
+        assert!(
+            !html.contains("disabled"),
+            "button is not disabled in the idle state"
+        );
     }
 }

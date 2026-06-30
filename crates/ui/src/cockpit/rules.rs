@@ -4825,10 +4825,31 @@ pub(super) fn SingleRuleEditor(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_repos_to_ruleset, domain_from_rule_id, is_inline_only_rule_id, selection_key,
-        AppliedRuleRow, ProposedRuleView, RuleOptionView, RuleSelectionView, SelectionBucket,
-        SINGLE_REPO_SELECTION_KEY,
+        applied_rule_columns, apply_repos_to_ruleset, corpus_columns, custom_columns,
+        default_draft, domain_from_rule_id, is_inline_only_rule_id, rule_columns, selection_key,
+        AppliedRuleRow, CellValue, ColumnId, CustomRuleView, ProposedRuleView, RuleOptionView,
+        RuleSelectionView, SelectionBucket, SINGLE_REPO_SELECTION_KEY,
     };
+
+    /// Find a column by its `ColumnId` string and run its `accessor` against `row`,
+    /// returning the `CellValue` the cell would display. The cockpit columns put all
+    /// of their display logic in these accessor closures (domain fallbacks, em-dash
+    /// sentinels, repo joins, recommendation labels), so invoking the accessor is the
+    /// way to test that logic without a render harness.
+    fn cell<TRow>(cols: &[super::ColumnDef<TRow>], id: &'static str, row: &TRow) -> CellValue {
+        let col = cols
+            .iter()
+            .find(|c| c.id == ColumnId(id))
+            .unwrap_or_else(|| panic!("no column with id {id:?}"));
+        (col.accessor)(row)
+    }
+
+    fn text(v: CellValue) -> String {
+        match v {
+            CellValue::Text(s) => s,
+            other => panic!("expected CellValue::Text, got {other:?}"),
+        }
+    }
 
     #[test]
     fn selection_key_empty_returns_sentinel() {
@@ -5495,6 +5516,278 @@ mod tests {
                 && l.contains("claude-sonnet-4-6")),
             "lines={lines:?}"
         );
+    }
+
+    // build_change_summary step_models diff branch: a project whose `step_models.audit`
+    // differs from the preview's `assignments.step_models.audit` must produce a
+    // `step.audit: <cur> → <new>` line and bump the count. Unchanged steps (calibration,
+    // etc., absent from the preview) must NOT produce noise lines.
+    #[test]
+    fn build_change_summary_reports_step_model_change() {
+        // The project's audit step differs from every other step (which take the sonnet
+        // default via serde). The preview echoes the current value for all seven steps and
+        // changes ONLY audit, so exactly one diff line is produced. (A preview that omitted
+        // the unchanged steps would read them as "" and spuriously diff all seven — this
+        // fixture pins them to prove the audit branch in isolation.)
+        let project = project_from_json(serde_json::json!({
+            "id": "p", "name": "n",
+            "step_models": {
+                "audit": "claude-opus-4-8",
+                "calibration": "claude-sonnet-4-6",
+                "research_chat": "claude-sonnet-4-6",
+                "story_authoring": "claude-sonnet-4-6",
+                "decomposition": "claude-sonnet-4-6",
+                "escalation": "claude-sonnet-4-6",
+                "clarification": "claude-sonnet-4-6"
+            }
+        }));
+        let preview = Some(serde_json::json!({
+            "assignments": {
+                "step_models": {
+                    "audit": "claude-sonnet-4-6",
+                    "calibration": "claude-sonnet-4-6",
+                    "research_chat": "claude-sonnet-4-6",
+                    "story_authoring": "claude-sonnet-4-6",
+                    "decomposition": "claude-sonnet-4-6",
+                    "escalation": "claude-sonnet-4-6",
+                    "clarification": "claude-sonnet-4-6"
+                }
+            }
+        }));
+        let (lines, count) = super::build_change_summary(&project, &preview);
+        assert_eq!(count, 1, "exactly the audit step changed; lines={lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("step.audit")
+                && l.contains("claude-opus-4-8")
+                && l.contains("claude-sonnet-4-6")),
+            "lines={lines:?}"
+        );
+    }
+
+    // build_change_summary l3_review diff branch: both the `enabled` toggle flip and the
+    // `model` change must each produce a line. The empty-model case must render the
+    // "(balanced fallback)" placeholder rather than a bare empty string.
+    #[test]
+    fn build_change_summary_reports_l3_enabled_and_model_change() {
+        let project = project_from_json(serde_json::json!({
+            "id": "p", "name": "n",
+            "l3_review": { "enabled": false, "model": "" }
+        }));
+        let preview = Some(serde_json::json!({
+            "assignments": {
+                "l3_review": { "enabled": true, "model": "claude-opus-4-8" }
+            }
+        }));
+        let (lines, count) = super::build_change_summary(&project, &preview);
+        assert_eq!(count, 2, "enabled flip + model change; lines={lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("l3.enabled") && l.contains("false") && l.contains("true")),
+            "lines={lines:?}"
+        );
+        // The current model is empty -> the line renders the "(balanced fallback)" placeholder
+        // for the OLD value, then the concrete new model.
+        assert!(
+            lines.iter().any(|l| l.contains("l3.model")
+                && l.contains("(balanced fallback)")
+                && l.contains("claude-opus-4-8")),
+            "lines={lines:?}"
+        );
+    }
+
+    // ── ColumnDef accessor closures ───────────────────────────────────────────
+    // Each table's columns put their display logic (domain fallbacks, em-dash
+    // sentinels, repo joins, recommendation labels) inside the accessor closure.
+    // We invoke each accessor against a constructed row and assert the CellValue,
+    // exercising the branchy ones directly without a render harness.
+
+    #[test]
+    fn applied_rule_columns_extractors_cover_each_cell() {
+        // A row with a corpus join: domain/title/provenance/type come from the corpus,
+        // the chosen option resolves to its label, and the scope label comes from the bucket.
+        let corpus = {
+            let mut c = corpus_with_options("rust:dioxus", vec![opt("a", "Inline SVG")]);
+            c.id = "RUST-DIOXUS-12".to_string();
+            c.title = "Icons render as inline SVG".to_string();
+            c.verification = "grounded".to_string();
+            c.enforcement = "structured".to_string();
+            c
+        };
+        let r = AppliedRuleRow {
+            selection: RuleSelectionView {
+                rule_id: "RUST-DIOXUS-12".to_string(),
+                chosen_option: Some("a".to_string()),
+                repos: vec!["me/api".to_string(), "me/web".to_string()],
+            },
+            bucket: SelectionBucket::Selections,
+            corpus: Some(corpus),
+        };
+        let cols = applied_rule_columns(vec![], vec![], vec![]);
+        assert_eq!(text(cell(&cols, "domain", &r)), "rust:dioxus");
+        assert_eq!(
+            text(cell(&cols, "rule", &r)),
+            "RUST-DIOXUS-12 \u{2014} Icons render as inline SVG"
+        );
+        assert_eq!(text(cell(&cols, "verif", &r)), "grounded");
+        assert_eq!(text(cell(&cols, "scope", &r)), "repo-local");
+        // repo-local (Selections) bucket -> the repos join, not "all repos".
+        assert_eq!(text(cell(&cols, "repos", &r)), "me/api, me/web");
+        assert_eq!(text(cell(&cols, "option", &r)), "Inline SVG");
+        assert_eq!(text(cell(&cols, "enf_type", &r)), "structured");
+    }
+
+    #[test]
+    fn applied_rule_columns_fallbacks_when_no_corpus_join() {
+        // No corpus: provenance falls back to "draft", type to empty, "Applies to" to em-dash
+        // for an empty repo-local selection, and a cross-repo bucket shows "all repos".
+        let r_local = AppliedRuleRow {
+            selection: RuleSelectionView {
+                rule_id: "CUSTOM-7".to_string(),
+                chosen_option: None,
+                repos: vec![],
+            },
+            bucket: SelectionBucket::Selections,
+            corpus: None,
+        };
+        let cols = applied_rule_columns(vec![], vec![], vec![]);
+        assert_eq!(text(cell(&cols, "verif", &r_local)), "draft");
+        assert_eq!(text(cell(&cols, "enf_type", &r_local)), String::new());
+        assert_eq!(text(cell(&cols, "repos", &r_local)), "\u{2014}");
+        // chosen_label with no corpus -> em-dash sentinel.
+        assert_eq!(text(cell(&cols, "option", &r_local)), "\u{2014}");
+
+        let r_cross = AppliedRuleRow {
+            selection: RuleSelectionView {
+                rule_id: "INTEGRATION-API-CONTRACT-1".to_string(),
+                chosen_option: None,
+                repos: vec![],
+            },
+            bucket: SelectionBucket::CrossRepo,
+            corpus: None,
+        };
+        // Non-Selections bucket short-circuits to "all repos" regardless of the repos list.
+        assert_eq!(text(cell(&cols, "repos", &r_cross)), "all repos");
+        assert_eq!(text(cell(&cols, "scope", &r_cross)), "cross-repo");
+    }
+
+    #[test]
+    fn corpus_columns_extractors_cover_domain_fallback_and_joins() {
+        let cols = corpus_columns();
+        // A rule with an explicit domain + repos: domain passes through, repos comma-join.
+        let mut r = corpus_with_options("security", vec![]);
+        r.id = "SEC-1".to_string();
+        r.title = "No hardcoded secrets".to_string();
+        r.verification = "verified".to_string();
+        r.scope = "cross-repo".to_string();
+        r.enforcement = "mechanical".to_string();
+        r.repos = vec!["me/api".to_string(), "me/web".to_string()];
+        assert_eq!(text(cell(&cols, "domain", &r)), "security");
+        assert_eq!(text(cell(&cols, "rule", &r)), "SEC-1 \u{2014} No hardcoded secrets");
+        assert_eq!(text(cell(&cols, "verif", &r)), "verified");
+        assert_eq!(text(cell(&cols, "scope", &r)), "cross-repo");
+        assert_eq!(text(cell(&cols, "applied_to", &r)), "me/api, me/web");
+        assert_eq!(text(cell(&cols, "enf_type", &r)), "mechanical");
+
+        // Empty domain -> "general"; empty repos -> empty string.
+        let mut blank = corpus_with_options("", vec![]);
+        blank.repos = vec![];
+        assert_eq!(text(cell(&cols, "domain", &blank)), "general");
+        assert_eq!(text(cell(&cols, "applied_to", &blank)), String::new());
+    }
+
+    #[test]
+    fn rule_columns_extractors_cover_recommendation_and_domain_fallback() {
+        let cols = rule_columns(vec!["sql".to_string()]);
+        // A recommended (auto) rule with an explicit domain.
+        let mut rec = corpus_with_options("sql", vec![]);
+        rec.id = "SQL-INDEX-1".to_string();
+        rec.is_auto_recommended = true;
+        rec.enforcement = "structured".to_string();
+        rec.verification = "grounded".to_string();
+        rec.scope = "repo-local".to_string();
+        rec.placement = "CONVENTIONS.md".to_string();
+        rec.kind = "review".to_string();
+        assert_eq!(text(cell(&cols, "domain", &rec)), "sql");
+        assert_eq!(text(cell(&cols, "suggested", &rec)), "recommended");
+        assert_eq!(text(cell(&cols, "id", &rec)), "SQL-INDEX-1");
+        assert_eq!(text(cell(&cols, "enf_type", &rec)), "structured");
+        assert_eq!(text(cell(&cols, "verif", &rec)), "grounded");
+        assert_eq!(text(cell(&cols, "scope", &rec)), "repo-local");
+        assert_eq!(text(cell(&cols, "placement", &rec)), "CONVENTIONS.md");
+        assert_eq!(text(cell(&cols, "kind", &rec)), "review");
+
+        // A non-auto rule with an empty domain -> "available" + "general".
+        let mut avail = corpus_with_options("", vec![]);
+        avail.is_auto_recommended = false;
+        assert_eq!(text(cell(&cols, "suggested", &avail)), "available");
+        assert_eq!(text(cell(&cols, "domain", &avail)), "general");
+    }
+
+    #[test]
+    fn custom_columns_extractors_cover_domain_and_type_sentinels() {
+        let cols = custom_columns();
+        let c = CustomRuleView {
+            name: "house-style".to_string(),
+            body: "Prefer explicit error types.".to_string(),
+            domain: "rust".to_string(),
+        };
+        assert_eq!(text(cell(&cols, "name", &c)), "house-style");
+        assert_eq!(text(cell(&cols, "domain", &c)), "rust");
+        assert_eq!(text(cell(&cols, "body", &c)), "Prefer explicit error types.");
+        // Custom rules carry no formal modality: the Type column is a constant sentinel.
+        assert_eq!(text(cell(&cols, "enf_type", &c)), "prose / structured");
+
+        // Empty domain -> the "*" wildcard sentinel.
+        let wild = CustomRuleView {
+            name: "n".to_string(),
+            body: "b".to_string(),
+            domain: String::new(),
+        };
+        assert_eq!(text(cell(&cols, "domain", &wild)), "*");
+    }
+
+    // ── AppliedRuleRow::domain corpus-empty-domain fallback ────────────────────
+    // When the corpus IS present but its `domain` is empty, domain() must NOT return
+    // the empty corpus domain — the `.filter(|s| !s.is_empty())` drops it and it falls
+    // through to the rule-id-prefix derivation.
+    #[test]
+    fn applied_row_domain_falls_through_empty_corpus_domain_to_prefix() {
+        let corpus = corpus_with_options("", vec![]); // domain deliberately empty
+        let r = row("SEC-NO-HARDCODED-SECRETS-1", None, SelectionBucket::Selections, Some(corpus));
+        // The empty corpus domain is skipped; domain_from_rule_id maps the SEC- prefix to "security".
+        assert_eq!(r.domain(), domain_from_rule_id("SEC-NO-HARDCODED-SECRETS-1"));
+        assert_eq!(r.domain(), "security");
+    }
+
+    // ── ProposedRuleView::effective_auto_recommended ──────────────────────────
+    // The server flag is authoritative: the method returns `is_auto_recommended`
+    // verbatim and must NOT re-derive from `recommended` or `verification`.
+    #[test]
+    fn effective_auto_recommended_honors_server_flag_only() {
+        let mut r = corpus_with_options("d", vec![]);
+        // Flag false but recommended + grounded: must still be false (opt_in_only case).
+        r.is_auto_recommended = false;
+        r.recommended = true;
+        r.verification = "grounded".to_string();
+        assert!(!r.effective_auto_recommended(), "must honor the server's false flag");
+        // Flag true: true regardless of the other fields.
+        r.is_auto_recommended = true;
+        r.recommended = false;
+        r.verification = "draft".to_string();
+        assert!(r.effective_auto_recommended(), "must honor the server's true flag");
+    }
+
+    // ── default_draft sentinel ────────────────────────────────────────────────
+    // The serde default for `ProposedRuleView.verification`: a rule with no verification
+    // field deserializes as "draft", and the sentinel fn returns that literal.
+    #[test]
+    fn default_draft_is_draft_and_drives_serde_default() {
+        assert_eq!(default_draft(), "draft");
+        // A corpus rule JSON omitting `verification` deserializes with the draft default.
+        let r: ProposedRuleView = serde_json::from_value(serde_json::json!({
+            "id": "R-1", "title": "T", "kind": "review"
+        }))
+        .expect("valid ProposedRuleView");
+        assert_eq!(r.verification, "draft");
     }
 }
 
@@ -6174,5 +6467,178 @@ mod render_tests {
             !html.contains("drift-notice"),
             "no drift banner when there is no (loaded) drift; html=\n{html}"
         );
+    }
+
+    // ── chorale-Table SSR probe + rule-table render tests ──────────────────────
+    //
+    // PROBE (`custom_rules_table_renders_chorale_table_and_chrome`): mounts the real
+    // `CustomRulesTable`, which wraps a `CamerataTable` (chorale's headless Table). It
+    // renders CLEANLY under SSR with SYNCHRONOUS row data (the rows are passed as a prop,
+    // not async-loaded), so we assert chorale's column headers AND the component's own
+    // static chrome (the delete button + the modality legend). This is the gate the rest
+    // of the rule-table family was blocked on; it passing is why the grouped
+    // synchronous-data tables below are worth writing.
+    //
+    // `ProposedRulesTable` is deliberately NOT covered here: it depends on six+ contexts
+    // (chosen / viewed_repo / placement / draft_loaded / detail_rule / selected_count) and
+    // its real content is async-loaded, so an SSR render is loading-shell theater. See the
+    // structured-summary skips.
+
+    /// A minimal custom rule fixture (synchronous prop data — no async load).
+    fn custom_rule(name: &str, domain: &str, body: &str) -> CustomRuleView {
+        CustomRuleView {
+            name: name.to_string(),
+            body: body.to_string(),
+            domain: domain.to_string(),
+        }
+    }
+
+    /// A minimal corpus rule fixture for the applied/all rule tables.
+    fn proposed_rule(id: &str, title: &str, domain: &str, scope: &str) -> ProposedRuleView {
+        ProposedRuleView {
+            id: id.to_string(),
+            title: title.to_string(),
+            kind: "review".to_string(),
+            enforcement: "structured".to_string(),
+            options: vec![],
+            default_option: None,
+            decision_question: None,
+            decision_why: None,
+            scope: scope.to_string(),
+            domain: domain.to_string(),
+            repos: vec![],
+            placement: String::new(),
+            finding_count: 0,
+            recommended: false,
+            is_auto_recommended: false,
+            verification: "grounded".to_string(),
+            sources: vec![],
+        }
+    }
+
+    /// A project carrying a single repo-local applied selection so Table 1 has a real row.
+    fn project_with_selection() -> ProjectView {
+        serde_json::from_value(serde_json::json!({
+            "id": "proj-1",
+            "name": "Acme",
+            "repos": ["me/api"],
+            "ruleset": {
+                "selections": [
+                    { "rule_id": "RUST-DIOXUS-12", "chosen_option": "a", "repos": ["me/api"] }
+                ],
+                "cross_repo": [],
+                "process": [],
+                "custom": []
+            }
+        }))
+        .expect("valid ProjectView fixture")
+    }
+
+    /// Provide the contexts every rule table reads (toasts + the rule-detail signal + the
+    /// per-rule chosen-option map). Without these the components panic on `use_context`.
+    fn provide_rule_table_contexts() {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        use_context_provider(|| Signal::new(Option::<ProposedRuleView>::None));
+        use_context_provider(|| {
+            Signal::new(std::collections::HashMap::<String, String>::new())
+        });
+    }
+
+    #[test]
+    fn custom_rules_table_renders_chorale_table_and_chrome() {
+        // THE PROBE. CustomRulesTable wraps a CamerataTable grouped by domain, with
+        // synchronous prop rows. It must render chorale's headers AND the component chrome.
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            let custom = vec![
+                custom_rule("house-style", "rust", "Prefer explicit error types."),
+                custom_rule("no-todos", "*", "No TODO comments on main."),
+            ];
+            let refresh = use_signal(|| 0u32);
+            rsx! {
+                CustomRulesTable {
+                    custom,
+                    project_id: "proj-1".to_string(),
+                    refresh,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        // chorale renders each column header. These are the custom-rules columns.
+        assert!(html.contains("Name"), "Name header; html=\n{html}");
+        assert!(html.contains("Directive"), "Directive header; html=\n{html}");
+        assert!(html.contains("Domain"), "Domain header; html=\n{html}");
+        // The component's own static chrome below the table.
+        assert!(
+            html.contains("Delete selected custom rules"),
+            "delete button; html=\n{html}"
+        );
+        assert!(html.contains("modality-legend"), "modality legend; html=\n{html}");
+        assert!(html.contains("Type modality key"), "legend summary; html=\n{html}");
+    }
+
+    #[test]
+    fn project_rules_table_renders_repo_filter_and_table_headers() {
+        // Table 1: applied rules. The repo-filter bar + the chorale table are static
+        // structure (the row comes from the project's synchronous ruleset, not an async load).
+        fn harness() -> Element {
+            provide_rule_table_contexts();
+            let project = project_with_selection();
+            let corpus = vec![proposed_rule(
+                "RUST-DIOXUS-12",
+                "Icons render as inline SVG",
+                "rust:dioxus",
+                "repo-local",
+            )];
+            let refresh = use_signal(|| 0u32);
+            let goto_repo = use_signal(|| Option::<String>::None);
+            rsx! {
+                ProjectRulesTable { project, corpus, refresh, goto_repo }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        // The repo-filter bar chrome.
+        assert!(html.contains("repo-select"), "repo filter wrapper; html=\n{html}");
+        assert!(html.contains("Filter by repo:"), "filter label; html=\n{html}");
+        assert!(html.contains("All repos"), "the all-repos option; html=\n{html}");
+        // The chorale table headers for applied rules.
+        assert!(html.contains("Domain"), "Domain header; html=\n{html}");
+        assert!(html.contains("Provenance"), "Provenance header; html=\n{html}");
+        assert!(html.contains("Scope"), "Scope header; html=\n{html}");
+        // The applied selection's rule id surfaces in the "Rule" cell.
+        assert!(html.contains("RUST-DIOXUS-12"), "the applied rule row; html=\n{html}");
+    }
+
+    #[test]
+    fn all_rules_table_renders_corpus_headers_and_rows() {
+        // Table 2: the full corpus library. Rows come from the synchronous `corpus` prop,
+        // so the chorale table renders headers AND a real data row under SSR.
+        fn harness() -> Element {
+            provide_rule_table_contexts();
+            let project = project_with_selection();
+            let corpus = vec![
+                proposed_rule("SEC-NO-HARDCODED-SECRETS-1", "No hardcoded secrets", "security", "cross-repo"),
+                proposed_rule("RUST-FMT-1", "Format with rustfmt", "rust", "repo-local"),
+            ];
+            let refresh = use_signal(|| 0u32);
+            let goto_repo = use_signal(|| Option::<String>::None);
+            rsx! {
+                AllRulesTable { project, corpus, refresh, goto_repo }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        // The corpus-table column headers.
+        assert!(html.contains("Domain"), "Domain header; html=\n{html}");
+        assert!(html.contains("Provenance"), "Provenance header; html=\n{html}");
+        assert!(html.contains("Applied to"), "Applied-to header; html=\n{html}");
+        // Real corpus rows render (synchronous prop data, not async).
+        assert!(html.contains("SEC-NO-HARDCODED-SECRETS-1"), "a corpus row; html=\n{html}");
+        assert!(html.contains("RUST-FMT-1"), "a corpus row; html=\n{html}");
     }
 }

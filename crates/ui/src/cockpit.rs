@@ -2766,6 +2766,26 @@ mod tests {
         assert_eq!(det_tool_label("ruff"), "ruff");
     }
 
+    /// `fmt_tokens` compacts a raw token count into the headline figure shown in the usage
+    /// meter: bare digits below 1k, `N.Nk` in the thousands, `N.NM` in the millions. Asserts
+    /// the exact rendered strings (the `{:.1}` rounding is load-bearing — the meter is narrow).
+    #[test]
+    fn fmt_tokens_formats_each_magnitude_band() {
+        use super::fmt_tokens;
+        // Below 1k: the raw integer, no suffix.
+        assert_eq!(fmt_tokens(0), "0");
+        assert_eq!(fmt_tokens(12), "12");
+        assert_eq!(fmt_tokens(999), "999");
+        // Thousands: one decimal place + `k`. 1000 rounds to "1.0k"; 1500 to "1.5k".
+        assert_eq!(fmt_tokens(1_000), "1.0k");
+        assert_eq!(fmt_tokens(1_500), "1.5k");
+        assert_eq!(fmt_tokens(3_400), "3.4k");
+        assert_eq!(fmt_tokens(999_999), "1000.0k"); // still below the 1M cutoff
+        // Millions: one decimal place + `M`.
+        assert_eq!(fmt_tokens(1_000_000), "1.0M");
+        assert_eq!(fmt_tokens(1_200_000), "1.2M");
+    }
+
     /// The development-run body must match the frozen backend contract exactly:
     /// `{ "tier_map": { "strongest", "balanced", "fast" } }`.
     #[test]
@@ -4247,6 +4267,69 @@ mod tests {
         assert!(ok);
     }
 
+    /// `set_project_step_model` is a single endpoint parameterised by the `step` string.
+    /// One test exercises two representative non-fleet step variants (clarification,
+    /// decomposition) to lock that the step name is passed through verbatim in the body
+    /// (a per-variant wiremock test would be redundant — same path, same shape).
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_project_step_model_passes_step_name_through_for_each_variant() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for step in ["clarification", "decomposition"] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/api/projects/p-9/step-models"))
+                .and(body_json(serde_json::json!({ "step": step, "model": "claude-sonnet-4-6" })))
+                .respond_with(ResponseTemplate::new(200))
+                .expect(1)
+                .mount(&server)
+                .await;
+
+            std::env::set_var("CAMERATA_BFF_URL", server.uri());
+            let ok = super::set_project_step_model("p-9", step, "claude-sonnet-4-6").await;
+            std::env::remove_var("CAMERATA_BFF_URL");
+
+            assert!(ok, "step variant `{step}` POSTs its name verbatim and maps 2xx to true");
+        }
+    }
+
+    /// `fetch_projects` GETs /api/projects and parses a `Vec<ProjectView>`. Asserts the
+    /// list is decoded in order and the per-project serde defaults fill in (a bare
+    /// {id, name} project is valid).
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_projects_parses_the_list() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": "p-1", "name": "Acme", "repos": ["acme/web"] },
+                { "id": "p-2", "name": "Globex" }
+            ])))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let projects = super::fetch_projects().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let projects = projects.expect("the projects list parses");
+        assert_eq!(projects.len(), 2);
+        assert_eq!(projects[0].id, "p-1");
+        assert_eq!(projects[0].repos, vec!["acme/web".to_string()]);
+        // The second project omits `repos`; the serde default fills an empty Vec.
+        assert_eq!(projects[1].id, "p-2");
+        assert_eq!(projects[1].name, "Globex");
+        assert!(projects[1].repos.is_empty());
+        // `max_iterations` defaults to 1 when absent (back-compat default).
+        assert_eq!(projects[1].max_iterations, 1);
+    }
+
     /// `set_max_iterations` POSTs {max_iterations} to the loop-guard endpoint.
     #[tokio::test]
     #[serial_test::serial(bff_env)]
@@ -4959,6 +5042,30 @@ mod tests {
         assert!(html.contains("cockpit-notice-title"), "the title class renders; html=\n{html}");
         // SSR escapes the apostrophe in "Can't" to &#39;, so assert on the apostrophe-free portion.
         assert!(html.contains("reach the engine"), "the error title; html=\n{html}");
+    }
+
+    /// `CockpitNotice` "loading" kind renders the distinct "connecting" copy (a different
+    /// title + body from the error/empty variants), so the operator sees a transient
+    /// "reaching the engine" state rather than the alarming "can't reach" error.
+    #[test]
+    fn cockpit_notice_renders_loading_kind() {
+        use dioxus::prelude::*;
+
+        fn harness() -> Element {
+            rsx! { super::CockpitNotice { kind: "loading".to_string() } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("cockpit-notice-title"), "the title class renders; html=\n{html}");
+        // The loading title is "Connecting to the engine…" — distinct from the error copy.
+        assert!(html.contains("Connecting to the engine"), "the loading title; html=\n{html}");
+        assert!(
+            html.contains("Reaching the local Camerata server"),
+            "the loading body; html=\n{html}"
+        );
+        // It must NOT show the error-kind copy (proves the match picked the loading arm).
+        assert!(!html.contains("isn&#39;t responding"), "loading is not the error variant; html=\n{html}");
     }
 
     /// `CockpitNotice` with an unknown kind falls back to the empty-state copy.
