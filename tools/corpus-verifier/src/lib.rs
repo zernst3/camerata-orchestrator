@@ -821,9 +821,16 @@ enforcement="mechanical""#,
     #[tokio::test]
     async fn self_source_batches_meta_rules_into_one_pr() {
         let tmp = tempfile::tempdir().unwrap();
+        // A rule's `domain` is DERIVED FROM ITS FOLDER PATH relative to the corpus root
+        // (see camerata_rules::load_one) — the in-file `domain` is only a cross-check. So each
+        // fixture must live in its own domain subfolder, exactly like a real corpus, for the
+        // meta-vs-non-meta filtering to be exercised. agentic + permissions are meta domains;
+        // rust is NOT, so r2 must be excluded from the self-source batch.
         for (i, dom) in ["agentic", "permissions", "rust"].iter().enumerate() {
+            let dir = tmp.path().join(dom);
+            std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(
-                tmp.path().join(format!("r{i}.toml")),
+                dir.join(format!("r{i}.toml")),
                 format!(
                     "id=\"META-{i}\"\ntitle=\"t\"\ndomain=\"{dom}\"\nenforcement=\"structured\"\nverification=\"grounded\""
                 ),
