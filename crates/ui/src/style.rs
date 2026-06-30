@@ -1373,7 +1373,7 @@ html, body {
   padding: 8px 10px; font-size: 12.5px; color: var(--ink); background: #11100f;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.45;
 }
-.op-list { display: flex; flex-direction: column; gap: 4px; }
+.op-list { display: flex; flex-direction: column; gap: 4px; max-height: 320px; overflow-y: auto; padding-right: 3px; }
 .op-row {
   display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: 7px;
   border: 1px solid var(--line); font-size: 12.5px; color: var(--ink-soft); line-height: 1.4; cursor: pointer;
@@ -1392,7 +1392,7 @@ html, body {
   background: rgba(202,138,4,0.18); border-radius: 6px; padding: 1px 7px;
 }
 .mem-empty { font-style: italic; }
-.mem-list { display: flex; flex-direction: column; gap: 5px; }
+.mem-list { display: flex; flex-direction: column; gap: 5px; max-height: 300px; overflow-y: auto; padding-right: 3px; }
 .mem-row {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
   border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px;
