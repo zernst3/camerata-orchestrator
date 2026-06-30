@@ -108,6 +108,23 @@ struct ProjectView {
     /// Agent operating principles (#112): how-we-work conduct, seeded with defaults + toggleable.
     #[serde(default)]
     operating_principles: Vec<OperatingPrincipleView>,
+    /// Project memory (#112, Layer 3): the accumulating, human-curated learnings.
+    #[serde(default)]
+    memory: Vec<MemoryEntryView>,
+}
+
+/// One project-memory entry as the BFF reports it (mirrors the server's `MemoryEntry`). Enum-ish
+/// fields are plain strings (snake_case) so the UI doesn't need to mirror the server enums.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct MemoryEntryView {
+    id: String,
+    #[serde(default)]
+    kind: String, // "decision" | "pattern" | "gotcha" | "constraint"
+    text: String,
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    status: String, // "proposed" | "approved" | "archived"
 }
 
 /// One agent operating principle as the BFF reports it (mirrors the server's `OperatingPrinciple`).
@@ -442,6 +459,68 @@ async fn set_product_brief(id: &str, brief: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Add a project-memory entry (#112, Layer 3) — human-added, persisted as Approved.
+async fn add_memory_entry(id: &str, kind: &str, text: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/memory", crate::BFF_URL, id))
+        .json(&serde_json::json!({ "kind": kind, "text": text }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Patch a memory entry's status (`"approved"` | `"archived"` | `"proposed"`).
+async fn patch_memory_status(id: &str, eid: &str, status: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/memory/{}", crate::BFF_URL, id, eid))
+        .json(&serde_json::json!({ "status": status }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Delete a memory entry (discard a proposal, or prune).
+async fn delete_memory_entry(id: &str, eid: &str) -> bool {
+    reqwest::Client::new()
+        .delete(format!("{}/api/projects/{}/memory/{}", crate::BFF_URL, id, eid))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// One curation action on a memory entry (keeps the per-button onclicks tiny).
+#[derive(Clone, Copy)]
+enum MemAction {
+    Approve,
+    Archive,
+    Delete,
+}
+
+/// Run a memory curation action, then bump `refresh` so the settings view re-fetches.
+fn run_mem_action(
+    id: String,
+    eid: String,
+    action: MemAction,
+    mut busy: Signal<bool>,
+    mut refresh: Signal<u32>,
+) {
+    busy.set(true);
+    spawn(async move {
+        let ok = match action {
+            MemAction::Approve => patch_memory_status(&id, &eid, "approved").await,
+            MemAction::Archive => patch_memory_status(&id, &eid, "archived").await,
+            MemAction::Delete => delete_memory_entry(&id, &eid).await,
+        };
+        busy.set(false);
+        if ok {
+            refresh += 1;
+        }
+    });
+}
+
 /// Save the project's operating principles (#112) — the full toggled/edited list.
 async fn set_operating_principles(id: &str, principles: &[OperatingPrincipleView]) -> bool {
     reqwest::Client::new()
@@ -585,6 +664,139 @@ fn OperatingPrinciplesEditor(project: ProjectView, refresh: Signal<u32>) -> Elem
                     });
                 },
                 if saving() { "Saving\u{2026}" } else { "Save principles" }
+            }
+        }
+    }
+}
+
+/// Editor for the per-project PROJECT MEMORY (#112, Layer 3): review proposed entries (Approve /
+/// Delete), manage approved/archived ones, and add learnings. Approved entries feed grounding;
+/// everything travels with the project export.
+#[component]
+fn MemoryEditor(project: ProjectView, refresh: Signal<u32>) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut new_text = use_signal(String::new);
+    let mut new_kind = use_signal(|| "decision".to_string());
+    let busy = use_signal(|| false);
+    let pid = project.id.clone();
+
+    // Proposed (review me) first, then approved, then archived.
+    let mut entries = project.memory.clone();
+    let rank = |s: &str| match s {
+        "proposed" => 0,
+        "approved" => 1,
+        _ => 2,
+    };
+    entries.sort_by_key(|m| rank(&m.status));
+    let proposed_count = entries.iter().filter(|m| m.status == "proposed").count();
+
+    rsx! {
+        div { class: "soft-ctx-card",
+            p { class: "soft-ctx-title",
+                "Project memory"
+                if proposed_count > 0 {
+                    span { class: "mem-badge", "{proposed_count} to review" }
+                }
+            }
+            p { class: "soft-ctx-sub",
+                "Durable learnings (decisions, patterns, gotchas, constraints) that carry across runs. \
+                 Approved entries feed every agent's context; agents propose, you curate. Travels with \
+                 the project export."
+            }
+            if entries.is_empty() {
+                p { class: "soft-ctx-sub mem-empty",
+                    "No memory yet. Add a learning below; agents will also propose them as they work."
+                }
+            }
+            div { class: "mem-list",
+                for m in entries.iter() {
+                    {
+                        let (id_app, eid_app) = (pid.clone(), m.id.clone());
+                        let (id_arc, eid_arc) = (pid.clone(), m.id.clone());
+                        let (id_del, eid_del) = (pid.clone(), m.id.clone());
+                        let approved = m.status == "approved";
+                        rsx! {
+                            div { key: "{m.id}", class: "mem-row mem-{m.status}",
+                                div { class: "mem-row-main",
+                                    span { class: "mem-kind", "{m.kind}" }
+                                    span { class: "mem-text", "{m.text}" }
+                                    if !m.source.is_empty() {
+                                        span { class: "mem-src", "{m.source}" }
+                                    }
+                                }
+                                div { class: "mem-actions",
+                                    if !approved {
+                                        button {
+                                            class: "mem-btn",
+                                            disabled: busy(),
+                                            onclick: move |_| run_mem_action(id_app.clone(), eid_app.clone(), MemAction::Approve, busy, refresh),
+                                            "Approve"
+                                        }
+                                    }
+                                    if approved {
+                                        button {
+                                            class: "mem-btn",
+                                            disabled: busy(),
+                                            onclick: move |_| run_mem_action(id_arc.clone(), eid_arc.clone(), MemAction::Archive, busy, refresh),
+                                            "Archive"
+                                        }
+                                    }
+                                    button {
+                                        class: "mem-btn mem-del",
+                                        disabled: busy(),
+                                        onclick: move |_| run_mem_action(id_del.clone(), eid_del.clone(), MemAction::Delete, busy, refresh),
+                                        "Delete"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            div { class: "mem-add",
+                select {
+                    class: "mem-kind-select",
+                    disabled: busy(),
+                    value: "{new_kind}",
+                    onchange: move |e| new_kind.set(e.value()),
+                    option { value: "decision", "decision" }
+                    option { value: "pattern", "pattern" }
+                    option { value: "gotcha", "gotcha" }
+                    option { value: "constraint", "constraint" }
+                }
+                input {
+                    class: "op-add-input",
+                    placeholder: "Add a learning\u{2026}",
+                    value: "{new_text}",
+                    disabled: busy(),
+                    oninput: move |e| new_text.set(e.value()),
+                }
+                button {
+                    class: "btn-restart",
+                    disabled: new_text().trim().is_empty() || busy(),
+                    onclick: move |_| {
+                        let id = pid.clone();
+                        let t = new_text();
+                        let k = new_kind();
+                        if t.trim().is_empty() { return; }
+                        let mut busy = busy;
+                        busy.set(true);
+                        spawn(async move {
+                            let ok = add_memory_entry(&id, &k, &t).await;
+                            busy.set(false);
+                            let mut refresh = refresh;
+                            let mut new_text = new_text;
+                            if ok {
+                                new_text.set(String::new());
+                                refresh += 1;
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Added to project memory.");
+                            } else {
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not add the entry.");
+                            }
+                        });
+                    },
+                    "Add"
+                }
             }
         }
     }
@@ -2172,6 +2384,7 @@ fn SettingsView(global_only: bool) -> Element {
                         p { class: "section-label settings-label", "Soft context" }
                         ProductBriefEditor { project: p_owned.clone(), refresh }
                         OperatingPrinciplesEditor { project: p_owned.clone(), refresh }
+                        MemoryEditor { project: p_owned.clone(), refresh }
                     }
                 }
             }}

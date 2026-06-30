@@ -1385,6 +1385,38 @@ html, body {
   flex: 1; box-sizing: border-box; border-radius: 8px; border: 1px solid var(--line);
   padding: 6px 9px; font-size: 12.5px; color: var(--ink); background: rgba(255,255,255,0.8); font-family: inherit;
 }
+/* Project memory (Layer 3) curation list. */
+.mem-badge {
+  margin-left: 8px; font-size: 10.5px; font-weight: 700; color: #7a5b00;
+  background: rgba(202,138,4,0.2); border-radius: 6px; padding: 1px 7px;
+}
+.mem-empty { font-style: italic; }
+.mem-list { display: flex; flex-direction: column; gap: 5px; }
+.mem-row {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px;
+}
+.mem-row.mem-proposed { border-color: rgba(202,138,4,0.4); background: rgba(202,138,4,0.07); }
+.mem-row.mem-archived { opacity: 0.55; }
+.mem-row-main { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; flex: 1; min-width: 0; }
+.mem-kind {
+  flex: none; font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.03em;
+  color: var(--ink-faint); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px;
+}
+.mem-text { font-size: 12.5px; color: var(--ink); line-height: 1.4; word-break: break-word; }
+.mem-src { font-size: 10.5px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.mem-actions { flex: none; display: flex; gap: 5px; }
+.mem-btn {
+  font-size: 11px; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--line);
+  background: rgba(255,255,255,0.8); color: var(--ink); cursor: pointer;
+}
+.mem-btn:hover { border-color: var(--accent); }
+.mem-del:hover { border-color: #dc2626; color: #dc2626; }
+.mem-add { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
+.mem-kind-select {
+  flex: none; border-radius: 8px; border: 1px solid var(--line); padding: 6px 8px;
+  font-size: 12px; color: var(--ink); background: rgba(255,255,255,0.8);
+}
 
 /* AskUserQuestion-style structured clarification card (reusable). */
 .clarify-q-card {
