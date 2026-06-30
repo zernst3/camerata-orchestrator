@@ -10900,6 +10900,91 @@ mod tests {
         assert!(state.projects.active().unwrap().memory.is_empty());
     }
 
+    /// The chat "+ Add to learnings" button's SERVER path: GET /api/projects/active to resolve the
+    /// id, then POST /api/projects/:id/memory with the reply text. Exercised end to end through the
+    /// router (the Dioxus button + add_chat_learning helper drive exactly these two calls).
+    #[tokio::test]
+    async fn chat_add_to_learnings_server_path_resolves_active_then_adds() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let app = router(state.clone());
+
+        // GET active -> the active project's id (what the chat resolves first).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/projects/active")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let active = body_json(resp).await;
+        let id = active["id"].as_str().expect("active project carries an id");
+        assert_eq!(id, p.id);
+
+        // POST the reply text as a learning to that id.
+        let post = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{id}/memory"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"kind":"decision","text":"Captured from the chat."}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(post.status(), StatusCode::OK);
+
+        // The entry is present, human-sourced, and Approved (the human clicked = curated).
+        let mem = state.projects.active().unwrap().memory;
+        assert_eq!(mem.len(), 1);
+        assert_eq!(mem[0].text, "Captured from the chat.");
+        assert_eq!(mem[0].status, crate::project::MemoryStatus::Approved);
+        assert_eq!(mem[0].source, "human");
+    }
+
+    /// The view/edit modal's Save POSTs {text, kind} to /memory/:eid. Confirm patch edits both.
+    #[tokio::test]
+    async fn memory_edit_modal_patches_text_and_kind() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec![]).expect("project created");
+        add_memory(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(p.id.clone()),
+            axum::Json(AddMemoryReq {
+                kind: crate::project::MemoryKind::Decision,
+                text: "original".to_string(),
+            }),
+        )
+        .await;
+        let eid = state.projects.active().unwrap().memory[0].id.clone();
+        // Edit text + kind (what the modal Save does).
+        patch_memory(
+            axum::extract::State(state.clone()),
+            axum::extract::Path((p.id.clone(), eid)),
+            axum::Json(PatchMemoryReq {
+                status: None,
+                text: Some("  edited learning  ".to_string()),
+                kind: Some(crate::project::MemoryKind::Gotcha),
+            }),
+        )
+        .await;
+        let m = state.projects.active().unwrap().memory[0].clone();
+        assert_eq!(m.text, "edited learning", "text edited + trimmed");
+        assert_eq!(m.kind, crate::project::MemoryKind::Gotcha, "kind edited");
+        assert_eq!(
+            m.status,
+            crate::project::MemoryStatus::Approved,
+            "status untouched when not in the patch"
+        );
+    }
+
     #[tokio::test]
     async fn routine_runs_endpoint_returns_history_after_run_now() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
