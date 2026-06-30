@@ -65,6 +65,44 @@ use crate::run::{live_mode_enabled, GateEvent, RunStatus, RunStore};
 use crate::review_agent::{run_l3_review, L3ReviewInput, ReviewVerdict};
 use crate::uow::UowStore;
 
+/// One in-scope escalation for a governed dev run: a SELECTED rule whose SELECTED option carries an
+/// escalation spec. The agent is grounded on `condition`; the server resolves `severity`
+/// authoritatively (the agent's self-report names the rule, the server decides what happens). Built
+/// from the corpus + the project's selections in `spawn_brownfield_dev_run`.
+#[derive(Debug, Clone)]
+pub struct EscalationInScope {
+    pub rule_id: String,
+    pub condition: String,
+    pub severity: camerata_rules::EscalationSeverity,
+}
+
+/// The wire shape of one escalation the gateway's `raise_escalation` tool appends to
+/// `<session_dir>/escalation-requests.jsonl`. Mirrors the gateway binary's `EscalationRequestRecord`
+/// (the binary's type is not importable as a lib type), so the server reads escalations back off the
+/// agent→run channel. The agent NAMES the rule + what it was doing; severity is NOT trusted from here
+/// (the server resolves it from the corpus, so an agent cannot downgrade a hard-pause).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct EscalationRequestRecord {
+    pub rule_id: String,
+    #[serde(default)]
+    pub condition_met: String,
+    #[serde(default)]
+    pub justification: String,
+}
+
+/// Read the FIRST escalation the agent raised from the session's escalation-request sink. The agent
+/// is told to raise the single most-blocking one then stop; extras re-raise on resume. Returns
+/// `None` when the sink is absent/empty/unparseable (the common case: no escalation). Pure read.
+pub(crate) fn read_first_escalation_request(
+    session_dir: &std::path::Path,
+) -> Option<EscalationRequestRecord> {
+    let sink = session_dir.join("escalation-requests.jsonl");
+    let text = std::fs::read_to_string(sink).ok()?;
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .find_map(|l| serde_json::from_str::<EscalationRequestRecord>(l).ok())
+}
+
 /// Bundle of inputs for the optional Layer-3 agentic code review (R7).
 ///
 /// Passed into `execute_dev_implement_run` when the active project has L3 enabled.
@@ -505,6 +543,7 @@ pub fn implement_prompt(
     target_branch: &str,
     decisions: &[DecisionRecord],
     grounding: Option<&str>,
+    escalations: &[EscalationInScope],
 ) -> String {
     // GROUNDING (the invariant): the implementer can read the repo clone, but still hand
     // it the project's rule context + repo digest up front and tell it to consult the real
@@ -541,6 +580,36 @@ pub fn implement_prompt(
                 .join("\n\n")
         }
     };
+    // ESCALATION CONDITIONS (the rule-agnostic, agent-driven gate): the selected rules whose chosen
+    // option calls for escalation. The agent self-reports via `raise_escalation` when its work meets
+    // one; the server resolves what happens from the rule's severity.
+    let escalation_block = if escalations.is_empty() {
+        String::new()
+    } else {
+        let lines = escalations
+            .iter()
+            .map(|e| {
+                let sev = match e.severity {
+                    camerata_rules::EscalationSeverity::HardPause => {
+                        "HARD-PAUSE: stop and wait for a human"
+                    }
+                    camerata_rules::EscalationSeverity::SoftFlag => {
+                        "SOFT-FLAG: you may continue after raising"
+                    }
+                };
+                format!("- `{}` [{}]: {}", e.rule_id, sev, e.condition)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "## ESCALATION CONDITIONS\n\n\
+             If your work would meet ANY of these conditions, call the `raise_escalation` tool with \
+             the rule id, what specifically met it, and your justification. Do NOT proceed past a \
+             HARD-PAUSE condition (raise it, then stop and end your turn). When unsure whether a \
+             condition is met, raise it rather than guess.\n\n\
+             {lines}\n\n"
+        )
+    };
 
     format!(
         "You are the BROWNFIELD IMPLEMENTER for story `{story_id}` (branch `{target_branch}`).\n\n\
@@ -550,6 +619,7 @@ pub fn implement_prompt(
          Description: {story_desc}\n\n\
          ## Architect-approved decisions (the spec)\n\n\
          {decisions_text}\n\n\
+         {escalation_block}\
          ## Your job\n\n\
          Read the existing codebase, then make the minimal correct changes that satisfy \
          the story and every approved decision above.\n\n\
@@ -643,6 +713,10 @@ pub async fn execute_dev_implement_run(
     // spec's `condition` + `severity` drive the escalation (hard-pause -> pause; soft-flag -> log +
     // continue). Field-driven, so the corpus is the source of truth, not hardcoded option ids.
     test_tamper_escalation: Option<camerata_rules::EscalationSpec>,
+    // ALL in-scope agent-driven escalations: the selected rules whose selected option carries an
+    // escalation spec. The agent is grounded on their conditions + can `raise_escalation`; the
+    // server resolves severity from this list (authoritative) when an escalation comes back.
+    escalations_in_scope: Vec<EscalationInScope>,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -797,6 +871,9 @@ pub async fn execute_dev_implement_run(
         // The story_id is stable across all iterations of this run's bounce-and-revise
         // loop (same story, same session id, cache stays warm). It changes between runs.
         Some(story_id.as_str()),
+        // Opt the implementer into the READ-CLASS raise_escalation tool so it can self-escalate
+        // when its work meets a selected rule's escalation condition (the rule-agnostic path).
+        true,
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -837,6 +914,7 @@ pub async fn execute_dev_implement_run(
         &target_branch,
         &decisions,
         grounding.as_deref(),
+        &escalations_in_scope,
     );
 
     // Bounce-and-revise loop: up to `max_iterations` passes. On each pass, run the
@@ -848,6 +926,118 @@ pub async fn execute_dev_implement_run(
         if let Err(e) = driver.run(&role, &task).await {
             fail(&runs, &uow, format!("implementation agent failed: {e}"));
             return;
+        }
+
+        // ── Agent-driven escalation (the RULE-AGNOSTIC gate) ───────────────────────────
+        // Did the agent call `raise_escalation` this pass? Severity is resolved AUTHORITATIVELY
+        // from the rule's spec (the agent NAMES the rule; the server decides what happens — an
+        // agent cannot downgrade a hard-pause). A not-in-scope rule id fails safe to hard-pause.
+        if let Some(req) = read_first_escalation_request(spawn._dir.path()) {
+            let severity = escalations_in_scope
+                .iter()
+                .find(|e| e.rule_id == req.rule_id)
+                .map(|e| e.severity)
+                .unwrap_or(camerata_rules::EscalationSeverity::HardPause);
+            match severity {
+                camerata_rules::EscalationSeverity::SoftFlag => {
+                    let flag = format!(
+                        "SOFT-FLAG {rule}: {what}. {why} Logged; the run continues.",
+                        rule = req.rule_id,
+                        what = req.condition_met,
+                        why = req.justification,
+                    );
+                    runs.push_event(
+                        &run_id,
+                        GateEvent {
+                            seq: next_seq(),
+                            layer: "escalation".to_string(),
+                            verdict: "soft-flag".to_string(),
+                            rule: Some(req.rule_id.clone()),
+                            detail: flag.clone(),
+                            content_hash: None,
+                        },
+                    );
+                    uow.append_history(&story_id, "dev_implement", &flag);
+                    // Clear the sink so this same flag is not re-read on the next pass.
+                    let _ = std::fs::remove_file(
+                        spawn._dir.path().join("escalation-requests.jsonl"),
+                    );
+                }
+                camerata_rules::EscalationSeverity::HardPause => {
+                    // PAUSE for human review: checkpoint + UoW review escalation + AwaitingReview,
+                    // the SAME engine the test-tamper backstop uses. The worktree is left intact.
+                    let just = if req.justification.trim().is_empty() {
+                        "(none given)"
+                    } else {
+                        req.justification.as_str()
+                    };
+                    let raise_req = crate::escalation::RaiseEscalationReq {
+                        subject_kind: crate::escalation::SubjectKind::Uow,
+                        checkpoint_id: None,
+                        routine_id: story_id.clone(),
+                        reason: format!("{}: {}", req.rule_id, req.condition_met),
+                        stopped_for: format!(
+                            "The implementer raised an escalation for rule `{rule}` on story \
+                             `{story_id}` (branch `{target_branch}`). What met the condition: \
+                             {what}. The agent's justification: {just}. Approve to resume from \
+                             here, Amend to redirect, or Reject to revert and stop.",
+                            rule = req.rule_id,
+                            what = req.condition_met,
+                        ),
+                        suggestions: vec![
+                            "Approve to authorize and resume the run from where it stopped."
+                                .to_string(),
+                            "Amend to give a corrected directive, then resume.".to_string(),
+                            "Reject to revert the agent's work and stop.".to_string(),
+                        ],
+                        raw_context: format!(
+                            "rule={}; story_id={story_id}; branch={target_branch}",
+                            req.rule_id
+                        ),
+                    };
+                    let esc =
+                        escalations.raise_deduped(raise_req, "dev-implement raise_escalation");
+                    if esc.checkpoint_id.is_none() {
+                        let ckpt = checkpoints.create(crate::checkpoint::NewCheckpoint {
+                            story_id: story_id.clone(),
+                            run_id: run_id.clone(),
+                            escalation_id: esc.id.clone(),
+                            pause_reason: format!("rule-escalation:{}", req.rule_id),
+                            repo: repo.clone(),
+                            branch: target_branch.clone(),
+                            worktree_dir: dir.to_string_lossy().to_string(),
+                            base_commit: base_commit.clone(),
+                            iteration,
+                            max_iterations,
+                            model: model.clone(),
+                            project_id: None,
+                        });
+                        escalations.set_checkpoint(&esc.id, &ckpt.id);
+                    }
+                    let pause_detail = format!(
+                        "PAUSED for human review: the implementer raised `{rule}` — {what}. Not \
+                         committed; the worktree is intact and review escalation ({esc_id}) is \
+                         open. Resolve it to resume.",
+                        rule = req.rule_id,
+                        what = req.condition_met,
+                        esc_id = esc.id,
+                    );
+                    runs.push_event(
+                        &run_id,
+                        GateEvent {
+                            seq: next_seq(),
+                            layer: "escalation".to_string(),
+                            verdict: "paused".to_string(),
+                            rule: Some(req.rule_id.clone()),
+                            detail: pause_detail.clone(),
+                            content_hash: None,
+                        },
+                    );
+                    uow.append_history(&story_id, "dev_implement", &pause_detail);
+                    runs.set_status(&run_id, RunStatus::AwaitingReview, false);
+                    return;
+                }
+            }
         }
 
         // Layer-2: real toolchain checks (skip when bootstrap-escaping).
@@ -1380,6 +1570,7 @@ mod tests {
             "camerata/story-42",
             &decisions,
             None,
+            &[],
         );
 
         // Story identity.
@@ -1431,6 +1622,7 @@ mod tests {
             "camerata/s-r-1",
             &decisions,
             None,
+            &[],
         );
         assert!(
             p.contains("approved-one"),
@@ -1445,8 +1637,59 @@ mod tests {
     /// When there are no decisions at all, a clear note replaces the list.
     #[test]
     fn implement_prompt_handles_empty_decisions() {
-        let p = implement_prompt("s/r#1", "T", "D", "b", &[], None);
+        let p = implement_prompt("s/r#1", "T", "D", "b", &[], None, &[]);
         assert!(p.contains("no approved decisions"));
+    }
+
+    #[test]
+    fn implement_prompt_renders_escalation_conditions() {
+        let escalations = vec![
+            EscalationInScope {
+                rule_id: "ORCH-ONE-WAY-DOOR-1".to_string(),
+                condition: "the change is hard to reverse".to_string(),
+                severity: camerata_rules::EscalationSeverity::HardPause,
+            },
+            EscalationInScope {
+                rule_id: "ORCH-BUDGET-1".to_string(),
+                condition: "spend is running away".to_string(),
+                severity: camerata_rules::EscalationSeverity::SoftFlag,
+            },
+        ];
+        let p = implement_prompt("s/r#1", "T", "D", "b", &[], None, &escalations);
+        // The agent is told about the tool + each rule's condition + severity.
+        assert!(p.contains("## ESCALATION CONDITIONS"));
+        assert!(p.contains("raise_escalation"));
+        assert!(p.contains("ORCH-ONE-WAY-DOOR-1"));
+        assert!(p.contains("HARD-PAUSE"));
+        assert!(p.contains("the change is hard to reverse"));
+        assert!(p.contains("ORCH-BUDGET-1"));
+        assert!(p.contains("SOFT-FLAG"));
+    }
+
+    #[test]
+    fn implement_prompt_omits_escalation_section_when_none_in_scope() {
+        let p = implement_prompt("s/r#1", "T", "D", "b", &[], None, &[]);
+        assert!(!p.contains("## ESCALATION CONDITIONS"));
+        assert!(!p.contains("raise_escalation"));
+    }
+
+    #[test]
+    fn read_first_escalation_request_parses_first_and_handles_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = dir.path().join("escalation-requests.jsonl");
+        std::fs::write(
+            &sink,
+            "\n{\"rule_id\":\"ORCH-ONE-WAY-DOOR-1\",\"condition_met\":\"renamed a public trait\",\"justification\":\"needed for X\"}\n\
+             {\"rule_id\":\"OTHER\",\"condition_met\":\"y\"}\n",
+        )
+        .unwrap();
+        let req = read_first_escalation_request(dir.path()).expect("first record parses");
+        assert_eq!(req.rule_id, "ORCH-ONE-WAY-DOOR-1");
+        assert_eq!(req.condition_met, "renamed a public trait");
+        assert_eq!(req.justification, "needed for X");
+        // Absent sink -> None (the common case: the agent did not escalate).
+        let empty = tempfile::tempdir().unwrap();
+        assert!(read_first_escalation_request(empty.path()).is_none());
     }
 
     // ── 2b. READ ACCESS assertion (the invariant) ──────────────────────────────
@@ -1570,6 +1813,7 @@ mod tests {
             crate::escalation::EscalationStore::new(),
             crate::checkpoint::CheckpointStore::new(),
             None, // no active test-tamper escalation (unreached here: live mode is off)
+            Vec::new(), // no in-scope agent-driven escalations in this test
         )
         .await;
 
@@ -1618,6 +1862,7 @@ mod tests {
             "camerata/story-7",
             &[approved_decision("opt-a", "Q", "R")],
             None,
+            &[],
         );
         assert!(
             p.contains("camerata/story-7"),

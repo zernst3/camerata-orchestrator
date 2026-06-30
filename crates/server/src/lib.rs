@@ -1346,16 +1346,34 @@ async fn spawn_brownfield_dev_run(
     // "allow" selection yields `None` and the backstop never fires. The spec's condition/severity
     // then drive the escalation in the run. (The agent-driven path covers all OTHER rules; this is
     // the one rule that also has a mechanical detector, kept as a safety net.)
-    let test_tamper_escalation = {
+    // Two outputs from one corpus load:
+    //   - `escalations_in_scope`: every SELECTED rule whose SELECTED option carries an escalation
+    //     spec. The agent is grounded on these + can `raise_escalation` (the rule-agnostic gate).
+    //   - `test_tamper_escalation`: the test-tamper rule's active spec specifically, driving its
+    //     deterministic detector backstop. `None` when its selected option does not escalate.
+    let (escalations_in_scope, test_tamper_escalation) = {
         let corpus = camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path())
             .await
             .0;
-        state
+        let selections = state
             .projects
             .active()
-            .and_then(|p| {
-                crate::test_tamper::test_tamper_escalation(&corpus, &p.ruleset.selections).cloned()
+            .map(|p| p.ruleset.selections.clone())
+            .unwrap_or_default();
+        let in_scope: Vec<crate::dev_implement_run::EscalationInScope> = selections
+            .iter()
+            .filter_map(|s| {
+                let rule = corpus.get_by_id(&s.rule_id)?;
+                let spec = rule.selected_escalation(s.chosen_option.as_deref())?;
+                Some(crate::dev_implement_run::EscalationInScope {
+                    rule_id: s.rule_id.clone(),
+                    condition: spec.condition.clone(),
+                    severity: spec.severity,
+                })
             })
+            .collect();
+        let tt = crate::test_tamper::test_tamper_escalation(&corpus, &selections).cloned();
+        (in_scope, tt)
     };
     let impl_escalations = state.escalations.clone();
     let impl_checkpoints = state.checkpoints.clone();
@@ -1389,6 +1407,7 @@ async fn spawn_brownfield_dev_run(
             impl_escalations,
             impl_checkpoints,
             test_tamper_escalation,
+            escalations_in_scope,
         )
         .await
     });

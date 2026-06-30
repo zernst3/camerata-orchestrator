@@ -628,6 +628,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         false,
         limiter.clone(),
         None,
+        false, // escalation
     );
     assert!(claude.is_ok(), "claude driver builds without a key");
 
@@ -644,6 +645,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         false,
         limiter.clone(),
         None,
+        false, // escalation
     );
     assert!(or.is_ok(), "openrouter driver builds with a key");
 
@@ -659,6 +661,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         false,
         limiter,
         None,
+        false, // escalation
     );
     let msg = match err {
         Err(e) => e.to_string(),

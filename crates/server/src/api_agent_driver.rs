@@ -1621,6 +1621,9 @@ fn build_claude_driver(
     rule_subset: Vec<RuleId>,
     worktree: Option<PathBuf>,
     orchestrator: bool,
+    // Opt this CLI agent into the READ-CLASS `raise_escalation` gateway tool. Only meaningful on
+    // the CLI path (the gateway MCP provides the tool); ignored by the Anthropic-API shape.
+    escalation: bool,
 ) -> Arc<dyn AgentDriver> {
     if let Some(key) = anthropic_api_backend_key() {
         // Anthropic Messages API agent. Same gate surface as every other ApiAgentDriver:
@@ -1635,8 +1638,9 @@ fn build_claude_driver(
         }
         Arc::new(driver)
     } else {
-        let mut cli_driver =
-            camerata_agent::ClaudeCliDriver::new(mcp_config_path).as_orchestrator(orchestrator);
+        let mut cli_driver = camerata_agent::ClaudeCliDriver::new(mcp_config_path)
+            .as_orchestrator(orchestrator)
+            .with_escalation(escalation);
         if !model_id.trim().is_empty() {
             cli_driver = cli_driver.with_model(model_id);
         }
@@ -1681,6 +1685,10 @@ pub fn build_agent_driver(
     orchestrator: bool,
     limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
     run_session_id: Option<&str>,
+    // Opt the agent into the READ-CLASS `raise_escalation` gateway tool (CLI path only). `false`
+    // for every caller except a governed dev run, which lets the agent self-escalate on rule
+    // conditions. Adds no write path; the gate posture is unchanged.
+    escalation: bool,
 ) -> anyhow::Result<Arc<dyn AgentDriver>> {
     let provider = registry
         .all_entries()
@@ -1723,6 +1731,7 @@ pub fn build_agent_driver(
             rule_subset,
             worktree,
             orchestrator,
+            escalation,
         )),
     }
 }
@@ -1851,6 +1860,7 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
             false, // depth-1 worker: NEVER an orchestrator
             self.limiter.clone(),
             self.run_session_id.as_deref(),
+            false, // workers do not self-escalate (the governed dev-implement agent does)
         )
         .map_err(|e| std::io::Error::other(format!("build child driver for `{model}`: {e}")))?;
 
@@ -2672,6 +2682,7 @@ mod tests {
             false,                // orchestrator
             limiter,
             None,                 // run_session_id
+            false, // escalation
         );
         assert!(
             result.is_ok(),
@@ -2723,6 +2734,7 @@ mod tests {
             false,
             limiter,
             None, // run_session_id
+            false, // escalation
         );
         assert!(
             result.is_ok(),
@@ -2751,6 +2763,7 @@ mod tests {
             false,
             limiter,
             None, // run_session_id
+            false, // escalation
         );
         assert!(
             result.is_err(),
@@ -2936,6 +2949,7 @@ mod tests {
             false,
             limiter,
             Some("uow-story-id-42"), // run_session_id
+            false, // escalation
         )
         .expect("build must succeed");
 
@@ -3509,6 +3523,7 @@ mod tests {
             vec![gov1_rule()],
             Some(PathBuf::from("/tmp/wt")),
             false,
+            false, // escalation
         ); // building must not panic / spawn
 
         // default cli: routing helper does not fire, CLI driver builds.
@@ -3521,6 +3536,7 @@ mod tests {
             vec![gov1_rule()],
             None,
             false,
+            false, // escalation
         );
     }
 
@@ -3548,6 +3564,7 @@ mod tests {
             false,
             limiter,
             None,
+            false, // escalation
         );
         assert!(result.is_ok(), "claude+api+key must build: {:?}", result.err().map(|e| e.to_string()));
     }
@@ -3574,6 +3591,7 @@ mod tests {
             false,
             limiter,
             None,
+            false, // escalation
         );
         assert!(result.is_ok(), "claude+cli must build: {:?}", result.err().map(|e| e.to_string()));
     }
