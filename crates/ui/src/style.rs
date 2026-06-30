@@ -1404,7 +1404,12 @@ html, body {
   flex: none; font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.03em;
   color: var(--ink-faint); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px;
 }
-.mem-text { font-size: 12.5px; color: var(--ink); line-height: 1.4; word-break: break-word; }
+.mem-text {
+  font-size: 12.5px; color: var(--ink); line-height: 1.4; word-break: break-word;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.mem-clickable { cursor: pointer; border-radius: 6px; }
+.mem-clickable:hover .mem-text { color: var(--accent); }
 .mem-src { font-size: 10.5px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .mem-actions { flex: none; display: flex; gap: 5px; }
 .mem-btn {
@@ -1418,6 +1423,20 @@ html, body {
   flex: none; border-radius: 6px; border: 1px solid var(--line); padding: 6px 8px;
   font-size: 12px; color: var(--ink); background: #11100f;
 }
+/* Project-memory view/edit modal (reuses .rule-modal-overlay + .rule-modal). */
+.mem-edit-modal { max-width: 520px; display: flex; flex-direction: column; gap: 10px; }
+.mem-edit-text {
+  width: 100%; box-sizing: border-box; resize: vertical; border-radius: 6px; border: 1px solid var(--line);
+  padding: 8px 10px; font-size: 13px; color: var(--ink); background: #11100f; line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.mem-edit-actions { display: flex; gap: 8px; justify-content: flex-end; }
+/* "+ Add to learnings" affordance on chat AI replies (#112). */
+.chat-add-learning {
+  align-self: flex-start; margin-top: 6px; background: none; border: none; padding: 0;
+  font-size: 11px; color: #2563eb; cursor: pointer; opacity: 0.7;
+}
+.chat-add-learning:hover { opacity: 1; text-decoration: underline; }
 
 /* AskUserQuestion-style structured clarification card (reusable). */
 .clarify-q-card {

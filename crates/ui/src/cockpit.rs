@@ -481,6 +481,17 @@ async fn patch_memory_status(id: &str, eid: &str, status: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Save an edit to a memory entry's text + kind (the view/edit modal).
+async fn save_memory_edit(id: &str, eid: &str, kind: &str, text: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/memory/{}", crate::BFF_URL, id, eid))
+        .json(&serde_json::json!({ "kind": kind, "text": text }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
 /// Delete a memory entry (discard a proposal, or prune).
 async fn delete_memory_entry(id: &str, eid: &str) -> bool {
     reqwest::Client::new()
@@ -678,7 +689,12 @@ fn MemoryEditor(project: ProjectView, refresh: Signal<u32>) -> Element {
     let mut new_text = use_signal(String::new);
     let mut new_kind = use_signal(|| "decision".to_string());
     let busy = use_signal(|| false);
+    // View/edit modal: Some(entry-id) while open, with the working draft text + kind.
+    let mut edit_id = use_signal(|| None::<String>);
+    let mut edit_text = use_signal(String::new);
+    let mut edit_kind = use_signal(|| "decision".to_string());
     let pid = project.id.clone();
+    let pid_modal = project.id.clone();
 
     // Proposed (review me) first, then approved, then archived.
     let mut entries = project.memory.clone();
@@ -714,10 +730,18 @@ fn MemoryEditor(project: ProjectView, refresh: Signal<u32>) -> Element {
                         let (id_app, eid_app) = (pid.clone(), m.id.clone());
                         let (id_arc, eid_arc) = (pid.clone(), m.id.clone());
                         let (id_del, eid_del) = (pid.clone(), m.id.clone());
+                        let (open_text, open_kind, open_eid) = (m.text.clone(), m.kind.clone(), m.id.clone());
                         let approved = m.status == "approved";
                         rsx! {
                             div { key: "{m.id}", class: "mem-row mem-{m.status}",
-                                div { class: "mem-row-main",
+                                div {
+                                    class: "mem-row-main mem-clickable",
+                                    title: "Click to view / edit",
+                                    onclick: move |_| {
+                                        edit_text.set(open_text.clone());
+                                        edit_kind.set(open_kind.clone());
+                                        edit_id.set(Some(open_eid.clone()));
+                                    },
                                     span { class: "mem-kind", "{m.kind}" }
                                     span { class: "mem-text", "{m.text}" }
                                     if !m.source.is_empty() {
@@ -796,6 +820,60 @@ fn MemoryEditor(project: ProjectView, refresh: Signal<u32>) -> Element {
                         });
                     },
                     "Add"
+                }
+            }
+
+            // ── View / edit modal ───────────────────────────────────────────
+            if let Some(eid) = edit_id() {
+                div {
+                    class: "rule-modal-overlay",
+                    onclick: move |_| edit_id.set(None),
+                    div {
+                        class: "rule-modal mem-edit-modal",
+                        onclick: move |e| e.stop_propagation(),
+                        div { class: "rule-modal-head",
+                            span { class: "rule-modal-id", "Edit learning" }
+                            button { class: "rule-modal-close", onclick: move |_| edit_id.set(None), "\u{2715}" }
+                        }
+                        select {
+                            class: "mem-kind-select",
+                            value: "{edit_kind}",
+                            onchange: move |e| edit_kind.set(e.value()),
+                            option { value: "decision", "decision" }
+                            option { value: "pattern", "pattern" }
+                            option { value: "gotcha", "gotcha" }
+                            option { value: "constraint", "constraint" }
+                        }
+                        textarea {
+                            class: "mem-edit-text",
+                            rows: 8,
+                            value: "{edit_text}",
+                            oninput: move |e| edit_text.set(e.value()),
+                        }
+                        div { class: "mem-edit-actions",
+                            button {
+                                class: "btn-run",
+                                disabled: edit_text().trim().is_empty(),
+                                onclick: move |_| {
+                                    let id = pid_modal.clone();
+                                    let eid = eid.clone();
+                                    let t = edit_text();
+                                    let k = edit_kind();
+                                    spawn(async move {
+                                        let ok = save_memory_edit(&id, &eid, &k, &t).await;
+                                        let mut refresh = refresh;
+                                        let mut edit_id = edit_id;
+                                        if ok {
+                                            edit_id.set(None);
+                                            refresh += 1;
+                                        }
+                                    });
+                                },
+                                "Save"
+                            }
+                            button { class: "mem-btn", onclick: move |_| edit_id.set(None), "Cancel" }
+                        }
+                    }
                 }
             }
         }

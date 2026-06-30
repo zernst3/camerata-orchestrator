@@ -790,6 +790,30 @@ async fn save_app_chat_model(model: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Capture a chat reply as a project-memory learning (#112): resolve the active project, then POST
+/// the text as a human-curated (Approved) entry. Returns true on success (false when there is no
+/// active project or the request fails).
+async fn add_chat_learning(text: &str) -> bool {
+    #[derive(serde::Deserialize)]
+    struct ActiveId {
+        id: String,
+    }
+    let resp = match reqwest::get(format!("{}/api/projects/active", crate::BFF_URL)).await {
+        Ok(r) => r,
+        Err(_) => return false,
+    };
+    let Some(active) = resp.json::<Option<ActiveId>>().await.ok().flatten() else {
+        return false;
+    };
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/memory", crate::BFF_URL, active.id))
+        .json(&serde_json::json!({ "kind": "decision", "text": text }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
 /// A prior chat turn sent to the server so the model has conversation context.
 /// Mirrors `ChatTurn` in `crates/server/src/lib.rs`; role is "user" or "assistant".
 #[derive(Clone, serde::Serialize)]
@@ -930,6 +954,8 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
     let mut turns = use_signal(Vec::<Turn>::new);
     let mut draft = use_signal(String::new);
     let mut sending = use_signal(|| false);
+    // Toast surface, for the "Add to learnings" affordance on AI replies (#112).
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     // Collapsed by default: the "what this assistant can see" strip shows the top few items + a
     // see-more/less toggle so it doesn't eat a chunk of the transcript's vertical space.
     let mut ctx_expanded = use_signal(|| false);
@@ -1318,6 +1344,25 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                     class: "chat-ai-md",
                                     style: "line-height:1.55;min-width:0;",
                                     dangerous_inner_html: md_to_html(&t.text)
+                                }
+                                button {
+                                    class: "chat-add-learning",
+                                    title: "Add this reply to project memory",
+                                    onclick: {
+                                        let txt = t.text.clone();
+                                        move |_| {
+                                            let txt = txt.clone();
+                                            spawn(async move {
+                                                let ok = add_chat_learning(&txt).await;
+                                                crate::toast::push_toast(
+                                                    toasts,
+                                                    if ok { crate::toast::ToastKind::Info } else { crate::toast::ToastKind::Error },
+                                                    if ok { "Added to project memory." } else { "No active project, or the add failed." },
+                                                );
+                                            });
+                                        }
+                                    },
+                                    "+ Add to learnings"
                                 }
                             } else {
                                 "{t.text}"
