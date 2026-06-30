@@ -1056,7 +1056,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                 div {
                     style: "display:flex;align-items:center;justify-content:space-between;\
                             padding:.75rem 1rem;border-bottom:1px solid rgba(226,232,240,0.6);\
-                            background:rgba(248,250,252,0.55);",
+                            background:rgba(248,250,252,0.9);",
                     span {
                         style: "font-weight:600;font-size:.95rem;color:#1e293b;",
                         "Camerata assistant"
@@ -1103,7 +1103,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                 // ── "what this assistant can see" affordance ─────────────
                 div {
                     style: "padding:.5rem 1rem;border-bottom:1px solid #e2e8f0;\
-                            background:rgba(240,249,255,0.45);font-size:.75rem;color:#0369a1;",
+                            background:rgba(240,249,255,0.9);font-size:.75rem;color:#0369a1;",
                     div {
                         style: "font-weight:600;margin-bottom:.2rem;",
                         "What this assistant can see:"
@@ -1309,7 +1309,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                  padding:.5rem .75rem;font-size:.875rem;"
                             } else {
                                 "align-self:flex-start;flex:none;max-width:90%;min-width:0;overflow-x:hidden;\
-                                 background:rgba(241,245,249,0.78);\
+                                 background:rgba(241,245,249,0.9);\
                                  color:#1e293b;border-radius:.5rem .5rem .5rem 0;\
                                  padding:.5rem .75rem;font-size:.875rem;"
                             },
@@ -1326,7 +1326,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                     }
                     if sending() {
                         div {
-                            style: "align-self:flex-start;flex:none;background:rgba(241,245,249,0.78);color:#94a3b8;\
+                            style: "align-self:flex-start;flex:none;background:rgba(241,245,249,0.9);color:#94a3b8;\
                                     border-radius:.5rem;padding:.5rem .75rem;font-size:.875rem;",
                             "thinking…"
                         }
@@ -1336,7 +1336,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                 // ── compose bar ─────────────────────────────────────────────
                 div {
                     style: "display:flex;gap:.5rem;padding:.75rem 1rem;\
-                            border-top:1px solid rgba(226,232,240,0.6);background:rgba(248,250,252,0.55);",
+                            border-top:1px solid rgba(226,232,240,0.6);background:rgba(248,250,252,0.9);",
                     textarea {
                         style: "flex:1;resize:none;border:1px solid #cbd5e1;border-radius:.375rem;\
                                 padding:.5rem .75rem;font-size:.875rem;font-family:inherit;\

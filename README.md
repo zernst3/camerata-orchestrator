@@ -70,6 +70,7 @@ Once a project is onboarded, **Governed Development** is where work gets done:
 - **Issue management** — pull all open issues across the project's repos, see the real Epic → sub-issue tree (via GitHub's sub-issues), and create a **Unit of Work** from any issue (or author a new story with an AI lead engineer that drafts against the actual codebase).
 - **The UoW lifecycle** — each unit moves through **investigation → decisions → development → update-branch → PR → sign-off**, every phase persisted as structured data rather than ephemeral chat, with a model selector and a Stop control per run, and a deterministic **gate self-check** runnable in-app.
 - **A project-aware chat assistant** grounded, per turn, in the rules catalog, the project's committed/selected rules, the live development state, and the latest scan — with an explicit "what this assistant can see" panel and a hard no-fabrication contract.
+- **Human-review escalations with resume** — when an agent's work meets the escalation condition of a rule you selected, the run *pauses* instead of failing: it checkpoints, surfaces in the **NEEDS YOU** queue, and you **Approve / Amend / Reject**. Approve and Amend re-spawn the agent from the checkpoint to continue; Reject reverts and stops. Which rules escalate is driven by the corpus, not hardcoded. See [`docs/ESCALATION_RESUME_DESIGN.md`](docs/ESCALATION_RESUME_DESIGN.md).
 
 This console is wired end-to-end in the UI and unit-tested. The validation milestone (see Status) is a **live** model driving real multi-step development through the gate with layer-2 bounce-back — built, not yet exercised live.
 
@@ -101,6 +102,8 @@ enforcement is opt-in and manually wired, never switched on automatically by app
 ## Every agent is grounded in the real project
 
 A foundational invariant: **every agent that runs inside a project has on-demand READ access to the entire set of that project's repo clones** (a project can hold several distinct repos), plus the project's rules and a cheap always-on digest. It is not a context-less chatbot guessing at your stack — the story-author, the investigation agent, and the developer agent can all open any file in any of the project's repos before they reason or write. **Writes stay gated:** the only write path is the gateway's tool, jailed to a single Unit-of-Work worktree, so cross-repo reading never widens what an agent can change. See [`docs/decisions/2026-06-25_all-agents-grounded-in-repo-and-rules.md`](docs/decisions/).
+
+Beyond the repos and rules, each project carries **soft context** that travels with its export: a **product brief** (what the product is, who it's for, the quality bar), **operating principles** (how a good engineer works here), and an accumulating, human-curated **project memory** (decisions, patterns, gotchas) that agents propose and you approve. All three feed the same grounding, so the agents read the *why* before the *what*. See [`docs/PROJECT_CONTEXT_LAYERS.md`](docs/PROJECT_CONTEXT_LAYERS.md).
 
 ## Where this leads (staged honestly, not the showcase)
 

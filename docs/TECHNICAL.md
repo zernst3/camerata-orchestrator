@@ -910,6 +910,50 @@ implementation decisions.
 
 ---
 
+## 4b. Human-review escalation + resume engine
+
+A governed development run can PAUSE for human review and later RESUME from where it stopped, instead
+of failing. The mechanism is rule-agnostic and spans the gateway, the agent, and the server.
+
+**The disposition is a rule property.** A `[[option]]` in the corpus may carry an inline
+`escalation = { condition, severity }` (`crates/rules/src/lib.rs`: `EscalationSpec`,
+`EscalationSeverity::{SoftFlag, HardPause}`). It is OPTION-scoped: `Rule::selected_escalation(chosen)`
+resolves the ACTIVE spec from the project's selected option, so choosing a non-escalating option does
+not escalate. This replaced the old hardcoded option-id string matching.
+
+**Two trigger mechanisms, both severity-aware:**
+
+- **Agent-driven (primary, rule-agnostic).** The implementer is grounded with its selected options'
+  conditions (an `## ESCALATION CONDITIONS` block in `implement_prompt`) and granted the READ-CLASS
+  `raise_escalation` gateway tool (`crates/gateway/src/main.rs`; opt-in via
+  `ClaudeCliDriver::with_escalation`). When its work meets a condition it calls the tool, which records
+  to `<session_dir>/escalation-requests.jsonl`. After the agent returns, the run reads the sink and
+  resolves severity AUTHORITATIVELY from the corpus (the agent cannot downgrade a hard-pause; an
+  unknown rule id fails safe to hard-pause).
+- **Deterministic backstop (per-rule, optional).** For a mechanically detectable condition a detector
+  may run post-task. Only `AGENTIC-NO-TEST-TAMPER-1` has one today (`crates/server/src/test_tamper.rs`:
+  `detect_test_tampering` + `test_tamper_escalation`, which reads the rule's own spec — field-driven).
+
+**Pause = checkpoint + escalation.** On a HARD-PAUSE, `execute_dev_implement_run`
+(`crates/server/src/dev_implement_run.rs`) persists a `Checkpoint` (`crates/server/src/checkpoint.rs`:
+worktree / branch / base_commit / iteration / model), raises a UoW-scoped review escalation
+(`crates/server/src/escalation.rs`: `Escalation` carries `subject_kind: {Routine, Uow}` +
+`checkpoint_id`), links the two, and parks the run at `RunStatus::AwaitingReview`. The worktree is left
+intact. A SOFT-FLAG logs a run event and continues.
+
+**Resume = re-spawn from the checkpoint.** Resolving the review (`answer_escalation`) branches on the
+human's action: Approve/Amend call `resume_governed_run`, which re-spawns the implement run from the
+checkpoint's worktree with the human's translated directive injected into grounding (so the agent
+continues, not restarts), marking the checkpoint resumed once-only; Reject reverts the worktree
+(`git checkout -- . && git clean -fd`) and stops. Both fresh-start and resume go through one shared
+`spawn_brownfield_dev_run` helper, so they cannot drift.
+
+**UI.** The paused run surfaces in the Governed Development NEEDS YOU queue as a `UowReviewPanel`
+(Approve / Amend / Reject + a clarifying chat); a toast fires on the pause. See
+`docs/ESCALATION_RESUME_DESIGN.md` and `docs/RULE_AUTHORING.md`.
+
+---
+
 ## 5. Rule corpus
 
 `crates/rules/src/lib.rs` is the rule corpus loader and subset selector.
@@ -1183,6 +1227,29 @@ const USER_GUIDE: &str    = include_str!("../../../docs/USER_GUIDE.md");
 ```
 
 Both are baked into the unified system prompt assembled for every chat turn (layer-1 of the prompt, static and cache-eligible). A doc change recompiles `camerata-ui` but does not require any other wiring change. The chatbot's canonical probe — "what is the difference between a prose and a structured rule?" — is answerable from this section: prose requires human judgment (matter of degree); structured requires human verification against a binary contract. Both live outside CI; the difference is judgment, not format.
+
+---
+
+## 5b. Soft context layers (product brief, operating principles, project memory)
+
+Beyond the rules (the HARD constraints), three SOFT per-project context layers feed agent grounding
+and travel with the project export (`crates/server/src/project.rs`, #112). All three compose into the
+single `project_grounding` assembly point (`crates/server/src/lib.rs`), size-budgeted, ABOVE the rule
+digest so the agent reads the why before the what.
+
+- **Product brief** (`Project.product_brief: String`) → `## Product context`.
+- **Operating principles** (`Project.operating_principles: Vec<OperatingPrinciple{id,text,enabled}>`,
+  seeded with `default_operating_principles()`) → `## How to work here`, ENABLED entries only.
+- **Project memory** (`Project.memory: Vec<MemoryEntry{kind,text,source,status}>`) →
+  `## What we have learned on this project`, APPROVED entries only, capped to the 15 most recent.
+  Curation: agents PROPOSE via the `propose_memory` gateway tool (mirrors `raise_escalation`);
+  `execute_dev_implement_run` reads `<session_dir>/memory-proposals.jsonl` after each pass and appends
+  each as a `Proposed` entry tagged `agent:<story>`; the human approves / archives / deletes (or adds
+  their own) via `POST /api/projects/:id/memory[/:eid]` and the `MemoryEditor` settings UI.
+
+All three are `#[serde(default)]` fields on `Project`, so they ride the existing export/import
+(`ProjectExportDoc` flatten + the `ProjectImport` upsert) with no migration. See
+`docs/PROJECT_CONTEXT_LAYERS.md`.
 
 ---
 

@@ -590,7 +590,35 @@ waiting pause point.
 
 The investigation phase can **pause mid-run** when the agent raises a question, park the run at
 "Awaiting clarification," and **resume** (re-spawn the gated agent with the Q+A in context) once you
-answer. Dev-phase mid-write pause/resume is planned but not yet shipped.
+answer. The **development** phase can likewise pause — for a human-review *escalation* — and resume
+from a checkpoint (see the next section).
+
+### Human review escalations (a run pauses, you decide, it resumes)
+
+Beyond clarifying questions, a governed **development** run can pause for a **review escalation** — a
+decision only you should make. This happens when the agent's work meets the escalation condition of a
+rule you selected (for example, modifying an existing test, which `AGENTIC-NO-TEST-TAMPER-1` calls for
+review on). Instead of failing, the run **pauses**: it checkpoints its state, leaves the worktree
+intact, and parks at **"Needs your review."**
+
+The paused run shows up in the same **NEEDS YOU** queue. Open it and you get a review panel:
+
+- **What happened** — the rule, what specifically met its condition, and the agent's reasoning.
+- A **chat** with the lead-engineer assistant to discuss it (chatting never decides anything).
+- Three decisions:
+  - **Approve & resume** — the change is fine; the agent resumes from where it stopped and continues.
+  - **Amend & resume** — give a free-text correction; the agent resumes with your directive applied.
+  - **Reject & revert** — the change is discarded and the run stops cleanly.
+
+Approve and Amend **re-spawn the agent from the checkpoint** (its partial work is still on disk), so it
+continues rather than restarting. A toast notifies you when a run pauses while you are on another tab.
+
+Which rules escalate — and whether a condition **hard-pauses** (stops for you) or **soft-flags** (logs
+and continues) — is driven entirely by the rule corpus: any rule whose selected option carries an
+escalation condition triggers this, not just test-tamper. The agent self-reports when its work meets a
+condition; a deterministic backstop catches the test-tamper case mechanically. See
+`docs/ESCALATION_RESUME_DESIGN.md` (the as-built design) and `docs/RULE_AUTHORING.md` (how to add an
+escalating rule).
 
 ### The 3-phase Development cockpit
 
@@ -1400,6 +1428,29 @@ choice wins over the project default for that run only.
 An opt-in, per-project agentic reviewer that runs in parallel with Layer-2 after each dev-run
 iteration. Toggle it on here; select the model (defaults to the Balanced tier when left blank).
 See §6a for the full description of what it does and when to use it.
+
+### Soft context: product brief, operating principles, project memory
+
+Below model configuration, the **Soft context** group holds the per-project context that helps the
+agents exercise good judgment *inside* the rules. The rules are the hard constraints; this is the
+softer "why / how / what we have learned" a well-briefed engineer carries. All three are woven into
+every agent's grounding and **travel with the project export**, so they transfer to another user on
+import.
+
+- **Product brief** — free text describing what the product is, who it is for, the quality bar, and
+  the non-negotiables. The agents read it *above* the rules, so they grasp the why before the what. A
+  scaffold prompts the sections to fill in.
+- **Operating principles** — how a good engineer works on this project (conduct, not the code): prefer
+  explicit over clever, confirm irreversible changes, report honestly, escalate when blocked, and so
+  on. New projects are seeded with a default set you can toggle off or extend with your own; only the
+  *enabled* ones reach the agents.
+- **Project memory** — the accumulating, **human-curated** learnings (decisions, patterns, gotchas,
+  constraints) that carry across runs, so the next agent does not rediscover what the last one learned.
+  **Agents propose, you curate:** after a run, the agent's proposed learnings appear here as
+  **Proposed** (with a "N to review" badge); you Approve, Archive, or Delete them, or add your own.
+  Only **Approved** entries (the most recent, capped) feed the agents' grounding.
+
+See `docs/PROJECT_CONTEXT_LAYERS.md` for the design.
 
 ---
 
