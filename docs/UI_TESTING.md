@@ -131,3 +131,29 @@ the call is still correct; the key just guarantees no overlap.
 3. Tier-2 wiremock tests for the network helpers whose request contract matters.
 
 Skip Tier-3 (browser E2E) on the desktop crate until/unless we add a `dioxus-web` target.
+
+---
+
+## Current coverage (as of the exhaustive sweep)
+
+The `camerata-ui` suite is **~550 tests** (`cargo test -p camerata-ui`), built out file-by-file so the
+crate's own tests exemplify the quality bar Camerata enforces elsewhere:
+
+- **Tier 2 — network helpers: effectively exhaustive.** Nearly every `reqwest` helper that talks to
+  the BFF was converted to `crate::bff_base()` and given a wiremock test asserting its exact request
+  contract (method + path, `body_json` + `.expect(1)` on every mutation, and the parsed return value).
+- **Tier 1 — render tests: every cleanly-renderable component.** Prop-only and single-context
+  (toast-provider) components are render-tested for static structure. Chorale-backed tables
+  (`CamerataTable`) **do** render under SSR when given synchronous prop rows, so the table family is
+  covered for real (column headers + rows + chrome).
+- **Pure-logic tests** for the extractable bits (model-group building, schedule parse/format, column
+  value-extractor closures, diff summaries, sentinels) — the highest-ROI layer.
+
+**Documented skips** (recorded in-file with reasons, not silently dropped): components whose isolated
+SSR render is only a loading/empty shell because their content comes from `use_resource` async fetches
+or 5+ contexts — e.g. `ChatBubble`, the Governed-Development phase views, `ProposedRulesTable`,
+`RuleDetailModal`, and the model/tier/step/L3 editors. A render test there would assert a fallback
+branch only (theater); their *display logic* is instead covered by the pure-logic extractor/diff
+tests. Also skipped: the native `rfd` save-dialog helpers (no BFF seam, can't run headless).
+
+When you add a UI feature, extend the matching tier here rather than leaving the new surface untested.

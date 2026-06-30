@@ -34,7 +34,7 @@ The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a
     ▸ CONSOLIDATED SETTINGS: one Settings nav item covering cross-project
       credentials (keychain-backed, masked) + Bombe animation controls, and
       per-project model configuration. The Rules page is rules-only.
-    ▸ 16-crate Rust workspace · ~2,000 tests · governs its OWN source in CI.
+    ▸ 16-crate Rust workspace · ~2,800 tests · governs its OWN source in CI.
 
  ⏳ STAGED — built & tested, NOT yet validated live (please don't grade these as proven)
     ▸ The gate inside a full LIVE development cycle — the engine + UI are wired and
@@ -119,7 +119,7 @@ A compiling, tested, all-Rust workspace, not a design folder.
 
 **Verified at runtime (you can reproduce it):**
 
-- A **16-crate workspace, ~2,000 passing tests**, `clippy -D warnings` + `unsafe`-forbidden + fmt enforced in CI, governing its OWN source ([`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)).
+- A **16-crate workspace, ~2,800 passing tests**, `clippy -D warnings` + `unsafe`-forbidden + fmt enforced in CI, governing its OWN source ([`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)).
 - **Brownfield onboarding, end to end** on fixture repos: per-repo detection and rule proposal, the two-tier audit with calibration and dedup, the triage tables, Process emitting baseline waivers and GitHub issues, and Apply writing the governance branch.
 - **The gate denies a real agent (standalone)** via `camerata -- live-demo`, with the gateway's verdict + jail tests covered by `cargo test`.
 - **The governed development console** — issue pull + Epic/sub-issue tree, UoW creation and the full lifecycle UI, the project-aware chat assistant, and the deterministic gate self-check — wired and unit-tested in-app.
