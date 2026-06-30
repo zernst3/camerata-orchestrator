@@ -1360,6 +1360,32 @@ html, body {
 }
 .uow-review-ask { flex: none; font-size: 12px; }
 
+/* Soft-context settings editors (#112): product brief + operating principles. */
+.soft-ctx-card {
+  border: 1px solid var(--line); border-radius: 10px; padding: 12px 13px; margin: 8px 0;
+  display: flex; flex-direction: column; gap: 8px; background: rgba(255,255,255,0.5);
+}
+.soft-ctx-title { font-size: 13px; font-weight: 700; color: var(--ink); margin: 0; }
+.soft-ctx-sub { font-size: 11.5px; color: var(--ink-faint); margin: 0; line-height: 1.4; }
+.soft-ctx-brief {
+  width: 100%; box-sizing: border-box; resize: vertical; border-radius: 8px; border: 1px solid var(--line);
+  padding: 8px 10px; font-size: 12.5px; color: var(--ink); background: rgba(255,255,255,0.8);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.45;
+}
+.op-list { display: flex; flex-direction: column; gap: 4px; }
+.op-row {
+  display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: 7px;
+  border: 1px solid var(--line); font-size: 12.5px; color: var(--ink-faint); line-height: 1.4; cursor: pointer;
+}
+.op-row.on { color: var(--ink); border-color: rgba(34,197,94,0.35); background: rgba(34,197,94,0.06); }
+.op-row input { margin-top: 2px; flex: none; }
+.op-text { display: block; }
+.op-add { display: flex; gap: 6px; align-items: center; }
+.op-add-input {
+  flex: 1; box-sizing: border-box; border-radius: 8px; border: 1px solid var(--line);
+  padding: 6px 9px; font-size: 12.5px; color: var(--ink); background: rgba(255,255,255,0.8); font-family: inherit;
+}
+
 /* AskUserQuestion-style structured clarification card (reusable). */
 .clarify-q-card {
   border: 1px solid rgba(202,138,4,0.3); background: rgba(202,138,4,0.08); border-radius: 10px;

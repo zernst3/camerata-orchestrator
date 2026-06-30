@@ -101,6 +101,26 @@ struct ProjectView {
     /// Defaults to false (disabled). When true, vision-capable stages are available.
     #[serde(default)]
     vision_enabled: bool,
+    /// Free-text product brief (#112): the soft context fed into agent grounding. Travels with
+    /// the project export. Absent → empty.
+    #[serde(default)]
+    product_brief: String,
+    /// Agent operating principles (#112): how-we-work conduct, seeded with defaults + toggleable.
+    #[serde(default)]
+    operating_principles: Vec<OperatingPrincipleView>,
+}
+
+/// One agent operating principle as the BFF reports it (mirrors the server's `OperatingPrinciple`).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct OperatingPrincipleView {
+    id: String,
+    text: String,
+    #[serde(default = "default_true_op")]
+    enabled: bool,
+}
+
+fn default_true_op() -> bool {
+    true
 }
 
 /// UI mirror of `camerata_server::project::L3ReviewConfig`.
@@ -409,6 +429,165 @@ async fn set_max_iterations(id: &str, max_iterations: usize) -> bool {
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false)
+}
+
+/// Save the project's free-text product brief (#112).
+async fn set_product_brief(id: &str, brief: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/product-brief", crate::BFF_URL, id))
+        .json(&serde_json::json!({ "product_brief": brief }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Save the project's operating principles (#112) — the full toggled/edited list.
+async fn set_operating_principles(id: &str, principles: &[OperatingPrincipleView]) -> bool {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/operating-principles",
+            crate::BFF_URL,
+            id
+        ))
+        .json(&serde_json::json!({ "operating_principles": principles }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+/// Editor for the per-project PRODUCT BRIEF (#112): a scaffolded free-text area + Save. The brief
+/// feeds agent grounding (the "why / for-whom / quality bar") and travels with the project export.
+#[component]
+fn ProductBriefEditor(project: ProjectView, refresh: Signal<u32>) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut brief = use_signal(|| project.product_brief.clone());
+    let mut saving = use_signal(|| false);
+    let pid = project.id.clone();
+    rsx! {
+        div { class: "soft-ctx-card",
+            p { class: "soft-ctx-title", "Product brief" }
+            p { class: "soft-ctx-sub",
+                "What this product is, who it's for, the quality bar, the non-negotiables. Agents read \
+                 it ABOVE the rules to make judgment calls the per-story spec didn't anticipate. \
+                 Travels with the project export."
+            }
+            textarea {
+                class: "soft-ctx-brief",
+                rows: 9,
+                placeholder: "## What is this product?\n(one paragraph: what it does, for whom)\n\n## Who uses it, and what do they care about most?\n\n## What does \"good\" look like here? (the quality bar)\n\n## Non-negotiables\n\n## Out of scope / non-goals",
+                value: "{brief}",
+                disabled: saving(),
+                oninput: move |e| brief.set(e.value()),
+            }
+            button {
+                class: "btn-run",
+                disabled: saving(),
+                onclick: move |_| {
+                    let pid = pid.clone();
+                    let b = brief();
+                    saving.set(true);
+                    spawn(async move {
+                        let ok = set_product_brief(&pid, &b).await;
+                        saving.set(false);
+                        let mut refresh = refresh;
+                        if ok {
+                            refresh += 1;
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Product brief saved.");
+                        } else {
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not save the brief.");
+                        }
+                    });
+                },
+                if saving() { "Saving\u{2026}" } else { "Save brief" }
+            }
+        }
+    }
+}
+
+/// Editor for the per-project OPERATING PRINCIPLES (#112): toggle the shipped defaults, add custom
+/// ones, Save. The ENABLED principles are woven into every agent's context. Travels with export.
+#[component]
+fn OperatingPrinciplesEditor(project: ProjectView, refresh: Signal<u32>) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut principles = use_signal(|| project.operating_principles.clone());
+    let mut new_text = use_signal(String::new);
+    let mut saving = use_signal(|| false);
+    let pid = project.id.clone();
+    rsx! {
+        div { class: "soft-ctx-card",
+            p { class: "soft-ctx-title", "Operating principles" }
+            p { class: "soft-ctx-sub",
+                "How a good engineer works on THIS project (conduct, not the code). Toggle the defaults \
+                 or add your own; the enabled ones are woven into every agent's context. Travels with \
+                 the project export."
+            }
+            div { class: "op-list",
+                for (i, p) in principles().iter().enumerate() {
+                    label {
+                        key: "{p.id}",
+                        class: if p.enabled { "op-row on" } else { "op-row" },
+                        input {
+                            r#type: "checkbox",
+                            checked: p.enabled,
+                            disabled: saving(),
+                            onchange: move |_| {
+                                let mut v = principles();
+                                v[i].enabled = !v[i].enabled;
+                                principles.set(v);
+                            },
+                        }
+                        span { class: "op-text", "{p.text}" }
+                    }
+                }
+            }
+            div { class: "op-add",
+                input {
+                    class: "op-add-input",
+                    placeholder: "Add a custom principle\u{2026}",
+                    value: "{new_text}",
+                    disabled: saving(),
+                    oninput: move |e| new_text.set(e.value()),
+                }
+                button {
+                    class: "btn-restart",
+                    disabled: new_text().trim().is_empty() || saving(),
+                    onclick: move |_| {
+                        let t = new_text().trim().to_string();
+                        if t.is_empty() { return; }
+                        let mut v = principles();
+                        let id = format!("custom-{}", v.len() + 1);
+                        v.push(OperatingPrincipleView { id, text: t, enabled: true });
+                        principles.set(v);
+                        new_text.set(String::new());
+                    },
+                    "Add"
+                }
+            }
+            button {
+                class: "btn-run",
+                disabled: saving(),
+                onclick: move |_| {
+                    let pid = pid.clone();
+                    let list = principles();
+                    saving.set(true);
+                    spawn(async move {
+                        let ok = set_operating_principles(&pid, &list).await;
+                        saving.set(false);
+                        let mut refresh = refresh;
+                        if ok {
+                            refresh += 1;
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Operating principles saved.");
+                        } else {
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not save the principles.");
+                        }
+                    });
+                },
+                if saving() { "Saving\u{2026}" } else { "Save principles" }
+            }
+        }
+    }
 }
 
 /// Set the L3 agentic code-review gate configuration for a project.
@@ -1987,6 +2166,12 @@ fn SettingsView(global_only: bool) -> Element {
                         // ── Commit / PR gate (#65): bypass mode + per-rule toggles ──
                         p { class: "section-label settings-label", "Commit / PR gate" }
                         crate::vcs_settings::VcsGateSettings { project_id: p_owned.id.clone() }
+
+                        // ── Soft context (#112): the product brief + operating principles that
+                        // feed agent grounding and travel with the project export ──
+                        p { class: "section-label settings-label", "Soft context" }
+                        ProductBriefEditor { project: p_owned.clone(), refresh }
+                        OperatingPrinciplesEditor { project: p_owned.clone(), refresh }
                     }
                 }
             }}
