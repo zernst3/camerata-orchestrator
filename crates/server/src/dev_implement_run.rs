@@ -103,6 +103,39 @@ pub(crate) fn read_first_escalation_request(
         .find_map(|l| serde_json::from_str::<EscalationRequestRecord>(l).ok())
 }
 
+/// The wire shape of one project-memory learning the gateway's `propose_memory` tool appends to
+/// `<session_dir>/memory-proposals.jsonl` (#112, Layer 3). Mirrors the gateway binary's
+/// `MemoryProposalRecord`. The agent proposes; the server appends as `Proposed`; the human curates.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub(crate) struct MemoryProposalRecord {
+    #[serde(default)]
+    pub kind: String,
+    pub text: String,
+}
+
+/// Read ALL memory proposals the agent raised this run (it may propose several). Empty when the
+/// sink is absent (the common case: no proposals). Pure read.
+pub(crate) fn read_memory_proposals(session_dir: &std::path::Path) -> Vec<MemoryProposalRecord> {
+    let sink = session_dir.join("memory-proposals.jsonl");
+    let Ok(text) = std::fs::read_to_string(sink) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<MemoryProposalRecord>(l).ok())
+        .collect()
+}
+
+/// Map a proposal's `kind` string to the typed [`crate::project::MemoryKind`] (default Decision).
+fn memory_kind_from_str(s: &str) -> crate::project::MemoryKind {
+    match s {
+        "pattern" => crate::project::MemoryKind::Pattern,
+        "gotcha" => crate::project::MemoryKind::Gotcha,
+        "constraint" => crate::project::MemoryKind::Constraint,
+        _ => crate::project::MemoryKind::Decision,
+    }
+}
+
 /// Bundle of inputs for the optional Layer-3 agentic code review (R7).
 ///
 /// Passed into `execute_dev_implement_run` when the active project has L3 enabled.
@@ -717,6 +750,11 @@ pub async fn execute_dev_implement_run(
     // escalation spec. The agent is grounded on their conditions + can `raise_escalation`; the
     // server resolves severity from this list (authoritative) when an escalation comes back.
     escalations_in_scope: Vec<EscalationInScope>,
+    // Project-memory sink (#112, Layer 3): the agent's `propose_memory` calls are read post-run and
+    // appended as PROPOSED entries on this project. `project_id` is the active project to append to
+    // (`None` skips memory capture, e.g. project-less test runs).
+    projects: crate::project::ProjectStore,
+    project_id: Option<String>,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -926,6 +964,33 @@ pub async fn execute_dev_implement_run(
         if let Err(e) = driver.run(&role, &task).await {
             fail(&runs, &uow, format!("implementation agent failed: {e}"));
             return;
+        }
+
+        // ── Project-memory proposals (#112, Layer 3) ───────────────────────────────────
+        // Did the agent call `propose_memory` this pass? Append each as a PROPOSED entry for the
+        // human to curate, then clear the sink so it is not re-read on the next pass. Captured
+        // BEFORE the escalation check so a paused run's proposals are not lost.
+        if let Some(pid) = &project_id {
+            let proposals = read_memory_proposals(spawn._dir.path());
+            if !proposals.is_empty() {
+                let _ = std::fs::remove_file(spawn._dir.path().join("memory-proposals.jsonl"));
+                let _ = projects.update(pid, |p| {
+                    for pr in &proposals {
+                        if pr.text.trim().is_empty() {
+                            continue;
+                        }
+                        let id = p.next_memory_id();
+                        p.memory.push(crate::project::MemoryEntry {
+                            id,
+                            kind: memory_kind_from_str(&pr.kind),
+                            text: pr.text.trim().to_string(),
+                            source: format!("agent:{story_id}"),
+                            status: crate::project::MemoryStatus::Proposed,
+                            created: chrono::Utc::now().to_rfc3339(),
+                        });
+                    }
+                });
+            }
         }
 
         // ── Agent-driven escalation (the RULE-AGNOSTIC gate) ───────────────────────────
@@ -1692,6 +1757,37 @@ mod tests {
         assert!(read_first_escalation_request(empty.path()).is_none());
     }
 
+    #[test]
+    fn read_memory_proposals_parses_all_and_kind_maps() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = dir.path().join("memory-proposals.jsonl");
+        std::fs::write(
+            &sink,
+            "\n{\"kind\":\"gotcha\",\"text\":\"The auth flow assumes X.\"}\n\
+             {\"kind\":\"pattern\",\"text\":\"Use the repository pattern.\"}\n",
+        )
+        .unwrap();
+        let props = read_memory_proposals(dir.path());
+        assert_eq!(props.len(), 2, "ALL proposals are read (agent may propose several)");
+        assert_eq!(props[0].text, "The auth flow assumes X.");
+        assert_eq!(
+            memory_kind_from_str(&props[0].kind),
+            crate::project::MemoryKind::Gotcha
+        );
+        assert_eq!(
+            memory_kind_from_str(&props[1].kind),
+            crate::project::MemoryKind::Pattern
+        );
+        // Unknown / absent kind falls back to Decision.
+        assert_eq!(
+            memory_kind_from_str("nonsense"),
+            crate::project::MemoryKind::Decision
+        );
+        // Absent sink -> empty (the common case: no proposals).
+        let empty = tempfile::tempdir().unwrap();
+        assert!(read_memory_proposals(empty.path()).is_empty());
+    }
+
     // ── 2b. READ ACCESS assertion (the invariant) ──────────────────────────────
 
     /// The implementer is bound to the worktree via `prepare_session(..., Some(dir))`, which
@@ -1814,6 +1910,8 @@ mod tests {
             crate::checkpoint::CheckpointStore::new(),
             None, // no active test-tamper escalation (unreached here: live mode is off)
             Vec::new(), // no in-scope agent-driven escalations in this test
+            crate::project::ProjectStore::new(),
+            None, // no project to capture memory into in this test
         )
         .await;
 

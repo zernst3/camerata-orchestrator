@@ -1440,6 +1440,9 @@ async fn spawn_brownfield_dev_run(
     };
     let impl_escalations = state.escalations.clone();
     let impl_checkpoints = state.checkpoints.clone();
+    // Project-memory capture (#112, Layer 3): the store + the active project to append proposals to.
+    let impl_projects = state.projects.clone();
+    let impl_project_id = state.projects.active().map(|p| p.id);
     let impl_registry = state.model_registry.clone();
     let impl_creds = state.credential_store.clone();
     let impl_limiter = state.rate_limiter.clone();
@@ -1471,6 +1474,8 @@ async fn spawn_brownfield_dev_run(
             impl_checkpoints,
             test_tamper_escalation,
             escalations_in_scope,
+            impl_projects,
+            impl_project_id,
         )
         .await
     });
