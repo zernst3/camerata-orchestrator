@@ -1360,35 +1360,36 @@ html, body {
 }
 .uow-review-ask { flex: none; font-size: 12px; }
 
-/* Soft-context settings editors (#112): product brief + operating principles. */
+/* Soft-context settings editors (#112): product brief + operating principles + memory. Dark, to
+   match the other per-project settings cards (.tier-map-editor et al.). */
 .soft-ctx-card {
-  border: 1px solid var(--line); border-radius: 10px; padding: 12px 13px; margin: 8px 0;
-  display: flex; flex-direction: column; gap: 8px; background: rgba(255,255,255,0.5);
+  border: 1px solid var(--line); border-radius: var(--r-md); padding: 14px 16px; margin: 8px 0;
+  display: flex; flex-direction: column; gap: 9px; background: var(--surface);
 }
-.soft-ctx-title { font-size: 13px; font-weight: 700; color: var(--ink); margin: 0; }
-.soft-ctx-sub { font-size: 11.5px; color: var(--ink-faint); margin: 0; line-height: 1.4; }
+.soft-ctx-title { font-size: 14px; font-weight: 600; color: var(--ink); margin: 0; }
+.soft-ctx-sub { font-size: 12px; color: var(--ink-soft); margin: 0; line-height: 1.4; }
 .soft-ctx-brief {
-  width: 100%; box-sizing: border-box; resize: vertical; border-radius: 8px; border: 1px solid var(--line);
-  padding: 8px 10px; font-size: 12.5px; color: var(--ink); background: rgba(255,255,255,0.8);
+  width: 100%; box-sizing: border-box; resize: vertical; border-radius: 6px; border: 1px solid var(--line);
+  padding: 8px 10px; font-size: 12.5px; color: var(--ink); background: #11100f;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace; line-height: 1.45;
 }
 .op-list { display: flex; flex-direction: column; gap: 4px; }
 .op-row {
   display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-radius: 7px;
-  border: 1px solid var(--line); font-size: 12.5px; color: var(--ink-faint); line-height: 1.4; cursor: pointer;
+  border: 1px solid var(--line); font-size: 12.5px; color: var(--ink-soft); line-height: 1.4; cursor: pointer;
 }
-.op-row.on { color: var(--ink); border-color: rgba(34,197,94,0.35); background: rgba(34,197,94,0.06); }
+.op-row.on { color: var(--ink); border-color: rgba(34,197,94,0.35); background: rgba(34,197,94,0.08); }
 .op-row input { margin-top: 2px; flex: none; }
 .op-text { display: block; }
 .op-add { display: flex; gap: 6px; align-items: center; }
 .op-add-input {
-  flex: 1; box-sizing: border-box; border-radius: 8px; border: 1px solid var(--line);
-  padding: 6px 9px; font-size: 12.5px; color: var(--ink); background: rgba(255,255,255,0.8); font-family: inherit;
+  flex: 1; box-sizing: border-box; border-radius: 6px; border: 1px solid var(--line);
+  padding: 6px 9px; font-size: 12.5px; color: var(--ink); background: #11100f; font-family: inherit;
 }
 /* Project memory (Layer 3) curation list. */
 .mem-badge {
-  margin-left: 8px; font-size: 10.5px; font-weight: 700; color: #7a5b00;
-  background: rgba(202,138,4,0.2); border-radius: 6px; padding: 1px 7px;
+  margin-left: 8px; font-size: 10.5px; font-weight: 700; color: #fbbf24;
+  background: rgba(202,138,4,0.18); border-radius: 6px; padding: 1px 7px;
 }
 .mem-empty { font-style: italic; }
 .mem-list { display: flex; flex-direction: column; gap: 5px; }
@@ -1396,8 +1397,8 @@ html, body {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 8px;
   border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px;
 }
-.mem-row.mem-proposed { border-color: rgba(202,138,4,0.4); background: rgba(202,138,4,0.07); }
-.mem-row.mem-archived { opacity: 0.55; }
+.mem-row.mem-proposed { border-color: rgba(202,138,4,0.45); background: rgba(202,138,4,0.10); }
+.mem-row.mem-archived { opacity: 0.5; }
 .mem-row-main { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; flex: 1; min-width: 0; }
 .mem-kind {
   flex: none; font-size: 9.5px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.03em;
@@ -1408,14 +1409,14 @@ html, body {
 .mem-actions { flex: none; display: flex; gap: 5px; }
 .mem-btn {
   font-size: 11px; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--line);
-  background: rgba(255,255,255,0.8); color: var(--ink); cursor: pointer;
+  background: var(--line-soft); color: var(--ink); cursor: pointer;
 }
 .mem-btn:hover { border-color: var(--accent); }
-.mem-del:hover { border-color: #dc2626; color: #dc2626; }
+.mem-del:hover { border-color: #dc2626; color: #f87171; }
 .mem-add { display: flex; gap: 6px; align-items: center; margin-top: 4px; }
 .mem-kind-select {
-  flex: none; border-radius: 8px; border: 1px solid var(--line); padding: 6px 8px;
-  font-size: 12px; color: var(--ink); background: rgba(255,255,255,0.8);
+  flex: none; border-radius: 6px; border: 1px solid var(--line); padding: 6px 8px;
+  font-size: 12px; color: var(--ink); background: #11100f;
 }
 
 /* AskUserQuestion-style structured clarification card (reusable). */
@@ -2786,7 +2787,7 @@ html, body {
 .loop-guard-title { font-weight: 700; font-size: 13px; color: var(--ink); }
 .loop-guard-sub { font-size: 12px; color: var(--ink-soft); }
 .loop-guard-row { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
-.loop-guard-input { width: 64px; text-align: center; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--ink); font-size: 13px; }
+.loop-guard-input { width: 64px; text-align: center; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: #11100f; color: var(--ink); font-size: 13px; }
 .loop-guard-save { margin-left: 4px; }
 
 /* ── Governed-development lifecycle strip (Pillar 2) ─────────────────────── */
