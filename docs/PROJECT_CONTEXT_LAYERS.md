@@ -1,6 +1,16 @@
 # Soft context layers: product brief, operating principles, project memory
 
-> **Status: DRAFT v0.1 (2026-06-29).** Design proposal. Tracking issue: #112.
+> **Status: Layers 1 + 2 BUILT (2026-06-30); Layer 3 deferred.** Tracking issue: #112.
+>
+> **Shipped:** the **product brief** (Layer 1) and **operating principles** (Layer 2) are persistent,
+> exportable per-project fields. Both feed `project_grounding` (`## Product context` + `## How to work
+> here`, enabled principles only), ride the existing project export/import (so they transfer between
+> users, per Zach's #112 comment), and are editable in Settings → This project → Soft context. New
+> projects are seeded with 8 default principles (toggleable). Server `407d48f` (model + grounding +
+> endpoints + tests), UI `eceae7c` (editors). OPEN-3 is resolved: yes, both export with the project.
+>
+> **Layer 3 (project memory)** — the agent-proposed, human-curated accumulating store — is the larger
+> propose/curate loop and is intentionally deferred to a follow-up.
 >
 > Origin: a conversation about why a well-context-loaded human + model pair "just gets it," and what
 > repo-independent context Camerata's agents are missing. The rules are Camerata's HARD constraints
