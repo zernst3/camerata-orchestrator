@@ -16,7 +16,7 @@ pub(super) struct RepoResolutionView {
 pub(super) async fn fetch_repo_health(project_id: &str) -> Option<Vec<RepoResolutionView>> {
     let v: serde_json::Value = reqwest::get(format!(
         "{}/api/projects/{}/repo-health",
-        crate::BFF_URL,
+        crate::bff_base(),
         project_id
     ))
     .await
@@ -29,7 +29,7 @@ pub(super) async fn fetch_repo_health(project_id: &str) -> Option<Vec<RepoResolu
 
 pub(super) async fn set_repo_path(repo: &str, path: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/repo-path", crate::BFF_URL))
+        .post(format!("{}/api/repo-path", crate::bff_base()))
         .json(&serde_json::json!({ "repo": repo, "path": path }))
         .send()
         .await
@@ -207,7 +207,7 @@ pub(super) fn default_finding_status() -> String {
 /// three tables (a single-select switches the view) until nothing is Unresolved; then the
 /// ignored and tech-debt buckets are processed. This is LOCAL triage state — the backend
 /// commit (baseline waiver / ticket / dev-engine import) happens at Process, not on each move.
-#[derive(Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub(super) enum TriageState {
     #[default]
     Unresolved,
@@ -271,7 +271,7 @@ pub(super) async fn ignore_findings(
     ticket: Option<String>,
 ) -> Option<String> {
     let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/onboard/ignore", crate::BFF_URL))
+        .post(format!("{}/api/onboard/ignore", crate::bff_base()))
         .json(&serde_json::json!({ "repo": repo, "findings": findings, "reason": reason, "ticket": ticket }))
         .send()
         .await
@@ -397,7 +397,7 @@ pub(super) async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {
     // background Bombe machine runs while the server is scanning.
     let _guard = crate::loading::LoadingGuard::new();
     reqwest::Client::new()
-        .post(format!("{}/api/onboard/scan", crate::BFF_URL))
+        .post(format!("{}/api/onboard/scan", crate::bff_base()))
         .json(&serde_json::json!({ "repos": repos }))
         .send()
         .await
@@ -437,7 +437,7 @@ pub(super) struct OnboardingDraft {
 /// Load the saved onboarding draft, or None when nothing is in progress.
 pub(super) async fn load_onboarding_draft() -> Option<OnboardingDraft> {
     reqwest::Client::new()
-        .get(format!("{}/api/onboard/draft", crate::BFF_URL))
+        .get(format!("{}/api/onboard/draft", crate::bff_base()))
         .send()
         .await
         .ok()?
@@ -450,7 +450,7 @@ pub(super) async fn load_onboarding_draft() -> Option<OnboardingDraft> {
 /// Persist the current onboarding draft (best-effort; failure is non-fatal).
 pub(super) async fn save_onboarding_draft(draft: &OnboardingDraft) {
     let _ = reqwest::Client::new()
-        .post(format!("{}/api/onboard/draft", crate::BFF_URL))
+        .post(format!("{}/api/onboard/draft", crate::bff_base()))
         .json(draft)
         .send()
         .await;
@@ -460,7 +460,7 @@ pub(super) async fn save_onboarding_draft(draft: &OnboardingDraft) {
 /// previous run's audit/dispositions onto it).
 pub(super) async fn clear_onboarding_draft() {
     let _ = reqwest::Client::new()
-        .post(format!("{}/api/onboard/draft/clear", crate::BFF_URL))
+        .post(format!("{}/api/onboard/draft/clear", crate::bff_base()))
         .send()
         .await;
 }
@@ -470,7 +470,7 @@ pub(super) async fn clear_onboarding_draft() {
 /// is the explicit "I'm done" action. Returns true on success.
 pub(super) async fn complete_onboarding() -> bool {
     let Ok(resp) = reqwest::Client::new()
-        .post(format!("{}/api/onboard/complete", crate::BFF_URL))
+        .post(format!("{}/api/onboard/complete", crate::bff_base()))
         .send()
         .await
     else {
@@ -522,7 +522,7 @@ pub(super) async fn audit_against(
     let _guard = crate::loading::LoadingGuard::new();
     let rule_json = audit_rules_json(rules);
     reqwest::Client::new()
-        .post(format!("{}/api/onboard/audit", crate::BFF_URL))
+        .post(format!("{}/api/onboard/audit", crate::bff_base()))
         .json(&serde_json::json!({
             "repos": repos,
             "rules": rule_json,
@@ -752,7 +752,7 @@ impl AuditModelsResp {
 /// Falls back gracefully: if OpenRouter key is not set, only Claude entries are returned.
 /// Returns `None` only when the server is unreachable.
 pub(super) async fn fetch_audit_models() -> Option<AuditModelsResp> {
-    let resp = reqwest::get(format!("{}/api/models/registry", crate::BFF_URL))
+    let resp = reqwest::get(format!("{}/api/models/registry", crate::bff_base()))
         .await
         .ok()?
         .json::<RegistryResp>()
@@ -1018,7 +1018,7 @@ pub(super) async fn audit_job_start(
 ) -> Option<String> {
     let rule_json = audit_rules_json(rules);
     let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/onboard/audit/start", crate::BFF_URL))
+        .post(format!("{}/api/onboard/audit/start", crate::bff_base()))
         .json(&serde_json::json!({
             "repos": repos,
             "rules": rule_json,
@@ -1056,7 +1056,7 @@ pub(super) fn recommend_scan_mode(report: &ScanReportView) -> String {
 pub(super) async fn audit_job_poll(job_id: &str) -> Option<JobStatusEnvelope> {
     reqwest::get(format!(
         "{}/api/onboard/audit/job/{}",
-        crate::BFF_URL,
+        crate::bff_base(),
         job_id
     ))
     .await
@@ -1765,7 +1765,7 @@ pub(super) async fn detect_local_repo() -> RepoDetect {
     };
     let path = folder.path().to_string_lossy().to_string();
     let resp = match reqwest::Client::new()
-        .post(format!("{}/api/git/detect-repo", crate::BFF_URL))
+        .post(format!("{}/api/git/detect-repo", crate::bff_base()))
         .json(&serde_json::json!({ "path": path }))
         .send()
         .await
@@ -1851,7 +1851,7 @@ pub(super) async fn scaffold_greenfield_api(
         })
         .collect();
     reqwest::Client::new()
-        .post(format!("{}/api/onboard/greenfield", crate::BFF_URL))
+        .post(format!("{}/api/onboard/greenfield", crate::bff_base()))
         .json(&serde_json::json!({
             "name": name,
             "path": dest_path,
@@ -3658,7 +3658,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
 pub(super) async fn fetch_deep_report(project_id: &str, include_soc2: bool) -> Option<String> {
     let url = format!(
         "{}/api/projects/{}/deep-report?include_soc2={}",
-        crate::BFF_URL,
+        crate::bff_base(),
         project_id,
         include_soc2
     );
@@ -4024,5 +4024,923 @@ mod tests {
             r#"{"models":[{"label":"Haiku","id":"haiku","provider":"claude","vision":false}]}"#,
         );
         assert!(resp.vision_grouped().is_empty());
+    }
+
+    // ── csv_field (RFC 4180 quoting) ──────────────────────────────────────────
+
+    #[test]
+    fn csv_field_passthrough_when_no_special_chars() {
+        assert_eq!(super::csv_field("plain"), "plain");
+    }
+
+    #[test]
+    fn csv_field_quotes_and_escapes_when_special() {
+        // A comma forces quoting; an embedded quote is doubled.
+        assert_eq!(super::csv_field("a,b"), "\"a,b\"");
+        assert_eq!(super::csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
+        // Newlines also force quoting.
+        assert_eq!(super::csv_field("line1\nline2"), "\"line1\nline2\"");
+    }
+
+    // ── findings_csv (header + flat one-row-per-finding) ──────────────────────
+
+    fn finding(json: serde_json::Value) -> super::FindingView {
+        serde_json::from_value(json).expect("valid FindingView fixture")
+    }
+
+    #[test]
+    fn findings_csv_header_and_row_shape() {
+        let f = finding(serde_json::json!({
+            "repo": "owner/repo",
+            "path": "src/lib.rs",
+            "line": 42,
+            "rule_id": "ARCH-1",
+            "severity": "high",
+            "snippet": "let x = 1;",
+            "detail": "explains it",
+            "also_matches": ["ARCH-2", "ARCH-3"],
+        }));
+        let csv = super::findings_csv(&[f]);
+        // Header is stable and column-complete.
+        assert!(
+            csv.starts_with("repo,severity,status,rule_id,also_matches,path,line,snippet,detail,preview,preview_tool\n"),
+            "header row; csv=\n{csv}"
+        );
+        // also_matches is space-joined in its single cell.
+        assert!(csv.contains("ARCH-2 ARCH-3"), "also_matches joined; csv=\n{csv}");
+        // Line + rule + path are present on the data row.
+        assert!(csv.contains("ARCH-1"), "rule id; csv=\n{csv}");
+        assert!(csv.contains("src/lib.rs"), "path; csv=\n{csv}");
+        assert!(csv.contains(",42,"), "line; csv=\n{csv}");
+    }
+
+    #[test]
+    fn findings_csv_quotes_snippet_with_comma() {
+        let f = finding(serde_json::json!({
+            "repo": "r",
+            "path": "p",
+            "line": 1,
+            "rule_id": "R",
+            "severity": "low",
+            "snippet": "a, b, c",
+            "detail": "d",
+        }));
+        let csv = super::findings_csv(&[f]);
+        assert!(csv.contains("\"a, b, c\""), "comma snippet must be quoted; csv=\n{csv}");
+    }
+
+    // ── finding_key / finding_state ───────────────────────────────────────────
+
+    #[test]
+    fn finding_key_combines_identity_fields() {
+        let f = finding(serde_json::json!({
+            "repo": "owner/repo", "path": "src/a.rs", "line": 7,
+            "rule_id": "RULE-X", "severity": "high", "snippet": "snip", "detail": ""
+        }));
+        let key = super::finding_key(&f);
+        assert!(key.contains("owner/repo"));
+        assert!(key.contains("RULE-X"));
+        assert!(key.contains("src/a.rs"));
+        assert!(key.contains('7'));
+        assert!(key.contains("snip"));
+    }
+
+    #[test]
+    fn finding_state_defaults_to_unresolved_when_absent() {
+        let f = finding(serde_json::json!({
+            "repo": "r", "path": "p", "line": 1,
+            "rule_id": "R", "severity": "low", "snippet": "s", "detail": ""
+        }));
+        let map = std::collections::HashMap::new();
+        assert_eq!(super::finding_state(&map, &f), super::TriageState::Unresolved);
+    }
+
+    #[test]
+    fn finding_state_reads_disposition_when_present() {
+        let f = finding(serde_json::json!({
+            "repo": "r", "path": "p", "line": 1,
+            "rule_id": "R", "severity": "low", "snippet": "s", "detail": ""
+        }));
+        let mut map = std::collections::HashMap::new();
+        map.insert(
+            super::finding_key(&f),
+            super::Disposition {
+                state: super::TriageState::Ignored,
+                reason: "noise".to_string(),
+                bucket: super::TechDebtBucket::Later,
+            },
+        );
+        assert_eq!(super::finding_state(&map, &f), super::TriageState::Ignored);
+    }
+
+    // ── default_finding_status / TriageState default ──────────────────────────
+
+    #[test]
+    fn default_finding_status_is_active() {
+        assert_eq!(super::default_finding_status(), "active");
+    }
+
+    #[test]
+    fn triage_state_defaults_to_unresolved() {
+        assert_eq!(super::TriageState::default(), super::TriageState::Unresolved);
+    }
+
+    // ── human_tokens (compact formatting) ─────────────────────────────────────
+
+    #[test]
+    fn human_tokens_formats_by_magnitude() {
+        assert_eq!(super::human_tokens(900), "900");
+        assert_eq!(super::human_tokens(2_000), "2k");
+        assert_eq!(super::human_tokens(350_000), "350k");
+        assert_eq!(super::human_tokens(2_000_000), "2.0M");
+    }
+
+    // ── det_tool_label ────────────────────────────────────────────────────────
+
+    #[test]
+    fn det_tool_label_maps_known_and_passes_through_unknown() {
+        assert_eq!(super::det_tool_label("floor"), "Security floor");
+        assert_eq!(super::det_tool_label("unrouted"), "Unrouted rules");
+        assert_eq!(super::det_tool_label("clippy"), "clippy");
+    }
+
+    // ── recommend_scan_mode ───────────────────────────────────────────────────
+
+    fn scan_report(json: serde_json::Value) -> super::ScanReportView {
+        serde_json::from_value(json).expect("valid ScanReportView fixture")
+    }
+
+    #[test]
+    fn recommend_scan_mode_job_for_multi_repo() {
+        let r = scan_report(serde_json::json!({
+            "repos": ["a", "b"], "files_scanned": 10,
+            "findings": [], "proposed_rules": [], "gated": false
+        }));
+        assert_eq!(super::recommend_scan_mode(&r), "job");
+    }
+
+    #[test]
+    fn recommend_scan_mode_job_for_large_single_repo() {
+        let r = scan_report(serde_json::json!({
+            "repos": ["a"], "files_scanned": 200,
+            "findings": [], "proposed_rules": [], "gated": false
+        }));
+        assert_eq!(super::recommend_scan_mode(&r), "job");
+    }
+
+    #[test]
+    fn recommend_scan_mode_parallel_for_small_single_repo() {
+        let r = scan_report(serde_json::json!({
+            "repos": ["a"], "files_scanned": 10,
+            "findings": [], "proposed_rules": [], "gated": false
+        }));
+        assert_eq!(super::recommend_scan_mode(&r), "parallel");
+    }
+
+    // ── audit_rules_json (request serialization shape) ────────────────────────
+
+    #[test]
+    fn audit_rules_json_emits_id_directive_repos() {
+        let rules = vec![super::SelectedAuditRule {
+            id: "ARCH-1".to_string(),
+            directive: "do the thing".to_string(),
+            repos: vec!["owner/repo".to_string()],
+        }];
+        let json = super::audit_rules_json(&rules);
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["id"], "ARCH-1");
+        assert_eq!(json[0]["directive"], "do the thing");
+        assert_eq!(json[0]["repos"][0], "owner/repo");
+    }
+
+    // ── resolve_gf_directive ──────────────────────────────────────────────────
+
+    fn proposed_rule(json: serde_json::Value) -> crate::cockpit::rules::ProposedRuleView {
+        serde_json::from_value(json).expect("valid ProposedRuleView fixture")
+    }
+
+    #[test]
+    fn resolve_gf_directive_uses_title_when_no_options() {
+        let r = proposed_rule(serde_json::json!({
+            "id": "R1", "title": "Use newtypes", "kind": "architectural"
+        }));
+        assert_eq!(super::resolve_gf_directive(&r), "Use newtypes");
+    }
+
+    #[test]
+    fn resolve_gf_directive_uses_default_option_directive() {
+        let r = proposed_rule(serde_json::json!({
+            "id": "R1", "title": "Title", "kind": "architectural",
+            "options": [
+                { "id": "opt-a", "label": "A", "directive": "directive A" },
+                { "id": "opt-b", "label": "B", "directive": "directive B" }
+            ],
+            "default_option": "opt-b"
+        }));
+        assert_eq!(super::resolve_gf_directive(&r), "directive B");
+    }
+
+    #[test]
+    fn resolve_gf_directive_falls_back_to_title_when_default_directive_empty() {
+        let r = proposed_rule(serde_json::json!({
+            "id": "R1", "title": "The Title", "kind": "architectural",
+            "options": [ { "id": "opt-a", "label": "A", "directive": "" } ],
+            "default_option": "opt-a"
+        }));
+        assert_eq!(super::resolve_gf_directive(&r), "The Title");
+    }
+
+    // ── estimate_audit_cost (monotonicity + mode/deep behaviour) ──────────────
+
+    #[test]
+    fn estimate_cost_returns_passes_and_nonzero_dollars() {
+        let (tokens, dollars, passes) = super::estimate_audit_cost(
+            400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false,
+        );
+        assert!(tokens > 0, "tokens estimated");
+        assert!(dollars > 0.0, "dollars estimated");
+        assert!(passes >= 1, "at least one pass");
+    }
+
+    #[test]
+    fn estimate_cost_batch_mode_is_cheaper_than_parallel() {
+        let (_, parallel, _) = super::estimate_audit_cost(
+            400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false,
+        );
+        let (_, batch, _) = super::estimate_audit_cost(
+            400_000, 20, "batch", 3.0, 15.0, 3.0, 15.0, false, false, false,
+        );
+        assert!(batch < parallel, "batch (50% scan discount) must cost less; batch={batch} parallel={parallel}");
+    }
+
+    #[test]
+    fn estimate_cost_deep_tier_adds_cost() {
+        let (_, without, _) = super::estimate_audit_cost(
+            400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false,
+        );
+        let (_, with_deep, _) = super::estimate_audit_cost(
+            400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, true,
+        );
+        assert!(with_deep > without, "deep tier must increase the estimate; deep={with_deep} base={without}");
+    }
+
+    // ════════════════════════════════════════════════════════════════════════
+    // Tier 2 — network-helper tests (wiremock). Each sets CAMERATA_BFF_URL, so
+    // each MUST carry BOTH #[tokio::test] (outer) and #[serial_test::serial(bff_env)]
+    // (inner) to serialize the process-global env override across the crate's tests.
+    // ════════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_repo_health_unwraps_repos_array() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-1/repo-health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "repos": [
+                    { "repo": "owner/a", "path": "/x/a", "resolved": true, "reason": "" },
+                    { "repo": "owner/b", "resolved": false, "reason": "no local checkout" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_repo_health("proj-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let repos = out.expect("repos array parses");
+        assert_eq!(repos.len(), 2);
+        assert_eq!(repos[0].repo, "owner/a");
+        assert!(repos[0].resolved);
+        assert_eq!(repos[1].repo, "owner/b");
+        assert!(!repos[1].resolved);
+        assert_eq!(repos[1].reason, "no local checkout");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_repo_path_posts_repo_and_path() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/repo-path"))
+            .and(body_json(serde_json::json!({ "repo": "owner/a", "path": "/local/a" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_repo_path("owner/a", "/local/a").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok, "set_repo_path succeeds on a 2xx");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn ignore_findings_posts_payload_and_returns_url() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/ignore"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "url": "https://github.com/owner/repo/pull/9"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let f: super::FindingView = serde_json::from_value(serde_json::json!({
+            "repo": "owner/repo", "path": "p", "line": 1,
+            "rule_id": "R", "severity": "low", "snippet": "s", "detail": ""
+        }))
+        .unwrap();
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let url = super::ignore_findings("owner/repo", &[f], "noise", Some("CAM-9".to_string())).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(url.as_deref(), Some("https://github.com/owner/repo/pull/9"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn ignore_findings_returns_none_when_not_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/ignore"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let url = super::ignore_findings("owner/repo", &[], "r", None).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(url.is_none(), "ok:false must yield None");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn scan_repos_posts_repos_and_parses_report() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/scan"))
+            .and(body_json(serde_json::json!({ "repos": ["owner/a", "owner/b"] })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "repos": ["owner/a", "owner/b"],
+                "files_scanned": 12,
+                "findings": [],
+                "proposed_rules": [],
+                "gated": false
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let report = super::scan_repos(&["owner/a".to_string(), "owner/b".to_string()]).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let report = report.expect("scan report parses");
+        assert_eq!(report.files_scanned, 12);
+        assert_eq!(report.repos, vec!["owner/a".to_string(), "owner/b".to_string()]);
+        assert!(!report.gated);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn load_onboarding_draft_parses_present_draft() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "scan": {
+                    "repos": ["owner/a"],
+                    "files_scanned": 3,
+                    "findings": [],
+                    "proposed_rules": [],
+                    "gated": false
+                },
+                "viewed_repo": "owner/a"
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let draft = super::load_onboarding_draft().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let draft = draft.expect("a present draft parses");
+        assert_eq!(draft.scan.files_scanned, 3);
+        assert_eq!(draft.viewed_repo, "owner/a");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn load_onboarding_draft_none_when_null() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::Value::Null))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let draft = super::load_onboarding_draft().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(draft.is_none(), "a null body means no draft in progress");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn save_onboarding_draft_posts_the_draft_body() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/draft"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let draft: super::OnboardingDraft = serde_json::from_value(serde_json::json!({
+            "scan": {
+                "files_scanned": 0, "findings": [], "proposed_rules": [], "gated": false
+            }
+        }))
+        .unwrap();
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        super::save_onboarding_draft(&draft).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+        // .expect(1) on the mock verifies (on server drop) the POST was issued once.
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn clear_onboarding_draft_posts_clear() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/draft/clear"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        super::clear_onboarding_draft().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn complete_onboarding_reads_ok_flag() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/complete"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::complete_onboarding().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok, "ok:true means onboarding completed");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn audit_against_posts_full_request_body() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/audit"))
+            .and(body_json(serde_json::json!({
+                "repos": ["owner/a"],
+                "rules": [ { "id": "R1", "directive": "do it", "repos": ["owner/a"] } ],
+                "model": "claude-opus-4-8",
+                "calibration_model": "claude-sonnet-4",
+                "mode": "parallel",
+                "thorough": false,
+                "incremental": true,
+                "deep": false,
+                "run_ai_review": true,
+                "run_deterministic": true,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "files_scanned": 4, "findings": [], "proposed_rules": [], "gated": false
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let rules = vec![super::SelectedAuditRule {
+            id: "R1".to_string(),
+            directive: "do it".to_string(),
+            repos: vec!["owner/a".to_string()],
+        }];
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let report = super::audit_against(
+            &["owner/a".to_string()],
+            &rules,
+            "claude-opus-4-8",
+            "claude-sonnet-4",
+            "parallel",
+            false,
+            true,
+            false,
+            true,
+            true,
+        )
+        .await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let report = report.expect("audit report parses");
+        assert_eq!(report.files_scanned, 4);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_audit_models_maps_registry_and_picks_claude_default() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/models/registry"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    { "id": "ds-r1", "display": "DeepSeek R1", "provider": "openrouter",
+                      "free": false, "tool_use": true, "context": 64000, "price_in": 0.5, "price_out": 0.55, "caching": true },
+                    { "id": "opus", "display": "Opus", "provider": "claude",
+                      "free": false, "tool_use": true, "context": 200000, "price_in": 3.0, "price_out": 15.0, "caching": true }
+                ],
+                "openrouter_fetched": true
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let resp = super::fetch_audit_models().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let resp = resp.expect("registry parses");
+        // Default = first claude model (opus), not the first model overall.
+        assert_eq!(resp.default, "opus");
+        assert!(resp.openrouter_fetched);
+        assert_eq!(resp.models.len(), 2);
+        // The badge label is built from registry fields at fetch time.
+        let opus = resp.models.iter().find(|m| m.id == "opus").unwrap();
+        assert!(opus.label.contains("Opus"), "label carries display name: {}", opus.label);
+        assert!(opus.label.contains("$15/M"), "label carries output price: {}", opus.label);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn audit_job_start_returns_job_id() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/audit/start"))
+            .and(body_json(serde_json::json!({
+                "repos": ["owner/a"],
+                "rules": [ { "id": "R1", "directive": "d", "repos": [] } ],
+                "model": "m",
+                "calibration_model": "c",
+                "mode": "job",
+                "thorough": false,
+                "incremental": false,
+                "deep": false,
+                "run_ai_review": true,
+                "run_deterministic": true,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "job_id": "job-123" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let rules = vec![super::SelectedAuditRule {
+            id: "R1".to_string(),
+            directive: "d".to_string(),
+            repos: vec![],
+        }];
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let jid = super::audit_job_start(
+            &["owner/a".to_string()],
+            &rules,
+            "m",
+            "c",
+            "job",
+            false,
+            false,
+            false,
+            true,
+            true,
+        )
+        .await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(jid.as_deref(), Some("job-123"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn audit_job_poll_parses_envelope() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/audit/job/job-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "job": { "status": "running", "done": 2, "total": 5, "findings": [] },
+                "idle_ms": 1200,
+                "cancel_requested": false
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let env = super::audit_job_poll("job-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let env = env.expect("envelope parses");
+        assert_eq!(env.job.status, "running");
+        assert_eq!(env.job.done, 2);
+        assert_eq!(env.job.total, 5);
+        assert_eq!(env.idle_ms, Some(1200));
+        assert!(!env.cancel_requested);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn scaffold_greenfield_api_filters_cross_repo_and_posts_arm_rules() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // The helper drops cross-repo / process rules and resolves each remaining rule to an
+        // ArmRuleReq scoped repo-local to the new repo name. Assert the exact emitted body.
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/greenfield"))
+            .and(body_json(serde_json::json!({
+                "name": "my-proj",
+                "path": "/dest/my-proj",
+                "rules": [
+                    {
+                        "id": "R-LOCAL",
+                        "title": "Local rule",
+                        "directive": "Local rule",
+                        "enforcement": "convention",
+                        "scope": "repo-local",
+                        "repos": ["my-proj"]
+                    }
+                ]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "path": "/dest/my-proj",
+                "files_written": ["CONVENTIONS.md"],
+                "commit_sha": "abc123",
+                "message": "scaffolded"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let rules = vec![
+            proposed_rule(serde_json::json!({
+                "id": "R-LOCAL", "title": "Local rule", "kind": "architectural",
+                "enforcement": "convention", "scope": "repo-local"
+            })),
+            // This cross-repo rule must be filtered OUT of the arm payload.
+            proposed_rule(serde_json::json!({
+                "id": "R-CROSS", "title": "Cross", "kind": "process",
+                "enforcement": "convention", "scope": "cross-repo"
+            })),
+        ];
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let result = super::scaffold_greenfield_api("my-proj", "/dest/my-proj", &rules).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let result = result.expect("scaffold result parses");
+        assert!(result.ok);
+        assert_eq!(result.commit_sha, "abc123");
+        assert_eq!(result.files_written, vec!["CONVENTIONS.md".to_string()]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_deep_report_returns_markdown_on_2xx() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-1/deep-report"))
+            .and(query_param("include_soc2", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("# Deep Report\n\nsome markdown"))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let md = super::fetch_deep_report("proj-1", true).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let md = md.expect("markdown returned on success");
+        assert!(md.contains("# Deep Report"), "markdown body returned: {md}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_deep_report_none_on_error_status() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-1/deep-report"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let md = super::fetch_deep_report("proj-1", false).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(md.is_none(), "a non-2xx must yield None, not the error body");
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    // ── Tier-1 render: DeterministicProgress (props-only, no context) ──────────
+    // Mirrors the live_run.rs render-test pattern: a harness root mounts the component
+    // inside the VirtualDom runtime so its hooks run, then dioxus_ssr renders static HTML.
+    fn det_progress_harness() -> Element {
+        let progress: DetProgressView = serde_json::from_value(serde_json::json!({
+            "tools": [
+                { "tool": "floor", "status": "done", "findings": 3 },
+                { "tool": "clippy", "status": "running", "findings": 0 }
+            ],
+            "done": 1,
+            "total": 2
+        }))
+        .expect("valid DetProgressView fixture");
+        rsx! {
+            DeterministicProgress { progress }
+        }
+    }
+
+    #[test]
+    fn deterministic_progress_renders_tools_and_count() {
+        let mut vdom = VirtualDom::new(det_progress_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("det-progress"), "root container; html=\n{html}");
+        assert!(html.contains("Deterministic scan"), "title; html=\n{html}");
+        assert!(html.contains("1/2 tools"), "done/total count; html=\n{html}");
+        // det_tool_label maps "floor" → "Security floor"; "clippy" passes through.
+        assert!(html.contains("Security floor"), "floor label; html=\n{html}");
+        assert!(html.contains("clippy"), "clippy label; html=\n{html}");
+        // The done tool shows its findings count; the running tool shows its status.
+        assert!(html.contains("3 finding(s)"), "done tool findings; html=\n{html}");
+        assert!(html.contains("running"), "running tool status; html=\n{html}");
+    }
+
+    // ── Tier-1 render: GreenfieldResultView, success branch (props-only) ───────
+    fn gf_ok_harness() -> Element {
+        let result: GreenfieldScaffoldResult = serde_json::from_value(serde_json::json!({
+            "ok": true,
+            "path": "/dest/my-proj",
+            "files_written": ["CONVENTIONS.md", "AGENTS.md"],
+            "commit_sha": "abc123",
+            "message": "Repo created"
+        }))
+        .expect("valid GreenfieldScaffoldResult fixture");
+        rsx! {
+            GreenfieldResultView { result }
+        }
+    }
+
+    #[test]
+    fn greenfield_result_ok_renders_files_and_sha() {
+        let mut vdom = VirtualDom::new(gf_ok_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("gf-result-ok"), "success container class; html=\n{html}");
+        assert!(html.contains("Repo scaffolded"), "success heading; html=\n{html}");
+        assert!(html.contains("CONVENTIONS.md"), "first file; html=\n{html}");
+        assert!(html.contains("AGENTS.md"), "second file; html=\n{html}");
+        assert!(html.contains("abc123"), "commit sha; html=\n{html}");
+        assert!(html.contains("/dest/my-proj"), "location path; html=\n{html}");
+    }
+
+    // ── Tier-1 render: GreenfieldResultView, error branch (props-only) ─────────
+    fn gf_err_harness() -> Element {
+        let result: GreenfieldScaffoldResult = serde_json::from_value(serde_json::json!({
+            "ok": false,
+            "message": "directory already exists"
+        }))
+        .expect("valid GreenfieldScaffoldResult fixture");
+        rsx! {
+            GreenfieldResultView { result }
+        }
+    }
+
+    #[test]
+    fn greenfield_result_err_renders_failure_message() {
+        let mut vdom = VirtualDom::new(gf_err_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("gf-result-err"), "error container class; html=\n{html}");
+        assert!(html.contains("Scaffold failed"), "error heading; html=\n{html}");
+        assert!(html.contains("directory already exists"), "error message; html=\n{html}");
+    }
+
+    // ── Tier-1 render: DeepReportExportPanel (needs the toast context) ─────────
+    // It calls use_context::<Signal<Vec<Toast>>>(), so the harness MUST provide it.
+    // The report_md signal starts None, so we assert the static button + hint structure
+    // (no modal until the async fetch resolves, which never runs under SSR).
+    fn deep_export_harness_soc2_on() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        rsx! {
+            DeepReportExportPanel { project_id: "proj-1".to_string(), soc2_enabled: true }
+        }
+    }
+
+    #[test]
+    fn deep_export_panel_renders_button_and_soc2_on_hint() {
+        let mut vdom = VirtualDom::new(deep_export_harness_soc2_on);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("deep-export-panel"), "panel container; html=\n{html}");
+        assert!(html.contains("Export deep compliance report"), "section label; html=\n{html}");
+        // soc2_enabled = true → the "also included" hint, not the "disabled" one.
+        assert!(html.contains("SOC-2 gap analysis is also included"), "soc2-on hint; html=\n{html}");
+        // The CTA label (loading() is false initially).
+        assert!(html.contains("Export deep report"), "export button label; html=\n{html}");
+        // No modal overlay until a report loads.
+        assert!(!html.contains("deep-export-modal-overlay"), "no modal before fetch; html=\n{html}");
+    }
+
+    fn deep_export_harness_soc2_off() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        rsx! {
+            DeepReportExportPanel { project_id: "proj-1".to_string(), soc2_enabled: false }
+        }
+    }
+
+    #[test]
+    fn deep_export_panel_renders_soc2_off_hint() {
+        let mut vdom = VirtualDom::new(deep_export_harness_soc2_off);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("SOC-2 gap analysis is disabled for this workspace"),
+            "soc2-off hint; html=\n{html}"
+        );
     }
 }

@@ -75,24 +75,40 @@ pub fn provide_loading_context() {
 /// automatically decrement when it falls out of scope (including on early
 /// return or panic unwind).
 pub struct LoadingGuard {
-    count: LoadingCount,
+    // `None` when there is no loading context (no Dioxus runtime, or created before
+    // `provide_loading_context()`): the guard degrades to a no-op instead of panicking. This keeps
+    // the async helpers that wrap themselves in a guard callable from plain unit tests.
+    count: Option<LoadingCount>,
 }
 
 impl LoadingGuard {
-    /// Increment the in-flight count.  Requires the loading context to have
-    /// been provided by `provide_loading_context()` at some ancestor.
+    /// Increment the in-flight count.  When the loading context is present (provided by
+    /// `provide_loading_context()` at an ancestor) this drives the Bombe animation; when it is
+    /// absent (e.g. a unit test with no runtime) it is a no-op.
     pub fn new() -> Self {
-        let mut count = consume_context::<LoadingCount>();
-        count += 1;
+        // `try_consume_context` still requires an active runtime (it calls
+        // `Runtime::with_current_scope`, which panics with no VirtualDom), so gate on
+        // `Runtime::try_current()` first. With no runtime — e.g. a plain unit test exercising an
+        // async helper that wraps itself in a guard — this degrades to a no-op.
+        let count = if dioxus::core::Runtime::try_current().is_some() {
+            try_consume_context::<LoadingCount>()
+        } else {
+            None
+        };
+        if let Some(mut c) = count {
+            c += 1;
+        }
         Self { count }
     }
 }
 
 impl Drop for LoadingGuard {
     fn drop(&mut self) {
-        // Saturating: a stray double-drop is silently safe.
-        let prev = *self.count.peek();
-        self.count.set(prev.saturating_sub(1));
+        if let Some(count) = self.count.as_mut() {
+            // Saturating: a stray double-drop is silently safe.
+            let prev = *count.peek();
+            count.set(prev.saturating_sub(1));
+        }
     }
 }
 

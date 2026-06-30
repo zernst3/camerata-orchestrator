@@ -16,7 +16,7 @@ pub(super) async fn emit_project_local(
     let resp = reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/emit-local",
-            crate::BFF_URL,
+            crate::bff_base(),
             project_id
         ))
         .json(&body)
@@ -73,7 +73,7 @@ pub(super) async fn add_custom_rule(
     reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/custom",
-            crate::BFF_URL,
+            crate::bff_base(),
             project_id
         ))
         .json(&serde_json::json!({ "name": name, "body": body, "repos": repos }))
@@ -128,7 +128,7 @@ pub(super) async fn delete_custom_rule(project_id: &str, name: &str) -> bool {
     reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/custom/delete",
-            crate::BFF_URL,
+            crate::bff_base(),
             project_id
         ))
         .json(&serde_json::json!({ "name": name }))
@@ -242,7 +242,7 @@ pub(super) async fn import_ruleset(project_id: &str, json: String) -> bool {
     reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/ruleset",
-            crate::BFF_URL,
+            crate::bff_base(),
             project_id
         ))
         .header("content-type", "application/json")
@@ -255,7 +255,7 @@ pub(super) async fn import_ruleset(project_id: &str, json: String) -> bool {
 
 /// Fetch ALL corpus rules (the full rule library, with full context).
 pub(super) async fn fetch_corpus_rules() -> Option<Vec<ProposedRuleView>> {
-    reqwest::get(format!("{}/api/corpus-rules", crate::BFF_URL))
+    reqwest::get(format!("{}/api/corpus-rules", crate::bff_base()))
         .await
         .ok()?
         .json::<Vec<ProposedRuleView>>()
@@ -269,7 +269,7 @@ pub(super) async fn save_ruleset(project_id: &str, ruleset: serde_json::Value) -
     reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/ruleset",
-            crate::BFF_URL,
+            crate::bff_base(),
             project_id
         ))
         .json(&ruleset)
@@ -306,7 +306,7 @@ pub(super) struct SuppressionView {
 pub(super) async fn fetch_suppressions(project_id: &str) -> Option<Vec<SuppressionView>> {
     reqwest::get(format!(
         "{}/api/projects/{}/suppressions",
-        crate::BFF_URL,
+        crate::bff_base(),
         project_id
     ))
     .await
@@ -437,7 +437,7 @@ pub(super) fn build_ruleset_json(project: &ProjectView) -> serde_json::Value {
 }
 
 /// Which of the three lists a rule_id lives in (selections / cross_repo / process).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum SelectionBucket {
     Selections,
     CrossRepo,
@@ -3232,7 +3232,7 @@ pub(super) async fn apply_rules(
     findings: &[FindingView],
 ) -> Option<(bool, String, Vec<ArmResultView>)> {
     let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/onboard/apply", crate::BFF_URL))
+        .post(format!("{}/api/onboard/apply", crate::bff_base()))
         .json(&serde_json::json!({ "rules": rules, "custom": custom, "findings": findings }))
         .send()
         .await
@@ -3273,7 +3273,7 @@ pub(super) async fn preflight_apply(
     findings: &[FindingView],
 ) -> Option<Vec<ApplyPreflightRepo>> {
     let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/onboard/apply/preflight", crate::BFF_URL))
+        .post(format!("{}/api/onboard/apply/preflight", crate::bff_base()))
         .json(&serde_json::json!({ "rules": rules, "custom": custom, "findings": findings }))
         .send()
         .await
@@ -3292,7 +3292,7 @@ pub(super) async fn preflight_apply(
 /// Open the governance PR for each repo from the already-applied branch (separate step).
 pub(super) async fn open_governance_pr(repos: &[String]) -> Option<Vec<ArmResultView>> {
     let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/onboard/open-pr", crate::BFF_URL))
+        .post(format!("{}/api/onboard/open-pr", crate::bff_base()))
         .json(&serde_json::json!({ "repos": repos }))
         .send()
         .await
@@ -3314,7 +3314,7 @@ pub(super) async fn create_ticket(
     title: Option<&str>,
 ) -> Option<String> {
     let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/onboard/ticket", crate::BFF_URL))
+        .post(format!("{}/api/onboard/ticket", crate::bff_base()))
         .json(&serde_json::json!({ "repo": repo, "findings": findings, "title": title }))
         .send()
         .await
@@ -4464,7 +4464,7 @@ pub(super) struct RuleDriftEntry {
 pub(super) async fn fetch_rule_drift(project_id: &str) -> Option<Vec<RuleDriftEntry>> {
     let v: serde_json::Value = reqwest::get(format!(
         "{}/api/projects/{}/rule-drift",
-        crate::BFF_URL,
+        crate::bff_base(),
         project_id
     ))
     .await
@@ -4484,7 +4484,7 @@ pub(super) async fn apply_rule_drift_update(project_id: &str, rule_id: &str) -> 
     reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/rule-drift/{}/accept",
-            crate::BFF_URL,
+            crate::bff_base(),
             project_id,
             rule_id
         ))
@@ -4614,7 +4614,7 @@ pub(super) enum RuleEditScope {
 pub(super) async fn fetch_single_rule(project_id: &str, rule_id: &str) -> Option<serde_json::Value> {
     reqwest::get(format!(
         "{}/api/projects/{}/rules/{}",
-        crate::BFF_URL,
+        crate::bff_base(),
         project_id,
         rule_id
     ))
@@ -4647,7 +4647,7 @@ pub(super) async fn save_single_rule_edit(
     reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/rules/{}",
-            crate::BFF_URL,
+            crate::bff_base(),
             project_id,
             rule_id
         ))
@@ -5300,5 +5300,879 @@ mod tests {
         assert_eq!(super::tier_chain_str(Some(&num)), "");
         let obj = serde_json::json!({"k": "v"});
         assert_eq!(super::tier_chain_str(Some(&obj)), "");
+    }
+
+    // ── verif_badge ───────────────────────────────────────────────────────────
+    // The provenance-badge mapping is shared across every rule table + the detail modal.
+    // A wrong (label, css-modifier) pair silently mis-colors the whole rule library.
+
+    #[test]
+    fn verif_badge_maps_each_known_state() {
+        assert_eq!(super::verif_badge("verified"), ("\u{2713} Verified", "verified"));
+        assert_eq!(super::verif_badge("grounded"), ("\u{29bf} Grounded", "grounded"));
+        assert_eq!(super::verif_badge("needs_recheck"), ("Needs re-check", "needs-recheck"));
+        assert_eq!(super::verif_badge("draft"), ("Draft", "draft"));
+    }
+
+    #[test]
+    fn verif_badge_unknown_falls_back_to_draft() {
+        // Any unrecognised provenance value renders as the muted Draft badge, never panics.
+        assert_eq!(super::verif_badge("anything-else"), ("Draft", "draft"));
+        assert_eq!(super::verif_badge(""), ("Draft", "draft"));
+    }
+
+    // ── verif_sources_tooltip ─────────────────────────────────────────────────
+
+    #[test]
+    fn verif_sources_tooltip_empty_is_empty_string() {
+        assert_eq!(super::verif_sources_tooltip(&[]), "");
+    }
+
+    #[test]
+    fn verif_sources_tooltip_joins_titles_and_appends_linter() {
+        let sources = vec![
+            super::RuleSourceView {
+                url: "https://a".to_string(),
+                title: "Rust API Guidelines".to_string(),
+                linter: None,
+            },
+            super::RuleSourceView {
+                url: "https://b".to_string(),
+                title: "Clippy lint".to_string(),
+                linter: Some("clippy".to_string()),
+            },
+        ];
+        assert_eq!(
+            super::verif_sources_tooltip(&sources),
+            "Rust API Guidelines \u{b7} Clippy lint [clippy]"
+        );
+    }
+
+    // ── split_needs_review ────────────────────────────────────────────────────
+    // The calibration pass appends `[needs review: <reason>]` to flag findings whose
+    // APPLICABILITY is in doubt. The split must separate the body from the reason so the
+    // table can surface WHY a finding is flagged.
+
+    #[test]
+    fn split_needs_review_no_flag_returns_detail_and_none() {
+        let (body, reason) = super::split_needs_review("Plain finding detail.");
+        assert_eq!(body, "Plain finding detail.");
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn split_needs_review_bare_flag_returns_empty_reason() {
+        let (body, reason) = super::split_needs_review("Some detail [needs review]");
+        assert_eq!(body, "Some detail");
+        assert_eq!(reason, Some(String::new()));
+    }
+
+    #[test]
+    fn split_needs_review_flag_with_reason_extracts_reason() {
+        let (body, reason) =
+            super::split_needs_review("Some detail [needs review: premature for a mini app]");
+        assert_eq!(body, "Some detail");
+        assert_eq!(reason, Some("premature for a mini app".to_string()));
+    }
+
+    // ── bucket_of ─────────────────────────────────────────────────────────────
+
+    fn rule_with_scope(scope: &str) -> super::ProposedRuleView {
+        let mut r = corpus_with_options("d", vec![]);
+        r.scope = scope.to_string();
+        r
+    }
+
+    #[test]
+    fn bucket_of_maps_scope_to_bucket() {
+        assert_eq!(super::bucket_of(&rule_with_scope("cross-repo")), SelectionBucket::CrossRepo);
+        assert_eq!(super::bucket_of(&rule_with_scope("process")), SelectionBucket::Process);
+        assert_eq!(super::bucket_of(&rule_with_scope("repo-local")), SelectionBucket::Selections);
+        // An unknown scope defaults to the repo-local Selections bucket.
+        assert_eq!(super::bucket_of(&rule_with_scope("whatever")), SelectionBucket::Selections);
+    }
+
+    // ── rules_csv ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rules_csv_emits_header_and_one_row_per_rule() {
+        let mut r = corpus_with_options("rust", vec![]);
+        r.id = "RUST-FMT-1".to_string();
+        r.title = "Format with rustfmt".to_string();
+        r.kind = "mechanical".to_string();
+        r.scope = "repo-local".to_string();
+        r.enforcement = "mechanical".to_string();
+        r.placement = "CI".to_string();
+        r.finding_count = 3;
+        r.repos = vec!["me/api".to_string(), "me/web".to_string()];
+        let csv = super::rules_csv(std::slice::from_ref(&r));
+        let mut lines = csv.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            "rule_id,title,kind,scope,enforcement,placement,finding_count,repos"
+        );
+        let row = lines.next().unwrap();
+        assert!(row.starts_with("RUST-FMT-1,Format with rustfmt,mechanical,repo-local,mechanical,CI,3,"));
+        // repos are space-joined inside the single CSV field.
+        assert!(row.contains("me/api me/web"), "row=\n{row}");
+    }
+
+    // ── build_ruleset_json ────────────────────────────────────────────────────
+
+    fn project_from_json(v: serde_json::Value) -> super::ProjectView {
+        serde_json::from_value(v).expect("valid ProjectView fixture")
+    }
+
+    #[test]
+    fn build_ruleset_json_preserves_selections_and_custom() {
+        let project = project_from_json(serde_json::json!({
+            "id": "proj-1",
+            "name": "Acme",
+            "ruleset": {
+                "selections": [
+                    { "rule_id": "RUST-FMT-1", "chosen_option": "a", "repos": ["me/api"] }
+                ],
+                "cross_repo": [
+                    { "rule_id": "INTEGRATION-API-CONTRACT-1", "chosen_option": null, "repos": [] }
+                ],
+                "process": [],
+                "custom": [
+                    { "name": "house", "body": "Prefer X.", "domain": "*" }
+                ]
+            }
+        }));
+        let out = super::build_ruleset_json(&project);
+        assert_eq!(out["selections"][0]["rule_id"], "RUST-FMT-1");
+        assert_eq!(out["selections"][0]["chosen_option"], "a");
+        assert_eq!(out["selections"][0]["repos"][0], "me/api");
+        assert_eq!(out["cross_repo"][0]["rule_id"], "INTEGRATION-API-CONTRACT-1");
+        assert_eq!(out["process"].as_array().unwrap().len(), 0);
+        // Custom rules are passed through with name/body/domain.
+        assert_eq!(out["custom"][0]["name"], "house");
+        assert_eq!(out["custom"][0]["body"], "Prefer X.");
+        assert_eq!(out["custom"][0]["domain"], "*");
+    }
+
+    // ── build_change_summary ──────────────────────────────────────────────────
+    // Drives the model-profile preview: a wrong diff would mislead the architect about
+    // what a profile switch changes. These cover the three early-return branches.
+
+    #[test]
+    fn build_change_summary_none_preview_is_unavailable() {
+        let project = project_from_json(serde_json::json!({ "id": "p", "name": "n" }));
+        let (lines, count) = super::build_change_summary(&project, &None);
+        assert_eq!(count, 0);
+        assert_eq!(lines, vec!["Preview unavailable.".to_string()]);
+    }
+
+    #[test]
+    fn build_change_summary_noop_preview() {
+        let project = project_from_json(serde_json::json!({ "id": "p", "name": "n" }));
+        let preview = Some(serde_json::json!({ "noop": true }));
+        let (lines, count) = super::build_change_summary(&project, &preview);
+        assert_eq!(count, 0);
+        assert_eq!(lines, vec!["Custom profile: no changes.".to_string()]);
+    }
+
+    #[test]
+    fn build_change_summary_reports_tier_strongest_change() {
+        // Build a project whose strongest tier differs from the preview's, and assert the
+        // single diff line + count are produced.
+        let project = project_from_json(serde_json::json!({
+            "id": "p", "name": "n",
+            "tier_map": { "strongest": "claude-opus-4-8", "balanced": [], "fast": [] }
+        }));
+        let preview = Some(serde_json::json!({
+            "assignments": {
+                "tier_map": { "strongest": "claude-sonnet-4-6" }
+            }
+        }));
+        let (lines, count) = super::build_change_summary(&project, &preview);
+        assert!(count >= 1, "at least the strongest change counts; lines={lines:?}");
+        assert!(
+            lines.iter().any(|l| l.contains("tier.strongest")
+                && l.contains("claude-opus-4-8")
+                && l.contains("claude-sonnet-4-6")),
+            "lines={lines:?}"
+        );
+    }
+}
+
+// ── Tier-2: network-helper tests (wiremock) ───────────────────────────────────
+// Each test points a `reqwest` helper at a fake BFF via the CAMERATA_BFF_URL seam and
+// asserts the request it issues (method + path + exact body for mutating calls) and how
+// it parses the response. Every test carries BOTH attributes in this order:
+//   #[tokio::test]            (outer)
+//   #[serial_test::serial(bff_env)]   (inner — serializes env-mutating tests crate-wide)
+// CAMERATA_BFF_URL is a process-global; without the serial key these race under cargo's
+// parallel test threads and go flaky. Mirrors crates/ui/src/chat.rs precisely.
+#[cfg(test)]
+mod bff_tests {
+    use super::{ArmRuleReq, RuleEditScope};
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn emit_project_local_posts_cascade_flags_and_summarizes_results() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-1/emit-local"))
+            .and(body_json(serde_json::json!({
+                "branch": true, "push": false, "open_pr": false
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "results": [
+                    { "repo": "me/api", "ok": true, "branch": "camerata/governance" },
+                    { "repo": "me/web", "ok": true }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let (ok, summary) = super::emit_project_local("proj-1", true, false, false).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok, "all repos ok");
+        assert!(summary.contains("me/api: committed to branch"), "summary={summary}");
+        assert!(summary.contains("me/web: emitted locally"), "summary={summary}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn emit_project_local_returns_top_level_message_on_early_return() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-9/emit-local"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": false,
+                "message": "No local path configured for this project."
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let (ok, summary) = super::emit_project_local("proj-9", false, false, false).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(!ok);
+        assert_eq!(summary, "No local path configured for this project.");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn emit_project_local_empty_results_reports_nothing_emitted() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-2/emit-local"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "results": []
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let (ok, summary) = super::emit_project_local("proj-2", false, false, false).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(!ok, "empty results is treated as a failure");
+        assert!(summary.contains("Nothing emitted"), "summary={summary}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn add_custom_rule_posts_name_body_and_repos() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-1/custom"))
+            .and(body_json(serde_json::json!({
+                "name": "house-style",
+                "body": "Prefer explicit error types.",
+                "repos": ["me/api"]
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::add_custom_rule(
+            "proj-1",
+            "house-style",
+            "Prefer explicit error types.",
+            &["me/api".to_string()],
+        )
+        .await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn delete_custom_rule_posts_name() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-1/custom/delete"))
+            .and(body_json(serde_json::json!({ "name": "house-style" })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::delete_custom_rule("proj-1", "house-style").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn import_ruleset_posts_raw_json_body() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-1/ruleset"))
+            .and(body_json(serde_json::json!({ "selections": [], "custom": [] })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::import_ruleset(
+            "proj-1",
+            r#"{"selections":[],"custom":[]}"#.to_string(),
+        )
+        .await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn save_ruleset_posts_json_value() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let ruleset = serde_json::json!({
+            "selections": [{ "rule_id": "RUST-FMT-1", "chosen_option": "a", "repos": [] }],
+            "cross_repo": [], "process": [], "custom": []
+        });
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-1/ruleset"))
+            .and(body_json(ruleset.clone()))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::save_ruleset("proj-1", ruleset).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_corpus_rules_parses_rule_array() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/corpus-rules"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": "RUST-FMT-1", "title": "Format", "kind": "mechanical" }
+            ])))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let rules = super::fetch_corpus_rules().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let rules = rules.expect("valid array parses");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].id, "RUST-FMT-1");
+        // Missing optional fields fall back to their serde defaults (e.g. draft provenance).
+        assert_eq!(rules[0].verification, "draft");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_suppressions_parses_view_array() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-1/suppressions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "rule_id": "SEC-NO-HARDCODED-SECRETS-1",
+                    "path": "src/main.rs",
+                    "line": 12,
+                    "source": "inline",
+                    "stale": false,
+                    "repo": "me/api"
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let sups = super::fetch_suppressions("proj-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let sups = sups.expect("valid array parses");
+        assert_eq!(sups.len(), 1);
+        assert_eq!(sups[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
+        assert_eq!(sups[0].line, Some(12));
+        assert!(!sups[0].stale);
+        assert_eq!(sups[0].repo, "me/api");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn apply_rules_posts_rules_custom_findings_and_parses_results() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // `option: None` is skipped in serialization, so the expected body omits it.
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/apply"))
+            .and(body_json(serde_json::json!({
+                "rules": [{
+                    "id": "RUST-FMT-1",
+                    "title": "Format",
+                    "directive": "Run rustfmt.",
+                    "enforcement": "mechanical",
+                    "scope": "repo-local",
+                    "repos": ["me/api"]
+                }],
+                "custom": [],
+                "findings": []
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "message": "applied",
+                "results": [
+                    { "repo": "me/api", "ok": true, "branch": "camerata/governance", "path": "/tmp/api" }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let rules = vec![ArmRuleReq {
+            id: "RUST-FMT-1".to_string(),
+            title: "Format".to_string(),
+            directive: "Run rustfmt.".to_string(),
+            option: None,
+            enforcement: "mechanical".to_string(),
+            scope: "repo-local".to_string(),
+            repos: vec!["me/api".to_string()],
+        }];
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let res = super::apply_rules(&rules, &[], &[]).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let (ok, message, results) = res.expect("Some on 2xx");
+        assert!(ok);
+        assert_eq!(message, "applied");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].repo, "me/api");
+        assert_eq!(results[0].branch.as_deref(), Some("camerata/governance"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn preflight_apply_returns_repos_when_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/apply/preflight"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "repos": [
+                    { "repo": "me/api", "existing_files": ["AGENTS.md", "CONVENTIONS.md"] }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let repos = super::preflight_apply(&[], &[], &[]).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let repos = repos.expect("Some when ok=true");
+        assert_eq!(repos.len(), 1);
+        assert_eq!(repos[0].repo, "me/api");
+        assert_eq!(repos[0].existing_files, vec!["AGENTS.md", "CONVENTIONS.md"]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn preflight_apply_returns_none_when_not_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/apply/preflight"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let repos = super::preflight_apply(&[], &[], &[]).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(repos.is_none(), "ok=false yields None so the caller falls through");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn open_governance_pr_posts_repos_and_parses_results() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/open-pr"))
+            .and(body_json(serde_json::json!({ "repos": ["me/api"] })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "results": [
+                    { "repo": "me/api", "ok": true, "url": "https://github.com/me/api/pull/1" }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let res = super::open_governance_pr(&["me/api".to_string()]).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let results = res.expect("Some when ok=true");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].url.as_deref(), Some("https://github.com/me/api/pull/1"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn create_ticket_posts_repo_findings_title_and_returns_url() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/ticket"))
+            .and(body_json(serde_json::json!({
+                "repo": "me/api",
+                "findings": [],
+                "title": "Tech debt: resolve later"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "url": "https://github.com/me/api/issues/7"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let url = super::create_ticket("me/api", &[], Some("Tech debt: resolve later")).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(url.as_deref(), Some("https://github.com/me/api/issues/7"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn create_ticket_returns_none_when_not_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/ticket"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let url = super::create_ticket("me/api", &[], None).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(url.is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_rule_drift_returns_entries_when_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-1/rule-drift"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "drift": [
+                    {
+                        "rule_id": "RUST-DIOXUS-12",
+                        "title": "Icons render as inline SVG",
+                        "applied_directive": "old",
+                        "corpus_directive": "new",
+                        "repos": ["me/ui"]
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let drift = super::fetch_rule_drift("proj-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let drift = drift.expect("Some when ok=true");
+        assert_eq!(drift.len(), 1);
+        assert_eq!(drift[0].rule_id, "RUST-DIOXUS-12");
+        assert_eq!(drift[0].corpus_directive, "new");
+        assert_eq!(drift[0].repos, vec!["me/ui"]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_rule_drift_returns_none_when_not_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-1/rule-drift"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let drift = super::fetch_rule_drift("proj-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(drift.is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn apply_rule_drift_update_posts_to_accept_endpoint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-1/rule-drift/RUST-DIOXUS-12/accept"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::apply_rule_drift_update("proj-1", "RUST-DIOXUS-12").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_single_rule_parses_json_body() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-1/rules/RUST-FMT-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "chosen_option": "a",
+                "overrides": []
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let v = super::fetch_single_rule("proj-1", "RUST-FMT-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let v = v.expect("valid json parses");
+        assert_eq!(v["chosen_option"], "a");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn save_single_rule_edit_project_scope_posts_null_repo() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-1/rules/RUST-FMT-1"))
+            .and(body_json(serde_json::json!({
+                "chosen_option": "a",
+                "scope": "project",
+                "repo": null
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::save_single_rule_edit(
+            "proj-1",
+            "RUST-FMT-1",
+            "a",
+            RuleEditScope::Project,
+            None,
+        )
+        .await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn save_single_rule_edit_repo_scope_posts_repo() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-1/rules/RUST-FMT-1"))
+            .and(body_json(serde_json::json!({
+                "chosen_option": "b",
+                "scope": "repo",
+                "repo": "me/api"
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::save_single_rule_edit(
+            "proj-1",
+            "RUST-FMT-1",
+            "b",
+            RuleEditScope::Repo,
+            Some("me/api"),
+        )
+        .await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+}
+
+// ── Tier-1: component render tests (dioxus-ssr) ────────────────────────────────
+// Render a component headlessly (VirtualDom + dioxus_ssr) and assert its static STRUCTURE
+// via stable class names / labels. No interaction, no async-loaded data (use_resource is
+// pending on first render). Components that read use_context must have it provided in the
+// harness. SSR HTML-escapes &/</>, so we assert class names + unescaped leading words.
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    // RuleCount: a tiny prop-only stat badge (no hooks, no context).
+    #[test]
+    fn rule_count_renders_number_and_label() {
+        fn harness() -> Element {
+            rsx! {
+                RuleCount { label: "Applied rules".to_string(), n: 7 }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("rule-count"), "wrapper class; html=\n{html}");
+        assert!(html.contains("rule-count-n"), "number class; html=\n{html}");
+        assert!(html.contains("rule-count-l"), "label class; html=\n{html}");
+        assert!(html.contains(">7<"), "the count renders; html=\n{html}");
+        assert!(html.contains("Applied rules"), "the label renders; html=\n{html}");
+    }
+
+    // SuppressionsPanel: hidden-by-default panel. Its use_resource is gated on `requested`
+    // (false on mount) so nothing is fetched; we assert the head + the press-Refresh hint.
+    // It does NOT read use_context, so no provider is needed.
+    #[test]
+    fn suppressions_panel_renders_head_and_press_refresh_hint() {
+        fn harness() -> Element {
+            rsx! {
+                SuppressionsPanel { project_id: "proj-1".to_string() }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("sups-panel"), "panel wrapper; html=\n{html}");
+        assert!(html.contains("Suppressions (waived findings)"), "section label; html=\n{html}");
+        assert!(html.contains("Refresh"), "the Refresh button; html=\n{html}");
+        // Before Refresh is pressed the panel shows the press-Refresh hint, not a table.
+        assert!(
+            html.contains("Press Refresh to pull the repos"),
+            "the hidden-until-refresh hint; html=\n{html}"
+        );
+        assert!(!html.contains("sups-table"), "no table before Refresh; html=\n{html}");
+    }
+
+    // RuleDriftNotice: returns an empty Element when there is no drift. Its use_resource is
+    // pending on first render, so `drift` is empty and the component renders nothing. We assert
+    // the drift-notice wrapper is ABSENT (the no-drift branch). It reads the toast context.
+    #[test]
+    fn rule_drift_notice_renders_nothing_while_drift_pending() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            rsx! {
+                RuleDriftNotice { project_id: "proj-1".to_string() }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        // use_resource is pending -> drift is empty -> the early `return rsx! {}` fires.
+        assert!(
+            !html.contains("drift-notice"),
+            "no drift banner when there is no (loaded) drift; html=\n{html}"
+        );
     }
 }

@@ -16,7 +16,7 @@ pub(super) async fn fetch_uow_branches(story_id: &str) -> MergeSourceBranchesVie
     let resp = reqwest::Client::new()
         .post(format!(
             "{}/api/uow/{}/branches",
-            crate::BFF_URL,
+            crate::bff_base(),
             enc_seg(story_id)
         ))
         .send()
@@ -42,7 +42,7 @@ pub(super) async fn start_update_branch_run(
     let resp = match reqwest::Client::new()
         .post(format!(
             "{}/api/uow/{}/update-branch",
-            crate::BFF_URL,
+            crate::bff_base(),
             enc_seg(story_id)
         ))
         .json(&serde_json::json!({
@@ -138,7 +138,7 @@ pub(super) struct PrInfoResult {
 /// server degrades to `ok=false` rather than erroring, so a network failure maps to the
 /// same "no PR" empty payload.
 pub(super) async fn fetch_uow_pr(story_id: &str) -> PrInfoResult {
-    let resp = reqwest::get(format!("{}/api/uow/{}/pr", crate::BFF_URL, enc_seg(story_id))).await;
+    let resp = reqwest::get(format!("{}/api/uow/{}/pr", crate::bff_base(), enc_seg(story_id))).await;
     match resp {
         Ok(r) => r.json::<PrInfoResult>().await.unwrap_or_default(),
         Err(_) => PrInfoResult::default(),
@@ -155,7 +155,7 @@ pub(super) enum OpenPrOutcome {
 /// Push the UoW branch + open a PR into `base_branch` (empty → server default branch).
 pub(super) async fn open_uow_pr(story_id: &str, base_branch: &str) -> OpenPrOutcome {
     let resp = match reqwest::Client::new()
-        .post(format!("{}/api/uow/{}/pr/open", crate::BFF_URL, enc_seg(story_id)))
+        .post(format!("{}/api/uow/{}/pr/open", crate::bff_base(), enc_seg(story_id)))
         .json(&serde_json::json!({ "base_branch": base_branch }))
         .send()
         .await
@@ -193,7 +193,7 @@ pub(super) async fn save_intake_context(story_id: &str, context: &str) -> bool {
     reqwest::Client::new()
         .post(format!(
             "{}/api/uow/{}/intake/context",
-            crate::BFF_URL,
+            crate::bff_base(),
             enc_seg(story_id)
         ))
         .json(&serde_json::json!({ "context": context }))
@@ -211,7 +211,7 @@ pub(super) async fn save_intake_repos(story_id: &str, repos: serde_json::Value) 
     reqwest::Client::new()
         .post(format!(
             "{}/api/uow/{}/intake/repos",
-            crate::BFF_URL,
+            crate::bff_base(),
             enc_seg(story_id)
         ))
         .json(&serde_json::json!({ "repos": repos }))
@@ -227,7 +227,7 @@ pub(super) async fn append_investigation_chat(story_id: &str, role: &str, text: 
     reqwest::Client::new()
         .post(format!(
             "{}/api/uow/{}/investigation/chat",
-            crate::BFF_URL,
+            crate::bff_base(),
             enc_seg(story_id)
         ))
         .json(&serde_json::json!({ "role": role, "text": text }))
@@ -243,7 +243,7 @@ pub(super) async fn append_development_chat(story_id: &str, role: &str, text: &s
     reqwest::Client::new()
         .post(format!(
             "{}/api/uow/{}/development/chat",
-            crate::BFF_URL,
+            crate::bff_base(),
             enc_seg(story_id)
         ))
         .json(&serde_json::json!({ "role": role, "text": text }))
@@ -259,7 +259,7 @@ pub(super) async fn save_contract(story_id: &str, contract: &str, crosses_bounda
     reqwest::Client::new()
         .post(format!(
             "{}/api/uow/{}/contract",
-            crate::BFF_URL,
+            crate::bff_base(),
             enc_seg(story_id)
         ))
         .json(&serde_json::json!({ "contract": contract, "crosses_boundary": crosses_boundary }))
@@ -276,7 +276,7 @@ pub(super) async fn save_meta(story_id: &str, body: serde_json::Value) -> bool {
     reqwest::Client::new()
         .post(format!(
             "{}/api/uow/{}/meta",
-            crate::BFF_URL,
+            crate::bff_base(),
             enc_seg(story_id)
         ))
         .json(&body)
@@ -289,7 +289,7 @@ pub(super) async fn save_meta(story_id: &str, body: serde_json::Value) -> bool {
 /// Post a comment on the UoW's PR. Returns the created comment url on success.
 pub(super) async fn comment_on_uow_pr(story_id: &str, body: &str) -> Option<String> {
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/uow/{}/pr/comment", crate::BFF_URL, enc_seg(story_id)))
+        .post(format!("{}/api/uow/{}/pr/comment", crate::bff_base(), enc_seg(story_id)))
         .json(&serde_json::json!({ "body": body }))
         .send()
         .await
@@ -304,7 +304,7 @@ pub(super) async fn comment_on_uow_pr(story_id: &str, body: &str) -> Option<Stri
 /// Start the gated "resolve PR feedback" run for a UoW. Mirrors `start_update_branch_run`.
 pub(super) async fn start_pr_resolve_run(story_id: &str, model: &str) -> StartRunOutcome {
     let resp = match reqwest::Client::new()
-        .post(format!("{}/api/uow/{}/pr/resolve", crate::BFF_URL, enc_seg(story_id)))
+        .post(format!("{}/api/uow/{}/pr/resolve", crate::bff_base(), enc_seg(story_id)))
         .json(&serde_json::json!({ "model": model }))
         .send()
         .await
@@ -332,7 +332,7 @@ pub(super) async fn start_pr_resolve_run(story_id: &str, model: &str) -> StartRu
 
 /// Fetch the current state of a run.
 pub(super) async fn fetch_run(run_id: &str) -> Option<RunView> {
-    reqwest::get(format!("{}/api/runs/{}", crate::BFF_URL, run_id))
+    reqwest::get(format!("{}/api/runs/{}", crate::bff_base(), run_id))
         .await
         .ok()?
         .json::<RunView>()
@@ -364,7 +364,7 @@ pub(super) struct RunProvenanceView {
 
 /// Fetch the provenance summary for a run.
 pub(super) async fn fetch_provenance(run_id: &str) -> Option<RunProvenanceView> {
-    reqwest::get(format!("{}/api/runs/{}/provenance", crate::BFF_URL, run_id))
+    reqwest::get(format!("{}/api/runs/{}/provenance", crate::bff_base(), run_id))
         .await
         .ok()?
         .json::<RunProvenanceView>()
@@ -379,7 +379,7 @@ pub(super) async fn fetch_provenance(run_id: &str) -> Option<RunProvenanceView> 
 /// poller ends on).
 pub(super) async fn cancel_run(run_id: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/runs/{}/cancel", crate::BFF_URL, run_id))
+        .post(format!("{}/api/runs/{}/cancel", crate::bff_base(), run_id))
         .send()
         .await
         .map(|r| r.status() == reqwest::StatusCode::NO_CONTENT)
@@ -389,7 +389,7 @@ pub(super) async fn cancel_run(run_id: &str) -> bool {
 /// Send a cancel request for an audit job. Fire-and-forget; 204 = success.
 pub(super) async fn cancel_audit_job(job_id: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/onboard/audit/job/{}/cancel", crate::BFF_URL, job_id))
+        .post(format!("{}/api/onboard/audit/job/{}/cancel", crate::bff_base(), job_id))
         .send()
         .await
         .map(|r| r.status() == reqwest::StatusCode::NO_CONTENT)
@@ -420,7 +420,7 @@ pub(super) async fn sign_off_run(
     waive_reason: Option<&str>,
 ) -> SignOffOutcome {
     let resp = match reqwest::Client::new()
-        .post(format!("{}/api/runs/{}/sign-off", crate::BFF_URL, run_id))
+        .post(format!("{}/api/runs/{}/sign-off", crate::bff_base(), run_id))
         .json(&serde_json::json!({ "by": by, "note": note, "waive_reason": waive_reason }))
         .send()
         .await
@@ -764,7 +764,7 @@ pub(super) struct UowView {
 
 /// Fetch the UoW for a single story (get-or-create semantics).
 pub(super) async fn fetch_uow(story_id: &str) -> Option<UowView> {
-    reqwest::get(format!("{}/api/uow/{}", crate::BFF_URL, enc_seg(story_id)))
+    reqwest::get(format!("{}/api/uow/{}", crate::bff_base(), enc_seg(story_id)))
         .await
         .ok()?
         .json::<UowView>()
@@ -779,7 +779,7 @@ pub(super) async fn fetch_uow(story_id: &str) -> Option<UowView> {
 /// status" toast even when the server succeeded.)
 pub(super) async fn post_uow_status(story_id: &str, status: DevStatus) -> Option<()> {
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/uow/{}/status", crate::BFF_URL, enc_seg(story_id)))
+        .post(format!("{}/api/uow/{}/status", crate::bff_base(), enc_seg(story_id)))
         .json(&serde_json::json!({ "status": status.wire_str() }))
         .send()
         .await
@@ -800,7 +800,7 @@ pub(super) enum TransitionOutcome {
 /// POST a lifecycle transition (`begin-investigation` / `approve-decisions`) and map the
 /// response: 2xx → the updated UoW, 409 → the block reason, anything else → Failed.
 pub(super) async fn post_uow_transition(story_id: &str, action: &str) -> TransitionOutcome {
-    let url = format!("{}/api/uow/{}/{}", crate::BFF_URL, enc_seg(story_id), action);
+    let url = format!("{}/api/uow/{}/{}", crate::bff_base(), enc_seg(story_id), action);
     let resp = match reqwest::Client::new().post(url).send().await {
         Ok(r) => r,
         Err(_) => return TransitionOutcome::Failed,
@@ -1263,7 +1263,7 @@ pub(super) fn create_or_open_label(has_uow: bool) -> &'static str {
 /// Manual / user-triggered; no cache. Body is empty (the server uses the active project).
 pub(super) async fn pull_work_items() -> Option<Vec<WorkItem>> {
     reqwest::Client::new()
-        .post(format!("{}/api/workitems/pull", crate::BFF_URL))
+        .post(format!("{}/api/workitems/pull", crate::bff_base()))
         .json(&serde_json::json!({}))
         .send()
         .await
@@ -1277,7 +1277,7 @@ pub(super) async fn pull_work_items() -> Option<Vec<WorkItem>> {
 /// List all Units of Work with their referenced WorkItem + lifecycle stage
 /// (`GET /api/uows`).
 pub(super) async fn fetch_uows() -> Option<Vec<UowListEntry>> {
-    reqwest::get(format!("{}/api/uows", crate::BFF_URL))
+    reqwest::get(format!("{}/api/uows", crate::bff_base()))
         .await
         .ok()?
         .json::<UowsResult>()
@@ -1290,7 +1290,7 @@ pub(super) async fn fetch_uows() -> Option<Vec<UowListEntry>> {
 /// external ref server-side: an existing UoW comes back with `created=false`.
 pub(super) async fn create_uow_from_work_item(work_item_id: &str) -> Option<FromWorkItemResult> {
     reqwest::Client::new()
-        .post(format!("{}/api/uow/from-workitem", crate::BFF_URL))
+        .post(format!("{}/api/uow/from-workitem", crate::bff_base()))
         .json(&serde_json::json!({ "work_item_id": work_item_id }))
         .send()
         .await
@@ -1348,7 +1348,7 @@ pub(super) async fn create_blank_uow(parent_id: Option<String>) -> Option<String
     // Normalize empty → None so the server receives null (not "").
     let pid = parent_id.filter(|s| !s.trim().is_empty());
     let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/uow/blank", crate::BFF_URL))
+        .post(format!("{}/api/uow/blank", crate::bff_base()))
         .json(&serde_json::json!({ "parent_id": pid }))
         .send()
         .await
@@ -1365,7 +1365,7 @@ pub(super) async fn create_blank_uow(parent_id: Option<String>) -> Option<String
 /// this behind an "are you sure?" confirmation before calling it.
 pub(super) async fn delete_uow(story_id: &str) -> bool {
     reqwest::Client::new()
-        .delete(format!("{}/api/uow/{}", crate::BFF_URL, enc_seg(story_id)))
+        .delete(format!("{}/api/uow/{}", crate::bff_base(), enc_seg(story_id)))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -1386,7 +1386,7 @@ pub(super) async fn set_draft_parent(story_id: &str, parent_id: &str) -> bool {
     reqwest::Client::new()
         .post(format!(
             "{}/api/uow/{}/set-draft-parent",
-            crate::BFF_URL,
+            crate::bff_base(),
             enc_seg(story_id)
         ))
         .json(&body)
@@ -1398,7 +1398,7 @@ pub(super) async fn set_draft_parent(story_id: &str, parent_id: &str) -> bool {
 
 /// Fetch a draft UoW's current authoring state (`GET /api/uow/:id`).
 pub(super) async fn fetch_authoring_uow(story_id: &str) -> Option<AuthoringUowView> {
-    reqwest::get(format!("{}/api/uow/{}", crate::BFF_URL, enc_seg(story_id)))
+    reqwest::get(format!("{}/api/uow/{}", crate::bff_base(), enc_seg(story_id)))
         .await
         .ok()?
         .json::<AuthoringUowView>()
@@ -1420,7 +1420,7 @@ pub(super) async fn post_author_message(
         body["model"] = serde_json::Value::String(model.trim().to_string());
     }
     reqwest::Client::new()
-        .post(format!("{}/api/uow/{}/author", crate::BFF_URL, enc_seg(story_id)))
+        .post(format!("{}/api/uow/{}/author", crate::bff_base(), enc_seg(story_id)))
         .json(&body)
         .send()
         .await
@@ -1442,7 +1442,7 @@ pub(super) enum PublishOutcome {
 
 /// Publish a drafted story to the board and link the UoW (`POST /api/uow/:id/publish`).
 pub(super) async fn post_publish(story_id: &str, repo: &str) -> PublishOutcome {
-    let url = format!("{}/api/uow/{}/publish", crate::BFF_URL, enc_seg(story_id));
+    let url = format!("{}/api/uow/{}/publish", crate::bff_base(), enc_seg(story_id));
     let resp = match reqwest::Client::new()
         .post(url)
         .json(&serde_json::json!({ "repo": repo }))
@@ -1473,7 +1473,7 @@ pub(super) async fn post_publish(story_id: &str, repo: &str) -> PublishOutcome {
 /// Re-pull a single work item (`POST /api/workitems/refresh`).
 pub(super) async fn refresh_work_item(work_item_id: &str) -> Option<WorkItem> {
     let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/workitems/refresh", crate::BFF_URL))
+        .post(format!("{}/api/workitems/refresh", crate::bff_base()))
         .json(&serde_json::json!({ "work_item_id": work_item_id }))
         .send()
         .await
@@ -1488,7 +1488,7 @@ pub(super) async fn refresh_work_item(work_item_id: &str) -> Option<WorkItem> {
 /// comment url on success.
 pub(super) async fn comment_on_work_item(work_item_id: &str, body: &str) -> Option<String> {
     let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/workitems/comment", crate::BFF_URL))
+        .post(format!("{}/api/workitems/comment", crate::bff_base()))
         .json(&serde_json::json!({ "work_item_id": work_item_id, "body": body }))
         .send()
         .await
@@ -1517,7 +1517,7 @@ pub(super) async fn set_work_item_parent(
     parent_number: &str,
 ) -> Result<(), String> {
     let res = reqwest::Client::new()
-        .post(format!("{}/api/workitems/set-parent", crate::BFF_URL))
+        .post(format!("{}/api/workitems/set-parent", crate::bff_base()))
         .json(&serde_json::json!({
             "work_item_id": work_item_id,
             "parent_number": parent_number,
@@ -1544,7 +1544,7 @@ pub(super) async fn set_work_item_parent(
 /// empty list (server returns `{ comments: [] }` token-less / on error).
 pub(super) async fn fetch_work_item_comments(work_item_id: &str) -> Vec<WorkItemComment> {
     let res = reqwest::Client::new()
-        .post(format!("{}/api/workitems/comments", crate::BFF_URL))
+        .post(format!("{}/api/workitems/comments", crate::bff_base()))
         .json(&serde_json::json!({ "work_item_id": work_item_id }))
         .send()
         .await
@@ -1564,7 +1564,7 @@ pub(super) async fn fetch_work_item_comments(work_item_id: &str) -> Vec<WorkItem
 /// Degrades to an empty list (server returns `{ users: [] }` token-less / on error).
 pub(super) async fn fetch_work_item_assignees(work_item_id: &str) -> Vec<String> {
     let res = reqwest::Client::new()
-        .post(format!("{}/api/workitems/assignees", crate::BFF_URL))
+        .post(format!("{}/api/workitems/assignees", crate::bff_base()))
         .json(&serde_json::json!({ "work_item_id": work_item_id }))
         .send()
         .await
@@ -1743,7 +1743,7 @@ pub(super) struct InvestigationReviewView {
 pub(super) async fn fetch_investigation_review(story_id: &str) -> Option<InvestigationReviewView> {
     reqwest::get(format!(
         "{}/api/uow/{}/investigation",
-        crate::BFF_URL,
+        crate::bff_base(),
         enc_seg(story_id)
     ))
     .await
@@ -1760,7 +1760,7 @@ pub(super) async fn post_decisions(story_id: &str, decisions: &[DecisionRecordVi
     reqwest::Client::new()
         .post(format!(
             "{}/api/uow/{}/decisions",
-            crate::BFF_URL,
+            crate::bff_base(),
             enc_seg(story_id)
         ))
         .json(decisions)
@@ -1776,7 +1776,7 @@ pub(super) async fn mark_investigation_reviewed(story_id: &str) -> bool {
     let v: serde_json::Value = match reqwest::Client::new()
         .post(format!(
             "{}/api/uow/{}/investigation/review",
-            crate::BFF_URL,
+            crate::bff_base(),
             enc_seg(story_id)
         ))
         .send()
@@ -5244,7 +5244,7 @@ pub(super) async fn wire_ci_rules_tier(
         "rules": rules,
     });
     let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/onboard/ci-rules", crate::BFF_URL))
+        .post(format!("{}/api/onboard/ci-rules", crate::bff_base()))
         .json(&payload)
         .send()
         .await
@@ -6515,5 +6515,1440 @@ pub(super) fn UowPanel(story_id: String, uow_refresh: Signal<u32>) -> Element {
                 }
             }
         }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Tier-2 — network-helper tests (wiremock). Each helper that issues a BFF request now
+// reads `crate::bff_base()` (the `CAMERATA_BFF_URL` seam), so a mock server can stand in
+// for the real BFF. Every test that sets that process-global env var carries
+// `#[serial_test::serial(bff_env)]` so the env-mutating tests never overlap (the doc's
+// REQUIRED rule). The mounted mocks assert the request CONTRACT (method + path, and for
+// mutations the exact body via `body_json` + `.expect(1)`); the assertions on the return
+// value verify the response is parsed/mapped correctly.
+// ════════════════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod bff_tests {
+    use super::*;
+
+    // ── fetch_uow_branches: POST /api/uow/:id/branches → MergeSourceBranchesView ──
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_uow_branches_parses_local_and_origin() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/branches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "local": ["feature/a", "feature/b"],
+                "origin": ["main"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_uow_branches("CAM-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(out.local, vec!["feature/a", "feature/b"]);
+        assert_eq!(out.origin, vec!["main"]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_uow_branches_defaults_empty_on_non_json() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/branches"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_uow_branches("CAM-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(out.local.is_empty() && out.origin.is_empty());
+    }
+
+    // ── start_update_branch_run: POST /api/uow/:id/update-branch ──────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn start_update_branch_run_sends_body_and_returns_run_id() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-9/update-branch"))
+            .and(body_json(serde_json::json!({
+                "source_branch": "main",
+                "source": "origin",
+                "model": "claude-opus-4-8",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "run-42" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::start_update_branch_run("CAM-9", "main", "origin", "claude-opus-4-8").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        match out {
+            StartRunOutcome::Started(id) => assert_eq!(id, "run-42"),
+            _ => panic!("expected Started(run-42)"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn start_update_branch_run_maps_400_to_blocked_reason() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-9/update-branch"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({ "error": "no branch yet" })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::start_update_branch_run("CAM-9", "main", "origin", "m").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        match out {
+            StartRunOutcome::Blocked(reason) => assert_eq!(reason, "no branch yet"),
+            _ => panic!("a 400 must map to Blocked(reason)"),
+        }
+    }
+
+    // ── fetch_uow_pr: GET /api/uow/:id/pr → PrInfoResult ─────────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_uow_pr_parses_full_payload() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/uow/CAM-3/pr"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "pr": { "number": 7, "state": "open", "url": "http://gh/7", "mergeable": true },
+                "comments": [{ "author": "alice", "body": "lgtm", "review": true }],
+                "checks": { "passed": 3, "failed": 1, "pending": 0, "failing": ["build"] },
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_uow_pr("CAM-3").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(out.ok);
+        let pr = out.pr.expect("pr present");
+        assert_eq!(pr.number, 7);
+        assert_eq!(pr.state, "open");
+        assert_eq!(pr.mergeable, Some(true));
+        assert_eq!(out.comments.len(), 1);
+        assert_eq!(out.comments[0].author, "alice");
+        let checks = out.checks.expect("checks present");
+        assert_eq!(checks.passed, 3);
+        assert_eq!(checks.failing, vec!["build"]);
+    }
+
+    // ── open_uow_pr: POST /api/uow/:id/pr/open ───────────────────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn open_uow_pr_sends_base_branch_and_returns_opened() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-3/pr/open"))
+            .and(body_json(serde_json::json!({ "base_branch": "develop" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "pr_number": 11, "pr_url": "http://gh/11"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::open_uow_pr("CAM-3", "develop").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        match out {
+            OpenPrOutcome::Opened(n, url) => {
+                assert_eq!(n, 11);
+                assert_eq!(url, "http://gh/11");
+            }
+            _ => panic!("expected Opened"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn open_uow_pr_maps_400_to_blocked() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-3/pr/open"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({ "error": "branch not pushed" })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::open_uow_pr("CAM-3", "").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        match out {
+            OpenPrOutcome::Blocked(r) => assert_eq!(r, "branch not pushed"),
+            _ => panic!("a 400 must map to Blocked"),
+        }
+    }
+
+    // ── fire-and-forget bool savers (intake/context, intake/repos, chats, etc.) ───
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn save_intake_context_posts_context_body() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/intake/context"))
+            .and(body_json(serde_json::json!({ "context": "some context" })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::save_intake_context("CAM-1", "some context").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn save_intake_context_reports_false_on_non_2xx() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/intake/context"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::save_intake_context("CAM-1", "x").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(!ok, "a 500 must be reported as failure");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn save_intake_repos_posts_repos_envelope() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let repos = serde_json::json!([
+            { "repo": "o/r", "branch": { "mode": "existing", "branch_name": "main" } }
+        ]);
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/intake/repos"))
+            .and(body_json(serde_json::json!({ "repos": repos.clone() })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::save_intake_repos("CAM-1", repos).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn append_investigation_chat_posts_role_and_text() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/investigation/chat"))
+            .and(body_json(serde_json::json!({ "role": "user", "text": "hi" })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::append_investigation_chat("CAM-1", "user", "hi").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn append_development_chat_posts_role_and_text() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/development/chat"))
+            .and(body_json(serde_json::json!({ "role": "agent", "text": "done" })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::append_development_chat("CAM-1", "agent", "done").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn save_contract_posts_contract_and_boundary_flag() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/contract"))
+            .and(body_json(serde_json::json!({ "contract": "fn foo()", "crosses_boundary": true })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::save_contract("CAM-1", "fn foo()", true).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn save_meta_posts_arbitrary_body() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let body = serde_json::json!({ "viewed_phase": "development", "done": true });
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/meta"))
+            .and(body_json(body.clone()))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::save_meta("CAM-1", body).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    // ── comment_on_uow_pr: POST /api/uow/:id/pr/comment → Option<url> ────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn comment_on_uow_pr_returns_url_on_success() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/pr/comment"))
+            .and(body_json(serde_json::json!({ "body": "ship it" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "url": "http://gh/c/1" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let url = super::comment_on_uow_pr("CAM-1", "ship it").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(url.as_deref(), Some("http://gh/c/1"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn comment_on_uow_pr_returns_none_on_non_2xx() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/pr/comment"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let url = super::comment_on_uow_pr("CAM-1", "x").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(url.is_none());
+    }
+
+    // ── start_pr_resolve_run: POST /api/uow/:id/pr/resolve ───────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn start_pr_resolve_run_sends_model_and_returns_started() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/pr/resolve"))
+            .and(body_json(serde_json::json!({ "model": "claude-sonnet-4" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "run-7" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::start_pr_resolve_run("CAM-1", "claude-sonnet-4").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        match out {
+            StartRunOutcome::Started(id) => assert_eq!(id, "run-7"),
+            _ => panic!("expected Started"),
+        }
+    }
+
+    // ── fetch_run: GET /api/runs/:id → Option<RunView> ──────────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_run_parses_run_view() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/runs/run-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "run-1",
+                "story_id": "CAM-1",
+                "status": "executing",
+                "events": [],
+                "done": false,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_run("run-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let run = out.expect("a valid RunView parses");
+        assert_eq!(run.story_id, "CAM-1");
+        assert_eq!(run.status, "executing");
+        assert!(!run.done);
+    }
+
+    // ── fetch_provenance: GET /api/runs/:id/provenance ──────────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_provenance_parses_summary() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/runs/run-1/provenance"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "run_id": "run-1",
+                "story_id": "CAM-1",
+                "mode": "development",
+                "rules_in_force": ["ARCH-1"],
+                "deny_count": 2,
+                "allow_count": 5,
+                "total_bounces": 1,
+                "rules_fired": ["ARCH-1"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_provenance("run-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let prov = out.expect("valid provenance parses");
+        assert_eq!(prov.deny_count, 2);
+        assert_eq!(prov.allow_count, 5);
+        assert_eq!(prov.rules_in_force, vec!["ARCH-1"]);
+    }
+
+    // ── cancel_run / cancel_audit_job: 204 = success, else false ─────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn cancel_run_true_only_on_204() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/runs/run-1/cancel"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::cancel_run("run-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn cancel_run_false_on_200() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/runs/run-1/cancel"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::cancel_run("run-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(!ok, "only 204 counts as a successful cancel");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn cancel_audit_job_true_on_204() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/audit/job/job-1/cancel"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::cancel_audit_job("job-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    // ── sign_off_run: POST /api/runs/:id/sign-off ────────────────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn sign_off_run_sends_body_and_returns_ok_uow() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/runs/run-1/sign-off"))
+            .and(body_json(serde_json::json!({
+                "by": "zach", "note": "looks good", "waive_reason": null
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "story_id": "CAM-1"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::sign_off_run("run-1", "zach", Some("looks good"), None).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        match out {
+            SignOffOutcome::Ok(uow) => assert_eq!(uow.story_id, "CAM-1"),
+            _ => panic!("expected Ok(uow)"),
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn sign_off_run_maps_409_to_blocked_reason() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/runs/run-1/sign-off"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "reason": "Critical finding open"
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::sign_off_run("run-1", "zach", None, None).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        match out {
+            SignOffOutcome::Blocked(r) => assert_eq!(r, "Critical finding open"),
+            _ => panic!("a 409 must map to Blocked(reason)"),
+        }
+    }
+
+    // ── fetch_uow: GET /api/uow/:id → Option<UowView> ───────────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_uow_parses_story_and_stage() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/uow/CAM-5"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "story_id": "CAM-5",
+                "stage": "development",
+                "branch": "feature/x",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        // enc_seg("CAM-5") leaves it unchanged → the path is /api/uow/CAM-5.
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_uow("CAM-5").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let uow = out.expect("valid UowView parses");
+        assert_eq!(uow.story_id, "CAM-5");
+        assert_eq!(uow.stage, UowStage::Development);
+        assert_eq!(uow.branch.as_deref(), Some("feature/x"));
+    }
+
+    // ── post_uow_status: POST /api/uow/:id/status (wire str) ─────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn post_uow_status_sends_wire_string_and_returns_some_on_2xx() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/status"))
+            .and(body_json(serde_json::json!({ "status": "in_progress" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "any": "body" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::post_uow_status("CAM-1", DevStatus::InProgress).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(out, Some(()));
+    }
+
+    // ── post_uow_transition: 2xx → Ok, 409 → Blocked ────────────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn post_uow_transition_ok_on_2xx() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/approve-decisions"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::post_uow_transition("CAM-1", "approve-decisions").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(matches!(out, TransitionOutcome::Ok));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn post_uow_transition_maps_409_to_blocked() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/approve-decisions"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({ "reason": "decisions pending" })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::post_uow_transition("CAM-1", "approve-decisions").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        match out {
+            TransitionOutcome::Blocked(r) => assert_eq!(r, "decisions pending"),
+            _ => panic!("a 409 must map to Blocked"),
+        }
+    }
+
+    // ── pull_work_items: POST /api/workitems/pull → items ───────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn pull_work_items_parses_items_envelope() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/workitems/pull"))
+            .and(body_json(serde_json::json!({})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "items": [{ "id": "github:o/r#1", "number": 1, "title": "Bug" }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::pull_work_items().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let items = out.expect("items parse");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "github:o/r#1");
+        assert_eq!(items[0].title, "Bug");
+    }
+
+    // ── fetch_uows: GET /api/uows → uows ────────────────────────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_uows_parses_uows_envelope() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/uows"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "uows": [{ "id": "CAM-1", "stage": "intake", "authoring": false }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_uows().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let uows = out.expect("uows parse");
+        assert_eq!(uows.len(), 1);
+        assert_eq!(uows[0].id, "CAM-1");
+        assert_eq!(uows[0].stage, UowStage::Intake);
+    }
+
+    // ── create_uow_from_work_item: POST /api/uow/from-workitem ───────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn create_uow_from_work_item_sends_id_and_parses_result() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/from-workitem"))
+            .and(body_json(serde_json::json!({ "work_item_id": "github:o/r#1" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "uow_id": "CAM-1", "created": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::create_uow_from_work_item("github:o/r#1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let res = out.expect("result parses");
+        assert_eq!(res.uow_id, "CAM-1");
+        assert!(res.created);
+    }
+
+    // ── create_blank_uow: normalizes empty parent → null ────────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn create_blank_uow_normalizes_empty_parent_to_null() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/blank"))
+            .and(body_json(serde_json::json!({ "parent_id": null })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "uow_id": "CAM-9" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let id = super::create_blank_uow(Some("   ".to_string())).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(id.as_deref(), Some("CAM-9"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn create_blank_uow_sends_non_empty_parent() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/blank"))
+            .and(body_json(serde_json::json!({ "parent_id": "42" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "uow_id": "CAM-9" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let id = super::create_blank_uow(Some("42".to_string())).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(id.as_deref(), Some("CAM-9"));
+    }
+
+    // ── delete_uow: DELETE /api/uow/:id ─────────────────────────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn delete_uow_true_on_2xx() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/uow/CAM-1"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::delete_uow("CAM-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    // ── set_draft_parent: empty → null, else value ──────────────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_draft_parent_clears_with_null_on_empty() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/set-draft-parent"))
+            .and(body_json(serde_json::json!({ "parent_id": null })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_draft_parent("CAM-1", "   ").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_draft_parent_sends_trimmed_value() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/set-draft-parent"))
+            .and(body_json(serde_json::json!({ "parent_id": "42" })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_draft_parent("CAM-1", "  42  ").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    // ── fetch_authoring_uow: GET /api/uow/:id → AuthoringUowView ─────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_authoring_uow_parses_authoring_state() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/uow/CAM-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "story_id": "CAM-1",
+                "authoring": { "draft_title": "T", "draft_body": "B", "chat": [] },
+                "parent_id": "9",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_authoring_uow("CAM-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let v = out.expect("authoring view parses");
+        assert_eq!(v.story_id, "CAM-1");
+        let authoring = v.authoring.expect("authoring present");
+        assert_eq!(authoring.draft_title, "T");
+        assert_eq!(v.parent_id.as_deref(), Some("9"));
+    }
+
+    // ── post_author_message: empty model omits the model field ──────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn post_author_message_omits_model_when_blank() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/author"))
+            .and(body_json(serde_json::json!({ "message": "hi" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "story_id": "CAM-1" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::post_author_message("CAM-1", "hi", "  ").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(out.expect("parses").story_id, "CAM-1");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn post_author_message_includes_trimmed_model() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/author"))
+            .and(body_json(serde_json::json!({ "message": "hi", "model": "claude-opus-4-8" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "story_id": "CAM-1" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::post_author_message("CAM-1", "hi", "  claude-opus-4-8  ").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(out.is_some());
+    }
+
+    // ── post_publish: 2xx → Ok, 4xx → Rejected(reason) ──────────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn post_publish_ok_on_2xx() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/publish"))
+            .and(body_json(serde_json::json!({ "repo": "o/r" })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::post_publish("CAM-1", "o/r").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(matches!(out, PublishOutcome::Ok));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn post_publish_rejected_uses_error_field() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/publish"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({ "error": "title required" })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::post_publish("CAM-1", "o/r").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        match out {
+            PublishOutcome::Rejected(r) => assert_eq!(r, "title required"),
+            _ => panic!("a 400 must map to Rejected"),
+        }
+    }
+
+    // ── refresh_work_item: unwraps the { item } envelope ────────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn refresh_work_item_unwraps_item() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/workitems/refresh"))
+            .and(body_json(serde_json::json!({ "work_item_id": "github:o/r#1" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "item": { "id": "github:o/r#1", "title": "Refreshed", "number": 1 }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::refresh_work_item("github:o/r#1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let item = out.expect("item parses");
+        assert_eq!(item.title, "Refreshed");
+    }
+
+    // ── comment_on_work_item: ok=true → url, ok=false → None ────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn comment_on_work_item_returns_url_when_ok() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/workitems/comment"))
+            .and(body_json(serde_json::json!({ "work_item_id": "wi-1", "body": "note" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true, "url": "http://gh/c" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::comment_on_work_item("wi-1", "note").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(out.as_deref(), Some("http://gh/c"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn comment_on_work_item_none_when_not_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/workitems/comment"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::comment_on_work_item("wi-1", "note").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(out.is_none());
+    }
+
+    // ── set_work_item_parent: ok → Ok(()), else Err(message) ────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_work_item_parent_ok() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/workitems/set-parent"))
+            .and(body_json(serde_json::json!({ "work_item_id": "wi-1", "parent_number": "42" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::set_work_item_parent("wi-1", "42").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(out.is_ok());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_work_item_parent_err_uses_message() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/workitems/set-parent"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false, "message": "no such parent" })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::set_work_item_parent("wi-1", "42").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(out.unwrap_err(), "no such parent");
+    }
+
+    // ── fetch_work_item_comments / _assignees: degrade to empty ─────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_work_item_comments_parses_list() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/workitems/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "comments": [{ "author": "bob", "body": "hi", "created_at": "2026-01-01" }]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_work_item_comments("wi-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].author, "bob");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_work_item_assignees_parses_users() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/workitems/assignees"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "users": ["alice", "bob"]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_work_item_assignees("wi-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(out, vec!["alice", "bob"]);
+    }
+
+    // ── fetch_investigation_review: GET /api/uow/:id/investigation ──────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_investigation_review_parses_note_and_decisions() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/uow/CAM-1/investigation"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "story_id": "CAM-1",
+                "note_present": true,
+                "note": { "story_id": "CAM-1", "note": "found X", "reviewed": false },
+                "decisions": [],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_investigation_review("CAM-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let v = out.expect("review parses");
+        assert!(v.note_present);
+        assert_eq!(v.note.expect("note").note, "found X");
+    }
+
+    // ── post_decisions: POSTs the serialized record set verbatim ────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn post_decisions_posts_serialized_records() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let decisions = vec![DecisionRecordView {
+            artifact_id: "a1".into(),
+            story_id: "CAM-1".into(),
+            label: "Storage".into(),
+            question: "Which backend?".into(),
+            rationale: "fast".into(),
+            alternatives_considered: vec!["sql".into()],
+            outcome: DecisionOutcomeView::Approved,
+            provenance: RevisionProvenanceView::default(),
+        }];
+        // The helper serializes the slice directly; compute the exact expected JSON.
+        let expected = serde_json::to_value(&decisions).expect("serializes");
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/decisions"))
+            .and(body_json(expected))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::post_decisions("CAM-1", &decisions).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    // ── mark_investigation_reviewed: ok=true → true ─────────────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn mark_investigation_reviewed_true_when_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/investigation/review"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::mark_investigation_reviewed("CAM-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn mark_investigation_reviewed_false_when_not_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/CAM-1/investigation/review"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::mark_investigation_reviewed("CAM-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(!ok);
+    }
+
+    // ── wire_ci_rules_tier: POST /api/onboard/ci-rules → Ok(url) / Err(message) ──
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn wire_ci_rules_tier_sends_payload_and_returns_url() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let rules = vec![CiRuleItem {
+            id: "LINT-1".into(),
+            title: "No any".into(),
+            enforcement: "mechanical".into(),
+            linter: Some("eslint".into()),
+        }];
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/ci-rules"))
+            .and(body_json(serde_json::json!({
+                "repo": "o/r",
+                "tier": "mechanical",
+                "rules": rules.clone(),
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true, "url": "http://gh/issue/1" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::wire_ci_rules_tier("o/r", "mechanical", rules).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(out.unwrap(), "http://gh/issue/1");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn wire_ci_rules_tier_err_uses_message() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/onboard/ci-rules"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false, "message": "repo not onboarded" })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::wire_ci_rules_tier("o/r", "mechanical", Vec::new()).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(out.unwrap_err(), "repo not onboarded");
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// Tier-1 — render tests (dioxus-ssr). Render a cleanly-isolatable component and assert
+// its key static structure via stable class names / unescaped leading words. SSR
+// HTML-escapes special chars, so we never assert on raw `&`/`<`/`>`.
+// ════════════════════════════════════════════════════════════════════════════════
+#[cfg(test)]
+mod render_tests {
+    use super::{CiRuleItem, CiRulesPanel};
+    use dioxus::prelude::*;
+
+    // CiRulesPanel takes plain props (Vec<String> repos + Vec<CiRuleItem> rules) and uses
+    // only use_signal — no use_context / use_resource — so it renders cleanly in isolation.
+    fn ci_panel_harness() -> Element {
+        rsx! {
+            CiRulesPanel {
+                repos: vec!["owner/repo".to_string()],
+                rules: vec![
+                    CiRuleItem {
+                        id: "LINT-1".into(),
+                        title: "No any".into(),
+                        enforcement: "mechanical".into(),
+                        linter: Some("eslint".into()),
+                    },
+                    CiRuleItem {
+                        id: "ARCH-1".into(),
+                        title: "Layering".into(),
+                        enforcement: "architectural".into(),
+                        linter: None,
+                    },
+                ],
+            }
+        }
+    }
+
+    #[test]
+    fn ci_rules_panel_renders_panel_and_repo_row() {
+        let mut vdom = VirtualDom::new(ci_panel_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        // Stable structural classes.
+        assert!(html.contains("fix-panel"), "panel shell present");
+        assert!(html.contains("scan-section-h"), "section header present");
+        assert!(html.contains("fix-row"), "per-repo row present");
+        assert!(html.contains("fix-repo"), "repo label present");
+        // The repo name renders in its row.
+        assert!(html.contains("owner/repo"), "repo name renders");
+    }
+
+    #[test]
+    fn ci_rules_panel_shows_a_button_per_present_tier() {
+        let mut vdom = VirtualDom::new(ci_panel_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        // One mechanical + one architectural rule → both tier buttons appear (a button is
+        // shown only when its tier has at least one rule). Asserting both guards the
+        // "a tier's create-story button silently vanished" regression.
+        assert!(
+            html.contains("Create mechanical-rules CI story"),
+            "mechanical tier button present"
+        );
+        assert!(
+            html.contains("Create architectural-rules CI story"),
+            "architectural tier button present"
+        );
+        // No VCS-metadata rule supplied → that button must NOT render.
+        assert!(
+            !html.contains("Create VCS-metadata CI story"),
+            "absent tier must not render its button"
+        );
+    }
+
+    #[test]
+    fn ci_rules_panel_hides_buttons_when_no_rules() {
+        // With zero rules, every tier is empty: the panel shell + repo row still render,
+        // but no create-story button does.
+        fn harness() -> Element {
+            rsx! {
+                CiRulesPanel { repos: vec!["o/r".to_string()], rules: Vec::new() }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("fix-panel"));
+        assert!(!html.contains("Create mechanical-rules CI story"));
+        assert!(!html.contains("Create architectural-rules CI story"));
+        assert!(!html.contains("Create VCS-metadata CI story"));
     }
 }

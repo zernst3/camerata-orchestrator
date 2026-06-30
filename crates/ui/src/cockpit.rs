@@ -272,7 +272,7 @@ fn default_model_profile_str() -> String {
 /// ~2.5s, then gives up (returns None) so a genuinely-down server still fails. A successful
 /// request whose body is empty / `null` is NOT retried — that is real data, not a race.
 async fn bff_get_json<T: serde::de::DeserializeOwned>(path: &str) -> Option<T> {
-    let url = format!("{}{}", crate::BFF_URL, path);
+    let url = format!("{}{}", crate::bff_base(), path);
     for attempt in 0..10u32 {
         match reqwest::get(url.as_str()).await {
             Ok(resp) => return resp.json::<T>().await.ok(),
@@ -364,7 +364,7 @@ async fn fetch_active_project() -> Option<ProjectView> {
 
 async fn create_project(name: &str, repos: Vec<String>) -> Option<ProjectView> {
     let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/projects", crate::BFF_URL))
+        .post(format!("{}/api/projects", crate::bff_base()))
         .json(&serde_json::json!({ "name": name, "repos": repos }))
         .send()
         .await
@@ -377,7 +377,7 @@ async fn create_project(name: &str, repos: Vec<String>) -> Option<ProjectView> {
 
 async fn set_active_project(id: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/active", crate::BFF_URL))
+        .post(format!("{}/api/projects/active", crate::bff_base()))
         .json(&serde_json::json!({ "id": id }))
         .send()
         .await
@@ -390,7 +390,7 @@ async fn set_active_project(id: &str) -> bool {
 /// all bands are always sent so a single round-trip sets the whole map.
 async fn set_project_tier_map(id: &str, map: &TierMapView) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/tier-map", crate::BFF_URL, id))
+        .post(format!("{}/api/projects/{}/tier-map", crate::bff_base(), id))
         .json(&serde_json::json!({
             "fast":     map.fast,
             "balanced": map.balanced,
@@ -407,7 +407,7 @@ async fn set_project_tier_map(id: &str, map: &TierMapView) -> bool {
 /// Uses `POST /api/projects/:id/vision-enabled {enabled: bool}`.
 pub(super) async fn set_project_vision_enabled(id: &str, enabled: bool) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/vision-enabled", crate::BFF_URL, id))
+        .post(format!("{}/api/projects/{}/vision-enabled", crate::bff_base(), id))
         .json(&serde_json::json!({ "enabled": enabled }))
         .send()
         .await
@@ -423,7 +423,7 @@ pub(super) async fn set_project_vision_enabled(id: &str, enabled: bool) -> bool 
 /// endpoint and keep Audit + Calibration bidirectionally synced.
 pub(super) async fn set_project_step_model(id: &str, step: &str, model: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/step-models", crate::BFF_URL, id))
+        .post(format!("{}/api/projects/{}/step-models", crate::bff_base(), id))
         .json(&serde_json::json!({ "step": step, "model": model }))
         .send()
         .await
@@ -438,7 +438,7 @@ async fn set_max_iterations(id: &str, max_iterations: usize) -> bool {
     reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/max-iterations",
-            crate::BFF_URL,
+            crate::bff_base(),
             id
         ))
         .json(&serde_json::json!({ "max_iterations": max_iterations }))
@@ -451,7 +451,7 @@ async fn set_max_iterations(id: &str, max_iterations: usize) -> bool {
 /// Save the project's free-text product brief (#112).
 async fn set_product_brief(id: &str, brief: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/product-brief", crate::BFF_URL, id))
+        .post(format!("{}/api/projects/{}/product-brief", crate::bff_base(), id))
         .json(&serde_json::json!({ "product_brief": brief }))
         .send()
         .await
@@ -462,7 +462,7 @@ async fn set_product_brief(id: &str, brief: &str) -> bool {
 /// Add a project-memory entry (#112, Layer 3) — human-added, persisted as Approved.
 async fn add_memory_entry(id: &str, kind: &str, text: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/memory", crate::BFF_URL, id))
+        .post(format!("{}/api/projects/{}/memory", crate::bff_base(), id))
         .json(&serde_json::json!({ "kind": kind, "text": text }))
         .send()
         .await
@@ -473,7 +473,7 @@ async fn add_memory_entry(id: &str, kind: &str, text: &str) -> bool {
 /// Patch a memory entry's status (`"approved"` | `"archived"` | `"proposed"`).
 async fn patch_memory_status(id: &str, eid: &str, status: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/memory/{}", crate::BFF_URL, id, eid))
+        .post(format!("{}/api/projects/{}/memory/{}", crate::bff_base(), id, eid))
         .json(&serde_json::json!({ "status": status }))
         .send()
         .await
@@ -484,7 +484,7 @@ async fn patch_memory_status(id: &str, eid: &str, status: &str) -> bool {
 /// Save an edit to a memory entry's text + kind (the view/edit modal).
 async fn save_memory_edit(id: &str, eid: &str, kind: &str, text: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/memory/{}", crate::BFF_URL, id, eid))
+        .post(format!("{}/api/projects/{}/memory/{}", crate::bff_base(), id, eid))
         .json(&serde_json::json!({ "kind": kind, "text": text }))
         .send()
         .await
@@ -495,7 +495,7 @@ async fn save_memory_edit(id: &str, eid: &str, kind: &str, text: &str) -> bool {
 /// Delete a memory entry (discard a proposal, or prune).
 async fn delete_memory_entry(id: &str, eid: &str) -> bool {
     reqwest::Client::new()
-        .delete(format!("{}/api/projects/{}/memory/{}", crate::BFF_URL, id, eid))
+        .delete(format!("{}/api/projects/{}/memory/{}", crate::bff_base(), id, eid))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -537,7 +537,7 @@ async fn set_operating_principles(id: &str, principles: &[OperatingPrincipleView
     reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/operating-principles",
-            crate::BFF_URL,
+            crate::bff_base(),
             id
         ))
         .json(&serde_json::json!({ "operating_principles": principles }))
@@ -884,7 +884,7 @@ fn MemoryEditor(project: ProjectView, refresh: Signal<u32>) -> Element {
 /// Uses the `POST /api/projects/:id/l3-review` endpoint (R7).
 async fn set_project_l3_review(id: &str, enabled: bool, model: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/l3-review", crate::BFF_URL, id))
+        .post(format!("{}/api/projects/{}/l3-review", crate::bff_base(), id))
         .json(&serde_json::json!({ "enabled": enabled, "model": model }))
         .send()
         .await
@@ -896,7 +896,7 @@ async fn set_project_l3_review(id: &str, enabled: bool, model: &str) -> bool {
 pub(super) async fn preview_model_profile(project_id: &str, profile: &str) -> Option<serde_json::Value> {
     reqwest::get(format!(
         "{}/api/projects/{}/model-profile/preview?profile={}",
-        crate::BFF_URL,
+        crate::bff_base(),
         project_id,
         profile
     ))
@@ -910,7 +910,7 @@ pub(super) async fn preview_model_profile(project_id: &str, profile: &str) -> Op
 /// Apply a profile to a project (set profile + cascade + auto-save).
 pub(super) async fn apply_model_profile(project_id: &str, profile: &str) -> Option<serde_json::Value> {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/model-profile", crate::BFF_URL, project_id))
+        .post(format!("{}/api/projects/{}/model-profile", crate::bff_base(), project_id))
         .json(&serde_json::json!({ "profile": profile }))
         .send()
         .await
@@ -924,7 +924,7 @@ pub(super) async fn apply_model_profile(project_id: &str, profile: &str) -> Opti
 /// Uses the `POST /api/projects/:id/stall-thresholds` endpoint.
 async fn set_project_stall_thresholds(id: &str, watched_secs: u64, routine_secs: u64) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/stall-thresholds", crate::BFF_URL, id))
+        .post(format!("{}/api/projects/{}/stall-thresholds", crate::bff_base(), id))
         .json(&serde_json::json!({ "watched_secs": watched_secs, "routine_secs": routine_secs }))
         .send()
         .await
@@ -964,7 +964,7 @@ struct AppliedRuleView {
 async fn fetch_reconcile(project_id: &str) -> Option<Vec<AppliedRuleView>> {
     let v: serde_json::Value = reqwest::get(format!(
         "{}/api/projects/{}/reconcile",
-        crate::BFF_URL,
+        crate::bff_base(),
         project_id
     ))
     .await
@@ -989,7 +989,7 @@ struct ProviderView {
 
 /// Fetch the active provider/connection from the BFF.
 async fn fetch_provider() -> Option<ProviderView> {
-    reqwest::get(format!("{}/api/provider", crate::BFF_URL))
+    reqwest::get(format!("{}/api/provider", crate::bff_base()))
         .await
         .ok()?
         .json::<ProviderView>()
@@ -1202,7 +1202,7 @@ async fn start_dev_run(
 ) -> StartRunOutcome {
     let body = dev_run_body(tier_map, skip_layer2);
     let resp = match reqwest::Client::new()
-        .post(format!("{}/api/stories/{}/run", crate::BFF_URL, enc_seg(story_id)))
+        .post(format!("{}/api/stories/{}/run", crate::bff_base(), enc_seg(story_id)))
         .json(&body)
         .send()
         .await
@@ -1258,7 +1258,7 @@ async fn begin_investigation_run(story_id: &str, model: &str) -> BeginInvestigat
     let resp = match reqwest::Client::new()
         .post(format!(
             "{}/api/uow/{}/begin-investigation",
-            crate::BFF_URL,
+            crate::bff_base(),
             enc_seg(story_id)
         ))
         .json(&serde_json::json!({ "model": model }))
@@ -1357,7 +1357,7 @@ pub fn CockpitShell() -> Element {
 
 /// Export a project as a JSON file (native save dialog). Returns true on success.
 async fn export_project_json(id: &str, name: &str) -> bool {
-    let Ok(resp) = reqwest::get(format!("{}/api/projects/{}/export", crate::BFF_URL, id)).await
+    let Ok(resp) = reqwest::get(format!("{}/api/projects/{}/export", crate::bff_base(), id)).await
     else {
         return false;
     };
@@ -1400,7 +1400,7 @@ enum ImportResult {
 /// Delete a project by id. Returns true on success.
 async fn delete_project(id: &str) -> bool {
     reqwest::Client::new()
-        .delete(format!("{}/api/projects/{}", crate::BFF_URL, id))
+        .delete(format!("{}/api/projects/{}", crate::bff_base(), id))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -1440,7 +1440,7 @@ async fn import_project_payload(payload: &str, overwrite: bool) -> ImportResult 
         return ImportResult::Failed;
     };
     let Ok(resp) = reqwest::Client::new()
-        .post(format!("{}/api/projects/import", crate::BFF_URL))
+        .post(format!("{}/api/projects/import", crate::bff_base()))
         .header("content-type", "application/json")
         .body(body_str)
         .send()
@@ -1974,7 +1974,7 @@ struct GateProbeView {
 
 async fn fetch_gate_probe() -> Option<GateProbeView> {
     reqwest::Client::new()
-        .post(format!("{}/api/gate-probe", crate::BFF_URL))
+        .post(format!("{}/api/gate-probe", crate::bff_base()))
         .send()
         .await
         .ok()?
@@ -2286,7 +2286,7 @@ struct ChatModelSettingLite {
 
 /// Fetch the app-level (cross-project) chat assistant model from `GET /api/settings`.
 async fn fetch_app_chat_model() -> Option<String> {
-    let s: ChatModelSettingLite = reqwest::get(format!("{}/api/settings", crate::BFF_URL))
+    let s: ChatModelSettingLite = reqwest::get(format!("{}/api/settings", crate::bff_base()))
         .await
         .ok()?
         .json()
@@ -2298,7 +2298,7 @@ async fn fetch_app_chat_model() -> Option<String> {
 /// Persist the app-level chat assistant model via `POST /api/settings/chat-model`.
 async fn save_app_chat_model(model: &str) -> bool {
     reqwest::Client::new()
-        .post(format!("{}/api/settings/chat-model", crate::BFF_URL))
+        .post(format!("{}/api/settings/chat-model", crate::bff_base()))
         .json(&serde_json::json!({ "model": model }))
         .send()
         .await
@@ -2584,7 +2584,7 @@ struct FeatureFlagMap {
 /// don't break the UI.
 async fn fetch_feature_flags() -> FeatureFlagMap {
     let result: Option<FeatureFlagMap> = async {
-        reqwest::get(format!("{}/api/feature-flags", crate::BFF_URL))
+        reqwest::get(format!("{}/api/feature-flags", crate::bff_base()))
             .await
             .ok()?
             .json::<FeatureFlagMap>()
@@ -2615,7 +2615,7 @@ struct AppReleaseView {
 }
 
 async fn fetch_app_release() -> Option<AppReleaseView> {
-    reqwest::get(format!("{}/api/release", crate::BFF_URL))
+    reqwest::get(format!("{}/api/release", crate::bff_base()))
         .await
         .ok()?
         .json::<AppReleaseView>()
@@ -3650,7 +3650,7 @@ mod tests {
     // ── CiRulesPanel helpers ───────────────────────────────────────────────────
 
     use super::{
-        ci_rule_items_from_proposed, ci_rule_items_from_selections, first_linter, CiRuleItem,
+        ci_rule_items_from_proposed, ci_rule_items_from_selections, first_linter,
         RuleSelectionView,
     };
 
@@ -4020,5 +4020,1096 @@ mod tests {
             DecisionOutcomeView::Rejected { reason } => assert_eq!(reason, "needs work"),
             other => panic!("expected rejected, got {other:?}"),
         }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // Tier 2 — network-helper tests (wiremock against a mock BFF).
+    //
+    // Each helper here was converted from `crate::BFF_URL` to `crate::bff_base()`
+    // (the test seam). We point that seam at a wiremock server via the
+    // CAMERATA_BFF_URL env override, call the helper, and assert the request it
+    // issues (method + path, and for mutating calls the EXACT body via body_json
+    // with `.expect(1)` so the body is verified on server drop).
+    //
+    // CAMERATA_BFF_URL is process-global, and cargo runs tests on parallel
+    // threads, so EVERY test that sets it carries `#[serial_test::serial(bff_env)]`
+    // (tokio outer, serial inner) to serialize them crate-wide. `set_var` +
+    // `remove_var` around the call still bracket the override.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// `fetch_usage` GETs /api/usage and parses the cumulative usage snapshot.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_usage_parses_snapshot() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/usage"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "total_cost_usd": 0.42,
+                "calls": 7,
+                "by_model": [ { "model": "claude-sonnet-4-6", "tokens": 1500, "cost": 0.42, "calls": 7 } ],
+                "rate_limited": false
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let u = super::fetch_usage().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let u = u.expect("usage parses");
+        assert_eq!(u.total_tokens(), 1500);
+        assert_eq!(u.calls, 7);
+        assert!(!u.rate_limited);
+        assert_eq!(u.by_model.len(), 1);
+        assert_eq!(u.by_model[0].model, "claude-sonnet-4-6");
+    }
+
+    /// `fetch_active_project` GETs /api/projects/active and flattens the `Option<ProjectView>`.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_active_project_parses_and_flattens() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "proj-9", "name": "Acme", "max_iterations": 3
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let p = super::fetch_active_project().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let p = p.expect("active project parses");
+        assert_eq!(p.id, "proj-9");
+        assert_eq!(p.name, "Acme");
+        assert_eq!(p.max_iterations, 3);
+    }
+
+    /// `fetch_active_project` returns None when the server reports a `null` active project.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_active_project_null_is_none() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::Value::Null))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let p = super::fetch_active_project().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(p.is_none(), "a null active project flattens to None");
+    }
+
+    /// `create_project` POSTs {name, repos} and reads back the nested `project`.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn create_project_posts_name_and_repos() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects"))
+            .and(body_json(serde_json::json!({ "name": "New", "repos": ["acme/web"] })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "project": { "id": "p-new", "name": "New", "repos": ["acme/web"] }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let p = super::create_project("New", vec!["acme/web".to_string()]).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let p = p.expect("project parses from the nested key");
+        assert_eq!(p.id, "p-new");
+        assert_eq!(p.repos, vec!["acme/web".to_string()]);
+    }
+
+    /// `set_active_project` POSTs {id} and maps a 2xx to true.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_active_project_posts_id() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/active"))
+            .and(body_json(serde_json::json!({ "id": "p-7" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_active_project("p-7").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok, "2xx maps to true");
+    }
+
+    /// `set_project_tier_map` POSTs all four bands in one round-trip.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_project_tier_map_posts_all_bands() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/tier-map"))
+            .and(body_json(serde_json::json!({
+                "fast": ["haiku-x"],
+                "balanced": ["sonnet-x"],
+                "strongest": "opus-x",
+                "vision": []
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tm = TierMapView {
+            strongest: "opus-x".to_string(),
+            balanced: vec!["sonnet-x".to_string()],
+            fast: vec!["haiku-x".to_string()],
+            vision: vec![],
+        };
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_project_tier_map("p-1", &tm).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    /// `set_project_vision_enabled` POSTs {enabled} to the per-project endpoint.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_project_vision_enabled_posts_flag() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/vision-enabled"))
+            .and(body_json(serde_json::json!({ "enabled": true })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_project_vision_enabled("p-1", true).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    /// `set_project_step_model` POSTs {step, model} (patch semantics: one step per call).
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_project_step_model_posts_step_and_model() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/step-models"))
+            .and(body_json(serde_json::json!({ "step": "audit", "model": "claude-opus-4-8" })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_project_step_model("p-1", "audit", "claude-opus-4-8").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    /// `set_max_iterations` POSTs {max_iterations} to the loop-guard endpoint.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_max_iterations_posts_value() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/max-iterations"))
+            .and(body_json(serde_json::json!({ "max_iterations": 5 })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_max_iterations("p-1", 5).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    /// `set_product_brief` POSTs {product_brief}.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_product_brief_posts_text() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/product-brief"))
+            .and(body_json(serde_json::json!({ "product_brief": "We build X for Y." })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_product_brief("p-1", "We build X for Y.").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    /// `add_memory_entry` POSTs {kind, text} to the project memory endpoint.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn add_memory_entry_posts_kind_and_text() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/memory"))
+            .and(body_json(serde_json::json!({ "kind": "gotcha", "text": "Watch the FK index." })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::add_memory_entry("p-1", "gotcha", "Watch the FK index.").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    /// `patch_memory_status` POSTs {status} to the per-entry endpoint.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn patch_memory_status_posts_status() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/memory/e-9"))
+            .and(body_json(serde_json::json!({ "status": "approved" })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::patch_memory_status("p-1", "e-9", "approved").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    /// `save_memory_edit` POSTs {kind, text} to the per-entry endpoint.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn save_memory_edit_posts_kind_and_text() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/memory/e-9"))
+            .and(body_json(serde_json::json!({ "kind": "decision", "text": "Edited." })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::save_memory_edit("p-1", "e-9", "decision", "Edited.").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    /// `delete_memory_entry` DELETEs the per-entry endpoint.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn delete_memory_entry_sends_delete() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/projects/p-1/memory/e-9"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::delete_memory_entry("p-1", "e-9").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    /// `set_operating_principles` POSTs the full list under {operating_principles}.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_operating_principles_posts_full_list() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/operating-principles"))
+            .and(body_json(serde_json::json!({
+                "operating_principles": [ { "id": "op-1", "text": "Write tests.", "enabled": true } ]
+            })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let principles = vec![super::OperatingPrincipleView {
+            id: "op-1".to_string(),
+            text: "Write tests.".to_string(),
+            enabled: true,
+        }];
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_operating_principles("p-1", &principles).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    /// `set_project_l3_review` POSTs {enabled, model}.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_project_l3_review_posts_enabled_and_model() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/l3-review"))
+            .and(body_json(serde_json::json!({ "enabled": true, "model": "claude-opus-4-8" })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_project_l3_review("p-1", true, "claude-opus-4-8").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    /// `set_project_stall_thresholds` POSTs {watched_secs, routine_secs}.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_project_stall_thresholds_posts_both_secs() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/stall-thresholds"))
+            .and(body_json(serde_json::json!({ "watched_secs": 90, "routine_secs": 450 })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_project_stall_thresholds("p-1", 90, 450).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    /// `delete_project` DELETEs /api/projects/:id.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn delete_project_sends_delete() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/projects/p-9"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::delete_project("p-9").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    /// `fetch_provider` GETs /api/provider and parses the connection view.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_provider_parses_connection() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/provider"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "provider": "github (token)", "live": true
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let p = super::fetch_provider().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let p = p.expect("provider parses");
+        assert_eq!(p.provider, "github (token)");
+        assert!(p.live);
+    }
+
+    /// `fetch_gate_probe` POSTs /api/gate-probe and parses the go/no-go.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_gate_probe_parses_verdict() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/gate-probe"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "go": true,
+                "layer1_denied": 5,
+                "layer1_total": 5,
+                "layer1_clean_allowed": true,
+                "layer2_bounced": true,
+                "layer2_clean": true
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let r = super::fetch_gate_probe().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let r = r.expect("gate probe parses");
+        assert!(r.go);
+        assert_eq!(r.layer1_denied, 5);
+        assert!(r.layer1_clean_allowed);
+        assert!(r.layer2_clean);
+    }
+
+    /// `fetch_app_release` GETs /api/release and parses the update info.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_app_release_parses_update_info() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/release"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "current": "0.4.1",
+                "latest": "0.4.2",
+                "update_available": true,
+                "release_notes": "Bug fixes."
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let rel = super::fetch_app_release().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let rel = rel.expect("release parses");
+        assert_eq!(rel.current, "0.4.1");
+        assert_eq!(rel.latest.as_deref(), Some("0.4.2"));
+        assert!(rel.update_available);
+    }
+
+    /// `fetch_feature_flags` GETs /api/feature-flags and parses the flag map.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_feature_flags_parses_map() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/feature-flags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "soc2": true })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let flags = super::fetch_feature_flags().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(flags.soc2, "soc2 flag parses from the server");
+    }
+
+    /// `fetch_feature_flags` degrades to an all-off default when the endpoint 500s.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_feature_flags_defaults_on_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/feature-flags"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let flags = super::fetch_feature_flags().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(!flags.soc2, "an error degrades to all-off (the conservative default)");
+    }
+
+    /// `fetch_app_chat_model` GETs /api/settings and returns the non-empty chat model.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_app_chat_model_returns_non_empty() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/settings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "chat_model": "claude-opus-4-8"
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let m = super::fetch_app_chat_model().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(m.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    /// `save_app_chat_model` POSTs {model} to /api/settings/chat-model.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn save_app_chat_model_posts_model() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/settings/chat-model"))
+            .and(body_json(serde_json::json!({ "model": "claude-sonnet-4-6" })))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::save_app_chat_model("claude-sonnet-4-6").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    /// `fetch_reconcile` GETs /api/projects/:id/reconcile and reads `applied` when `ok`.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_reconcile_reads_applied_when_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/p-1/reconcile"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "applied": [
+                    { "id": "RULE-1", "repo": "acme/web", "title": "No secrets", "summary": "s" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let applied = super::fetch_reconcile("p-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let applied = applied.expect("applied list parses");
+        assert_eq!(applied.len(), 1);
+        assert_eq!(applied[0].id, "RULE-1");
+        assert_eq!(applied[0].repo, "acme/web");
+    }
+
+    /// `fetch_reconcile` returns None when the server reports `ok: false`.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_reconcile_none_when_not_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/p-1/reconcile"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let applied = super::fetch_reconcile("p-1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(applied.is_none(), "ok:false yields None");
+    }
+
+    /// `apply_model_profile` POSTs {profile} and returns the JSON body.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn apply_model_profile_posts_profile() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/model-profile"))
+            .and(body_json(serde_json::json!({ "profile": "max_quality" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let v = super::apply_model_profile("p-1", "max_quality").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let v = v.expect("apply returns a JSON body");
+        assert_eq!(v.get("ok").and_then(|b| b.as_bool()), Some(true));
+    }
+
+    /// `preview_model_profile` GETs the preview endpoint with the profile query param.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn preview_model_profile_gets_with_query() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/p-1/model-profile/preview"))
+            .and(query_param("profile", "balanced"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "preview": true })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let v = super::preview_model_profile("p-1", "balanced").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let v = v.expect("preview returns a JSON body");
+        assert_eq!(v.get("preview").and_then(|b| b.as_bool()), Some(true));
+    }
+
+    /// `start_dev_run` POSTs the tier_map body to the story-run path and returns
+    /// Started with the run id. (Uses a plain story id; `enc_seg`'s percent-encoding
+    /// is unit-tested separately so this test's path is unambiguous.)
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn start_dev_run_started_returns_run_id() {
+        use super::StartRunOutcome;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/stories/CAM-7/run"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "run-7" })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let tm = TierMapView::default();
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let outcome = super::start_dev_run("CAM-7", &tm, false).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        match outcome {
+            StartRunOutcome::Started(id) => assert_eq!(id, "run-7"),
+            _ => panic!("expected Started"),
+        }
+    }
+
+    /// `enc_seg` percent-encodes the reserved chars in `owner/repo#num` story ids so the
+    /// '/' doesn't break single-segment routing and the '#' isn't dropped as a fragment.
+    #[test]
+    fn enc_seg_encodes_slash_and_hash() {
+        assert_eq!(super::enc_seg("acme/web#42"), "acme%2Fweb%2342");
+        // Unreserved chars pass through unchanged.
+        assert_eq!(super::enc_seg("CAM-7_v.1~x"), "CAM-7_v.1~x");
+    }
+
+    /// `start_dev_run` maps a 409 with a reason to Blocked(reason).
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn start_dev_run_409_is_blocked_with_reason() {
+        use super::StartRunOutcome;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/stories/s-1/run"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "reason": "Decisions are not all approved."
+            })))
+            .mount(&server)
+            .await;
+
+        let tm = TierMapView::default();
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let outcome = super::start_dev_run("s-1", &tm, false).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        match outcome {
+            StartRunOutcome::Blocked(reason) => assert_eq!(reason, "Decisions are not all approved."),
+            _ => panic!("expected Blocked"),
+        }
+    }
+
+    /// `begin_investigation_run` POSTs {model} and returns Started with the run id.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn begin_investigation_run_started_posts_model() {
+        use super::BeginInvestigationOutcome;
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/s-1/begin-investigation"))
+            .and(body_json(serde_json::json!({ "model": "claude-opus-4-8" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "run_id": "run-3", "story_id": "s-1"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let outcome = super::begin_investigation_run("s-1", "claude-opus-4-8").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        match outcome {
+            BeginInvestigationOutcome::Started(id) => assert_eq!(id, "run-3"),
+            _ => panic!("expected Started"),
+        }
+    }
+
+    /// `begin_investigation_run` maps a 409 with a reason to Blocked(reason).
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn begin_investigation_run_409_is_blocked() {
+        use super::BeginInvestigationOutcome;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/uow/s-1/begin-investigation"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({
+                "reason": "Not at intake."
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let outcome = super::begin_investigation_run("s-1", "m").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        match outcome {
+            BeginInvestigationOutcome::Blocked(reason) => assert_eq!(reason, "Not at intake."),
+            _ => panic!("expected Blocked"),
+        }
+    }
+
+    /// `import_project_payload` merges the `overwrite` flag and parses an Imported result.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn import_project_payload_imported() {
+        use super::ImportResult;
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // The helper parses the payload, inserts overwrite:true, and re-serialises.
+        Mock::given(method("POST"))
+            .and(path("/api/projects/import"))
+            .and(body_json(serde_json::json!({ "name": "Imp", "overwrite": true })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "project": { "id": "p-imp", "name": "Imp" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let res = super::import_project_payload(r#"{"name":"Imp"}"#, true).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        match res {
+            ImportResult::Imported(p) => assert_eq!(p.id, "p-imp"),
+            _ => panic!("expected Imported"),
+        }
+    }
+
+    /// `import_project_payload` surfaces a name-collision Conflict (with name + payload).
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn import_project_payload_conflict() {
+        use super::ImportResult;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/import"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "conflict": true, "name": "Existing"
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let res = super::import_project_payload(r#"{"name":"Existing"}"#, false).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        match res {
+            ImportResult::Conflict { name, payload } => {
+                assert_eq!(name, "Existing");
+                // The original (flag-free) payload is preserved for the confirmed re-POST.
+                assert_eq!(payload, r#"{"name":"Existing"}"#);
+            }
+            _ => panic!("expected Conflict"),
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // Tier 1 — render tests (dioxus-ssr). Render a component headlessly and assert
+    // its static STRUCTURE via stable class names / labels. No interaction, no
+    // async-loaded data (use_resource is pending on first render → fallback branch).
+    // SSR HTML-escapes special chars, so we assert on class names / leading words.
+    // ══════════════════════════════════════════════════════════════════════════
+
+    /// `CockpitNotice` is props-only (no context, no hooks beyond the match). Each
+    /// `kind` renders its distinct title + body.
+    #[test]
+    fn cockpit_notice_renders_error_kind() {
+        use dioxus::prelude::*;
+
+        fn harness() -> Element {
+            rsx! { super::CockpitNotice { kind: "error".to_string() } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("cockpit-notice-title"), "the title class renders; html=\n{html}");
+        // SSR escapes the apostrophe in "Can't" to &#39;, so assert on the apostrophe-free portion.
+        assert!(html.contains("reach the engine"), "the error title; html=\n{html}");
+    }
+
+    /// `CockpitNotice` with an unknown kind falls back to the empty-state copy.
+    #[test]
+    fn cockpit_notice_unknown_kind_is_empty_state() {
+        use dioxus::prelude::*;
+
+        fn harness() -> Element {
+            rsx! { super::CockpitNotice { kind: "anything-else".to_string() } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("No stories yet"), "the empty-state title; html=\n{html}");
+    }
+
+    /// `GateSelfCheck` renders its title + the run button before any result is fetched
+    /// (no context needed; the result use_signal starts None).
+    #[test]
+    fn gate_self_check_renders_title_and_button() {
+        use dioxus::prelude::*;
+
+        fn harness() -> Element {
+            rsx! { super::GateSelfCheck {} }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("gate-selfcheck"), "the wrapper class; html=\n{html}");
+        assert!(html.contains("Gate self-check"), "the title; html=\n{html}");
+        assert!(html.contains("Run gate self-check"), "the run button label; html=\n{html}");
+    }
+
+    /// `HomeNav` renders the three project-independent tabs (a bound signal prop; no
+    /// context). The active tab carries the `on` modifier class.
+    #[test]
+    fn home_nav_renders_three_tabs_with_active_modifier() {
+        use dioxus::prelude::*;
+
+        fn harness() -> Element {
+            let hv = use_signal(|| super::HomeView::Projects);
+            rsx! { super::HomeNav { home_view: hv } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("cockpit-nav"), "the nav wrapper; html=\n{html}");
+        assert!(html.contains("Projects"), "the Projects tab; html=\n{html}");
+        assert!(html.contains("Docs"), "the Docs tab; html=\n{html}");
+        assert!(html.contains("Settings"), "the Settings tab; html=\n{html}");
+        // Projects is the active view → its button carries the `on` modifier.
+        assert!(html.contains("cockpit-nav-tab on"), "the active tab modifier; html=\n{html}");
+    }
+
+    /// `DocsView` renders its two doc tabs + the markdown body wrapper. The body uses
+    /// `dangerous_inner_html` (does NOT render under SSR), so we assert the surrounding
+    /// structure only, not the rendered markdown.
+    #[test]
+    fn docs_view_renders_tabs_and_body_wrapper() {
+        use dioxus::prelude::*;
+
+        fn harness() -> Element {
+            rsx! { super::DocsView {} }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("docs-view"), "the docs wrapper; html=\n{html}");
+        assert!(html.contains("User Guide"), "the user-guide tab; html=\n{html}");
+        assert!(html.contains("Technical"), "the technical tab; html=\n{html}");
+        assert!(html.contains("docs-body"), "the body wrapper (dangerous_inner_html); html=\n{html}");
+    }
+
+    /// `UsageMeter` renders its neutral placeholder before the first poll lands (the
+    /// usage use_signal starts None, and the use_future fetch is pending under SSR).
+    #[test]
+    fn usage_meter_renders_loading_placeholder() {
+        use dioxus::prelude::*;
+
+        fn harness() -> Element {
+            rsx! { super::UsageMeter {} }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("usage-meter-loading"), "the loading placeholder class; html=\n{html}");
+    }
+
+    // Build a minimal ProjectView fixture from JSON (it has many serde-default
+    // fields; a bare {id, name} fills the rest with defaults).
+    fn project_fixture() -> super::ProjectView {
+        serde_json::from_value(serde_json::json!({ "id": "p-1", "name": "Acme" }))
+            .expect("valid ProjectView fixture")
+    }
+
+    /// `ProductBriefEditor` needs the toast context (use_context::<Signal<Vec<Toast>>>),
+    /// so the harness provides it. Asserts the card structure + the brief textarea.
+    #[test]
+    fn product_brief_editor_renders_card_and_textarea() {
+        use dioxus::prelude::*;
+
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            let refresh = use_signal(|| 0u32);
+            rsx! { super::ProductBriefEditor { project: project_fixture(), refresh } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("soft-ctx-card"), "the card wrapper; html=\n{html}");
+        assert!(html.contains("Product brief"), "the title; html=\n{html}");
+        assert!(html.contains("soft-ctx-brief"), "the brief textarea; html=\n{html}");
+        assert!(html.contains("Save brief"), "the save button label; html=\n{html}");
+    }
+
+    /// `OperatingPrinciplesEditor` (toast context provided) renders the card + add control.
+    #[test]
+    fn operating_principles_editor_renders_card_and_add() {
+        use dioxus::prelude::*;
+
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            let refresh = use_signal(|| 0u32);
+            rsx! { super::OperatingPrinciplesEditor { project: project_fixture(), refresh } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("soft-ctx-card"), "the card wrapper; html=\n{html}");
+        assert!(html.contains("Operating principles"), "the title; html=\n{html}");
+        assert!(html.contains("op-add"), "the add-principle row; html=\n{html}");
+        assert!(html.contains("Save principles"), "the save button; html=\n{html}");
+    }
+
+    /// `MemoryEditor` (toast context provided) renders the card, the empty-state line
+    /// (the fixture has no memory), and the add-learning controls.
+    #[test]
+    fn memory_editor_renders_card_empty_state_and_add() {
+        use dioxus::prelude::*;
+
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            let refresh = use_signal(|| 0u32);
+            rsx! { super::MemoryEditor { project: project_fixture(), refresh } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("soft-ctx-card"), "the card wrapper; html=\n{html}");
+        assert!(html.contains("Project memory"), "the title; html=\n{html}");
+        assert!(html.contains("mem-empty"), "the empty-state line (no memory in the fixture); html=\n{html}");
+        assert!(html.contains("mem-kind-select"), "the kind selector; html=\n{html}");
     }
 }
