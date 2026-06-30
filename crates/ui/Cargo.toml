@@ -56,3 +56,8 @@ pulldown-cmark = { version = "0.12", default-features = false, features = ["html
 
 [dev-dependencies]
 tokio = { version = "1", features = ["time", "rt", "macros", "rt-multi-thread"] }
+# UI testing (#112 follow-up). dioxus-ssr renders a component to an HTML string for headless
+# structure assertions (Tier 1); wiremock stands up a fake BFF so the reqwest network helpers can be
+# tested against CAMERATA_BFF_URL (Tier 2). No browser / wasm needed.
+dioxus-ssr = "0.7"
+wiremock = "0.6"

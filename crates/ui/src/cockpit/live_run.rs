@@ -822,3 +822,43 @@ pub(super) fn ModelSelect(models: Option<AuditModelsResp>, selected: Signal<Stri
         }
     }
 }
+
+#[cfg(test)]
+mod render_tests {
+    use super::{ClarificationView, ClarifyQuestion};
+    use dioxus::prelude::*;
+
+    // A root component that mounts the component under test. It runs INSIDE the VirtualDom runtime,
+    // so the inner component's hooks (use_signal) + event-handler creation work.
+    fn clarify_harness() -> Element {
+        rsx! {
+            ClarifyQuestion {
+                clar: ClarificationView {
+                    id: "c1".to_string(),
+                    question: "Which storage backend?".to_string(),
+                    ..Default::default()
+                },
+                on_answered: move |_| {},
+            }
+        }
+    }
+
+    // Tier-1 UI test: render a component to HTML headlessly (VirtualDom + dioxus-ssr) and assert its
+    // STRUCTURE. No browser / wasm. Catches "the component renders the wrong shape / an element
+    // vanished" bugs (e.g. the recurring model-selector-disappeared class). Static render only: it
+    // asserts the presence of text/elements, not click behavior or async-loaded data.
+    #[test]
+    fn clarify_question_renders_question_and_submit() {
+        let mut vdom = VirtualDom::new(clarify_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("Which storage backend?"),
+            "the question text renders; html=\n{html}"
+        );
+        assert!(
+            html.to_lowercase().contains("submit"),
+            "a submit affordance renders; html=\n{html}"
+        );
+    }
+}

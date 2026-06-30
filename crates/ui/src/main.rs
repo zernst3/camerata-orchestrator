@@ -32,6 +32,15 @@ use dioxus::prelude::*;
 pub const BFF_ADDR: &str = "127.0.0.1:8787";
 pub const BFF_URL: &str = "http://127.0.0.1:8787";
 
+/// The BFF base URL the cockpit's HTTP helpers talk to. Production uses the embedded BFF at
+/// [`BFF_URL`]; tests override it via `CAMERATA_BFF_URL` to point a helper at a mock server
+/// (wiremock). New/converted network helpers should call this instead of `BFF_URL` directly so they
+/// are testable. (The override is process-global env, so mock-server tests that set it should not
+/// run concurrently with other helpers that read it — keep such tests narrowly scoped.)
+pub fn bff_base() -> String {
+    std::env::var("CAMERATA_BFF_URL").unwrap_or_else(|_| BFF_URL.to_string())
+}
+
 fn main() {
     // Auto-load the gitignored .env at the repo root (and any parent), so the
     // GitHub token etc. are available to the embedded BFF without exporting them.

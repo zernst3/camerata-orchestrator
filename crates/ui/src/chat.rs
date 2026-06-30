@@ -798,7 +798,8 @@ async fn add_chat_learning(text: &str) -> bool {
     struct ActiveId {
         id: String,
     }
-    let resp = match reqwest::get(format!("{}/api/projects/active", crate::BFF_URL)).await {
+    let base = crate::bff_base();
+    let resp = match reqwest::get(format!("{base}/api/projects/active")).await {
         Ok(r) => r,
         Err(_) => return false,
     };
@@ -806,7 +807,7 @@ async fn add_chat_learning(text: &str) -> bool {
         return false;
     };
     reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/memory", crate::BFF_URL, active.id))
+        .post(format!("{base}/api/projects/{}/memory", active.id))
         .json(&serde_json::json!({ "kind": "decision", "text": text }))
         .send()
         .await
@@ -1554,6 +1555,44 @@ mod tests {
 
     fn total_options(groups: &[(String, Vec<ModelOption>)]) -> usize {
         groups.iter().map(|(_, o)| o.len()).sum()
+    }
+
+    // ── Tier-2 UI test: a network helper against a MOCK BFF (wiremock) ──────────
+    // Verifies add_chat_learning's request CONTRACT: it GETs the active project, then POSTs the
+    // reply text to that project's /memory with the right body. Points the helper at a fake server
+    // via the CAMERATA_BFF_URL seam. (The env override is process-global; this is the only test that
+    // reads bff_base(), so it can't race another helper.)
+    #[tokio::test]
+    async fn add_chat_learning_resolves_active_then_posts_the_reply() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "id": "proj-7", "name": "Acme" })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-7/memory"))
+            .and(body_json(
+                serde_json::json!({ "kind": "decision", "text": "A durable learning." }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::add_chat_learning("A durable learning.").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok, "resolves the active project, then posts the learning");
+        // `.expect(1)` on the POST mock asserts (on server drop) it was hit once with the exact
+        // path + body — i.e. the helper sent {kind, text} to /api/projects/proj-7/memory.
     }
 
     #[test]
