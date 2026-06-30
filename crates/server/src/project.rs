@@ -334,6 +334,12 @@ pub struct Project {
     /// empty list stays empty.
     #[serde(default = "default_operating_principles")]
     pub operating_principles: Vec<OperatingPrinciple>,
+    /// PROJECT MEMORY (#112, Layer 3): the accumulating, human-curated learnings (decisions,
+    /// patterns, gotchas, constraints). Agents propose entries at run end; the architect curates;
+    /// `Approved` entries (capped) feed grounding under `## What we have learned`. Travels with the
+    /// project export. Serde default = empty for projects persisted before this field existed.
+    #[serde(default)]
+    pub memory: Vec<MemoryEntry>,
 }
 
 /// One agent operating principle: a single imperative line the governed agent is held to (about
@@ -352,6 +358,59 @@ pub struct OperatingPrinciple {
 
 fn default_true_principle() -> bool {
     true
+}
+
+/// What a [`MemoryEntry`] records — the accumulating PROJECT MEMORY (#112, Layer 3): the durable
+/// learnings that carry across runs so agent N+1 doesn't rediscover what agent N learned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryKind {
+    /// A decision that was made (and should hold).
+    #[default]
+    Decision,
+    /// A pattern established in this codebase.
+    Pattern,
+    /// A gotcha / sharp edge learned the hard way.
+    Gotcha,
+    /// A constraint to respect.
+    Constraint,
+}
+
+/// The curation state of a [`MemoryEntry`]. Agents PROPOSE; the human curates. Only `Approved`
+/// entries reach agent grounding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryStatus {
+    /// Proposed by an agent, awaiting human review (NOT yet grounded).
+    #[default]
+    Proposed,
+    /// Approved by the human — durable, and woven into agent grounding.
+    Approved,
+    /// Retired: kept for the record but no longer grounded.
+    Archived,
+}
+
+/// One PROJECT MEMORY entry (#112, Layer 3): a single curated learning. Agents propose them at run
+/// end; the architect approves/edits/archives. Approved entries (capped) feed agent grounding under
+/// `## What we have learned`. Travels with the project export, so the curated memory is transferable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryEntry {
+    /// Stable id (`mem-N`).
+    pub id: String,
+    /// What kind of learning this is.
+    #[serde(default)]
+    pub kind: MemoryKind,
+    /// The learning itself, one fact.
+    pub text: String,
+    /// Who proposed it: `"human"` or `"agent:<story-or-run>"`.
+    #[serde(default)]
+    pub source: String,
+    /// Curation state. Absent → `Proposed`.
+    #[serde(default)]
+    pub status: MemoryStatus,
+    /// RFC3339 creation timestamp.
+    #[serde(default)]
+    pub created: String,
 }
 
 /// The shipped DEFAULT operating principles — distilled from the standards this project's architect
@@ -462,6 +521,18 @@ impl Project {
     /// never disable the bounce, only cap how many revise passes a stage may take.
     pub fn set_max_iterations(&mut self, n: usize) {
         self.max_iterations = n.max(1);
+    }
+
+    /// The next free `mem-N` id for a new project-memory entry (max existing suffix + 1).
+    pub fn next_memory_id(&self) -> String {
+        let max = self
+            .memory
+            .iter()
+            .filter_map(|m| m.id.strip_prefix("mem-"))
+            .filter_map(|n| n.parse::<usize>().ok())
+            .max()
+            .unwrap_or(0);
+        format!("mem-{}", max + 1)
     }
 
     /// Replace the VCS-gate process-rule configuration for this project.
@@ -599,6 +670,8 @@ pub struct ProjectImport {
     pub product_brief: String,
     /// The agent operating principles (conduct).
     pub operating_principles: Vec<OperatingPrinciple>,
+    /// The curated project memory (Layer 3).
+    pub memory: Vec<MemoryEntry>,
 }
 
 /// Outcome of a [`ProjectStore::import_or_overwrite`] call.
@@ -740,6 +813,7 @@ impl ProjectStore {
                 vision_enabled: false,
                 product_brief: String::new(),
                 operating_principles: default_operating_principles(),
+                memory: Vec::new(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -811,6 +885,7 @@ impl ProjectStore {
                 existing.vision_enabled = import.vision_enabled;
                 existing.product_brief = import.product_brief;
                 existing.operating_principles = import.operating_principles;
+                existing.memory = import.memory;
                 let updated = existing.clone();
                 s.active = Some(updated.id.clone());
                 ImportOutcome::Overwritten(updated)
@@ -833,6 +908,7 @@ impl ProjectStore {
                     vision_enabled: import.vision_enabled,
                     product_brief: import.product_brief,
                     operating_principles: import.operating_principles,
+                    memory: import.memory,
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -969,6 +1045,7 @@ mod tests {
             vision_enabled: false,
             product_brief: String::new(),
             operating_principles: Vec::new(),
+            memory: Vec::new(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -1015,6 +1092,7 @@ mod tests {
             vision_enabled: false,
             product_brief: String::new(),
             operating_principles: Vec::new(),
+            memory: Vec::new(),
             ruleset: ProjectRuleset {
                 selections: vec![],
                 cross_repo: vec![],
@@ -1060,6 +1138,7 @@ mod tests {
             vision_enabled: false,
             product_brief: String::new(),
             operating_principles: Vec::new(),
+            memory: Vec::new(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -1099,6 +1178,7 @@ mod tests {
             vision_enabled: false,
             product_brief: String::new(),
             operating_principles: Vec::new(),
+            memory: Vec::new(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -1141,6 +1221,7 @@ mod tests {
             vision_enabled: false,
             product_brief: String::new(),
             operating_principles: Vec::new(),
+            memory: Vec::new(),
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -1195,6 +1276,7 @@ mod tests {
             vision_enabled: false,
             product_brief: String::new(),
             operating_principles: Vec::new(),
+            memory: Vec::new(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
@@ -1545,6 +1627,7 @@ mod tests {
             vision_enabled: false,
             product_brief: String::new(),
             operating_principles: Vec::new(),
+            memory: Vec::new(),
             ruleset: ProjectRuleset::default(),
         };
         original.set_model_for_step(StepKind::Decomposition, "claude-opus-4-8".into());

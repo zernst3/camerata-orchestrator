@@ -137,6 +137,7 @@ fn import_via_handler_path(
         vision_enabled: field_or_default(export, "vision_enabled"),
         product_brief: field_or_default(export, "product_brief"),
         operating_principles: field_or_default(export, "operating_principles"),
+        memory: field_or_default(export, "memory"),
     };
     store
         .import_or_overwrite(&name, import, overwrite)

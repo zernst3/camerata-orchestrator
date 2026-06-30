@@ -101,6 +101,7 @@ mod tests {
             vision_enabled: false,
             product_brief: String::new(),
             operating_principles: Vec::new(),
+            memory: Vec::new(),
             ruleset: ProjectRuleset::default(),
         };
         let json = serde_json::to_string(&original).unwrap();

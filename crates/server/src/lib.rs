@@ -359,6 +359,30 @@ impl AppState {
             }
             soft.push('\n');
         }
+        // Project memory (Layer 3): the APPROVED, curated learnings, capped to the most recent so
+        // they inform without crowding out the task. Proposed/archived entries are excluded.
+        let approved: Vec<&crate::project::MemoryEntry> = project
+            .memory
+            .iter()
+            .filter(|m| {
+                m.status == crate::project::MemoryStatus::Approved && !m.text.trim().is_empty()
+            })
+            .collect();
+        if !approved.is_empty() {
+            const MEM_CAP: usize = 15;
+            let start = approved.len().saturating_sub(MEM_CAP);
+            soft.push_str("## What we have learned on this project\n");
+            for m in &approved[start..] {
+                let k = match m.kind {
+                    crate::project::MemoryKind::Decision => "decision",
+                    crate::project::MemoryKind::Pattern => "pattern",
+                    crate::project::MemoryKind::Gotcha => "gotcha",
+                    crate::project::MemoryKind::Constraint => "constraint",
+                };
+                soft.push_str(&format!("- [{k}] {}\n", m.text.trim()));
+            }
+            soft.push('\n');
+        }
         let soft = if soft.trim().is_empty() { None } else { Some(soft) };
 
         let base = crate::grounding::assemble(rule_section, &repo_digests, &unresolved);
@@ -623,6 +647,11 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/projects/:id/operating-principles",
             post(set_operating_principles),
+        )
+        .route("/api/projects/:id/memory", post(add_memory))
+        .route(
+            "/api/projects/:id/memory/:eid",
+            post(patch_memory).delete(delete_memory),
         )
         // Per-step model config: set the model for one NON-FLEET AI step on this project.
         .route("/api/projects/:id/step-models", post(set_step_model))
@@ -2323,6 +2352,9 @@ struct ImportProjectReq {
     /// The agent operating principles (#112). Transferable.
     #[serde(default)]
     operating_principles: Vec<crate::project::OperatingPrinciple>,
+    /// The curated project memory (#112, Layer 3). Transferable.
+    #[serde(default)]
+    memory: Vec<crate::project::MemoryEntry>,
     /// When `false` (the default) a name collision returns `conflict: true` so the UI
     /// can ask before overwriting. Pass `true` to overwrite in place (same id, same
     /// name, replacing the full transferable config — repos/ruleset/onboarded plus
@@ -2407,6 +2439,7 @@ async fn import_project(
         vision_enabled: req.vision_enabled,
         product_brief: req.product_brief,
         operating_principles: req.operating_principles,
+        memory: req.memory,
     };
     match state
         .projects
@@ -2709,6 +2742,90 @@ async fn set_operating_principles(
 ) -> Json<serde_json::Value> {
     match state.projects.update(&id, |p| {
         p.operating_principles = req.operating_principles.clone();
+    }) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Body for `POST /api/projects/:id/memory` — add a project-memory entry (#112, Layer 3).
+#[derive(serde::Deserialize)]
+struct AddMemoryReq {
+    #[serde(default)]
+    kind: crate::project::MemoryKind,
+    text: String,
+}
+
+/// `POST /api/projects/:id/memory` — add a project-memory entry. A human-added entry is `Approved`
+/// immediately (the human IS the curator); agent proposals arrive `Proposed` via the propose path.
+async fn add_memory(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AddMemoryReq>,
+) -> Json<serde_json::Value> {
+    let text = req.text.trim().to_string();
+    if text.is_empty() {
+        return Json(serde_json::json!({ "ok": false, "message": "empty memory text" }));
+    }
+    match state.projects.update(&id, |p| {
+        let entry = crate::project::MemoryEntry {
+            id: p.next_memory_id(),
+            kind: req.kind,
+            text: text.clone(),
+            source: "human".to_string(),
+            status: crate::project::MemoryStatus::Approved,
+            created: chrono::Utc::now().to_rfc3339(),
+        };
+        p.memory.push(entry);
+    }) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Body for `POST /api/projects/:id/memory/:eid` — patch one entry.
+#[derive(serde::Deserialize)]
+struct PatchMemoryReq {
+    #[serde(default)]
+    status: Option<crate::project::MemoryStatus>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    kind: Option<crate::project::MemoryKind>,
+}
+
+/// `POST /api/projects/:id/memory/:eid` — patch a memory entry: approve/archive (status), or edit
+/// its text/kind. The curation surface for both human and agent-proposed entries.
+async fn patch_memory(
+    State(state): State<AppState>,
+    Path((id, eid)): Path<(String, String)>,
+    Json(req): Json<PatchMemoryReq>,
+) -> Json<serde_json::Value> {
+    match state.projects.update(&id, |p| {
+        if let Some(m) = p.memory.iter_mut().find(|m| m.id == eid) {
+            if let Some(s) = req.status {
+                m.status = s;
+            }
+            if let Some(t) = &req.text {
+                m.text = t.trim().to_string();
+            }
+            if let Some(k) = req.kind {
+                m.kind = k;
+            }
+        }
+    }) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// `DELETE /api/projects/:id/memory/:eid` — remove a memory entry (discard a proposal, or prune).
+async fn delete_memory(
+    State(state): State<AppState>,
+    Path((id, eid)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    match state.projects.update(&id, |p| {
+        p.memory.retain(|m| m.id != eid);
     }) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
@@ -10697,6 +10814,85 @@ mod tests {
             !g.contains("SECRET-DISABLED-PRINCIPLE"),
             "a DISABLED principle must NOT reach grounding"
         );
+    }
+
+    #[tokio::test]
+    async fn project_grounding_includes_approved_memory_only() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec![]).expect("project created");
+        state.projects.update(&p.id, |pr| {
+            pr.memory = vec![
+                crate::project::MemoryEntry {
+                    id: "mem-1".to_string(),
+                    kind: crate::project::MemoryKind::Gotcha,
+                    text: "APPROVED-LEARNING.".to_string(),
+                    source: "human".to_string(),
+                    status: crate::project::MemoryStatus::Approved,
+                    created: String::new(),
+                },
+                crate::project::MemoryEntry {
+                    id: "mem-2".to_string(),
+                    kind: crate::project::MemoryKind::Decision,
+                    text: "PROPOSED-LEARNING.".to_string(),
+                    source: "agent:x".to_string(),
+                    status: crate::project::MemoryStatus::Proposed,
+                    created: String::new(),
+                },
+            ];
+        });
+        let g = state.project_grounding().await.expect("grounding present");
+        assert!(g.contains("## What we have learned on this project"));
+        assert!(g.contains("APPROVED-LEARNING"));
+        assert!(g.contains("[gotcha]"), "the kind tag is rendered");
+        assert!(
+            !g.contains("PROPOSED-LEARNING"),
+            "a PROPOSED (un-curated) entry must NOT reach grounding"
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_add_patch_delete_curation_flow() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec![]).expect("project created");
+        // Human add → an Approved entry with a fresh id.
+        let r = add_memory(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(p.id.clone()),
+            axum::Json(AddMemoryReq {
+                kind: crate::project::MemoryKind::Pattern,
+                text: "  Use the repository pattern for data access.  ".to_string(),
+            }),
+        )
+        .await
+        .0;
+        assert_eq!(r["ok"], true);
+        let proj = state.projects.active().unwrap();
+        assert_eq!(proj.memory.len(), 1);
+        assert_eq!(proj.memory[0].status, crate::project::MemoryStatus::Approved);
+        assert_eq!(proj.memory[0].text, "Use the repository pattern for data access.");
+        let eid = proj.memory[0].id.clone();
+        // Patch → archive it.
+        let _ = patch_memory(
+            axum::extract::State(state.clone()),
+            axum::extract::Path((p.id.clone(), eid.clone())),
+            axum::Json(PatchMemoryReq {
+                status: Some(crate::project::MemoryStatus::Archived),
+                text: None,
+                kind: None,
+            }),
+        )
+        .await;
+        assert_eq!(
+            state.projects.active().unwrap().memory[0].status,
+            crate::project::MemoryStatus::Archived
+        );
+        // Delete → gone.
+        let _ = delete_memory(
+            axum::extract::State(state.clone()),
+            axum::extract::Path((p.id.clone(), eid)),
+        )
+        .await;
+        assert!(state.projects.active().unwrap().memory.is_empty());
     }
 
     #[tokio::test]
