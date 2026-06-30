@@ -155,7 +155,7 @@ struct ConnectionsView {
 }
 
 async fn fetch_connections() -> Option<ConnectionsView> {
-    reqwest::get(format!("{}/api/connections", crate::BFF_URL))
+    reqwest::get(format!("{}/api/connections", crate::bff_base()))
         .await
         .ok()?
         .json::<ConnectionsView>()
@@ -181,7 +181,7 @@ struct NotificationsFeed {
 async fn fetch_notifications(since: u64) -> Option<NotificationsFeed> {
     reqwest::get(format!(
         "{}/api/notifications?since={since}",
-        crate::BFF_URL
+        crate::bff_base()
     ))
     .await
     .ok()?
@@ -321,4 +321,241 @@ pub fn ConnectionWatcher() -> Element {
         });
     });
     rsx! {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Tier 2: network-helper tests (wiremock) ─────────────────────────────────
+    // These point a reqwest helper at a fake BFF via the CAMERATA_BFF_URL seam
+    // (crate::bff_base) and assert the request it issues + that the JSON body parses
+    // into the expected value. CAMERATA_BFF_URL is process-global, so each test sets
+    // it, calls the helper, then removes it (don't run these concurrently with other
+    // bff_base() readers).
+
+    // fetch_connections GETs /api/connections and deserializes the report. Asserts
+    // both the path it hits AND that a representative connections payload parses into
+    // the typed ConnectionsView (id/label/configured/ok/error_category/login).
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_connections_gets_endpoint_and_parses_report() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/connections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "connections": [
+                    {
+                        "id": "github",
+                        "label": "GitHub",
+                        "configured": true,
+                        "ok": false,
+                        "error_category": "invalid_or_expired"
+                    },
+                    {
+                        "id": "claude",
+                        "label": "Claude",
+                        "configured": true,
+                        "ok": true,
+                        "login": "octocat"
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let report = super::fetch_connections().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let report = report.expect("the /api/connections payload parses into ConnectionsView");
+        assert_eq!(report.connections.len(), 2);
+        let gh = &report.connections[0];
+        assert_eq!(gh.id, "github");
+        assert_eq!(gh.label, "GitHub");
+        assert!(gh.configured);
+        assert_eq!(gh.ok, Some(false));
+        assert_eq!(gh.error_category.as_deref(), Some("invalid_or_expired"));
+        let claude = &report.connections[1];
+        assert_eq!(claude.ok, Some(true));
+        assert_eq!(claude.login.as_deref(), Some("octocat"));
+    }
+
+    // fetch_connections returns None when the server errors (non-200 / unparseable),
+    // so the watcher loop simply skips that probe rather than panicking.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_connections_returns_none_on_server_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/connections"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let report = super::fetch_connections().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(report.is_none(), "a 500 yields None, not a panic");
+    }
+
+    // fetch_notifications GETs /api/notifications with the `since` cursor as a query
+    // param and parses the feed (notifications + cursor high-water mark). Asserts the
+    // path, the exact `since` query value, and that the body deserializes.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_notifications_passes_since_cursor_and_parses_feed() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/notifications"))
+            .and(query_param("since", "42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "notifications": [
+                    { "kind": "error", "message": "a story failed" },
+                    { "kind": "info", "message": "a story moved" }
+                ],
+                "cursor": 99
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let feed = super::fetch_notifications(42).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let feed = feed.expect("the /api/notifications payload parses into NotificationsFeed");
+        assert_eq!(feed.cursor, 99);
+        assert_eq!(feed.notifications.len(), 2);
+        assert_eq!(feed.notifications[0].kind, "error");
+        assert_eq!(feed.notifications[0].message, "a story failed");
+        assert_eq!(feed.notifications[1].kind, "info");
+    }
+
+    // ── Tier 1: render tests (dioxus-ssr) ───────────────────────────────────────
+    // Render a component headlessly (VirtualDom + dioxus-ssr) and assert its static
+    // STRUCTURE. Components here read a Signal<Vec<Toast>> from context, so the
+    // harness root MUST provide it before rendering, else use_context panics.
+
+    // ToastCard renders the severity label, the message, and the dismiss button for a
+    // given toast. Verifies the Warning kind maps to the "HEADS UP" label and that the
+    // message text + close affordance are present.
+    #[test]
+    fn toast_card_renders_label_message_and_dismiss() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<Toast>::new()));
+            rsx! {
+                ToastCard {
+                    toast: Toast {
+                        id: 1,
+                        kind: ToastKind::Warning,
+                        message: "nothing connected".to_string(),
+                    },
+                }
+            }
+        }
+
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+
+        assert!(
+            html.contains("HEADS UP"),
+            "Warning renders the HEADS UP label; html=\n{html}"
+        );
+        assert!(
+            html.contains("nothing connected"),
+            "the message text renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("toast-close"),
+            "the dismiss button renders; html=\n{html}"
+        );
+    }
+
+    // ToastCard maps the Error kind to the "ERROR" label + the `toast error` class.
+    #[test]
+    fn toast_card_error_kind_renders_error_label_and_class() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<Toast>::new()));
+            rsx! {
+                ToastCard {
+                    toast: Toast {
+                        id: 2,
+                        kind: ToastKind::Error,
+                        message: "GitHub connection failed".to_string(),
+                    },
+                }
+            }
+        }
+
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+
+        assert!(
+            html.contains("ERROR"),
+            "Error renders the ERROR label; html=\n{html}"
+        );
+        assert!(
+            html.contains("toast error"),
+            "Error renders the `toast error` class; html=\n{html}"
+        );
+        assert!(
+            html.contains("GitHub connection failed"),
+            "the message text renders; html=\n{html}"
+        );
+    }
+
+    // ToastHost reads the app-wide Signal<Vec<Toast>> from context and renders one
+    // card per toast inside the `toast-host` container. Seed the context with two
+    // toasts and assert both messages render under the host.
+    #[test]
+    fn toast_host_renders_a_card_per_toast() {
+        fn harness() -> Element {
+            use_context_provider(|| {
+                Signal::new(vec![
+                    Toast {
+                        id: 1,
+                        kind: ToastKind::Info,
+                        message: "first toast".to_string(),
+                    },
+                    Toast {
+                        id: 2,
+                        kind: ToastKind::Error,
+                        message: "second toast".to_string(),
+                    },
+                ])
+            });
+            rsx! { ToastHost {} }
+        }
+
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+
+        assert!(
+            html.contains("toast-host"),
+            "the host container renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("first toast") && html.contains("second toast"),
+            "one card renders per toast in the signal; html=\n{html}"
+        );
+        assert!(
+            html.contains("INFO") && html.contains("ERROR"),
+            "each card renders its own severity label; html=\n{html}"
+        );
+    }
 }

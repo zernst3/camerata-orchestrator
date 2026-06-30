@@ -440,3 +440,179 @@ pub fn TerminalBubble() -> Element {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Pure-logic unit tests (highest ROI; doc §"What to test" item 1) ──────────
+    //
+    // The script builders are the load-bearing contract of this file: a wrong DOM id
+    // or a wrong ws URL silently breaks the terminal at runtime (no browser test would
+    // catch it pre-ship). They are plain `format!` string builders, so we assert the
+    // interpolated structure directly.
+
+    #[test]
+    fn next_tab_id_is_monotonic_and_unique() {
+        let a = next_tab_id();
+        let b = next_tab_id();
+        let c = next_tab_id();
+        assert!(b > a, "ids increase: {a} then {b}");
+        assert!(c > b, "ids increase: {b} then {c}");
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+    }
+
+    #[test]
+    fn session_script_targets_the_right_container_and_global() {
+        let script = make_session_script(7, "ws://127.0.0.1:8787/api/terminal/ws");
+        // The xterm div id and the per-session window global must both key off the tab id,
+        // or the double-init guard + cleanup look at the wrong session.
+        assert!(
+            script.contains("'xterm-7'"),
+            "container id is xterm-<id>; script=\n{script}"
+        );
+        assert!(
+            script.contains("window['__term_7']"),
+            "session global is __term_<id>; script=\n{script}"
+        );
+    }
+
+    #[test]
+    fn session_script_interpolates_the_ws_url() {
+        let url = "ws://127.0.0.1:8787/api/terminal/ws";
+        let script = make_session_script(3, url);
+        assert!(
+            script.contains(&format!("new WebSocket('{url}')")),
+            "opens the ws at the passed url; script=\n{script}"
+        );
+    }
+
+    #[test]
+    fn session_script_sends_resize_geometry() {
+        // The PTY only matches the rendered terminal if the resize message is sent;
+        // assert both the initial onopen send and the onResize send are present.
+        let script = make_session_script(1, "ws://x/y");
+        assert!(
+            script.contains("resize:"),
+            "sends a resize message; script=\n{script}"
+        );
+        assert!(
+            script.contains("term.onResize"),
+            "wires onResize -> ws.send(resize); script=\n{script}"
+        );
+        assert!(
+            script.contains("term.onData"),
+            "wires onData -> ws.send; script=\n{script}"
+        );
+    }
+
+    #[test]
+    fn cleanup_script_tears_down_the_matching_session() {
+        let script = make_cleanup_script(42);
+        assert!(
+            script.contains("window['__term_42']"),
+            "reads the matching session global; script=\n{script}"
+        );
+        assert!(
+            script.contains("delete window['__term_42']"),
+            "deletes the matching session global; script=\n{script}"
+        );
+        assert!(script.contains("s.ws.close()"), "closes the ws");
+        assert!(
+            script.contains("s.observer.disconnect()"),
+            "disconnects the ResizeObserver"
+        );
+        assert!(script.contains("s.term.dispose()"), "disposes xterm");
+    }
+
+    #[test]
+    fn cleanup_and_session_scripts_for_different_ids_do_not_alias() {
+        // Closing tab 1 must not touch tab 2's global — verify the id is the only thing
+        // distinguishing the two scripts.
+        let c1 = make_cleanup_script(1);
+        let c2 = make_cleanup_script(2);
+        assert!(c1.contains("__term_1") && !c1.contains("__term_2"));
+        assert!(c2.contains("__term_2") && !c2.contains("__term_1"));
+    }
+
+    #[test]
+    fn reveal_script_refits_and_refocuses_the_matching_session() {
+        let script = make_reveal_script(9);
+        assert!(
+            script.contains("window['__term_9']"),
+            "targets the matching session; script=\n{script}"
+        );
+        assert!(
+            script.contains("getElementById('xterm-9')"),
+            "polls the matching dom element; script=\n{script}"
+        );
+        // The reveal must force a full repaint (fit() alone no-ops if dims are unchanged,
+        // leaving the canvas blank after a hide/show) and re-focus.
+        assert!(script.contains("fit()"), "re-fits the addon");
+        assert!(script.contains("refresh(0"), "forces a full viewport repaint");
+        assert!(script.contains("focus()"), "re-focuses for keystrokes");
+    }
+
+    #[test]
+    fn xterm_load_script_pins_cdn_versions() {
+        // A floating version would break reproducibility / could pull a breaking xterm.
+        assert!(XTERM_LOAD_SCRIPT.contains("xterm@5.3.0"));
+        assert!(XTERM_LOAD_SCRIPT.contains("xterm-addon-fit@0.8.0"));
+        // Loads css + js + fit addon and resolves the readiness promise.
+        assert!(XTERM_LOAD_SCRIPT.contains("xterm.min.css"));
+        assert!(XTERM_LOAD_SCRIPT.contains("xterm.min.js"));
+        assert!(XTERM_LOAD_SCRIPT.contains("__xtermLoaded"));
+    }
+
+    // ── Tier 1: render test (dioxus-ssr) ─────────────────────────────────────────
+    //
+    // On first render `open()` and `ever_opened()` are both false, so only the FAB
+    // button renders (the panel is gated behind `if ever_opened()`). SSR is static —
+    // we cannot click to open the panel — so we assert the FAB's structure, which is
+    // the affordance most prone to a "the toggle button vanished" regression.
+    // `TerminalBubble` uses only `use_signal` (no `use_context`), so no provider is needed.
+    mod render_tests {
+        use super::super::TerminalBubble;
+        use dioxus::prelude::*;
+
+        fn harness() -> Element {
+            rsx! { TerminalBubble {} }
+        }
+
+        #[test]
+        fn renders_the_terminal_fab() {
+            let mut vdom = VirtualDom::new(harness);
+            vdom.rebuild_in_place();
+            let html = dioxus_ssr::render(&vdom);
+            assert!(
+                html.contains("term-fab"),
+                "the FAB button renders with its class; html=\n{html}"
+            );
+            assert!(
+                html.contains("Terminal"),
+                "the FAB carries its title; html=\n{html}"
+            );
+            // Closed-state glyph (the prompt icon), not the ✕ close glyph. SSR escapes '>' to
+            // '&#62;', so assert on the escaped form.
+            assert!(
+                html.contains("&#62;_"),
+                "shows the closed-state prompt glyph; html=\n{html}"
+            );
+        }
+
+        #[test]
+        fn panel_is_not_mounted_before_first_open() {
+            // The panel sits behind `if ever_opened()`, which is false on first render.
+            // This guards the lazy-mount contract (the panel must NOT be in the DOM until
+            // the FAB is clicked once).
+            let mut vdom = VirtualDom::new(harness);
+            vdom.rebuild_in_place();
+            let html = dioxus_ssr::render(&vdom);
+            assert!(
+                !html.contains("term-panel"),
+                "panel is not mounted until first open; html=\n{html}"
+            );
+        }
+    }
+}

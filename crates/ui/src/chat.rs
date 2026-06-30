@@ -132,7 +132,7 @@ fn chat_model_groups(models: &Option<ModelsResp>, current: &str) -> Vec<(String,
     )]
 }
 
-#[derive(Clone, PartialEq, serde::Deserialize)]
+#[derive(Clone, PartialEq, Debug, serde::Deserialize)]
 struct ChatResp {
     text: String,
     #[serde(default)]
@@ -172,7 +172,7 @@ struct CorpusOptLite {
 /// rule). This is Layer 2 of the system prompt. Fetched once per session.
 pub(crate) async fn fetch_rules_catalog() -> Option<String> {
     let mut rules: Vec<CorpusRuleLite> =
-        reqwest::get(format!("{}/api/corpus-rules", crate::BFF_URL))
+        reqwest::get(format!("{}/api/corpus-rules", crate::bff_base()))
             .await
             .ok()?
             .json()
@@ -289,7 +289,7 @@ async fn fetch_uow_snapshot() -> Option<Vec<UowSnapshot>> {
     // `{"ok": true, "units_of_work": [...]}` — parse it as such (see
     // `DevelopmentContextResponse`). Parsing it as a bare array was the bug that
     // silently emptied development-state grounding.
-    let dev_url = format!("{}/api/development/context", crate::BFF_URL);
+    let dev_url = format!("{}/api/development/context", crate::bff_base());
     if let Ok(resp) = reqwest::get(&dev_url).await {
         if resp.status().is_success() {
             if let Ok(wrapped) = resp.json::<DevelopmentContextResponse>().await {
@@ -301,7 +301,7 @@ async fn fetch_uow_snapshot() -> Option<Vec<UowSnapshot>> {
     }
     // Last-resort fallback: the legacy /api/uow endpoint returns a bare array of
     // the full UnitOfWork (a superset of UowSnapshot; serde(default) covers extras).
-    reqwest::get(format!("{}/api/uow", crate::BFF_URL))
+    reqwest::get(format!("{}/api/uow", crate::bff_base()))
         .await
         .ok()?
         .json::<Vec<UowSnapshot>>()
@@ -390,7 +390,7 @@ async fn fetch_project_context_sections(
 ) -> (Option<String>, Option<String>, Option<String>, Option<String>) {
     let ctx: ProjectContextLite = match reqwest::get(format!(
         "{}/api/projects/active/context",
-        crate::BFF_URL
+        crate::bff_base()
     ))
     .await
     .ok()
@@ -697,7 +697,7 @@ struct RegistryResp {
 }
 
 async fn fetch_models() -> Option<ModelsResp> {
-    let resp: RegistryResp = reqwest::get(format!("{}/api/models/registry", crate::BFF_URL))
+    let resp: RegistryResp = reqwest::get(format!("{}/api/models/registry", crate::bff_base()))
         .await
         .ok()?
         .json()
@@ -769,7 +769,7 @@ struct SettingsLite {
 /// Fetch the app-level chat assistant model from `GET /api/settings`. `None` when unset/blank
 /// or the server is unreachable.
 async fn fetch_app_chat_model() -> Option<String> {
-    let s: SettingsLite = reqwest::get(format!("{}/api/settings", crate::BFF_URL))
+    let s: SettingsLite = reqwest::get(format!("{}/api/settings", crate::bff_base()))
         .await
         .ok()?
         .json()
@@ -782,7 +782,7 @@ async fn fetch_app_chat_model() -> Option<String> {
 async fn save_app_chat_model(model: &str) -> bool {
     let body = serde_json::json!({ "model": model });
     reqwest::Client::new()
-        .post(format!("{}/api/settings/chat-model", crate::BFF_URL))
+        .post(format!("{}/api/settings/chat-model", crate::bff_base()))
         .json(&body)
         .send()
         .await
@@ -850,7 +850,7 @@ async fn send_chat(
         "history": history,
     });
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/chat", crate::BFF_URL))
+        .post(format!("{}/api/chat", crate::bff_base()))
         .json(&body)
         .send()
         .await
@@ -1545,6 +1545,18 @@ mod tests {
     // ── in-chatbox model selector: it must NEVER render empty/invisible ────────
     // (this selector has regressed away repeatedly; these guard the option-building logic).
 
+    // `CAMERATA_BFF_URL` is a process-global env var. Every Tier-2 test below sets it (to a
+    // mock-server URI) then removes it. `cargo test` runs tests on parallel threads, so two such
+    // tests overlapping would clobber each other's override and point a helper at the wrong server.
+    // This mutex serializes the env-mutating tests against each other (the doc's "serial_test-style
+    // mutex"; we can't add the serial_test crate without touching Cargo.toml). Lock for the whole
+    // body; recover from poisoning so one failing test doesn't cascade-fail the rest.
+    static BFF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn bff_env_guard() -> std::sync::MutexGuard<'static, ()> {
+        BFF_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn opt(id: &str, provider: &str) -> ModelOption {
         ModelOption {
             label: id.to_string(),
@@ -1563,10 +1575,12 @@ mod tests {
     // via the CAMERATA_BFF_URL seam. (The env override is process-global; this is the only test that
     // reads bff_base(), so it can't race another helper.)
     #[tokio::test]
+    #[serial_test::serial(bff_env)]
     async fn add_chat_learning_resolves_active_then_posts_the_reply() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
+        let _env = bff_env_guard();
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/projects/active"))
@@ -1593,6 +1607,447 @@ mod tests {
         assert!(ok, "resolves the active project, then posts the learning");
         // `.expect(1)` on the POST mock asserts (on server drop) it was hit once with the exact
         // path + body — i.e. the helper sent {kind, text} to /api/projects/proj-7/memory.
+    }
+
+    // ── Tier-2: send_chat POSTs the right body to /api/chat ───────────────────
+    // The request CONTRACT for the chat turn is load-bearing: a wrong field name (prompt / model /
+    // system / history) silently breaks grounding or model selection. body_json asserts every field.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn send_chat_posts_prompt_model_system_and_history() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .and(body_json(serde_json::json!({
+                "prompt": "What is CAM-1 blocked on?",
+                "model": "claude-opus-4-8",
+                "system": "SYS PROMPT",
+                "history": [
+                    { "role": "user", "content": "hi" },
+                    { "role": "assistant", "content": "hello" },
+                ],
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "text": "It is blocked on the gate.", "backend": "cli" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let history = vec![
+            super::ChatHistoryTurn { role: "user", content: "hi".to_string() },
+            super::ChatHistoryTurn { role: "assistant", content: "hello".to_string() },
+        ];
+        let res = super::send_chat("What is CAM-1 blocked on?", "claude-opus-4-8", "SYS PROMPT", history).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let resp = res.expect("2xx with a valid ChatResp body parses");
+        assert_eq!(resp.text, "It is blocked on the gate.");
+        assert_eq!(resp.backend, "cli");
+    }
+
+    // send_chat must surface a non-2xx body verbatim (the difference between the user seeing the
+    // real `claude` CLI error and a generic "no response"). Asserts both the status and the body
+    // text make it into the Err string.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn send_chat_surfaces_backend_error_body() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("claude CLI exited 1: rate limited"))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let res = super::send_chat("hi", "m", "s", Vec::new()).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let err = res.expect_err("a 500 must be an Err");
+        assert!(err.contains("500"), "error must include the status; got: {err}");
+        assert!(
+            err.contains("claude CLI exited 1: rate limited"),
+            "error must preserve the backend body verbatim; got: {err}"
+        );
+    }
+
+    // ── Tier-2: save_app_chat_model POSTs {model} to /api/settings/chat-model ──
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn save_app_chat_model_posts_model_body() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/settings/chat-model"))
+            .and(body_json(serde_json::json!({ "model": "claude-sonnet-4" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::save_app_chat_model("claude-sonnet-4").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok, "a 2xx response must be reported as success");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn save_app_chat_model_reports_failure_on_non_2xx() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/settings/chat-model"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::save_app_chat_model("x").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(!ok, "a 500 response must be reported as failure (best-effort helper)");
+    }
+
+    // ── Tier-2: fetch_app_chat_model GETs /api/settings and reads chat_model ──
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_app_chat_model_parses_chat_model_field() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/settings"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "chat_model": "claude-opus-4-8" })),
+            )
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let model = super::fetch_app_chat_model().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(model, Some("claude-opus-4-8".to_string()));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_app_chat_model_returns_none_for_blank_model() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/settings"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "chat_model": "   " })),
+            )
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let model = super::fetch_app_chat_model().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(model, None, "a blank/whitespace chat_model must read as unset");
+    }
+
+    // ── Tier-2: fetch_models GETs /api/models/registry and builds labels ──────
+    // Asserts the registry-entry → ModelOption transformation: provider passes through and the
+    // label is composed (price · tool-use · context · cache). A wrong field here makes the selector
+    // mislabel models.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_models_parses_registry_and_builds_labels() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/models/registry"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    {
+                        "id": "claude-opus-4-8",
+                        "display": "Opus",
+                        "provider": "claude",
+                        "free": false,
+                        "tool_use": true,
+                        "context": 200000,
+                        "price_out": 15.0,
+                        "caching": true
+                    },
+                    {
+                        "id": "ds-free",
+                        "display": "DeepSeek",
+                        "provider": "openrouter",
+                        "free": true,
+                        "tool_use": false,
+                        "context": 64000,
+                        "price_out": 0.0,
+                        "caching": false
+                    }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let resp = super::fetch_models().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let resp = resp.expect("registry response must parse into ModelsResp");
+        assert_eq!(resp.models.len(), 2);
+        // The first claude model is the default.
+        assert_eq!(resp.default, "claude-opus-4-8");
+        let opus = resp.models.iter().find(|m| m.id == "claude-opus-4-8").expect("opus present");
+        assert_eq!(opus.provider, "claude");
+        // price_out 15 -> "$15/M"; tool_use -> "tool-use"; 200000 ctx -> "200K"; caching -> "cache".
+        assert!(opus.label.contains("Opus"), "label keeps display name; got {}", opus.label);
+        assert!(opus.label.contains("$15/M"), "label encodes price; got {}", opus.label);
+        assert!(opus.label.contains("tool-use"), "label encodes tool-use; got {}", opus.label);
+        assert!(opus.label.contains("200K"), "label encodes context; got {}", opus.label);
+        assert!(opus.label.contains("cache"), "label encodes caching; got {}", opus.label);
+        let ds = resp.models.iter().find(|m| m.id == "ds-free").expect("deepseek present");
+        assert!(ds.label.contains("FREE"), "free models are labelled FREE; got {}", ds.label);
+        assert!(ds.label.contains("no-tools"), "non-tool models are labelled no-tools; got {}", ds.label);
+    }
+
+    // ── Tier-2: fetch_rules_catalog GETs /api/corpus-rules and renders a catalog ──
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_rules_catalog_renders_sorted_catalog_lines() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/corpus-rules"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": "SEC-1",
+                    "title": "no hardcoded secrets",
+                    "domain": "security",
+                    "scope": "repo-local",
+                    "options": [ { "label": "warn" }, { "label": "deny" } ]
+                },
+                {
+                    "id": "ARCH-1",
+                    "title": "layering",
+                    "domain": "architecture",
+                    "scope": "all-repos",
+                    "options": []
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let catalog = super::fetch_rules_catalog().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let catalog = catalog.expect("non-empty rule corpus yields Some(catalog)");
+        assert!(catalog.contains("SEC-1"), "catalog must name the rule id; got:\n{catalog}");
+        assert!(catalog.contains("[security · repo-local]"), "catalog encodes domain · scope; got:\n{catalog}");
+        assert!(catalog.contains("no hardcoded secrets"), "catalog includes the title");
+        assert!(catalog.contains("alternatives: warn / deny"), "catalog lists option labels as alternatives");
+        // Sorted by (domain, id): architecture sorts before security.
+        let arch_pos = catalog.find("ARCH-1").expect("ARCH-1 present");
+        let sec_pos = catalog.find("SEC-1").expect("SEC-1 present");
+        assert!(arch_pos < sec_pos, "rules must be sorted by domain then id (architecture before security)");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_rules_catalog_returns_none_for_empty_corpus() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/corpus-rules"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let catalog = super::fetch_rules_catalog().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(catalog, None, "an empty corpus must yield None, not an empty catalog string");
+    }
+
+    // ── Tier-2: fetch_uow_snapshot prefers the object-wrapped context endpoint ──
+    // The dedicated endpoint returns {"ok":true,"units_of_work":[...]}; the helper must parse the
+    // OBJECT wrapper (parsing it as a bare array was the bug that silently emptied dev-state).
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_uow_snapshot_parses_object_wrapper_from_context_endpoint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/development/context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "units_of_work": [
+                    { "story_id": "CAM-1", "stage": "development", "updated": "2026-06-24T00:00:00Z" }
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let snaps = super::fetch_uow_snapshot().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let snaps = snaps.expect("the context endpoint must yield Some");
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].story_id, "CAM-1");
+        assert_eq!(snaps[0].stage, "development");
+    }
+
+    // When the context endpoint is unavailable (404), the helper falls back to the legacy bare-array
+    // /api/uow endpoint.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_uow_snapshot_falls_back_to_legacy_uow_endpoint() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/development/context"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/uow"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "story_id": "CAM-9", "stage": "intake" }
+            ])))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let snaps = super::fetch_uow_snapshot().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let snaps = snaps.expect("legacy /api/uow fallback must yield Some");
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].story_id, "CAM-9");
+    }
+
+    // ── Tier-2: fetch_project_context_sections GETs /api/projects/active/context ──
+    // Asserts the four-tuple projection: name, scan section, selected-rules section, ruleset summary.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_project_context_sections_projects_all_four_fields() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active/context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "project_name": "agora-api",
+                "scan_results_section": "Total findings: 3\n",
+                "selected_rules_section": "Total selected: 2 rule(s)\n",
+                "ruleset_summary": "SEC-1: all repos\n"
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let (name, scan, selected, ruleset) = super::fetch_project_context_sections().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(name, Some("agora-api".to_string()));
+        assert_eq!(scan, Some("Total findings: 3\n".to_string()));
+        assert_eq!(selected, Some("Total selected: 2 rule(s)\n".to_string()));
+        assert_eq!(ruleset, Some("SEC-1: all repos\n".to_string()));
+    }
+
+    // When the context reports `ok: false` (no active project), all four fields degrade to None.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_project_context_sections_all_none_when_not_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active/context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let tuple = super::fetch_project_context_sections().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(tuple, (None, None, None, None), "ok=false must degrade every section to None");
+    }
+
+    // Whitespace-only sections must be filtered to None (empty sections are not meaningful grounding).
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_project_context_sections_filters_whitespace_sections() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active/context"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "project_name": "   ",
+                "scan_results_section": "\n  \t",
+                "selected_rules_section": "real\n"
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let (name, scan, selected, ruleset) = super::fetch_project_context_sections().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(name, None, "whitespace-only project_name filters to None");
+        assert_eq!(scan, None, "whitespace-only scan section filters to None");
+        assert_eq!(selected, Some("real\n".to_string()), "non-blank section survives");
+        assert_eq!(ruleset, None, "absent ruleset_summary is None");
     }
 
     #[test]

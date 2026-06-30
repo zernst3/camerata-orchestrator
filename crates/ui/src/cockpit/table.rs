@@ -162,3 +162,117 @@ mod tests {
         assert_eq!(collapse_page_size(), 5000);
     }
 }
+
+#[cfg(test)]
+mod render_tests {
+    //! Tier-1 dioxus-ssr render tests for `CamerataTable` (see docs/UI_TESTING.md).
+    //!
+    //! `CamerataTable` is generic over `TRow` and takes a `UseTableHandle<TRow>`,
+    //! which can only be minted by the `use_table` hook from inside the VirtualDom
+    //! runtime. So the harness root mints the handle itself (with a tiny test row
+    //! type + columns) and forwards it to the component, exactly like the real call
+    //! sites in `rules.rs` / `scan.rs`. We assert the static SHAPE chorale renders:
+    //! the column header labels in the sticky header. This catches the
+    //! "the wrapper stopped forwarding columns / the table vanished" class of bug.
+    //!
+    //! These cover both the ungrouped path (`group_by` empty -> no collapse-on-mount)
+    //! and the grouped path (`group_by` non-empty -> the load-all-then-collapse
+    //! sequence in the `use_hook`), so the grouping branch is exercised under render.
+
+    use super::{CamerataTable, ColumnId, RowId};
+    use chorale_core::{CellValue, ColumnDef, TableState};
+    use chorale_dioxus::use_table;
+    use dioxus::prelude::*;
+
+    /// Minimal renderable row type for the table-under-test.
+    #[derive(Clone, PartialEq)]
+    struct Row {
+        name: String,
+        domain: String,
+    }
+
+    /// Two columns whose header labels we assert in the rendered HTML. The
+    /// "domain" column is also what the grouped harness groups by, matching the
+    /// real custom-rules table.
+    fn columns() -> Vec<ColumnDef<Row>> {
+        vec![
+            ColumnDef::new(ColumnId("name"), "Name", |r: &Row| {
+                CellValue::Text(r.name.clone())
+            })
+            .sortable(),
+            ColumnDef::new(ColumnId("domain"), "Domain", |r: &Row| {
+                CellValue::Text(r.domain.clone())
+            })
+            .sortable(),
+        ]
+    }
+
+    fn rows() -> Vec<(RowId, Row)> {
+        vec![
+            (
+                RowId::new(),
+                Row {
+                    name: "alpha".into(),
+                    domain: "rust".into(),
+                },
+            ),
+            (
+                RowId::new(),
+                Row {
+                    name: "beta".into(),
+                    domain: "js".into(),
+                },
+            ),
+        ]
+    }
+
+    /// Ungrouped harness: `group_by` defaults to empty, so the collapse-on-mount
+    /// `use_hook` is a no-op and the table keeps chorale's default pagination.
+    fn ungrouped_harness() -> Element {
+        let handle = use_table(|| TableState::new(rows(), columns()));
+        rsx! {
+            CamerataTable { handle }
+        }
+    }
+
+    /// Grouped harness: passing `group_by` drives the load-all-then-collapse
+    /// sequence in the wrapper's `use_hook`, exercising that branch under render.
+    fn grouped_harness() -> Element {
+        let handle = use_table(|| TableState::new(rows(), columns()));
+        rsx! {
+            CamerataTable {
+                handle,
+                selection_enabled: true,
+                group_by: vec![ColumnId("domain")],
+            }
+        }
+    }
+
+    #[test]
+    fn renders_column_headers_ungrouped() {
+        let mut vdom = VirtualDom::new(ungrouped_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        // chorale renders each column's header label inside a <th>. The wrapper
+        // forwarding the columns through is the contract under test.
+        assert!(html.contains("Name"), "missing 'Name' header in:\n{html}");
+        assert!(html.contains("Domain"), "missing 'Domain' header in:\n{html}");
+        // House default: the wrapper always sets sticky_header: true. chorale's
+        // sticky header emits position: sticky on the header element.
+        assert!(
+            html.contains("sticky"),
+            "sticky_header default not applied (no 'sticky' in markup):\n{html}"
+        );
+    }
+
+    #[test]
+    fn renders_column_headers_grouped() {
+        // Grouping the table (group_by non-empty) must still render the full
+        // header set; the collapse-on-mount sequence must not drop the columns.
+        let mut vdom = VirtualDom::new(grouped_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Name"), "missing 'Name' header in:\n{html}");
+        assert!(html.contains("Domain"), "missing 'Domain' header in:\n{html}");
+    }
+}

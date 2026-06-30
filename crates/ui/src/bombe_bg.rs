@@ -175,3 +175,188 @@ fn BgRotor(row: usize, start_angle: u16, duration: &'static str) -> Element {
         }
     }
 }
+
+#[cfg(test)]
+mod render_tests {
+    use super::{BgRotor, BombeBg};
+    use crate::loading::{BombeEnabled, BombePreview, LoadingCount};
+    use dioxus::prelude::*;
+
+    // Tier-1 render test: mount the component inside a VirtualDom (so its hooks /
+    // context reads run), render to a static HTML string with dioxus-ssr, and assert
+    // the STRUCTURE. No browser / wasm, no interaction or async-loaded data.
+
+    // ── BombeBg ──────────────────────────────────────────────────────────────
+    //
+    // BombeBg reads its three control signals via try_consume_context, so it
+    // renders safely with NO context provided (defaults: enabled=true, count=0,
+    // preview=false → running=false → idle classes).
+
+    fn bombe_idle_harness() -> Element {
+        rsx! { BombeBg {} }
+    }
+
+    #[test]
+    fn bombe_bg_renders_core_structure() {
+        let mut vdom = VirtualDom::new(bombe_idle_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+
+        // The machine root, the obscuring overlay, the cabinet and its panels.
+        assert!(
+            html.contains(r#"id="bg-bombe-machine""#),
+            "the machine root renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("bombe-overlay"),
+            "the obscuring overlay renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("bombe-cabinet"),
+            "the cabinet renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("left-control-panel") && html.contains("right-control-panel"),
+            "both control panels render; html=\n{html}"
+        );
+        // The right panel's OUTPUT label + the rotor matrix.
+        assert!(
+            html.contains("OUTPUT"),
+            "the OUTPUT label renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("bombe-rotors-matrix"),
+            "the rotor matrix renders; html=\n{html}"
+        );
+    }
+
+    #[test]
+    fn bombe_bg_idle_state_omits_running_classes() {
+        // No context → defaults → running=false. The machine and overlay must NOT
+        // carry their *-running modifier classes.
+        let mut vdom = VirtualDom::new(bombe_idle_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+
+        assert!(
+            html.contains("bombe-bg-machine"),
+            "the base machine class is present; html=\n{html}"
+        );
+        assert!(
+            !html.contains("bombe-running"),
+            "idle: no bombe-running class; html=\n{html}"
+        );
+        assert!(
+            !html.contains("bombe-overlay-running"),
+            "idle: no bombe-overlay-running class; html=\n{html}"
+        );
+    }
+
+    // Provide the three control contexts with preview=true so running=true
+    // (enabled=true && (count==0 → false || preview==true → true)).
+    fn bombe_running_harness() -> Element {
+        use_context_provider(|| Signal::new(0_usize) as LoadingCount);
+        use_context_provider(|| BombeEnabled(Signal::new(true)));
+        use_context_provider(|| BombePreview(Signal::new(true)));
+        rsx! { BombeBg {} }
+    }
+
+    #[test]
+    fn bombe_bg_running_state_adds_running_classes() {
+        let mut vdom = VirtualDom::new(bombe_running_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+
+        assert!(
+            html.contains("bombe-running"),
+            "running: the machine gets bombe-running; html=\n{html}"
+        );
+        assert!(
+            html.contains("bombe-overlay-running"),
+            "running: the overlay gets bombe-overlay-running; html=\n{html}"
+        );
+    }
+
+    #[test]
+    fn bombe_bg_disabled_stays_idle_even_with_preview() {
+        // enabled=false short-circuits running to false regardless of preview/count.
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(5_usize) as LoadingCount);
+            use_context_provider(|| BombeEnabled(Signal::new(false)));
+            use_context_provider(|| BombePreview(Signal::new(true)));
+            rsx! { BombeBg {} }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+
+        assert!(
+            !html.contains("bombe-running"),
+            "disabled: no bombe-running even with preview/count; html=\n{html}"
+        );
+        assert!(
+            !html.contains("bombe-overlay-running"),
+            "disabled: no bombe-overlay-running; html=\n{html}"
+        );
+    }
+
+    // ── BgRotor ──────────────────────────────────────────────────────────────
+    //
+    // Prop-only component (no context, no hooks). The row index selects the
+    // CSS row class; start_angle + duration flow into the drum's inline style.
+
+    #[test]
+    fn bg_rotor_top_row_renders_class_and_style() {
+        fn harness() -> Element {
+            rsx! {
+                BgRotor { row: 0_usize, start_angle: 137_u16, duration: "0.9s" }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+
+        assert!(
+            html.contains("bg-bombe-rotor") && html.contains("bombe-row-top"),
+            "row 0 → top row class; html=\n{html}"
+        );
+        assert!(
+            html.contains("rotor-drum"),
+            "the spinning drum child renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("--start-angle:137deg"),
+            "start_angle flows into the inline style; html=\n{html}"
+        );
+        assert!(
+            html.contains("animation-duration:0.9s"),
+            "duration flows into the inline style; html=\n{html}"
+        );
+    }
+
+    #[test]
+    fn bg_rotor_mid_and_bot_rows_select_distinct_classes() {
+        fn mid_harness() -> Element {
+            rsx! { BgRotor { row: 1_usize, start_angle: 0_u16, duration: "26.0s" } }
+        }
+        fn bot_harness() -> Element {
+            rsx! { BgRotor { row: 2_usize, start_angle: 0_u16, duration: "78.0s" } }
+        }
+
+        let mut mid = VirtualDom::new(mid_harness);
+        mid.rebuild_in_place();
+        let mid_html = dioxus_ssr::render(&mid);
+        assert!(
+            mid_html.contains("bombe-row-mid"),
+            "row 1 → mid row class; html=\n{mid_html}"
+        );
+
+        let mut bot = VirtualDom::new(bot_harness);
+        bot.rebuild_in_place();
+        let bot_html = dioxus_ssr::render(&bot);
+        assert!(
+            bot_html.contains("bombe-row-bot"),
+            "row 2 (and beyond) → bot row class; html=\n{bot_html}"
+        );
+    }
+}

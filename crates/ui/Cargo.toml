@@ -61,3 +61,7 @@ tokio = { version = "1", features = ["time", "rt", "macros", "rt-multi-thread"] 
 # tested against CAMERATA_BFF_URL (Tier 2). No browser / wasm needed.
 dioxus-ssr = "0.7"
 wiremock = "0.6"
+# The wiremock tests point helpers at a mock BFF via the process-global CAMERATA_BFF_URL env var.
+# serial_test's shared key (#[serial(bff_env)]) serializes every such test crate-wide so they can't
+# clobber each other's override under cargo's parallel test threads.
+serial_test = "3"

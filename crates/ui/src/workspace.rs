@@ -75,7 +75,7 @@ struct GitStatusView {
 // ── BFF fetch helpers ─────────────────────────────────────────────────────────
 
 async fn fetch_settings() -> Option<SettingsView> {
-    reqwest::get(format!("{}/api/settings", crate::BFF_URL))
+    reqwest::get(format!("{}/api/settings", crate::bff_base()))
         .await
         .ok()?
         .json::<SettingsView>()
@@ -85,7 +85,7 @@ async fn fetch_settings() -> Option<SettingsView> {
 
 async fn set_workspace(path: &str) -> Option<SettingsView> {
     reqwest::Client::new()
-        .post(format!("{}/api/settings/workspace", crate::BFF_URL))
+        .post(format!("{}/api/settings/workspace", crate::bff_base()))
         .json(&serde_json::json!({ "path": path }))
         .send()
         .await
@@ -97,7 +97,7 @@ async fn set_workspace(path: &str) -> Option<SettingsView> {
 
 async fn fetch_active_project() -> Option<ProjectLite> {
     // The endpoint returns `null` when no project exists yet; Option parses that.
-    reqwest::get(format!("{}/api/projects/active", crate::BFF_URL))
+    reqwest::get(format!("{}/api/projects/active", crate::bff_base()))
         .await
         .ok()?
         .json::<Option<ProjectLite>>()
@@ -109,7 +109,7 @@ async fn fetch_active_project() -> Option<ProjectLite> {
 async fn fetch_checkout(project_id: &str) -> Option<Vec<RepoCheckout>> {
     reqwest::get(format!(
         "{}/api/projects/{}/checkout",
-        crate::BFF_URL,
+        crate::bff_base(),
         project_id
     ))
     .await
@@ -123,7 +123,7 @@ async fn clone_project(project_id: &str) -> Option<Vec<RepoCheckout>> {
     reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/checkout",
-            crate::BFF_URL,
+            crate::bff_base(),
             project_id
         ))
         .send()
@@ -138,7 +138,7 @@ async fn start_branch(project_id: &str, repo: &str, branch: &str) -> Option<Repo
     reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/branch",
-            crate::BFF_URL,
+            crate::bff_base(),
             project_id
         ))
         .json(&serde_json::json!({ "repo": repo, "branch": branch }))
@@ -155,7 +155,7 @@ async fn ship(project_id: &str, repo: &str, branch: &str, title: &str) -> Option
     let v: serde_json::Value = reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/ship",
-            crate::BFF_URL,
+            crate::bff_base(),
             project_id
         ))
         .json(&serde_json::json!({ "repo": repo, "branch": branch, "title": title, "body": "" }))
@@ -180,7 +180,7 @@ fn urlencoding_simple(s: &str) -> String {
 async fn api_git_status(project_id: &str, repo: &str) -> Option<GitStatusView> {
     let v: serde_json::Value = reqwest::get(format!(
         "{}/api/projects/{}/git/status?repo={}",
-        crate::BFF_URL,
+        crate::bff_base(),
         project_id,
         urlencoding_simple(repo),
     ))
@@ -199,7 +199,7 @@ async fn api_git_status(project_id: &str, repo: &str) -> Option<GitStatusView> {
 async fn api_git_branches(project_id: &str, repo: &str) -> Option<BranchListView> {
     let v: serde_json::Value = reqwest::get(format!(
         "{}/api/projects/{}/git/branches?repo={}",
-        crate::BFF_URL,
+        crate::bff_base(),
         project_id,
         urlencoding_simple(repo),
     ))
@@ -218,7 +218,7 @@ async fn api_git_branches(project_id: &str, repo: &str) -> Option<BranchListView
 async fn api_git_log(project_id: &str, repo: &str, limit: usize) -> Vec<CommitRow> {
     let v: serde_json::Value = match reqwest::get(format!(
         "{}/api/projects/{}/git/log?repo={}&limit={}",
-        crate::BFF_URL,
+        crate::bff_base(),
         project_id,
         urlencoding_simple(repo),
         limit,
@@ -243,7 +243,7 @@ async fn api_git_checkout(
     let v: serde_json::Value = match reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/git/checkout",
-            crate::BFF_URL,
+            crate::bff_base(),
             project_id
         ))
         .json(&serde_json::json!({ "repo": repo, "branch": branch, "create": create }))
@@ -267,7 +267,7 @@ async fn api_git_commit(project_id: &str, repo: &str, message: &str) -> (bool, S
     let v: serde_json::Value = match reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/git/commit",
-            crate::BFF_URL,
+            crate::bff_base(),
             project_id
         ))
         .json(&serde_json::json!({ "repo": repo, "message": message }))
@@ -292,7 +292,7 @@ async fn api_git_push(project_id: &str, repo: &str, branch: &str) -> (bool, Stri
     let v: serde_json::Value = match reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/git/push",
-            crate::BFF_URL,
+            crate::bff_base(),
             project_id
         ))
         .json(&serde_json::json!({ "repo": repo, "branch": branch }))
@@ -316,7 +316,7 @@ async fn api_git_pull(project_id: &str, repo: &str, branch: &str) -> (bool, Stri
     let v: serde_json::Value = match reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/git/pull",
-            crate::BFF_URL,
+            crate::bff_base(),
             project_id
         ))
         .json(&serde_json::json!({ "repo": repo, "branch": branch }))
@@ -341,7 +341,7 @@ async fn api_git_cherry_pick(project_id: &str, repo: &str, sha: &str) -> (bool, 
     let v: serde_json::Value = match reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/git/cherry-pick",
-            crate::BFF_URL,
+            crate::bff_base(),
             project_id
         ))
         .json(&serde_json::json!({ "repo": repo, "sha": sha }))
@@ -1002,5 +1002,564 @@ fn GitPanel(repo: String, project_id: String) -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Pure-logic: the query-string encoder used for every git/* request ─────────
+    #[test]
+    fn urlencoding_simple_encodes_slash_and_space() {
+        assert_eq!(urlencoding_simple("zernst3/agora"), "zernst3%2Fagora");
+        assert_eq!(urlencoding_simple("a b/c"), "a%20b%2Fc");
+        // Nothing else is touched — a plain repo slug round-trips unchanged.
+        assert_eq!(urlencoding_simple("plainrepo"), "plainrepo");
+    }
+
+    // ── Tier 2: network-helper tests (wiremock) ──────────────────────────────────
+    // Each points the helper at a fake BFF via the CAMERATA_BFF_URL seam and asserts the
+    // request CONTRACT (method + path + exact body for mutations). The env override is
+    // process-global, so these must not run concurrently with each other; cargo runs the
+    // tests in this module in-process and they each set+remove the var around one await.
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_settings_parses_workspace_root() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/settings"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "workspace_root": "/tmp/ws" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_settings().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let out = out.expect("settings parse");
+        assert_eq!(out.workspace_root.as_deref(), Some("/tmp/ws"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_workspace_posts_the_path() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/settings/workspace"))
+            .and(body_json(serde_json::json!({ "path": "/tmp/ws" })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "workspace_root": "/tmp/ws" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::set_workspace("/tmp/ws").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(
+            out.expect("settings echo").workspace_root.as_deref(),
+            Some("/tmp/ws")
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_active_project_parses_null_as_none() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(null)))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_active_project().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(out.is_none(), "a null body means no active project");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_active_project_parses_a_project() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/active"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "proj-7",
+                "name": "Acme",
+                "repos": ["zernst3/agora"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_active_project().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let proj = out.expect("project parsed");
+        assert_eq!(proj.id, "proj-7");
+        assert_eq!(proj.name, "Acme");
+        assert_eq!(proj.repos, vec!["zernst3/agora".to_string()]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_checkout_hits_project_scoped_path() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-7/checkout"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "repo": "zernst3/agora",
+                "cloned": true,
+                "path": "/tmp/ws/zernst3/agora",
+                "branch": "main",
+                "dirty": false,
+                "detail": "on main",
+            }])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_checkout("proj-7").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let rows = out.expect("checkout list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].repo, "zernst3/agora");
+        assert!(rows[0].cloned);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn clone_project_posts_to_checkout() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-7/checkout"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([{
+                "repo": "zernst3/agora",
+                "cloned": true,
+                "path": "/tmp/ws/zernst3/agora",
+                "branch": "main",
+                "dirty": false,
+                "detail": "cloned",
+            }])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::clone_project("proj-7").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let rows = out.expect("clone result");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].detail, "cloned");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn start_branch_posts_repo_and_branch() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-7/branch"))
+            .and(body_json(serde_json::json!({
+                "repo": "zernst3/agora",
+                "branch": "camerata/work",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "repo": "zernst3/agora",
+                "cloned": true,
+                "path": "/tmp/ws/zernst3/agora",
+                "branch": "camerata/work",
+                "dirty": false,
+                "detail": "on branch camerata/work",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::start_branch("proj-7", "zernst3/agora", "camerata/work").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(out.expect("checkout").branch.as_deref(), Some("camerata/work"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn ship_posts_full_body_and_returns_pr_url() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-7/ship"))
+            .and(body_json(serde_json::json!({
+                "repo": "zernst3/agora",
+                "branch": "camerata/work",
+                "title": "Camerata: changes",
+                "body": "",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "pr_url": "https://github.com/zernst3/agora/pull/42",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::ship("proj-7", "zernst3/agora", "camerata/work", "Camerata: changes").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(
+            out.as_deref(),
+            Some("https://github.com/zernst3/agora/pull/42")
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn api_git_status_requires_ok_true_and_encodes_repo() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // wiremock decodes the query param, so the matcher sees the raw "owner/repo".
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-7/git/status"))
+            .and(query_param("repo", "zernst3/agora"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "branch": "main",
+                "dirty": true,
+                "ahead": 2,
+                "behind": 0,
+                "detail": "ahead 2",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::api_git_status("proj-7", "zernst3/agora").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let st = out.expect("status parsed when ok=true");
+        assert_eq!(st.branch, "main");
+        assert!(st.dirty);
+        assert_eq!(st.ahead, Some(2));
+        assert_eq!(st.behind, Some(0));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn api_git_status_returns_none_when_not_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-7/git/status"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": false })),
+            )
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::api_git_status("proj-7", "zernst3/agora").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(out.is_none(), "ok=false collapses to None");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn api_git_branches_parses_current_and_list() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-7/git/branches"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "current": "main",
+                "branches": ["main", "camerata/work"],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::api_git_branches("proj-7", "zernst3/agora").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let bl = out.expect("branches parsed");
+        assert_eq!(bl.current, "main");
+        assert_eq!(bl.branches, vec!["main".to_string(), "camerata/work".to_string()]);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn api_git_log_extracts_commits_array() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-7/git/log"))
+            .and(query_param("limit", "30"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "commits": [{
+                    "sha": "abcdef0123",
+                    "short": "abcdef0",
+                    "subject": "Initial commit",
+                    "author": "Zach",
+                    "date": "2026-06-30",
+                }],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::api_git_log("proj-7", "zernst3/agora", 30).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].sha, "abcdef0123");
+        assert_eq!(out[0].subject, "Initial commit");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn api_git_checkout_posts_create_flag_and_returns_ok_message() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-7/git/checkout"))
+            .and(body_json(serde_json::json!({
+                "repo": "zernst3/agora",
+                "branch": "feature/x",
+                "create": true,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "message": "created feature/x",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let (ok, msg) = super::api_git_checkout("proj-7", "zernst3/agora", "feature/x", true).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+        assert_eq!(msg, "created feature/x");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn api_git_commit_posts_message_and_reads_output() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-7/git/commit"))
+            .and(body_json(serde_json::json!({
+                "repo": "zernst3/agora",
+                "message": "wip",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "output": "1 file changed",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let (ok, out) = super::api_git_commit("proj-7", "zernst3/agora", "wip").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+        assert_eq!(out, "1 file changed");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn api_git_push_posts_branch() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-7/git/push"))
+            .and(body_json(serde_json::json!({
+                "repo": "zernst3/agora",
+                "branch": "camerata/work",
+            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let (ok, _msg) = super::api_git_push("proj-7", "zernst3/agora", "camerata/work").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn api_git_pull_reports_failure_message() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-7/git/pull"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": false,
+                "message": "merge conflict",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let (ok, out) = super::api_git_pull("proj-7", "zernst3/agora", "main").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(!ok);
+        assert_eq!(out, "merge conflict");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn api_git_cherry_pick_posts_sha() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-7/git/cherry-pick"))
+            .and(body_json(serde_json::json!({
+                "repo": "zernst3/agora",
+                "sha": "abcdef0123",
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "output": "applied",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let (ok, out) = super::api_git_cherry_pick("proj-7", "zernst3/agora", "abcdef0123").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+        assert_eq!(out, "applied");
+    }
+
+    // ── Tier 1: render tests (dioxus-ssr) ────────────────────────────────────────
+
+    // RepoCard with status=None renders the "not cloned" branch, which does NOT mount
+    // GitPanel (that only renders when cloned) and issues no fetches — so it's cleanly
+    // renderable in isolation with only props.
+    #[test]
+    fn repo_card_uncloned_renders_repo_name_and_hint() {
+        fn harness() -> Element {
+            rsx! {
+                RepoCard {
+                    repo: "zernst3/agora".to_string(),
+                    project_id: "proj-7".to_string(),
+                    status: None,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("zernst3/agora"), "repo name renders");
+        assert!(html.contains("not cloned yet"), "uncloned detail renders");
+        assert!(html.contains("Not cloned"), "the not-cloned hint renders");
+    }
+
+    // GitPanel uses use_context::<Signal<Vec<Toast>>> and three use_resource fetches.
+    // The fetches are pending on first SSR render (so the loading/empty branches show),
+    // but the static section scaffolding (labels, buttons, placeholders) renders. The
+    // harness MUST provide the toast context or the component panics.
+    #[test]
+    fn git_panel_renders_static_section_scaffold() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            rsx! {
+                GitPanel {
+                    repo: "zernst3/agora".to_string(),
+                    project_id: "proj-7".to_string(),
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("git-panel"), "panel root renders");
+        assert!(html.contains("Branches"), "branches section label renders");
+        assert!(html.contains("Commit"), "commit section label renders");
+        assert!(html.contains("Recent commits"), "log section label renders");
+        // Resources are pending on first render → the empty-state branches show.
+        assert!(
+            html.contains("No local branches (clone / update first)."),
+            "empty branch list hint renders while branches fetch is pending"
+        );
+        assert!(
+            html.contains("No commits yet."),
+            "empty log hint renders while log fetch is pending"
+        );
     }
 }

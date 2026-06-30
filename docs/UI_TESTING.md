@@ -65,6 +65,10 @@ mod render_tests {
   (the bubble, the "+ Add to learnings" button) but NOT the rendered markdown body.
 - **`use_resource` (async fetches) are pending** on first render — the component renders its
   loading/fallback branch, not the loaded data.
+- **SSR HTML-escapes special characters** in text/attribute content: `&` → `&#38;`, `>` → `&#62;`,
+  `<` → `&#60;`. So `html.contains("Approve & resume")` and `html.contains(">_")` FAIL even though
+  the render is correct. Assert on a **stable class name** (`uow-review-approve`), the unescaped
+  leading word (`"Approve"`), or the **escaped form** (`"&#62;_"`) — not the raw special character.
 
 ---
 
@@ -102,10 +106,20 @@ async fn helper_sends_the_right_request() {
 }
 ```
 
-**Caveat:** `CAMERATA_BFF_URL` is a process-global env var, so a mock-server test that sets it must not
-run concurrently with another test that reads `bff_base()`. Keep these tests narrowly scoped (today
-only `add_chat_learning` reads `bff_base()`); if more helpers are converted and tested, gate the
-env-setting tests behind a shared `serial_test`-style mutex.
+**REQUIRED — serialize env-mutating tests.** `CAMERATA_BFF_URL` is a process-global env var, and
+`cargo test` runs the crate's tests on parallel threads in one process. Two wiremock tests that set it
+concurrently clobber each other's override (flaky failures). So **every** wiremock test that sets
+`CAMERATA_BFF_URL` MUST carry the shared `serial_test` key, which serializes them crate-wide:
+
+```rust
+#[tokio::test]
+#[serial_test::serial(bff_env)]   // <-- tokio::test OUTER, serial INNER (serial_test's async order)
+async fn helper_sends_the_right_request() { /* ... set_var / call / remove_var ... */ }
+```
+
+`serial_test` is a dev-dep. All tests sharing the `bff_env` key run one-at-a-time relative to each
+other (across all files), while everything else still runs parallel. `set_var` + `remove_var` around
+the call is still correct; the key just guarantees no overlap.
 
 ---
 

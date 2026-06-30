@@ -38,7 +38,7 @@ pub(super) struct ClarificationView {
 pub(super) async fn fetch_clarifications_for_story(story_id: &str) -> Vec<ClarificationView> {
     let resp = match reqwest::get(format!(
         "{}/api/stories/{}/clarifications",
-        crate::BFF_URL,
+        crate::bff_base(),
         enc_seg(story_id)
     ))
     .await
@@ -61,7 +61,7 @@ pub(super) async fn fetch_open_clarifications_for_story(story_id: &str) -> Vec<C
 /// Fetch ALL open clarifications across every story (`GET /api/clarifications`),
 /// driving the NEEDS YOU queue.
 pub(super) async fn fetch_all_open_clarifications() -> Vec<ClarificationView> {
-    let resp = match reqwest::get(format!("{}/api/clarifications", crate::BFF_URL)).await {
+    let resp = match reqwest::get(format!("{}/api/clarifications", crate::bff_base())).await {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
@@ -71,7 +71,7 @@ pub(super) async fn fetch_all_open_clarifications() -> Vec<ClarificationView> {
 /// Fetch all OPEN UoW (Governed Development) review escalations across every story — paused runs
 /// awaiting an Approve / Amend / Reject. Filters the shared escalation feed to UoW subjects.
 pub(super) async fn fetch_open_uow_escalations() -> Vec<crate::routines::EscalationView> {
-    let resp = match reqwest::get(format!("{}/api/escalations?open=true", crate::BFF_URL)).await {
+    let resp = match reqwest::get(format!("{}/api/escalations?open=true", crate::bff_base())).await {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
@@ -92,7 +92,7 @@ pub(super) async fn answer_uow_escalation(
     action: &str,
 ) -> Option<crate::routines::EscalationView> {
     reqwest::Client::new()
-        .post(format!("{}/api/escalations/{}/answer", crate::BFF_URL, id))
+        .post(format!("{}/api/escalations/{}/answer", crate::bff_base(), id))
         .json(&serde_json::json!({ "answer": answer, "action": action }))
         .send()
         .await
@@ -111,7 +111,7 @@ pub(super) async fn chat_uow_escalation(
     model: &str,
 ) -> Option<crate::routines::EscalationView> {
     reqwest::Client::new()
-        .post(format!("{}/api/escalations/{}/chat", crate::BFF_URL, id))
+        .post(format!("{}/api/escalations/{}/chat", crate::bff_base(), id))
         .json(&serde_json::json!({ "message": message, "model": model }))
         .send()
         .await
@@ -291,7 +291,7 @@ pub(super) async fn answer_clarification(
     reqwest::Client::new()
         .post(format!(
             "{}/api/clarifications/{}/answer",
-            crate::BFF_URL,
+            crate::bff_base(),
             enc_seg(cid)
         ))
         .json(&serde_json::json!({
@@ -860,5 +860,437 @@ mod render_tests {
             html.to_lowercase().contains("submit"),
             "a submit affordance renders; html=\n{html}"
         );
+    }
+
+    // ── Tier-1 render: ModelSelect (props-only, no context) ────────────────────
+    // The model selector has regressed away repeatedly; this guards that a populated
+    // model list renders the <select> with its grouped <optgroup> + <option>s.
+    fn model_select_harness() -> Element {
+        // AuditModelsResp / AuditModelOption don't derive Default, but both derive
+        // Deserialize — build the fixture from JSON (the same wire shape the BFF sends).
+        let models: super::super::scan::AuditModelsResp = serde_json::from_value(serde_json::json!({
+            "models": [
+                { "label": "Claude Sonnet 4.6", "id": "claude-sonnet-4-6", "provider": "claude" },
+                { "label": "DeepSeek R1", "id": "deepseek-r1", "provider": "openrouter" }
+            ],
+            "default": "claude-sonnet-4-6",
+            "openrouter_fetched": true
+        }))
+        .expect("valid AuditModelsResp fixture");
+        rsx! {
+            ModelSelectHarnessInner { models }
+        }
+    }
+
+    // Inner wrapper that owns the bound Signal<String> ModelSelect needs.
+    #[component]
+    fn ModelSelectHarnessInner(models: super::super::scan::AuditModelsResp) -> Element {
+        let selected = use_signal(|| "claude-sonnet-4-6".to_string());
+        rsx! {
+            super::ModelSelect { models: Some(models), selected }
+        }
+    }
+
+    #[test]
+    fn model_select_renders_options_grouped_by_provider() {
+        let mut vdom = VirtualDom::new(model_select_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("run-model-select"), "the <select> renders; html=\n{html}");
+        assert!(html.contains("Claude (subscription)"), "claude optgroup; html=\n{html}");
+        assert!(html.contains("OpenRouter"), "openrouter optgroup; html=\n{html}");
+        assert!(html.contains("Claude Sonnet 4.6"), "claude option label; html=\n{html}");
+        assert!(html.contains("DeepSeek R1"), "openrouter option label; html=\n{html}");
+    }
+
+    #[test]
+    fn model_select_renders_nothing_when_models_absent() {
+        // ModelSelect is `if let Some(m) = models { ... }` — None must render no <select>.
+        fn none_harness() -> Element {
+            let selected = use_signal(String::new);
+            rsx! {
+                super::ModelSelect { models: None, selected }
+            }
+        }
+        let mut vdom = VirtualDom::new(none_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            !html.contains("run-model-select"),
+            "no <select> when the model list hasn't loaded; html=\n{html}"
+        );
+    }
+
+    // ── Tier-1 render: UowReviewPanel (the governed-development review surface) ──
+    // Constructed via serde (EscalationView only derives Deserialize). The chat_model
+    // use_resource is pending on first render, so it falls back to its default model —
+    // that's fine, we assert the static review structure, not the async-loaded model.
+    fn uow_panel_harness() -> Element {
+        let esc: crate::routines::EscalationView = serde_json::from_value(serde_json::json!({
+            "id": "esc-1",
+            "routine_id": "r1",
+            "routine_name": "dev",
+            "subject_kind": "uow",
+            "reason": "TEST-TAMPER-1",
+            "stopped_for": "The agent edited a test assertion.",
+            "suggestions": ["Restore the original assertion."],
+            "raw_context": "diff context here",
+            "status": "open",
+            "created": "2026-06-30T00:00:00Z",
+            "conversation": [
+                { "role": "user", "text": "Why did this stop?" },
+                { "role": "assistant", "text": "A test assertion was weakened." }
+            ]
+        }))
+        .expect("valid EscalationView fixture");
+        rsx! {
+            super::UowReviewPanel { esc, on_resolved: move |_| {} }
+        }
+    }
+
+    #[test]
+    fn uow_review_panel_renders_reason_actions_and_thread() {
+        let mut vdom = VirtualDom::new(uow_panel_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("NEEDS YOUR REVIEW"), "the review badge; html=\n{html}");
+        assert!(html.contains("TEST-TAMPER-1"), "the rule/reason; html=\n{html}");
+        assert!(
+            html.contains("The agent edited a test assertion."),
+            "the stopped-for line; html=\n{html}"
+        );
+        assert!(
+            html.contains("Restore the original assertion."),
+            "a suggestion renders; html=\n{html}"
+        );
+        assert!(html.contains("A test assertion was weakened."), "the chat thread; html=\n{html}");
+        // SSR HTML-escapes '&' to '&#38;', so assert on the stable class names + the unescaped
+        // leading word rather than the literal "Approve & resume".
+        assert!(html.contains("uow-review-approve") && html.contains("Approve"), "approve action; html=\n{html}");
+        assert!(html.contains("uow-review-reject") && html.contains("Reject"), "reject action; html=\n{html}");
+    }
+
+    // ── Tier-1 render: RunProvenancePanel (needs the toast context) ─────────────
+    // It calls use_context::<Signal<Vec<Toast>>>() so the harness MUST provide it,
+    // else the component panics. The provenance use_resource is pending on first
+    // render, so it shows the "Computing provenance…" branch — we assert the static
+    // surrounding structure (heading + sign-off button), not the loaded tallies.
+    fn provenance_harness() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        let uow_refresh = use_signal(|| 0u32);
+        rsx! {
+            super::RunProvenancePanel { run_id: "run-1".to_string(), uow_refresh }
+        }
+    }
+
+    #[test]
+    fn run_provenance_panel_renders_heading_and_signoff() {
+        let mut vdom = VirtualDom::new(provenance_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("PROVENANCE"), "the provenance heading; html=\n{html}");
+        assert!(
+            html.contains("Sign off this run") || html.contains("Computing provenance"),
+            "the sign-off affordance / pending branch renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("never auto-opens a PR"),
+            "the explicit-sign-off hint renders; html=\n{html}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // `CAMERATA_BFF_URL` is a process-global env override (see crate::bff_base()). `cargo test` runs
+    // tests on parallel threads, so two tests that set it could clobber each other. This mutex
+    // serializes the env-mutating Tier-2 tests against each other; we recover from poisoning so one
+    // failing test doesn't cascade-fail the rest. (We can't add serial_test without touching Cargo.toml.)
+    static BFF_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn bff_env_guard() -> std::sync::MutexGuard<'static, ()> {
+        BFF_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    // ── Tier-2: fetch_clarifications_for_story — GET the story's clarifications ──
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_clarifications_for_story_gets_and_parses() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/stories/story-9/clarifications"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": "c1", "question": "Which backend?", "answer": null },
+                { "id": "c2", "question": "Which queue?", "answer": "redis" }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let clars = super::fetch_clarifications_for_story("story-9").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(clars.len(), 2, "both clarifications parse");
+        assert_eq!(clars[0].id, "c1");
+        assert_eq!(clars[0].question, "Which backend?");
+        assert!(clars[0].answer.is_none());
+        assert_eq!(clars[1].answer.as_deref(), Some("redis"));
+    }
+
+    // ── Tier-2: fetch_open_clarifications_for_story — same GET, filters answered ──
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_open_clarifications_for_story_filters_answered() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/stories/story-9/clarifications"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": "c1", "question": "Open one", "answer": null },
+                { "id": "c2", "question": "Answered one", "answer": "done" }
+            ])))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let open = super::fetch_open_clarifications_for_story("story-9").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(open.len(), 1, "only the unanswered clarification survives the filter");
+        assert_eq!(open[0].id, "c1");
+    }
+
+    // ── Tier-2: fetch_all_open_clarifications — GET the cross-story queue ────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_all_open_clarifications_gets_and_parses() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/clarifications"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": "c1", "question": "Q1" },
+                { "id": "c2", "question": "Q2" }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let clars = super::fetch_all_open_clarifications().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(clars.len(), 2);
+        assert_eq!(clars[0].question, "Q1");
+        assert_eq!(clars[1].id, "c2");
+    }
+
+    // ── Tier-2: fetch_open_uow_escalations — GET ?open=true, keep subject_kind=="uow" ──
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_open_uow_escalations_filters_to_uow_subjects() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/escalations"))
+            .and(query_param("open", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": "e1", "routine_id": "r1", "routine_name": "dev",
+                    "subject_kind": "uow", "reason": "TEST-TAMPER-1",
+                    "stopped_for": "edited a test", "status": "open",
+                    "created": "2026-06-30T00:00:00Z"
+                },
+                {
+                    "id": "e2", "routine_id": "r2", "routine_name": "nightly",
+                    "subject_kind": "routine", "reason": "OTHER",
+                    "stopped_for": "something else", "status": "open",
+                    "created": "2026-06-30T00:00:00Z"
+                }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let uow = super::fetch_open_uow_escalations().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(uow.len(), 1, "only the uow-subject escalation survives the filter");
+        assert_eq!(uow[0].id, "e1");
+        assert_eq!(uow[0].subject_kind, "uow");
+    }
+
+    // ── Tier-2: answer_uow_escalation — POST {answer, action}, parse the result ──
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn answer_uow_escalation_posts_answer_and_action() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/escalations/esc-7/answer"))
+            .and(body_json(serde_json::json!({
+                "answer": "Approved: proceed.",
+                "action": "approve"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "esc-7", "routine_id": "r1", "routine_name": "dev",
+                "subject_kind": "uow", "reason": "TEST-TAMPER-1",
+                "stopped_for": "edited a test", "status": "resolved",
+                "created": "2026-06-30T00:00:00Z"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::answer_uow_escalation("esc-7", "Approved: proceed.", "approve").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let out = out.expect("the resolved escalation parses");
+        assert_eq!(out.id, "esc-7");
+        assert_eq!(out.status, "resolved");
+        // `.expect(1)` asserts (on server drop) the exact {answer, action} body was posted.
+    }
+
+    // ── Tier-2: chat_uow_escalation — POST {message, model}, parse the result ───
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn chat_uow_escalation_posts_message_and_model() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/escalations/esc-3/chat"))
+            .and(body_json(serde_json::json!({
+                "message": "Why did this stop?",
+                "model": "claude-sonnet-4-6"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "esc-3", "routine_id": "r1", "routine_name": "dev",
+                "subject_kind": "uow", "reason": "TEST-TAMPER-1",
+                "stopped_for": "edited a test", "status": "open",
+                "created": "2026-06-30T00:00:00Z",
+                "conversation": [
+                    { "role": "user", "text": "Why did this stop?" },
+                    { "role": "assistant", "text": "A test assertion was weakened." }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out =
+            super::chat_uow_escalation("esc-3", "Why did this stop?", "claude-sonnet-4-6").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let out = out.expect("the escalation with the appended turns parses");
+        assert_eq!(out.conversation.len(), 2);
+        assert_eq!(out.conversation[1].role, "assistant");
+        // `.expect(1)` asserts the exact {message, model} body was posted (a wrong field is a real bug).
+    }
+
+    // ── Tier-2: answer_clarification — POST {selected, free_text, answered_by} ──
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn answer_clarification_posts_selected_and_free_text() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/clarifications/clar-2/answer"))
+            .and(body_json(serde_json::json!({
+                "selected": ["Postgres"],
+                "free_text": "lean toward managed",
+                "answered_by": "you"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::answer_clarification(
+            "clar-2",
+            vec!["Postgres".to_string()],
+            Some("lean toward managed".to_string()),
+        )
+        .await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok, "a 2xx answer is reported as success");
+        // `.expect(1)` asserts the exact {selected, free_text, answered_by} body was posted.
+    }
+
+    // ── Tier-2: answer_clarification — a null free_text serializes to JSON null ─
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn answer_clarification_omits_free_text_as_null() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/clarifications/clar-5/answer"))
+            .and(body_json(serde_json::json!({
+                "selected": ["Yes"],
+                "free_text": null,
+                "answered_by": "you"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::answer_clarification("clar-5", vec!["Yes".to_string()], None).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok, "a single-select answer with no free text posts free_text: null");
+    }
+
+    // ── Tier-2: answer_clarification — a non-2xx response is reported as false ──
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn answer_clarification_reports_failure_on_non_2xx() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/clarifications/clar-9/answer"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::answer_clarification("clar-9", vec!["X".to_string()], None).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(!ok, "a 500 from the answer endpoint is reported as failure");
     }
 }

@@ -227,7 +227,7 @@ struct RegistryResp {
 /// the model its agent runs on. Falls back gracefully to Claude-only when no
 /// OpenRouter key is set.
 async fn fetch_models() -> Option<ModelsResp> {
-    let resp: RegistryResp = reqwest::get(format!("{}/api/models/registry", crate::BFF_URL))
+    let resp: RegistryResp = reqwest::get(format!("{}/api/models/registry", crate::bff_base()))
         .await
         .ok()?
         .json()
@@ -297,7 +297,7 @@ struct ProjectView {
 
 /// Fetch the project list so routines can be assigned to (and grouped by) a project.
 async fn fetch_projects() -> Option<Vec<ProjectView>> {
-    reqwest::get(format!("{}/api/projects", crate::BFF_URL))
+    reqwest::get(format!("{}/api/projects", crate::bff_base()))
         .await
         .ok()?
         .json::<Vec<ProjectView>>()
@@ -323,7 +323,7 @@ struct RoutineTemplate {
 
 /// Fetch available routine templates (preset configurations).
 async fn fetch_routine_templates() -> Option<Vec<RoutineTemplate>> {
-    reqwest::get(format!("{}/api/routines/templates", crate::BFF_URL))
+    reqwest::get(format!("{}/api/routines/templates", crate::bff_base()))
         .await
         .ok()?
         .json::<Vec<RoutineTemplate>>()
@@ -337,7 +337,7 @@ async fn instantiate_from_template(template_id: &str) -> Option<RoutineView> {
     reqwest::Client::new()
         .post(format!(
             "{}/api/routines/templates/{}/instantiate",
-            crate::BFF_URL,
+            crate::bff_base(),
             template_id
         ))
         .send()
@@ -416,7 +416,7 @@ pub struct EscalationMsgView {
 }
 
 async fn fetch_routines() -> Option<Vec<RoutineView>> {
-    reqwest::get(format!("{}/api/routines", crate::BFF_URL))
+    reqwest::get(format!("{}/api/routines", crate::bff_base()))
         .await
         .ok()?
         .json::<Vec<RoutineView>>()
@@ -426,7 +426,7 @@ async fn fetch_routines() -> Option<Vec<RoutineView>> {
 
 /// Fetch all currently-open escalations so the dashboard can mark blocked rows.
 async fn fetch_open_escalations() -> Option<Vec<EscalationView>> {
-    reqwest::get(format!("{}/api/escalations?open=true", crate::BFF_URL))
+    reqwest::get(format!("{}/api/escalations?open=true", crate::bff_base()))
         .await
         .ok()?
         .json::<Vec<EscalationView>>()
@@ -439,7 +439,7 @@ async fn fetch_open_escalations() -> Option<Vec<EscalationView>> {
 /// escalation with both turns appended.
 async fn chat_escalation(id: &str, message: &str, model: &str) -> Option<EscalationView> {
     reqwest::Client::new()
-        .post(format!("{}/api/escalations/{}/chat", crate::BFF_URL, id))
+        .post(format!("{}/api/escalations/{}/chat", crate::bff_base(), id))
         .json(&serde_json::json!({ "message": message, "model": model }))
         .send()
         .await
@@ -453,7 +453,7 @@ async fn chat_escalation(id: &str, message: &str, model: &str) -> Option<Escalat
 /// escalation (including the server's `translated_directive`) on success.
 async fn answer_escalation(id: &str, answer: &str, action: &str) -> Option<EscalationView> {
     reqwest::Client::new()
-        .post(format!("{}/api/escalations/{}/answer", crate::BFF_URL, id))
+        .post(format!("{}/api/escalations/{}/answer", crate::bff_base(), id))
         .json(&serde_json::json!({ "answer": answer, "action": action }))
         .send()
         .await
@@ -465,7 +465,7 @@ async fn answer_escalation(id: &str, answer: &str, action: &str) -> Option<Escal
 
 async fn set_enabled(id: &str, enabled: bool) -> Option<RoutineView> {
     reqwest::Client::new()
-        .post(format!("{}/api/routines/{}/enable", crate::BFF_URL, id))
+        .post(format!("{}/api/routines/{}/enable", crate::bff_base(), id))
         .json(&serde_json::json!({ "enabled": enabled }))
         .send()
         .await
@@ -479,7 +479,7 @@ async fn set_enabled(id: &str, enabled: bool) -> Option<RoutineView> {
 /// updated routine (now `provisioned`, still stopped).
 async fn provision(id: &str) -> Option<RoutineView> {
     reqwest::Client::new()
-        .post(format!("{}/api/routines/{}/provision", crate::BFF_URL, id))
+        .post(format!("{}/api/routines/{}/provision", crate::bff_base(), id))
         .send()
         .await
         .ok()?
@@ -490,7 +490,7 @@ async fn provision(id: &str) -> Option<RoutineView> {
 
 async fn run_now(id: &str) -> Option<RoutineView> {
     reqwest::Client::new()
-        .post(format!("{}/api/routines/{}/run", crate::BFF_URL, id))
+        .post(format!("{}/api/routines/{}/run", crate::bff_base(), id))
         .send()
         .await
         .ok()?
@@ -509,7 +509,7 @@ async fn create_routine(
     model: &str,
 ) -> Option<RoutineView> {
     reqwest::Client::new()
-        .post(format!("{}/api/routines", crate::BFF_URL))
+        .post(format!("{}/api/routines", crate::bff_base()))
         .json(&serde_json::json!({
             "name": name, "schedule": schedule, "intent": intent, "prompt": prompt,
             "scope": scope, "project_id": project_id, "model": model
@@ -534,7 +534,7 @@ async fn update_routine(
     model: &str,
 ) -> Option<RoutineView> {
     reqwest::Client::new()
-        .put(format!("{}/api/routines/{}", crate::BFF_URL, id))
+        .put(format!("{}/api/routines/{}", crate::bff_base(), id))
         .json(&serde_json::json!({
             "name": name, "schedule": schedule, "intent": intent, "prompt": prompt,
             "scope": scope, "project_id": project_id, "model": model
@@ -549,7 +549,7 @@ async fn update_routine(
 
 async fn delete_routine(id: &str) -> bool {
     reqwest::Client::new()
-        .delete(format!("{}/api/routines/{}", crate::BFF_URL, id))
+        .delete(format!("{}/api/routines/{}", crate::bff_base(), id))
         .send()
         .await
         .map(|r| r.status().is_success())
@@ -559,7 +559,7 @@ async fn delete_routine(id: &str) -> bool {
 /// Draft the operational prompt from the user's intent. Returns (prompt, authored_by).
 async fn draft_prompt(intent: &str, scope: &str, model: &str) -> Option<(String, String)> {
     let v: serde_json::Value = reqwest::Client::new()
-        .post(format!("{}/api/routines/draft-prompt", crate::BFF_URL))
+        .post(format!("{}/api/routines/draft-prompt", crate::bff_base()))
         .json(&serde_json::json!({ "intent": intent, "scope": scope, "model": model }))
         .send()
         .await
@@ -1460,5 +1460,690 @@ pub fn RoutineDashboard() -> Element {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Pure-logic tests: schedule serialization round-trips ────────────────────
+
+    #[test]
+    fn build_schedule_daily_uses_time() {
+        let s = build_schedule("daily", "07:30", "", &[], 1);
+        assert_eq!(s, "daily 07:30");
+    }
+
+    #[test]
+    fn build_schedule_daily_empty_time_falls_back_to_0900() {
+        let s = build_schedule("daily", "", "", &[], 1);
+        assert_eq!(s, "daily 09:00");
+    }
+
+    #[test]
+    fn build_schedule_weekly_joins_selected_days() {
+        // Sun..Sat: Mon + Wed on.
+        let days = [false, true, false, true, false, false, false];
+        let s = build_schedule("weekly", "08:00", "", &days, 1);
+        assert_eq!(s, "weekly Mon,Wed 08:00");
+    }
+
+    #[test]
+    fn build_schedule_weekly_no_days_defaults_to_mon() {
+        let days = [false; 7];
+        let s = build_schedule("weekly", "08:00", "", &days, 1);
+        assert_eq!(s, "weekly Mon 08:00");
+    }
+
+    #[test]
+    fn build_schedule_monthly_includes_day_of_month() {
+        let s = build_schedule("monthly", "06:00", "", &[], 15);
+        assert_eq!(s, "monthly day 15 06:00");
+    }
+
+    #[test]
+    fn build_schedule_once_with_date() {
+        let s = build_schedule("once", "14:00", "2026-06-20", &[], 1);
+        assert_eq!(s, "once 2026-06-20 14:00");
+    }
+
+    #[test]
+    fn build_schedule_once_without_date_omits_it() {
+        let s = build_schedule("once", "14:00", "", &[], 1);
+        assert_eq!(s, "once 14:00");
+    }
+
+    #[test]
+    fn parse_schedule_round_trips_weekly() {
+        let (freq, time, date, wd, _md) = parse_schedule("weekly Mon,Wed 08:00");
+        assert_eq!(freq, "weekly");
+        assert_eq!(time, "08:00");
+        assert!(date.is_empty());
+        // Sun=0, Mon=1, Wed=3.
+        assert!(wd[1]);
+        assert!(wd[3]);
+        assert!(!wd[0]);
+        assert!(!wd[2]);
+    }
+
+    #[test]
+    fn parse_schedule_round_trips_monthly() {
+        let (freq, time, _date, _wd, md) = parse_schedule("monthly day 22 06:00");
+        assert_eq!(freq, "monthly");
+        assert_eq!(time, "06:00");
+        assert_eq!(md, 22);
+    }
+
+    #[test]
+    fn parse_schedule_clamps_out_of_range_monthday() {
+        let (_freq, _time, _date, _wd, md) = parse_schedule("monthly day 99 06:00");
+        assert_eq!(md, 31, "day-of-month is clamped to 31");
+    }
+
+    #[test]
+    fn parse_schedule_unknown_shape_falls_back_to_daily() {
+        let (freq, time, _date, _wd, _md) = parse_schedule("garbage input here");
+        assert_eq!(freq, "daily");
+        assert_eq!(time, "09:00");
+    }
+
+    #[test]
+    fn status_badge_maps_known_states() {
+        assert_eq!(status_badge("running"), ("Running", "running"));
+        assert_eq!(status_badge("blocked_needs_review"), ("Blocked", "blocked"));
+        assert_eq!(status_badge("done"), ("Done", "done"));
+        assert_eq!(status_badge("failed"), ("Failed", "failed"));
+    }
+
+    #[test]
+    fn status_badge_unknown_falls_back_to_idle() {
+        assert_eq!(status_badge("some_new_server_status"), ("Idle", "idle"));
+    }
+
+    #[test]
+    fn models_resp_grouped_splits_by_provider_and_skips_empty() {
+        let resp = ModelsResp {
+            models: vec![
+                ModelOption {
+                    label: "Claude".into(),
+                    id: "c1".into(),
+                    provider: "claude".into(),
+                    free: false,
+                },
+                ModelOption {
+                    label: "OR-A".into(),
+                    id: "o1".into(),
+                    provider: "openrouter".into(),
+                    free: true,
+                },
+            ],
+            default: "c1".into(),
+        };
+        let groups = resp.grouped();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].0, "Claude (subscription)");
+        assert_eq!(groups[0].1.len(), 1);
+        assert_eq!(groups[1].0, "OpenRouter");
+        assert_eq!(groups[1].1.len(), 1);
+    }
+
+    #[test]
+    fn models_resp_grouped_omits_empty_provider_group() {
+        let resp = ModelsResp {
+            models: vec![ModelOption {
+                label: "Claude".into(),
+                id: "c1".into(),
+                provider: "claude".into(),
+                free: false,
+            }],
+            default: "c1".into(),
+        };
+        let groups = resp.grouped();
+        assert_eq!(groups.len(), 1, "no OpenRouter models -> no OpenRouter group");
+        assert_eq!(groups[0].0, "Claude (subscription)");
+    }
+
+    // ── Tier 2: network-helper tests (wiremock) ─────────────────────────────────
+    // Each points a helper at a fake BFF via the CAMERATA_BFF_URL seam and asserts the
+    // request CONTRACT (path + method, and for mutating helpers the exact JSON body).
+    // The env override is process-global; each test sets then removes it. These rely on
+    // not running concurrently with a test that reads bff_base() expecting production.
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_routines_gets_the_routines_list() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/routines"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": "r1", "name": "Nightly scan", "schedule": "daily 09:00",
+                    "prompt": "scan", "scope": "read-only", "enabled": true, "last_run": null
+                }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let routines = super::fetch_routines().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let routines = routines.expect("body parses into Vec<RoutineView>");
+        assert_eq!(routines.len(), 1);
+        assert_eq!(routines[0].id, "r1");
+        assert_eq!(routines[0].name, "Nightly scan");
+        assert!(routines[0].enabled);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_projects_gets_the_projects_list() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": "p1", "name": "Acme" }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let projects = super::fetch_projects().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let projects = projects.expect("body parses into Vec<ProjectView>");
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].id, "p1");
+        assert_eq!(projects[0].name, "Acme");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_open_escalations_uses_open_query() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/escalations"))
+            .and(query_param("open", "true"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": "e1", "routine_id": "r1", "routine_name": "Nightly",
+                    "reason": "needs a decision", "stopped_for": "pick a backend",
+                    "status": "open", "created": "2026-06-20T09:00:00Z"
+                }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let escs = super::fetch_open_escalations().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let escs = escs.expect("body parses into Vec<EscalationView>");
+        assert_eq!(escs.len(), 1);
+        assert_eq!(escs[0].id, "e1");
+        assert_eq!(escs[0].routine_id, "r1");
+        assert_eq!(escs[0].status, "open");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_models_parses_registry_and_builds_labels() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/models/registry"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "models": [
+                    {
+                        "id": "claude-x", "display": "Claude X", "provider": "claude",
+                        "free": false, "tool_use": true, "context": 200000,
+                        "price_out": 15.0, "caching": true
+                    },
+                    {
+                        "id": "or-free", "display": "OR Free", "provider": "openrouter",
+                        "free": true, "tool_use": false, "context": 0,
+                        "price_out": 0.0, "caching": false
+                    }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let resp = super::fetch_models().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let resp = resp.expect("registry parses into ModelsResp");
+        assert_eq!(resp.models.len(), 2);
+        // Default prefers a claude provider.
+        assert_eq!(resp.default, "claude-x");
+        let claude = resp.models.iter().find(|m| m.id == "claude-x").unwrap();
+        // Label is enriched: price, tool-use, context, cache.
+        assert!(claude.label.contains("$15/M"), "label was: {}", claude.label);
+        assert!(claude.label.contains("tool-use"));
+        assert!(claude.label.contains("200K"));
+        assert!(claude.label.contains("cache"));
+        let free = resp.models.iter().find(|m| m.id == "or-free").unwrap();
+        assert!(free.label.contains("FREE"), "label was: {}", free.label);
+        assert!(free.label.contains("no-tools"));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_routine_templates_gets_the_templates_list() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/routines/templates"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": "t1", "name": "Dep scan", "description": "scan deps",
+                    "prompt": "do the scan"
+                }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let tmpls = super::fetch_routine_templates().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let tmpls = tmpls.expect("body parses into Vec<RoutineTemplate>");
+        assert_eq!(tmpls.len(), 1);
+        assert_eq!(tmpls[0].id, "t1");
+        assert_eq!(tmpls[0].name, "Dep scan");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn instantiate_from_template_posts_to_instantiate_path() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/routines/templates/t1/instantiate"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "r-new", "name": "From template", "schedule": "daily 09:00",
+                "prompt": "p", "scope": "read-only", "enabled": false, "last_run": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let rt = super::instantiate_from_template("t1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let rt = rt.expect("instantiate returns a RoutineView");
+        assert_eq!(rt.id, "r-new");
+        assert_eq!(rt.name, "From template");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn create_routine_posts_the_full_payload() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/routines"))
+            .and(body_json(serde_json::json!({
+                "name": "Nightly", "schedule": "daily 09:00", "intent": "scan deps",
+                "prompt": "the prompt", "scope": "read-only",
+                "project_id": "p1", "model": "claude-x"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "r1", "name": "Nightly", "schedule": "daily 09:00",
+                "prompt": "the prompt", "scope": "read-only", "enabled": false, "last_run": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let created = super::create_routine(
+            "Nightly",
+            "daily 09:00",
+            "scan deps",
+            "the prompt",
+            "read-only",
+            Some("p1"),
+            "claude-x",
+        )
+        .await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(created.is_some(), "create_routine returns the new routine");
+        // body_json + expect(1) assert the exact payload reached the server.
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn update_routine_puts_to_the_id_path_with_payload() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path("/api/routines/r1"))
+            .and(body_json(serde_json::json!({
+                "name": "Renamed", "schedule": "weekly Mon 08:00", "intent": "intent",
+                "prompt": "prompt", "scope": "write (gated)",
+                "project_id": null, "model": "m1"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "r1", "name": "Renamed", "schedule": "weekly Mon 08:00",
+                "prompt": "prompt", "scope": "write (gated)", "enabled": true, "last_run": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let updated = super::update_routine(
+            "r1",
+            "Renamed",
+            "weekly Mon 08:00",
+            "intent",
+            "prompt",
+            "write (gated)",
+            None,
+            "m1",
+        )
+        .await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let updated = updated.expect("update returns the routine");
+        assert_eq!(updated.name, "Renamed");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_enabled_posts_enabled_flag() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/routines/r1/enable"))
+            .and(body_json(serde_json::json!({ "enabled": true })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "r1", "name": "N", "schedule": "daily 09:00",
+                "prompt": "p", "scope": "read-only", "enabled": true, "last_run": null
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let r = super::set_enabled("r1", true).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let r = r.expect("returns the updated routine");
+        assert!(r.enabled);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn provision_posts_to_provision_path() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/routines/r1/provision"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "r1", "name": "N", "schedule": "daily 09:00",
+                "prompt": "p", "scope": "read-only", "enabled": false,
+                "last_run": null, "provisioned": true
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let r = super::provision("r1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let r = r.expect("returns the provisioned routine");
+        assert!(r.provisioned);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn run_now_posts_to_run_path() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/routines/r1/run"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "r1", "name": "N", "schedule": "daily 09:00",
+                "prompt": "p", "scope": "read-only", "enabled": true,
+                "last_run": { "outcome": "passed", "total_verdicts": 3, "denies": 0, "allows": 3 }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let r = super::run_now("r1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let r = r.expect("returns the routine with a last_run summary");
+        let last = r.last_run.expect("run_now records a summary");
+        assert_eq!(last.outcome, "passed");
+        assert_eq!(last.allows, 3);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn delete_routine_deletes_the_id_path() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/routines/r1"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::delete_routine("r1").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok, "a 2xx delete reports success");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn delete_routine_reports_failure_on_404() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/routines/missing"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::delete_routine("missing").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(!ok, "a non-2xx delete reports failure");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn chat_escalation_posts_message_and_model() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/escalations/e1/chat"))
+            .and(body_json(
+                serde_json::json!({ "message": "why did you stop?", "model": "claude-x" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "e1", "routine_id": "r1", "routine_name": "Nightly",
+                "reason": "stopped", "stopped_for": "decision needed",
+                "status": "open", "created": "2026-06-20T09:00:00Z",
+                "conversation": [
+                    { "role": "user", "text": "why did you stop?" },
+                    { "role": "assistant", "text": "I hit an ambiguity." }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let esc = super::chat_escalation("e1", "why did you stop?", "claude-x").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let esc = esc.expect("returns the escalation with the conversation appended");
+        assert_eq!(esc.conversation.len(), 2);
+        assert_eq!(esc.conversation[1].role, "assistant");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn answer_escalation_posts_answer_and_action() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/escalations/e1/answer"))
+            .and(body_json(
+                serde_json::json!({ "answer": "go with option B", "action": "approve" }),
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "e1", "routine_id": "r1", "routine_name": "Nightly",
+                "reason": "stopped", "stopped_for": "decision needed",
+                "status": "resolved", "created": "2026-06-20T09:00:00Z",
+                "translated_directive": "Use backend B."
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let esc = super::answer_escalation("e1", "go with option B", "approve").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let esc = esc.expect("returns the resolved escalation");
+        assert_eq!(esc.status, "resolved");
+        assert_eq!(esc.translated_directive.as_deref(), Some("Use backend B."));
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn draft_prompt_posts_intent_and_extracts_prompt() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/routines/draft-prompt"))
+            .and(body_json(serde_json::json!({
+                "intent": "scan deps nightly", "scope": "read-only", "model": "claude-x"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "prompt": "You are a dependency scanner...", "authored_by": "claude"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let drafted = super::draft_prompt("scan deps nightly", "read-only", "claude-x").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let (prompt, authored_by) = drafted.expect("draft returns (prompt, authored_by)");
+        assert_eq!(prompt, "You are a dependency scanner...");
+        assert_eq!(authored_by, "claude");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn draft_prompt_defaults_authored_by_to_scaffold_when_absent() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/routines/draft-prompt"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "prompt": "scaffolded prompt"
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let drafted = super::draft_prompt("x", "read-only", "m").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let (prompt, authored_by) = drafted.expect("draft returns a tuple");
+        assert_eq!(prompt, "scaffolded prompt");
+        assert_eq!(authored_by, "scaffold", "missing authored_by defaults to scaffold");
+    }
+
+    // ── Tier 1: render test (dioxus-ssr) ────────────────────────────────────────
+    // RoutineDashboard issues its data via use_resource; on first render those resources
+    // are pending, so the component renders its loading/empty scaffold. We assert the
+    // static page chrome that must always be present (the heading + the table head + the
+    // status-strip pills). The component uses no use_context, so no provider harness is
+    // needed; the pending fetches never resolve during rebuild_in_place.
+    #[test]
+    fn dashboard_renders_static_chrome() {
+        use dioxus::prelude::*;
+
+        fn harness() -> Element {
+            rsx! {
+                super::RoutineDashboard {}
+            }
+        }
+
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+
+        assert!(html.contains("Routines"), "renders the page heading");
+        assert!(html.contains("Automation"), "renders the eyebrow");
+        // The status-strip filter pills are always present.
+        assert!(html.contains("total"));
+        assert!(html.contains("enabled"));
+        assert!(html.contains("blocked"));
+        // The table head labels.
+        assert!(html.contains("Schedule"));
+        assert!(html.contains("Last run"));
     }
 }

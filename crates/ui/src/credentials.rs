@@ -9,7 +9,6 @@
 
 use dioxus::prelude::*;
 
-use crate::BFF_URL;
 use crate::loading::{BombeEnabled, BombePreview};
 use crate::toast::{push_toast, ToastKind};
 
@@ -38,7 +37,7 @@ struct CredentialListItem {
 // ── Fetch ─────────────────────────────────────────────────────────────────────
 
 async fn fetch_credentials() -> Option<Vec<CredentialListItem>> {
-    reqwest::get(format!("{BFF_URL}/api/credentials"))
+    reqwest::get(format!("{}/api/credentials", crate::bff_base()))
         .await
         .ok()?
         .json::<Vec<CredentialListItem>>()
@@ -49,7 +48,7 @@ async fn fetch_credentials() -> Option<Vec<CredentialListItem>> {
 async fn post_credential(name: &str, value: &str) -> Result<String, String> {
     let body = serde_json::json!({ "value": value });
     let resp = reqwest::Client::new()
-        .post(format!("{BFF_URL}/api/credentials/{name}"))
+        .post(format!("{}/api/credentials/{name}", crate::bff_base()))
         .json(&body)
         .send()
         .await
@@ -327,5 +326,243 @@ fn CredentialRow(
                 }
             }
         }
+    }
+}
+
+// ── Tests ───────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── Tier 2: network-helper tests (wiremock) ─────────────────────────────────
+    // These point the BFF helpers at a fake server via the CAMERATA_BFF_URL seam
+    // (crate::bff_base()) and assert the request CONTRACT. The env override is
+    // process-global, so these set+remove it and must not run concurrently with a
+    // test that reads bff_base() — keep them narrow.
+
+    // GET /api/credentials — asserts the path and that the JSON list is parsed into
+    // the expected CredentialListItem vec.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_credentials_gets_list_and_parses_items() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/credentials"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "name": "openrouter_api_key", "is_set": true, "masked": "sk-1••••" },
+                { "name": "github_token", "is_set": false, "masked": null },
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let result = super::fetch_credentials().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let items = result.expect("the GET succeeds and the body parses");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].name, "openrouter_api_key");
+        assert!(items[0].is_set);
+        assert_eq!(items[0].masked.as_deref(), Some("sk-1••••"));
+        assert_eq!(items[1].name, "github_token");
+        assert!(!items[1].is_set);
+        assert_eq!(items[1].masked, None);
+    }
+
+    // POST /api/credentials/{name} — asserts the path includes the credential name
+    // and the body is exactly {"value": "..."}; on 200 it returns the masked value.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn post_credential_posts_value_body_and_returns_masked_on_success() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/credentials/openrouter_api_key"))
+            .and(body_json(serde_json::json!({ "value": "sk-secret-123" })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "masked": "sk-s••••" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let result = super::post_credential("openrouter_api_key", "sk-secret-123").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(result, Ok("sk-s••••".to_string()));
+    }
+
+    // POST with a non-success status — returns Err carrying the server's `error` field.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn post_credential_returns_error_message_on_failure_status() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/credentials/github_token"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(serde_json::json!({ "error": "invalid token format" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let result = super::post_credential("github_token", "bad").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(result, Err("invalid token format".to_string()));
+    }
+
+    // ── Tier 1: render tests (dioxus-ssr) ───────────────────────────────────────
+    // Render components headlessly to an HTML string and assert KEY static
+    // structure. SSR is static (no clicks, no async-loaded data): use_resource is
+    // pending on first render, so CredentialsSettings renders its loading branch.
+
+    // BombeSettings consumes BombeEnabled + BombePreview from context. The harness
+    // must provide both before rendering it, else use_context panics.
+    fn bombe_harness() -> Element {
+        use_context_provider(|| BombeEnabled(Signal::new(true)));
+        use_context_provider(|| BombePreview(Signal::new(false)));
+        rsx! {
+            BombeSettings {}
+        }
+    }
+
+    #[test]
+    fn bombe_settings_renders_animate_and_preview_controls() {
+        let mut vdom = VirtualDom::new(bombe_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("Background Animation"),
+            "section label renders; html=\n{html}"
+        );
+        assert!(html.contains("Animate"), "the Animate control renders; html=\n{html}");
+        assert!(html.contains("Preview"), "the Preview control renders; html=\n{html}");
+        // enabled defaults to true → the toggle shows "ON" and the preview button is enabled.
+        assert!(html.contains("ON"), "enabled toggle shows ON state; html=\n{html}");
+        assert!(
+            html.contains("Play Preview"),
+            "preview button shows Play (not Pause) when inactive; html=\n{html}"
+        );
+    }
+
+    // CredentialRow is prop-only + use_signal — no context needed. The `toasts`
+    // prop is a Signal, constructed via the VirtualDom-runtime harness.
+    fn credential_row_set_harness() -> Element {
+        let toasts = use_signal(Vec::<crate::toast::Toast>::new);
+        rsx! {
+            CredentialRow {
+                name: "openrouter_api_key".to_string(),
+                label: "OpenRouter API Key".to_string(),
+                is_set: true,
+                current_masked: Some("sk-1••••".to_string()),
+                toasts,
+                on_saved: move |_| {},
+            }
+        }
+    }
+
+    #[test]
+    fn credential_row_renders_label_masked_badge_and_save_button() {
+        let mut vdom = VirtualDom::new(credential_row_set_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("OpenRouter API Key"),
+            "the credential label renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("sk-1••••"),
+            "the masked value shows in the Saved badge; html=\n{html}"
+        );
+        assert!(
+            html.contains("Saved:"),
+            "the set-state badge renders; html=\n{html}"
+        );
+        assert!(html.contains("Save"), "the Save button renders; html=\n{html}");
+        assert!(
+            html.contains("Enter new value to update"),
+            "the is_set placeholder renders; html=\n{html}"
+        );
+    }
+
+    fn credential_row_unset_harness() -> Element {
+        let toasts = use_signal(Vec::<crate::toast::Toast>::new);
+        rsx! {
+            CredentialRow {
+                name: "github_token".to_string(),
+                label: "GitHub Token".to_string(),
+                is_set: false,
+                current_masked: None,
+                toasts,
+                on_saved: move |_| {},
+            }
+        }
+    }
+
+    #[test]
+    fn credential_row_renders_not_set_badge_when_unset() {
+        let mut vdom = VirtualDom::new(credential_row_unset_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("GitHub Token"),
+            "the credential label renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("Not set"),
+            "the unset-state badge renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("Paste value here"),
+            "the unset placeholder renders; html=\n{html}"
+        );
+    }
+
+    // CredentialsSettings consumes three contexts (toasts Signal, BombeEnabled,
+    // BombePreview) and a use_resource. On first SSR render the resource is pending,
+    // so it renders the "Loading…" branch plus the BombeSettings section.
+    fn credentials_settings_harness() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        use_context_provider(|| BombeEnabled(Signal::new(true)));
+        use_context_provider(|| BombePreview(Signal::new(false)));
+        rsx! {
+            CredentialsSettings {}
+        }
+    }
+
+    #[test]
+    fn credentials_settings_renders_title_intro_and_loading_branch() {
+        let mut vdom = VirtualDom::new(credentials_settings_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Settings"), "the panel title renders; html=\n{html}");
+        assert!(
+            html.contains("OS keychain"),
+            "the intro copy renders; html=\n{html}"
+        );
+        // use_resource is pending on first render → loading branch.
+        assert!(
+            html.contains("Loading"),
+            "the pending-resource loading branch renders; html=\n{html}"
+        );
+        // The Bombe section renders below regardless of the resource state.
+        assert!(
+            html.contains("Background Animation"),
+            "the Bombe settings section renders below; html=\n{html}"
+        );
     }
 }
