@@ -79,6 +79,12 @@ pub const CLARIFY_REQUESTS_FILE_ENV: &str = "CAMERATA_CLARIFY_REQUESTS_FILE";
 /// to the repo.
 pub const ESCALATION_REQUESTS_FILE_ENV: &str = "CAMERATA_ESCALATION_REQUESTS_FILE";
 
+/// Optional env override for the memory-proposal JSONL sink (#112, Layer 3). When set, every
+/// `propose_memory` call is appended to this file; else it derives a `memory-proposals.jsonl`
+/// sibling of the rules file. The agent→run channel for proposed project-memory learnings; never
+/// writes to the repo.
+pub const MEMORY_PROPOSALS_FILE_ENV: &str = "CAMERATA_MEMORY_PROPOSALS_FILE";
+
 /// One structured gate-decision record, appended as a single JSONL line to the sink.
 ///
 /// Recording-only: this mirrors what [`Gateway::gated_write`] already decided, so the
@@ -191,6 +197,40 @@ fn append_escalation_request(record: &EscalationRequestRecord) {
     }
 }
 
+/// One PROJECT-MEMORY learning the agent PROPOSES at run end (#112, Layer 3). Wire shape between the
+/// gateway subprocess and the server: the server reads these back and appends them as `Proposed`
+/// memory entries for the human to curate. Recording-only — proposing a learning is not a repo write
+/// and cannot change a gate verdict.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryProposalRecord {
+    /// The kind of learning: `"decision"` | `"pattern"` | `"gotcha"` | `"constraint"`.
+    #[serde(default)]
+    pub kind: String,
+    /// The learning itself, one fact.
+    pub text: String,
+    /// Unix-epoch milliseconds when the proposal was recorded.
+    pub ts_ms: u128,
+}
+
+/// Append a memory-proposal record to the memory JSONL sink (best-effort, recording-only).
+fn append_memory_proposal(record: &MemoryProposalRecord) {
+    let Some(path) = memory_proposals_sink_path() else {
+        return;
+    };
+    let Ok(mut line) = serde_json::to_string(record) else {
+        return;
+    };
+    line.push('\n');
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        use std::io::Write as _;
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 /// Append a clarification-request record to the clarify-request JSONL sink (best-effort).
 ///
 /// The agent→run channel for Phase 3b. RECORDING-ONLY: a write failure is ignored. This
@@ -257,6 +297,18 @@ pub fn escalation_requests_sink_path() -> Option<std::path::PathBuf> {
     let rules_path = std::path::PathBuf::from(rules);
     let dir = rules_path.parent()?;
     Some(dir.join("escalation-requests.jsonl"))
+}
+
+/// Resolve the memory-proposal sink path: [`MEMORY_PROPOSALS_FILE_ENV`] if set, else a
+/// `memory-proposals.jsonl` sibling of the per-session rules file. A RECORDING channel only.
+pub fn memory_proposals_sink_path() -> Option<std::path::PathBuf> {
+    if let Some(explicit) = std::env::var_os(MEMORY_PROPOSALS_FILE_ENV) {
+        return Some(std::path::PathBuf::from(explicit));
+    }
+    let rules = std::env::var_os(RULES_FILE_ENV)?;
+    let rules_path = std::path::PathBuf::from(rules);
+    let dir = rules_path.parent()?;
+    Some(dir.join("memory-proposals.jsonl"))
 }
 
 /// SHA-256 hash of `s`, returned as a 64-char lowercase hex string. Matches
@@ -432,6 +484,15 @@ pub struct RaiseEscalationArgs {
     /// Your justification / the recommendation you would make, for the human reviewing.
     #[serde(default)]
     pub justification: String,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub struct ProposeMemoryArgs {
+    /// The kind of learning: "decision" | "pattern" | "gotcha" | "constraint".
+    #[serde(default)]
+    pub kind: String,
+    /// The learning itself, ONE durable fact worth carrying to future work on this project.
+    pub text: String,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema)]
@@ -704,6 +765,26 @@ impl Gateway {
              rule is a HARD-PAUSE, STOP now and end your turn — the run will pause for human review \
              and you will be resumed with the decision. If it is a SOFT-FLAG, you may continue."
         )
+    }
+
+    /// Propose a PROJECT-MEMORY learning (#112, Layer 3): a durable fact (a decision that should
+    /// hold, a pattern established, a gotcha learned, a constraint to respect) worth carrying to
+    /// future work on this project. Records it to the per-session sink (outside the worktree jail);
+    /// the server appends it as a PROPOSED entry the human curates. Not a write; the gate is intact.
+    #[tool(
+        name = "propose_memory",
+        description = "Propose a durable PROJECT-MEMORY learning worth carrying to future work here: a decision that should hold, a pattern you established, a gotcha you hit, or a constraint to respect. Give a `kind` (decision|pattern|gotcha|constraint) and one-fact `text`. This does NOT write any files and does NOT pause the run — it records a suggestion the human curates. Only propose genuinely durable, non-obvious learnings; do not propose routine restatements of the task."
+    )]
+    pub async fn propose_memory(&self, args: Parameters<ProposeMemoryArgs>) -> String {
+        let ProposeMemoryArgs { kind, text } = args.0;
+        let record = MemoryProposalRecord {
+            kind,
+            text: text.clone(),
+            ts_ms: now_ms(),
+        };
+        eprintln!("[gateway] propose_memory recorded");
+        append_memory_proposal(&record);
+        format!("MEMORY PROPOSED: \"{text}\". Recorded for the human to curate; continue your work.")
     }
 
     /// Governed delegation. ENABLED only in orchestrator mode (the lead agent's

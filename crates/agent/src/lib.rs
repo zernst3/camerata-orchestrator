@@ -223,6 +223,11 @@ pub const ASK_CLARIFICATION_TOOL: &str = "mcp__camerata__ask_clarification";
 /// [`ClaudeCliDriver::with_escalation`].
 pub const RAISE_ESCALATION_TOOL: &str = "mcp__camerata__raise_escalation";
 
+/// The READ-CLASS project-memory proposal tool (#112, Layer 3): the agent proposes a durable
+/// learning the human curates. Like the escalation tool it records to a per-session sink and creates
+/// NO new write path. Granted alongside `raise_escalation` to the governed dev agent.
+pub const PROPOSE_MEMORY_TOOL: &str = "mcp__camerata__propose_memory";
+
 /// Read-only built-ins an agent always needs (they cannot mutate the worktree,
 /// so they are safe to allow alongside the governed write path).
 pub const READONLY_BUILTINS: &[&str] = &["Read", "Glob", "Grep", "LS"];
@@ -420,6 +425,8 @@ impl ClaudeCliDriver {
         }
         if self.escalation {
             allowed.push(RAISE_ESCALATION_TOOL.to_string());
+            // The governed dev agent that can self-escalate can also propose project memory.
+            allowed.push(PROPOSE_MEMORY_TOOL.to_string());
         }
         let mut args: Vec<String> = vec![
             "-p".to_string(),
