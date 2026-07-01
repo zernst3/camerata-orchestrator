@@ -1359,80 +1359,11 @@ struct RunGateEvent {
     detail: String,
 }
 
-/// The display label + CSS class for a run-activity event, derived from its `layer` +
-/// `verdict`. PURE so the mapping is unit-testable without rendering. The class is one of
-/// the existing `live-event {variant}` families plus the new layer variants; the label is
-/// a short, human tag (no chain-of-thought).
-fn live_event_style(layer: &str, verdict: &str) -> (&'static str, &'static str) {
-    match layer {
-        // Layer-1 deny-before-execute gate: allow / deny (the bounce-back).
-        "layer-1" => match verdict {
-            "deny" => ("GATE DENY", "live-event deny"),
-            "allow" => ("GATE ALLOW", "live-event allow"),
-            _ => ("GATE", "live-event info"),
-        },
-        // Layer-2 post-task lint/test check + the bounce-and-revise pass.
-        "layer-2" => match verdict {
-            "pass" => ("LAYER-2 PASS", "live-event allow"),
-            "fail" => ("LAYER-2 FAIL", "live-event deny"),
-            "revise" => ("REVISE", "live-event revise"),
-            // legacy scripted "bounce" verdict.
-            "bounce" => ("REVISE", "live-event revise"),
-            _ => ("LAYER-2", "live-event info"),
-        },
-        // Delegation dispatch / return (+ INCOMPLETE escalation).
-        "delegate" => match verdict {
-            "dispatch" => ("DELEGATE", "live-event delegate"),
-            "incomplete" => ("DELEGATE INCOMPLETE", "live-event deny"),
-            _ => ("DELEGATE RETURN", "live-event delegate"),
-        },
-        // Phase 3b: the agent raised a structured clarifying question; the run paused
-        // ("pause") or resumed on the answer ("info").
-        "clarification" => match verdict {
-            "pause" => ("WAITING ON YOU", "live-event revise"),
-            _ => ("CLARIFICATION", "live-event info"),
-        },
-        // Model/tier routing per spawned agent.
-        "tier" => ("TIER", "live-event tier"),
-        // cargo build/test verification.
-        "checks" => match verdict {
-            "allow" => ("CHECKS PASS", "live-event allow"),
-            "deny" => ("CHECKS FAIL", "live-event deny"),
-            _ => ("CHECKS", "live-event info"),
-        },
-        // Stage / fleet lifecycle + setup.
-        "stage" => match verdict {
-            "fail" => ("STAGE", "live-event deny"),
-            _ => ("STAGE", "live-event info"),
-        },
-        // Stall-detection synthetic event: the run has been idle longer than the threshold.
-        "stall" => ("STALL", "live-event stall"),
-        "setup" => ("SETUP", "live-event info"),
-        // Default (incl. "fleet" lifecycle, empty/legacy): fall back to the verdict.
-        _ => match verdict {
-            "deny" | "error" => (
-                if verdict == "error" { "ERROR" } else { "DENY" },
-                "live-event deny",
-            ),
-            "allow" => ("ALLOW", "live-event allow"),
-            _ => ("INFO", "live-event info"),
-        },
-    }
-}
-
-// format_idle now lives in the framework-agnostic core (RUST-HEADLESS-CORE-1); re-exported so the
-// cockpit and its submodules (live_run, scan) call sites are unchanged.
-pub(crate) use camerata_ui_core::run::format_idle;
-
-/// True when a run is in a non-terminal, cancellable state.
-fn run_is_cancellable(status: &str, done: bool) -> bool {
-    !done && !matches!(status, "failed" | "cancelled")
-}
-
-/// True when a stall warning banner should be shown for a run.
-fn run_stall_banner_visible(stalled: bool, done: bool) -> bool {
-    stalled && !done
-}
+// Run/event display helpers now live in the framework-agnostic core (RUST-HEADLESS-CORE-1);
+// re-exported so the cockpit and its submodules (live_run, scan) call sites are unchanged.
+pub(crate) use camerata_ui_core::run::{
+    format_idle, live_event_style, run_is_cancellable, run_stall_banner_visible,
+};
 
 /// The outcome of attempting to start a governed run. The no-code-first gate (Pillar 2)
 /// can BLOCK the start with a precise reason (server 409), which the cockpit surfaces as
@@ -3147,30 +3078,6 @@ mod tests {
         assert_eq!(no_layer.verdict, "deny");
     }
 
-    /// The per-layer/verdict styling gives each observability kind a distinct label +
-    /// class so the activity log reads clearly. Asserts the load-bearing mappings.
-    #[test]
-    fn live_event_style_labels_each_layer_distinctly() {
-        assert_eq!(live_event_style("layer-1", "deny"), ("GATE DENY", "live-event deny"));
-        assert_eq!(live_event_style("layer-1", "allow"), ("GATE ALLOW", "live-event allow"));
-        assert_eq!(live_event_style("layer-2", "pass"), ("LAYER-2 PASS", "live-event allow"));
-        assert_eq!(live_event_style("layer-2", "fail"), ("LAYER-2 FAIL", "live-event deny"));
-        assert_eq!(live_event_style("layer-2", "revise"), ("REVISE", "live-event revise"));
-        assert_eq!(live_event_style("tier", "info"), ("TIER", "live-event tier"));
-        assert_eq!(
-            live_event_style("delegate", "dispatch"),
-            ("DELEGATE", "live-event delegate")
-        );
-        assert_eq!(
-            live_event_style("delegate", "incomplete"),
-            ("DELEGATE INCOMPLETE", "live-event deny")
-        );
-        assert_eq!(live_event_style("checks", "allow"), ("CHECKS PASS", "live-event allow"));
-        // Legacy/empty layer falls back to verdict-based styling.
-        assert_eq!(live_event_style("", "deny"), ("DENY", "live-event deny"));
-        assert_eq!(live_event_style("", "allow"), ("ALLOW", "live-event allow"));
-    }
-
     /// The bootstrap toggle adds `skip_layer2: true` to the body ONLY when on, and never
     /// when off (so a normal run is byte-for-byte the existing contract).
     #[test]
@@ -4123,40 +4030,6 @@ mod tests {
 
     /// Pure: idle duration formatting from milliseconds.
     // (format_idle test moved to camerata-ui-core::run.)
-
-    /// Pure: cancellable-state predicate.
-    #[test]
-    fn run_is_cancellable_predicate() {
-        // Running states are cancellable.
-        assert!(run_is_cancellable("executing", false));
-        assert!(run_is_cancellable("gating", false));
-        assert!(run_is_cancellable("awaiting_clarification", false));
-        // Terminal states are not cancellable.
-        assert!(!run_is_cancellable("failed", true));
-        assert!(!run_is_cancellable("cancelled", true));
-        // done=true always non-cancellable.
-        assert!(!run_is_cancellable("executing", true));
-        // failed/cancelled with done=false are also non-cancellable (status check).
-        assert!(!run_is_cancellable("failed", false));
-        assert!(!run_is_cancellable("cancelled", false));
-    }
-
-    /// Pure: stall banner visibility predicate.
-    #[test]
-    fn run_stall_banner_visible_predicate() {
-        assert!(run_stall_banner_visible(true, false));
-        assert!(!run_stall_banner_visible(false, false));
-        assert!(!run_stall_banner_visible(true, true));
-        assert!(!run_stall_banner_visible(false, true));
-    }
-
-    /// `live_event_style` maps the "stall" family to the amber/warning treatment.
-    #[test]
-    fn live_event_style_stall_family() {
-        let (label, cls) = live_event_style("stall", "");
-        assert_eq!(label, "STALL");
-        assert_eq!(cls, "live-event stall");
-    }
 
     /// `RunView` deserializes with back-compat defaults when stall fields are absent.
     #[test]
