@@ -51,7 +51,10 @@ pub mod run;
 pub mod scan_cache;
 pub mod scan_routing;
 pub mod scan_tools;
-pub mod schedule;
+// `schedule` (routine string parsing + is_due/next_fire) is now the framework-agnostic
+// `camerata_app_core::schedule` (RUST-HEADLESS-CORE-1); re-exported so `crate::schedule::*` call
+// sites (auto_fire, lib) are unchanged.
+pub use camerata_app_core::schedule;
 pub mod tool_provisioning;
 pub mod model_tier;
 pub mod settings;

@@ -668,6 +668,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "camerata-app-core"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+]
+
+[[package]]
 name = "camerata-checks"
 version = "0.0.0"
 dependencies = [
@@ -832,6 +839,7 @@ dependencies = [
  "axum",
  "base64",
  "camerata-agent",
+ "camerata-app-core",
  "camerata-checks",
  "camerata-core",
  "camerata-fleet",

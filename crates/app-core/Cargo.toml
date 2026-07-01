@@ -1,0 +1,17 @@
+[package]
+name = "camerata-app-core"
+edition.workspace = true
+version = "0.0.0"
+
+[lints]
+workspace = true
+
+# Framework-agnostic backend app-orchestration logic (RUST-HEADLESS-CORE-1 + RUST-PURE-STATE-
+# TRANSITIONS-1), the backend twin of `camerata-ui-core`. This crate owns the stateless domain
+# types + pure state transitions that `crates/server` (the Axum adapter) drives; it MUST NOT depend
+# on any transport framework (no axum/http). The adapter keeps the stores (Arc<Mutex> persistence)
+# and calls these transitions to compute the next state. See docs/plans/2026-07-01_backend-headless-core.md.
+[dependencies]
+# `schedule` parses routine strings + computes fire times against `NaiveDateTime`. Time math is a
+# domain concern, not a transport one, so chrono belongs in the framework-agnostic core.
+chrono = { version = "0.4", features = ["clock"] }

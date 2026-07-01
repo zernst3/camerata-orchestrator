@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/liveness",    # leaf crate: LivenessTracker + mtime probe + HeartbeatFn (no camerata deps)
     "crates/core",        # orchestrator brain: roles, tasks, DAG, coordination (zero model calls)
+    "crates/app-core",    # framework-agnostic backend app-orchestration (RUST-HEADLESS-CORE-1); no axum dep
     "crates/intake",      # PO-mode: intake form schema + LeadEngineer (architect-abstracted second level)
     "crates/gateway",     # layer-1 real-time governance gate: Rust MCP server (VERIFIED)
     "crates/agent",       # agent runtime: drives `claude -p` subprocesses, parses stream-json

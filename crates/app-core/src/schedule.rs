@@ -1,5 +1,6 @@
-//! Server-side parsing of a routine's human-readable `schedule` string and the
-//! "is this routine due right now?" decision the auto-fire scheduler ticks on.
+//! Parsing of a routine's human-readable `schedule` string and the "is this routine due right now?"
+//! decision the auto-fire scheduler ticks on. Framework-agnostic (RUST-HEADLESS-CORE-1): the server
+//! adapter's `auto_fire` loop drives these pure functions; nothing here touches the transport layer.
 //!
 //! The schedule strings are authored UI-side (`crates/ui/src/routines.rs`):
 //!   - `daily HH:MM`
