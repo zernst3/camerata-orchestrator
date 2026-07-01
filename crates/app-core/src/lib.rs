@@ -10,5 +10,6 @@
 //! modules are promoted here as each surface's transition logic moves over. First beachhead: the
 //! already-pure `schedule` decision functions (`is_due` / `next_fire`).
 
+pub mod checkpoint;
 pub mod lifecycle;
 pub mod schedule;
