@@ -15,6 +15,26 @@ pub fn verif_badge(verif: &str) -> (&'static str, &'static str) {
     }
 }
 
+/// Split a finding's detail into `(body, optional "needs review" reason)`. If the detail carries a
+/// trailing `[needs review]` or `[needs review: <reason>]` marker, the reason is extracted and the
+/// marker is stripped from the body; otherwise the detail passes through unchanged with `None`.
+pub fn split_needs_review(detail: &str) -> (String, Option<String>) {
+    if let Some(start) = detail.rfind("[needs review") {
+        if let Some(end_rel) = detail[start..].find(']') {
+            let inside = &detail[start + 1..start + end_rel];
+            let reason = inside
+                .strip_prefix("needs review")
+                .unwrap_or("")
+                .trim_start_matches([':', ' '])
+                .trim()
+                .to_string();
+            let body = detail[..start].trim_end().to_string();
+            return (body, Some(reason));
+        }
+    }
+    (detail.to_string(), None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -61,5 +81,27 @@ mod tests {
         let (label, cls) = verif_badge("something_new");
         assert_eq!(label, "Draft");
         assert_eq!(cls, "draft");
+    }
+
+    #[test]
+    fn split_needs_review_no_flag_returns_detail_and_none() {
+        let (body, reason) = split_needs_review("Plain finding detail.");
+        assert_eq!(body, "Plain finding detail.");
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn split_needs_review_bare_flag_returns_empty_reason() {
+        let (body, reason) = split_needs_review("Some detail [needs review]");
+        assert_eq!(body, "Some detail");
+        assert_eq!(reason, Some(String::new()));
+    }
+
+    #[test]
+    fn split_needs_review_flag_with_reason_extracts_reason() {
+        let (body, reason) =
+            split_needs_review("Some detail [needs review: premature for a mini app]");
+        assert_eq!(body, "Some detail");
+        assert_eq!(reason, Some("premature for a mini app".to_string()));
     }
 }

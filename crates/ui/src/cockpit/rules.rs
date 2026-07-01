@@ -3150,7 +3150,7 @@ impl ProposedRuleView {
 /// - anything else  -> same as `draft`
 // verif_badge now lives in the framework-agnostic core (RUST-HEADLESS-CORE-1); re-exported here so the
 // rules-table call sites are unchanged.
-pub(super) use camerata_ui_core::rules::verif_badge;
+pub(super) use camerata_ui_core::rules::{split_needs_review, verif_badge};
 
 /// Build a human-readable tooltip string from a list of sources.
 /// Returns an empty string when sources is empty (badge has no hover text in that case).
@@ -3320,27 +3320,6 @@ pub(super) async fn create_ticket(
     }
 }
 
-/// Split a finding's detail into (body, needs-review reason). The calibration pass appends
-/// `[needs review: <reason>]` (or a bare `[needs review]`) to flag findings whose
-/// APPLICABILITY is questionable — distinct from the trivial sense in which every finding
-/// "needs review". Returns `Some(reason)` (reason may be empty) when the flag is present, so
-/// the table can surface WHY this one is flagged (e.g. "premature for a mini/internal app").
-pub(super) fn split_needs_review(detail: &str) -> (String, Option<String>) {
-    if let Some(start) = detail.rfind("[needs review") {
-        if let Some(end_rel) = detail[start..].find(']') {
-            let inside = &detail[start + 1..start + end_rel];
-            let reason = inside
-                .strip_prefix("needs review")
-                .unwrap_or("")
-                .trim_start_matches([':', ' '])
-                .trim()
-                .to_string();
-            let body = detail[..start].trim_end().to_string();
-            return (body, Some(reason));
-        }
-    }
-    (detail.to_string(), None)
-}
 
 /// The deterministic security-floor rule ids — the gate's content arms. A finding carrying one
 /// of these is ENFORCED: pure regex/logic, repeatable (same code → same id, same line), gateable,
@@ -5365,27 +5344,7 @@ mod tests {
     // APPLICABILITY is in doubt. The split must separate the body from the reason so the
     // table can surface WHY a finding is flagged.
 
-    #[test]
-    fn split_needs_review_no_flag_returns_detail_and_none() {
-        let (body, reason) = super::split_needs_review("Plain finding detail.");
-        assert_eq!(body, "Plain finding detail.");
-        assert_eq!(reason, None);
-    }
-
-    #[test]
-    fn split_needs_review_bare_flag_returns_empty_reason() {
-        let (body, reason) = super::split_needs_review("Some detail [needs review]");
-        assert_eq!(body, "Some detail");
-        assert_eq!(reason, Some(String::new()));
-    }
-
-    #[test]
-    fn split_needs_review_flag_with_reason_extracts_reason() {
-        let (body, reason) =
-            super::split_needs_review("Some detail [needs review: premature for a mini app]");
-        assert_eq!(body, "Some detail");
-        assert_eq!(reason, Some("premature for a mini app".to_string()));
-    }
+    // (split_needs_review tests moved to camerata-ui-core::rules.)
 
     // ── bucket_of ─────────────────────────────────────────────────────────────
 
