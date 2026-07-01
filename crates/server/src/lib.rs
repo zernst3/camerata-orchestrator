@@ -783,6 +783,9 @@ pub fn router(state: AppState) -> Router {
         // ── AI story authoring from a blank UoW (2026-06-22) ──────────────────
         .route("/api/uow/blank", post(uow_blank))
         .route("/api/uow/:story_id/author", post(uow_author))
+        // ── UoW file attachments (2026-07-01) ─────────────────────────────────
+        .route("/api/uow/:story_id/attachments", get(uow_list_attachments).post(uow_add_attachment))
+        .route("/api/uow/:story_id/attachments/:name", get(uow_get_attachment).delete(uow_remove_attachment))
         // ── Design draft-tree (2026-07-01) ────────────────────────────────────
         .route("/api/designs/blank", post(design_blank))
         .route("/api/designs/:id/author", post(design_author))
@@ -8325,12 +8328,14 @@ async fn uow_publish(
     // and the GitHub database id (for the sub-issue link). `create_issue_returning_id`
     // replaces the previous `onboard::create_issue` call — same endpoint, same payload,
     // additionally reads the `id` field from the response.
+    // Embed any UoW attachments in the body as collapsed <details> blocks.
+    let issue_body = embed_attachments(&authoring.draft_body, &uow.attachments);
     let (html_url, child_db_id) = crate::github_issues::create_issue_returning_id(
         &coord.owner,
         &coord.repo,
         &token,
         &authoring.draft_title,
-        &authoring.draft_body,
+        &issue_body,
     )
     .await
     .map_err(AppError)?;
@@ -8353,7 +8358,7 @@ async fn uow_publish(
         &req.repo,
         number,
         &authoring.draft_title,
-        &authoring.draft_body,
+        &issue_body,
     );
     let work_item_story_id = story.id.clone();
     state.stories.upsert(story).await.map_err(AppError)?;
@@ -8408,6 +8413,120 @@ async fn uow_publish(
         "work_item": work_item,
         "parent_link_warning": parent_link_warning,
     })))
+}
+
+// ── UoW file attachments ──────────────────────────────────────────────────────
+//
+// A UoW can carry zero or more named file attachments (name + mime + content).
+// Attachments are stored inline in the UoW JSON, travel with the project export,
+// and are embedded in the published GitHub issue body as collapsed `<details>` blocks.
+//
+// Decided (2026-07-01): publish-embed uses inline `<details>` in the issue body.
+// The gist/CDN and repo-commit paths are deferred for Zach to confirm (see
+// .overnight-decisions_needed.md entry #1).
+
+/// `GET /api/uow/:story_id/attachments` -- list all attachments on a UoW
+/// (name + mime; content is omitted from the list for bandwidth). Returns
+/// `{ "attachments": [{ "name", "mime" }] }`.
+async fn uow_list_attachments(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let uow = state.uow.get_or_create(&story_id);
+    let list: Vec<serde_json::Value> = uow
+        .attachments
+        .iter()
+        .map(|a| serde_json::json!({ "name": a.name, "mime": a.mime }))
+        .collect();
+    Json(serde_json::json!({ "attachments": list }))
+}
+
+#[derive(serde::Deserialize)]
+struct AddAttachmentReq {
+    /// The filename (e.g. `"mockup.html"`).
+    name: String,
+    /// MIME type (e.g. `"text/html"`). Defaults to `"text/plain"`.
+    #[serde(default = "default_attachment_mime_handler")]
+    mime: String,
+    /// The file content as a UTF-8 string. Caller must base64-encode binary content.
+    content: String,
+}
+
+fn default_attachment_mime_handler() -> String {
+    "text/plain".to_string()
+}
+
+/// `POST /api/uow/:story_id/attachments` -- add or replace a named attachment.
+/// Replacing an existing name is idempotent (last-writer-wins). Returns the full UoW.
+async fn uow_add_attachment(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<AddAttachmentReq>,
+) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
+    if req.name.trim().is_empty() {
+        return Err(AppError(anyhow::anyhow!("attachment name must not be empty")));
+    }
+    let attachment = crate::uow::UowAttachment {
+        name: req.name.trim().to_string(),
+        mime: req.mime,
+        content: req.content,
+    };
+    Ok(Json(state.uow.add_attachment(&story_id, attachment)))
+}
+
+/// `GET /api/uow/:story_id/attachments/:name` -- fetch a single attachment
+/// (name + mime + full content). Returns `{ "attachment": { name, mime, content } }`
+/// or `{ "ok": false }` when the attachment is not found.
+async fn uow_get_attachment(
+    State(state): State<AppState>,
+    Path((story_id, name)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    let uow = state.uow.get_or_create(&story_id);
+    match uow.attachments.iter().find(|a| a.name == name) {
+        Some(a) => Json(serde_json::json!({
+            "attachment": { "name": a.name, "mime": a.mime, "content": a.content }
+        })),
+        None => Json(serde_json::json!({ "ok": false, "error": format!("attachment `{name}` not found") })),
+    }
+}
+
+/// `DELETE /api/uow/:story_id/attachments/:name` -- remove a named attachment.
+/// Idempotent. Returns `{ "ok": true }`.
+async fn uow_remove_attachment(
+    State(state): State<AppState>,
+    Path((story_id, name)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    state.uow.remove_attachment(&story_id, &name);
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// Embed any attachments on a UoW into its issue body as collapsed `<details>` blocks.
+/// HTML attachments use an HTML code-fence; all others use a code-fence keyed to the
+/// file extension. This is the decided low-risk approach (no CDN, no gist dependency):
+/// the content lives in the issue body itself, stays searchable, and requires no extra
+/// GitHub permissions. (Gist/CDN paths deferred for Zach to confirm.)
+fn embed_attachments(body: &str, attachments: &[crate::uow::UowAttachment]) -> String {
+    if attachments.is_empty() {
+        return body.to_string();
+    }
+    let mut result = body.to_string();
+    result.push_str("\n\n---\n");
+    for att in attachments {
+        let lang = if att.mime.contains("html") {
+            "html"
+        } else if att.mime.contains("mermaid") || att.name.ends_with(".mmd") {
+            "mermaid"
+        } else if att.mime.contains("json") || att.name.ends_with(".json") {
+            "json"
+        } else {
+            "text"
+        };
+        result.push_str(&format!(
+            "\n<details>\n<summary>Attachment: {}</summary>\n\n```{}\n{}\n```\n\n</details>\n",
+            att.name, lang, att.content
+        ));
+    }
+    result
 }
 
 // ── Design draft-tree endpoints (Design Page Increment 2 backend) ─────────────
@@ -8788,13 +8907,14 @@ async fn design_publish(
             continue;
         }
 
-        // Create the issue.
+        // Create the issue. Embed any node attachments in the body.
+        let node_issue_body = embed_attachments(&authoring.draft_body, &node.attachments);
         let (html_url, child_db_id) = crate::github_issues::create_issue_returning_id(
             &coord.owner,
             &coord.repo,
             &token,
             &authoring.draft_title,
-            &authoring.draft_body,
+            &node_issue_body,
         )
         .await
         .map_err(AppError)?;
@@ -8853,7 +8973,7 @@ async fn design_publish(
             &req.repo,
             number,
             &authoring.draft_title,
-            &authoring.draft_body,
+            &node_issue_body,
         );
         let work_item_story_id = story.id.clone();
         state.stories.upsert(story).await.map_err(AppError)?;
@@ -15962,6 +16082,155 @@ mod tests {
             resolved.as_deref(),
             Some("env_token"),
             "must fall back to env var when store is empty"
+        );
+    }
+
+    // ── Attachment tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn embed_attachments_no_attachments_returns_body_unchanged() {
+        let body = "## Summary\nSome content.";
+        assert_eq!(embed_attachments(body, &[]), body);
+    }
+
+    #[test]
+    fn embed_attachments_html_uses_html_lang_fence() {
+        let att = crate::uow::UowAttachment {
+            name: "mockup.html".to_string(),
+            mime: "text/html".to_string(),
+            content: "<html>Hi</html>".to_string(),
+        };
+        let result = embed_attachments("Body", &[att]);
+        assert!(result.contains("<details>"), "details block present");
+        assert!(result.contains("Attachment: mockup.html"), "name present");
+        assert!(result.contains("```html"), "html lang fence");
+        assert!(result.contains("<html>Hi</html>"), "content present");
+    }
+
+    #[test]
+    fn embed_attachments_mermaid_uses_mermaid_fence() {
+        let att = crate::uow::UowAttachment {
+            name: "arch.mmd".to_string(),
+            mime: "text/plain".to_string(),
+            content: "graph LR; A-->B".to_string(),
+        };
+        let result = embed_attachments("Body", &[att]);
+        assert!(result.contains("```mermaid"), "mermaid fence for .mmd extension");
+    }
+
+    /// End-to-end router test for UoW file attachments: add, list, get, remove.
+    #[tokio::test]
+    async fn uow_attachments_http_round_trip() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let app = router(state.clone());
+
+        // Create a blank draft UoW to attach files to.
+        let blank_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/uow/blank")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blank_resp.status(), StatusCode::OK);
+        let blank_body = body_json(blank_resp).await;
+        let uow_id = blank_body["uow_id"].as_str().expect("uow_id").to_string();
+
+        // POST /api/uow/:id/attachments -- add an HTML mockup attachment.
+        let add_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{uow_id}/attachments"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_string(&serde_json::json!({
+                            "name": "mockup.html",
+                            "mime": "text/html",
+                            "content": "<html><body>Hello</body></html>"
+                        }))
+                        .unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(add_resp.status(), StatusCode::OK);
+        let add_body = body_json(add_resp).await;
+        assert_eq!(add_body["attachments"].as_array().unwrap().len(), 1);
+
+        // GET /api/uow/:id/attachments -- list (name + mime, no content).
+        let list_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/uow/{uow_id}/attachments"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = body_json(list_resp).await;
+        let attachments = list_body["attachments"].as_array().unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0]["name"].as_str().unwrap(), "mockup.html");
+        assert!(attachments[0].get("content").is_none(), "content omitted from list");
+
+        // GET /api/uow/:id/attachments/:name -- fetch content.
+        let get_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/uow/{uow_id}/attachments/mockup.html"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let get_body = body_json(get_resp).await;
+        assert_eq!(
+            get_body["attachment"]["content"].as_str().unwrap(),
+            "<html><body>Hello</body></html>"
+        );
+
+        // DELETE /api/uow/:id/attachments/:name -- remove.
+        let del_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/uow/{uow_id}/attachments/mockup.html"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_resp.status(), StatusCode::OK);
+
+        // List after delete: empty.
+        let list2_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/uow/{uow_id}/attachments"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let list2_body = body_json(list2_resp).await;
+        assert_eq!(
+            list2_body["attachments"].as_array().unwrap().len(),
+            0,
+            "attachment removed"
         );
     }
 

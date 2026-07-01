@@ -119,6 +119,32 @@ pub struct ProposedChild {
     pub body: String,
 }
 
+/// A file attached to a UnitOfWork. The content is stored inline (base64 for binary;
+/// raw text for HTML/plain text), travels with the UoW in the JSON store and in project
+/// exports, and is embedded into the published GitHub issue body as a collapsed
+/// `<details>` block.
+///
+/// Design note: GitHub's REST API has no "attach file to issue" endpoint (web-only CDN).
+/// The decided approach (low-risk, no external deps) is to embed the content directly
+/// in the issue body. For HTML mockups this means the full HTML in a `<details>` block;
+/// for other types a code-fence snippet. The gist/CDN paths are deferred for Zach to
+/// confirm.
+#[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
+pub struct UowAttachment {
+    /// A short name identifying this attachment (e.g. `"mockup.html"`, `"arch-diagram.mmd"`).
+    pub name: String,
+    /// The MIME type (e.g. `"text/html"`, `"text/x-mermaid"`, `"text/plain"`).
+    #[serde(default = "default_attachment_mime")]
+    pub mime: String,
+    /// The attachment content as a UTF-8 string. Binary files must be base64-encoded
+    /// before being stored here; the mime type signals to readers how to decode.
+    pub content: String,
+}
+
+fn default_attachment_mime() -> String {
+    "text/plain".to_string()
+}
+
 /// The durable gate provenance persisted onto a UoW after a governed run finishes.
 ///
 /// [`crate::run::RunProvenance`] is the live, derived-on-read summary of a run; this
@@ -474,6 +500,12 @@ pub struct UnitOfWork {
     /// Empty for normal (non-design) UoWs. Serde default for back-compat.
     #[serde(default)]
     pub proposed_children: Vec<ProposedChild>,
+    /// Files attached to this UoW. Stored inline (UTF-8 or base64 content), portable
+    /// (travels with the UoW in JSON), and embedded into the published GitHub issue body
+    /// as a collapsed `<details>` block at publish time. Empty by default. Serde default
+    /// for back-compat so legacy `uow.json` records load unchanged.
+    #[serde(default)]
+    pub attachments: Vec<UowAttachment>,
     /// The id of the project that CREATED this UoW, when it is a project-scoped draft.
     ///
     /// A brand-new blank draft has no `work_item` and a `draft-<uuid>` `story_id`, so it
@@ -1879,6 +1911,51 @@ impl UowStore {
                 kind: "provenance".to_string(),
                 text: summary,
             });
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    // ── Attachment methods ─────────────────────────────────────────────────────
+
+    /// Add or replace a named attachment on a UoW. If an attachment with the same
+    /// `name` already exists it is replaced (last-writer-wins per name). Persists.
+    pub fn add_attachment(&self, story_id: &str, attachment: UowAttachment) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            if let Some(pos) = uow.attachments.iter().position(|a| a.name == attachment.name) {
+                uow.attachments[pos] = attachment;
+            } else {
+                uow.attachments.push(attachment);
+            }
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    /// Remove a named attachment from a UoW. Idempotent. Persists.
+    pub fn remove_attachment(&self, story_id: &str, name: &str) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            uow.attachments.retain(|a| a.name != name);
             uow.updated = now;
             uow.clone()
         };
@@ -3540,6 +3617,68 @@ mod concurrency_regression_tests {
             Some(PhaseTab::Development)
         );
         assert_eq!(PhaseTab::from_wire("bogus"), None);
+    }
+
+    // ── Attachment tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn add_attachment_stores_and_replaces_by_name() {
+        let store = UowStore::new();
+        let a1 = UowAttachment {
+            name: "mockup.html".to_string(),
+            mime: "text/html".to_string(),
+            content: "<html>First</html>".to_string(),
+        };
+        let updated = store.add_attachment("S-1", a1.clone());
+        assert_eq!(updated.attachments.len(), 1);
+        assert_eq!(updated.attachments[0].name, "mockup.html");
+        assert_eq!(updated.attachments[0].content, "<html>First</html>");
+
+        // Replace by name (same name, new content).
+        let a2 = UowAttachment {
+            name: "mockup.html".to_string(),
+            mime: "text/html".to_string(),
+            content: "<html>Second</html>".to_string(),
+        };
+        let updated2 = store.add_attachment("S-1", a2);
+        assert_eq!(updated2.attachments.len(), 1, "replace, not append");
+        assert_eq!(updated2.attachments[0].content, "<html>Second</html>");
+
+        // Different name adds a second attachment.
+        let a3 = UowAttachment {
+            name: "arch.mmd".to_string(),
+            mime: "text/x-mermaid".to_string(),
+            content: "graph LR; A-->B".to_string(),
+        };
+        let updated3 = store.add_attachment("S-1", a3);
+        assert_eq!(updated3.attachments.len(), 2, "two distinct attachments");
+    }
+
+    #[test]
+    fn remove_attachment_is_idempotent() {
+        let store = UowStore::new();
+        store.add_attachment("S-2", UowAttachment {
+            name: "mockup.html".to_string(),
+            mime: "text/html".to_string(),
+            content: "<html></html>".to_string(),
+        });
+        let after_remove = store.remove_attachment("S-2", "mockup.html");
+        assert!(after_remove.attachments.is_empty(), "attachment removed");
+
+        // Removing again is safe.
+        let again = store.remove_attachment("S-2", "mockup.html");
+        assert!(again.attachments.is_empty(), "idempotent");
+
+        // Removing non-existent is safe.
+        let fresh = store.remove_attachment("nonexistent-story", "foo.txt");
+        assert!(fresh.attachments.is_empty());
+    }
+
+    #[test]
+    fn attachments_default_empty_on_normal_uow() {
+        let store = UowStore::new();
+        let uow = store.get_or_create("acme/repo#55");
+        assert!(uow.attachments.is_empty(), "normal UoW has no attachments by default");
     }
 
     // ── Design-tree tests ──────────────────────────────────────────────────────
