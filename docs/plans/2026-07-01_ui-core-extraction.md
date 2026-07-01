@@ -115,3 +115,32 @@ PR #115 (overnight design-page work, still open) touches these UI files, so Phas
   design-page state is extracted at the same time. Given the volume (~150 pure-logic tests across the
   cockpit files), a dedicated push (a focused session or an extraction routine like the design-page one)
   is the right vehicle for the bulk.
+
+- **Session update 2026-07-01 (post-#115-merge).** PR #115 merged; `cockpit.rs` no longer collides.
+  Six more beachheads landed on `feature/ui-core-extraction`, each green with coverage preserved 1:1.
+  Running totals: **ui-core 50 tests, ui 516, total 566** (unchanged from the pre-extraction 566).
+  Beachheads that filled the ui-core modules:
+  3. `cockpit/scan.rs` `human_tokens` + `det_tool_label` + `default_finding_status` (+3 tests, incl. the
+     merged `cockpit.rs` `det_tool_label` "ruff" duplicate) -> `camerata_ui_core::scan`.
+  4. `cockpit/rules.rs` `verif_badge` + `split_needs_review` (+8 tests) -> `camerata_ui_core::rules`.
+  5. `cockpit.rs` `format_idle` (+1 test) -> `camerata_ui_core::run` (`pub(crate)` re-export so the
+     `live_run`/`scan` descendants keep working).
+  6. `cockpit.rs` run cluster: `live_event_style` + `run_is_cancellable` + `run_stall_banner_visible`
+     (+4 tests) -> `camerata_ui_core::run`.
+  7. `cockpit/scan.rs` `estimate_audit_cost` (the full pricing model) + **all 15** pricing tests
+     (consolidated from the cockpit + scan test modules, incl. the 400k/20 monotonicity cases) ->
+     `camerata_ui_core::scan`. Also dropped a stray orphaned `human_tokens` doc-comment and the
+     now-unused run-cluster test imports; cleared the pre-existing #115 `design.rs` unused-import warning.
+  Commits are LOCAL (fb3b456, f0e14ce, 19818b4, and predecessors), NOT pushed (per Zach: push tonight).
+
+- **Next resume point — the rules view-model cluster (largest remaining frontend beachhead).**
+  `bucket_of` + `rules_csv` are thin, but they hang off `ProposedRuleView`, a *central* view type:
+  embedded in `scan.rs`'s `ScanReportView` (`proposed_rules: Vec<ProposedRuleView>`), constructed via
+  `to_proposed()`, and referenced ~10x across `scan.rs` plus several `rules.rs` response types. The
+  cluster to move together is `SelectionBucket` + `bucket_of` + `RuleOptionView` + `RuleSourceView` +
+  `ProposedRuleView` + `default_draft` + `rules_csv` (all dioxus-free serde/pure — same category as the
+  `models` move). **Caveat discovered:** `rules_csv` depends on `csv_field`, defined in `cockpit/scan.rs`
+  and *shared* with scan.rs's own finding-CSV export — so moving `rules_csv` also pulls `csv_field` into
+  ui-core (re-export back to scan.rs). That makes it a two-file re-export move (rules.rs + scan.rs), the
+  biggest so far. Mechanical + compiler-verified, but wants a fresh budget, not a long-session tail.
+  After it: the `use_*` hook state-lift (the genuinely structural part).
