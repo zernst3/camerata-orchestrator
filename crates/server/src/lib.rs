@@ -783,6 +783,12 @@ pub fn router(state: AppState) -> Router {
         // ── AI story authoring from a blank UoW (2026-06-22) ──────────────────
         .route("/api/uow/blank", post(uow_blank))
         .route("/api/uow/:story_id/author", post(uow_author))
+        // ── Design draft-tree (2026-07-01) ────────────────────────────────────
+        .route("/api/designs/blank", post(design_blank))
+        .route("/api/designs/:id/author", post(design_author))
+        .route("/api/designs/:id/nodes", get(design_list_nodes).post(design_materialize_nodes))
+        .route("/api/designs/:id/nodes/:node_id", axum::routing::delete(design_delete_node))
+        .route("/api/designs/:id/publish", post(design_publish))
         .route(
             "/api/uow/:story_id/set-draft-parent",
             post(uow_set_draft_parent),
@@ -8404,6 +8410,465 @@ async fn uow_publish(
     })))
 }
 
+// ── Design draft-tree endpoints (Design Page Increment 2 backend) ─────────────
+//
+// A "design" is a hierarchical draft tree: a root node plus child nodes linked by
+// `draft_parent_id`. All nodes are UoWs with `node_type` set. The tree is assembled
+// in-memory before a batch top-down publish pushes it to GitHub as a tree of issues
+// linked via native sub-issues.
+//
+// Node types are validated against the active project's `HierarchySchema` (the
+// work-type DAG built by the drag-and-drop schema builder). Strict enforcement:
+// a child may only be created under a parent when the schema's `relations` list
+// contains a `TypeRelation { parent, child }` matching the pair.
+
+/// The system prompt for design-mode authoring. Distinct from `STORY_AUTHOR_SYSTEM`:
+/// it asks the AI to draft THIS node's title/body AND propose immediate children
+/// whose types are constrained by the allowed-child list injected at call time.
+const DESIGN_AUTHOR_SYSTEM: &str = "You are a product planning assistant. You help a team \
+co-design a hierarchy of work. Given a work item and a conversation, you: (1) draft or refine \
+this item's title and body, and (2) propose immediate child items that logically belong under \
+it, using ONLY the child types listed under ALLOWED_CHILD_TYPES in the user message. \
+Respond ONLY with a minified JSON object with exactly these keys: \
+\"title\" (string: this item's title), \
+\"body\" (string: markdown body with Summary, Acceptance Criteria, and Notes as appropriate), \
+\"reply\" (string: a short conversational message -- either a clarifying question with 2-4 \
+options, or a brief note on what you proposed), \
+\"proposed_children\" (array: each element has exactly \"node_type\" (string, must be one of \
+ALLOWED_CHILD_TYPES), \"title\" (string), and \"body\" (string, markdown)). \
+Propose 2-5 children unless the conversation makes a different count obvious. \
+Do not wrap the JSON in code fences.";
+
+/// Parse the LLM's design-author response. Extracts `title`, `body`, `reply`, and
+/// `proposed_children`. Falls back gracefully when the model deviates from the JSON
+/// contract: strips code fences, then treats unparse-able text as the reply.
+fn parse_design_author_response(
+    raw: &str,
+) -> (String, String, String, Vec<crate::uow::ProposedChild>) {
+    let trimmed = raw.trim();
+    let inner = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .map(|s| s.trim_start())
+        .and_then(|s| s.strip_suffix("```"))
+        .map(|s| s.trim())
+        .unwrap_or(trimmed);
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(inner) {
+        let title = v.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let body = v.get("body").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let reply = v.get("reply").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let children = v
+            .get("proposed_children")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|o| {
+                        let node_type =
+                            o.get("node_type").and_then(|x| x.as_str())?.trim().to_string();
+                        if node_type.is_empty() {
+                            return None;
+                        }
+                        Some(crate::uow::ProposedChild {
+                            node_type,
+                            title: o
+                                .get("title")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                            body: o
+                                .get("body")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("")
+                                .to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        return (title, body, reply, children);
+    }
+    (String::new(), String::new(), trimmed.to_string(), Vec::new())
+}
+
+/// Validate that `child_type` is an allowed child of `parent_type` in `schema`.
+/// Returns `Ok(())` when valid, `Err(reason)` when not.
+fn validate_design_type_relation(
+    schema: &crate::project::HierarchySchema,
+    parent_type: &str,
+    child_type: &str,
+) -> Result<(), String> {
+    let allowed = schema
+        .relations
+        .iter()
+        .any(|r| r.parent == parent_type && r.child == child_type);
+    if allowed {
+        Ok(())
+    } else {
+        Err(format!(
+            "type `{child_type}` is not an allowed child of `{parent_type}` in this project's \
+             hierarchy schema; allowed children of `{parent_type}`: [{}]",
+            schema
+                .relations
+                .iter()
+                .filter(|r| r.parent == parent_type)
+                .map(|r| r.child.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct DesignBlankReq {
+    /// The schema type for the root node. Must be marked `is_design_root: true`
+    /// in the project's hierarchy schema. If absent or not a design-root type,
+    /// the node is still created (the schema check is a soft guard for this endpoint:
+    /// the strict validation lives at `materialize_nodes`).
+    #[serde(default)]
+    root_type: Option<String>,
+}
+
+/// `POST /api/designs/blank` -- create a blank root design node (the "design" itself).
+/// Returns `{ "design_id": "<draft-token>" }`. The root node is a UoW with
+/// `node_type` set to `root_type`, no `draft_parent_id`. Scoped to the active project.
+async fn design_blank(
+    State(state): State<AppState>,
+    body: Option<Json<DesignBlankReq>>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let root_type = body.and_then(|Json(r)| r.root_type);
+    let project_id = state.projects.active().map(|p| p.id);
+    let root = state.uow.create_blank_design(root_type, None, project_id);
+    Ok(Json(serde_json::json!({ "design_id": root.story_id })))
+}
+
+/// `GET /api/designs/:id/nodes` -- return all nodes in the design tree rooted at
+/// `:id` in BFS order (root first). Returns `{ "nodes": [...UnitOfWork...] }`.
+async fn design_list_nodes(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let nodes = state.uow.list_design_tree(&id);
+    Json(serde_json::json!({ "nodes": nodes }))
+}
+
+#[derive(serde::Deserialize)]
+struct DesignAuthorReq {
+    /// The next message in the design clarification chat.
+    message: String,
+    /// Optional per-turn model override.
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// `POST /api/designs/:id/author` -- design-mode author turn. Analogous to
+/// `uow_author` but uses a design-specific system prompt that asks the AI to
+/// propose child nodes (types constrained to what the schema allows under this
+/// node's type). Returns the full updated `UnitOfWork` including `proposed_children`.
+async fn design_author(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<DesignAuthorReq>,
+) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
+    let message = req.message.trim().to_string();
+    if message.is_empty() {
+        return Err(AppError(anyhow::anyhow!("message must not be empty")));
+    }
+    let before = state.uow.get_or_create(&id);
+    let prior = before.authoring.clone().unwrap_or_default();
+
+    // Inject schema context: which child types are allowed under this node's type.
+    let node_type = before.node_type.clone().unwrap_or_default();
+    let (schema_context, allowed_child_types) = {
+        let schema = state
+            .projects
+            .active()
+            .map(|p| p.hierarchy_schema)
+            .unwrap_or_default();
+        let allowed: Vec<String> = schema
+            .relations
+            .iter()
+            .filter(|r| r.parent == node_type)
+            .map(|r| r.child.clone())
+            .collect();
+        let ctx = if !node_type.is_empty() {
+            format!(
+                "\nCurrent node type: {node_type}\nALLOWED_CHILD_TYPES: [{}]",
+                allowed.join(", ")
+            )
+        } else {
+            String::new()
+        };
+        (ctx, allowed)
+    };
+
+    let prompt = {
+        let mut p = build_author_prompt(&prior.chat, &message);
+        p.push_str(&schema_context);
+        p
+    };
+
+    let model = match req.model.as_deref().map(str::trim) {
+        Some(m) if !m.is_empty() => m.to_string(),
+        _ => step_model(&state, crate::project::StepKind::StoryAuthoring),
+    };
+    let system = match state.project_grounding().await {
+        Some(grounding) => format!("{DESIGN_AUTHOR_SYSTEM}\n\n{grounding}"),
+        None => DESIGN_AUTHOR_SYSTEM.to_string(),
+    };
+    let mut request = crate::llm::LlmRequest::new(prompt)
+        .with_model(model)
+        .with_system(system);
+    let repo_dirs = state.active_repo_dirs();
+    if !repo_dirs.is_empty() {
+        request = request.with_repo_read_dirs(repo_dirs);
+    }
+    let (title, body, reply, mut proposed) = match state.llm().complete(request).await {
+        Ok(resp) => {
+            let (t, b, r, children) = parse_design_author_response(&resp.text);
+            let title = if t.is_empty() { prior.draft_title.clone() } else { t };
+            let body = if b.is_empty() { prior.draft_body.clone() } else { b };
+            let reply = if r.is_empty() { "Updated the draft.".to_string() } else { r };
+            (title, body, reply, children)
+        }
+        Err(e) => {
+            let note = format!(
+                "AI drafting is unavailable right now ({}). Your message was saved; \
+                 configure a model (CLI or ANTHROPIC_API_KEY) and try again.",
+                e
+            );
+            (prior.draft_title.clone(), prior.draft_body.clone(), note, Vec::new())
+        }
+    };
+
+    // Strip any proposed children whose node_type is not in the allowed list (schema guard).
+    if !allowed_child_types.is_empty() {
+        proposed.retain(|c| allowed_child_types.contains(&c.node_type));
+    }
+
+    state.uow.append_authoring_turn(&id, &message, &reply, &title, &body);
+    let updated = state.uow.set_proposed_children(&id, proposed);
+    Ok(Json(updated))
+}
+
+#[derive(serde::Deserialize)]
+struct MaterializeChildReq {
+    /// The schema work type for this node.
+    node_type: String,
+    /// The initial title.
+    #[serde(default)]
+    title: String,
+    /// The initial body (markdown).
+    #[serde(default)]
+    body: String,
+}
+
+#[derive(serde::Deserialize)]
+struct DesignMaterializeReq {
+    /// The draft story_id of the PARENT node to hang the new children under.
+    /// Must be in the same design tree (has the same root).
+    parent_draft_id: String,
+    /// The nodes to create.
+    nodes: Vec<MaterializeChildReq>,
+}
+
+/// `POST /api/designs/:id/nodes` -- materialize child nodes from the proposed list
+/// (or from an explicit `nodes` array). Each node's type is validated against the
+/// project's `HierarchySchema`: the `parent_draft_id` node's type must have a
+/// `TypeRelation` allowing each child type. Returns `{ "node_ids": [...] }`.
+async fn design_materialize_nodes(
+    State(state): State<AppState>,
+    Path(_design_id): Path<String>,
+    Json(req): Json<DesignMaterializeReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Resolve the parent node.
+    let parent = state.uow.get_or_create(&req.parent_draft_id);
+    let parent_type = parent.node_type.as_deref().unwrap_or("");
+
+    // Get the active schema for validation.
+    let schema = state
+        .projects
+        .active()
+        .map(|p| p.hierarchy_schema)
+        .unwrap_or_default();
+
+    let project_id = state.projects.active().map(|p| p.id);
+
+    let mut node_ids = Vec::new();
+    for node in &req.nodes {
+        // Strict schema validation: reject invalid parent-child type pairs.
+        if !parent_type.is_empty() && !node.node_type.is_empty() {
+            validate_design_type_relation(&schema, parent_type, &node.node_type)
+                .map_err(|e| AppError(anyhow::anyhow!("{e}")))?;
+        }
+        let child = state.uow.create_blank_design(
+            Some(node.node_type.clone()),
+            Some(req.parent_draft_id.clone()),
+            project_id.clone(),
+        );
+        // Set the initial draft title/body if provided.
+        if !node.title.is_empty() || !node.body.is_empty() {
+            state.uow.append_authoring_turn(
+                &child.story_id,
+                "(initial draft)",
+                "Draft created.",
+                &node.title,
+                &node.body,
+            );
+        }
+        node_ids.push(child.story_id);
+    }
+
+    // Clear the proposed_children on the parent after materialization.
+    state.uow.set_proposed_children(&req.parent_draft_id, vec![]);
+
+    Ok(Json(serde_json::json!({ "node_ids": node_ids })))
+}
+
+/// `DELETE /api/designs/:id/nodes/:node_id` -- remove a draft node and all its
+/// descendants. Idempotent. Returns `{ "ok": true, "removed": [...ids...] }`.
+async fn design_delete_node(
+    State(state): State<AppState>,
+    Path((_design_id, node_id)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    let removed = state.uow.remove_design_subtree(&node_id);
+    Json(serde_json::json!({ "ok": true, "removed": removed }))
+}
+
+#[derive(serde::Deserialize)]
+struct DesignPublishReq {
+    /// The target repo (`owner/repo`).
+    repo: String,
+}
+
+/// `POST /api/designs/:id/publish` -- batch top-down publish of the design tree.
+///
+/// Walks the tree rooted at `:id` in BFS order (parents before children). For each
+/// node, creates a GitHub issue, applies a `type:<name>` label, and creates a native
+/// sub-issue link to the parent. Fail-soft per link: a failed sub-issue link is
+/// collected as a warning, not a publish failure. Returns
+/// `{ "nodes": ["owner/repo#N", ...], "warnings": [...] }`.
+async fn design_publish(
+    State(state): State<AppState>,
+    Path(design_id): Path<String>,
+    Json(req): Json<DesignPublishReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let coord = camerata_worktracker::RepoCoord::parse(&req.repo).ok_or_else(|| {
+        AppError(anyhow::anyhow!(
+            "repo must be `owner/repo`, got `{}`",
+            req.repo
+        ))
+    })?;
+    let token = state.github_token().ok_or_else(|| {
+        AppError(anyhow::anyhow!(
+            "Connect GitHub (set CAMERATA_GITHUB_TOKEN) to publish the design to the board."
+        ))
+    })?;
+
+    // Walk the tree in BFS order (parents always processed before children).
+    let tree = state.uow.list_design_tree(&design_id);
+    if tree.is_empty() {
+        return Err(AppError(anyhow::anyhow!(
+            "design `{design_id}` not found or has no nodes"
+        )));
+    }
+
+    // Map: draft_story_id -> published issue number (used to resolve draft_parent_id).
+    let mut published_numbers: std::collections::HashMap<String, u64> =
+        std::collections::HashMap::new();
+    let mut node_refs: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+
+    for node in &tree {
+        let authoring = node.authoring.clone().unwrap_or_default();
+        if authoring.draft_title.trim().is_empty() {
+            warnings.push(format!(
+                "node `{}` skipped: no drafted title",
+                node.story_id
+            ));
+            continue;
+        }
+
+        // Create the issue.
+        let (html_url, child_db_id) = crate::github_issues::create_issue_returning_id(
+            &coord.owner,
+            &coord.repo,
+            &token,
+            &authoring.draft_title,
+            &authoring.draft_body,
+        )
+        .await
+        .map_err(AppError)?;
+
+        let number: u64 = html_url
+            .rsplit('/')
+            .next()
+            .and_then(|s| s.trim().parse().ok())
+            .ok_or_else(|| {
+                AppError(anyhow::anyhow!(
+                    "could not parse issue number from `{html_url}`"
+                ))
+            })?;
+
+        // Apply the type label (fail-soft: label failure does not abort publish).
+        if let Some(ref node_type) = node.node_type {
+            let label = format!("type:{}", node_type.to_lowercase());
+            if let Err(e) = crate::github_issues::add_labels_to_issue(
+                &coord.owner,
+                &coord.repo,
+                number,
+                &[label.as_str()],
+                &token,
+            )
+            .await
+            {
+                warnings.push(format!(
+                    "#{number}: label `{label}` could not be applied: {e}"
+                ));
+            }
+        }
+
+        // Sub-issue link to parent (fail-soft).
+        // `link_sub_issue` needs the parent's issue NUMBER and the child's DATABASE id.
+        // The parent number comes from `published_numbers`; the child db_id from creation.
+        if let Some(ref parent_draft_id) = node.draft_parent_id {
+            if let Some(&parent_number) = published_numbers.get(parent_draft_id) {
+                if let Err(e) = crate::github_issues::link_sub_issue(
+                    &coord.owner,
+                    &coord.repo,
+                    parent_number,
+                    child_db_id,
+                    &token,
+                )
+                .await
+                {
+                    warnings.push(format!(
+                        "#{number}: sub-issue link to #{parent_number} failed: {e}"
+                    ));
+                }
+            }
+        }
+
+        // Upsert the story onto the canonical spine.
+        let story = crate::github_issues::issue_to_story(
+            &req.repo,
+            number,
+            &authoring.draft_title,
+            &authoring.draft_body,
+        );
+        let work_item_story_id = story.id.clone();
+        state.stories.upsert(story).await.map_err(AppError)?;
+        state.uow.link_work_item(&node.story_id, &work_item_story_id);
+
+        published_numbers.insert(node.story_id.clone(), number);
+        node_refs.push(format!("{}#{number}", req.repo));
+    }
+
+    Ok(Json(serde_json::json!({
+        "nodes": node_refs,
+        "warnings": warnings,
+    })))
+}
+
 #[derive(serde::Deserialize)]
 struct UowStatusReq {
     /// Accepted values: `"new"`, `"in_progress"`, `"done"`.
@@ -15497,6 +15962,300 @@ mod tests {
             resolved.as_deref(),
             Some("env_token"),
             "must fall back to env var when store is empty"
+        );
+    }
+
+    // ── Design draft-tree unit tests ─────────────────────────────────────────
+
+    #[test]
+    fn parse_design_author_response_extracts_all_fields() {
+        let raw = r##"{"title":"Epic: Checkout revamp","body":"Summary: Revamp.","reply":"Here are some features I'd suggest:","proposed_children":[{"node_type":"Feature","title":"Auth UI","body":"Handle auth."},{"node_type":"Feature","title":"Payment UI","body":"Handle payments."}]}"##;
+        let (title, body, reply, children) = parse_design_author_response(raw);
+        assert_eq!(title, "Epic: Checkout revamp");
+        assert_eq!(body, "Summary: Revamp.");
+        assert!(reply.contains("features"));
+        assert_eq!(children.len(), 2);
+        assert_eq!(children[0].node_type, "Feature");
+        assert_eq!(children[0].title, "Auth UI");
+        assert_eq!(children[1].node_type, "Feature");
+    }
+
+    #[test]
+    fn parse_design_author_response_strips_code_fence() {
+        let raw = "```json\n{\"title\":\"T\",\"body\":\"B\",\"reply\":\"R\",\"proposed_children\":[]}\n```";
+        let (title, body, reply, children) = parse_design_author_response(raw);
+        assert_eq!(title, "T");
+        assert_eq!(body, "B");
+        assert_eq!(reply, "R");
+        assert!(children.is_empty());
+    }
+
+    #[test]
+    fn parse_design_author_response_gracefully_handles_malformed() {
+        let raw = "This is not JSON at all.";
+        let (title, body, reply, children) = parse_design_author_response(raw);
+        assert!(title.is_empty());
+        assert!(body.is_empty());
+        assert_eq!(reply, "This is not JSON at all.");
+        assert!(children.is_empty());
+    }
+
+    #[test]
+    fn validate_design_type_relation_allows_and_rejects() {
+        let schema = crate::project::HierarchySchema {
+            types: vec![
+                crate::project::WorkType {
+                    name: "Epic".to_string(),
+                    builtin: true,
+                    is_design_root: true,
+                },
+                crate::project::WorkType {
+                    name: "Feature".to_string(),
+                    builtin: true,
+                    is_design_root: false,
+                },
+                crate::project::WorkType {
+                    name: "Story".to_string(),
+                    builtin: true,
+                    is_design_root: false,
+                },
+            ],
+            relations: vec![
+                crate::project::TypeRelation {
+                    parent: "Epic".to_string(),
+                    child: "Feature".to_string(),
+                },
+                crate::project::TypeRelation {
+                    parent: "Feature".to_string(),
+                    child: "Story".to_string(),
+                },
+            ],
+        };
+        assert!(validate_design_type_relation(&schema, "Epic", "Feature").is_ok());
+        assert!(validate_design_type_relation(&schema, "Feature", "Story").is_ok());
+        // Epic -> Story is NOT in the schema.
+        let err = validate_design_type_relation(&schema, "Epic", "Story");
+        assert!(err.is_err(), "Epic -> Story must be rejected");
+        assert!(err.unwrap_err().contains("Story"), "error names the invalid type");
+        // Unknown types.
+        assert!(validate_design_type_relation(&schema, "Epic", "Bug").is_err());
+    }
+
+    /// End-to-end through the HTTP router: full design draft-tree flow.
+    /// Exercises schema enforcement, node materialization, tree listing, node deletion,
+    /// and publish (no-token error path). Mirrors `hierarchy_schema_http_round_trip_and_export`.
+    #[tokio::test]
+    async fn design_draft_tree_http_round_trip() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let app = router(state.clone());
+        let id = p.id.clone();
+
+        // Set a hierarchy schema: Epic -> Feature -> Story
+        let schema_json = r#"{"types":[
+            {"name":"Epic","builtin":true,"is_design_root":true},
+            {"name":"Feature","builtin":true,"is_design_root":false},
+            {"name":"Story","builtin":true,"is_design_root":false}
+        ],"relations":[
+            {"parent":"Epic","child":"Feature"},
+            {"parent":"Feature","child":"Story"}
+        ]}"#;
+        let schema_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{id}/hierarchy"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(schema_json))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(schema_resp.status(), StatusCode::OK);
+
+        // POST /api/designs/blank -- create the design root (Epic).
+        let blank_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/designs/blank")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"root_type":"Epic"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(blank_resp.status(), StatusCode::OK);
+        let blank_body = body_json(blank_resp).await;
+        let design_id = blank_body["design_id"].as_str().expect("design_id").to_string();
+        assert!(design_id.starts_with("draft-"), "design_id is a draft id");
+
+        // Verify the root node has node_type=Epic in the store.
+        let root_uow = state.uow.get_or_create(&design_id);
+        assert_eq!(root_uow.node_type.as_deref(), Some("Epic"));
+
+        // POST /api/designs/:id/nodes -- materialize two Feature children.
+        let nodes_body = serde_json::json!({
+            "parent_draft_id": design_id,
+            "nodes": [
+                {"node_type": "Feature", "title": "Auth flow", "body": "Handle auth."},
+                {"node_type": "Feature", "title": "Payment flow", "body": "Handle payments."}
+            ]
+        });
+        let mat_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/designs/{design_id}/nodes"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&nodes_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(mat_resp.status(), StatusCode::OK, "materialize succeeds");
+        let mat_body = body_json(mat_resp).await;
+        let node_ids = mat_body["node_ids"].as_array().expect("node_ids array");
+        assert_eq!(node_ids.len(), 2, "two feature nodes created");
+        let feature_id = node_ids[0].as_str().unwrap().to_string();
+
+        // POST /api/designs/:id/nodes -- try invalid type: Epic -> Story (not in schema).
+        let invalid_body = serde_json::json!({
+            "parent_draft_id": design_id,
+            "nodes": [{"node_type": "Story", "title": "Stray story", "body": ""}]
+        });
+        let invalid_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/designs/{design_id}/nodes"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&invalid_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            invalid_resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "invalid parent-child type must be rejected"
+        );
+
+        // Add a Story under the first Feature (valid by schema).
+        let story_body = serde_json::json!({
+            "parent_draft_id": feature_id,
+            "nodes": [{"node_type": "Story", "title": "Auth login", "body": "Login screen."}]
+        });
+        let story_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/designs/{design_id}/nodes"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&story_body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(story_resp.status(), StatusCode::OK);
+        let story_body = body_json(story_resp).await;
+        let story_id = story_body["node_ids"][0].as_str().unwrap().to_string();
+
+        // GET /api/designs/:id/nodes -- list the full tree (root + 2 features + 1 story).
+        let list_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/designs/{design_id}/nodes"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = body_json(list_resp).await;
+        let nodes = list_body["nodes"].as_array().expect("nodes array");
+        assert_eq!(nodes.len(), 4, "root + 2 features + 1 story");
+        // Root is first.
+        assert_eq!(nodes[0]["story_id"].as_str().unwrap(), design_id);
+        // All node types present.
+        let types: Vec<&str> = nodes
+            .iter()
+            .filter_map(|n| n["node_type"].as_str())
+            .collect();
+        assert!(types.contains(&"Epic"), "Epic in tree");
+        assert_eq!(types.iter().filter(|&&t| t == "Feature").count(), 2, "two Features");
+        assert!(types.contains(&"Story"), "Story in tree");
+
+        // DELETE /api/designs/:id/nodes/:node_id -- delete the story node only.
+        let del_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/designs/{design_id}/nodes/{story_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_resp.status(), StatusCode::OK);
+        let del_body = body_json(del_resp).await;
+        assert_eq!(del_body["ok"], true);
+        let removed: Vec<&str> = del_body["removed"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert!(removed.contains(&story_id.as_str()), "story was removed");
+
+        // Tree should now be root + 2 features only.
+        let list2_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/designs/{design_id}/nodes"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let list2_body = body_json(list2_resp).await;
+        assert_eq!(
+            list2_body["nodes"].as_array().unwrap().len(),
+            3,
+            "story deleted; root + 2 features remain"
+        );
+
+        // POST /api/designs/:id/publish -- no GitHub token: expect a clear error, not a panic.
+        let pub_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/designs/{design_id}/publish"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"repo":"acme/testrepo"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            pub_resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "publish without a token returns a server error, not a panic"
+        );
+        let pub_body = body_json(pub_resp).await;
+        let msg = pub_body["error"].as_str().unwrap_or("");
+        assert!(
+            msg.contains("GitHub") || msg.contains("token"),
+            "error field mentions GitHub/token; got: {msg}"
         );
     }
 }
