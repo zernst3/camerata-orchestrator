@@ -11037,6 +11037,90 @@ mod tests {
         assert_eq!(mem[0].source, "human");
     }
 
+    /// End-to-end THROUGH THE HTTP ROUTER: the design-page hierarchy round-trips — GET returns the
+    /// seeded default ladder, POST replaces it with a custom graph, a second GET reflects the change,
+    /// and the project export carries the schema (portability). Exercises routing + (de)serialization
+    /// + persistence in one flow, exactly as the drag-and-drop builder drives it.
+    #[tokio::test]
+    async fn hierarchy_schema_http_round_trip_and_export() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let app = router(state.clone());
+        let id = p.id.clone();
+
+        // GET → the seeded default ladder (includes Epic).
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{id}/hierarchy"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let got = body_json(resp).await;
+        assert_eq!(got["ok"], true);
+        let names: Vec<&str> = got["hierarchy"]["types"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"Epic"), "seeded default includes Epic; got {names:?}");
+
+        // POST → replace with a custom graph.
+        let post = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{id}/hierarchy"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"types":[{"name":"Objective","builtin":false,"is_design_root":true}],"relations":[{"parent":"Objective","child":"KeyResult"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(post.status(), StatusCode::OK);
+
+        // GET again → the custom schema is reflected.
+        let resp2 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{id}/hierarchy"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let got2 = body_json(resp2).await;
+        assert_eq!(got2["hierarchy"]["types"][0]["name"], "Objective");
+        assert_eq!(got2["hierarchy"]["relations"][0]["child"], "KeyResult");
+
+        // Export carries the schema (portability — travels with the project).
+        let exp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{id}/export"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(exp.status(), StatusCode::OK);
+        let doc = body_json(exp).await;
+        // ProjectExportDoc #[serde(flatten)]s the project, so its fields are at the top level.
+        assert_eq!(
+            doc["hierarchy_schema"]["types"][0]["name"], "Objective",
+            "the schema travels in the project export"
+        );
+    }
+
     /// The view/edit modal's Save POSTs {text, kind} to /memory/:eid. Confirm patch edits both.
     #[tokio::test]
     async fn memory_edit_modal_patches_text_and_kind() {

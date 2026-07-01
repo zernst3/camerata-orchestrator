@@ -111,6 +111,10 @@ struct ProjectView {
     /// Project memory (#112, Layer 3): the accumulating, human-curated learnings.
     #[serde(default)]
     memory: Vec<MemoryEntryView>,
+    /// The work hierarchy schema (design-page work-type graph): types + allowed nestings. Edited by
+    /// the drag-and-drop builder. Absent → empty (the server seeds a default on the project side).
+    #[serde(default)]
+    hierarchy_schema: HierarchySchemaView,
 }
 
 /// One project-memory entry as the BFF reports it (mirrors the server's `MemoryEntry`). Enum-ish
@@ -138,6 +142,133 @@ struct OperatingPrincipleView {
 
 fn default_true_op() -> bool {
     true
+}
+
+/// One work-item TYPE in a project's hierarchy schema, as the BFF reports it (mirrors the server's
+/// `WorkType`). See `docs/plans/2026-06-30_epic-design-page.md` §3.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct WorkTypeView {
+    name: String,
+    #[serde(default)]
+    builtin: bool,
+    #[serde(default)]
+    is_design_root: bool,
+}
+
+/// One allowed parent→child nesting (mirrors the server's `TypeRelation`).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+struct TypeRelationView {
+    parent: String,
+    child: String,
+}
+
+/// A project's WORK HIERARCHY SCHEMA (mirrors the server's `HierarchySchema`): the work-item types
+/// this project uses + the allowed parent→child nestings (a DAG). Edited by the drag-and-drop
+/// builder and POSTed back whole.
+#[derive(Clone, PartialEq, Default, serde::Deserialize, serde::Serialize)]
+struct HierarchySchemaView {
+    #[serde(default)]
+    types: Vec<WorkTypeView>,
+    #[serde(default)]
+    relations: Vec<TypeRelationView>,
+}
+
+/// The default palette the builder offers (the common Scrum/ADO types). A short explanation per type
+/// powers the `(i)` hover so people new to the terminology are not lost.
+const DEFAULT_TYPE_PALETTE: &[(&str, &str)] = &[
+    ("Initiative", "A large, cross-team goal spanning multiple epics; the top of the ladder."),
+    ("Epic", "A large body of work delivered over multiple sprints, decomposed into features/stories."),
+    ("Feature", "A shippable capability under an epic; groups the stories that build it."),
+    ("Story", "A user-facing increment of value, small enough to finish in a sprint."),
+    ("Defect", "A flaw in delivered work that must be corrected; tracked alongside stories."),
+    ("Task", "A unit of implementation work under a story; often a technical step."),
+    ("Bug", "A specific coding error to fix; the smallest defect-style item."),
+];
+
+// ── Pure schema mutations (unit-tested; the component calls these on its working copy) ──────────
+
+/// Add a work type by name if it is not already present. `builtin` marks palette types. Returns
+/// `true` if it was added (`false` if it already existed or the name was blank).
+fn schema_add_type(schema: &mut HierarchySchemaView, name: &str, builtin: bool) -> bool {
+    let name = name.trim();
+    if name.is_empty() || schema.types.iter().any(|t| t.name == name) {
+        return false;
+    }
+    schema.types.push(WorkTypeView { name: name.to_string(), builtin, is_design_root: false });
+    true
+}
+
+/// Remove a type AND every relation that references it (so no dangling edges remain).
+fn schema_remove_type(schema: &mut HierarchySchemaView, name: &str) {
+    schema.types.retain(|t| t.name != name);
+    schema.relations.retain(|r| r.parent != name && r.child != name);
+}
+
+/// Toggle whether a type may be a design root (the top of a design tree).
+fn schema_toggle_root(schema: &mut HierarchySchemaView, name: &str) {
+    if let Some(t) = schema.types.iter_mut().find(|t| t.name == name) {
+        t.is_design_root = !t.is_design_root;
+    }
+}
+
+/// Whether adding `parent → child` would create a cycle (i.e. `parent` is already reachable FROM
+/// `child` through existing relations, so the new edge would close a loop). Keeps the schema a DAG.
+fn schema_would_cycle(schema: &HierarchySchemaView, parent: &str, child: &str) -> bool {
+    // Can we reach `parent` starting from `child`? If so, parent→child closes a cycle.
+    let mut stack = vec![child.to_string()];
+    let mut seen = std::collections::HashSet::new();
+    while let Some(node) = stack.pop() {
+        if node == parent {
+            return true;
+        }
+        if !seen.insert(node.clone()) {
+            continue;
+        }
+        for r in schema.relations.iter().filter(|r| r.parent == node) {
+            stack.push(r.child.clone());
+        }
+    }
+    false
+}
+
+/// Add an allowed `parent → child` nesting. Returns `Err(reason)` if it would be a self-loop, a
+/// duplicate, or would create a cycle; otherwise adds it (auto-adding the child type if the name is
+/// a known type not yet in the schema is the caller's job) and returns `Ok(())`.
+fn schema_add_relation(
+    schema: &mut HierarchySchemaView,
+    parent: &str,
+    child: &str,
+) -> Result<(), &'static str> {
+    if parent == child {
+        return Err("a type cannot nest under itself");
+    }
+    if schema.relations.iter().any(|r| r.parent == parent && r.child == child) {
+        return Err("that nesting already exists");
+    }
+    if schema_would_cycle(schema, parent, child) {
+        return Err("that would create a cycle");
+    }
+    schema
+        .relations
+        .push(TypeRelationView { parent: parent.to_string(), child: child.to_string() });
+    Ok(())
+}
+
+/// Remove an allowed `parent → child` nesting.
+fn schema_remove_relation(schema: &mut HierarchySchemaView, parent: &str, child: &str) {
+    schema.relations.retain(|r| !(r.parent == parent && r.child == child));
+}
+
+/// Save the project's work hierarchy schema (the whole graph) — the drag-and-drop builder's Save.
+/// POSTs the schema object directly (the server handler deserializes a `HierarchySchema` body).
+async fn set_hierarchy_schema(id: &str, schema: &HierarchySchemaView) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/hierarchy", crate::bff_base(), id))
+        .json(schema)
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
 }
 
 /// UI mirror of `camerata_server::project::L3ReviewConfig`.
@@ -675,6 +806,193 @@ fn OperatingPrinciplesEditor(project: ProjectView, refresh: Signal<u32>) -> Elem
                     });
                 },
                 if saving() { "Saving\u{2026}" } else { "Save principles" }
+            }
+        }
+    }
+}
+
+/// The drag-and-drop WORK HIERARCHY builder (design page, §3): define the project's work-item types
+/// and the allowed parent→child nestings. Drag a type onto another type's "children" zone to allow
+/// that nesting; toggle design roots; add custom types; Save posts the whole graph. Camerata's own,
+/// portable, relationship-aware alternative to GitHub issue types.
+#[component]
+fn HierarchySchemaEditor(project: ProjectView, refresh: Signal<u32>) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut schema = use_signal(|| project.hierarchy_schema.clone());
+    let mut dragged = use_signal(String::new);
+    let mut new_type = use_signal(String::new);
+    let mut saving = use_signal(|| false);
+    let pid = project.id.clone();
+
+    rsx! {
+        div { class: "soft-ctx-card",
+            p { class: "soft-ctx-title", "Work hierarchy" }
+            p { class: "soft-ctx-sub",
+                "Define your team's work types and which nest under which (an Epic parents Features; a \
+                 Feature parents Stories and Defects). Drag a type onto another type's \"children\" to \
+                 allow that nesting. Saved per project and travels with the export \u{2014} your own, \
+                 more customizable alternative to GitHub issue types."
+            }
+
+            // Palette: built-in types (draggable onto a parent; click to (re)add) + custom-type add.
+            div { class: "hier-palette",
+                for (name , tip) in DEFAULT_TYPE_PALETTE.iter() {
+                    span {
+                        key: "{name}",
+                        class: "hier-chip hier-palette-chip",
+                        draggable: "true",
+                        title: "{tip}",
+                        ondragstart: {
+                            let n = name.to_string();
+                            move |_| dragged.set(n.clone())
+                        },
+                        onclick: {
+                            let n = name.to_string();
+                            move |_| {
+                                let mut s = schema();
+                                if schema_add_type(&mut s, &n, true) {
+                                    schema.set(s);
+                                }
+                            }
+                        },
+                        "{name} \u{24d8}"
+                    }
+                }
+            }
+            div { class: "hier-add",
+                input {
+                    class: "op-add-input",
+                    placeholder: "Add a custom type\u{2026}",
+                    value: "{new_type}",
+                    disabled: saving(),
+                    oninput: move |e| new_type.set(e.value()),
+                }
+                button {
+                    class: "btn-restart",
+                    disabled: new_type().trim().is_empty() || saving(),
+                    onclick: move |_| {
+                        let t = new_type().trim().to_string();
+                        let mut s = schema();
+                        if schema_add_type(&mut s, &t, false) {
+                            schema.set(s);
+                        }
+                        new_type.set(String::new());
+                    },
+                    "Add type"
+                }
+            }
+
+            // One card per type: draggable name chip, design-root toggle, remove, and a children
+            // drop zone showing the allowed child types (each removable).
+            div { class: "hier-types",
+                for t in schema().types.iter() {
+                    div { key: "{t.name}", class: "hier-type-card",
+                        div { class: "hier-type-head",
+                            span {
+                                class: "hier-chip",
+                                draggable: "true",
+                                ondragstart: {
+                                    let n = t.name.clone();
+                                    move |_| dragged.set(n.clone())
+                                },
+                                "{t.name}"
+                            }
+                            label { class: "hier-root-toggle",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: t.is_design_root,
+                                    onchange: {
+                                        let n = t.name.clone();
+                                        move |_| {
+                                            let mut s = schema();
+                                            schema_toggle_root(&mut s, &n);
+                                            schema.set(s);
+                                        }
+                                    },
+                                }
+                                "design root"
+                            }
+                            button {
+                                class: "hier-remove",
+                                onclick: {
+                                    let n = t.name.clone();
+                                    move |_| {
+                                        let mut s = schema();
+                                        schema_remove_type(&mut s, &n);
+                                        schema.set(s);
+                                    }
+                                },
+                                "\u{2715}"
+                            }
+                        }
+                        div {
+                            class: "hier-children",
+                            ondragover: move |evt| evt.prevent_default(),
+                            ondrop: {
+                                let parent = t.name.clone();
+                                move |evt| {
+                                    evt.prevent_default();
+                                    let child = dragged();
+                                    if child.is_empty() {
+                                        return;
+                                    }
+                                    let mut s = schema();
+                                    let known = DEFAULT_TYPE_PALETTE.iter().any(|(n, _)| *n == child);
+                                    let _ = schema_add_type(&mut s, &child, known);
+                                    match schema_add_relation(&mut s, &parent, &child) {
+                                        Ok(()) => schema.set(s),
+                                        Err(reason) => crate::toast::push_toast(
+                                            toasts,
+                                            crate::toast::ToastKind::Error,
+                                            reason,
+                                        ),
+                                    }
+                                }
+                            },
+                            span { class: "hier-children-label", "children:" }
+                            for r in schema().relations.iter().filter(|r| r.parent == t.name) {
+                                span { key: "{r.child}", class: "hier-chip hier-child-chip",
+                                    "{r.child}"
+                                    button {
+                                        class: "hier-chip-x",
+                                        onclick: {
+                                            let (p, c) = (r.parent.clone(), r.child.clone());
+                                            move |_| {
+                                                let mut s = schema();
+                                                schema_remove_relation(&mut s, &p, &c);
+                                                schema.set(s);
+                                            }
+                                        },
+                                        "\u{2715}"
+                                    }
+                                }
+                            }
+                            span { class: "hier-drop-hint", "drop a type here" }
+                        }
+                    }
+                }
+            }
+
+            button {
+                class: "btn-run",
+                disabled: saving(),
+                onclick: move |_| {
+                    let pid = pid.clone();
+                    let s = schema();
+                    saving.set(true);
+                    spawn(async move {
+                        let ok = set_hierarchy_schema(&pid, &s).await;
+                        saving.set(false);
+                        let mut refresh = refresh;
+                        if ok {
+                            refresh += 1;
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Hierarchy saved.");
+                        } else {
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not save the hierarchy.");
+                        }
+                    });
+                },
+                if saving() { "Saving\u{2026}" } else { "Save hierarchy" }
             }
         }
     }
@@ -2462,6 +2780,7 @@ fn SettingsView(global_only: bool) -> Element {
                         p { class: "section-label settings-label", "Soft context" }
                         ProductBriefEditor { project: p_owned.clone(), refresh }
                         OperatingPrinciplesEditor { project: p_owned.clone(), refresh }
+                        HierarchySchemaEditor { project: p_owned.clone(), refresh }
                         MemoryEditor { project: p_owned.clone(), refresh }
                     }
                 }
@@ -5218,5 +5537,150 @@ mod tests {
         assert!(html.contains("Project memory"), "the title; html=\n{html}");
         assert!(html.contains("mem-empty"), "the empty-state line (no memory in the fixture); html=\n{html}");
         assert!(html.contains("mem-kind-select"), "the kind selector; html=\n{html}");
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // Work hierarchy schema builder (design page §3)
+    // ══════════════════════════════════════════════════════════════════════════
+
+    fn project_with_schema() -> super::ProjectView {
+        serde_json::from_value(serde_json::json!({
+            "id": "p-1",
+            "name": "Acme",
+            "hierarchy_schema": {
+                "types": [
+                    { "name": "Epic", "builtin": true, "is_design_root": true },
+                    { "name": "Feature", "builtin": true, "is_design_root": false },
+                    { "name": "Story", "builtin": true, "is_design_root": false }
+                ],
+                "relations": [
+                    { "parent": "Epic", "child": "Feature" },
+                    { "parent": "Feature", "child": "Story" }
+                ]
+            }
+        }))
+        .expect("valid ProjectView fixture")
+    }
+
+    /// Tier-1 render: `HierarchySchemaEditor` (toast context provided) renders the palette, a card
+    /// per schema type, the children drop zone, and the save button. Guards the "the builder lost a
+    /// section" class of regression.
+    #[test]
+    fn hierarchy_editor_renders_palette_types_and_children_zone() {
+        use dioxus::prelude::*;
+
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            let refresh = use_signal(|| 0u32);
+            rsx! { super::HierarchySchemaEditor { project: project_with_schema(), refresh } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Work hierarchy"), "the title; html=\n{html}");
+        assert!(html.contains("hier-palette"), "the type palette; html=\n{html}");
+        assert!(html.contains("hier-type-card"), "a card per type; html=\n{html}");
+        assert!(html.contains("Epic"), "a schema type renders; html=\n{html}");
+        assert!(html.contains("hier-children"), "the children drop zone; html=\n{html}");
+        assert!(html.contains("hier-child-chip"), "an allowed-child chip renders; html=\n{html}");
+        assert!(html.contains("Save hierarchy"), "the save button; html=\n{html}");
+    }
+
+    // ── Pure schema-mutation logic (the highest-ROI layer) ──────────────────────
+
+    #[test]
+    fn schema_add_type_dedups_and_ignores_blank() {
+        let mut s = super::HierarchySchemaView::default();
+        assert!(super::schema_add_type(&mut s, "Epic", true));
+        assert!(!super::schema_add_type(&mut s, "Epic", true), "no duplicate");
+        assert!(!super::schema_add_type(&mut s, "   ", false), "blank ignored");
+        assert_eq!(s.types.len(), 1);
+    }
+
+    #[test]
+    fn schema_remove_type_drops_its_relations() {
+        let mut s = super::HierarchySchemaView::default();
+        super::schema_add_type(&mut s, "Epic", true);
+        super::schema_add_type(&mut s, "Feature", true);
+        super::schema_add_relation(&mut s, "Epic", "Feature").unwrap();
+        super::schema_remove_type(&mut s, "Feature");
+        assert!(s.types.iter().all(|t| t.name != "Feature"));
+        assert!(s.relations.is_empty(), "the relation referencing Feature is removed too");
+    }
+
+    #[test]
+    fn schema_toggle_root_flips() {
+        let mut s = super::HierarchySchemaView::default();
+        super::schema_add_type(&mut s, "Epic", true);
+        super::schema_toggle_root(&mut s, "Epic");
+        assert!(s.types[0].is_design_root);
+        super::schema_toggle_root(&mut s, "Epic");
+        assert!(!s.types[0].is_design_root);
+    }
+
+    #[test]
+    fn schema_add_relation_rejects_self_dup_and_cycle() {
+        let mut s = super::HierarchySchemaView::default();
+        for t in ["A", "B", "C"] {
+            super::schema_add_type(&mut s, t, false);
+        }
+        assert!(super::schema_add_relation(&mut s, "A", "A").is_err(), "self-loop rejected");
+        super::schema_add_relation(&mut s, "A", "B").unwrap();
+        super::schema_add_relation(&mut s, "B", "C").unwrap();
+        assert!(super::schema_add_relation(&mut s, "A", "B").is_err(), "duplicate rejected");
+        // C→A would close the cycle A→B→C→A.
+        assert!(super::schema_add_relation(&mut s, "C", "A").is_err(), "cycle rejected");
+        // A→C is fine: C may sit under BOTH A and B (a DAG with multiple parents, not a cycle).
+        assert!(super::schema_add_relation(&mut s, "A", "C").is_ok(), "multi-parent DAG edge allowed");
+    }
+
+    #[test]
+    fn schema_remove_relation_removes_only_that_edge() {
+        let mut s = super::HierarchySchemaView::default();
+        for t in ["A", "B", "C"] {
+            super::schema_add_type(&mut s, t, false);
+        }
+        super::schema_add_relation(&mut s, "A", "B").unwrap();
+        super::schema_add_relation(&mut s, "A", "C").unwrap();
+        super::schema_remove_relation(&mut s, "A", "B");
+        assert_eq!(s.relations.len(), 1);
+        assert_eq!(s.relations[0].child, "C");
+    }
+
+    /// Tier-2 network: the save helper POSTs the WHOLE schema graph to the hierarchy endpoint with
+    /// the exact body the server expects.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_hierarchy_schema_posts_the_whole_graph() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-9/hierarchy"))
+            .and(body_json(serde_json::json!({
+                "types": [{ "name": "Epic", "builtin": true, "is_design_root": true }],
+                "relations": [{ "parent": "Epic", "child": "Feature" }]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let schema = super::HierarchySchemaView {
+            types: vec![super::WorkTypeView {
+                name: "Epic".into(),
+                builtin: true,
+                is_design_root: true,
+            }],
+            relations: vec![super::TypeRelationView {
+                parent: "Epic".into(),
+                child: "Feature".into(),
+            }],
+        };
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_hierarchy_schema("p-9", &schema).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+        assert!(ok, "the helper POSTs the schema graph and reports success");
     }
 }

@@ -1386,6 +1386,33 @@ html, body {
   flex: 1; box-sizing: border-box; border-radius: 6px; border: 1px solid var(--line);
   padding: 6px 9px; font-size: 12.5px; color: var(--ink); background: #11100f; font-family: inherit;
 }
+/* Work hierarchy (design-page) drag-and-drop schema builder. */
+.hier-palette { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 4px; }
+.hier-chip {
+  display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600;
+  color: var(--ink); background: var(--line-soft); border: 1px solid var(--line);
+  border-radius: 6px; padding: 3px 9px; user-select: none;
+}
+.hier-palette-chip { cursor: grab; }
+.hier-palette-chip:active { cursor: grabbing; }
+.hier-add { display: flex; gap: 8px; margin: 4px 0 10px; }
+.hier-types { display: flex; flex-direction: column; gap: 8px; max-height: 360px; overflow-y: auto; padding-right: 3px; }
+.hier-type-card { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; background: #11100f; }
+.hier-type-head { display: flex; align-items: center; gap: 10px; }
+.hier-type-head .hier-chip { cursor: grab; }
+.hier-root-toggle { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; color: var(--ink-soft); margin-left: auto; }
+.hier-remove, .hier-chip-x {
+  border: none; background: transparent; color: var(--ink-faint); cursor: pointer;
+  font-size: 12px; line-height: 1; padding: 0 2px;
+}
+.hier-remove:hover, .hier-chip-x:hover { color: #f87171; }
+.hier-children {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px;
+  border: 1px dashed var(--line); border-radius: 6px; padding: 6px 8px; min-height: 30px;
+}
+.hier-children-label { font-size: 11px; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.04em; }
+.hier-child-chip { background: rgba(202,138,4,0.14); border-color: rgba(202,138,4,0.35); }
+.hier-drop-hint { font-size: 11px; color: var(--ink-faint); font-style: italic; margin-left: auto; }
 /* Project memory (Layer 3) curation list. */
 .mem-badge {
   margin-left: 8px; font-size: 10.5px; font-weight: 700; color: #fbbf24;
