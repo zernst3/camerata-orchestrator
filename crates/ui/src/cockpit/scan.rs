@@ -199,9 +199,10 @@ pub(super) struct FindingView {
     pub needs_review: bool,
 }
 
-pub(super) fn default_finding_status() -> String {
-    "active".to_string()
-}
+// Scan-surface formatting helpers (human_tokens, det_tool_label, default_finding_status) now live in
+// the framework-agnostic core (RUST-HEADLESS-CORE-1); re-exported so the scan/cockpit call sites are
+// unchanged.
+pub(super) use camerata_ui_core::scan::{default_finding_status, det_tool_label, human_tokens};
 
 /// Where a finding sits in onboarding triage. The architect moves each finding between these
 /// three tables (a single-select switches the view) until nothing is Unresolved; then the
@@ -927,15 +928,6 @@ pub(super) fn estimate_audit_cost(
 }
 
 /// Compact human token count: 2.0M / 350k / 900.
-pub(super) fn human_tokens(t: u64) -> String {
-    if t >= 1_000_000 {
-        format!("{:.1}M", t as f64 / 1_000_000.0)
-    } else if t >= 1_000 {
-        format!("{:.0}k", t as f64 / 1_000.0)
-    } else {
-        t.to_string()
-    }
-}
 
 /// One deterministic-scan tool's live progress (mirror of the server's `DetToolProgress`).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
@@ -1195,13 +1187,6 @@ pub(super) fn DeterministicProgress(progress: DetProgressView) -> Element {
 
 /// Friendly label for a deterministic tool name. `floor` is the always-on security scanner;
 /// the rest are the scan-preview linters; `unrouted` collects rules with no driveable tool.
-pub(super) fn det_tool_label(tool: &str) -> String {
-    match tool {
-        "floor" => "Security floor".to_string(),
-        "unrouted" => "Unrouted rules".to_string(),
-        other => other.to_string(),
-    }
-}
 
 pub(super) fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<FindingView>> {
     // chorale 0.2.3's palette has a native orange, so each severity gets a distinct color
@@ -4136,33 +4121,12 @@ mod tests {
     // ── default_finding_status / TriageState default ──────────────────────────
 
     #[test]
-    fn default_finding_status_is_active() {
-        assert_eq!(super::default_finding_status(), "active");
-    }
-
-    #[test]
     fn triage_state_defaults_to_unresolved() {
         assert_eq!(super::TriageState::default(), super::TriageState::Unresolved);
     }
 
-    // ── human_tokens (compact formatting) ─────────────────────────────────────
-
-    #[test]
-    fn human_tokens_formats_by_magnitude() {
-        assert_eq!(super::human_tokens(900), "900");
-        assert_eq!(super::human_tokens(2_000), "2k");
-        assert_eq!(super::human_tokens(350_000), "350k");
-        assert_eq!(super::human_tokens(2_000_000), "2.0M");
-    }
-
-    // ── det_tool_label ────────────────────────────────────────────────────────
-
-    #[test]
-    fn det_tool_label_maps_known_and_passes_through_unknown() {
-        assert_eq!(super::det_tool_label("floor"), "Security floor");
-        assert_eq!(super::det_tool_label("unrouted"), "Unrouted rules");
-        assert_eq!(super::det_tool_label("clippy"), "clippy");
-    }
+    // (human_tokens, det_tool_label, default_finding_status tests moved to
+    // camerata-ui-core::scan — pure, now unit-tested with no VirtualDom.)
 
     // ── recommend_scan_mode ───────────────────────────────────────────────────
 

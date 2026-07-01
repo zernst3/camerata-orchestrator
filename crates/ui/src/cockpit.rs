@@ -3058,7 +3058,7 @@ pub use uow::*;
 #[cfg(test)]
 mod tests {
     use super::{
-        det_tool_label, dev_run_body, estimate_audit_cost, format_idle, is_enforced_floor,
+        dev_run_body, estimate_audit_cost, format_idle, is_enforced_floor,
         live_event_style, run_is_cancellable, run_stall_banner_visible, run_status_badge,
         FindingView, JobStatusEnvelope, JobStateView, RunGateEvent, RunView, StallThresholdsView,
         TierMapView,
@@ -3094,15 +3094,8 @@ mod tests {
         assert!(legacy.deterministic.tools.is_empty());
     }
 
-    /// The per-tool label maps the wire tool names to friendly labels.
-    #[test]
-    fn deterministic_tool_labels() {
-        assert_eq!(det_tool_label("floor"), "Security floor");
-        assert_eq!(det_tool_label("unrouted"), "Unrouted rules");
-        // Linters pass through unchanged.
-        assert_eq!(det_tool_label("clippy"), "clippy");
-        assert_eq!(det_tool_label("ruff"), "ruff");
-    }
+    // (deterministic_tool_labels moved to camerata-ui-core::scan::det_tool_label, merged with the
+    // scan.rs test — the "ruff" passthrough case is preserved there.)
 
     /// `fmt_tokens` compacts a raw token count into the headline figure shown in the usage
     /// meter: bare digits below 1k, `N.Nk` in the thousands, `N.NM` in the millions. Asserts

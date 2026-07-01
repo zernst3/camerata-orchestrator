@@ -8,4 +8,5 @@
 //! modules are added here as each surface's logic moves over.
 
 pub mod models;
+pub mod scan;
 pub mod schedule;
