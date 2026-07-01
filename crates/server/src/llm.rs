@@ -90,7 +90,12 @@ impl Vendor {
 
 /// The default model when none is configured / requested. Capable by default; override
 /// per call or via `CAMERATA_LLM_MODEL`.
-pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+///
+/// The const was RELOCATED to the framework-agnostic core (`camerata_app_core::project`,
+/// D2) so the pure `project` domain can seed its per-step model slots without depending on
+/// this transport-layer LLM module. Re-exported here so this module's own uses and every
+/// external `crate::llm::DEFAULT_MODEL` call site keep resolving unchanged.
+pub use camerata_app_core::project::DEFAULT_MODEL;
 
 /// Force the `claude -p` CLI into a PURE, non-agentic, single-shot completion. The
 /// orchestrator's model calls reason over the prompt and return text (JSON for the audit);

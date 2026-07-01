@@ -21,7 +21,7 @@ pub use camerata_fleet::tier::{
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::project::{Project, ProjectRuleset, ProjectStore};
+    use crate::project::ProjectStore;
 
     // ── Project-level tier_map integration ────────────────────────────────────
 
@@ -60,55 +60,11 @@ mod tests {
         assert_eq!(fetched.tier_map, custom_map);
     }
 
-    #[test]
-    fn tier_map_defaults_when_absent_from_legacy_project_json() {
-        // A project JSON written before tier_map existed must deserialise correctly
-        // with serde filling in the default TierMap. Mirrors the max_iterations test.
-        let json = r#"{
-            "id": "proj-1",
-            "name": "Legacy",
-            "repos": [],
-            "ruleset": {},
-            "onboarded": []
-        }"#;
-        let p: Project = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            p.tier_map,
-            TierMap::default(),
-            "legacy project must deserialise with default tier_map"
-        );
-    }
-
-    #[test]
-    fn tier_map_custom_values_survive_project_json_roundtrip() {
-        let original = Project {
-            id: "p".into(),
-            name: "P".into(),
-            repos: vec![],
-            onboarded: vec![],
-            max_iterations: crate::project::default_max_iterations(),
-            tier_map: TierMap {
-                fast: vec!["haiku-custom".into()],
-                balanced: vec!["sonnet-custom".into()],
-                strongest: "opus-custom".into(),
-                vision: vec![],
-            },
-            process_rule_config: camerata_checks::vcs_action::ProcessRuleConfig::default(),
-            step_models: crate::project::StepModels::default(),
-            stall_thresholds: crate::project::StallThresholds::default(),
-            l3_review: crate::project::L3ReviewConfig::default(),
-            model_profile: crate::project::ModelProfile::default(),
-            vision_enabled: false,
-            product_brief: String::new(),
-            operating_principles: Vec::new(),
-            memory: Vec::new(),
-            hierarchy_schema: crate::project::HierarchySchema::default(),
-            ruleset: ProjectRuleset::default(),
-        };
-        let json = serde_json::to_string(&original).unwrap();
-        let back: Project = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.tier_map, original.tier_map);
-    }
+    // The two PURE serde tests (tier_map_defaults_when_absent_from_legacy_project_json,
+    // tier_map_custom_values_survive_project_json_roundtrip) moved to
+    // `camerata_app_core::project`'s test module alongside the Project type itself
+    // (#117, backend headless-core split). The three tests below stay here because each
+    // constructs a `ProjectStore` (the persistence adapter, which lives in this crate).
 
     #[test]
     fn tier_map_vision_round_trips_through_project_save_load() {

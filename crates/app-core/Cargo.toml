@@ -33,6 +33,12 @@ camerata-core = { path = "../core" }
 # `run` domain type `Run.tracker` is a LivenessTracker, and `stall_decision` reads its idle_ms.
 # camerata-liveness is a leaf crate (tokio time only, no camerata-crate deps, no axum/rmcp).
 camerata-liveness = { path = "../liveness" }
+# `project` stores the fleet's per-band `TierMap` (`Project.tier_map`; `l3_model` reads
+# `tier_map.balanced_primary()`). camerata-fleet is transport-free (no axum/http).
+camerata-fleet = { path = "../fleet" }
+# `project` stores the VCS-action gate config (`Project.process_rule_config`:
+# `vcs_action::ProcessRuleConfig`). camerata-checks is transport-free (no axum/http).
+camerata-checks = { path = "../checks" }
 
 [dev-dependencies]
 # `lifecycle` + `routine` tests build sample transition payloads as JSON; still needed for

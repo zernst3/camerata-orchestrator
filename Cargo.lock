@@ -673,6 +673,10 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "camerata-checks",
+ "camerata-core",
+ "camerata-fleet",
+ "camerata-liveness",
  "camerata-worktracker",
  "chrono",
  "serde",
