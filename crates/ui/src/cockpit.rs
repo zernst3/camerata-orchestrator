@@ -1629,6 +1629,9 @@ enum CockpitView {
     /// The local workspace: clone the active project's repos into the chosen folder,
     /// see their checkout status, and ship a branch (push + PR).
     Workspace,
+    /// AI-assisted design canvas: create / navigate a draft work-hierarchy tree,
+    /// author each node with AI, materialize proposed children, and batch-publish.
+    Design,
     /// In-app documentation viewer: USER_GUIDE.md and TECHNICAL.md rendered as markdown.
     Docs,
     /// App-wide credentials (OpenRouter key, GitHub token) stored in the OS keychain.
@@ -2162,6 +2165,11 @@ fn CockpitNav(view: Signal<CockpitView>) -> Element {
                 "Repository Workspace"
             }
             button {
+                class: cls(CockpitView::Design),
+                onclick: move |_| view.set(CockpitView::Design),
+                "Design Canvas"
+            }
+            button {
                 class: cls(CockpitView::Docs),
                 onclick: move |_| view.set(CockpitView::Docs),
                 "Docs"
@@ -2537,6 +2545,17 @@ pub fn CockpitApp() -> Element {
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
                     crate::routines::RoutineDashboard {}
+                }
+            }
+        };
+    }
+    if view() == CockpitView::Design {
+        return rsx! {
+            div { class: "cockpit",
+                AppUpdateBanner {}
+                CockpitNav { view }
+                div { class: "cockpit-scroll cockpit-scroll-full",
+                    crate::design::DesignCanvasView {}
                 }
             }
         };
