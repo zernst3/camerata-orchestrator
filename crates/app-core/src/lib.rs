@@ -12,4 +12,5 @@
 
 pub mod checkpoint;
 pub mod lifecycle;
+pub mod routine;
 pub mod schedule;
