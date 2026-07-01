@@ -1420,22 +1420,9 @@ fn live_event_style(layer: &str, verdict: &str) -> (&'static str, &'static str) 
     }
 }
 
-/// Format an idle duration from milliseconds into a human-readable string.
-/// e.g. 90_000 → "1m 30s", 5_000 → "5s", 65_000 → "1m 5s".
-fn format_idle(idle_ms: u128) -> String {
-    let total_secs = idle_ms / 1000;
-    if total_secs < 60 {
-        format!("{total_secs}s")
-    } else {
-        let mins = total_secs / 60;
-        let secs = total_secs % 60;
-        if secs == 0 {
-            format!("{mins}m")
-        } else {
-            format!("{mins}m {secs}s")
-        }
-    }
-}
+// format_idle now lives in the framework-agnostic core (RUST-HEADLESS-CORE-1); re-exported so the
+// cockpit and its submodules (live_run, scan) call sites are unchanged.
+pub(crate) use camerata_ui_core::run::format_idle;
 
 /// True when a run is in a non-terminal, cancellable state.
 fn run_is_cancellable(status: &str, done: bool) -> bool {
@@ -3058,7 +3045,7 @@ pub use uow::*;
 #[cfg(test)]
 mod tests {
     use super::{
-        dev_run_body, estimate_audit_cost, format_idle, is_enforced_floor,
+        dev_run_body, estimate_audit_cost, is_enforced_floor,
         live_event_style, run_is_cancellable, run_stall_banner_visible, run_status_badge,
         FindingView, JobStatusEnvelope, JobStateView, RunGateEvent, RunView, StallThresholdsView,
         TierMapView,
@@ -4135,16 +4122,7 @@ mod tests {
     }
 
     /// Pure: idle duration formatting from milliseconds.
-    #[test]
-    fn format_idle_formats_durations() {
-        assert_eq!(format_idle(0), "0s");
-        assert_eq!(format_idle(5_000), "5s");
-        assert_eq!(format_idle(59_000), "59s");
-        assert_eq!(format_idle(60_000), "1m");
-        assert_eq!(format_idle(65_000), "1m 5s");
-        assert_eq!(format_idle(90_000), "1m 30s");
-        assert_eq!(format_idle(3_600_000), "60m");
-    }
+    // (format_idle test moved to camerata-ui-core::run.)
 
     /// Pure: cancellable-state predicate.
     #[test]
