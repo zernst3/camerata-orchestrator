@@ -18,10 +18,19 @@ chrono = { version = "0.4", features = ["clock"] }
 # `lifecycle` (UowStage state machine + transitions) serializes its stage/error enums; serde is a
 # data concern, not a transport one.
 serde = { workspace = true }
+# `escalation` uses serde_json in non-test code (parse_resume_payload), so promoted from dev-dep.
+serde_json = { workspace = true }
+# `escalation` translate_answer_ai returns anyhow::Result from the TranslationDriver trait seam.
+anyhow = { workspace = true }
+# `escalation` TranslationDriver is an object-safe async trait (the seam for fake test drivers).
+async-trait = { workspace = true }
 # `lifecycle` transitions reference the canonical investigation shapes from the worktracker port
 # crate (itself framework-agnostic — no axum).
 camerata-worktracker = { path = "../worktracker" }
 
 [dev-dependencies]
-# `lifecycle` tests build sample transition payloads as JSON.
+# `lifecycle` + `routine` tests build sample transition payloads as JSON; still needed for
+# dev-only test helpers in those modules.
 serde_json = { workspace = true }
+# `escalation` tests use tokio::test for async driver tests.
+tokio = { workspace = true, features = ["macros", "rt"] }

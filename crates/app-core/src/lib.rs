@@ -11,6 +11,7 @@
 //! already-pure `schedule` decision functions (`is_due` / `next_fire`).
 
 pub mod checkpoint;
+pub mod escalation;
 pub mod lifecycle;
 pub mod routine;
 pub mod schedule;

@@ -671,10 +671,13 @@ dependencies = [
 name = "camerata-app-core"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "camerata-worktracker",
  "chrono",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
