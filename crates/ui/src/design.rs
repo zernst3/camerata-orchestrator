@@ -577,6 +577,111 @@ fn DesignNodeAuthorPanel(
                     p { class: "ws-hint", "{pub_msg}" }
                 }
             }
+
+            // Mockup window
+            MockupPanel { uow_id: node.story_id.clone() }
+        }
+    }
+}
+
+// ── MockupPanel ───────────────────────────────────────────────────────────────
+
+/// `POST /api/uow/:id/mockup` — generate HTML + save as mockup.html attachment.
+/// Returns `{ html, uow }`.
+async fn api_generate_mockup(uow_id: &str, message: &str) -> Option<String> {
+    let v: serde_json::Value = reqwest::Client::new()
+        .post(format!("{}/api/uow/{}/mockup", crate::bff_base(), uow_id))
+        .json(&serde_json::json!({ "message": message }))
+        .send()
+        .await
+        .ok()?
+        .json()
+        .await
+        .ok()?;
+    v.get("html").and_then(|h| h.as_str()).map(String::from)
+}
+
+/// A collapsible mockup window: chat with AI to generate an HTML wireframe,
+/// preview it live in an `<iframe srcdoc>`. The generated HTML is auto-saved
+/// as a `mockup.html` attachment on the UoW.
+#[component]
+fn MockupPanel(uow_id: String) -> Element {
+    let mut expanded = use_signal(|| false);
+    let mut mockup_html: Signal<Option<String>> = use_signal(|| None);
+    let mut message = use_signal(String::new);
+    let mut generating = use_signal(|| false);
+    let mut error_msg = use_signal(String::new);
+
+    rsx! {
+        div { class: "mockup-panel",
+            button {
+                class: "mockup-toggle",
+                onclick: move |_| expanded.set(!expanded()),
+                if expanded() { "▼ Mockup window" } else { "▶ Mockup window" }
+            }
+
+            if expanded() {
+                div { class: "mockup-body",
+                    div { class: "mockup-left",
+                        p { class: "section-label", "Generate HTML mockup" }
+                        p { class: "ws-hint",
+                            "Describe the UI you want. The AI generates self-contained HTML \
+                             and saves it as a mockup.html attachment on this node."
+                        }
+                        textarea {
+                            class: "design-input-area",
+                            placeholder: "Describe the screen, layout, or component…",
+                            disabled: generating(),
+                            value: "{message}",
+                            oninput: move |e| message.set(e.value()),
+                        }
+                        div { class: "mockup-actions",
+                            button {
+                                class: "btn-run",
+                                disabled: generating(),
+                                onclick: move |_| {
+                                    let msg = message().trim().to_string();
+                                    if msg.is_empty() { return; }
+                                    let uid = uow_id.clone();
+                                    generating.set(true);
+                                    error_msg.set(String::new());
+                                    spawn(async move {
+                                        match api_generate_mockup(&uid, &msg).await {
+                                            Some(html) => mockup_html.set(Some(html)),
+                                            None => error_msg.set("AI generation failed or no token configured.".to_string()),
+                                        }
+                                        generating.set(false);
+                                    });
+                                },
+                                if generating() { "Generating…" } else { "Generate" }
+                            }
+                            if mockup_html().is_some() {
+                                button {
+                                    class: "btn-edit-sm",
+                                    onclick: move |_| mockup_html.set(None),
+                                    "Clear"
+                                }
+                            }
+                        }
+                        if !error_msg().is_empty() {
+                            p { class: "ws-hint", style: "color: var(--bad)", "{error_msg}" }
+                        }
+                    }
+                    div { class: "mockup-right",
+                        if let Some(html) = mockup_html() {
+                            iframe {
+                                class: "mockup-iframe",
+                                srcdoc: "{html}",
+                                title: "Mockup preview",
+                            }
+                        } else {
+                            div { class: "mockup-placeholder",
+                                p { class: "ws-hint", "Preview will appear here after generation." }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -587,6 +692,18 @@ fn DesignNodeAuthorPanel(
 mod tests {
     use super::*;
     use dioxus::prelude::*;
+
+    #[test]
+    fn mockup_panel_renders_collapsed() {
+        fn harness() -> Element {
+            rsx! { MockupPanel { uow_id: "draft-test".to_string() } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Mockup window"), "toggle label renders");
+        assert!(!html.contains("Generate HTML mockup"), "body hidden when collapsed");
+    }
 
     #[test]
     fn design_canvas_view_renders_empty_state() {

@@ -788,6 +788,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/uow/:story_id/attachments/:name", get(uow_get_attachment).delete(uow_remove_attachment))
         // ── UoW Mermaid diagram (2026-07-01) ──────────────────────────────────
         .route("/api/uow/:story_id/diagram", get(uow_get_diagram).post(uow_generate_diagram).delete(uow_clear_diagram))
+        // ── UoW mockup window (2026-07-01) ────────────────────────────────────
+        .route("/api/uow/:story_id/mockup", post(uow_generate_mockup))
         // ── Design draft-tree (2026-07-01) ────────────────────────────────────
         .route("/api/designs/blank", post(design_blank))
         .route("/api/designs/:id/author", post(design_author))
@@ -8658,6 +8660,77 @@ async fn uow_clear_diagram(
     Json(serde_json::json!({ "ok": true }))
 }
 
+// ── Mockup window endpoint ────────────────────────────────────────────────────
+
+const MOCKUP_AUTHOR_SYSTEM: &str = "You are a UI mockup assistant. Given a work item's \
+context and user instructions, generate a self-contained HTML prototype or wireframe that \
+visually illustrates the feature. Respond with ONLY the raw HTML — no markdown, no prose, \
+no backticks, no fences. The HTML MUST be fully self-contained: inline CSS (no external \
+stylesheets), no external scripts, no network requests. Use modern clean design with a \
+dark card-based UI if no specific style is requested.";
+
+#[derive(serde::Deserialize)]
+struct MockupReq {
+    /// The user's instruction (e.g. "make a login form with email + password").
+    message: String,
+    /// Optional model override.
+    #[serde(default)]
+    model: Option<String>,
+}
+
+/// `POST /api/uow/:story_id/mockup` -- generate a self-contained HTML mockup via AI,
+/// save it as the `mockup.html` attachment on the UoW, and return `{ html, uow }`.
+/// Uses the UoW's draft title + body as grounding context. Fail-hard: returns AppError
+/// if the AI call fails (caller decides whether to show a toast or retry).
+async fn uow_generate_mockup(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<MockupReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let message = req.message.trim().to_string();
+    if message.is_empty() {
+        return Err(AppError(anyhow::anyhow!("message must not be empty")));
+    }
+    let uow = state.uow.get_or_create(&story_id);
+    let authoring = uow.authoring.clone().unwrap_or_default();
+
+    let prompt = {
+        let mut p = String::new();
+        if !authoring.draft_title.trim().is_empty() {
+            p.push_str(&format!("Work item title: {}\n\n", authoring.draft_title.trim()));
+        }
+        if !authoring.draft_body.trim().is_empty() {
+            p.push_str(&format!("Work item body:\n{}\n\n", authoring.draft_body.trim()));
+        }
+        p.push_str(&format!("Instruction: {message}\n\nGenerate the HTML mockup now."));
+        p
+    };
+    let model = match req.model.as_deref().map(str::trim) {
+        Some(m) if !m.is_empty() => m.to_string(),
+        _ => step_model(&state, crate::project::StepKind::StoryAuthoring),
+    };
+    let system = match state.project_grounding().await {
+        Some(grounding) => format!("{MOCKUP_AUTHOR_SYSTEM}\n\n{grounding}"),
+        None => MOCKUP_AUTHOR_SYSTEM.to_string(),
+    };
+    let request = crate::llm::LlmRequest::new(prompt)
+        .with_model(model)
+        .with_system(system);
+
+    let html = state.llm().complete(request).await.map_err(AppError)?.text;
+
+    // Save as the `mockup.html` attachment (last-writer-wins).
+    let updated = state.uow.add_attachment(
+        &story_id,
+        crate::uow::UowAttachment {
+            name: "mockup.html".to_string(),
+            mime: "text/html".to_string(),
+            content: html.clone(),
+        },
+    );
+    Ok(Json(serde_json::json!({ "html": html, "uow": updated })))
+}
+
 // ── Design draft-tree endpoints (Design Page Increment 2 backend) ─────────────
 //
 // A "design" is a hierarchical draft tree: a root node plus child nodes linked by
@@ -16480,6 +16553,48 @@ mod tests {
             .unwrap();
         let get3_body = body_json(get3).await;
         assert!(get3_body["diagram"].is_null(), "diagram cleared");
+    }
+
+    /// Mockup endpoint rejects an empty message (no AI call needed).
+    #[tokio::test]
+    async fn uow_mockup_rejects_empty_message() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let app = router(state.clone());
+        // Create blank UoW.
+        let blank_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/uow/blank")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let blank_body = body_json(blank_resp).await;
+        let uow_id = blank_body["uow_id"].as_str().expect("uow_id").to_string();
+
+        // POST with empty message.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{uow_id}/mockup"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"message":""}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body_json(resp).await;
+        assert!(
+            body["error"].as_str().unwrap_or("").contains("must not be empty"),
+            "error message explains why"
+        );
     }
 
     // ── Design draft-tree unit tests ─────────────────────────────────────────
