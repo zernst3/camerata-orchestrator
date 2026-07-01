@@ -27,6 +27,12 @@ async-trait = { workspace = true }
 # `lifecycle` transitions reference the canonical investigation shapes from the worktracker port
 # crate (itself framework-agnostic — no axum).
 camerata-worktracker = { path = "../worktracker" }
+# `run` provenance maps enforced RuleId -> String (run_provenance); RuleId is the domain
+# newtype from camerata-core, a transport-free leaf (serde/thiserror/anyhow only, no axum/rmcp).
+camerata-core = { path = "../core" }
+# `run` domain type `Run.tracker` is a LivenessTracker, and `stall_decision` reads its idle_ms.
+# camerata-liveness is a leaf crate (tokio time only, no camerata-crate deps, no axum/rmcp).
+camerata-liveness = { path = "../liveness" }
 
 [dev-dependencies]
 # `lifecycle` + `routine` tests build sample transition payloads as JSON; still needed for
