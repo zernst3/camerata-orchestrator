@@ -234,6 +234,77 @@ pub struct ProjectRuleset {
     pub custom: Vec<CustomRule>,
 }
 
+/// One work-item TYPE in a project's hierarchy schema (e.g. `"Epic"`, `"Story"`, or a custom
+/// `"Spike"`). GitHub has no native "Epic"; a type is just a freetext name that the GitHub adapter
+/// maps to a `type:<name>` label. See `docs/plans/2026-06-30_epic-design-page.md` §3.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkType {
+    /// The type name (e.g. `"Feature"`). Freetext; custom types use any non-empty string.
+    pub name: String,
+    /// Whether this came from the shipped default palette (vs. a user-added custom type).
+    #[serde(default)]
+    pub builtin: bool,
+    /// Whether a design may be ROOTED at this type (be the top node of a design tree).
+    #[serde(default)]
+    pub is_design_root: bool,
+}
+
+/// One allowed parent→child nesting in a project's hierarchy schema: `child` may nest under
+/// `parent`. The full set forms a DAG — a parent may allow several child types, and a child type
+/// may be allowed under several parents.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TypeRelation {
+    /// The parent type name.
+    pub parent: String,
+    /// The child type name allowed under `parent`.
+    pub child: String,
+}
+
+/// A project's WORK HIERARCHY SCHEMA: the work-item types this project uses and the allowed
+/// parent→child nesting rules between them. Saved on the [`Project`] and portable (travels with
+/// export). It is effectively Camerata's own, per-project, relationship-aware alternative to GitHub
+/// Issue Types (per-project not org-locked, freetext + custom types, and it encodes hierarchy
+/// RELATIONS that Issue Types do not). See `docs/plans/2026-06-30_epic-design-page.md` §3.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HierarchySchema {
+    /// The work-item types available in this project (built-in palette + custom).
+    #[serde(default)]
+    pub types: Vec<WorkType>,
+    /// The allowed parent→child nestings (a DAG over `types`).
+    #[serde(default)]
+    pub relations: Vec<TypeRelation>,
+}
+
+/// The seeded default hierarchy schema: the common Scrum/ADO ladder as a starting point the
+/// architect can edit via the drag-and-drop builder. `Initiative` and `Epic` are design roots.
+pub fn default_hierarchy_schema() -> HierarchySchema {
+    fn ty(name: &str, is_design_root: bool) -> WorkType {
+        WorkType { name: name.to_string(), builtin: true, is_design_root }
+    }
+    fn rel(parent: &str, child: &str) -> TypeRelation {
+        TypeRelation { parent: parent.to_string(), child: child.to_string() }
+    }
+    HierarchySchema {
+        types: vec![
+            ty("Initiative", true),
+            ty("Epic", true),
+            ty("Feature", false),
+            ty("Story", false),
+            ty("Defect", false),
+            ty("Task", false),
+            ty("Bug", false),
+        ],
+        relations: vec![
+            rel("Initiative", "Epic"),
+            rel("Epic", "Feature"),
+            rel("Feature", "Story"),
+            rel("Feature", "Defect"),
+            rel("Story", "Task"),
+            rel("Story", "Bug"),
+        ],
+    }
+}
+
 /// One project.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Project {
@@ -340,6 +411,14 @@ pub struct Project {
     /// project export. Serde default = empty for projects persisted before this field existed.
     #[serde(default)]
     pub memory: Vec<MemoryEntry>,
+    /// The project's WORK HIERARCHY SCHEMA (the design-page work-type graph): the work-item types
+    /// this project uses and the allowed parent→child nesting rules. Saved project-level and
+    /// portable (travels with the project export). Serde default seeds [`default_hierarchy_schema`]
+    /// (the common Scrum ladder) for projects persisted before this field existed — no migration
+    /// required; an explicitly-saved empty schema stays empty. See
+    /// `docs/plans/2026-06-30_epic-design-page.md`.
+    #[serde(default = "default_hierarchy_schema")]
+    pub hierarchy_schema: HierarchySchema,
 }
 
 /// One agent operating principle: a single imperative line the governed agent is held to (about
@@ -672,6 +751,9 @@ pub struct ProjectImport {
     pub operating_principles: Vec<OperatingPrinciple>,
     /// The curated project memory (Layer 3).
     pub memory: Vec<MemoryEntry>,
+    /// The work hierarchy schema (design-page work-type graph). Constructed in code (from the
+    /// import request), so no serde attribute; `HierarchySchema: Default` covers `..Default::default()`.
+    pub hierarchy_schema: HierarchySchema,
 }
 
 /// Outcome of a [`ProjectStore::import_or_overwrite`] call.
@@ -814,6 +896,7 @@ impl ProjectStore {
                 product_brief: String::new(),
                 operating_principles: default_operating_principles(),
                 memory: Vec::new(),
+                hierarchy_schema: default_hierarchy_schema(),
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -886,6 +969,7 @@ impl ProjectStore {
                 existing.product_brief = import.product_brief;
                 existing.operating_principles = import.operating_principles;
                 existing.memory = import.memory;
+                existing.hierarchy_schema = import.hierarchy_schema;
                 let updated = existing.clone();
                 s.active = Some(updated.id.clone());
                 ImportOutcome::Overwritten(updated)
@@ -909,6 +993,7 @@ impl ProjectStore {
                     product_brief: import.product_brief,
                     operating_principles: import.operating_principles,
                     memory: import.memory,
+                    hierarchy_schema: import.hierarchy_schema,
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -991,6 +1076,12 @@ impl ProjectStore {
         self.update(id, |p| p.set_l3_review(config))
     }
 
+    /// Replace a project's work hierarchy schema (the design-page work-type graph). Returns the
+    /// updated project, or `None` if no project has that id.
+    pub fn set_hierarchy_schema(&self, id: &str, schema: HierarchySchema) -> Option<Project> {
+        self.update(id, |p| p.hierarchy_schema = schema)
+    }
+
     /// Mutate a project in place by id, returning the updated copy.
     pub fn update<F: FnOnce(&mut Project)>(&self, id: &str, f: F) -> Option<Project> {
         let updated = {
@@ -1046,6 +1137,7 @@ mod tests {
             product_brief: String::new(),
             operating_principles: Vec::new(),
             memory: Vec::new(),
+            hierarchy_schema: crate::project::HierarchySchema::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -1093,6 +1185,7 @@ mod tests {
             product_brief: String::new(),
             operating_principles: Vec::new(),
             memory: Vec::new(),
+            hierarchy_schema: crate::project::HierarchySchema::default(),
             ruleset: ProjectRuleset {
                 selections: vec![],
                 cross_repo: vec![],
@@ -1139,6 +1232,7 @@ mod tests {
             product_brief: String::new(),
             operating_principles: Vec::new(),
             memory: Vec::new(),
+            hierarchy_schema: crate::project::HierarchySchema::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -1179,6 +1273,7 @@ mod tests {
             product_brief: String::new(),
             operating_principles: Vec::new(),
             memory: Vec::new(),
+            hierarchy_schema: crate::project::HierarchySchema::default(),
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -1222,6 +1317,7 @@ mod tests {
             product_brief: String::new(),
             operating_principles: Vec::new(),
             memory: Vec::new(),
+            hierarchy_schema: crate::project::HierarchySchema::default(),
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -1277,6 +1373,7 @@ mod tests {
             product_brief: String::new(),
             operating_principles: Vec::new(),
             memory: Vec::new(),
+            hierarchy_schema: crate::project::HierarchySchema::default(),
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
@@ -1316,6 +1413,79 @@ mod tests {
                 .iter()
                 .any(|x| x.id == "escalate-when-blocked"),
             "the escalate-when-blocked default is present"
+        );
+    }
+
+    #[test]
+    fn create_seeds_default_hierarchy_schema() {
+        let store = ProjectStore::new();
+        let p = store.create("Acme", vec![]).unwrap();
+        let h = &p.hierarchy_schema;
+        assert!(
+            h.types.iter().any(|t| t.name == "Epic" && t.is_design_root),
+            "a new project is seeded with the default ladder incl. Epic as a design root"
+        );
+        assert!(
+            h.types.iter().any(|t| t.name == "Story"),
+            "the default palette includes Story"
+        );
+        assert!(
+            h.relations
+                .iter()
+                .any(|r| r.parent == "Feature" && r.child == "Defect"),
+            "the default relations allow a Defect under a Feature (multiple child types per parent)"
+        );
+    }
+
+    #[test]
+    fn set_hierarchy_schema_replaces_and_persists() {
+        let store = ProjectStore::new();
+        let p = store.create("Acme", vec![]).unwrap();
+        let custom = HierarchySchema {
+            types: vec![WorkType {
+                name: "Spike".to_string(),
+                builtin: false,
+                is_design_root: true,
+            }],
+            relations: vec![],
+        };
+        let updated = store.set_hierarchy_schema(&p.id, custom.clone()).unwrap();
+        assert_eq!(
+            updated.hierarchy_schema, custom,
+            "the setter replaces the whole schema"
+        );
+        assert_eq!(
+            store.get(&p.id).unwrap().hierarchy_schema,
+            custom,
+            "and the replacement is readable back off the store"
+        );
+    }
+
+    #[test]
+    fn import_round_trips_hierarchy_schema() {
+        let store = ProjectStore::new();
+        let custom = HierarchySchema {
+            types: vec![WorkType {
+                name: "Objective".to_string(),
+                builtin: false,
+                is_design_root: true,
+            }],
+            relations: vec![TypeRelation {
+                parent: "Objective".to_string(),
+                child: "KeyResult".to_string(),
+            }],
+        };
+        let import = ProjectImport {
+            hierarchy_schema: custom.clone(),
+            ..Default::default()
+        };
+        let project = store
+            .import_or_overwrite("Imported", import, false)
+            .unwrap()
+            .into_project();
+        assert_eq!(
+            project.hierarchy_schema, custom,
+            "the schema travels through import (portable project-level field)"
         );
     }
 
@@ -1628,6 +1798,7 @@ mod tests {
             product_brief: String::new(),
             operating_principles: Vec::new(),
             memory: Vec::new(),
+            hierarchy_schema: crate::project::HierarchySchema::default(),
             ruleset: ProjectRuleset::default(),
         };
         original.set_model_for_step(StepKind::Decomposition, "claude-opus-4-8".into());

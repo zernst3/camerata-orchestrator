@@ -659,6 +659,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/stall-thresholds", post(set_stall_thresholds_handler))
         // L3 agentic code-review gate: per-project opt-in (R7).
         .route("/api/projects/:id/l3-review", post(set_l3_review_handler))
+        // Work hierarchy schema (design-page work-type graph): read (GET) + replace (POST).
+        .route(
+            "/api/projects/:id/hierarchy",
+            get(get_hierarchy_handler).post(set_hierarchy_handler),
+        )
         // Model Efficiency Profile: preview (GET) and apply (POST).
         .route("/api/projects/:id/model-profile/preview", get(preview_model_profile))
         .route("/api/projects/:id/model-profile", post(apply_model_profile))
@@ -2360,6 +2365,10 @@ struct ImportProjectReq {
     /// The curated project memory (#112, Layer 3). Transferable.
     #[serde(default)]
     memory: Vec<crate::project::MemoryEntry>,
+    /// The work hierarchy schema (design-page work-type graph). Transferable; `#[serde(default)]`
+    /// seeds the common ladder for older exports that omit it.
+    #[serde(default = "crate::project::default_hierarchy_schema")]
+    hierarchy_schema: crate::project::HierarchySchema,
     /// When `false` (the default) a name collision returns `conflict: true` so the UI
     /// can ask before overwriting. Pass `true` to overwrite in place (same id, same
     /// name, replacing the full transferable config — repos/ruleset/onboarded plus
@@ -2445,6 +2454,7 @@ async fn import_project(
         product_brief: req.product_brief,
         operating_principles: req.operating_principles,
         memory: req.memory,
+        hierarchy_schema: req.hierarchy_schema,
     };
     match state
         .projects
@@ -2980,6 +2990,34 @@ async fn set_l3_review_handler(
         model: req.model.trim().to_string(),
     };
     match state.projects.set_l3_review(&id, config) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+// ── Work hierarchy schema (design-page work-type graph) ───────────────────────
+
+/// `GET /api/projects/:id/hierarchy` — the project's work hierarchy schema (the design-page
+/// work-type graph: the types the project uses + the allowed parent→child nestings). Returns the
+/// seeded default ladder for a project that never customized it.
+async fn get_hierarchy_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    match state.projects.get(&id) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "hierarchy": p.hierarchy_schema })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// `POST /api/projects/:id/hierarchy` — replace the project's work hierarchy schema with the posted
+/// one (the drag-and-drop builder saves the whole graph). Body is a `HierarchySchema`.
+async fn set_hierarchy_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(schema): Json<crate::project::HierarchySchema>,
+) -> Json<serde_json::Value> {
+    match state.projects.set_hierarchy_schema(&id, schema) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
     }
@@ -10898,6 +10936,56 @@ mod tests {
         )
         .await;
         assert!(state.projects.active().unwrap().memory.is_empty());
+    }
+
+    /// The design-page hierarchy endpoints: GET returns the seeded default ladder; POST replaces the
+    /// whole schema and it persists on the project.
+    #[tokio::test]
+    async fn hierarchy_get_default_then_post_replaces() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec![]).expect("project created");
+
+        // GET → the seeded default ladder (includes Epic).
+        let got = get_hierarchy_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(p.id.clone()),
+        )
+        .await
+        .0;
+        assert_eq!(got["ok"], true);
+        assert!(
+            got["hierarchy"]["types"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "Epic"),
+            "the seeded default schema is returned"
+        );
+
+        // POST → replace with a custom schema.
+        let custom = crate::project::HierarchySchema {
+            types: vec![crate::project::WorkType {
+                name: "Spike".to_string(),
+                builtin: false,
+                is_design_root: true,
+            }],
+            relations: vec![],
+        };
+        let posted = set_hierarchy_handler(
+            axum::extract::State(state.clone()),
+            axum::extract::Path(p.id.clone()),
+            axum::Json(custom.clone()),
+        )
+        .await
+        .0;
+        assert_eq!(posted["ok"], true);
+
+        // The replacement persisted.
+        assert_eq!(
+            state.projects.get(&p.id).unwrap().hierarchy_schema,
+            custom,
+            "POST replaced the whole schema and it persisted on the project"
+        );
     }
 
     /// The chat "+ Add to learnings" button's SERVER path: GET /api/projects/active to resolve the

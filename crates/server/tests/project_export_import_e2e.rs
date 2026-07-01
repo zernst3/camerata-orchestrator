@@ -138,6 +138,7 @@ fn import_via_handler_path(
         product_brief: field_or_default(export, "product_brief"),
         operating_principles: field_or_default(export, "operating_principles"),
         memory: field_or_default(export, "memory"),
+        hierarchy_schema: field_or_default(export, "hierarchy_schema"),
     };
     store
         .import_or_overwrite(&name, import, overwrite)

@@ -102,6 +102,7 @@ mod tests {
             product_brief: String::new(),
             operating_principles: Vec::new(),
             memory: Vec::new(),
+            hierarchy_schema: crate::project::HierarchySchema::default(),
             ruleset: ProjectRuleset::default(),
         };
         let json = serde_json::to_string(&original).unwrap();
