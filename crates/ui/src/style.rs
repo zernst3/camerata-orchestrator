@@ -2595,6 +2595,13 @@ html, body {
 .ws-repo-pr { font-size: 12.5px; margin: 10px 0 0; }
 .ws-repo-pr a { color: var(--accent-ink); }
 .ws-repo-msg { font-size: 12.5px; color: var(--ink-soft); margin: 8px 0 0; }
+.ws-project-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ws-health { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 4px; }
+.ws-health-stat { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 20px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft); }
+.ws-health-stat.ok   { background: rgba(22,163,74,0.10); border-color: rgba(22,163,74,0.28); color: #4ade80; }
+.ws-health-stat.warn { background: rgba(202,138,4,0.14); border-color: rgba(202,138,4,0.30); color: #fbbf24; }
+.ws-health-stat.bad  { background: rgba(220,38,38,0.14); border-color: rgba(220,38,38,0.28); color: #f87171; }
+.ws-health-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 
 /* ---- Git panel (issue #37) ------------------------------------------------ */
 /* Compact panels that sit beneath the branch+ship row inside each .ws-repo.    */
