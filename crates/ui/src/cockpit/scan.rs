@@ -111,14 +111,8 @@ pub(super) fn RepoHealthPanel(project_id: String) -> Element {
     }
 }
 
-/// Quote a CSV field if it contains a comma, quote, or newline (RFC 4180).
-pub(super) fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
+// csv_field moved to camerata-ui-core::rules (shared by rules_csv there and findings_csv here).
+pub(super) use camerata_ui_core::rules::csv_field;
 
 /// Pop a native save dialog and write `content`. Returns true on success.
 pub(super) async fn save_csv(default_name: &str, content: String) -> bool {
@@ -3856,21 +3850,7 @@ mod tests {
         assert!(resp.vision_grouped().is_empty());
     }
 
-    // ── csv_field (RFC 4180 quoting) ──────────────────────────────────────────
-
-    #[test]
-    fn csv_field_passthrough_when_no_special_chars() {
-        assert_eq!(super::csv_field("plain"), "plain");
-    }
-
-    #[test]
-    fn csv_field_quotes_and_escapes_when_special() {
-        // A comma forces quoting; an embedded quote is doubled.
-        assert_eq!(super::csv_field("a,b"), "\"a,b\"");
-        assert_eq!(super::csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
-        // Newlines also force quoting.
-        assert_eq!(super::csv_field("line1\nline2"), "\"line1\nline2\"");
-    }
+    // (csv_field tests moved to camerata-ui-core::rules.)
 
     // ── findings_csv (header + flat one-row-per-finding) ──────────────────────
 

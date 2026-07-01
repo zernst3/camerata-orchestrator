@@ -436,21 +436,7 @@ pub(super) fn build_ruleset_json(project: &ProjectView) -> serde_json::Value {
     })
 }
 
-/// Which of the three lists a rule_id lives in (selections / cross_repo / process).
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum SelectionBucket {
-    Selections,
-    CrossRepo,
-    Process,
-}
-
-pub(super) fn bucket_of(rule: &ProposedRuleView) -> SelectionBucket {
-    match rule.scope.as_str() {
-        "cross-repo" => SelectionBucket::CrossRepo,
-        "process" => SelectionBucket::Process,
-        _ => SelectionBucket::Selections,
-    }
-}
+// SelectionBucket, bucket_of moved to camerata-ui-core::rules (re-exported above).
 
 /// True when this rule id is a *truly inline* rule built by `propose_rules` and is
 /// therefore legitimately ABSENT from the corpus TOML (so `AppliedRuleRow.corpus`
@@ -3019,122 +3005,8 @@ pub(super) fn RuleCount(label: String, n: usize) -> Element {
     }
 }
 
-/// Build CSV for the proposed-rules table.
-pub(super) fn rules_csv(rules: &[ProposedRuleView]) -> String {
-    let mut out =
-        String::from("rule_id,title,kind,scope,enforcement,placement,finding_count,repos\n");
-    for r in rules {
-        out.push_str(&format!(
-            "{},{},{},{},{},{},{},{}\n",
-            csv_field(&r.id),
-            csv_field(&r.title),
-            csv_field(&r.kind),
-            csv_field(&r.scope),
-            csv_field(&r.enforcement),
-            csv_field(&r.placement),
-            r.finding_count,
-            csv_field(&r.repos.join(" ")),
-        ));
-    }
-    out
-}
-
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-pub(super) struct RuleOptionView {
-    pub id: String,
-    pub label: String,
-    #[serde(default)]
-    pub directive: String,
-    #[serde(default)]
-    pub why: String,
-}
-
-/// One authoritative source backing a rule's grounding (mirrors `RuleSourceView`
-/// from the server DTO). Used in `ProposedRuleView.sources`.
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
-pub(super) struct RuleSourceView {
-    pub url: String,
-    pub title: String,
-    #[serde(default)]
-    pub linter: Option<String>,
-}
-
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-pub(super) struct ProposedRuleView {
-    pub id: String,
-    pub title: String,
-    pub kind: String,
-    #[serde(default)]
-    pub enforcement: String,
-    #[serde(default)]
-    pub options: Vec<RuleOptionView>,
-    #[serde(default)]
-    pub default_option: Option<String>,
-    #[serde(default)]
-    pub decision_question: Option<String>,
-    #[serde(default)]
-    pub decision_why: Option<String>,
-    #[serde(default)]
-    pub scope: String,
-    #[serde(default)]
-    pub domain: String,
-    #[serde(default)]
-    pub repos: Vec<String>,
-    #[serde(default)]
-    pub placement: String,
-    #[serde(default)]
-    pub finding_count: usize,
-    #[serde(default)]
-    pub recommended: bool,
-    /// Server-side auto-recommend flag (pw/cockpit-ui product wave). The server
-    /// emits `is_auto_recommended: true` for rules whose `verification` is
-    /// `grounded` or `verified` (the two rungs that have been reviewed against a
-    /// real source). `draft` and `needs_recheck` rules arrive with it `false`.
-    /// Falls back to `recommended` when the field is absent so old server payloads
-    /// continue to work.
-    #[serde(default)]
-    pub is_auto_recommended: bool,
-    /// Provenance / verification status: `draft` | `grounded` | `verified` |
-    /// `needs_recheck`. Defaults to `draft` for any rule that omits the field
-    /// (pre-schema corpus rules, AI-discovered rules). See
-    /// `docs/decisions/2026-06-20_rule_provenance_schema.md`.
-    #[serde(default = "default_draft")]
-    pub verification: String,
-    /// Authoritative sources backing this rule's grounding (empty for `draft`).
-    #[serde(default)]
-    pub sources: Vec<RuleSourceView>,
-}
-
-pub(super) fn default_draft() -> String {
-    "draft".to_string()
-}
-
-impl ProposedRuleView {
-    /// True when this rule should be pre-checked on first view of the proposed-rules
-    /// table.
-    ///
-    /// The SERVER is authoritative for this value. It gates on three conditions:
-    /// stack-relevance (the rule's domain matches the scanned repo) + provenance
-    /// (`grounded` or `verified`) + `!opt_in_only`. `opt_in_only` rules (e.g.
-    /// CICD-CODEQL-SECURITY-SCAN-1, CICD-SEMGREP-SECURITY-SCAN-1) are NEVER
-    /// pre-checked even when they are grounded and stack-relevant — they appear in
-    /// the list so the architect can deliberately opt in, but the server sends
-    /// `is_auto_recommended: false` for them and the UI must honour that flag
-    /// without re-deriving it from `recommended` or `verification`.
-    ///
-    /// `draft` and `needs_recheck` rules appear LISTED but unchecked so the
-    /// architect must explicitly opt them in.
-    pub(super) fn effective_auto_recommended(&self) -> bool {
-        // The server encodes the full gate (stack-relevance + grounded/verified +
-        // !opt_in_only) into `is_auto_recommended`. Use it directly — do NOT
-        // fall back to `recommended` or re-derive from `verification`. A fallback
-        // that re-derives from `recommended && grounded/verified` would incorrectly
-        // pre-check opt_in_only rules (which are grounded + recommended but must
-        // never be pre-selected). The server is always co-versioned with the UI in
-        // this codebase, so there is no version-skew risk.
-        self.is_auto_recommended
-    }
-}
+// rules_csv, RuleOptionView, RuleSourceView, ProposedRuleView, default_draft moved to
+// camerata-ui-core::rules (re-exported below).
 
 /// Map a verification string to `(badge_label, css_modifier)`.
 ///
@@ -3148,9 +3020,13 @@ impl ProposedRuleView {
 /// - `draft`        -> muted italic badge ("Draft")
 /// - `needs_recheck`-> amber warning badge ("Needs re-check")
 /// - anything else  -> same as `draft`
-// verif_badge now lives in the framework-agnostic core (RUST-HEADLESS-CORE-1); re-exported here so the
-// rules-table call sites are unchanged.
-pub(super) use camerata_ui_core::rules::{split_needs_review, verif_badge};
+// verif_badge + all rules view-model items now live in the framework-agnostic core
+// (RUST-HEADLESS-CORE-1); re-exported here so all call sites are unchanged.
+pub(super) use camerata_ui_core::rules::{
+    split_needs_review, verif_badge,
+    SelectionBucket, bucket_of, RuleOptionView, RuleSourceView, ProposedRuleView, default_draft,
+    rules_csv, csv_field,
+};
 
 /// Build a human-readable tooltip string from a list of sources.
 /// Returns an empty string when sources is empty (badge has no hover text in that case).
@@ -5346,47 +5222,7 @@ mod tests {
 
     // (split_needs_review tests moved to camerata-ui-core::rules.)
 
-    // ── bucket_of ─────────────────────────────────────────────────────────────
-
-    fn rule_with_scope(scope: &str) -> super::ProposedRuleView {
-        let mut r = corpus_with_options("d", vec![]);
-        r.scope = scope.to_string();
-        r
-    }
-
-    #[test]
-    fn bucket_of_maps_scope_to_bucket() {
-        assert_eq!(super::bucket_of(&rule_with_scope("cross-repo")), SelectionBucket::CrossRepo);
-        assert_eq!(super::bucket_of(&rule_with_scope("process")), SelectionBucket::Process);
-        assert_eq!(super::bucket_of(&rule_with_scope("repo-local")), SelectionBucket::Selections);
-        // An unknown scope defaults to the repo-local Selections bucket.
-        assert_eq!(super::bucket_of(&rule_with_scope("whatever")), SelectionBucket::Selections);
-    }
-
-    // ── rules_csv ─────────────────────────────────────────────────────────────
-
-    #[test]
-    fn rules_csv_emits_header_and_one_row_per_rule() {
-        let mut r = corpus_with_options("rust", vec![]);
-        r.id = "RUST-FMT-1".to_string();
-        r.title = "Format with rustfmt".to_string();
-        r.kind = "mechanical".to_string();
-        r.scope = "repo-local".to_string();
-        r.enforcement = "mechanical".to_string();
-        r.placement = "CI".to_string();
-        r.finding_count = 3;
-        r.repos = vec!["me/api".to_string(), "me/web".to_string()];
-        let csv = super::rules_csv(std::slice::from_ref(&r));
-        let mut lines = csv.lines();
-        assert_eq!(
-            lines.next().unwrap(),
-            "rule_id,title,kind,scope,enforcement,placement,finding_count,repos"
-        );
-        let row = lines.next().unwrap();
-        assert!(row.starts_with("RUST-FMT-1,Format with rustfmt,mechanical,repo-local,mechanical,CI,3,"));
-        // repos are space-joined inside the single CSV field.
-        assert!(row.contains("me/api me/web"), "row=\n{row}");
-    }
+    // ── bucket_of / rules_csv tests moved to camerata-ui-core::rules ─────────
 
     // ── build_ruleset_json ────────────────────────────────────────────────────
 
@@ -5726,19 +5562,7 @@ mod tests {
         assert!(r.effective_auto_recommended(), "must honor the server's true flag");
     }
 
-    // ── default_draft sentinel ────────────────────────────────────────────────
-    // The serde default for `ProposedRuleView.verification`: a rule with no verification
-    // field deserializes as "draft", and the sentinel fn returns that literal.
-    #[test]
-    fn default_draft_is_draft_and_drives_serde_default() {
-        assert_eq!(default_draft(), "draft");
-        // A corpus rule JSON omitting `verification` deserializes with the draft default.
-        let r: ProposedRuleView = serde_json::from_value(serde_json::json!({
-            "id": "R-1", "title": "T", "kind": "review"
-        }))
-        .expect("valid ProposedRuleView");
-        assert_eq!(r.verification, "draft");
-    }
+    // (default_draft_is_draft_and_drives_serde_default moved to camerata-ui-core::rules.)
 }
 
 // ── Tier-2: network-helper tests (wiremock) ───────────────────────────────────
