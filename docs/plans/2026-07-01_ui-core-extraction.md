@@ -93,5 +93,25 @@ PR #115 (overnight design-page work, still open) touches these UI files, so Phas
 
 ## 7. Status log
 
-- **Phase 0 started 2026-07-01** on `feature/ui-core-extraction`: `camerata-ui-core` crate created;
-  first extraction = `routines.rs` schedule build/parse + tests. (Commits local until tonight per Zach.)
+- **Phase 0 started 2026-07-01** on `feature/ui-core-extraction`: `camerata-ui-core` crate created.
+  Two beachheads landed, both green with coverage preserved 1:1 (total UI-related tests unchanged at
+  560; `ui` 560 -> 541, `ui-core` 0 -> 19):
+  1. `routines.rs` schedule build/parse + `WEEKDAYS` + 11 tests -> `camerata_ui_core::schedule`.
+  2. `chat.rs` `ModelOption`/`ModelsResp`/`grouped`/`chat_model_groups` + 8 tests ->
+     `camerata_ui_core::models` (fields made `pub` for the cross-crate adapter).
+  Commits local (9f38e52, 122f993, 424549d), NOT pushed (per Zach: push tonight).
+- **Finding (2026-07-01): the CLEAN non-colliding self-contained beachheads are now exhausted.** The
+  remaining extractions are entangled and should NOT be forced now:
+  - Some touch the COLLIDING `cockpit.rs` (e.g. `det_tool_label` has a test in `cockpit.rs`, which
+    #115 modified). Extracting them would edit `cockpit.rs` and conflict with PR #115.
+  - The valuable logic (`AuditModelsResp` + `grouped`/`vision_grouped`; `rules.rs` `build_change_summary`,
+    the `ColumnDef` extractors, `verif_badge`; `scan.rs` triage) drags cross-cutting view types
+    referenced across many cockpit files. These are the same pattern as the model beachhead but touch
+    5+ files each (compiler-verified, so mechanical, but larger).
+  - Duplicate model types exist to dedup: `routines.rs` and `cockpit/scan.rs` each carry their own
+    `ModelsResp`/`AuditModelsResp`; a unified `camerata_ui_core::models` can absorb them.
+- **Recommended sequencing:** land PR #115 first, then do the cross-cutting extractions (including the
+  `cockpit.rs`/`design.rs`/`workspace.rs` surfaces) in one focused pass, so nothing collides and the
+  design-page state is extracted at the same time. Given the volume (~150 pure-logic tests across the
+  cockpit files), a dedicated push (a focused session or an extraction routine like the design-page one)
+  is the right vehicle for the bulk.
