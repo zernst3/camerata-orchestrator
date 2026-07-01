@@ -27,6 +27,19 @@ use camerata_worktracker::investigation::{DecisionRecord, DecisionOutcome, Inves
 
 use crate::lifecycle::{TransitionError, UowStage};
 
+// The pure, serde-only leaf domain types now live in the framework-agnostic core
+// (RUST-HEADLESS-CORE-1); re-exported so every `crate::uow::X` call site — including the
+// `UnitOfWork` fields below — resolves unchanged. The `UnitOfWork` aggregate root and the
+// `UowStore` (Arc<Mutex> + JSON persistence + ArtifactStore integration) STAY in this
+// adapter: `UnitOfWork` embeds a `crate::evidence::UowEvidenceRecord`, which transitively
+// needs the adapter-only `crate::onboard` (filesystem/audit) engine that must never enter
+// app-core.
+pub use camerata_app_core::uow::{
+    AuthorChatMessage, AuthoringState, BranchMode, ChatTurn, DevStatus, DevelopmentState,
+    GateProvenance, HistoryEntry, IntakeState, InvestigationState, PhaseTab, ProposedChild,
+    RepoScope, SignOff, UowAttachment, UowMeta,
+};
+
 /// The single SQLite project id under which all UoW-owned artifacts (decision
 /// records, investigation notes) are filed in the central [`ArtifactStore`].
 ///
@@ -50,342 +63,6 @@ fn decisions_artifact_id(story_id: &str) -> String {
 /// [`camerata_worktracker::investigation::InvestigationArtifact`].
 fn investigation_artifact_id(story_id: &str) -> String {
     format!("{story_id}/investigation")
-}
-
-// ── domain types ─────────────────────────────────────────────────────────────
-
-/// The dev lifecycle status for a story's Unit of Work. Shown ALONGSIDE the
-/// story's own tracker status — they are orthogonal: a story can be "Planned"
-/// (product) while its UoW is "In Progress" (dev already started).
-#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum DevStatus {
-    /// Dev work has not started for this story.
-    #[default]
-    New,
-    /// Dev work is actively in progress.
-    InProgress,
-    /// Dev work is complete (code shipped / PR merged / ready for QA).
-    Done,
-}
-
-impl DevStatus {
-    /// Parse from the wire string the API accepts (`"new"`, `"in_progress"`, `"done"`).
-    pub fn from_wire(s: &str) -> Option<Self> {
-        match s {
-            "new" => Some(Self::New),
-            "in_progress" => Some(Self::InProgress),
-            "done" => Some(Self::Done),
-            _ => None,
-        }
-    }
-
-    /// A short display label for the UI.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::New => "New",
-            Self::InProgress => "In progress",
-            Self::Done => "Done",
-        }
-    }
-}
-
-/// A single entry in the AI development history for a UoW. Appended by the
-/// governed run (Pillar 2) when it takes an action on this story's behalf; also
-/// appendable via the API for manual notes.
-#[derive(Clone, Serialize, Deserialize, Debug)]
-pub struct HistoryEntry {
-    /// RFC 3339 timestamp of the action.
-    pub ts: String,
-    /// A short kind tag: `"run"`, `"note"`, `"gate_deny"`, `"gate_allow"`, etc.
-    pub kind: String,
-    /// Human-readable description of what happened.
-    pub text: String,
-}
-
-/// A child node proposed by the AI during design-mode authoring. When the architect
-/// accepts a proposal, each entry is materialized into a new draft UoW via
-/// `POST /api/designs/:id/nodes`.
-#[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
-pub struct ProposedChild {
-    /// The schema work type for this proposed node (e.g. "Feature", "Story").
-    #[serde(default)]
-    pub node_type: String,
-    /// The proposed issue title.
-    #[serde(default)]
-    pub title: String,
-    /// The proposed issue body (markdown).
-    #[serde(default)]
-    pub body: String,
-}
-
-/// A file attached to a UnitOfWork. The content is stored inline (base64 for binary;
-/// raw text for HTML/plain text), travels with the UoW in the JSON store and in project
-/// exports, and is embedded into the published GitHub issue body as a collapsed
-/// `<details>` block.
-///
-/// Design note: GitHub's REST API has no "attach file to issue" endpoint (web-only CDN).
-/// The decided approach (low-risk, no external deps) is to embed the content directly
-/// in the issue body. For HTML mockups this means the full HTML in a `<details>` block;
-/// for other types a code-fence snippet. The gist/CDN paths are deferred for Zach to
-/// confirm.
-#[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
-pub struct UowAttachment {
-    /// A short name identifying this attachment (e.g. `"mockup.html"`, `"arch-diagram.mmd"`).
-    pub name: String,
-    /// The MIME type (e.g. `"text/html"`, `"text/x-mermaid"`, `"text/plain"`).
-    #[serde(default = "default_attachment_mime")]
-    pub mime: String,
-    /// The attachment content as a UTF-8 string. Binary files must be base64-encoded
-    /// before being stored here; the mime type signals to readers how to decode.
-    pub content: String,
-}
-
-fn default_attachment_mime() -> String {
-    "text/plain".to_string()
-}
-
-/// The durable gate provenance persisted onto a UoW after a governed run finishes.
-///
-/// [`crate::run::RunProvenance`] is the live, derived-on-read summary of a run; this
-/// is the FROZEN copy stamped onto the UoW so the governed-development record survives
-/// even if the in-memory run is gone (the `RunStore` is in-memory, the UoW persists).
-/// It is the honest accounting an architect reviews at QA before signing off.
-///
-/// # Invariant (BUG-10)
-///
-/// `total_bounces == deny_count` is an INVARIANT: both fields mean the same count.
-/// `total_bounces` uses the architect-facing "bounce" vocabulary in the UI; `deny_count`
-/// uses the gate-facing vocabulary in code. They are kept as two fields for API
-/// back-compat but MUST be set to identical values. A `debug_assert` fires in
-/// `record_gate_provenance` when this invariant is violated. Future callers should
-/// prefer the `new` constructor which enforces it at construction time.
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub struct GateProvenance {
-    /// The run this provenance came from.
-    pub run_id: String,
-    /// "scripted" (token-free, real-gate verdicts) or "live".
-    pub mode: String,
-    /// How many gate verdicts allowed a write.
-    pub allow_count: usize,
-    /// How many gate verdicts denied a write.
-    pub deny_count: usize,
-    /// Total bounces the gate sent back (== `deny_count`; named for the architect-
-    /// facing vocabulary). Must always equal `deny_count` — see type-level doc.
-    pub total_bounces: usize,
-    /// The distinct rule ids that actually fired a denial, in first-seen order.
-    #[serde(default)]
-    pub rules_fired: Vec<String>,
-    /// RFC 3339 timestamp of when this provenance was stamped onto the UoW.
-    pub recorded: String,
-}
-
-impl GateProvenance {
-    /// Canonical constructor that enforces the `total_bounces == deny_count` invariant
-    /// (BUG-10). Prefer this over struct literals in new code.
-    pub fn new(
-        run_id: impl Into<String>,
-        mode: impl Into<String>,
-        allow_count: usize,
-        deny_count: usize,
-        rules_fired: Vec<String>,
-        recorded: impl Into<String>,
-    ) -> Self {
-        Self {
-            run_id: run_id.into(),
-            mode: mode.into(),
-            allow_count,
-            deny_count,
-            // total_bounces is identical to deny_count by definition; the two fields
-            // exist for back-compat vocabulary reasons only.
-            total_bounces: deny_count,
-            rules_fired,
-            recorded: recorded.into(),
-        }
-    }
-}
-
-/// One message in a story-authoring clarification chat. `role` is `"user"` or
-/// `"ai"`; `text` is the message body. Persisted on the UoW so the back-and-forth
-/// survives sessions until the story is published.
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub struct AuthorChatMessage {
-    /// `"user"` (the requirements author) or `"ai"` (the drafting assistant).
-    pub role: String,
-    /// The message body.
-    pub text: String,
-}
-
-/// The transient AI story-authoring state carried by a DRAFT UoW (one created via
-/// `POST /api/uow/blank` with `work_item = None`). It records the requirements
-/// prompt, the clarification chat transcript, and the current AI-drafted issue
-/// (title + body). It is preserved on the struct after publish for the record.
-///
-/// All fields default, so a legacy `uow.json` written before this field existed
-/// deserializes with an empty/absent authoring state (back-compat).
-#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub struct AuthoringState {
-    /// The first user message: the free-text requirements that seed the draft.
-    #[serde(default)]
-    pub requirements_prompt: String,
-    /// The full clarification chat transcript (user + ai turns), in order.
-    #[serde(default)]
-    pub chat: Vec<AuthorChatMessage>,
-    /// The current AI-drafted issue title.
-    #[serde(default)]
-    pub draft_title: String,
-    /// The current AI-drafted issue body (GitHub-flavoured markdown).
-    #[serde(default)]
-    pub draft_body: String,
-}
-
-/// One turn in a per-phase agent chat transcript (investigation or development).
-/// `role` is `"user"` or `"agent"`; `text` is the message body. Persisted on the UoW
-/// so the back-and-forth refinement session survives sessions (3-phase doc §7).
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub struct ChatTurn {
-    /// `"user"` (the architect) or `"agent"` (the gated working agent).
-    pub role: String,
-    /// The message body.
-    pub text: String,
-}
-
-/// The branch mode for one in-scope repo (R6): either work off an EXISTING branch in
-/// that repo, or create a NEW UoW-specific branch from a chosen base. Both are
-/// first-class options (3-phase doc §3, fleet doc R6).
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum BranchMode {
-    /// Work off an existing branch in this repo.
-    Existing {
-        /// The existing branch name to work off.
-        #[serde(default)]
-        branch_name: String,
-    },
-    /// Create a new UoW-specific branch from a chosen base.
-    NewFromBase {
-        /// The base branch to create the new branch from (e.g. `"main"`).
-        #[serde(default)]
-        base: String,
-        /// The new branch name to create. May be empty when the fleet derives it.
-        #[serde(default)]
-        new_name: String,
-    },
-}
-
-impl Default for BranchMode {
-    fn default() -> Self {
-        Self::NewFromBase {
-            base: String::new(),
-            new_name: String::new(),
-        }
-    }
-}
-
-/// One in-scope repo for a story, with its branch mode (R6). Out-of-scope repos are not
-/// mounted into the agents' read grounding — this set is the token-cost / correctness
-/// control the orchestrator's fan-out is bounded to (fleet doc R6).
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub struct RepoScope {
-    /// `OWNER/REPO` for this in-scope repo.
-    pub repo: String,
-    /// The branch mode for this repo: existing branch vs. new-from-base.
-    #[serde(default)]
-    pub branch: BranchMode,
-}
-
-/// The Intake-phase state for a UoW (3-phase doc §3 / §7). Free-text context for the
-/// next agent and the per-story repo/branch scope (R6). All fields default so a legacy
-/// `uow.json` written before this field existed deserializes with an empty intake state.
-#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub struct IntakeState {
-    /// Free-text context for the investigation agent — extra context the story doesn't capture.
-    #[serde(default)]
-    pub context: String,
-    /// The in-scope repos for this story, each with its branch mode (R6). Empty until the
-    /// architect selects repos in the Intake scoping UI.
-    #[serde(default)]
-    pub repos: Vec<RepoScope>,
-}
-
-/// The Investigation & Refinement-phase state for a UoW (3-phase doc §4 / §7). Holds the
-/// free-text refinement chat transcript and the prose interface contract (R3.g). All
-/// fields default for back-compat.
-#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub struct InvestigationState {
-    /// The investigation/refinement agent chat transcript (user + agent turns), in order.
-    #[serde(default)]
-    pub chat: Vec<ChatTurn>,
-    /// The prose interface contract (R3.g). Free-form prose written into the story; the
-    /// cross-repo integration gate reads and checks the assembled code against it. Empty
-    /// when no contract has been settled.
-    #[serde(default)]
-    pub contract: String,
-    /// `true` when the architect (or orchestrator) has determined the work crosses a
-    /// contract boundary, so a contract is REQUIRED before development (R3.g / §4.6).
-    #[serde(default)]
-    pub crosses_boundary: bool,
-}
-
-/// The Development-phase state for a UoW (3-phase doc §5 / §7). Holds the dev-agent chat
-/// transcript (clarification back-and-forth, bug-fix chat). Dev-run output + layer-2
-/// results already live in `history` / `gate_provenance`. All fields default for back-compat.
-#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub struct DevelopmentState {
-    /// The development agent chat transcript (user + agent turns), in order.
-    #[serde(default)]
-    pub chat: Vec<ChatTurn>,
-}
-
-/// Which of the three cockpit phases the user last selected to view. Navigation is FREE —
-/// this is informational view state, never drives control flow (3-phase doc §2 / §7).
-#[derive(Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, Debug)]
-#[serde(rename_all = "snake_case")]
-pub enum PhaseTab {
-    /// Intake phase.
-    #[default]
-    Intake,
-    /// Investigation & Refinement phase.
-    Investigation,
-    /// Development phase.
-    Development,
-}
-
-impl PhaseTab {
-    /// Parse from the wire string (`"intake"`, `"investigation"`, `"development"`).
-    pub fn from_wire(s: &str) -> Option<Self> {
-        match s {
-            "intake" => Some(Self::Intake),
-            "investigation" => Some(Self::Investigation),
-            "development" => Some(Self::Development),
-            _ => None,
-        }
-    }
-}
-
-/// Per-UoW metadata for the 3-phase cockpit shell (3-phase doc §7 `meta`). The viewed
-/// phase, the per-phase finished flags, and the done/archived flag. All fields default
-/// so a legacy `uow.json` loads with an empty meta (back-compat). This is the durable
-/// home for the soft Finish/Reopen structure the architect uses to separate "what I'm
-/// doing now" from "what I've settled" (§2).
-#[derive(Clone, Default, Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub struct UowMeta {
-    /// Which phase the architect last selected to view.
-    #[serde(default)]
-    pub viewed_phase: PhaseTab,
-    /// `true` when Intake has been Finished (greyed read-only until Reopened).
-    #[serde(default)]
-    pub intake_finished: bool,
-    /// `true` when Investigation & Refinement has been Finished.
-    #[serde(default)]
-    pub investigation_finished: bool,
-    /// `true` when Development has been Finished.
-    #[serde(default)]
-    pub development_finished: bool,
-    /// `true` when the whole UoW is Done (read-only + archived). Never deletes the UoW —
-    /// deletion is a separate explicit act (§5.8).
-    #[serde(default)]
-    pub done: bool,
 }
 
 /// The Unit of Work for one story. Keyed by `story_id`.
@@ -554,21 +231,6 @@ impl UnitOfWork {
             .as_ref()
             .is_some_and(|e| e.is_sign_off_blocked())
     }
-}
-
-/// An architect's explicit sign-off on a story's governed run (issue #21). Recorded
-/// only by the deliberate sign-off action — Camerata never signs work off on its own.
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
-pub struct SignOff {
-    /// RFC 3339 timestamp of when the sign-off was recorded.
-    pub ts: String,
-    /// Who signed off (the architect's handle/name).
-    pub by: String,
-    /// The run that was signed off (the provenance the architect reviewed).
-    pub run_id: String,
-    /// An optional note the architect attached to the sign-off.
-    #[serde(default)]
-    pub note: Option<String>,
 }
 
 // ── store ─────────────────────────────────────────────────────────────────────
@@ -2619,18 +2281,9 @@ mod tests {
     }
 
     // ── BUG-10 regression: GateProvenance invariant ─────────────────────────────
-
-    /// `GateProvenance::new` must set `total_bounces == deny_count`.
-    #[test]
-    fn bug10_gate_provenance_new_enforces_invariant() {
-        let p = GateProvenance::new("run-x", "scripted", 5, 3, vec![], "2026-06-20T00:00:00Z");
-        assert_eq!(
-            p.total_bounces, p.deny_count,
-            "GateProvenance::new must set total_bounces == deny_count"
-        );
-        assert_eq!(p.deny_count, 3);
-        assert_eq!(p.total_bounces, 3);
-    }
+    //
+    // `bug10_gate_provenance_new_enforces_invariant` moved to `camerata_app_core::uow`
+    // with the `GateProvenance` type it exercises (Phase 2d, #117).
 
     // ── BUG-12 partial mitigation: UowStore::is_sign_off_blocked ───────────────
 
@@ -2904,7 +2557,7 @@ mod post_story_hook_tests {
     }
 
     fn make_gate_prov(story: &str) -> GateProvenance {
-        GateProvenance {
+        let prov = GateProvenance {
             run_id: "run-hook-1".to_string(),
             mode: "scripted".to_string(),
             allow_count: 2,
@@ -2912,20 +2565,21 @@ mod post_story_hook_tests {
             total_bounces: 1,
             rules_fired: vec!["SEC-NO-PATH-ESCAPE-1".to_string()],
             recorded: Utc::now().to_rfc3339(),
-        }
+        };
         // Use the story param only so the compiler doesn't warn about unused.
         // The provenance is story-scoped by the caller context, not by this record.
-        .apply(story)
+        // (`GateProvenance` now lives in `camerata_app_core::uow`, so this
+        // test-uniqueness helper is a free fn — the orphan rule forbids an inherent
+        // impl on the foreign type here.)
+        apply_story(prov, story)
     }
 
-    impl GateProvenance {
-        /// Helper: attach the provenance run_id suffix to make tests distinct (no
-        /// real mutation needed; purely for test uniqueness).
-        fn apply(self, story: &str) -> Self {
-            GateProvenance {
-                run_id: format!("{}-{story}", self.run_id),
-                ..self
-            }
+    /// Helper: attach the provenance run_id suffix to make tests distinct (no real
+    /// mutation needed; purely for test uniqueness).
+    fn apply_story(prov: GateProvenance, story: &str) -> GateProvenance {
+        GateProvenance {
+            run_id: format!("{}-{story}", prov.run_id),
+            ..prov
         }
     }
 
@@ -3584,24 +3238,8 @@ mod concurrency_regression_tests {
         assert_eq!(uow.intake.context, "extra context");
     }
 
-    #[test]
-    fn branch_mode_serializes_tagged() {
-        let existing = serde_json::to_value(BranchMode::Existing {
-            branch_name: "b".into(),
-        })
-        .unwrap();
-        assert_eq!(existing["mode"], "existing");
-        assert_eq!(existing["branch_name"], "b");
-
-        let new = serde_json::to_value(BranchMode::NewFromBase {
-            base: "main".into(),
-            new_name: "n".into(),
-        })
-        .unwrap();
-        assert_eq!(new["mode"], "new_from_base");
-        assert_eq!(new["base"], "main");
-        assert_eq!(new["new_name"], "n");
-    }
+    // `branch_mode_serializes_tagged` moved to `camerata_app_core::uow` with the
+    // `BranchMode` type it exercises (Phase 2d, #117).
 
     #[test]
     fn append_phase_chats_accumulate() {
@@ -3649,19 +3287,8 @@ mod concurrency_regression_tests {
         assert!(uow.meta.done);
     }
 
-    #[test]
-    fn phase_tab_from_wire_round_trips() {
-        assert_eq!(PhaseTab::from_wire("intake"), Some(PhaseTab::Intake));
-        assert_eq!(
-            PhaseTab::from_wire("investigation"),
-            Some(PhaseTab::Investigation)
-        );
-        assert_eq!(
-            PhaseTab::from_wire("development"),
-            Some(PhaseTab::Development)
-        );
-        assert_eq!(PhaseTab::from_wire("bogus"), None);
-    }
+    // `phase_tab_from_wire_round_trips` moved to `camerata_app_core::uow` with the
+    // `PhaseTab` type it exercises (Phase 2d, #117).
 
     // ── Attachment tests ───────────────────────────────────────────────────────
 
