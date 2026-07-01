@@ -34,7 +34,10 @@ pub mod grounding;
 pub mod github_issues;
 pub mod investigation_run;
 pub mod jobs;
-pub mod lifecycle;
+// `lifecycle` (UowStage state machine + transitions) is now the framework-agnostic
+// `camerata_app_core::lifecycle` (RUST-HEADLESS-CORE-1); re-exported so `crate::lifecycle::*` call
+// sites (uow, lib) are unchanged.
+pub use camerata_app_core::lifecycle;
 pub mod live_fleet;
 pub mod llm;
 pub mod notify;

@@ -15,3 +15,13 @@ workspace = true
 # `schedule` parses routine strings + computes fire times against `NaiveDateTime`. Time math is a
 # domain concern, not a transport one, so chrono belongs in the framework-agnostic core.
 chrono = { version = "0.4", features = ["clock"] }
+# `lifecycle` (UowStage state machine + transitions) serializes its stage/error enums; serde is a
+# data concern, not a transport one.
+serde = { workspace = true }
+# `lifecycle` transitions reference the canonical investigation shapes from the worktracker port
+# crate (itself framework-agnostic — no axum).
+camerata-worktracker = { path = "../worktracker" }
+
+[dev-dependencies]
+# `lifecycle` tests build sample transition payloads as JSON.
+serde_json = { workspace = true }
