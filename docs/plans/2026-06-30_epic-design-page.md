@@ -66,6 +66,15 @@ The schema is injected into the design agent's grounding: the allowed types, the
 ### 3.3 Why project-level and saved is critical
 Teams reuse one hierarchy across all their work. Storing it on the project (and exporting it with the project, alongside `TierMap`/`DesignerBand`/rulesets) means a design session starts from the team's real structure every time, and the structure travels when the project is shared.
 
+### 3.4 Positioning: Camerata's own, more capable alternative to GitHub Issue Types
+Because the schema lives in Camerata at the **project level** (not in a tracker's org settings), it is effectively Camerata's own answer to GitHub Issue Types, and a more capable one:
+- **Per-project, not org-locked.** Every project defines its own taxonomy; no org-admin gatekeeping, and it works on personal-account repos where GitHub Issue Types do not exist.
+- **Freetext + custom types anywhere.** No fixed enum and no cap.
+- **Relationship-aware.** It encodes the parent→child nesting RULES (which types may nest under which). GitHub Issue Types are a flat, per-issue label; they do not model hierarchy relationships at all.
+- **Portable and tracker-agnostic.** It travels with the project export, so a team carries its work taxonomy between repos and, later, between trackers. Where an adapter has native typing (GitHub Issue Types when present, ADO work-item types), Camerata maps down onto it; where it does not, Camerata's schema still holds.
+
+This is a real differentiator, not just an implementation convenience: an org that manages its hierarchy in Camerata gets a customizable, relationship-enforcing, portable typing system that outlives any single tracker.
+
 ## 4. UX flow
 
 ```
