@@ -616,6 +616,35 @@ pub async fn link_sub_issue(
 /// bare number. The `external_ref` points back at the issue (container = repo,
 /// external_id = the number, url = the issue page) so status write-back and
 /// clarification bridging can find it later. Pure (no I/O), so it is unit-testable.
+/// Add labels to an existing GitHub issue. Used at design-publish time to apply
+/// `type:<name>` labels that encode the node's schema type (e.g. `type:feature`).
+/// Labels that do not yet exist in the repo are created on the fly by the API.
+/// Fail-soft caller: errors are surfaced as warnings rather than publish failures.
+pub async fn add_labels_to_issue(
+    owner: &str,
+    repo: &str,
+    number: u64,
+    labels: &[&str],
+    token: &str,
+) -> anyhow::Result<()> {
+    if labels.is_empty() {
+        return Ok(());
+    }
+    let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/issues/{number}/labels");
+    let payload =
+        serde_json::to_string(&serde_json::json!({ "labels": labels }))?;
+    let resp = transport.post(&url, &payload).await?;
+    if !(200..300).contains(&resp.status) {
+        anyhow::bail!(
+            "GitHub add labels to #{number}: HTTP {} {}",
+            resp.status,
+            resp.body
+        );
+    }
+    Ok(())
+}
+
 pub fn issue_to_story(repo: &str, number: u64, title: &str, body: &str) -> CanonicalStory {
     let url = format!("https://github.com/{repo}/issues/{number}");
     CanonicalStory {

@@ -362,6 +362,71 @@ async fn api_git_cherry_pick(project_id: &str, repo: &str, sha: &str) -> (bool, 
     (ok, out)
 }
 
+/// Export the active project as a JSON file via a native save dialog.
+async fn export_project_json(id: &str, name: &str) -> bool {
+    let Ok(resp) = reqwest::get(format!("{}/api/projects/{}/export", crate::bff_base(), id)).await
+    else {
+        return false;
+    };
+    let Ok(text) = resp.text().await else {
+        return false;
+    };
+    let slug: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let filename = format!("camerata-project-{slug}.json");
+    match rfd::AsyncFileDialog::new()
+        .set_file_name(&filename)
+        .save_file()
+        .await
+    {
+        Some(file) => file.write(text.as_bytes()).await.is_ok(),
+        None => false,
+    }
+}
+
+// ── RepoHealthPanel ───────────────────────────────────────────────────────────
+
+/// Compact health summary bar: cloned count, dirty count, shown as color-coded pills.
+/// Renders nothing when `checkouts` is empty (no project or no repos).
+#[component]
+fn RepoHealthPanel(checkouts: Vec<RepoCheckout>) -> Element {
+    if checkouts.is_empty() {
+        return rsx! {};
+    }
+    let total = checkouts.len();
+    let cloned = checkouts.iter().filter(|c| c.cloned).count();
+    let dirty = checkouts.iter().filter(|c| c.dirty).count();
+    let clone_cls = if cloned == total {
+        "ws-health-stat ok"
+    } else {
+        "ws-health-stat warn"
+    };
+    let dirty_cls = if dirty == 0 {
+        "ws-health-stat ok"
+    } else {
+        "ws-health-stat bad"
+    };
+    rsx! {
+        div { class: "ws-health",
+            div { class: clone_cls,
+                span { class: "ws-health-dot" }
+                span { "{cloned}/{total} cloned" }
+            }
+            div { class: dirty_cls,
+                span { class: "ws-health-dot" }
+                span { if dirty == 0 { "all clean" } else { "{dirty} dirty" } }
+            }
+        }
+    }
+}
+
 // ── Top-level view ────────────────────────────────────────────────────────────
 
 #[component]
@@ -456,6 +521,11 @@ pub fn WorkspaceView() -> Element {
                 }
             }
 
+            // ── Repo health summary ──────────────────────────────────────────
+            if !checkouts.is_empty() {
+                RepoHealthPanel { checkouts: checkouts.clone() }
+            }
+
             // ── Project + repo checkouts ─────────────────────────────────────
             match (&workspace_root, &project) {
                 (None, _) => rsx! {
@@ -473,20 +543,40 @@ pub fn WorkspaceView() -> Element {
                                     p { class: "section-label", "Project — {proj.name}" }
                                     p { class: "ws-hint", "{proj.repos.len()} repo(s) in scope." }
                                 }
-                                button {
-                                    class: "btn-run",
-                                    disabled: busy(),
-                                    onclick: move |_| {
-                                        let id = pid.clone();
-                                        let mut busy = busy;
-                                        busy.set(true);
-                                        spawn(async move {
-                                            let _ = clone_project(&id).await;
-                                            busy.set(false);
-                                            refresh += 1;
-                                        });
-                                    },
-                                    if busy() { "Cloning…" } else { "Clone / update all repos" }
+                                div { class: "ws-project-actions",
+                                    button {
+                                        class: "btn-run",
+                                        disabled: busy(),
+                                        onclick: move |_| {
+                                            let id = pid.clone();
+                                            let mut busy = busy;
+                                            busy.set(true);
+                                            spawn(async move {
+                                                let _ = clone_project(&id).await;
+                                                busy.set(false);
+                                                refresh += 1;
+                                            });
+                                        },
+                                        if busy() { "Cloning…" } else { "Clone / update all repos" }
+                                    }
+                                    {
+                                        let export_id = proj.id.clone();
+                                        let export_name = proj.name.clone();
+                                        rsx! {
+                                            button {
+                                                class: "btn-edit-sm",
+                                                title: "Export project config as JSON",
+                                                onclick: move |_| {
+                                                    let id = export_id.clone();
+                                                    let name = export_name.clone();
+                                                    spawn(async move {
+                                                        export_project_json(&id, &name).await;
+                                                    });
+                                                },
+                                                "Export JSON"
+                                            }
+                                        }
+                                    }
                                 }
                             }
 
@@ -1507,6 +1597,89 @@ mod tests {
     }
 
     // ── Tier 1: render tests (dioxus-ssr) ────────────────────────────────────────
+
+    #[test]
+    fn repo_health_panel_all_cloned_and_clean() {
+        fn harness() -> Element {
+            rsx! {
+                RepoHealthPanel {
+                    checkouts: vec![
+                        super::RepoCheckout {
+                            repo: "acme/alpha".to_string(),
+                            cloned: true,
+                            path: "/ws/acme/alpha".to_string(),
+                            branch: Some("main".to_string()),
+                            dirty: false,
+                            detail: String::new(),
+                        },
+                        super::RepoCheckout {
+                            repo: "acme/beta".to_string(),
+                            cloned: true,
+                            path: "/ws/acme/beta".to_string(),
+                            branch: Some("main".to_string()),
+                            dirty: false,
+                            detail: String::new(),
+                        },
+                    ],
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("2/2 cloned"), "cloned pill shows 2/2");
+        assert!(html.contains("all clean"), "dirty pill shows all clean");
+        assert!(html.contains("ws-health-stat ok"), "ok class present");
+    }
+
+    #[test]
+    fn repo_health_panel_partially_cloned_and_dirty() {
+        fn harness() -> Element {
+            rsx! {
+                RepoHealthPanel {
+                    checkouts: vec![
+                        super::RepoCheckout {
+                            repo: "acme/alpha".to_string(),
+                            cloned: true,
+                            path: "/ws/acme/alpha".to_string(),
+                            branch: Some("main".to_string()),
+                            dirty: true,
+                            detail: String::new(),
+                        },
+                        super::RepoCheckout {
+                            repo: "acme/beta".to_string(),
+                            cloned: false,
+                            path: String::new(),
+                            branch: None,
+                            dirty: false,
+                            detail: "not cloned".to_string(),
+                        },
+                    ],
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("1/2 cloned"), "cloned pill shows 1/2");
+        assert!(html.contains("1 dirty"), "dirty pill shows 1");
+        assert!(html.contains("ws-health-stat warn"), "warn class for partial clone");
+        assert!(html.contains("ws-health-stat bad"), "bad class for dirty");
+    }
+
+    #[test]
+    fn repo_health_panel_empty_renders_nothing() {
+        fn harness() -> Element {
+            rsx! { RepoHealthPanel { checkouts: vec![] } }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            !html.contains("ws-health"),
+            "empty checkouts renders nothing"
+        );
+    }
 
     // RepoCard with status=None renders the "not cloned" branch, which does NOT mount
     // GitPanel (that only renders when cloned) and issues no fetches — so it's cleanly

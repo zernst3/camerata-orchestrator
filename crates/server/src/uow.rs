@@ -103,6 +103,48 @@ pub struct HistoryEntry {
     pub text: String,
 }
 
+/// A child node proposed by the AI during design-mode authoring. When the architect
+/// accepts a proposal, each entry is materialized into a new draft UoW via
+/// `POST /api/designs/:id/nodes`.
+#[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
+pub struct ProposedChild {
+    /// The schema work type for this proposed node (e.g. "Feature", "Story").
+    #[serde(default)]
+    pub node_type: String,
+    /// The proposed issue title.
+    #[serde(default)]
+    pub title: String,
+    /// The proposed issue body (markdown).
+    #[serde(default)]
+    pub body: String,
+}
+
+/// A file attached to a UnitOfWork. The content is stored inline (base64 for binary;
+/// raw text for HTML/plain text), travels with the UoW in the JSON store and in project
+/// exports, and is embedded into the published GitHub issue body as a collapsed
+/// `<details>` block.
+///
+/// Design note: GitHub's REST API has no "attach file to issue" endpoint (web-only CDN).
+/// The decided approach (low-risk, no external deps) is to embed the content directly
+/// in the issue body. For HTML mockups this means the full HTML in a `<details>` block;
+/// for other types a code-fence snippet. The gist/CDN paths are deferred for Zach to
+/// confirm.
+#[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq, Eq)]
+pub struct UowAttachment {
+    /// A short name identifying this attachment (e.g. `"mockup.html"`, `"arch-diagram.mmd"`).
+    pub name: String,
+    /// The MIME type (e.g. `"text/html"`, `"text/x-mermaid"`, `"text/plain"`).
+    #[serde(default = "default_attachment_mime")]
+    pub mime: String,
+    /// The attachment content as a UTF-8 string. Binary files must be base64-encoded
+    /// before being stored here; the mime type signals to readers how to decode.
+    pub content: String,
+}
+
+fn default_attachment_mime() -> String {
+    "text/plain".to_string()
+}
+
 /// The durable gate provenance persisted onto a UoW after a governed run finishes.
 ///
 /// [`crate::run::RunProvenance`] is the live, derived-on-read summary of a run; this
@@ -441,6 +483,34 @@ pub struct UnitOfWork {
     /// field round-trip unchanged.
     #[serde(default)]
     pub parent_id: Option<String>,
+    /// The schema work type this node represents in the design tree (e.g. "Epic",
+    /// "Feature", "Story"). `None` for a normal story-authoring UoW that is not part
+    /// of a design tree. Serde default so legacy `uow.json` records load unchanged.
+    #[serde(default)]
+    pub node_type: Option<String>,
+    /// The parent node's draft story_id (e.g. `"draft-<token>"`) in the design tree.
+    /// Distinct from `parent_id`, which carries a digits-only PUBLISHED GitHub issue
+    /// number. At design-publish time `draft_parent_id` is resolved to the parent's
+    /// newly created issue number and stored there. `None` for root design nodes and
+    /// for normal (non-design) UoWs. Serde default for back-compat.
+    #[serde(default)]
+    pub draft_parent_id: Option<String>,
+    /// Children proposed by the AI during design-mode authoring (design-mode `author`
+    /// endpoint). Cleared when the architect materializes them via `POST /api/designs/:id/nodes`.
+    /// Empty for normal (non-design) UoWs. Serde default for back-compat.
+    #[serde(default)]
+    pub proposed_children: Vec<ProposedChild>,
+    /// Files attached to this UoW. Stored inline (UTF-8 or base64 content), portable
+    /// (travels with the UoW in JSON), and embedded into the published GitHub issue body
+    /// as a collapsed `<details>` block at publish time. Empty by default. Serde default
+    /// for back-compat so legacy `uow.json` records load unchanged.
+    #[serde(default)]
+    pub attachments: Vec<UowAttachment>,
+    /// AI-generated Mermaid diagram source text for this UoW. When present it is embedded
+    /// as a ```mermaid fenced block in the published GitHub issue body (GitHub renders it
+    /// natively). None by default; serde(default) for back-compat.
+    #[serde(default)]
+    pub diagram: Option<String>,
     /// The id of the project that CREATED this UoW, when it is a project-scoped draft.
     ///
     /// A brand-new blank draft has no `work_item` and a `draft-<uuid>` `story_id`, so it
@@ -1851,6 +1921,212 @@ impl UowStore {
         };
         self.flush();
         updated
+    }
+
+    // ── Attachment methods ─────────────────────────────────────────────────────
+
+    /// Add or replace a named attachment on a UoW. If an attachment with the same
+    /// `name` already exists it is replaced (last-writer-wins per name). Persists.
+    pub fn add_attachment(&self, story_id: &str, attachment: UowAttachment) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            if let Some(pos) = uow.attachments.iter().position(|a| a.name == attachment.name) {
+                uow.attachments[pos] = attachment;
+            } else {
+                uow.attachments.push(attachment);
+            }
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    /// Remove a named attachment from a UoW. Idempotent. Persists.
+    pub fn remove_attachment(&self, story_id: &str, name: &str) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            uow.attachments.retain(|a| a.name != name);
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    /// Store (or replace) the AI-generated Mermaid diagram text for a UoW.
+    /// Idempotent: calling again with a different text replaces the previous diagram.
+    pub fn set_diagram(&self, story_id: &str, text: String) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            uow.diagram = Some(text);
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    /// Clear the stored diagram for a UoW. Idempotent when none is set.
+    pub fn clear_diagram(&self, story_id: &str) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            uow.diagram = None;
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    // ── Design-tree methods ────────────────────────────────────────────────────
+
+    /// Create a blank DRAFT UoW that is a node in a design tree. Analogous to
+    /// `create_blank_with_parent` but sets `node_type` (the schema type) and
+    /// `draft_parent_id` (the parent node's draft story_id, forming the N-level
+    /// tree pre-publish). The `authoring` state is initialized so the node can
+    /// receive per-node author turns. Persists immediately.
+    pub fn create_blank_design(
+        &self,
+        node_type: Option<String>,
+        draft_parent_id: Option<String>,
+        project_id: Option<String>,
+    ) -> UnitOfWork {
+        let id = format!("draft-{}", Self::next_draft_token());
+        let now = Self::now_rfc3339();
+        let uow = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = UnitOfWork {
+                story_id: id.clone(),
+                authoring: Some(AuthoringState::default()),
+                node_type,
+                draft_parent_id,
+                project_id,
+                updated: now,
+                ..Default::default()
+            };
+            map.insert(id.clone(), uow.clone());
+            uow
+        };
+        self.flush();
+        uow
+    }
+
+    /// Replace the proposed children on a design node. Called after the design-mode
+    /// author endpoint parses the AI's response. Persists immediately.
+    pub fn set_proposed_children(
+        &self,
+        story_id: &str,
+        children: Vec<ProposedChild>,
+    ) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    authoring: Some(AuthoringState::default()),
+                    ..Default::default()
+                });
+            uow.proposed_children = children;
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    /// Walk the design tree rooted at `root_id` and return all nodes in BFS order
+    /// (root first, then children at increasing depth). Returns an empty vec when the
+    /// root is not found. Tracks visited ids to prevent infinite loops if a cycle is
+    /// somehow present in the data.
+    pub fn list_design_tree(&self, root_id: &str) -> Vec<UnitOfWork> {
+        let map = self.mem.lock().expect("uow mutex poisoned");
+        let root = match map.get(root_id) {
+            Some(r) => r.clone(),
+            None => return vec![],
+        };
+        let mut result = vec![root];
+        let mut visited: std::collections::HashSet<String> =
+            std::collections::HashSet::from([root_id.to_string()]);
+        let mut to_expand: std::collections::VecDeque<String> =
+            std::collections::VecDeque::from([root_id.to_string()]);
+        while let Some(parent_id) = to_expand.pop_front() {
+            for uow in map.values() {
+                if uow.draft_parent_id.as_deref() == Some(parent_id.as_str())
+                    && !visited.contains(&uow.story_id)
+                {
+                    visited.insert(uow.story_id.clone());
+                    to_expand.push_back(uow.story_id.clone());
+                    result.push(uow.clone());
+                }
+            }
+        }
+        result
+    }
+
+    /// Remove the node `node_id` and all its descendants from the design tree.
+    /// Returns the list of removed story ids. Idempotent: removing a non-existent
+    /// node returns an empty list.
+    pub fn remove_design_subtree(&self, node_id: &str) -> Vec<String> {
+        // Single lock acquisition: BFS to collect all ids, then remove them all.
+        let mut map = self.mem.lock().expect("uow mutex poisoned");
+        if !map.contains_key(node_id) {
+            return vec![];
+        }
+        let mut ids = vec![node_id.to_string()];
+        let mut visited: std::collections::HashSet<String> =
+            std::collections::HashSet::from([node_id.to_string()]);
+        let mut idx = 0;
+        while idx < ids.len() {
+            let parent = ids[idx].clone();
+            for uow in map.values() {
+                if uow.draft_parent_id.as_deref() == Some(parent.as_str())
+                    && !visited.contains(&uow.story_id)
+                {
+                    visited.insert(uow.story_id.clone());
+                    ids.push(uow.story_id.clone());
+                }
+            }
+            idx += 1;
+        }
+        for id in &ids {
+            map.remove(id);
+        }
+        drop(map);
+        if !ids.is_empty() {
+            self.flush();
+        }
+        ids
     }
 }
 
@@ -3385,5 +3661,244 @@ mod concurrency_regression_tests {
             Some(PhaseTab::Development)
         );
         assert_eq!(PhaseTab::from_wire("bogus"), None);
+    }
+
+    // ── Attachment tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn add_attachment_stores_and_replaces_by_name() {
+        let store = UowStore::new();
+        let a1 = UowAttachment {
+            name: "mockup.html".to_string(),
+            mime: "text/html".to_string(),
+            content: "<html>First</html>".to_string(),
+        };
+        let updated = store.add_attachment("S-1", a1.clone());
+        assert_eq!(updated.attachments.len(), 1);
+        assert_eq!(updated.attachments[0].name, "mockup.html");
+        assert_eq!(updated.attachments[0].content, "<html>First</html>");
+
+        // Replace by name (same name, new content).
+        let a2 = UowAttachment {
+            name: "mockup.html".to_string(),
+            mime: "text/html".to_string(),
+            content: "<html>Second</html>".to_string(),
+        };
+        let updated2 = store.add_attachment("S-1", a2);
+        assert_eq!(updated2.attachments.len(), 1, "replace, not append");
+        assert_eq!(updated2.attachments[0].content, "<html>Second</html>");
+
+        // Different name adds a second attachment.
+        let a3 = UowAttachment {
+            name: "arch.mmd".to_string(),
+            mime: "text/x-mermaid".to_string(),
+            content: "graph LR; A-->B".to_string(),
+        };
+        let updated3 = store.add_attachment("S-1", a3);
+        assert_eq!(updated3.attachments.len(), 2, "two distinct attachments");
+    }
+
+    #[test]
+    fn remove_attachment_is_idempotent() {
+        let store = UowStore::new();
+        store.add_attachment("S-2", UowAttachment {
+            name: "mockup.html".to_string(),
+            mime: "text/html".to_string(),
+            content: "<html></html>".to_string(),
+        });
+        let after_remove = store.remove_attachment("S-2", "mockup.html");
+        assert!(after_remove.attachments.is_empty(), "attachment removed");
+
+        // Removing again is safe.
+        let again = store.remove_attachment("S-2", "mockup.html");
+        assert!(again.attachments.is_empty(), "idempotent");
+
+        // Removing non-existent is safe.
+        let fresh = store.remove_attachment("nonexistent-story", "foo.txt");
+        assert!(fresh.attachments.is_empty());
+    }
+
+    #[test]
+    fn attachments_default_empty_on_normal_uow() {
+        let store = UowStore::new();
+        let uow = store.get_or_create("acme/repo#55");
+        assert!(uow.attachments.is_empty(), "normal UoW has no attachments by default");
+    }
+
+    #[test]
+    fn set_diagram_stores_and_replaces() {
+        let store = UowStore::new();
+        let id = "draft-diag-1";
+        let uow = store.set_diagram(id, "graph TD\n  A-->B".to_string());
+        assert_eq!(uow.diagram.as_deref(), Some("graph TD\n  A-->B"));
+        // Replace with a new diagram.
+        let uow2 = store.set_diagram(id, "sequenceDiagram\n  A->>B: hi".to_string());
+        assert_eq!(uow2.diagram.as_deref(), Some("sequenceDiagram\n  A->>B: hi"));
+    }
+
+    #[test]
+    fn clear_diagram_is_idempotent() {
+        let store = UowStore::new();
+        let id = "draft-diag-2";
+        store.set_diagram(id, "graph TD\n  A-->B".to_string());
+        let cleared = store.clear_diagram(id);
+        assert!(cleared.diagram.is_none(), "diagram cleared");
+        // Clearing again should not panic.
+        let cleared2 = store.clear_diagram(id);
+        assert!(cleared2.diagram.is_none());
+    }
+
+    #[test]
+    fn diagram_defaults_none_on_normal_uow() {
+        let store = UowStore::new();
+        let uow = store.get_or_create("acme/repo#77");
+        assert!(uow.diagram.is_none(), "normal UoW has no diagram by default");
+    }
+
+    // ── Design-tree tests ──────────────────────────────────────────────────────
+
+    #[test]
+    fn design_node_fields_default_and_round_trip() {
+        let store = UowStore::new();
+        // A design root node: node_type set, no draft_parent_id.
+        let root = store.create_blank_design(
+            Some("Epic".to_string()),
+            None,
+            Some("proj-1".to_string()),
+        );
+        assert!(root.story_id.starts_with("draft-"), "draft id");
+        assert_eq!(root.node_type.as_deref(), Some("Epic"));
+        assert!(root.draft_parent_id.is_none());
+        assert!(root.proposed_children.is_empty());
+        // The node is findable by story_id.
+        let fetched = store.get_or_create(&root.story_id);
+        assert_eq!(fetched.node_type.as_deref(), Some("Epic"));
+
+        // A child node: node_type + draft_parent_id.
+        let child = store.create_blank_design(
+            Some("Feature".to_string()),
+            Some(root.story_id.clone()),
+            Some("proj-1".to_string()),
+        );
+        assert_eq!(child.draft_parent_id.as_deref(), Some(root.story_id.as_str()));
+
+        // New fields default to None / empty on a normal (non-design) UoW.
+        let normal = store.get_or_create("acme/repo#42");
+        assert!(normal.node_type.is_none());
+        assert!(normal.draft_parent_id.is_none());
+        assert!(normal.proposed_children.is_empty());
+    }
+
+    #[test]
+    fn set_proposed_children_stores_and_replaces() {
+        let store = UowStore::new();
+        let root = store.create_blank_design(Some("Epic".to_string()), None, None);
+
+        let children = vec![
+            ProposedChild {
+                node_type: "Feature".to_string(),
+                title: "Feature A".to_string(),
+                body: "Body A".to_string(),
+            },
+            ProposedChild {
+                node_type: "Story".to_string(),
+                title: "Story B".to_string(),
+                body: "Body B".to_string(),
+            },
+        ];
+        let updated = store.set_proposed_children(&root.story_id, children.clone());
+        assert_eq!(updated.proposed_children, children);
+
+        // Replace with a single child.
+        let single = vec![ProposedChild {
+            node_type: "Feature".to_string(),
+            title: "Just one".to_string(),
+            body: String::new(),
+        }];
+        let updated2 = store.set_proposed_children(&root.story_id, single.clone());
+        assert_eq!(updated2.proposed_children, single, "set replaces, not appends");
+    }
+
+    #[test]
+    fn list_design_tree_bfs_order_root_first() {
+        let store = UowStore::new();
+        let root = store.create_blank_design(Some("Epic".to_string()), None, Some("p".to_string()));
+        let child_a = store.create_blank_design(
+            Some("Feature".to_string()),
+            Some(root.story_id.clone()),
+            Some("p".to_string()),
+        );
+        let child_b = store.create_blank_design(
+            Some("Feature".to_string()),
+            Some(root.story_id.clone()),
+            Some("p".to_string()),
+        );
+        let grandchild = store.create_blank_design(
+            Some("Story".to_string()),
+            Some(child_a.story_id.clone()),
+            Some("p".to_string()),
+        );
+
+        let tree = store.list_design_tree(&root.story_id);
+        assert_eq!(tree.len(), 4, "root + 2 children + 1 grandchild");
+
+        // Root must be first.
+        assert_eq!(tree[0].story_id, root.story_id, "root is first");
+
+        // Children appear before grandchild (BFS ordering).
+        let pos_child_a = tree.iter().position(|u| u.story_id == child_a.story_id).unwrap();
+        let pos_child_b = tree.iter().position(|u| u.story_id == child_b.story_id).unwrap();
+        let pos_grandchild = tree.iter().position(|u| u.story_id == grandchild.story_id).unwrap();
+        assert!(pos_child_a < pos_grandchild, "child_a before grandchild");
+        assert!(pos_child_b < pos_grandchild, "child_b before grandchild");
+    }
+
+    #[test]
+    fn list_design_tree_unknown_root_returns_empty() {
+        let store = UowStore::new();
+        let result = store.list_design_tree("draft-nonexistent");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn remove_design_subtree_removes_node_and_descendants() {
+        let store = UowStore::new();
+        let root = store.create_blank_design(Some("Epic".to_string()), None, Some("p".to_string()));
+        let child = store.create_blank_design(
+            Some("Feature".to_string()),
+            Some(root.story_id.clone()),
+            Some("p".to_string()),
+        );
+        let grandchild = store.create_blank_design(
+            Some("Story".to_string()),
+            Some(child.story_id.clone()),
+            Some("p".to_string()),
+        );
+        // Also create a sibling branch that should NOT be removed.
+        let sibling = store.create_blank_design(
+            Some("Feature".to_string()),
+            Some(root.story_id.clone()),
+            Some("p".to_string()),
+        );
+
+        // Remove the child subtree (child + grandchild only; root and sibling survive).
+        let removed = store.remove_design_subtree(&child.story_id);
+        assert_eq!(removed.len(), 2, "child and its grandchild removed");
+        assert!(removed.contains(&child.story_id));
+        assert!(removed.contains(&grandchild.story_id));
+
+        let tree = store.list_design_tree(&root.story_id);
+        let ids: Vec<&str> = tree.iter().map(|u| u.story_id.as_str()).collect();
+        assert!(ids.contains(&root.story_id.as_str()), "root survives");
+        assert!(ids.contains(&sibling.story_id.as_str()), "sibling survives");
+        assert!(!ids.contains(&child.story_id.as_str()), "child removed");
+        assert!(!ids.contains(&grandchild.story_id.as_str()), "grandchild removed");
+    }
+
+    #[test]
+    fn remove_design_subtree_nonexistent_is_idempotent() {
+        let store = UowStore::new();
+        let removed = store.remove_design_subtree("draft-nonexistent");
+        assert!(removed.is_empty());
     }
 }

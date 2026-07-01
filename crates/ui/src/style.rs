@@ -2595,6 +2595,13 @@ html, body {
 .ws-repo-pr { font-size: 12.5px; margin: 10px 0 0; }
 .ws-repo-pr a { color: var(--accent-ink); }
 .ws-repo-msg { font-size: 12.5px; color: var(--ink-soft); margin: 8px 0 0; }
+.ws-project-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ws-health { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 4px; }
+.ws-health-stat { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; padding: 3px 10px; border-radius: 20px; border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft); }
+.ws-health-stat.ok   { background: rgba(22,163,74,0.10); border-color: rgba(22,163,74,0.28); color: #4ade80; }
+.ws-health-stat.warn { background: rgba(202,138,4,0.14); border-color: rgba(202,138,4,0.30); color: #fbbf24; }
+.ws-health-stat.bad  { background: rgba(220,38,38,0.14); border-color: rgba(220,38,38,0.28); color: #f87171; }
+.ws-health-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 
 /* ---- Git panel (issue #37) ------------------------------------------------ */
 /* Compact panels that sit beneath the branch+ship row inside each .ws-repo.    */
@@ -5475,5 +5482,52 @@ select:focus {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+/* ---- Design canvas (2026-07-01) ------------------------------------------ */
+.cockpit-scroll-full { display: flex; flex-direction: column; overflow: hidden; flex: 1; }
+.design-canvas { display: flex; height: 100%; overflow: hidden; }
+.design-tree-pane { width: 280px; min-width: 200px; border-right: 1px solid var(--line); display: flex; flex-direction: column; overflow-y: auto; }
+.design-tree-head { padding: 14px 14px 8px; border-bottom: 1px solid var(--line-soft); }
+.design-root-id { font-size: 10.5px; font-family: ui-monospace, monospace; color: var(--ink-faint); margin: 4px 0 0; word-break: break-all; }
+.design-tree-empty { padding: 14px; display: flex; flex-direction: column; gap: 14px; }
+.design-new-root { display: flex; flex-direction: column; gap: 6px; }
+.design-input-label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: var(--ink-faint); margin: 0; }
+.design-input { width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--ink); font-size: 13px; box-sizing: border-box; }
+.design-node-list { flex: 1; overflow-y: auto; }
+.design-node-row { display: flex; align-items: center; gap: 6px; padding: 8px 12px; border-bottom: 1px solid var(--line-soft); cursor: pointer; min-width: 0; }
+.design-node-row:hover { background: var(--paper-raise); }
+.design-node-row.selected { background: rgba(59,130,246,0.10); border-left: 3px solid var(--accent); }
+.design-node-type { font-size: 10px; font-weight: 700; padding: 2px 5px; border-radius: 4px; background: var(--paper-raise); color: var(--ink-soft); text-transform: uppercase; letter-spacing: .05em; flex-shrink: 0; }
+.design-node-type.lg { font-size: 12px; padding: 3px 8px; }
+.design-node-title { flex: 1; font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.design-node-del { background: none; border: none; cursor: pointer; color: var(--ink-faint); font-size: 16px; line-height: 1; padding: 0 2px; flex-shrink: 0; }
+.design-node-del:hover { color: var(--bad); }
+.design-add-child { padding: 8px 12px; border-top: 1px solid var(--line-soft); }
+.design-reset-btn { width: 100%; padding: 10px; background: none; border: none; border-top: 1px solid var(--line); cursor: pointer; font-size: 12.5px; color: var(--ink-soft); text-align: left; }
+.design-reset-btn:hover { background: var(--paper-raise); }
+.design-author-pane { flex: 1; overflow-y: auto; padding: 20px 24px; }
+.design-author-empty { display: flex; align-items: center; justify-content: center; height: 100%; }
+.design-node-panel { display: flex; flex-direction: column; gap: 16px; max-width: 760px; }
+.design-node-panel-head { display: flex; flex-direction: column; gap: 4px; }
+.design-node-panel-title { font-size: 18px; font-weight: 700; color: var(--ink); margin: 4px 0 0; }
+.design-node-id { font-size: 10.5px; font-family: ui-monospace, monospace; color: var(--ink-faint); margin: 0; }
+.design-draft-body { padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); font-size: 13.5px; line-height: 1.6; }
+.design-chat { max-height: 320px; }
+.design-send-row { display: flex; gap: 10px; align-items: flex-end; }
+.design-input-area { flex: 1; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink); font-size: 13.5px; resize: vertical; min-height: 72px; font-family: inherit; }
+.design-proposed-section { display: flex; flex-direction: column; gap: 8px; }
+.design-proposed { display: flex; flex-wrap: wrap; gap: 8px; }
+.design-proposed-chip { font-size: 12.5px; padding: 4px 12px; border-radius: 16px; border: 1px solid rgba(59,130,246,0.35); color: #60a5fa; background: rgba(59,130,246,0.08); }
+.design-publish-section { display: flex; flex-direction: column; gap: 8px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
+.design-publish-row { display: flex; gap: 10px; align-items: center; }
+.mockup-panel { margin-top: 20px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.mockup-toggle { width: 100%; padding: 10px 14px; background: var(--surface); border: none; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--ink-soft); text-align: left; }
+.mockup-toggle:hover { background: var(--paper-raise); color: var(--ink); }
+.mockup-body { display: flex; height: 480px; border-top: 1px solid var(--line); }
+.mockup-left { width: 280px; min-width: 220px; border-right: 1px solid var(--line); padding: 14px; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
+.mockup-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.mockup-right { flex: 1; display: flex; flex-direction: column; background: var(--paper); }
+.mockup-iframe { width: 100%; height: 100%; border: none; display: block; }
+.mockup-placeholder { display: flex; align-items: center; justify-content: center; height: 100%; }
 
 "#;

@@ -22,6 +22,7 @@ mod style;
 mod terminal;
 mod toast;
 mod vcs_settings;
+mod design;
 mod workspace;
 
 use dioxus::prelude::*;
