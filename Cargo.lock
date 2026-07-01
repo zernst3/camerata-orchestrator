@@ -870,6 +870,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "camerata-server",
+ "camerata-ui-core",
  "camerata-worktracker",
  "chorale-core",
  "chorale-dioxus",
@@ -885,6 +886,14 @@ dependencies = [
  "serial_test",
  "tokio",
  "wiremock",
+]
+
+[[package]]
+name = "camerata-ui-core"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
