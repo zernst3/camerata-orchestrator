@@ -3448,53 +3448,9 @@ mod tests {
         assert_ne!(selection_key("a/b"), SINGLE_REPO_SELECTION_KEY);
     }
 
-    // ── verif_badge() unit tests ──────────────────────────────────────────────
-    //
-    // Pure function, no DOM — each test just asserts label + CSS modifier.
-    // Coverage: all four canonical values + an unknown value (falls back to draft).
+    // (verif_badge tests moved to camerata-ui-core::rules — pure, now unit-tested with no VirtualDom.)
 
-    use super::{verif_badge, verif_sources_tooltip, RuleSourceView};
-
-    #[test]
-    fn verif_badge_verified_returns_checkmark_label_and_green_class() {
-        let (label, cls) = verif_badge("verified");
-        assert!(label.contains("Verified"), "label should mention Verified, got: {label}");
-        assert_eq!(cls, "verified");
-    }
-
-    #[test]
-    fn verif_badge_grounded_returns_grounded_label_and_blue_class() {
-        let (label, cls) = verif_badge("grounded");
-        assert!(label.contains("Grounded"), "label should mention Grounded, got: {label}");
-        // Grounded must carry its own distinct symbol (the circled source-dot), separate from
-        // the verified checkmark, so it's a clear table status not a faint tint.
-        assert!(label.contains('\u{29bf}'), "grounded label should carry its source-dot symbol");
-        assert!(!label.contains('\u{2713}'), "grounded must NOT reuse the verified checkmark");
-        assert_eq!(cls, "grounded");
-    }
-
-    #[test]
-    fn verif_badge_draft_returns_draft_label_and_gray_class() {
-        let (label, cls) = verif_badge("draft");
-        assert_eq!(label, "Draft");
-        assert_eq!(cls, "draft");
-    }
-
-    #[test]
-    fn verif_badge_needs_recheck_returns_distinct_label_and_class() {
-        let (label, cls) = verif_badge("needs_recheck");
-        assert!(label.contains("re-check") || label.contains("recheck"), "label should signal re-check, got: {label}");
-        assert_eq!(cls, "needs-recheck");
-    }
-
-    #[test]
-    fn verif_badge_unknown_value_falls_back_to_draft() {
-        // An unrecognised value (e.g. a future extension the UI hasn't caught up to)
-        // must not panic and must fall back to the `draft` visual.
-        let (label, cls) = verif_badge("something_new");
-        assert_eq!(label, "Draft");
-        assert_eq!(cls, "draft");
-    }
+    use super::{verif_sources_tooltip, RuleSourceView};
 
     #[test]
     fn verif_sources_tooltip_empty_sources_returns_empty_string() {

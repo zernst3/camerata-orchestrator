@@ -3148,18 +3148,9 @@ impl ProposedRuleView {
 /// - `draft`        -> muted italic badge ("Draft")
 /// - `needs_recheck`-> amber warning badge ("Needs re-check")
 /// - anything else  -> same as `draft`
-pub(super) fn verif_badge(verif: &str) -> (&'static str, &'static str) {
-    match verif {
-        "verified"     => ("\u{2713} Verified",    "verified"),
-        // Grounded carries its OWN distinct glyph (a circled source-dot, ⦿) so it reads as a
-        // clear status on the rule tables, not just a faint blue tint — and is visually
-        // distinct from the verified checkmark and the symbol-less draft / needs-re-check
-        // badges. See `docs/decisions/2026-06-20_ui_bugfixes.md`.
-        "grounded"     => ("\u{29bf} Grounded",    "grounded"),
-        "needs_recheck"=> ("Needs re-check",       "needs-recheck"),
-        _              => ("Draft",                "draft"),
-    }
-}
+// verif_badge now lives in the framework-agnostic core (RUST-HEADLESS-CORE-1); re-exported here so the
+// rules-table call sites are unchanged.
+pub(super) use camerata_ui_core::rules::verif_badge;
 
 /// Build a human-readable tooltip string from a list of sources.
 /// Returns an empty string when sources is empty (badge has no hover text in that case).
