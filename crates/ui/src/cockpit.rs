@@ -2753,15 +2753,8 @@ fn CockpitNotice(kind: String) -> Element {
     }
 }
 
-impl Default for Disposition {
-    fn default() -> Self {
-        Self {
-            state: TriageState::Unresolved,
-            reason: String::new(),
-            bucket: TechDebtBucket::Later,
-        }
-    }
-}
+// `impl Default for Disposition` moved to `camerata_ui_core::triage` alongside `Disposition`
+// itself (the orphan rule requires the impl to live in the crate that owns the now-foreign type).
 
 /// Custom-rule helpers for onboarding. `domain` routes a rule: a repo's `owner/repo` =
 /// repo-scoped (the "Custom" domain, shown only in that repo's table); `*` = all repos (the

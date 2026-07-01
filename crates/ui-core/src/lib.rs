@@ -12,3 +12,4 @@ pub mod rules;
 pub mod run;
 pub mod scan;
 pub mod schedule;
+pub mod triage;

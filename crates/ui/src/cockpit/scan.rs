@@ -157,107 +157,21 @@ pub(super) fn findings_csv(findings: &[FindingView]) -> String {
     out
 }
 
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-pub(super) struct FindingView {
-    #[serde(default)]
-    pub repo: String,
-    pub path: String,
-    pub line: usize,
-    pub rule_id: String,
-    pub severity: String,
-    pub snippet: String,
-    pub detail: String,
-    /// `active` (enforced), `suppressed-inline`, or `suppressed-baseline`.
-    #[serde(default = "default_finding_status")]
-    pub status: String,
-    /// Other rule ids this same location also violates (the server merged them into this
-    /// row). Empty for an un-merged finding. Surfaced as a "+N" on the rule and listed in
-    /// the detail modal.
-    #[serde(default)]
-    pub also_matches: Vec<String>,
-    /// PREVIEW (CI-security Part B): the server's scan-time deterministic preview pass ran
-    /// the rule's underlying tool ITSELF and produced this finding, even though the rule is
-    /// NOT yet wired into the repo's gate. Deterministic (stable tool rule-id) but ADVISORY:
-    /// "preview — not enforced until wired". Defaults to `false` (back-compatible).
-    #[serde(default)]
-    pub preview: bool,
-    /// For a preview finding, the tool that produced it (`clippy` | `ruff` | `eslint` |
-    /// `semgrep`). `None` for non-preview findings. Shown in the Authority badge label.
-    #[serde(default)]
-    pub preview_tool: Option<String>,
-    /// True when this finding is in test/fixture scope.
-    #[serde(default)]
-    pub in_test: bool,
-    /// True when this finding needs manual verification.
-    #[serde(default)]
-    pub needs_review: bool,
-}
-
 // Scan-surface helpers (human_tokens, det_tool_label, default_finding_status, estimate_audit_cost)
 // now live in the framework-agnostic core (RUST-HEADLESS-CORE-1); re-exported so the scan/cockpit
-// call sites are unchanged.
-pub(super) use camerata_ui_core::scan::{
-    default_finding_status, det_tool_label, estimate_audit_cost, human_tokens,
+// call sites are unchanged. `default_finding_status` is re-exported via the triage block below
+// (FindingView moved to core::triage), so it's not repeated here.
+pub(super) use camerata_ui_core::scan::{det_tool_label, estimate_audit_cost, human_tokens};
+
+// The onboarding-triage state machine + its data shapes now live in the framework-agnostic core
+// (RUST-HEADLESS-CORE-1): FindingView, Disposition (+ its Default), TriageState, TechDebtBucket,
+// finding_key/finding_state, and the new pure TriageModel. Re-exported so every existing
+// scan/cockpit call site (and cockpit's `pub use scan::*`) is unchanged; the Dioxus layer keeps
+// the signals, table effects, toasts, and rsx. (FindingView's `default_finding_status` serde
+// provider lives with it in core::triage — re-exported from core::scan; not needed bare here.)
+pub(super) use camerata_ui_core::triage::{
+    finding_key, finding_state, Disposition, FindingView, TechDebtBucket, TriageModel, TriageState,
 };
-
-/// Where a finding sits in onboarding triage. The architect moves each finding between these
-/// three tables (a single-select switches the view) until nothing is Unresolved; then the
-/// ignored and tech-debt buckets are processed. This is LOCAL triage state — the backend
-/// commit (baseline waiver / ticket / dev-engine import) happens at Process, not on each move.
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, serde::Serialize, serde::Deserialize)]
-pub(super) enum TriageState {
-    #[default]
-    Unresolved,
-    Ignored,
-    TechDebt,
-}
-
-impl TriageState {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Unresolved => "Unresolved",
-            Self::Ignored => "Ignored",
-            Self::TechDebt => "Tech debt",
-        }
-    }
-}
-
-/// Which tech-debt bucket a finding is in: resolve LATER (file a tracked ticket) or NOW (pull
-/// into the dev engine as the first story). Only meaningful when state == TechDebt.
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(super) enum TechDebtBucket {
-    Later,
-    Now,
-}
-
-/// One finding's triage disposition: its table, the (required) ignore reason, and its
-/// tech-debt bucket. Absence from the dispositions map == Unresolved with defaults.
-#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(super) struct Disposition {
-    pub state: TriageState,
-    pub reason: String,
-    pub bucket: TechDebtBucket,
-}
-
-/// Stable identity for a finding across the triage tables (repo + rule + location + snippet),
-/// so its disposition survives table switches and re-sorts.
-pub(super) fn finding_key(f: &FindingView) -> String {
-    format!(
-        "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
-        f.repo, f.rule_id, f.path, f.line, f.snippet
-    )
-}
-
-/// The disposition state for a finding (Unresolved when absent from the map).
-pub(super) fn finding_state(
-    dispositions: &std::collections::HashMap<String, Disposition>,
-    f: &FindingView,
-) -> TriageState {
-    dispositions
-        .get(&finding_key(f))
-        .map(|d| d.state)
-        .unwrap_or(TriageState::Unresolved)
-}
 
 /// Durable ignore: record the findings as reasoned baseline suppressions (governed PR).
 /// Returns the PR URL.
@@ -1202,29 +1116,15 @@ pub(super) fn FindingsTable(
     #[props(default)] dispositions: Signal<std::collections::HashMap<String, Disposition>>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
-    // Keep only the findings in THIS table's triage state (absent from the map = Unresolved).
+    // Filter to THIS table's triage state + apply the default triage order (enforced/new before
+    // suppressed/debt, then critical → high → medium → low). Both the filter and the sort are the
+    // pure `TriageModel::visible` derivation now (RUST-HEADLESS-CORE-1): a flat 200-row dump is
+    // paralysis; this floats the exploitable-bug criticals to the very top so a hardcoded secret
+    // can never sit below "no mappers crate." Absent from the map = Unresolved.
     let findings: Vec<FindingView> = {
-        let d = dispositions.peek();
-        findings
-            .into_iter()
-            .filter(|f| finding_state(&d, f) == triage_view)
-            .collect()
+        let model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+        model.visible(&findings)
     };
-    // Default order leads triage with what matters: enforced (new) before suppressed
-    // (debt/waived), then by severity (critical → high → medium → low). A flat 200-row dump
-    // is paralysis; this floats the exploitable-bug criticals to the very top so a
-    // hardcoded secret can never sit below "no mappers crate."
-    let mut findings = findings;
-    findings.sort_by_key(|f| {
-        let enforced = if f.status == "active" { 0 } else { 1 };
-        let sev = match f.severity.as_str() {
-            "critical" => 0,
-            "high" => 1,
-            "medium" => 2,
-            _ => 3,
-        };
-        (enforced, sev)
-    });
     // Distinct repos for the repo multi-select filter. (Finding type is a Text/contains
     // filter now, so it needs no precomputed option list.)
     let mut filter_repos: Vec<String> = findings.iter().map(|f| f.repo.clone()).collect();
@@ -1391,13 +1291,9 @@ pub(super) fn FindingsTable(
                                 crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "A reason is required to ignore a finding (it's recorded in the baseline at Process).");
                                 return;
                             }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked {
-                                let e = d.entry(finding_key(f)).or_default();
-                                e.state = TriageState::Ignored;
-                                e.reason = reason.clone();
-                            }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.ignore(&picked, &reason);
+                            dispositions.set(model.dispositions);
                             handle.remove_rows(&sel);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Ignored.", picked.len()));
                         },
@@ -1409,9 +1305,9 @@ pub(super) fn FindingsTable(
                             let sel = handle.selected_ids();
                             let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_b.get(id).cloned()).collect();
                             if picked.is_empty() { return; }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked { d.entry(finding_key(f)).or_default().state = TriageState::TechDebt; }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.move_to(&picked, TriageState::TechDebt);
+                            dispositions.set(model.dispositions);
                             handle.remove_rows(&sel);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Tech debt.", picked.len()));
                         },
@@ -1425,9 +1321,9 @@ pub(super) fn FindingsTable(
                             let sel = handle.selected_ids();
                             let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_a.get(id).cloned()).collect();
                             if picked.is_empty() { return; }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked { d.entry(finding_key(f)).or_default().state = TriageState::Unresolved; }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.move_to(&picked, TriageState::Unresolved);
+                            dispositions.set(model.dispositions);
                             handle.remove_rows(&sel);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} back to Unresolved.", picked.len()));
                         },
@@ -1439,9 +1335,9 @@ pub(super) fn FindingsTable(
                             let sel = handle.selected_ids();
                             let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_b.get(id).cloned()).collect();
                             if picked.is_empty() { return; }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked { d.entry(finding_key(f)).or_default().state = TriageState::TechDebt; }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.move_to(&picked, TriageState::TechDebt);
+                            dispositions.set(model.dispositions);
                             handle.remove_rows(&sel);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Tech debt.", picked.len()));
                         },
@@ -1458,9 +1354,9 @@ pub(super) fn FindingsTable(
                             let sel = handle.selected_ids();
                             let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_c.get(id).cloned()).collect();
                             if picked.is_empty() { return; }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked { d.entry(finding_key(f)).or_default().bucket = TechDebtBucket::Later; }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.set_bucket(&picked, TechDebtBucket::Later);
+                            dispositions.set(model.dispositions);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Marked {} as resolve later.", picked.len()));
                         },
                         "Mark: resolve later"
@@ -1471,9 +1367,9 @@ pub(super) fn FindingsTable(
                             let sel = handle.selected_ids();
                             let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_d.get(id).cloned()).collect();
                             if picked.is_empty() { return; }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked { d.entry(finding_key(f)).or_default().bucket = TechDebtBucket::Now; }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.set_bucket(&picked, TechDebtBucket::Now);
+                            dispositions.set(model.dispositions);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Marked {} as resolve now.", picked.len()));
                         },
                         "Mark: resolve now"
@@ -1484,9 +1380,9 @@ pub(super) fn FindingsTable(
                             let sel = handle.selected_ids();
                             let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_a.get(id).cloned()).collect();
                             if picked.is_empty() { return; }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked { d.entry(finding_key(f)).or_default().state = TriageState::Unresolved; }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.move_to(&picked, TriageState::Unresolved);
+                            dispositions.set(model.dispositions);
                             handle.remove_rows(&sel);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} back to Unresolved.", picked.len()));
                         },
@@ -1498,9 +1394,9 @@ pub(super) fn FindingsTable(
                             let sel = handle.selected_ids();
                             let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_b.get(id).cloned()).collect();
                             if picked.is_empty() { return; }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked { d.entry(finding_key(f)).or_default().state = TriageState::Ignored; }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.move_to(&picked, TriageState::Ignored);
+                            dispositions.set(model.dispositions);
                             handle.remove_rows(&sel);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Ignored.", picked.len()));
                         },
@@ -3899,59 +3795,10 @@ mod tests {
         assert!(csv.contains("\"a, b, c\""), "comma snippet must be quoted; csv=\n{csv}");
     }
 
-    // ── finding_key / finding_state ───────────────────────────────────────────
-
-    #[test]
-    fn finding_key_combines_identity_fields() {
-        let f = finding(serde_json::json!({
-            "repo": "owner/repo", "path": "src/a.rs", "line": 7,
-            "rule_id": "RULE-X", "severity": "high", "snippet": "snip", "detail": ""
-        }));
-        let key = super::finding_key(&f);
-        assert!(key.contains("owner/repo"));
-        assert!(key.contains("RULE-X"));
-        assert!(key.contains("src/a.rs"));
-        assert!(key.contains('7'));
-        assert!(key.contains("snip"));
-    }
-
-    #[test]
-    fn finding_state_defaults_to_unresolved_when_absent() {
-        let f = finding(serde_json::json!({
-            "repo": "r", "path": "p", "line": 1,
-            "rule_id": "R", "severity": "low", "snippet": "s", "detail": ""
-        }));
-        let map = std::collections::HashMap::new();
-        assert_eq!(super::finding_state(&map, &f), super::TriageState::Unresolved);
-    }
-
-    #[test]
-    fn finding_state_reads_disposition_when_present() {
-        let f = finding(serde_json::json!({
-            "repo": "r", "path": "p", "line": 1,
-            "rule_id": "R", "severity": "low", "snippet": "s", "detail": ""
-        }));
-        let mut map = std::collections::HashMap::new();
-        map.insert(
-            super::finding_key(&f),
-            super::Disposition {
-                state: super::TriageState::Ignored,
-                reason: "noise".to_string(),
-                bucket: super::TechDebtBucket::Later,
-            },
-        );
-        assert_eq!(super::finding_state(&map, &f), super::TriageState::Ignored);
-    }
-
-    // ── default_finding_status / TriageState default ──────────────────────────
-
-    #[test]
-    fn triage_state_defaults_to_unresolved() {
-        assert_eq!(super::TriageState::default(), super::TriageState::Unresolved);
-    }
-
-    // (human_tokens, det_tool_label, default_finding_status tests moved to
-    // camerata-ui-core::scan — pure, now unit-tested with no VirtualDom.)
+    // (finding_key / finding_state / TriageState-default tests moved to
+    // camerata_ui_core::triage alongside the lifted state machine — pure, unit-tested with no
+    // VirtualDom. human_tokens / det_tool_label / default_finding_status tests live in
+    // camerata_ui_core::scan.)
 
     // ── recommend_scan_mode ───────────────────────────────────────────────────
 
