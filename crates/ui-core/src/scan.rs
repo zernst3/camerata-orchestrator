@@ -386,6 +386,304 @@ mod tests {
         );
     }
 
+    // ── Property / monotonicity tests ────────────────────────────────────────────────────────────
+    // These sweep representative inputs to verify invariants that are hard to cover with point
+    // tests. All use hand-rolled loops — no new crate dependency.
+
+    /// Property 1 — MONOTONIC IN CODE SIZE: holding everything else fixed, increasing code_chars
+    /// never decreases tokens and never decreases dollars.
+    ///
+    /// We sweep code_chars in order and assert each step is >= the previous. We include sizes
+    /// that straddle chunk boundaries (CHUNK_DIGEST_CHARS = 350_000) so the property is verified
+    /// across both single-chunk and multi-chunk inputs.
+    #[test]
+    fn prop_monotonic_in_code_size() {
+        let sizes: &[usize] = &[50_000, 200_000, 350_000, 351_000, 700_000, 1_400_000];
+        for &selected in &[0usize, 1, 15, 30, 60] {
+            for &mode in &["sequential", "parallel", "batch"] {
+                for &thorough in &[false, true] {
+                    for &deep in &[false, true] {
+                        let mut prev_toks = 0u64;
+                        let mut prev_dollars = 0.0f64;
+                        for &code_chars in sizes {
+                            let (toks, dollars, _passes) = estimate_audit_cost(
+                                code_chars, selected, mode,
+                                3.0, 15.0, 3.0, 15.0,
+                                thorough, false, deep,
+                            );
+                            assert!(
+                                toks >= prev_toks,
+                                "tokens must be non-decreasing in code_chars: \
+                                 code_chars={code_chars} selected={selected} mode={mode} \
+                                 thorough={thorough} deep={deep} \
+                                 prev_toks={prev_toks} toks={toks}"
+                            );
+                            assert!(
+                                dollars >= prev_dollars,
+                                "dollars must be non-decreasing in code_chars: \
+                                 code_chars={code_chars} selected={selected} mode={mode} \
+                                 thorough={thorough} deep={deep} \
+                                 prev_dollars={prev_dollars:.6} dollars={dollars:.6}"
+                            );
+                            prev_toks = toks;
+                            prev_dollars = dollars;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Property 2 — MONOTONIC IN RULE COUNT (parallel): in "parallel" mode, increasing `selected`
+    /// never decreases `passes` and never decreases `dollars`. Passes increase in steps of
+    /// ceil(selected/15), so equality is expected within each 15-rule batch tier.
+    #[test]
+    fn prop_parallel_monotonic_in_rule_count() {
+        let rule_counts: &[usize] = &[0, 1, 14, 15, 16, 30, 31, 60];
+        for &code_chars in &[50_000usize, 200_000, 700_000] {
+            let mut prev_passes = 0usize;
+            let mut prev_dollars = 0.0f64;
+            for &selected in rule_counts {
+                let (_toks, dollars, passes) = estimate_audit_cost(
+                    code_chars, selected, "parallel",
+                    3.0, 15.0, 3.0, 15.0,
+                    false, false, false,
+                );
+                assert!(
+                    passes >= prev_passes,
+                    "passes must be non-decreasing in selected (parallel): \
+                     code_chars={code_chars} selected={selected} \
+                     prev_passes={prev_passes} passes={passes}"
+                );
+                assert!(
+                    dollars >= prev_dollars,
+                    "dollars must be non-decreasing in selected (parallel): \
+                     code_chars={code_chars} selected={selected} \
+                     prev_dollars={prev_dollars:.6} dollars={dollars:.6}"
+                );
+                prev_passes = passes;
+                prev_dollars = dollars;
+            }
+        }
+    }
+
+    /// Property 3 — BATCH IS CHEAPER THAN PARALLEL: for non-zero audit prices, "batch" dollars
+    /// are strictly less than "parallel" dollars on the same config. Passes are identical because
+    /// chunking and rule-batching are mode-independent.
+    ///
+    /// We use non-zero audit prices (3.0/15.0) so the scan discount actually saves money.
+    /// If audit prices were 0 the scan portion would contribute $0 in both modes and the totals
+    /// would be equal; that edge-case is explicitly tested as ai_scan_off_zero_prices_yields_zero_dollars.
+    #[test]
+    fn prop_batch_cheaper_than_parallel() {
+        for &code_chars in &[50_000usize, 200_000, 350_000, 700_000, 1_400_000] {
+            for &selected in &[0usize, 1, 15, 30, 60] {
+                for &thorough in &[false, true] {
+                    let (_tp, dp, passes_p) = estimate_audit_cost(
+                        code_chars, selected, "parallel",
+                        3.0, 15.0, 3.0, 15.0,
+                        thorough, false, false,
+                    );
+                    let (_tb, db, passes_b) = estimate_audit_cost(
+                        code_chars, selected, "batch",
+                        3.0, 15.0, 3.0, 15.0,
+                        thorough, false, false,
+                    );
+                    assert_eq!(
+                        passes_p, passes_b,
+                        "passes must be equal for parallel vs batch: \
+                         code_chars={code_chars} selected={selected}"
+                    );
+                    assert!(
+                        db < dp,
+                        "batch must be cheaper than parallel (scan discount): \
+                         code_chars={code_chars} selected={selected} thorough={thorough} \
+                         batch_dollars={db:.6} parallel_dollars={dp:.6}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Property 4 — DEEP IS THE PRICIEST LEVER: deep=true dollars are strictly greater than
+    /// deep=false, and deep=true dollars are >= thorough=true dollars on the same base config.
+    ///
+    /// Both sub-properties are tested together across the sweep so a regression in either
+    /// is caught with the offending inputs in the failure message.
+    #[test]
+    fn prop_deep_is_the_priciest_lever() {
+        for &code_chars in &[50_000usize, 200_000, 350_000, 700_000, 1_400_000] {
+            for &selected in &[0usize, 1, 15, 30, 60] {
+                for &mode in &["sequential", "parallel", "batch"] {
+                    let base = |deep: bool, thorough: bool| {
+                        estimate_audit_cost(
+                            code_chars, selected, mode,
+                            3.0, 15.0, 3.0, 15.0,
+                            thorough, false, deep,
+                        ).1
+                    };
+                    let standard   = base(false, false);
+                    let with_deep  = base(true,  false);
+                    let with_thorough = base(false, true);
+
+                    assert!(
+                        with_deep > standard,
+                        "deep=true must cost more than deep=false: \
+                         code_chars={code_chars} selected={selected} mode={mode} \
+                         deep={with_deep:.6} standard={standard:.6}"
+                    );
+                    assert!(
+                        with_deep >= with_thorough,
+                        "deep must be >= thorough on the same config: \
+                         code_chars={code_chars} selected={selected} mode={mode} \
+                         deep={with_deep:.6} thorough={with_thorough:.6}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Property 5 — THOROUGH ADDS COST: thorough=true dollars are strictly greater than
+    /// thorough=false across the sweep (thorough triples calibration, which has non-zero price
+    /// when calib model prices are > 0).
+    #[test]
+    fn prop_thorough_adds_cost() {
+        for &code_chars in &[50_000usize, 200_000, 350_000, 700_000, 1_400_000] {
+            for &selected in &[0usize, 1, 15, 30, 60] {
+                for &mode in &["sequential", "parallel", "batch"] {
+                    let (_, dollars_default, _) = estimate_audit_cost(
+                        code_chars, selected, mode,
+                        3.0, 15.0, 3.0, 15.0,
+                        false, false, false,
+                    );
+                    let (_, dollars_thorough, _) = estimate_audit_cost(
+                        code_chars, selected, mode,
+                        3.0, 15.0, 3.0, 15.0,
+                        true, false, false,
+                    );
+                    assert!(
+                        dollars_thorough > dollars_default,
+                        "thorough=true must cost more than thorough=false: \
+                         code_chars={code_chars} selected={selected} mode={mode} \
+                         thorough={dollars_thorough:.6} default={dollars_default:.6}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Property 6 — ZERO PRICES => ZERO DOLLARS: for ANY combination of code/rules/mode/flags,
+    /// if all four price args are 0.0 then dollars == 0.0. Token count may still be > 0 (it's
+    /// computed for informational display regardless of price).
+    #[test]
+    fn prop_zero_prices_yield_zero_dollars() {
+        for &code_chars in &[50_000usize, 200_000, 350_000, 700_000, 1_400_000] {
+            for &selected in &[0usize, 1, 15, 30, 60] {
+                for &mode in &["sequential", "parallel", "batch"] {
+                    for &thorough in &[false, true] {
+                        for &incremental in &[false, true] {
+                            for &deep in &[false, true] {
+                                let (toks, dollars, _) = estimate_audit_cost(
+                                    code_chars, selected, mode,
+                                    0.0, 0.0, 0.0, 0.0,
+                                    thorough, incremental, deep,
+                                );
+                                assert_eq!(
+                                    dollars, 0.0,
+                                    "all-zero prices must yield $0: \
+                                     code_chars={code_chars} selected={selected} mode={mode} \
+                                     thorough={thorough} incremental={incremental} deep={deep} \
+                                     got dollars={dollars}"
+                                );
+                                // Tokens are still computed (non-zero for non-trivial inputs).
+                                let _ = toks;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Property 7 — LINEAR IN PRICE: doubling all four price args exactly doubles dollars
+    /// (within a tight relative tolerance of 1e-9). The function is linear in all price
+    /// parameters, so this must hold exactly up to floating-point rounding.
+    #[test]
+    fn prop_linear_in_price() {
+        for &code_chars in &[50_000usize, 200_000, 350_000, 700_000, 1_400_000] {
+            for &selected in &[0usize, 1, 15, 30, 60] {
+                for &mode in &["sequential", "parallel", "batch"] {
+                    for &thorough in &[false, true] {
+                        for &deep in &[false, true] {
+                            let (_, dollars_base, _) = estimate_audit_cost(
+                                code_chars, selected, mode,
+                                3.0, 15.0, 3.0, 15.0,
+                                thorough, false, deep,
+                            );
+                            let (_, dollars_double, _) = estimate_audit_cost(
+                                code_chars, selected, mode,
+                                6.0, 30.0, 6.0, 30.0,
+                                thorough, false, deep,
+                            );
+                            // Doubling all prices must double the dollar figure.
+                            let expected = dollars_base * 2.0;
+                            let rel_err = if expected.abs() > f64::EPSILON {
+                                ((dollars_double - expected) / expected).abs()
+                            } else {
+                                // Both are ~0 (e.g. zero prices); equality is the right check.
+                                (dollars_double - expected).abs()
+                            };
+                            assert!(
+                                rel_err < 1e-9,
+                                "doubling prices must double dollars (relative error < 1e-9): \
+                                 code_chars={code_chars} selected={selected} mode={mode} \
+                                 thorough={thorough} deep={deep} \
+                                 base={dollars_base:.10} doubled={dollars_double:.10} \
+                                 expected={expected:.10} rel_err={rel_err:.2e}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Property 8 — INCREMENTAL IS A NO-OP TODAY: the `incremental` flag never changes the
+    /// returned dollars for otherwise-identical inputs. The function binds the flag but does not
+    /// use it in any computation (over-estimate by design; see fn doc).
+    #[test]
+    fn prop_incremental_is_noop() {
+        for &code_chars in &[50_000usize, 200_000, 350_000, 700_000, 1_400_000] {
+            for &selected in &[0usize, 1, 15, 30, 60] {
+                for &mode in &["sequential", "parallel", "batch"] {
+                    for &thorough in &[false, true] {
+                        for &deep in &[false, true] {
+                            let (toks_f, dollars_f, passes_f) = estimate_audit_cost(
+                                code_chars, selected, mode,
+                                3.0, 15.0, 3.0, 15.0,
+                                thorough, false, deep,
+                            );
+                            let (toks_i, dollars_i, passes_i) = estimate_audit_cost(
+                                code_chars, selected, mode,
+                                3.0, 15.0, 3.0, 15.0,
+                                thorough, true, deep,
+                            );
+                            assert_eq!(
+                                dollars_f, dollars_i,
+                                "incremental flag must not change dollars: \
+                                 code_chars={code_chars} selected={selected} mode={mode} \
+                                 thorough={thorough} deep={deep} \
+                                 non_incremental={dollars_f:.10} incremental={dollars_i:.10}"
+                            );
+                            assert_eq!(toks_f, toks_i, "incremental must not change token count");
+                            assert_eq!(passes_f, passes_i, "incremental must not change pass count");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // The following three (from the scan UI) assert monotonicity at a distinct input point
     // (400k chars / 20 rules), complementing the cockpit cases above.
 
