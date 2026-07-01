@@ -7,4 +7,5 @@
 //! Extraction from `camerata-ui` is incremental (see `docs/plans/2026-07-01_ui-core-extraction.md`);
 //! modules are added here as each surface's logic moves over.
 
+pub mod models;
 pub mod schedule;

@@ -9,5 +9,12 @@ workspace = true
 # Framework-agnostic UI logic + state for the cockpit (RUST-HEADLESS-CORE-1). This crate owns the
 # cockpit's pure logic, data shapes, and state transitions and MUST NOT depend on any rendering
 # framework (no dioxus). The compiler then guarantees it stays renderer-free and unit-testable with
-# no VirtualDom. Dependencies are added only as logic is extracted; the schedule beachhead needs none.
+# no VirtualDom. Dependencies are added only as logic is extracted (never a rendering framework).
 [dependencies]
+# The BFF view types (e.g. the model registry response) deserialize from the API; serde is a data
+# concern, not a rendering one, so it belongs in the framework-agnostic core.
+serde = { workspace = true }
+
+[dev-dependencies]
+# Tests deserialize sample API payloads to exercise the view types + grouping logic.
+serde_json = { workspace = true }
