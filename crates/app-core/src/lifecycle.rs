@@ -579,4 +579,328 @@ mod tests {
         let json = serde_json::to_string(&err).unwrap();
         assert!(json.contains("\"decisions_not_approved\""));
     }
+
+    // ── exhaustive transition table ──────────────────────────────────────────
+    //
+    // For EVERY UowStage variant × EVERY transition method: assert the exact
+    // outcome. This is the "state machine completeness" test — if a new
+    // UowStage variant is ever added, the explicit array below will force a
+    // compile error (non-exhaustive match) or obvious test failure, ensuring
+    // the table is kept up to date.
+    //
+    // Transitions that accept `&[DecisionRecord]` are tested with two flavours:
+    //   - `approved_decisions` (a non-empty slice where every entry is Approved)
+    //   - `bad_decisions`      (a non-empty slice with at least one Pending)
+    // so we can exercise both the gate-pass and gate-fail paths from the correct
+    // source stage, and confirm that neither flavour helps wrong-stage calls.
+
+    const ALL_STAGES: [UowStage; 6] = [
+        UowStage::Intake,
+        UowStage::Investigating,
+        UowStage::DecisionsApproved,
+        UowStage::Development,
+        UowStage::AwaitingQa,
+        UowStage::SignedOff,
+    ];
+
+    // ── begin_investigation: legal only from Intake ──────────────────────────
+
+    #[test]
+    fn transition_table_begin_investigation() {
+        for stage in ALL_STAGES {
+            let result = stage.begin_investigation();
+            if stage == UowStage::Intake {
+                assert_eq!(
+                    result,
+                    Ok(UowStage::Investigating),
+                    "begin_investigation should succeed from Intake"
+                );
+            } else {
+                let err = result.unwrap_err();
+                assert!(
+                    matches!(
+                        err,
+                        TransitionError::WrongStage {
+                            attempted: "begin_investigation",
+                            expected: UowStage::Intake,
+                            ..
+                        }
+                    ),
+                    "begin_investigation from {stage:?} should produce WrongStage(expected=Intake), got {err:?}"
+                );
+                // Confirm `from` carries the actual stage, not something else.
+                if let TransitionError::WrongStage { from, .. } = err {
+                    assert_eq!(from, stage);
+                }
+            }
+        }
+    }
+
+    // ── approve_decisions: legal only from Investigating + gate satisfied ────
+
+    #[test]
+    fn transition_table_approve_decisions_with_approved_records() {
+        let good = vec![approved_decision("x"), approved_decision("y")];
+        for stage in ALL_STAGES {
+            let result = stage.approve_decisions(&good);
+            if stage == UowStage::Investigating {
+                assert_eq!(
+                    result,
+                    Ok(UowStage::DecisionsApproved),
+                    "approve_decisions with approved records should succeed from Investigating"
+                );
+            } else {
+                let err = result.unwrap_err();
+                assert!(
+                    matches!(
+                        err,
+                        TransitionError::WrongStage {
+                            attempted: "approve_decisions",
+                            expected: UowStage::Investigating,
+                            ..
+                        }
+                    ),
+                    "approve_decisions (good records) from {stage:?} should produce WrongStage, got {err:?}"
+                );
+                if let TransitionError::WrongStage { from, .. } = err {
+                    assert_eq!(from, stage);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn transition_table_approve_decisions_with_bad_records_from_investigating() {
+        // Even the legal source stage must not succeed when the gate is not satisfied.
+        let bad = vec![approved_decision("a"), pending_decision("b")];
+        let err = UowStage::Investigating
+            .approve_decisions(&bad)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                TransitionError::DecisionsNotApproved {
+                    total: 2,
+                    unapproved: 1
+                }
+            ),
+            "gate must block even from Investigating when a decision is still pending: {err:?}"
+        );
+    }
+
+    #[test]
+    fn transition_table_approve_decisions_with_empty_records_from_investigating() {
+        // No decisions at all is also a gate failure (gate requires at least one).
+        let err = UowStage::Investigating
+            .approve_decisions(&[])
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                TransitionError::DecisionsNotApproved {
+                    total: 0,
+                    unapproved: 0
+                }
+            ),
+            "gate must block with zero decisions: {err:?}"
+        );
+    }
+
+    #[test]
+    fn transition_table_approve_decisions_wrong_stage_beats_gate() {
+        // Wrong-stage check runs before the gate check; bad records from a wrong
+        // stage should still give WrongStage, not DecisionsNotApproved.
+        let bad = vec![pending_decision("p")];
+        for stage in ALL_STAGES {
+            if stage == UowStage::Investigating {
+                continue; // legal stage, covered above
+            }
+            let err = stage.approve_decisions(&bad).unwrap_err();
+            assert!(
+                matches!(err, TransitionError::WrongStage { .. }),
+                "approve_decisions with bad records from {stage:?} should produce WrongStage first: {err:?}"
+            );
+        }
+    }
+
+    // ── start_development: legal only from DecisionsApproved + gate satisfied ─
+
+    #[test]
+    fn transition_table_start_development_with_approved_records() {
+        let good = vec![approved_decision("x")];
+        for stage in ALL_STAGES {
+            let result = stage.start_development(&good);
+            if stage == UowStage::DecisionsApproved {
+                assert_eq!(
+                    result,
+                    Ok(UowStage::Development),
+                    "start_development with approved records should succeed from DecisionsApproved"
+                );
+            } else {
+                let err = result.unwrap_err();
+                assert!(
+                    matches!(
+                        err,
+                        TransitionError::WrongStage {
+                            attempted: "start_development",
+                            expected: UowStage::DecisionsApproved,
+                            ..
+                        }
+                    ),
+                    "start_development (good records) from {stage:?} should produce WrongStage, got {err:?}"
+                );
+                if let TransitionError::WrongStage { from, .. } = err {
+                    assert_eq!(from, stage);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn transition_table_start_development_rechecks_gate() {
+        // Stage is correct but records have a pending decision — the re-check must block.
+        let bad = vec![pending_decision("p")];
+        let err = UowStage::DecisionsApproved
+            .start_development(&bad)
+            .unwrap_err();
+        assert!(
+            matches!(err, TransitionError::DecisionsNotApproved { .. }),
+            "start_development must recheck the gate even when the stage is correct: {err:?}"
+        );
+    }
+
+    #[test]
+    fn transition_table_start_development_wrong_stage_beats_gate() {
+        let bad = vec![pending_decision("p")];
+        for stage in ALL_STAGES {
+            if stage == UowStage::DecisionsApproved {
+                continue;
+            }
+            let err = stage.start_development(&bad).unwrap_err();
+            assert!(
+                matches!(err, TransitionError::WrongStage { .. }),
+                "start_development with bad records from {stage:?} should produce WrongStage first: {err:?}"
+            );
+        }
+    }
+
+    // ── finish_development: legal only from Development ──────────────────────
+
+    #[test]
+    fn transition_table_finish_development() {
+        for stage in ALL_STAGES {
+            let result = stage.finish_development();
+            if stage == UowStage::Development {
+                assert_eq!(
+                    result,
+                    Ok(UowStage::AwaitingQa),
+                    "finish_development should succeed from Development"
+                );
+            } else {
+                let err = result.unwrap_err();
+                assert!(
+                    matches!(
+                        err,
+                        TransitionError::WrongStage {
+                            attempted: "finish_development",
+                            expected: UowStage::Development,
+                            ..
+                        }
+                    ),
+                    "finish_development from {stage:?} should produce WrongStage(expected=Development), got {err:?}"
+                );
+                if let TransitionError::WrongStage { from, .. } = err {
+                    assert_eq!(from, stage);
+                }
+            }
+        }
+    }
+
+    // ── sign_off: legal only from AwaitingQa ────────────────────────────────
+
+    #[test]
+    fn transition_table_sign_off() {
+        for stage in ALL_STAGES {
+            let result = stage.sign_off();
+            if stage == UowStage::AwaitingQa {
+                assert_eq!(
+                    result,
+                    Ok(UowStage::SignedOff),
+                    "sign_off should succeed from AwaitingQa"
+                );
+            } else {
+                let err = result.unwrap_err();
+                assert!(
+                    matches!(
+                        err,
+                        TransitionError::WrongStage {
+                            attempted: "sign_off",
+                            expected: UowStage::AwaitingQa,
+                            ..
+                        }
+                    ),
+                    "sign_off from {stage:?} should produce WrongStage(expected=AwaitingQa), got {err:?}"
+                );
+                if let TransitionError::WrongStage { from, .. } = err {
+                    assert_eq!(from, stage);
+                }
+            }
+        }
+    }
+
+    // ── no stage can call multiple transitions successfully in one step ───────
+    //
+    // Belt-and-suspenders: a correct stage produces exactly ONE Ok target from
+    // the transition it is meant for and Err from the other four.
+
+    #[test]
+    fn each_stage_has_exactly_one_legal_simple_transition() {
+        let good = vec![approved_decision("z")];
+
+        // (stage, which transition gives Ok, expected next stage)
+        // Transitions with decision args: approve_decisions / start_development
+        // Simple transitions: begin_investigation / finish_development / sign_off
+
+        // Intake: only begin_investigation succeeds.
+        assert!(UowStage::Intake.begin_investigation().is_ok());
+        assert!(UowStage::Intake.approve_decisions(&good).is_err());
+        assert!(UowStage::Intake.start_development(&good).is_err());
+        assert!(UowStage::Intake.finish_development().is_err());
+        assert!(UowStage::Intake.sign_off().is_err());
+
+        // Investigating: only approve_decisions (with good records) succeeds.
+        assert!(UowStage::Investigating.begin_investigation().is_err());
+        assert!(UowStage::Investigating.approve_decisions(&good).is_ok());
+        assert!(UowStage::Investigating.start_development(&good).is_err());
+        assert!(UowStage::Investigating.finish_development().is_err());
+        assert!(UowStage::Investigating.sign_off().is_err());
+
+        // DecisionsApproved: only start_development (with good records) succeeds.
+        assert!(UowStage::DecisionsApproved.begin_investigation().is_err());
+        assert!(UowStage::DecisionsApproved.approve_decisions(&good).is_err());
+        assert!(UowStage::DecisionsApproved.start_development(&good).is_ok());
+        assert!(UowStage::DecisionsApproved.finish_development().is_err());
+        assert!(UowStage::DecisionsApproved.sign_off().is_err());
+
+        // Development: only finish_development succeeds.
+        assert!(UowStage::Development.begin_investigation().is_err());
+        assert!(UowStage::Development.approve_decisions(&good).is_err());
+        assert!(UowStage::Development.start_development(&good).is_err());
+        assert!(UowStage::Development.finish_development().is_ok());
+        assert!(UowStage::Development.sign_off().is_err());
+
+        // AwaitingQa: only sign_off succeeds.
+        assert!(UowStage::AwaitingQa.begin_investigation().is_err());
+        assert!(UowStage::AwaitingQa.approve_decisions(&good).is_err());
+        assert!(UowStage::AwaitingQa.start_development(&good).is_err());
+        assert!(UowStage::AwaitingQa.finish_development().is_err());
+        assert!(UowStage::AwaitingQa.sign_off().is_ok());
+
+        // SignedOff: no transition succeeds (terminal state).
+        assert!(UowStage::SignedOff.begin_investigation().is_err());
+        assert!(UowStage::SignedOff.approve_decisions(&good).is_err());
+        assert!(UowStage::SignedOff.start_development(&good).is_err());
+        assert!(UowStage::SignedOff.finish_development().is_err());
+        assert!(UowStage::SignedOff.sign_off().is_err());
+    }
 }
