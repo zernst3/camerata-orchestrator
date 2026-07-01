@@ -691,7 +691,6 @@ fn MockupPanel(uow_id: String) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dioxus::prelude::*;
 
     #[test]
     fn mockup_panel_renders_collapsed() {
