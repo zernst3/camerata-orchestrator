@@ -199,10 +199,12 @@ pub(super) struct FindingView {
     pub needs_review: bool,
 }
 
-// Scan-surface formatting helpers (human_tokens, det_tool_label, default_finding_status) now live in
-// the framework-agnostic core (RUST-HEADLESS-CORE-1); re-exported so the scan/cockpit call sites are
-// unchanged.
-pub(super) use camerata_ui_core::scan::{default_finding_status, det_tool_label, human_tokens};
+// Scan-surface helpers (human_tokens, det_tool_label, default_finding_status, estimate_audit_cost)
+// now live in the framework-agnostic core (RUST-HEADLESS-CORE-1); re-exported so the scan/cockpit
+// call sites are unchanged.
+pub(super) use camerata_ui_core::scan::{
+    default_finding_status, det_tool_label, estimate_audit_cost, human_tokens,
+};
 
 /// Where a finding sits in onboarding triage. The architect moves each finding between these
 /// three tables (a single-select switches the view) until nothing is Unresolved; then the
@@ -771,163 +773,6 @@ pub(super) async fn fetch_audit_models() -> Option<AuditModelsResp> {
 
     Some(AuditModelsResp { models, default, openrouter_fetched: resp.openrouter_fetched })
 }
-
-/// Rough pre-audit cost estimate, returned as (total_tokens, dollars, passes). Mirrors the
-/// server's chunk/batch math (ai_audit) so the number tracks what the audit actually sends.
-///
-/// Input and output are priced SEPARATELY (output bills ~5× input and dominates
-/// findings-heavy scans). The estimate is deliberately biased slightly CONSERVATIVE (high):
-/// an estimate that turns into a smaller bill is a pleasant surprise; one that turns into
-/// a bigger bill is broken trust.
-///
-/// PROMPT CACHING: for multi-batch parallel scans (the default), the codebase prefix (repo
-/// map + chunk digest) is the same across every rule-batch for a given chunk. When the API
-/// backend is in use the server marks this prefix with `cache_control: ephemeral` so the
-/// provider caches it after the first batch and reads it at ~0.1× for subsequent batches.
-/// The estimate models this:
-///   - batch 0 per chunk: full input price + 1.25× cache-write surcharge on the digest
-///   - batches 1..N per chunk: digest tokens read from cache at 0.1× instead of 1.0×
-/// Sequential mode (one batch per chunk) has no prefix reuse across batches, so no caching
-/// discount applies. CLI backend also skips caching (no-op there).
-///
-/// The FUDGE factor keeps the estimate conservative overall even after the cache discount,
-/// since the calibration pass (over aggregated findings) and the resolution round are
-/// modeled at full price.
-/// `code_chars` is the in-scope code size. The caller is responsible for passing the size of
-/// the SCANNED file set: the whole repo for a full scan. For an incremental re-scan only the
-/// CHANGED files are actually sent to the AI, but the client has no per-file / changed-file
-/// token breakdown today (`ScanReportView` carries only the repo-total `code_chars`), so we
-/// price the FULL set and flag `incremental` in the readout as a known over-estimate. See the
-/// followup in `docs/decisions/2026-06-20_ui_bugfixes.md`.
-///
-/// `deep` (the SOC-2 / deep-security / threat-model tier) adds three EXTRA whole-repo prose
-/// passes at the AUDIT model on top of the standard scan + calibration: each re-reads the full
-/// `code_chars` as input and emits a long prose report. Deep is therefore the priciest option
-/// and the returned dollar figure reflects that, not just a prose warning.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn estimate_audit_cost(
-    code_chars: usize,
-    selected: usize,
-    mode: &str,
-    audit_in: f64,
-    audit_out: f64,
-    calib_in: f64,
-    calib_out: f64,
-    thorough: bool,
-    incremental: bool,
-    deep: bool,
-) -> (u64, f64, usize) {
-    const CHUNK_DIGEST_CHARS: usize = 350_000;
-    const RULE_BATCH_SIZE: usize = 15;
-    const CHARS_PER_TOKEN: f64 = 4.0;
-    // Per-pass overhead (rules block + system prompt) that varies per batch and is never
-    // cached. The digest + repo map form the cached prefix, so only this remainder is
-    // re-sent at full price for subsequent batches.
-    const OVERHEAD_CHARS_PER_PASS: usize = 10_000;
-    // Output is findings: a baseline per pass plus a term that scales with code scanned
-    // (so a findings-dense or large scan isn't under-counted on the half that bites most).
-    const OUT_TOKENS_PER_PASS: f64 = 2_200.0;
-    const OUTPUT_PER_CODE_TOKEN: f64 = 0.02;
-    // Resolution round + general conservatism. Biased HIGH on purpose: logged real runs
-    // (budget-mini ~2.24×, chorale ~1.75×) came in UNDER estimate even before caching, and
-    // an audit that costs more than quoted is the bad surprise.
-    const FUDGE: f64 = 1.4;
-    // Prompt-cache pricing multipliers (Anthropic list pricing as of 2024-07):
-    //   write (first batch per chunk): 1.25× input
-    //   read  (subsequent batches):    0.10× input
-    const CACHE_WRITE_MULT: f64 = 1.25;
-    const CACHE_READ_MULT: f64 = 0.10;
-    // Deep tier (#55): three EXTRA whole-repo passes (SOC-2 gap, deep security, threat model).
-    // Each reads the full code once and emits a long prose report. Priced at the audit model.
-    const DEEP_PASSES: f64 = 3.0;
-    // A deep pass emits far more prose than a per-rule finding pass (full report per lens).
-    const DEEP_OUT_TOKENS_PER_PASS: f64 = 8_000.0;
-
-    // Batch mode (#61): the Anthropic Message Batches API charges a flat 50% discount on
-    // ALL input and output tokens for the SCAN passes (which are submitted as a batch).
-    // The calibration pass always runs real-time (a single call over aggregated findings
-    // — not batched), so calib pricing is NOT discounted.
-    let batch_discount = if mode == "batch" { 0.5 } else { 1.0 };
-    let (eff_audit_in, eff_audit_out) = (audit_in * batch_discount, audit_out * batch_discount);
-    // Calibration is real-time even in batch mode: one call over the aggregated findings.
-    let (eff_calib_in, eff_calib_out) = (calib_in, calib_out);
-
-    let chunks = code_chars.div_ceil(CHUNK_DIGEST_CHARS).max(1);
-    let batches = if mode == "sequential" {
-        1
-    } else {
-        selected.div_ceil(RULE_BATCH_SIZE).max(1)
-    };
-    let passes = chunks * batches;
-    let code_tokens = code_chars as f64 / CHARS_PER_TOKEN;
-
-    // ── Scan passes, priced at the AUDIT model (with batch discount applied) ──
-    //
-    // Without caching: the full digest is re-sent at full input price every pass.
-    // With caching (parallel/batch mode, batches > 1): per chunk, batch 0 pays full input
-    // + the one-time 1.25× cache-write surcharge; batches 1..N read the cached digest at
-    // 0.1×. Sequential (batches == 1) has no reuse, so no discount.
-    //
-    // Overhead tokens (rules block, system prompt) are always sent at full price since they
-    // vary per batch.
-    let scan_in = if batches <= 1 {
-        // No caching benefit: every batch pays full price for the digest.
-        (code_chars * batches + OVERHEAD_CHARS_PER_PASS * passes) as f64 / CHARS_PER_TOKEN
-    } else {
-        // Batch 0 per chunk: full digest price + cache-write surcharge.
-        // Batches 1..N per chunk: digest at cache-read rate (0.1×).
-        let digest_tokens_per_chunk = code_chars as f64 / chunks as f64 / CHARS_PER_TOKEN;
-        let write_cost = digest_tokens_per_chunk * CACHE_WRITE_MULT * chunks as f64;
-        let read_cost = digest_tokens_per_chunk
-            * CACHE_READ_MULT
-            * (batches.saturating_sub(1)) as f64
-            * chunks as f64;
-        // Overhead (never cached) is full price for every pass.
-        let overhead_cost = OVERHEAD_CHARS_PER_PASS as f64 / CHARS_PER_TOKEN * passes as f64;
-        write_cost + read_cost + overhead_cost
-    };
-    let scan_out =
-        OUT_TOKENS_PER_PASS * passes as f64 + OUTPUT_PER_CODE_TOKEN * code_tokens * batches as f64;
-
-    // ── Calibration: ONE pass over all findings, priced at the CALIBRATION model. It
-    // re-reads roughly the scan's output (the findings) and RE-EMITS each finding with a
-    // corrected/verified body. So its output rides with the full findings volume, ~1× the
-    // scan's output. Thorough mode (#51) runs ~3× for multi-vote consensus.
-    let cal_passes = if thorough { 3.0 } else { 1.0 };
-    let cal_in = scan_out * cal_passes;
-    let cal_out = scan_out * cal_passes;
-
-    // ── Deep tier: three EXTRA whole-repo prose passes at the AUDIT model. Each reads the
-    // full code (no per-rule batching, no caching discount — distinct prompts per lens) and
-    // emits a long prose report. This is the dominant cost when enabled, which is why deep is
-    // surfaced as the priciest option in the readout. Batch discount does NOT apply (these run
-    // real-time as part of the deep lens flow, not in the scan batch).
-    let (deep_in, deep_out) = if deep {
-        let full_code_tokens = code_chars as f64 / CHARS_PER_TOKEN;
-        let din = full_code_tokens * DEEP_PASSES;
-        let dout = DEEP_OUT_TOKENS_PER_PASS * DEEP_PASSES;
-        (din, dout)
-    } else {
-        (0.0, 0.0)
-    };
-
-    // Incremental scope (only changed files actually billed) would lower the scan portion, but
-    // the client has no changed-file token breakdown today (see fn doc + followup), so we keep
-    // the full-scan price and let the readout flag incremental as an over-estimate. Bind the
-    // flag so its role is explicit even though the number is unchanged here.
-    let _ = incremental;
-
-    let dollars = ((scan_in * eff_audit_in + scan_out * eff_audit_out)
-        + (cal_in * eff_calib_in + cal_out * eff_calib_out)
-        + (deep_in * audit_in + deep_out * audit_out))
-        / 1_000_000.0
-        * FUDGE;
-    let total_tokens =
-        ((scan_in + scan_out + cal_in + cal_out + deep_in + deep_out) * FUDGE) as u64;
-    (total_tokens, dollars, passes)
-}
-
-/// Compact human token count: 2.0M / 350k / 900.
 
 /// One deterministic-scan tool's live progress (mirror of the server's `DetToolProgress`).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
@@ -4214,39 +4059,8 @@ mod tests {
         assert_eq!(super::resolve_gf_directive(&r), "The Title");
     }
 
-    // ── estimate_audit_cost (monotonicity + mode/deep behaviour) ──────────────
-
-    #[test]
-    fn estimate_cost_returns_passes_and_nonzero_dollars() {
-        let (tokens, dollars, passes) = super::estimate_audit_cost(
-            400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false,
-        );
-        assert!(tokens > 0, "tokens estimated");
-        assert!(dollars > 0.0, "dollars estimated");
-        assert!(passes >= 1, "at least one pass");
-    }
-
-    #[test]
-    fn estimate_cost_batch_mode_is_cheaper_than_parallel() {
-        let (_, parallel, _) = super::estimate_audit_cost(
-            400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false,
-        );
-        let (_, batch, _) = super::estimate_audit_cost(
-            400_000, 20, "batch", 3.0, 15.0, 3.0, 15.0, false, false, false,
-        );
-        assert!(batch < parallel, "batch (50% scan discount) must cost less; batch={batch} parallel={parallel}");
-    }
-
-    #[test]
-    fn estimate_cost_deep_tier_adds_cost() {
-        let (_, without, _) = super::estimate_audit_cost(
-            400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false,
-        );
-        let (_, with_deep, _) = super::estimate_audit_cost(
-            400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, true,
-        );
-        assert!(with_deep > without, "deep tier must increase the estimate; deep={with_deep} base={without}");
-    }
+    // estimate_audit_cost pricing tests now live with the function in
+    // camerata_ui_core::scan (all assertions, incl. these 400k/20 monotonicity cases).
 
     // ════════════════════════════════════════════════════════════════════════
     // Tier 2 — network-helper tests (wiremock). Each sets CAMERATA_BFF_URL, so
