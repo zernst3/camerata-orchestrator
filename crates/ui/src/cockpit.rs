@@ -1359,93 +1359,11 @@ struct RunGateEvent {
     detail: String,
 }
 
-/// The display label + CSS class for a run-activity event, derived from its `layer` +
-/// `verdict`. PURE so the mapping is unit-testable without rendering. The class is one of
-/// the existing `live-event {variant}` families plus the new layer variants; the label is
-/// a short, human tag (no chain-of-thought).
-fn live_event_style(layer: &str, verdict: &str) -> (&'static str, &'static str) {
-    match layer {
-        // Layer-1 deny-before-execute gate: allow / deny (the bounce-back).
-        "layer-1" => match verdict {
-            "deny" => ("GATE DENY", "live-event deny"),
-            "allow" => ("GATE ALLOW", "live-event allow"),
-            _ => ("GATE", "live-event info"),
-        },
-        // Layer-2 post-task lint/test check + the bounce-and-revise pass.
-        "layer-2" => match verdict {
-            "pass" => ("LAYER-2 PASS", "live-event allow"),
-            "fail" => ("LAYER-2 FAIL", "live-event deny"),
-            "revise" => ("REVISE", "live-event revise"),
-            // legacy scripted "bounce" verdict.
-            "bounce" => ("REVISE", "live-event revise"),
-            _ => ("LAYER-2", "live-event info"),
-        },
-        // Delegation dispatch / return (+ INCOMPLETE escalation).
-        "delegate" => match verdict {
-            "dispatch" => ("DELEGATE", "live-event delegate"),
-            "incomplete" => ("DELEGATE INCOMPLETE", "live-event deny"),
-            _ => ("DELEGATE RETURN", "live-event delegate"),
-        },
-        // Phase 3b: the agent raised a structured clarifying question; the run paused
-        // ("pause") or resumed on the answer ("info").
-        "clarification" => match verdict {
-            "pause" => ("WAITING ON YOU", "live-event revise"),
-            _ => ("CLARIFICATION", "live-event info"),
-        },
-        // Model/tier routing per spawned agent.
-        "tier" => ("TIER", "live-event tier"),
-        // cargo build/test verification.
-        "checks" => match verdict {
-            "allow" => ("CHECKS PASS", "live-event allow"),
-            "deny" => ("CHECKS FAIL", "live-event deny"),
-            _ => ("CHECKS", "live-event info"),
-        },
-        // Stage / fleet lifecycle + setup.
-        "stage" => match verdict {
-            "fail" => ("STAGE", "live-event deny"),
-            _ => ("STAGE", "live-event info"),
-        },
-        // Stall-detection synthetic event: the run has been idle longer than the threshold.
-        "stall" => ("STALL", "live-event stall"),
-        "setup" => ("SETUP", "live-event info"),
-        // Default (incl. "fleet" lifecycle, empty/legacy): fall back to the verdict.
-        _ => match verdict {
-            "deny" | "error" => (
-                if verdict == "error" { "ERROR" } else { "DENY" },
-                "live-event deny",
-            ),
-            "allow" => ("ALLOW", "live-event allow"),
-            _ => ("INFO", "live-event info"),
-        },
-    }
-}
-
-/// Format an idle duration from milliseconds into a human-readable string.
-/// e.g. 90_000 → "1m 30s", 5_000 → "5s", 65_000 → "1m 5s".
-fn format_idle(idle_ms: u128) -> String {
-    let total_secs = idle_ms / 1000;
-    if total_secs < 60 {
-        format!("{total_secs}s")
-    } else {
-        let mins = total_secs / 60;
-        let secs = total_secs % 60;
-        if secs == 0 {
-            format!("{mins}m")
-        } else {
-            format!("{mins}m {secs}s")
-        }
-    }
-}
-
-/// True when a run is in a non-terminal, cancellable state.
-fn run_is_cancellable(status: &str, done: bool) -> bool {
-    !done && !matches!(status, "failed" | "cancelled")
-}
-
-/// True when a stall warning banner should be shown for a run.
-fn run_stall_banner_visible(stalled: bool, done: bool) -> bool {
-    stalled && !done
-}
+// Run/event display helpers now live in the framework-agnostic core (RUST-HEADLESS-CORE-1);
+// re-exported so the cockpit and its submodules (live_run, scan) call sites are unchanged.
+pub(crate) use camerata_ui_core::run::{
+    format_idle, live_event_style, run_is_cancellable, run_stall_banner_visible,
+};
 
 /// The outcome of attempting to start a governed run. The no-code-first gate (Pillar 2)
 /// can BLOCK the start with a precise reason (server 409), which the cockpit surfaces as
@@ -2835,15 +2753,8 @@ fn CockpitNotice(kind: String) -> Element {
     }
 }
 
-impl Default for Disposition {
-    fn default() -> Self {
-        Self {
-            state: TriageState::Unresolved,
-            reason: String::new(),
-            bucket: TechDebtBucket::Later,
-        }
-    }
-}
+// `impl Default for Disposition` moved to `camerata_ui_core::triage` alongside `Disposition`
+// itself (the orphan rule requires the impl to live in the crate that owns the now-foreign type).
 
 /// Custom-rule helpers for onboarding. `domain` routes a rule: a repo's `owner/repo` =
 /// repo-scoped (the "Custom" domain, shown only in that repo's table); `*` = all repos (the
@@ -3058,10 +2969,8 @@ pub use uow::*;
 #[cfg(test)]
 mod tests {
     use super::{
-        det_tool_label, dev_run_body, estimate_audit_cost, format_idle, is_enforced_floor,
-        live_event_style, run_is_cancellable, run_stall_banner_visible, run_status_badge,
-        FindingView, JobStatusEnvelope, JobStateView, RunGateEvent, RunView, StallThresholdsView,
-        TierMapView,
+        dev_run_body, is_enforced_floor, run_status_badge, FindingView, JobStatusEnvelope,
+        JobStateView, RunGateEvent, RunView, StallThresholdsView, TierMapView,
     };
 
     /// The job-state view deserializes the server's `deterministic` progress section
@@ -3094,15 +3003,8 @@ mod tests {
         assert!(legacy.deterministic.tools.is_empty());
     }
 
-    /// The per-tool label maps the wire tool names to friendly labels.
-    #[test]
-    fn deterministic_tool_labels() {
-        assert_eq!(det_tool_label("floor"), "Security floor");
-        assert_eq!(det_tool_label("unrouted"), "Unrouted rules");
-        // Linters pass through unchanged.
-        assert_eq!(det_tool_label("clippy"), "clippy");
-        assert_eq!(det_tool_label("ruff"), "ruff");
-    }
+    // (deterministic_tool_labels moved to camerata-ui-core::scan::det_tool_label, merged with the
+    // scan.rs test — the "ruff" passthrough case is preserved there.)
 
     /// `fmt_tokens` compacts a raw token count into the headline figure shown in the usage
     /// meter: bare digits below 1k, `N.Nk` in the thousands, `N.NM` in the millions. Asserts
@@ -3167,30 +3069,6 @@ mod tests {
         assert_eq!(no_layer.verdict, "deny");
     }
 
-    /// The per-layer/verdict styling gives each observability kind a distinct label +
-    /// class so the activity log reads clearly. Asserts the load-bearing mappings.
-    #[test]
-    fn live_event_style_labels_each_layer_distinctly() {
-        assert_eq!(live_event_style("layer-1", "deny"), ("GATE DENY", "live-event deny"));
-        assert_eq!(live_event_style("layer-1", "allow"), ("GATE ALLOW", "live-event allow"));
-        assert_eq!(live_event_style("layer-2", "pass"), ("LAYER-2 PASS", "live-event allow"));
-        assert_eq!(live_event_style("layer-2", "fail"), ("LAYER-2 FAIL", "live-event deny"));
-        assert_eq!(live_event_style("layer-2", "revise"), ("REVISE", "live-event revise"));
-        assert_eq!(live_event_style("tier", "info"), ("TIER", "live-event tier"));
-        assert_eq!(
-            live_event_style("delegate", "dispatch"),
-            ("DELEGATE", "live-event delegate")
-        );
-        assert_eq!(
-            live_event_style("delegate", "incomplete"),
-            ("DELEGATE INCOMPLETE", "live-event deny")
-        );
-        assert_eq!(live_event_style("checks", "allow"), ("CHECKS PASS", "live-event allow"));
-        // Legacy/empty layer falls back to verdict-based styling.
-        assert_eq!(live_event_style("", "deny"), ("DENY", "live-event deny"));
-        assert_eq!(live_event_style("", "allow"), ("ALLOW", "live-event allow"));
-    }
-
     /// The bootstrap toggle adds `skip_layer2: true` to the body ONLY when on, and never
     /// when off (so a normal run is byte-for-byte the existing contract).
     #[test]
@@ -3231,209 +3109,6 @@ mod tests {
         assert_eq!(tier["fast"][0].as_str().unwrap(), tm.fast[0]);
     }
 
-    /// Sequential mode (1 batch per chunk) has no caching reuse across batches — the
-    /// estimate must match the pre-caching math (full digest price every pass).
-    #[test]
-    fn sequential_mode_no_cache_discount() {
-        // Small repo: 100k chars, 0 rules, sequential.
-        let (toks, dollars, passes) =
-            estimate_audit_cost(100_000, 0, "sequential", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        assert_eq!(passes, 1, "0 rules + sequential = one pass");
-        assert!(toks > 0, "some tokens");
-        assert!(dollars > 0.0, "some cost");
-    }
-
-    /// Parallel mode with multiple batches should cost LESS than the naive per-batch full
-    /// price because subsequent batches read the digest from cache at ~0.1×.
-    #[test]
-    fn parallel_multi_batch_cheaper_than_sequential_sum() {
-        // 30 rules -> ceil(30/15)=2 batches; 350k chars = 1 chunk.
-        let (_, dollars_parallel, passes_parallel) =
-            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        assert_eq!(passes_parallel, 2, "2 batches for 30 rules");
-
-        // If we ran sequential with 30 rules we get 1 pass; run twice to simulate
-        // the naive "pay full price twice" baseline.
-        let (_, dollars_seq_single, _) =
-            estimate_audit_cost(350_000, 30, "sequential", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        let naive_two_passes = dollars_seq_single * 2.0;
-
-        assert!(
-            dollars_parallel < naive_two_passes,
-            "caching makes 2 parallel batches cheaper than naive 2× sequential: {dollars_parallel:.4} < {naive_two_passes:.4}"
-        );
-    }
-
-    /// Single-batch parallel (1 rule, or 0 rules) has nothing to cache — no second batch
-    /// to amortise over, so the discount path is not taken.
-    #[test]
-    fn parallel_single_batch_no_discount() {
-        // 1 rule -> 1 batch in parallel mode.
-        let (toks1, dollars1, passes1) =
-            estimate_audit_cost(350_000, 1, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        let (toks_seq, dollars_seq, passes_seq) =
-            estimate_audit_cost(350_000, 1, "sequential", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        assert_eq!(passes1, 1);
-        assert_eq!(passes_seq, 1);
-        // Token counts should be in the same ballpark (both are 1 pass over the same chunk).
-        // The cache-write surcharge on the parallel path makes it *slightly* higher than
-        // sequential, but they should be within 30% of each other.
-        let ratio = toks1 as f64 / toks_seq as f64;
-        assert!(
-            ratio < 1.3,
-            "single-batch parallel not much more expensive than sequential: ratio={ratio:.2}"
-        );
-        let _ = (dollars1, dollars_seq); // exercise the values without asserting exact amounts
-    }
-
-    /// Thorough mode triples the calibration cost; the estimate should grow accordingly.
-    #[test]
-    fn thorough_mode_costs_more_than_default() {
-        let (_, dollars_default, _) =
-            estimate_audit_cost(200_000, 15, "parallel", 3.0, 15.0, 1.0, 5.0, false, false, false);
-        let (_, dollars_thorough, _) =
-            estimate_audit_cost(200_000, 15, "parallel", 3.0, 15.0, 1.0, 5.0, true, false, false);
-        assert!(
-            dollars_thorough > dollars_default,
-            "thorough costs more: {dollars_thorough:.4} > {dollars_default:.4}"
-        );
-    }
-
-    /// Batch mode applies a flat 50% discount to the SCAN passes vs. parallel on the same
-    /// config. Calibration is NOT discounted (it always runs real-time). The pass count
-    /// is identical (same chunking + rule-batching).
-    #[test]
-    fn batch_mode_cheaper_than_parallel_due_to_scan_discount() {
-        // 30 rules, 350k chars = 1 chunk, 2 rule-batches. Calibration = same model.
-        let (_, dollars_parallel, passes_parallel) =
-            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        let (_, dollars_batch, passes_batch) =
-            estimate_audit_cost(350_000, 30, "batch", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        assert_eq!(
-            passes_parallel, passes_batch,
-            "same pass count in parallel and batch (only pricing differs)"
-        );
-        // Batch must be cheaper than parallel (scan discount applied), but the ratio is
-        // not exactly 0.5 because calibration is priced at full rate in both modes.
-        assert!(
-            dollars_batch < dollars_parallel,
-            "batch is cheaper than parallel: {dollars_batch:.4} < {dollars_parallel:.4}"
-        );
-        // The discount is at least 25% overall (scan dominates in a 2-batch, 1-chunk case).
-        let ratio = dollars_batch / dollars_parallel;
-        assert!(
-            ratio < 0.75,
-            "batch should be at least 25% cheaper than parallel: ratio={ratio:.4}"
-        );
-    }
-
-    /// Batch mode with 0 rules (free-form, 1 pass per chunk): calibration cost is
-    /// identical in both modes; scan cost is halved. Total must be cheaper in batch mode.
-    #[test]
-    fn batch_mode_zero_rules_cheaper_than_parallel() {
-        let (_, dollars_parallel, _) =
-            estimate_audit_cost(200_000, 0, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        let (_, dollars_batch, _) =
-            estimate_audit_cost(200_000, 0, "batch", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        assert!(
-            dollars_batch < dollars_parallel,
-            "batch cheaper even with 0 rules: {dollars_batch:.4} < {dollars_parallel:.4}"
-        );
-    }
-
-    /// Deep tier (three extra whole-repo passes) must ADD to the dollar figure, and it must be
-    /// the single priciest option vs. thorough or full-vs-incremental on the same config.
-    #[test]
-    fn deep_tier_costs_more_and_is_the_priciest_option() {
-        let base = |deep: bool, thorough: bool| {
-            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, thorough, false, deep).1
-        };
-        let standard = base(false, false);
-        let thorough = base(false, true);
-        let deep = base(true, false);
-        assert!(deep > standard, "deep adds cost: {deep:.4} > {standard:.4}");
-        assert!(
-            deep > thorough,
-            "deep is the priciest option (more than thorough): {deep:.4} > {thorough:.4}"
-        );
-    }
-
-    /// The incremental flag is plumbed through but, with no changed-file breakdown available
-    /// client-side, prices the same full-scan figure (over-estimate by design). It must not
-    /// blow up the estimate and must equal the full-scan number for the same inputs.
-    #[test]
-    fn incremental_flag_prices_same_as_full_today() {
-        let full =
-            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        let incremental =
-            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, true, false);
-        assert_eq!(
-            full.1, incremental.1,
-            "incremental prices the full set today (no changed-file data): {} vs {}",
-            full.1, incremental.1
-        );
-    }
-
-    // ── estimate_audit_cost — AI-scan-off and free-model pricing ─────────────
-
-    /// When AI scan is off (run_ai_review=false), the UI passes 0.0 for all model prices.
-    /// estimate_audit_cost must return $0 in that case (no LLM calls, no token spend).
-    #[test]
-    fn ai_scan_off_zero_prices_yields_zero_dollars() {
-        // Simulate the UI's behaviour when run_ai_review() is false: both model prices
-        // are clamped to (0.0, 0.0) before calling estimate_audit_cost.
-        let (toks, dollars, _passes) =
-            estimate_audit_cost(350_000, 30, "parallel", 0.0, 0.0, 0.0, 0.0, false, false, false);
-        assert_eq!(
-            dollars, 0.0,
-            "zero prices must produce $0 estimate (AI scan off): got {dollars}"
-        );
-        // Token count is still computed (for informational display) even at $0.
-        assert!(toks > 0, "token count should still be non-zero even when prices are zero");
-    }
-
-    /// A free OpenRouter model has price_in=0.0 and price_out=0.0.  Passing those values
-    /// must produce a $0 estimate (the model is free, so no cost regardless of token count).
-    #[test]
-    fn free_model_zero_prices_yields_zero_dollars() {
-        let (_, dollars, _) =
-            estimate_audit_cost(200_000, 15, "parallel", 0.0, 0.0, 0.0, 0.0, false, false, false);
-        assert_eq!(
-            dollars, 0.0,
-            "free model (price_in=price_out=0) must yield $0 estimate: got {dollars}"
-        );
-    }
-
-    /// A paid model with known registry prices must produce a non-zero estimate, and the
-    /// estimate must scale with price: doubling the model price doubles the dollar figure.
-    #[test]
-    fn paid_model_registry_prices_produce_nonzero_and_scale_linearly() {
-        let (_, dollars_base, _) =
-            estimate_audit_cost(200_000, 15, "parallel", 1.0, 5.0, 1.0, 5.0, false, false, false);
-        let (_, dollars_double, _) =
-            estimate_audit_cost(200_000, 15, "parallel", 2.0, 10.0, 2.0, 10.0, false, false, false);
-        assert!(dollars_base > 0.0, "paid model must yield non-zero estimate: {dollars_base}");
-        // Doubling prices must double the dollar figure (the function is linear in price).
-        let ratio = dollars_double / dollars_base;
-        assert!(
-            (ratio - 2.0).abs() < 0.001,
-            "doubling model prices must double the estimate: ratio={ratio:.4}"
-        );
-    }
-
-    /// Sonnet 4.6 registry prices ($3/$15 per M) produce a meaningful estimate for a
-    /// medium-sized repo scan — sanity-checks the default fallback used by the UI.
-    #[test]
-    fn sonnet_registry_price_estimate_is_positive() {
-        // Sonnet 4.6 list price: $3 in / $15 out per million tokens.
-        let (_, dollars, _) =
-            estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
-        assert!(
-            dollars > 0.0,
-            "Sonnet-priced estimate must be positive for a 350k-char, 30-rule scan: {dollars}"
-        );
-    }
-
     // ── selection_key() unit tests ────────────────────────────────────────────
 
     use super::{selection_key, SINGLE_REPO_SELECTION_KEY};
@@ -3455,53 +3130,9 @@ mod tests {
         assert_ne!(selection_key("a/b"), SINGLE_REPO_SELECTION_KEY);
     }
 
-    // ── verif_badge() unit tests ──────────────────────────────────────────────
-    //
-    // Pure function, no DOM — each test just asserts label + CSS modifier.
-    // Coverage: all four canonical values + an unknown value (falls back to draft).
+    // (verif_badge tests moved to camerata-ui-core::rules — pure, now unit-tested with no VirtualDom.)
 
-    use super::{verif_badge, verif_sources_tooltip, RuleSourceView};
-
-    #[test]
-    fn verif_badge_verified_returns_checkmark_label_and_green_class() {
-        let (label, cls) = verif_badge("verified");
-        assert!(label.contains("Verified"), "label should mention Verified, got: {label}");
-        assert_eq!(cls, "verified");
-    }
-
-    #[test]
-    fn verif_badge_grounded_returns_grounded_label_and_blue_class() {
-        let (label, cls) = verif_badge("grounded");
-        assert!(label.contains("Grounded"), "label should mention Grounded, got: {label}");
-        // Grounded must carry its own distinct symbol (the circled source-dot), separate from
-        // the verified checkmark, so it's a clear table status not a faint tint.
-        assert!(label.contains('\u{29bf}'), "grounded label should carry its source-dot symbol");
-        assert!(!label.contains('\u{2713}'), "grounded must NOT reuse the verified checkmark");
-        assert_eq!(cls, "grounded");
-    }
-
-    #[test]
-    fn verif_badge_draft_returns_draft_label_and_gray_class() {
-        let (label, cls) = verif_badge("draft");
-        assert_eq!(label, "Draft");
-        assert_eq!(cls, "draft");
-    }
-
-    #[test]
-    fn verif_badge_needs_recheck_returns_distinct_label_and_class() {
-        let (label, cls) = verif_badge("needs_recheck");
-        assert!(label.contains("re-check") || label.contains("recheck"), "label should signal re-check, got: {label}");
-        assert_eq!(cls, "needs-recheck");
-    }
-
-    #[test]
-    fn verif_badge_unknown_value_falls_back_to_draft() {
-        // An unrecognised value (e.g. a future extension the UI hasn't caught up to)
-        // must not panic and must fall back to the `draft` visual.
-        let (label, cls) = verif_badge("something_new");
-        assert_eq!(label, "Draft");
-        assert_eq!(cls, "draft");
-    }
+    use super::{verif_sources_tooltip, RuleSourceView};
 
     #[test]
     fn verif_sources_tooltip_empty_sources_returns_empty_string() {
@@ -4186,50 +3817,7 @@ mod tests {
     }
 
     /// Pure: idle duration formatting from milliseconds.
-    #[test]
-    fn format_idle_formats_durations() {
-        assert_eq!(format_idle(0), "0s");
-        assert_eq!(format_idle(5_000), "5s");
-        assert_eq!(format_idle(59_000), "59s");
-        assert_eq!(format_idle(60_000), "1m");
-        assert_eq!(format_idle(65_000), "1m 5s");
-        assert_eq!(format_idle(90_000), "1m 30s");
-        assert_eq!(format_idle(3_600_000), "60m");
-    }
-
-    /// Pure: cancellable-state predicate.
-    #[test]
-    fn run_is_cancellable_predicate() {
-        // Running states are cancellable.
-        assert!(run_is_cancellable("executing", false));
-        assert!(run_is_cancellable("gating", false));
-        assert!(run_is_cancellable("awaiting_clarification", false));
-        // Terminal states are not cancellable.
-        assert!(!run_is_cancellable("failed", true));
-        assert!(!run_is_cancellable("cancelled", true));
-        // done=true always non-cancellable.
-        assert!(!run_is_cancellable("executing", true));
-        // failed/cancelled with done=false are also non-cancellable (status check).
-        assert!(!run_is_cancellable("failed", false));
-        assert!(!run_is_cancellable("cancelled", false));
-    }
-
-    /// Pure: stall banner visibility predicate.
-    #[test]
-    fn run_stall_banner_visible_predicate() {
-        assert!(run_stall_banner_visible(true, false));
-        assert!(!run_stall_banner_visible(false, false));
-        assert!(!run_stall_banner_visible(true, true));
-        assert!(!run_stall_banner_visible(false, true));
-    }
-
-    /// `live_event_style` maps the "stall" family to the amber/warning treatment.
-    #[test]
-    fn live_event_style_stall_family() {
-        let (label, cls) = live_event_style("stall", "");
-        assert_eq!(label, "STALL");
-        assert_eq!(cls, "live-event stall");
-    }
+    // (format_idle test moved to camerata-ui-core::run.)
 
     /// `RunView` deserializes with back-compat defaults when stall fields are absent.
     #[test]

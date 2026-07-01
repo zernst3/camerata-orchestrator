@@ -111,14 +111,8 @@ pub(super) fn RepoHealthPanel(project_id: String) -> Element {
     }
 }
 
-/// Quote a CSV field if it contains a comma, quote, or newline (RFC 4180).
-pub(super) fn csv_field(s: &str) -> String {
-    if s.contains([',', '"', '\n', '\r']) {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
+// csv_field moved to camerata-ui-core::rules (shared by rules_csv there and findings_csv here).
+pub(super) use camerata_ui_core::rules::csv_field;
 
 /// Pop a native save dialog and write `content`. Returns true on success.
 pub(super) async fn save_csv(default_name: &str, content: String) -> bool {
@@ -163,104 +157,21 @@ pub(super) fn findings_csv(findings: &[FindingView]) -> String {
     out
 }
 
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-pub(super) struct FindingView {
-    #[serde(default)]
-    pub repo: String,
-    pub path: String,
-    pub line: usize,
-    pub rule_id: String,
-    pub severity: String,
-    pub snippet: String,
-    pub detail: String,
-    /// `active` (enforced), `suppressed-inline`, or `suppressed-baseline`.
-    #[serde(default = "default_finding_status")]
-    pub status: String,
-    /// Other rule ids this same location also violates (the server merged them into this
-    /// row). Empty for an un-merged finding. Surfaced as a "+N" on the rule and listed in
-    /// the detail modal.
-    #[serde(default)]
-    pub also_matches: Vec<String>,
-    /// PREVIEW (CI-security Part B): the server's scan-time deterministic preview pass ran
-    /// the rule's underlying tool ITSELF and produced this finding, even though the rule is
-    /// NOT yet wired into the repo's gate. Deterministic (stable tool rule-id) but ADVISORY:
-    /// "preview — not enforced until wired". Defaults to `false` (back-compatible).
-    #[serde(default)]
-    pub preview: bool,
-    /// For a preview finding, the tool that produced it (`clippy` | `ruff` | `eslint` |
-    /// `semgrep`). `None` for non-preview findings. Shown in the Authority badge label.
-    #[serde(default)]
-    pub preview_tool: Option<String>,
-    /// True when this finding is in test/fixture scope.
-    #[serde(default)]
-    pub in_test: bool,
-    /// True when this finding needs manual verification.
-    #[serde(default)]
-    pub needs_review: bool,
-}
+// Scan-surface helpers (human_tokens, det_tool_label, default_finding_status, estimate_audit_cost)
+// now live in the framework-agnostic core (RUST-HEADLESS-CORE-1); re-exported so the scan/cockpit
+// call sites are unchanged. `default_finding_status` is re-exported via the triage block below
+// (FindingView moved to core::triage), so it's not repeated here.
+pub(super) use camerata_ui_core::scan::{det_tool_label, estimate_audit_cost, human_tokens};
 
-pub(super) fn default_finding_status() -> String {
-    "active".to_string()
-}
-
-/// Where a finding sits in onboarding triage. The architect moves each finding between these
-/// three tables (a single-select switches the view) until nothing is Unresolved; then the
-/// ignored and tech-debt buckets are processed. This is LOCAL triage state — the backend
-/// commit (baseline waiver / ticket / dev-engine import) happens at Process, not on each move.
-#[derive(Clone, Copy, PartialEq, Eq, Default, Debug, serde::Serialize, serde::Deserialize)]
-pub(super) enum TriageState {
-    #[default]
-    Unresolved,
-    Ignored,
-    TechDebt,
-}
-
-impl TriageState {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Unresolved => "Unresolved",
-            Self::Ignored => "Ignored",
-            Self::TechDebt => "Tech debt",
-        }
-    }
-}
-
-/// Which tech-debt bucket a finding is in: resolve LATER (file a tracked ticket) or NOW (pull
-/// into the dev engine as the first story). Only meaningful when state == TechDebt.
-#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(super) enum TechDebtBucket {
-    Later,
-    Now,
-}
-
-/// One finding's triage disposition: its table, the (required) ignore reason, and its
-/// tech-debt bucket. Absence from the dispositions map == Unresolved with defaults.
-#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(super) struct Disposition {
-    pub state: TriageState,
-    pub reason: String,
-    pub bucket: TechDebtBucket,
-}
-
-/// Stable identity for a finding across the triage tables (repo + rule + location + snippet),
-/// so its disposition survives table switches and re-sorts.
-pub(super) fn finding_key(f: &FindingView) -> String {
-    format!(
-        "{}\u{0}{}\u{0}{}\u{0}{}\u{0}{}",
-        f.repo, f.rule_id, f.path, f.line, f.snippet
-    )
-}
-
-/// The disposition state for a finding (Unresolved when absent from the map).
-pub(super) fn finding_state(
-    dispositions: &std::collections::HashMap<String, Disposition>,
-    f: &FindingView,
-) -> TriageState {
-    dispositions
-        .get(&finding_key(f))
-        .map(|d| d.state)
-        .unwrap_or(TriageState::Unresolved)
-}
+// The onboarding-triage state machine + its data shapes now live in the framework-agnostic core
+// (RUST-HEADLESS-CORE-1): FindingView, Disposition (+ its Default), TriageState, TechDebtBucket,
+// finding_key/finding_state, and the new pure TriageModel. Re-exported so every existing
+// scan/cockpit call site (and cockpit's `pub use scan::*`) is unchanged; the Dioxus layer keeps
+// the signals, table effects, toasts, and rsx. (FindingView's `default_finding_status` serde
+// provider lives with it in core::triage — re-exported from core::scan; not needed bare here.)
+pub(super) use camerata_ui_core::triage::{
+    finding_key, finding_state, Disposition, FindingView, TechDebtBucket, TriageModel, TriageState,
+};
 
 /// Durable ignore: record the findings as reasoned baseline suppressions (governed PR).
 /// Returns the PR URL.
@@ -771,172 +682,6 @@ pub(super) async fn fetch_audit_models() -> Option<AuditModelsResp> {
     Some(AuditModelsResp { models, default, openrouter_fetched: resp.openrouter_fetched })
 }
 
-/// Rough pre-audit cost estimate, returned as (total_tokens, dollars, passes). Mirrors the
-/// server's chunk/batch math (ai_audit) so the number tracks what the audit actually sends.
-///
-/// Input and output are priced SEPARATELY (output bills ~5× input and dominates
-/// findings-heavy scans). The estimate is deliberately biased slightly CONSERVATIVE (high):
-/// an estimate that turns into a smaller bill is a pleasant surprise; one that turns into
-/// a bigger bill is broken trust.
-///
-/// PROMPT CACHING: for multi-batch parallel scans (the default), the codebase prefix (repo
-/// map + chunk digest) is the same across every rule-batch for a given chunk. When the API
-/// backend is in use the server marks this prefix with `cache_control: ephemeral` so the
-/// provider caches it after the first batch and reads it at ~0.1× for subsequent batches.
-/// The estimate models this:
-///   - batch 0 per chunk: full input price + 1.25× cache-write surcharge on the digest
-///   - batches 1..N per chunk: digest tokens read from cache at 0.1× instead of 1.0×
-/// Sequential mode (one batch per chunk) has no prefix reuse across batches, so no caching
-/// discount applies. CLI backend also skips caching (no-op there).
-///
-/// The FUDGE factor keeps the estimate conservative overall even after the cache discount,
-/// since the calibration pass (over aggregated findings) and the resolution round are
-/// modeled at full price.
-/// `code_chars` is the in-scope code size. The caller is responsible for passing the size of
-/// the SCANNED file set: the whole repo for a full scan. For an incremental re-scan only the
-/// CHANGED files are actually sent to the AI, but the client has no per-file / changed-file
-/// token breakdown today (`ScanReportView` carries only the repo-total `code_chars`), so we
-/// price the FULL set and flag `incremental` in the readout as a known over-estimate. See the
-/// followup in `docs/decisions/2026-06-20_ui_bugfixes.md`.
-///
-/// `deep` (the SOC-2 / deep-security / threat-model tier) adds three EXTRA whole-repo prose
-/// passes at the AUDIT model on top of the standard scan + calibration: each re-reads the full
-/// `code_chars` as input and emits a long prose report. Deep is therefore the priciest option
-/// and the returned dollar figure reflects that, not just a prose warning.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn estimate_audit_cost(
-    code_chars: usize,
-    selected: usize,
-    mode: &str,
-    audit_in: f64,
-    audit_out: f64,
-    calib_in: f64,
-    calib_out: f64,
-    thorough: bool,
-    incremental: bool,
-    deep: bool,
-) -> (u64, f64, usize) {
-    const CHUNK_DIGEST_CHARS: usize = 350_000;
-    const RULE_BATCH_SIZE: usize = 15;
-    const CHARS_PER_TOKEN: f64 = 4.0;
-    // Per-pass overhead (rules block + system prompt) that varies per batch and is never
-    // cached. The digest + repo map form the cached prefix, so only this remainder is
-    // re-sent at full price for subsequent batches.
-    const OVERHEAD_CHARS_PER_PASS: usize = 10_000;
-    // Output is findings: a baseline per pass plus a term that scales with code scanned
-    // (so a findings-dense or large scan isn't under-counted on the half that bites most).
-    const OUT_TOKENS_PER_PASS: f64 = 2_200.0;
-    const OUTPUT_PER_CODE_TOKEN: f64 = 0.02;
-    // Resolution round + general conservatism. Biased HIGH on purpose: logged real runs
-    // (budget-mini ~2.24×, chorale ~1.75×) came in UNDER estimate even before caching, and
-    // an audit that costs more than quoted is the bad surprise.
-    const FUDGE: f64 = 1.4;
-    // Prompt-cache pricing multipliers (Anthropic list pricing as of 2024-07):
-    //   write (first batch per chunk): 1.25× input
-    //   read  (subsequent batches):    0.10× input
-    const CACHE_WRITE_MULT: f64 = 1.25;
-    const CACHE_READ_MULT: f64 = 0.10;
-    // Deep tier (#55): three EXTRA whole-repo passes (SOC-2 gap, deep security, threat model).
-    // Each reads the full code once and emits a long prose report. Priced at the audit model.
-    const DEEP_PASSES: f64 = 3.0;
-    // A deep pass emits far more prose than a per-rule finding pass (full report per lens).
-    const DEEP_OUT_TOKENS_PER_PASS: f64 = 8_000.0;
-
-    // Batch mode (#61): the Anthropic Message Batches API charges a flat 50% discount on
-    // ALL input and output tokens for the SCAN passes (which are submitted as a batch).
-    // The calibration pass always runs real-time (a single call over aggregated findings
-    // — not batched), so calib pricing is NOT discounted.
-    let batch_discount = if mode == "batch" { 0.5 } else { 1.0 };
-    let (eff_audit_in, eff_audit_out) = (audit_in * batch_discount, audit_out * batch_discount);
-    // Calibration is real-time even in batch mode: one call over the aggregated findings.
-    let (eff_calib_in, eff_calib_out) = (calib_in, calib_out);
-
-    let chunks = code_chars.div_ceil(CHUNK_DIGEST_CHARS).max(1);
-    let batches = if mode == "sequential" {
-        1
-    } else {
-        selected.div_ceil(RULE_BATCH_SIZE).max(1)
-    };
-    let passes = chunks * batches;
-    let code_tokens = code_chars as f64 / CHARS_PER_TOKEN;
-
-    // ── Scan passes, priced at the AUDIT model (with batch discount applied) ──
-    //
-    // Without caching: the full digest is re-sent at full input price every pass.
-    // With caching (parallel/batch mode, batches > 1): per chunk, batch 0 pays full input
-    // + the one-time 1.25× cache-write surcharge; batches 1..N read the cached digest at
-    // 0.1×. Sequential (batches == 1) has no reuse, so no discount.
-    //
-    // Overhead tokens (rules block, system prompt) are always sent at full price since they
-    // vary per batch.
-    let scan_in = if batches <= 1 {
-        // No caching benefit: every batch pays full price for the digest.
-        (code_chars * batches + OVERHEAD_CHARS_PER_PASS * passes) as f64 / CHARS_PER_TOKEN
-    } else {
-        // Batch 0 per chunk: full digest price + cache-write surcharge.
-        // Batches 1..N per chunk: digest at cache-read rate (0.1×).
-        let digest_tokens_per_chunk = code_chars as f64 / chunks as f64 / CHARS_PER_TOKEN;
-        let write_cost = digest_tokens_per_chunk * CACHE_WRITE_MULT * chunks as f64;
-        let read_cost = digest_tokens_per_chunk
-            * CACHE_READ_MULT
-            * (batches.saturating_sub(1)) as f64
-            * chunks as f64;
-        // Overhead (never cached) is full price for every pass.
-        let overhead_cost = OVERHEAD_CHARS_PER_PASS as f64 / CHARS_PER_TOKEN * passes as f64;
-        write_cost + read_cost + overhead_cost
-    };
-    let scan_out =
-        OUT_TOKENS_PER_PASS * passes as f64 + OUTPUT_PER_CODE_TOKEN * code_tokens * batches as f64;
-
-    // ── Calibration: ONE pass over all findings, priced at the CALIBRATION model. It
-    // re-reads roughly the scan's output (the findings) and RE-EMITS each finding with a
-    // corrected/verified body. So its output rides with the full findings volume, ~1× the
-    // scan's output. Thorough mode (#51) runs ~3× for multi-vote consensus.
-    let cal_passes = if thorough { 3.0 } else { 1.0 };
-    let cal_in = scan_out * cal_passes;
-    let cal_out = scan_out * cal_passes;
-
-    // ── Deep tier: three EXTRA whole-repo prose passes at the AUDIT model. Each reads the
-    // full code (no per-rule batching, no caching discount — distinct prompts per lens) and
-    // emits a long prose report. This is the dominant cost when enabled, which is why deep is
-    // surfaced as the priciest option in the readout. Batch discount does NOT apply (these run
-    // real-time as part of the deep lens flow, not in the scan batch).
-    let (deep_in, deep_out) = if deep {
-        let full_code_tokens = code_chars as f64 / CHARS_PER_TOKEN;
-        let din = full_code_tokens * DEEP_PASSES;
-        let dout = DEEP_OUT_TOKENS_PER_PASS * DEEP_PASSES;
-        (din, dout)
-    } else {
-        (0.0, 0.0)
-    };
-
-    // Incremental scope (only changed files actually billed) would lower the scan portion, but
-    // the client has no changed-file token breakdown today (see fn doc + followup), so we keep
-    // the full-scan price and let the readout flag incremental as an over-estimate. Bind the
-    // flag so its role is explicit even though the number is unchanged here.
-    let _ = incremental;
-
-    let dollars = ((scan_in * eff_audit_in + scan_out * eff_audit_out)
-        + (cal_in * eff_calib_in + cal_out * eff_calib_out)
-        + (deep_in * audit_in + deep_out * audit_out))
-        / 1_000_000.0
-        * FUDGE;
-    let total_tokens =
-        ((scan_in + scan_out + cal_in + cal_out + deep_in + deep_out) * FUDGE) as u64;
-    (total_tokens, dollars, passes)
-}
-
-/// Compact human token count: 2.0M / 350k / 900.
-pub(super) fn human_tokens(t: u64) -> String {
-    if t >= 1_000_000 {
-        format!("{:.1}M", t as f64 / 1_000_000.0)
-    } else if t >= 1_000 {
-        format!("{:.0}k", t as f64 / 1_000.0)
-    } else {
-        t.to_string()
-    }
-}
-
 /// One deterministic-scan tool's live progress (mirror of the server's `DetToolProgress`).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 pub(super) struct DetToolProgressView {
@@ -1195,13 +940,6 @@ pub(super) fn DeterministicProgress(progress: DetProgressView) -> Element {
 
 /// Friendly label for a deterministic tool name. `floor` is the always-on security scanner;
 /// the rest are the scan-preview linters; `unrouted` collects rules with no driveable tool.
-pub(super) fn det_tool_label(tool: &str) -> String {
-    match tool {
-        "floor" => "Security floor".to_string(),
-        "unrouted" => "Unrouted rules".to_string(),
-        other => other.to_string(),
-    }
-}
 
 pub(super) fn finding_columns(repos: Vec<String>, show_bucket: bool) -> Vec<ColumnDef<FindingView>> {
     // chorale 0.2.3's palette has a native orange, so each severity gets a distinct color
@@ -1378,29 +1116,15 @@ pub(super) fn FindingsTable(
     #[props(default)] dispositions: Signal<std::collections::HashMap<String, Disposition>>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
-    // Keep only the findings in THIS table's triage state (absent from the map = Unresolved).
+    // Filter to THIS table's triage state + apply the default triage order (enforced/new before
+    // suppressed/debt, then critical → high → medium → low). Both the filter and the sort are the
+    // pure `TriageModel::visible` derivation now (RUST-HEADLESS-CORE-1): a flat 200-row dump is
+    // paralysis; this floats the exploitable-bug criticals to the very top so a hardcoded secret
+    // can never sit below "no mappers crate." Absent from the map = Unresolved.
     let findings: Vec<FindingView> = {
-        let d = dispositions.peek();
-        findings
-            .into_iter()
-            .filter(|f| finding_state(&d, f) == triage_view)
-            .collect()
+        let model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+        model.visible(&findings)
     };
-    // Default order leads triage with what matters: enforced (new) before suppressed
-    // (debt/waived), then by severity (critical → high → medium → low). A flat 200-row dump
-    // is paralysis; this floats the exploitable-bug criticals to the very top so a
-    // hardcoded secret can never sit below "no mappers crate."
-    let mut findings = findings;
-    findings.sort_by_key(|f| {
-        let enforced = if f.status == "active" { 0 } else { 1 };
-        let sev = match f.severity.as_str() {
-            "critical" => 0,
-            "high" => 1,
-            "medium" => 2,
-            _ => 3,
-        };
-        (enforced, sev)
-    });
     // Distinct repos for the repo multi-select filter. (Finding type is a Text/contains
     // filter now, so it needs no precomputed option list.)
     let mut filter_repos: Vec<String> = findings.iter().map(|f| f.repo.clone()).collect();
@@ -1567,13 +1291,9 @@ pub(super) fn FindingsTable(
                                 crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "A reason is required to ignore a finding (it's recorded in the baseline at Process).");
                                 return;
                             }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked {
-                                let e = d.entry(finding_key(f)).or_default();
-                                e.state = TriageState::Ignored;
-                                e.reason = reason.clone();
-                            }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.ignore(&picked, &reason);
+                            dispositions.set(model.dispositions);
                             handle.remove_rows(&sel);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Ignored.", picked.len()));
                         },
@@ -1585,9 +1305,9 @@ pub(super) fn FindingsTable(
                             let sel = handle.selected_ids();
                             let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_b.get(id).cloned()).collect();
                             if picked.is_empty() { return; }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked { d.entry(finding_key(f)).or_default().state = TriageState::TechDebt; }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.move_to(&picked, TriageState::TechDebt);
+                            dispositions.set(model.dispositions);
                             handle.remove_rows(&sel);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Tech debt.", picked.len()));
                         },
@@ -1601,9 +1321,9 @@ pub(super) fn FindingsTable(
                             let sel = handle.selected_ids();
                             let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_a.get(id).cloned()).collect();
                             if picked.is_empty() { return; }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked { d.entry(finding_key(f)).or_default().state = TriageState::Unresolved; }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.move_to(&picked, TriageState::Unresolved);
+                            dispositions.set(model.dispositions);
                             handle.remove_rows(&sel);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} back to Unresolved.", picked.len()));
                         },
@@ -1615,9 +1335,9 @@ pub(super) fn FindingsTable(
                             let sel = handle.selected_ids();
                             let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_b.get(id).cloned()).collect();
                             if picked.is_empty() { return; }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked { d.entry(finding_key(f)).or_default().state = TriageState::TechDebt; }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.move_to(&picked, TriageState::TechDebt);
+                            dispositions.set(model.dispositions);
                             handle.remove_rows(&sel);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Tech debt.", picked.len()));
                         },
@@ -1634,9 +1354,9 @@ pub(super) fn FindingsTable(
                             let sel = handle.selected_ids();
                             let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_c.get(id).cloned()).collect();
                             if picked.is_empty() { return; }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked { d.entry(finding_key(f)).or_default().bucket = TechDebtBucket::Later; }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.set_bucket(&picked, TechDebtBucket::Later);
+                            dispositions.set(model.dispositions);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Marked {} as resolve later.", picked.len()));
                         },
                         "Mark: resolve later"
@@ -1647,9 +1367,9 @@ pub(super) fn FindingsTable(
                             let sel = handle.selected_ids();
                             let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_d.get(id).cloned()).collect();
                             if picked.is_empty() { return; }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked { d.entry(finding_key(f)).or_default().bucket = TechDebtBucket::Now; }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.set_bucket(&picked, TechDebtBucket::Now);
+                            dispositions.set(model.dispositions);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Marked {} as resolve now.", picked.len()));
                         },
                         "Mark: resolve now"
@@ -1660,9 +1380,9 @@ pub(super) fn FindingsTable(
                             let sel = handle.selected_ids();
                             let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_a.get(id).cloned()).collect();
                             if picked.is_empty() { return; }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked { d.entry(finding_key(f)).or_default().state = TriageState::Unresolved; }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.move_to(&picked, TriageState::Unresolved);
+                            dispositions.set(model.dispositions);
                             handle.remove_rows(&sel);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} back to Unresolved.", picked.len()));
                         },
@@ -1674,9 +1394,9 @@ pub(super) fn FindingsTable(
                             let sel = handle.selected_ids();
                             let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_b.get(id).cloned()).collect();
                             if picked.is_empty() { return; }
-                            let mut d = dispositions.peek().clone();
-                            for f in &picked { d.entry(finding_key(f)).or_default().state = TriageState::Ignored; }
-                            dispositions.set(d);
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.move_to(&picked, TriageState::Ignored);
+                            dispositions.set(model.dispositions);
                             handle.remove_rows(&sel);
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Ignored.", picked.len()));
                         },
@@ -4026,21 +3746,7 @@ mod tests {
         assert!(resp.vision_grouped().is_empty());
     }
 
-    // ── csv_field (RFC 4180 quoting) ──────────────────────────────────────────
-
-    #[test]
-    fn csv_field_passthrough_when_no_special_chars() {
-        assert_eq!(super::csv_field("plain"), "plain");
-    }
-
-    #[test]
-    fn csv_field_quotes_and_escapes_when_special() {
-        // A comma forces quoting; an embedded quote is doubled.
-        assert_eq!(super::csv_field("a,b"), "\"a,b\"");
-        assert_eq!(super::csv_field("say \"hi\""), "\"say \"\"hi\"\"\"");
-        // Newlines also force quoting.
-        assert_eq!(super::csv_field("line1\nline2"), "\"line1\nline2\"");
-    }
+    // (csv_field tests moved to camerata-ui-core::rules.)
 
     // ── findings_csv (header + flat one-row-per-finding) ──────────────────────
 
@@ -4089,80 +3795,10 @@ mod tests {
         assert!(csv.contains("\"a, b, c\""), "comma snippet must be quoted; csv=\n{csv}");
     }
 
-    // ── finding_key / finding_state ───────────────────────────────────────────
-
-    #[test]
-    fn finding_key_combines_identity_fields() {
-        let f = finding(serde_json::json!({
-            "repo": "owner/repo", "path": "src/a.rs", "line": 7,
-            "rule_id": "RULE-X", "severity": "high", "snippet": "snip", "detail": ""
-        }));
-        let key = super::finding_key(&f);
-        assert!(key.contains("owner/repo"));
-        assert!(key.contains("RULE-X"));
-        assert!(key.contains("src/a.rs"));
-        assert!(key.contains('7'));
-        assert!(key.contains("snip"));
-    }
-
-    #[test]
-    fn finding_state_defaults_to_unresolved_when_absent() {
-        let f = finding(serde_json::json!({
-            "repo": "r", "path": "p", "line": 1,
-            "rule_id": "R", "severity": "low", "snippet": "s", "detail": ""
-        }));
-        let map = std::collections::HashMap::new();
-        assert_eq!(super::finding_state(&map, &f), super::TriageState::Unresolved);
-    }
-
-    #[test]
-    fn finding_state_reads_disposition_when_present() {
-        let f = finding(serde_json::json!({
-            "repo": "r", "path": "p", "line": 1,
-            "rule_id": "R", "severity": "low", "snippet": "s", "detail": ""
-        }));
-        let mut map = std::collections::HashMap::new();
-        map.insert(
-            super::finding_key(&f),
-            super::Disposition {
-                state: super::TriageState::Ignored,
-                reason: "noise".to_string(),
-                bucket: super::TechDebtBucket::Later,
-            },
-        );
-        assert_eq!(super::finding_state(&map, &f), super::TriageState::Ignored);
-    }
-
-    // ── default_finding_status / TriageState default ──────────────────────────
-
-    #[test]
-    fn default_finding_status_is_active() {
-        assert_eq!(super::default_finding_status(), "active");
-    }
-
-    #[test]
-    fn triage_state_defaults_to_unresolved() {
-        assert_eq!(super::TriageState::default(), super::TriageState::Unresolved);
-    }
-
-    // ── human_tokens (compact formatting) ─────────────────────────────────────
-
-    #[test]
-    fn human_tokens_formats_by_magnitude() {
-        assert_eq!(super::human_tokens(900), "900");
-        assert_eq!(super::human_tokens(2_000), "2k");
-        assert_eq!(super::human_tokens(350_000), "350k");
-        assert_eq!(super::human_tokens(2_000_000), "2.0M");
-    }
-
-    // ── det_tool_label ────────────────────────────────────────────────────────
-
-    #[test]
-    fn det_tool_label_maps_known_and_passes_through_unknown() {
-        assert_eq!(super::det_tool_label("floor"), "Security floor");
-        assert_eq!(super::det_tool_label("unrouted"), "Unrouted rules");
-        assert_eq!(super::det_tool_label("clippy"), "clippy");
-    }
+    // (finding_key / finding_state / TriageState-default tests moved to
+    // camerata_ui_core::triage alongside the lifted state machine — pure, unit-tested with no
+    // VirtualDom. human_tokens / det_tool_label / default_finding_status tests live in
+    // camerata_ui_core::scan.)
 
     // ── recommend_scan_mode ───────────────────────────────────────────────────
 
@@ -4250,39 +3886,8 @@ mod tests {
         assert_eq!(super::resolve_gf_directive(&r), "The Title");
     }
 
-    // ── estimate_audit_cost (monotonicity + mode/deep behaviour) ──────────────
-
-    #[test]
-    fn estimate_cost_returns_passes_and_nonzero_dollars() {
-        let (tokens, dollars, passes) = super::estimate_audit_cost(
-            400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false,
-        );
-        assert!(tokens > 0, "tokens estimated");
-        assert!(dollars > 0.0, "dollars estimated");
-        assert!(passes >= 1, "at least one pass");
-    }
-
-    #[test]
-    fn estimate_cost_batch_mode_is_cheaper_than_parallel() {
-        let (_, parallel, _) = super::estimate_audit_cost(
-            400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false,
-        );
-        let (_, batch, _) = super::estimate_audit_cost(
-            400_000, 20, "batch", 3.0, 15.0, 3.0, 15.0, false, false, false,
-        );
-        assert!(batch < parallel, "batch (50% scan discount) must cost less; batch={batch} parallel={parallel}");
-    }
-
-    #[test]
-    fn estimate_cost_deep_tier_adds_cost() {
-        let (_, without, _) = super::estimate_audit_cost(
-            400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false,
-        );
-        let (_, with_deep, _) = super::estimate_audit_cost(
-            400_000, 20, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, true,
-        );
-        assert!(with_deep > without, "deep tier must increase the estimate; deep={with_deep} base={without}");
-    }
+    // estimate_audit_cost pricing tests now live with the function in
+    // camerata_ui_core::scan (all assertions, incl. these 400k/20 monotonicity cases).
 
     // ════════════════════════════════════════════════════════════════════════
     // Tier 2 — network-helper tests (wiremock). Each sets CAMERATA_BFF_URL, so

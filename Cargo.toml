@@ -13,7 +13,8 @@ members = [
     "crates/fleet",       # reusable governed-fleet build logic (used by CLI + UI)
     "crates/server",      # Axum HTTP/WS the cockpit talks to (embedded in orchestrator)
     "crates/cli",         # binary entrypoint wiring it all together
-    "crates/ui",          # Dioxus cockpit (separate process)
+    "crates/ui",          # Dioxus cockpit (separate process) — the thin rendering ADAPTER
+    "crates/ui-core",     # framework-agnostic UI logic/state (RUST-HEADLESS-CORE-1); no dioxus dep
     "crates/worktracker", # WorkItemProvider port: canonical shapes, sync policy, native provider
     "crates/maintenance", # Tier-2 standing post-publish ops agent (upgrades, security, rotation)
     "crates/deploy",          # Tier-2 BYO-infra publish: DeployTarget seam + local + Azure adapter
