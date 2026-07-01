@@ -506,6 +506,11 @@ pub struct UnitOfWork {
     /// for back-compat so legacy `uow.json` records load unchanged.
     #[serde(default)]
     pub attachments: Vec<UowAttachment>,
+    /// AI-generated Mermaid diagram source text for this UoW. When present it is embedded
+    /// as a ```mermaid fenced block in the published GitHub issue body (GitHub renders it
+    /// natively). None by default; serde(default) for back-compat.
+    #[serde(default)]
+    pub diagram: Option<String>,
     /// The id of the project that CREATED this UoW, when it is a project-scoped draft.
     ///
     /// A brand-new blank draft has no `work_item` and a `draft-<uuid>` `story_id`, so it
@@ -1956,6 +1961,45 @@ impl UowStore {
                     ..Default::default()
                 });
             uow.attachments.retain(|a| a.name != name);
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    /// Store (or replace) the AI-generated Mermaid diagram text for a UoW.
+    /// Idempotent: calling again with a different text replaces the previous diagram.
+    pub fn set_diagram(&self, story_id: &str, text: String) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            uow.diagram = Some(text);
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    /// Clear the stored diagram for a UoW. Idempotent when none is set.
+    pub fn clear_diagram(&self, story_id: &str) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    ..Default::default()
+                });
+            uow.diagram = None;
             uow.updated = now;
             uow.clone()
         };
@@ -3679,6 +3723,36 @@ mod concurrency_regression_tests {
         let store = UowStore::new();
         let uow = store.get_or_create("acme/repo#55");
         assert!(uow.attachments.is_empty(), "normal UoW has no attachments by default");
+    }
+
+    #[test]
+    fn set_diagram_stores_and_replaces() {
+        let store = UowStore::new();
+        let id = "draft-diag-1";
+        let uow = store.set_diagram(id, "graph TD\n  A-->B".to_string());
+        assert_eq!(uow.diagram.as_deref(), Some("graph TD\n  A-->B"));
+        // Replace with a new diagram.
+        let uow2 = store.set_diagram(id, "sequenceDiagram\n  A->>B: hi".to_string());
+        assert_eq!(uow2.diagram.as_deref(), Some("sequenceDiagram\n  A->>B: hi"));
+    }
+
+    #[test]
+    fn clear_diagram_is_idempotent() {
+        let store = UowStore::new();
+        let id = "draft-diag-2";
+        store.set_diagram(id, "graph TD\n  A-->B".to_string());
+        let cleared = store.clear_diagram(id);
+        assert!(cleared.diagram.is_none(), "diagram cleared");
+        // Clearing again should not panic.
+        let cleared2 = store.clear_diagram(id);
+        assert!(cleared2.diagram.is_none());
+    }
+
+    #[test]
+    fn diagram_defaults_none_on_normal_uow() {
+        let store = UowStore::new();
+        let uow = store.get_or_create("acme/repo#77");
+        assert!(uow.diagram.is_none(), "normal UoW has no diagram by default");
     }
 
     // ── Design-tree tests ──────────────────────────────────────────────────────

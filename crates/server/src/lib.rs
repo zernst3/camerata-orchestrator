@@ -786,6 +786,8 @@ pub fn router(state: AppState) -> Router {
         // ── UoW file attachments (2026-07-01) ─────────────────────────────────
         .route("/api/uow/:story_id/attachments", get(uow_list_attachments).post(uow_add_attachment))
         .route("/api/uow/:story_id/attachments/:name", get(uow_get_attachment).delete(uow_remove_attachment))
+        // ── UoW Mermaid diagram (2026-07-01) ──────────────────────────────────
+        .route("/api/uow/:story_id/diagram", get(uow_get_diagram).post(uow_generate_diagram).delete(uow_clear_diagram))
         // ── Design draft-tree (2026-07-01) ────────────────────────────────────
         .route("/api/designs/blank", post(design_blank))
         .route("/api/designs/:id/author", post(design_author))
@@ -8328,8 +8330,9 @@ async fn uow_publish(
     // and the GitHub database id (for the sub-issue link). `create_issue_returning_id`
     // replaces the previous `onboard::create_issue` call — same endpoint, same payload,
     // additionally reads the `id` field from the response.
-    // Embed any UoW attachments in the body as collapsed <details> blocks.
+    // Embed any UoW attachments then the Mermaid diagram (if present) in the issue body.
     let issue_body = embed_attachments(&authoring.draft_body, &uow.attachments);
+    let issue_body = embed_diagram(&issue_body, uow.diagram.as_deref());
     let (html_url, child_db_id) = crate::github_issues::create_issue_returning_id(
         &coord.owner,
         &coord.repo,
@@ -8527,6 +8530,132 @@ fn embed_attachments(body: &str, attachments: &[crate::uow::UowAttachment]) -> S
         ));
     }
     result
+}
+
+/// Embed an AI-generated Mermaid diagram into the issue body as a native fenced block.
+/// GitHub renders ```mermaid fences natively (since May 2022). Returns body unchanged
+/// when diagram is None or empty.
+fn embed_diagram(body: &str, diagram: Option<&str>) -> String {
+    match diagram {
+        Some(d) if !d.trim().is_empty() => {
+            format!("{body}\n\n```mermaid\n{}\n```", d.trim())
+        }
+        _ => body.to_string(),
+    }
+}
+
+/// `GET /api/uow/:story_id/diagram` -- fetch the stored Mermaid diagram text.
+/// Returns `{ "diagram": "<text>" }` or `{ "diagram": null }` when absent.
+async fn uow_get_diagram(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let uow = state.uow.get_or_create(&story_id);
+    Json(serde_json::json!({ "diagram": uow.diagram }))
+}
+
+const DIAGRAM_AUTHOR_SYSTEM: &str = "You are a technical diagram assistant. Given a work \
+item's title, body, and any conversation context, generate a concise Mermaid diagram that \
+visually represents the work: its components, data flow, state machine, sequence, or class \
+relationships — whichever type best fits the content. Respond with ONLY the raw Mermaid \
+diagram source text. No fences, no prose, no explanations — just the diagram.";
+
+#[derive(serde::Deserialize)]
+struct GenerateDiagramReq {
+    /// Optional model override; falls back to the project's StoryAuthoring model.
+    #[serde(default)]
+    model: Option<String>,
+    /// Optional extra instruction from the user (e.g. "focus on the data model").
+    #[serde(default)]
+    instruction: Option<String>,
+}
+
+/// `POST /api/uow/:story_id/diagram` -- generate a Mermaid diagram via AI from the UoW's
+/// draft title + body + optional instruction. Stores the result on the UoW and returns
+/// the updated `UnitOfWork`. Fail-soft: if the AI call fails, returns an error but does
+/// not mutate the stored diagram.
+async fn uow_generate_diagram(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<GenerateDiagramReq>,
+) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
+    let uow = state.uow.get_or_create(&story_id);
+    let authoring = uow.authoring.clone().unwrap_or_default();
+
+    let title = authoring.draft_title.trim().to_string();
+    let body = authoring.draft_body.trim().to_string();
+    let instruction = req
+        .instruction
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .to_string();
+
+    let prompt = {
+        let mut p = String::new();
+        if !title.is_empty() {
+            p.push_str(&format!("Title: {title}\n\n"));
+        }
+        if !body.is_empty() {
+            p.push_str(&format!("Body:\n{body}\n\n"));
+        }
+        if !instruction.is_empty() {
+            p.push_str(&format!("Extra instruction: {instruction}\n\n"));
+        }
+        if p.is_empty() {
+            p.push_str("Generate a simple placeholder Mermaid diagram.");
+        }
+        p.push_str("Generate the Mermaid diagram now.");
+        p
+    };
+
+    let model = match req.model.as_deref().map(str::trim) {
+        Some(m) if !m.is_empty() => m.to_string(),
+        _ => step_model(&state, crate::project::StepKind::StoryAuthoring),
+    };
+    let system = match state.project_grounding().await {
+        Some(grounding) => format!("{DIAGRAM_AUTHOR_SYSTEM}\n\n{grounding}"),
+        None => DIAGRAM_AUTHOR_SYSTEM.to_string(),
+    };
+    let request = crate::llm::LlmRequest::new(prompt)
+        .with_model(model)
+        .with_system(system);
+
+    let diagram_text = state
+        .llm()
+        .complete(request)
+        .await
+        .map_err(AppError)?
+        .text;
+
+    // Strip any accidental fences the model may have added despite instructions.
+    let stripped = strip_mermaid_fence(&diagram_text);
+    let updated = state.uow.set_diagram(&story_id, stripped);
+    Ok(Json(updated))
+}
+
+/// Strip leading/trailing ```mermaid ... ``` fences in case the model disobeys.
+fn strip_mermaid_fence(raw: &str) -> String {
+    let s = raw.trim();
+    if let Some(inner) = s
+        .strip_prefix("```mermaid")
+        .or_else(|| s.strip_prefix("```"))
+    {
+        if let Some(stripped) = inner.strip_suffix("```") {
+            return stripped.trim().to_string();
+        }
+    }
+    s.to_string()
+}
+
+/// `DELETE /api/uow/:story_id/diagram` -- remove the stored diagram. Idempotent.
+/// Returns `{ "ok": true }`.
+async fn uow_clear_diagram(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+) -> Json<serde_json::Value> {
+    state.uow.clear_diagram(&story_id);
+    Json(serde_json::json!({ "ok": true }))
 }
 
 // ── Design draft-tree endpoints (Design Page Increment 2 backend) ─────────────
@@ -8907,8 +9036,9 @@ async fn design_publish(
             continue;
         }
 
-        // Create the issue. Embed any node attachments in the body.
+        // Create the issue. Embed any node attachments then the diagram in the body.
         let node_issue_body = embed_attachments(&authoring.draft_body, &node.attachments);
+        let node_issue_body = embed_diagram(&node_issue_body, node.diagram.as_deref());
         let (html_url, child_db_id) = crate::github_issues::create_issue_returning_id(
             &coord.owner,
             &coord.repo,
@@ -16232,6 +16362,124 @@ mod tests {
             0,
             "attachment removed"
         );
+    }
+
+    // ── Diagram embed / strip tests ───────────────────────────────────────────
+
+    #[test]
+    fn embed_diagram_no_diagram_unchanged() {
+        assert_eq!(embed_diagram("Body text", None), "Body text");
+        assert_eq!(embed_diagram("Body text", Some("")), "Body text");
+        assert_eq!(embed_diagram("Body text", Some("   ")), "Body text");
+    }
+
+    #[test]
+    fn embed_diagram_appends_mermaid_fence() {
+        let result = embed_diagram("## Summary", Some("graph TD\n  A-->B"));
+        assert!(result.starts_with("## Summary"), "original body intact");
+        assert!(result.contains("```mermaid"), "mermaid fence present");
+        assert!(result.contains("graph TD"), "diagram content present");
+        assert!(result.contains("A-->B"), "diagram arrow present");
+    }
+
+    #[test]
+    fn strip_mermaid_fence_strips_fenced_output() {
+        let raw = "```mermaid\ngraph TD\n  A-->B\n```";
+        assert_eq!(strip_mermaid_fence(raw), "graph TD\n  A-->B");
+    }
+
+    #[test]
+    fn strip_mermaid_fence_passthrough_unfenced() {
+        let raw = "graph TD\n  A-->B";
+        assert_eq!(strip_mermaid_fence(raw), "graph TD\n  A-->B");
+    }
+
+    /// End-to-end router test: GET/DELETE diagram endpoints without AI (no token).
+    #[tokio::test]
+    async fn uow_diagram_http_round_trip() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let app = router(state.clone());
+
+        // Create a blank UoW.
+        let blank_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/uow/blank")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let blank_body = body_json(blank_resp).await;
+        let uow_id = blank_body["uow_id"].as_str().expect("uow_id").to_string();
+
+        // GET /api/uow/:id/diagram -- no diagram yet.
+        let get1 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/uow/{uow_id}/diagram"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(get1.status(), StatusCode::OK);
+        let get1_body = body_json(get1).await;
+        assert!(get1_body["diagram"].is_null(), "no diagram initially");
+
+        // Inject a diagram directly via the store (bypasses LLM).
+        state
+            .uow
+            .set_diagram(&uow_id, "graph TD\n  A-->B".to_string());
+
+        // GET -- now returns the diagram.
+        let get2 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/uow/{uow_id}/diagram"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let get2_body = body_json(get2).await;
+        assert_eq!(
+            get2_body["diagram"].as_str().unwrap(),
+            "graph TD\n  A-->B"
+        );
+
+        // DELETE -- clears it.
+        let del = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/uow/{uow_id}/diagram"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del.status(), StatusCode::OK);
+
+        // GET after delete -- null again.
+        let get3 = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/uow/{uow_id}/diagram"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let get3_body = body_json(get3).await;
+        assert!(get3_body["diagram"].is_null(), "diagram cleared");
     }
 
     // ── Design draft-tree unit tests ─────────────────────────────────────────
