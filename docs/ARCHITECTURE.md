@@ -6,6 +6,145 @@ TypeScript-core / Rust-BFF shape in the earlier `TECH_DESIGN.md` and `UI_DESIGN.
 diagrams; the design *reasoning* in those docs still holds, only the language
 boundary moved.
 
+> **Update (post-#116/#117):** the two headless-core extractions refined the "Orchestrator Core"
+> below into three *framework-agnostic core crates* plus thin adapters. The layered chart in the next
+> section is the current, canonical view; the ASCII vertical stack further down remains accurate as
+> the *runtime / agent-execution* view.
+
+---
+
+## The layer separation (post-#116/#117)
+
+**Thesis:** Camerata is a **framework-agnostic governance + orchestration core** wrapped by **thin
+adapters**. The core is the single source of truth for *how everything works*; every interface
+(visual, CLI, and — planned — chat and voice) is just an adapter over it. **State lives on the
+adapter, not in the core.**
+
+- **#116** — the UI headless core (`camerata-ui-core`): pure UI logic/state, no rendering framework.
+- **#117** — the backend headless core (`camerata-app-core`): pure app-orchestration domain types +
+  state transitions, no transport framework.
+
+Both are enforced by `RUST-HEADLESS-CORE-1` + `RUST-PURE-STATE-TRANSITIONS-1` (see `../CONVENTIONS.md`).
+
+```mermaid
+flowchart TB
+    subgraph SURFACES["① Surfaces — how humans and agents drive Camerata"]
+        direction LR
+        UI["Cockpit UI<br/>(Dioxus desktop)"]
+        CLI["CLI"]
+        CHAT["Chat adapter<br/><i>(planned)</i>"]
+        VOICE["Voice adapter<br/><i>(planned)</i>"]
+    end
+
+    subgraph CONTRACT["② Capability surface — the governed verbs (one contract, many bindings)"]
+        direction LR
+        HTTP["HTTP / WS<br/><b>today</b>"]
+        MCPOUT["MCP tools<br/><i>(planned — lets any LLM agent become an adapter)</i>"]
+    end
+
+    subgraph ADAPTERS["③ Adapters — own STATE + transport/render (thin shells)"]
+        direction LR
+        SERVER["<b>camerata-server</b><br/>Axum HTTP/WS · owns the stores · drives core transitions"]
+        UIADAPT["<b>camerata-ui</b><br/>Dioxus render adapter"]
+        STATE[("State / stores<br/>Project · Uow · Run · Escalation<br/>Routine · Checkpoint · …<br/>in-memory + camerata-persistence")]
+    end
+
+    subgraph CORES["④ Framework-agnostic CORES — no transport, no renderer · SOURCE OF TRUTH"]
+        direction LR
+        APPCORE["<b>camerata-app-core</b> (#117)<br/>domain types + PURE state transitions:<br/>uow lifecycle · escalation · run<br/>routine · schedule · checkpoint · project"]
+        UICORE["<b>camerata-ui-core</b> (#116)<br/>UI logic + state:<br/>triage model · rules view-models<br/>run/scan derivations"]
+        CORE["<b>camerata-core</b><br/>orchestrator brain<br/>(roles, task DAG, coordination —<br/>zero model calls)"]
+        SUPPORT["supporting pure crates:<br/>rules · checks · fleet · intake<br/>worktracker · persistence · liveness<br/>deploy · maintenance · linter-registry"]
+    end
+
+    subgraph EXEC["⑤ Governed execution — the 'doing', on a leash the core holds"]
+        direction LR
+        GATEWAY["<b>camerata-gateway</b><br/>layer-1 MCP gate (allow / deny tool calls)"]
+        AGENT["<b>camerata-agent</b><br/>runs claude -p · parses stream-json"]
+    end
+
+    UI --> UIADAPT
+    UI --> HTTP
+    CLI --> HTTP
+    CHAT -.-> MCPOUT
+    VOICE -.-> CHAT
+    HTTP --> SERVER
+    MCPOUT -.-> SERVER
+
+    UIADAPT --> UICORE
+    SERVER --> STATE
+    SERVER --> APPCORE
+    SERVER --> CORE
+    SERVER --> SUPPORT
+    SERVER --> AGENT
+    AGENT --> GATEWAY
+    GATEWAY --> CORE
+
+    classDef planned stroke-dasharray:5 5,fill:#f5f5f5,color:#555;
+    class CHAT,VOICE,MCPOUT planned;
+    classDef core fill:#e8f0fe,stroke:#4285f4;
+    class APPCORE,UICORE,CORE,SUPPORT core;
+```
+
+Solid boxes exist today; dashed boxes are the planned multi-adapter future.
+
+### Four rules that hold the whole thing together
+
+1. **The cores are the source of truth.** `camerata-core`, `camerata-app-core`, and
+   `camerata-ui-core` own *how everything works*: the rules, the lifecycle state machine (`UowStage`),
+   and the decisions (is this run cancellable, is this escalation blocked, is this tool call allowed).
+   They are **stateless** — state goes in, the next state comes out.
+2. **The cores never import a transport or a renderer.** `camerata-app-core` has no `axum`;
+   `camerata-ui-core` has no `dioxus`. The compiler enforces this by crate boundary, which is why the
+   logic is unit-testable with no HTTP server and no VirtualDom. This is `RUST-HEADLESS-CORE-1`.
+3. **State lives on the adapter, not in the core.** The stores (`ProjectStore`, `UowStore`,
+   `RunStore`, …) live in `camerata-server`. The adapter *owns* state and asks the stateless core how
+   it should change, then persists the result. This is `RUST-PURE-STATE-TRANSITIONS-1`.
+4. **The core governs execution; it is not the executor.** `camerata-agent` does the actual work
+   (drives the LLM, executes tool calls); `camerata-gateway` is the layer-1 MCP gate that allows/denies
+   each call against the core's rules. The core decides and governs; the agent acts, on a leash.
+
+### Why this shape (and what it unlocks)
+
+Adding an interface should mean **writing an adapter, not re-architecting**. Because the cores are
+framework-agnostic and state lives on the adapter, a new surface is a thin shell that owns/holds state
+and drives the **capability surface** (Camerata's governed verbs: create project, start run, answer
+escalation, materialize a design):
+
+- **Cockpit UI** — a visual adapter that renders `camerata-ui-core` state.
+- **CLI** — a text adapter over the same capability surface.
+- **Chat adapter** *(planned)* — an LLM agent whose tools *are* Camerata's capability surface.
+- **Voice adapter** *(planned)* — the chat adapter + speech-to-text / text-to-speech.
+- **Voice + cockpit together** *(planned)* — the voice agent and the UI driving **one shared state
+  model**, which is exactly what the #116 UI state-lift makes possible.
+
+Today the capability surface is HTTP endpoints on the server adapter. Exposing that same surface as
+**MCP tools** turns "add a chat/voice interface" into "point an LLM agent at the existing governed
+verbs" — no bespoke integration. That is the natural next architectural unit after #116/#117.
+
+### Crate map
+
+| Layer | Crate | Role |
+|---|---|---|
+| Core | `camerata-core` | Orchestrator brain: roles, task DAG, coordination (zero model calls) |
+| Core | `camerata-app-core` | **(#117)** Backend domain types + pure state transitions |
+| Core | `camerata-ui-core` | **(#116)** Framework-agnostic UI logic + state |
+| Core (support) | `camerata-rules` | Rule corpus loader, enforcement kinds, rule-subset selection |
+| Core (support) | `camerata-checks` | Layer-2 post-task gate logic (CheckRunner) |
+| Core (support) | `camerata-fleet` | Reusable governed-fleet build logic (CLI + UI) |
+| Core (support) | `camerata-intake` | PO-mode intake schema + LeadEngineer |
+| Core (support) | `camerata-worktracker` | WorkItemProvider port + canonical shapes |
+| Core (support) | `camerata-persistence` | SQLite state + JSON provenance |
+| Core (support) | `camerata-liveness` | LivenessTracker + heartbeat/idle probe |
+| Core (support) | `camerata-deploy` | Tier-2 BYO-infra publish (DeployTarget seam) |
+| Core (support) | `camerata-maintenance` | Tier-2 standing post-publish ops agent |
+| Core (support) | `camerata-linter-registry` | Citation validator (canonical linter rule-id lists) |
+| Execution | `camerata-gateway` | Layer-1 real-time MCP governance gate (allow/deny) |
+| Execution | `camerata-agent` | Agent runtime: drives `claude -p`, parses stream-json |
+| Adapter | `camerata-server` | Axum HTTP/WS adapter; **owns the stores** |
+| Adapter | `camerata-ui` | Dioxus cockpit (thin render adapter) |
+| Adapter | `camerata-cli` (`camerata`) | Binary entrypoint wiring it together |
+
 ---
 
 ## Glossary (read this first)
