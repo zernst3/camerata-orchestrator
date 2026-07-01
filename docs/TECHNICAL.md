@@ -1230,6 +1230,62 @@ Both are baked into the unified system prompt assembled for every chat turn (lay
 
 ---
 
+## 4c. Routines and the auto-fire scheduler
+
+A **routine** (`Routine`, `crates/server/src/routine.rs`) is a scheduled governed run: `name`,
+`schedule` (a human-readable string), `intent` (the user's words), `prompt` (the AI-authored operational
+prompt actually executed), `scope` (permission cap), `model`, `enabled`, `provisioned`, `project_id`
+(owning project, or `None` = global), a `RoutineStatus` badge (`Idle` / `Running` / `BlockedNeedsReview`
+/ `Done` / `Failed`), a `last_run` summary, `last_fired`, and a bounded `runs` history (FIFO cap 20).
+Persisted to `routines.json` via `RoutineStore` (`Arc<Mutex<Vec<Routine>>>`), rehydrated on load with
+the id counter advanced past the highest `rt-N`.
+
+**Schedule parsing** (`crates/server/src/schedule.rs`). The stored string parses into `enum Schedule`:
+`Daily { h, m }`, `Weekly { days, h, m }`, `Monthly { day, h, m }` (day clamps to the month's last day),
+`Once { date, h, m }`, or `Manual` (the literal `manual`, or anything malformed, a safe default that
+never auto-fires). Three pure, clock-free functions drive scheduling: `next_fire`, `most_recent_slot`,
+and `is_due(schedule, now, last_fired)` (due when a slot at or before `now` is strictly newer than
+`last_fired`, giving one-fire-per-slot with single-missed-slot catch-up). All are heavily unit-tested.
+
+**The scheduler** (`crates/server/src/auto_fire.rs`). `spawn_routine_scheduler` starts one background
+tokio task from `serve()` after `AppState` is built; it ticks every `CAMERATA_ROUTINE_TICK_SECS` (default
+60, min 1). Each tick iterates ALL routines across ALL projects, skips any that is not
+`provisioned && enabled`, and for each `is_due` routine calls `run_now_scheduled`, stamps `last_fired`
+(one fire per slot), and, if the run is blocked, calls `escalation::raise_if_blocked` to raise a deduped
+human-review escalation (at most one open per routine) linked to the run-history entry. The scheduler
+lives in-process, so routines fire only while the app is running.
+
+**`enabled` vs `provisioned`.** `provisioned` = the routine physically exists / is registered on THIS
+backend (locally-created = true; imported = false, so a Start cannot silently no-op). `enabled` = the
+scheduler is armed to auto-fire it. Provisioning never auto-enables: `POST /api/routines/:id/provision`
+(`provision_routine`) idempotently sets `provisioned = true`; the architect still presses Start
+(`POST /api/routines/:id/enable`).
+
+**Prompt authoring** (`draft_routine_prompt`, `POST /api/routines/draft-prompt`). The lead-engineer AI
+authors the operational `prompt` from `intent` + `scope` + `model`; on model failure it falls back to a
+deterministic `scaffold_prompt`, so the raw intent is never executed (`authored_by` records `claude` vs
+`scaffold`). Two built-in templates (`bug-triage`, `security-scan`) seed the create form.
+
+**Endpoints** (`crates/server/src/lib.rs`): `GET /api/routines` (active project only, each wrapped with a
+computed `next_fire` / `due_soon`), `POST /api/routines`, `PUT /api/routines/:id`,
+`DELETE /api/routines/:id`, `GET /api/routines/templates`,
+`POST /api/routines/templates/:id/instantiate`, `POST /api/routines/draft-prompt`,
+`POST /api/routines/:id/enable`, `POST /api/routines/:id/provision`, `POST /api/routines/:id/run`,
+`GET /api/routines/:id/runs`. There are no `/api/projects/:id/routines` routes; a routine associates to
+a project purely via `project_id` and travels in that project's export (imported routines arrive
+un-provisioned + stopped).
+
+**Current execution caveat (honest state).** A fire runs `crate::run::run_event_script()`, which
+exercises the real governance gate against a fixed set of representative planted calls
+(`enforced_gate_rules` + `evaluate_call`) to demonstrate deny/allow. The verdicts are genuine and
+token-free, but the routine's authored `prompt`, `scope`, and `model` are NOT yet used at fire time to
+drive a live multi-agent build, so a fire always yields the same representative summary and lands
+`BlockedNeedsReview`. A live path exists elsewhere (`CAMERATA_LIVE_BUILD`) but is not wired into the
+routine fire path. The scheduling, authoring, dashboard, and escalation surfaces are shipped; live prompt
+execution is the remaining piece.
+
+---
+
 ## 5b. Soft context layers (product brief, operating principles, project memory)
 
 Beyond the rules (the HARD constraints), three SOFT per-project context layers feed agent grounding
@@ -1707,11 +1763,11 @@ JSON files in `dirs::data_dir()/camerata/`:
 
 | File | Store type | Contents |
 |---|---|---|
-| `projects.json` | `ProjectStore` (`crates/server/src/project.rs`) | All projects: id, name, repos list, `ProjectRuleset` (selections/cross-repo/process/custom), onboarded repo set, `TierMap` (fleet bands + fallback chains), `DesignerBand` (enabled + model), `StepModels` (per-step helper models), `ModelProfile` (Balanced/MaxEfficiency/MaxQuality/Custom), `L3ReviewConfig` (enabled + model), stall thresholds, and loop guard. |
+| `projects.json` | `ProjectStore` (`crates/server/src/project.rs`) | All projects: id, name, repos list, `ProjectRuleset` (selections/cross-repo/process/custom), onboarded repo set, `TierMap` (fleet bands + fallback chains), `DesignerBand` (enabled + model), `StepModels` (per-step helper models), `ModelProfile` (Balanced/MaxEfficiency/MaxQuality/Custom), `L3ReviewConfig` (enabled + model), stall thresholds, loop guard, the soft-context layers (product brief, operating principles, curated memory; see 5b), and the work `HierarchySchema` (work-item `WorkType`s + `TypeRelation` nesting rules, the design-page work-type graph; `GET`/`POST /api/projects/:id/hierarchy`). All of these travel with the project export. |
 | `settings.json` | `SettingsStore` (`crates/server/src/settings.rs`) | `workspace_root` (the dir under which repos are cloned) + `repo_paths` (machine-local per-repo path overrides; never travels in export) + `bombe_enabled` (global animation on/off). Credentials (OpenRouter key, GitHub token) are stored in the system keychain, not in this file. |
 | `onboarding-draft.json` | `DraftStore` (`crates/server/src/draft.rs`) | In-flight brownfield onboarding state, a `{ project_id: draft }` map (one draft PER PROJECT, opaque JSON the UI owns) — opening a project with a draft prompts continue/start-over. Survives a restart; lost only if the scan hasn't produced output yet. |
 | `uow.json` | `UowStore` (`crates/server/src/uow.rs`) | `HashMap<story_id, UnitOfWork>`. Each UoW holds `branch`, `DevStatus`, the precise `UowStage` lifecycle, `history`, `gate_provenance`, `sign_off`, `evidence`, and a `decisions` read-cache (durable home is the `ArtifactStore`). See §10. |
-| `routines.json` | `RoutineStore` (`crates/server/src/routine.rs`) | Scheduled routines: name, schedule, intent, operational prompt, scope, model, enabled/provisioned, last_run/last_fired, project_id. The auto-fire scheduler (`auto_fire.rs`) ticks over these. |
+| `routines.json` | `RoutineStore` (`crates/server/src/routine.rs`) | Scheduled routines: name, schedule, intent, operational prompt, scope, model, enabled/provisioned, `RoutineStatus` (Idle/Running/BlockedNeedsReview/Done/Failed), last_run/last_fired, project_id, and a bounded `runs` history (cap 20). The auto-fire scheduler (`auto_fire.rs`) ticks over these; see 4c. |
 | `escalations.json` | `EscalationStore` (`crates/server/src/escalation.rs`) | Routine escalations: a blocked run's reason/options/suggestions, the human↔lead-engineer conversation, status (open/resolved), and the translated resume directive. |
 
 Each store type follows the same pattern: `Arc<Mutex<T>>` in-memory mirror,
@@ -2764,7 +2820,7 @@ The cockpit's top-level state machine is `CockpitScreen` (Projects / InProject).
 
 Inside a project, `CockpitView` (an enum in `crates/ui/src/cockpit.rs`) selects
 the active tab. The nav order is: **Onboard repos · Governed Development · Rules ·
-Routines · Repository Workspace · Docs.**
+Routines · Repository Workspace · Settings · Docs.**
 
 | Variant | Nav label | What it shows |
 |---|---|---|

@@ -122,9 +122,11 @@ Repository Workspace · Settings · Docs**.
 - **Rules** — manage the project's ruleset after onboarding + the repo-path health check (§4, §5).
   Rule tables are grouped by domain, collapsed by default; clicking a row opens a rule-detail modal.
   This page is rules-only: model configuration has moved to Settings.
-- **Routines** — schedule governed runs.
+- **Routines** — schedule governed runs (templates, an in-app auto-fire scheduler, run history, and
+  blocked-run review). Full walkthrough in §18.
 - **Repository Workspace** — the local clones: clone status, branch, and ship (push + PR) for dev work.
-- **Settings**: all configuration in one place, split into two clearly-labeled scopes (see §17).
+- **Settings**: all configuration in one place, split into two clearly-labeled scopes (see §17). The
+  Soft-context group also holds the **Work hierarchy** builder (define your work-item types and nesting).
 - **Docs** — the in-app documentation viewer (this guide and the technical reference).
 
 ---
@@ -1451,6 +1453,100 @@ import.
   Only **Approved** entries (the most recent, capped) feed the agents' grounding.
 
 See `docs/PROJECT_CONTEXT_LAYERS.md` for the design.
+
+### Work hierarchy (define your work-item types)
+
+Also in the Soft-context group is the **Work hierarchy** builder: define, per project, the work-item
+types your team uses and which types may nest under which. It is Camerata's own, portable, per-project
+answer to a fixed type system: freetext types (so custom ones slot in), and it encodes the parent-child
+RELATIONSHIP rules that a flat label cannot.
+
+- A **palette** of built-in types (Initiative, Epic, Feature, Story, Defect, Task, Bug), each with a
+  hover explaining the term, plus an input to add your own **custom** types.
+- **Drag a type onto another type's "children" zone** to allow that nesting. A parent may allow several
+  child types (a Feature can parent a Story and a Defect), and a child type may sit under several
+  parents. Cycles are prevented, so the graph stays a sane tree.
+- Mark which types may be a **design root** (the top of a work tree), then **Save** to persist the whole
+  graph. It travels with the project export.
+
+New projects start seeded with the common ladder (Initiative, then Epic, then Feature, then Story or
+Defect; Story then Task or Bug); edit it freely. This is the first shipped piece of a larger Design
+page: the schema itself is live today; the AI-assisted decomposition of an epic into drafted child
+stories, and publishing that tree to your tracker, are planned (see
+`docs/plans/2026-06-30_epic-design-page.md`).
+
+---
+
+## 18. Routines (scheduled governed runs)
+
+A **routine** is a governed run on a schedule: give it a name, a schedule, an operational prompt, and a
+permission scope, and Camerata fires it for you. Routines live under the **Routines** nav item. The
+scheduler runs *inside the app*, so routines fire while Camerata is open (not as a background OS
+service).
+
+### Creating a routine
+
+Open **Routines** and either start from a **template** or fill the form fresh.
+
+- **Templates** — two presets to start from: **Bug Triage Dashboard** (daily 09:00, read-only) and
+  **Security Scan and Patch** (daily 04:00, write-gated). "Use this template" prefills the form; you
+  still write the intent and press Save.
+- **Name** — what you will recognize it by.
+- **Permissions (scope)** — the cap on what an unattended run may do:
+  - **Read-only** — analyze and report; write nothing.
+  - **Write (gated)** — edit on a working branch, every write through the governance gate, no push.
+  - **Write and open PR** — the above, plus push and open a PR. Nothing auto-merges.
+- **Project** — assign it to a project (for grouping, and so it travels with that project's export) or
+  leave it **Global**. Either way the scheduler fires it; the assignment is about organization, not
+  execution.
+- **Model** — the model the routine uses, from your model catalog.
+- **Schedule** — a structured picker: **One-off** (a single date and time), **Daily**, **Weekly** (pick
+  the weekdays), or **Monthly** (pick the day of month), each with a time. A live preview shows the
+  resulting schedule. Anything left unscheduled is **manual**: it never auto-fires, and you run it by
+  hand.
+- **Intent** — describe, in plain words, WHAT you want the routine to do. This is never run verbatim.
+- **Draft operational prompt** — press it and the lead-engineer AI authors a concrete **operational
+  prompt** from your intent plus scope (falling back to a deterministic scaffold if the model is
+  unavailable). The prompt is editable; it is what a run would actually execute.
+
+Press **Add routine** to save. A locally-created routine is **provisioned** and ready.
+
+### The dashboard
+
+The Routines view shows a status strip you can click to filter: **Total, Enabled, Running, Blocked,
+Due (under 24h)**. Rows are grouped by project (Global last), each showing its schedule, next fire, and
+last run. Per routine:
+
+- **Start / Stop** — arm or disarm auto-firing (the `enabled` state). Provisioning never auto-starts a
+  routine; you press Start.
+- **Run now** — fire it immediately (a manual run).
+- **Set up** — appears on an **imported** routine, which arrives un-provisioned (so a Start cannot
+  silently do nothing on a machine where the routine does not really exist). Press it to provision,
+  then Start.
+- **Run history** — the recent runs (capped at 20), each with its gate summary.
+
+### Blocked runs and review
+
+When a run's governance gate denies something, the routine lands in **Blocked (needs review)** and
+raises a human-review escalation (at most one open per routine). Its row expands into a review panel
+where you can **chat with the lead engineer** about what was denied (chatting never unblocks) and then
+**Authorize and unblock**. This is the same review flow as the interactive escalations in section 6.
+
+### What a fire does today (current behavior)
+
+Be aware of the current execution model so nothing surprises you: a scheduled or manual fire exercises
+the **governance gate against a fixed set of representative calls** to demonstrate deny and allow
+enforcement, rather than running your operational prompt as a live multi-agent build. The gate verdicts
+are real and the blocked-run review flow is real, but the routine's authored prompt, scope, and model
+are not yet driving a live build at fire time (so a fire currently returns the same representative
+summary). Live prompt execution is planned; the scheduling, prompt authoring, dashboard, run history,
+and review surfaces are what is shipped today.
+
+### Portability
+
+Routines assigned to a project travel with that project's **export**. On import they arrive
+**un-provisioned and stopped**, so nothing fires on the new machine until you press **Set up** and then
+**Start**.
 
 ---
 

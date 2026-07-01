@@ -130,6 +130,7 @@ A compiling, tested, all-Rust workspace, not a design folder.
 - **The gate inside a live development cycle** — the engine and console are wired and unit-tested at the argv/jail/state level, but a live model doing real multi-step work with layer-2 bounce-back has not been run end-to-end.
 - **The consumer app-builder default flow is deterministic, not model-driven** (real fleet behind `CAMERATA_LIVE_BUILD=1`; Azure deploy is a plan).
 - **The architect surface has made zero live board calls** — the `WorkItemProvider` port, the Jira/ADO/GitHub adapters, and the sync policy exist with an end-to-end flow test against scripted fakes only.
+- **Scheduled routines** — the routine model, the in-app auto-fire scheduler, AI-authored operational prompts, the dashboard, run history, and blocked-run review are built and unit-tested. Today a fire exercises the gate against representative calls (to prove deny/allow); live execution of a routine's own prompt is not yet wired. This is the structured, visible home for routines that motivated Camerata (see the opening).
 
 **Still ahead:** the live development-cycle validation; live wiring for the worktracker adapters (OAuth, webhooks) and the Azure deploy adapter; the dev-engine ingest of "resolve now" stories; and deepening the gate's rule set (more enforcement arms, AST-level checks).
 
