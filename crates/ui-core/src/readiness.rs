@@ -185,4 +185,21 @@ mod tests {
         assert!(should_open_resolve_modal(ProjectReadiness::Unlinked));
         assert!(should_open_resolve_modal(ProjectReadiness::Partial));
     }
+
+    // ── Bug regression: ResolveModal early-return guard (Bug 2) ─────────────────────────────────
+    //
+    // `ResolveModal` early-returns `rsx! {}` when `unresolved().is_empty()` so a Ready project
+    // never shows the empty modal even if `modal_open` is still true after the last resolve.
+    // This test confirms the load-bearing condition: a fully-resolved repo list yields an empty
+    // unresolved set, which triggers the early-return.
+    #[test]
+    fn ready_project_has_empty_unresolved_repos() {
+        // All repos resolved — this is the post-link state that triggers the empty-modal bug.
+        let repos = vec![res("a/one", true), res("a/two", true)];
+        let unresolved = unresolved_repos(&repos);
+        assert!(
+            unresolved.is_empty(),
+            "a fully-resolved repo list must produce an empty unresolved set (ResolveModal early-return guard)"
+        );
+    }
 }

@@ -167,6 +167,15 @@ pub fn ResolveModal(
     on_close: EventHandler<()>,
 ) -> Element {
     let unresolved = readiness.unresolved();
+    // Early-return when there are no unresolved repos (project is Ready). This can happen when
+    // `on_resolved` triggers a readiness re-fetch and the last repo just resolved, but
+    // `modal_open` hasn't been cleared yet. Rendering nothing here prevents the contradictory
+    // "paused until each repo resolves" header + "Dismiss (stay paused)" button from showing on
+    // an already-Ready project. The parent's `modal_open.set(false)` in `on_resolved` provides
+    // a second line of defence, but this guard ensures correctness regardless of state ordering.
+    if unresolved.is_empty() {
+        return rsx! {};
+    }
     // Per-repo inline error (keyed by repo id) surfaced from a rejected link.
     let mut link_error = use_signal(|| None::<(String, String)>);
     // The repo currently mid clone-or-link (disables its buttons + shows a spinner label).

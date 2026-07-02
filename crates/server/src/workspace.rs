@@ -277,8 +277,12 @@ pub async fn repo_resolution(
         };
     };
     let path_str = dir.to_string_lossy().into_owned();
+    // `detect_remote_repo` returns the already-parsed `owner/repo` string (from the origin
+    // URL). Compare case-insensitively so a clone whose origin casing differs from the stored
+    // project identity (e.g. stored `Owner/Repo`, origin `owner/repo`) still resolves as
+    // expected — matching the same invariant enforced by `validate_link_target`.
     match detect_remote_repo(&dir).await {
-        Ok(found) if found == repo => RepoResolution {
+        Ok(found) if found.eq_ignore_ascii_case(repo.trim()) => RepoResolution {
             repo: repo.to_string(),
             path: Some(path_str),
             resolved: true,
@@ -2292,6 +2296,43 @@ mod tests {
             err.contains("not a git clone"),
             "the error explains it is not a git clone; got: {err}"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── Bug regression: repo_resolution must be case-insensitive on origin (Bug 1) ─────────────
+    //
+    // `validate_link_target` accepts a link when the folder's origin casing DIFFERS from the stored
+    // project identity (e.g. stored `Owner/Repo`, origin `owner/repo`), because it uses
+    // `eq_ignore_ascii_case`. Before the fix, `repo_resolution` used `==` (case-sensitive), so a
+    // successfully-linked repo would still fail the resolution check and leave the project stuck
+    // Unlinked/Partial (paused) forever. This test is the regression guard.
+    #[tokio::test]
+    async fn repo_resolution_resolved_when_origin_casing_differs_from_stored_repo() {
+        let base =
+            std::env::temp_dir().join(format!("cam-res-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("clone");
+
+        // Clone whose origin uses LOWER-CASE `owner/repo` (what GitHub actually stores).
+        init_repo_with_origin(&dir, "https://github.com/owner/repo.git");
+
+        // But the project stores the identity with UPPER-CASE `Owner/Repo` (e.g. typed by the
+        // user or imported from a GitHub API response that preserves display casing).
+        let stored_repo = "Owner/Repo";
+
+        let resolution = repo_resolution(
+            Some(&dir.to_string_lossy()),
+            None,  // no workspace root — use the explicit override path
+            stored_repo,
+        )
+        .await;
+
+        assert!(
+            resolution.resolved,
+            "repo_resolution must resolve when origin casing differs from stored identity; reason: {}",
+            resolution.reason
+        );
+
         let _ = std::fs::remove_dir_all(&base);
     }
 }

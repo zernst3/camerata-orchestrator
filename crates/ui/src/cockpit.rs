@@ -2494,7 +2494,15 @@ pub fn CockpitApp() -> Element {
                     crate::readiness_gate::ResolveModal {
                         project_id: pid.clone(),
                         readiness: r.clone(),
-                        on_resolved: move |_| readiness_refresh += 1,
+                        on_resolved: move |_| {
+                            readiness_refresh += 1;
+                            // Close the modal state eagerly so it can't linger open after the
+                            // last repo resolves. The ResolveModal early-return (unresolved empty)
+                            // is the authoritative guard; this ensures `modal_open` is clean and
+                            // prevents the PausedBanner from re-opening a stale modal on the next
+                            // render before the readiness re-fetch completes.
+                            modal_open.set(false);
+                        },
                         on_close: move |_| modal_open.set(false),
                     }
                 }
