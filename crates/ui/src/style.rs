@@ -5532,8 +5532,11 @@ select:focus {
 .design-send-row { display: flex; gap: 10px; align-items: flex-end; }
 .design-input-area { flex: 1; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); color: var(--ink); font-size: 13.5px; resize: vertical; min-height: 72px; font-family: inherit; }
 .design-proposed-section { display: flex; flex-direction: column; gap: 8px; }
-.design-proposed { display: flex; flex-wrap: wrap; gap: 8px; }
+.design-proposed { display: flex; flex-direction: column; gap: 10px; }
 .design-proposed-chip { font-size: 12.5px; padding: 4px 12px; border-radius: 16px; border: 1px solid rgba(59,130,246,0.35); color: #60a5fa; background: rgba(59,130,246,0.08); }
+.design-proposed-item { padding: 10px 14px; border-radius: 8px; border: 1px solid rgba(59,130,246,0.35); background: rgba(59,130,246,0.06); }
+.design-proposed-title { font-size: 13px; font-weight: 600; color: #60a5fa; margin: 0 0 6px 0; }
+.design-proposed-body { font-size: 12.5px; color: var(--ink-soft); line-height: 1.6; }
 .design-publish-section { display: flex; flex-direction: column; gap: 8px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
 .design-publish-row { display: flex; gap: 10px; align-items: center; }
 .mockup-panel { margin-top: 20px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }

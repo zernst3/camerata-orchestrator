@@ -45,6 +45,8 @@ struct ProposedChild {
     pub node_type: String,
     #[serde(default)]
     pub title: String,
+    #[serde(default)]
+    pub body: String,
 }
 
 /// The project's work-hierarchy schema (mirrors the server `HierarchySchema` shape): the
@@ -596,8 +598,22 @@ fn DesignNodeAuthorPanel(
                                 } else {
                                     format!("{}: {}", child.node_type, child.title)
                                 };
+                                let body_html = if child.body.is_empty() {
+                                    String::new()
+                                } else {
+                                    crate::md::md_to_html(&child.body)
+                                };
+                                let has_body = !child.body.is_empty();
                                 rsx! {
-                                    span { class: "design-proposed-chip", "{label}" }
+                                    div { class: "design-proposed-item",
+                                        p { class: "design-proposed-title", "{label}" }
+                                        if has_body {
+                                            div {
+                                                class: "design-proposed-body",
+                                                dangerous_inner_html: "{body_html}"
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -617,7 +633,7 @@ fn DesignNodeAuthorPanel(
                                         .map(|c| serde_json::json!({
                                             "node_type": c.node_type,
                                             "title": c.title,
-                                            "body": "",
+                                            "body": c.body,
                                         }))
                                         .collect();
                                     spawn(async move {
@@ -933,6 +949,7 @@ mod tests {
                             ProposedChild {
                                 node_type: "Feature".to_string(),
                                 title: "Auth UI".to_string(),
+                                body: "## Summary\nAllow users to log in via OAuth.".to_string(),
                             },
                         ],
                         authoring: None,
@@ -945,7 +962,11 @@ mod tests {
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("Feature: Auth UI"), "proposed child chip renders");
+        assert!(html.contains("Feature: Auth UI"), "proposed child title renders");
+        assert!(
+            html.contains("Allow users to log in via OAuth"),
+            "proposed child body is displayed in rendered HTML"
+        );
         assert!(html.contains("Materialize 1 child"), "materialize button renders");
     }
 }
