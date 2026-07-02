@@ -2580,6 +2580,22 @@ html, body {
 .ws-path { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; color: var(--ink); flex: 1; min-width: 200px; word-break: break-all; }
 .ws-path.none { color: var(--ink-faint); font-style: italic; font-family: inherit; }
 .ws-hint { font-size: 13px; color: var(--ink-soft); line-height: 1.5; margin: 8px 0; }
+
+/* Project readiness gate (2026-07-01): paused banner + clone-or-link modal. */
+.readiness-banner { display: flex; align-items: center; gap: 12px; padding: 12px 16px; margin-bottom: 16px; border: 1px solid var(--warn, #c98a1a); border-radius: 12px; background: rgba(201,138,26,.10); }
+.readiness-banner-dot { width: 9px; height: 9px; border-radius: 50%; background: var(--warn, #c98a1a); flex: 0 0 auto; }
+.readiness-banner-text { font-size: 13.5px; font-weight: 600; color: var(--ink); flex: 1; }
+.readiness-banner-btn { margin-bottom: 0; }
+.readiness-gated-hint { color: var(--ink-soft); font-style: italic; }
+.readiness-modal .rule-modal-detail { margin-bottom: 12px; }
+.readiness-repo { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; background: var(--surface); }
+.readiness-repo-name { font-size: 14px; font-weight: 700; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0 0 6px; }
+.readiness-repo-prompt { font-size: 13px; color: var(--ink-soft); line-height: 1.5; margin: 0 0 12px; }
+.readiness-repo-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+.readiness-repo-actions .btn-run { margin-bottom: 0; }
+.readiness-repo-error { font-size: 12.5px; color: var(--bad, #c0392b); margin: 10px 0 0; font-weight: 600; }
+.readiness-modal-foot { display: flex; justify-content: flex-end; margin-top: 4px; }
+
 .ws-project { margin-top: 18px; }
 .ws-project-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 12px; border-bottom: 1px solid var(--line); margin-bottom: 12px; flex-wrap: wrap; }
 .ws-repo { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; background: var(--surface); }

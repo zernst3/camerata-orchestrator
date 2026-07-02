@@ -2431,6 +2431,86 @@ pub fn CockpitApp() -> Element {
     let govdev_sel = use_signal(|| uow::GovDevSel::IssueManagement);
     use_context_provider(|| govdev_sel);
 
+    // ── Project readiness gate (2026-07-01 ADR) ───────────────────────────────────
+    // On project entry / active-project change, fetch the project's DERIVED readiness. A
+    // paused (Unlinked / Partial) project loads behind a single "link repo" affordance:
+    // the modal auto-opens and repo-dependent action surfaces are gated so nothing fires
+    // into a guaranteed 404 / no-op. `readiness_refresh` is bumped after a clone/link so
+    // the state re-derives; pure logic lives in `camerata_ui_core::readiness`.
+    let mut readiness_refresh = use_signal(|| 0u32);
+    let readiness_res = use_resource(move || {
+        let _dep = readiness_refresh();
+        let pid = active_proj.read().clone().flatten().map(|p| p.id);
+        async move {
+            match pid {
+                Some(id) => crate::readiness_gate::fetch_readiness(&id).await,
+                None => None,
+            }
+        }
+    });
+    let readiness = readiness_res.read().clone().flatten();
+    let active_pid = active_proj
+        .read()
+        .clone()
+        .flatten()
+        .map(|p| p.id)
+        .unwrap_or_default();
+    // Whether repo-dependent primary actions (scan / run / apply / design-publish) are gated.
+    let gated = readiness
+        .as_ref()
+        .map(|r| crate::readiness_gate::action_gated(r.state))
+        .unwrap_or(false);
+
+    // Resolve-modal open state. Auto-open ONCE when a paused project is first observed; the
+    // user can dismiss it (project stays paused) and re-open via the banner CTA.
+    let mut modal_open = use_signal(|| false);
+    let mut modal_auto_inited = use_signal(|| false);
+    use_effect(move || {
+        if modal_auto_inited() {
+            return;
+        }
+        if let Some(r) = &*readiness_res.read() {
+            if let Some(r) = r {
+                if crate::readiness_gate::action_gated(r.state) {
+                    modal_open.set(true);
+                }
+                modal_auto_inited.set(true);
+            }
+        }
+    });
+
+    // The shared paused banner (renders nothing when Ready) + resolve modal, injected into
+    // every in-project surface's chrome so the gate is inescapable while paused.
+    let gate_chrome = {
+        let readiness = readiness.clone();
+        let pid = active_pid.clone();
+        rsx! {
+            if let Some(r) = readiness.clone() {
+                crate::readiness_gate::PausedBanner {
+                    readiness: r.clone(),
+                    open_modal: move |_| modal_open.set(true),
+                }
+                if modal_open() {
+                    crate::readiness_gate::ResolveModal {
+                        project_id: pid.clone(),
+                        readiness: r.clone(),
+                        on_resolved: move |_| readiness_refresh += 1,
+                        on_close: move |_| modal_open.set(false),
+                    }
+                }
+            }
+        }
+    };
+
+    // For gated repo-dependent surfaces (scan / run / apply / design-publish), we render the
+    // banner + modal in place of the surface body so the primary actions can't fire. Workspace
+    // (where you clone/link) and the config/read-only surfaces stay reachable.
+    let gated_notice = rsx! {
+        p { class: "ws-hint readiness-gated-hint",
+            "This action is paused until the project's repo is linked. Use \u{201c}Link repo\u{201d} above to resolve it."
+        }
+    };
+
     // Routines + Onboard live inside the cockpit (architect tools). All hooks above
     // have run, so branching here is safe.
     if view() == CockpitView::Onboard {
@@ -2440,7 +2520,9 @@ pub fn CockpitApp() -> Element {
                 AppUpdateBanner {}
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
-                    OnboardView { connection: conn }
+                    {gate_chrome.clone()}
+                    // Onboarding runs the brownfield SCAN — a repo-dependent action. Gated while paused.
+                    if gated { {gated_notice.clone()} } else { OnboardView { connection: conn } }
                 }
             }
         };
@@ -2451,7 +2533,9 @@ pub fn CockpitApp() -> Element {
                 AppUpdateBanner {}
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
-                    RulesView {}
+                    {gate_chrome.clone()}
+                    // Rules hosts APPLY (install rules into the local checkout) — repo-dependent. Gated.
+                    if gated { {gated_notice.clone()} } else { RulesView {} }
                 }
             }
         };
@@ -2462,6 +2546,7 @@ pub fn CockpitApp() -> Element {
                 AppUpdateBanner {}
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
+                    {gate_chrome.clone()}
                     crate::routines::RoutineDashboard {}
                 }
             }
@@ -2473,17 +2558,22 @@ pub fn CockpitApp() -> Element {
                 AppUpdateBanner {}
                 CockpitNav { view }
                 div { class: "cockpit-scroll cockpit-scroll-full",
-                    crate::design::DesignCanvasView {}
+                    {gate_chrome.clone()}
+                    // The Design Canvas hosts design-PUBLISH (push nodes to GitHub) — repo-dependent. Gated.
+                    if gated { {gated_notice.clone()} } else { crate::design::DesignCanvasView {} }
                 }
             }
         };
     }
     if view() == CockpitView::Workspace {
+        // Workspace is where you CLONE/LINK, so it must stay reachable while paused — show the
+        // banner (so the modal is one click away) but never gate the surface itself.
         return rsx! {
             div { class: "cockpit",
                 AppUpdateBanner {}
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
+                    {gate_chrome.clone()}
                     crate::workspace::WorkspaceView {}
                 }
             }
@@ -2495,6 +2585,7 @@ pub fn CockpitApp() -> Element {
                 AppUpdateBanner {}
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
+                    {gate_chrome.clone()}
                     DocsView {}
                 }
             }
@@ -2506,20 +2597,22 @@ pub fn CockpitApp() -> Element {
                 AppUpdateBanner {}
                 CockpitNav { view }
                 div { class: "cockpit-scroll",
+                    {gate_chrome.clone()}
                     SettingsView { global_only: false }
                 }
             }
         };
     }
 
-    // The Governed Development page (work-item / UoW surface). It owns its own data
-    // fetching and selection state; CockpitApp just hosts it inside the shell chrome.
+    // The Governed Development page (work-item / UoW surface). It hosts the "Begin
+    // Development" / "Begin investigation" RUN controls — repo-dependent. Gated while paused.
     rsx! {
         div { class: "cockpit",
             AppUpdateBanner {}
             CockpitNav { view }
             div { class: "cockpit-scroll",
-                GovernedDevPage {}
+                {gate_chrome.clone()}
+                if gated { {gated_notice.clone()} } else { GovernedDevPage {} }
             }
         }
     }

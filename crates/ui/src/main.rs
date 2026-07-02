@@ -23,6 +23,7 @@ mod terminal;
 mod toast;
 mod vcs_settings;
 mod design;
+mod readiness_gate;
 mod workspace;
 
 use dioxus::prelude::*;

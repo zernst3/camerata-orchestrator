@@ -8,6 +8,7 @@
 //! modules are added here as each surface's logic moves over.
 
 pub mod models;
+pub mod readiness;
 pub mod rules;
 pub mod run;
 pub mod scan;
