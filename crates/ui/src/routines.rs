@@ -972,6 +972,7 @@ pub fn RoutineDashboard() -> Element {
                                                         if msg.trim().is_empty() { return; }
                                                         chatting.set(true);
                                                         spawn(async move {
+                                                            let _guard = crate::loading::LoadingGuard::new();
                                                             if chat_escalation(&id, &msg, &md).await.is_some() {
                                                                 chat_input.set(String::new());
                                                                 refresh += 1;
