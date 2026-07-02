@@ -4471,10 +4471,16 @@ pub(super) async fn fetch_single_rule(project_id: &str, rule_id: &str) -> Option
     .ok()
 }
 
-/// Persist a single-rule edit. Scope determines whether the edit goes to the project
-/// level or a specific repo override.
+/// Persist a single-rule edit. Scope determines which endpoint the edit targets:
 ///
-/// Body shape: `{ "chosen_option": "opt-id", "scope": "project"|"repo", "repo": "owner/repo" }`
+/// - `RuleEditScope::Project` → `POST /api/projects/:id/rules/:rule_id`
+///   (project-level selection; `set_rule_override`).
+/// - `RuleEditScope::Repo` (with `repo: Some(..)`) → `POST /api/projects/:id/repos/:repo/rules/:rule_id`
+///   (repo-scoped override; `set_repo_rule_override`).
+///
+/// Both handlers read `{ "chosen_option": "opt-id" }` from the body; the scope is
+/// carried by the URL, not a body field. Routing repo edits through the repo path
+/// is what makes the override land at repo level instead of silently at project level.
 pub(super) async fn save_single_rule_edit(
     project_id: &str,
     rule_id: &str,
@@ -4482,21 +4488,28 @@ pub(super) async fn save_single_rule_edit(
     scope: RuleEditScope,
     repo: Option<&str>,
 ) -> bool {
-    let body = serde_json::json!({
-        "chosen_option": chosen_option,
-        "scope": match scope {
-            RuleEditScope::Project => "project",
-            RuleEditScope::Repo => "repo",
-        },
-        "repo": repo,
-    });
-    reqwest::Client::new()
-        .post(format!(
+    let body = serde_json::json!({ "chosen_option": chosen_option });
+    let url = match (scope, repo) {
+        (RuleEditScope::Repo, Some(repo)) => format!(
+            // `repo` is `owner/repo`; percent-encode it so the `/` stays inside a
+            // single path segment (axum's Path extractor decodes it back). Same
+            // convention as UoW/story ids — see `super::enc_seg`.
+            "{}/api/projects/{}/repos/{}/rules/{}",
+            crate::bff_base(),
+            project_id,
+            super::enc_seg(repo),
+            rule_id
+        ),
+        // Project scope, or repo scope with no target repo, writes to the project level.
+        _ => format!(
             "{}/api/projects/{}/rules/{}",
             crate::bff_base(),
             project_id,
             rule_id
-        ))
+        ),
+    };
+    reqwest::Client::new()
+        .post(url)
         .json(&body)
         .send()
         .await
@@ -6113,11 +6126,7 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/proj-1/rules/RUST-FMT-1"))
-            .and(body_json(serde_json::json!({
-                "chosen_option": "a",
-                "scope": "project",
-                "repo": null
-            })))
+            .and(body_json(serde_json::json!({ "chosen_option": "a" })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
@@ -6144,13 +6153,14 @@ mod bff_tests {
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
+        // BUG C regression: repo-scoped edits MUST hit the repo-level route with a
+        // body of just `{ chosen_option }` (scope carried by URL, not body). Before
+        // the fix this POSTed to the project-level path with `{scope,repo}` — which
+        // `set_rule_override` ignores, silently landing the override at project level.
         Mock::given(method("POST"))
-            .and(path("/api/projects/proj-1/rules/RUST-FMT-1"))
-            .and(body_json(serde_json::json!({
-                "chosen_option": "b",
-                "scope": "repo",
-                "repo": "me/api"
-            })))
+            // `repo` is percent-encoded into a single path segment (owner%2Frepo).
+            .and(path("/api/projects/proj-1/repos/me%2Fapi/rules/RUST-FMT-1"))
+            .and(body_json(serde_json::json!({ "chosen_option": "b" })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)

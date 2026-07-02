@@ -2651,6 +2651,7 @@ mod post_story_hook_tests {
             rule_id: rule_id.to_string(),
             chosen_option: opt.map(String::from),
             repos: vec![],
+            ..Default::default()
         }
     }
 

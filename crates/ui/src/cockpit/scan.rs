@@ -3374,13 +3374,16 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
 
 /// Fetch and return the Markdown deep report for the active project from
 /// `GET /api/projects/:id/deep-report`. Returns the Markdown string on success.
-/// The `soc2` parameter controls whether the SOC-2 section is included.
-pub(super) async fn fetch_deep_report(project_id: &str, include_soc2: bool) -> Option<String> {
+///
+/// BUG 3 fix: SOC-2 inclusion is decided SERVER-SIDE via the `soc2` feature flag
+/// (`export_deep_report` drives it off `state.feature_flags.soc2`). The client used
+/// to send `?include_soc2=<bool>`, but the server ignored it — the query param was a
+/// dead lever giving false control. It is dropped; the server owns the decision.
+pub(super) async fn fetch_deep_report(project_id: &str) -> Option<String> {
     let url = format!(
-        "{}/api/projects/{}/deep-report?include_soc2={}",
+        "{}/api/projects/{}/deep-report",
         crate::bff_base(),
         project_id,
-        include_soc2
     );
     let resp = reqwest::get(url).await.ok()?;
     if resp.status().is_success() {
@@ -3419,10 +3422,10 @@ pub(super) fn DeepReportExportPanel(project_id: String, soc2_enabled: bool) -> E
                 disabled: loading(),
                 onclick: move |_| {
                     let pid = project_id.clone();
-                    let include_soc2 = soc2_enabled;
                     loading.set(true);
                     spawn(async move {
-                        match fetch_deep_report(&pid, include_soc2).await {
+                        // SOC-2 inclusion is feature-flag-driven server-side; no client param.
+                        match fetch_deep_report(&pid).await {
                             Some(md) => report_md.set(Some(md)),
                             None => crate::toast::push_toast(
                                 toasts,
@@ -4377,19 +4380,20 @@ mod tests {
     #[tokio::test]
     #[serial_test::serial(bff_env)]
     async fn fetch_deep_report_returns_markdown_on_2xx() {
-        use wiremock::matchers::{method, path, query_param};
+        use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
+        // BUG 3: no `?include_soc2` query param is sent — the server owns the SOC-2
+        // decision via its feature flag. The request is a bare GET on the path.
         Mock::given(method("GET"))
             .and(path("/api/projects/proj-1/deep-report"))
-            .and(query_param("include_soc2", "true"))
             .respond_with(ResponseTemplate::new(200).set_body_string("# Deep Report\n\nsome markdown"))
             .mount(&server)
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let md = super::fetch_deep_report("proj-1", true).await;
+        let md = super::fetch_deep_report("proj-1").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         let md = md.expect("markdown returned on success");
@@ -4410,7 +4414,7 @@ mod tests {
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let md = super::fetch_deep_report("proj-1", false).await;
+        let md = super::fetch_deep_report("proj-1").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(md.is_none(), "a non-2xx must yield None, not the error body");

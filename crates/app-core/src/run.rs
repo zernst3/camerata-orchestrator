@@ -13,6 +13,8 @@
 //! existing `crate::run::X` call sites are unchanged.
 
 use serde::{Deserialize, Serialize};
+use serde::de::{self, Deserializer};
+use serde::ser::Serializer;
 
 use camerata_core::RuleId;
 use camerata_liveness::LivenessTracker;
@@ -49,8 +51,29 @@ impl Default for StallPolicy {
 }
 
 /// The lifecycle status of a run, in Camerata's vocabulary.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+///
+/// # Wire shape (BUG 1 fix)
+///
+/// `RunStatus` is SERIALIZE-ONLY on the wire: it is emitted in API responses
+/// (`GET /api/runs/:id` via `RunStatusResponse`) and in `RunProvenance`, but is
+/// never deserialized from the wire or persisted to disk (the `RunStore` is an
+/// in-memory `HashMap`). The old derived `Serialize` with `rename_all="snake_case"`
+/// serialized the unit variants to plain strings but the `Failed { reason }` STRUCT
+/// variant to an OBJECT (`{"failed":{"reason":"…"}}`). The client parse target
+/// (`RunView.status: String`) therefore FAILED to deserialize a failed run, so the
+/// "Run failed" banner + Stop button never rendered.
+///
+/// The custom `Serialize` below emits `Failed` as the bare string `"failed"` — the
+/// same shape as every other terminal state — so a failed run deserializes on the
+/// client like any other. The failure reason is NOT lost: it travels separately in
+/// `Run.failure_reason` (mirrored from `RunStatus::Failed.reason`), which the client
+/// reads directly.
+///
+/// The custom `Deserialize` accepts BOTH the new bare-string form (`"failed"`, with
+/// an empty reason) AND the legacy object form (`{"failed":{"reason":"…"}}`) so any
+/// future in-repo deserialization is tolerant. It is provided for symmetry/robustness
+/// only; nothing currently deserializes `RunStatus` from the wire.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RunStatus {
     Planned,
     Executing,
@@ -73,6 +96,100 @@ pub enum RunStatus {
     Failed { reason: String },
     /// The run was explicitly cancelled (by the architect or by automatic stall policy).
     Cancelled,
+}
+
+impl RunStatus {
+    /// The snake_case wire token for this status. `Failed` maps to the bare `"failed"`
+    /// (the reason travels separately via `Run.failure_reason`); every variant is a
+    /// plain string, so the whole enum serializes uniformly on the wire.
+    pub fn wire_str(&self) -> &'static str {
+        match self {
+            RunStatus::Planned => "planned",
+            RunStatus::Executing => "executing",
+            RunStatus::Gating => "gating",
+            RunStatus::AwaitingClarification => "awaiting_clarification",
+            RunStatus::AwaitingReview => "awaiting_review",
+            RunStatus::AwaitingQa => "awaiting_qa",
+            RunStatus::Failed { .. } => "failed",
+            RunStatus::Cancelled => "cancelled",
+        }
+    }
+}
+
+impl Serialize for RunStatus {
+    /// Emit every variant as its bare snake_case string, INCLUDING `Failed` (as
+    /// `"failed"`). This is the BUG 1 fix: the derived impl serialized `Failed` as
+    /// `{"failed":{"reason":"…"}}`, which the string-typed client parse target could
+    /// not deserialize. The reason is carried separately in `Run.failure_reason`.
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.wire_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for RunStatus {
+    /// Accept BOTH the bare-string form (`"failed"`, reason defaults to empty) AND the
+    /// legacy object form (`{"failed":{"reason":"…"}}`) so in-repo deserialization is
+    /// tolerant of either shape. Provided for symmetry only; nothing currently
+    /// deserializes `RunStatus` from the wire or disk.
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct FailedReason {
+            #[serde(default)]
+            reason: String,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            /// A plain snake_case token, e.g. `"executing"` or `"failed"`.
+            Tag(String),
+            /// The legacy object form: `{"failed": {"reason": "…"}}`.
+            Object {
+                #[serde(default)]
+                failed: Option<FailedReason>,
+            },
+        }
+
+        match Wire::deserialize(deserializer)? {
+            Wire::Tag(s) => match s.as_str() {
+                "planned" => Ok(RunStatus::Planned),
+                "executing" => Ok(RunStatus::Executing),
+                "gating" => Ok(RunStatus::Gating),
+                "awaiting_clarification" => Ok(RunStatus::AwaitingClarification),
+                "awaiting_review" => Ok(RunStatus::AwaitingReview),
+                "awaiting_qa" => Ok(RunStatus::AwaitingQa),
+                "failed" => Ok(RunStatus::Failed {
+                    reason: String::new(),
+                }),
+                "cancelled" => Ok(RunStatus::Cancelled),
+                other => Err(de::Error::unknown_variant(
+                    other,
+                    &[
+                        "planned",
+                        "executing",
+                        "gating",
+                        "awaiting_clarification",
+                        "awaiting_review",
+                        "awaiting_qa",
+                        "failed",
+                        "cancelled",
+                    ],
+                )),
+            },
+            Wire::Object { failed } => match failed {
+                Some(f) => Ok(RunStatus::Failed { reason: f.reason }),
+                None => Err(de::Error::custom(
+                    "unrecognized RunStatus object form (expected `failed`)",
+                )),
+            },
+        }
+    }
 }
 
 /// One real gate verdict recorded during a run.
@@ -284,6 +401,74 @@ pub fn stall_decision(run: &Run, threshold_ms: u128, now_ms: u128) -> StallDecis
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── BUG 1: RunStatus wire shape (serialize-only contract) ────────────────
+
+    /// `RunStatus::Failed { reason }` must serialize to the BARE string `"failed"`,
+    /// NOT the object `{"failed":{"reason":"…"}}`. The reason travels separately via
+    /// `Run.failure_reason`; the client parse target (`RunView.status: String`) needs
+    /// a plain string or the failed-run banner never renders. Regression for BUG 1.
+    #[test]
+    fn run_status_failed_serializes_to_bare_string() {
+        let s = RunStatus::Failed {
+            reason: "Stall timeout exceeded".to_string(),
+        };
+        let json = serde_json::to_string(&s).unwrap();
+        assert_eq!(json, "\"failed\"");
+    }
+
+    /// Every terminal/lifecycle variant serializes to its plain snake_case string, so
+    /// the whole enum is uniform on the wire (all strings, no object variant).
+    #[test]
+    fn run_status_all_variants_serialize_to_snake_case_strings() {
+        let cases = [
+            (RunStatus::Planned, "\"planned\""),
+            (RunStatus::Executing, "\"executing\""),
+            (RunStatus::Gating, "\"gating\""),
+            (
+                RunStatus::AwaitingClarification,
+                "\"awaiting_clarification\"",
+            ),
+            (RunStatus::AwaitingReview, "\"awaiting_review\""),
+            (RunStatus::AwaitingQa, "\"awaiting_qa\""),
+            (
+                RunStatus::Failed {
+                    reason: "x".to_string(),
+                },
+                "\"failed\"",
+            ),
+            (RunStatus::Cancelled, "\"cancelled\""),
+        ];
+        for (status, expected) in cases {
+            assert_eq!(serde_json::to_string(&status).unwrap(), expected);
+        }
+    }
+
+    /// The tolerant custom `Deserialize` accepts BOTH the bare-string form and the
+    /// legacy object form. (Nothing deserializes RunStatus on the wire today; this
+    /// guards the symmetry the impl promises.)
+    #[test]
+    fn run_status_deserializes_bare_string_and_legacy_object() {
+        let from_str: RunStatus = serde_json::from_str("\"failed\"").unwrap();
+        assert_eq!(
+            from_str,
+            RunStatus::Failed {
+                reason: String::new()
+            }
+        );
+
+        let from_obj: RunStatus =
+            serde_json::from_str(r#"{"failed":{"reason":"boom"}}"#).unwrap();
+        assert_eq!(
+            from_obj,
+            RunStatus::Failed {
+                reason: "boom".to_string()
+            }
+        );
+
+        let executing: RunStatus = serde_json::from_str("\"executing\"").unwrap();
+        assert_eq!(executing, RunStatus::Executing);
+    }
 
     #[test]
     fn idle_ms_computes_elapsed() {

@@ -349,6 +349,7 @@ mod tests {
             rule_id: id.to_string(),
             chosen_option: None,
             repos: vec!["me/api".to_string()],
+            ..Default::default()
         }
     }
 
