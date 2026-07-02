@@ -8853,6 +8853,10 @@ struct DesignBlankReq {
     /// the strict validation lives at `materialize_nodes`).
     #[serde(default)]
     root_type: Option<String>,
+    /// When set, the new node is created as a child of this draft node ID.
+    /// Allows the "Add child node" flow to properly link the new node to its parent.
+    #[serde(default)]
+    draft_parent_id: Option<String>,
 }
 
 /// `POST /api/designs/blank` -- create a blank root design node (the "design" itself).
@@ -8862,9 +8866,11 @@ async fn design_blank(
     State(state): State<AppState>,
     body: Option<Json<DesignBlankReq>>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let root_type = body.and_then(|Json(r)| r.root_type);
+    let (root_type, draft_parent_id) = body
+        .map(|Json(r)| (r.root_type, r.draft_parent_id))
+        .unwrap_or((None, None));
     let project_id = state.projects.active().map(|p| p.id);
-    let root = state.uow.create_blank_design(root_type, None, project_id);
+    let root = state.uow.create_blank_design(root_type, draft_parent_id, project_id);
     Ok(Json(serde_json::json!({ "design_id": root.story_id })))
 }
 

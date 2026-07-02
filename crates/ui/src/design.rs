@@ -50,14 +50,14 @@ struct ProposedChild {
 // ── API helpers ───────────────────────────────────────────────────────────────
 
 async fn api_design_blank(
-    node_type: &str,
+    root_type: &str,
     draft_parent_id: Option<&str>,
     project_id: Option<&str>,
-) -> Option<DesignNode> {
-    reqwest::Client::new()
+) -> Option<String> {
+    let v: serde_json::Value = reqwest::Client::new()
         .post(format!("{}/api/designs/blank", crate::bff_base()))
         .json(&serde_json::json!({
-            "node_type": node_type,
+            "root_type": root_type,
             "draft_parent_id": draft_parent_id,
             "project_id": project_id,
         }))
@@ -66,7 +66,10 @@ async fn api_design_blank(
         .ok()?
         .json()
         .await
-        .ok()
+        .ok()?;
+    v.get("design_id")
+        .and_then(|id| id.as_str())
+        .map(String::from)
 }
 
 async fn api_fetch_design_nodes(root_id: &str) -> Vec<DesignNode> {
@@ -139,9 +142,23 @@ async fn api_design_publish(root_id: &str, repo: &str) -> (bool, String) {
         Some(r) => r.json().await.unwrap_or_default(),
         None => return (false, "network error".to_string()),
     };
-    if v.get("published_count").is_some() {
-        let count = v["published_count"].as_u64().unwrap_or(0);
-        (true, format!("Published {count} node(s) to GitHub."))
+    if v.get("nodes").is_some() {
+        let count = v["nodes"].as_array().map(|a| a.len()).unwrap_or(0);
+        let warnings: Vec<String> = v
+            .get("warnings")
+            .and_then(|w| w.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|w| w.as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut msg = format!("Published {count} node(s) to GitHub.");
+        if !warnings.is_empty() {
+            msg.push_str(&format!(" Warnings: {}", warnings.join("; ")));
+        }
+        (true, msg)
     } else {
         let msg = v
             .get("error")
@@ -220,9 +237,9 @@ pub fn DesignCanvasView() -> Element {
                                     if nt.is_empty() { return; }
                                     creating.set(true);
                                     spawn(async move {
-                                        if let Some(node) = api_design_blank(&nt, None, None).await {
-                                            root_id.set(Some(node.story_id.clone()));
-                                            selected_node_id.set(Some(node.story_id));
+                                        if let Some(id) = api_design_blank(&nt, None, None).await {
+                                            root_id.set(Some(id.clone()));
+                                            selected_node_id.set(Some(id));
                                             refresh += 1;
                                         }
                                         creating.set(false);
@@ -312,8 +329,7 @@ pub fn DesignCanvasView() -> Element {
                                                 let r = rid.clone();
                                                 let p = sel_id.clone();
                                                 spawn(async move {
-                                                    if let Some(node) = api_design_blank("Story", Some(&p), None).await {
-                                                        let new_id = node.story_id.clone();
+                                                    if let Some(new_id) = api_design_blank("Story", Some(&p), None).await {
                                                         // Materialize it by re-fetching; the blank node is already in the store.
                                                         let _ = api_design_materialize(
                                                             &r,
@@ -745,6 +761,60 @@ mod tests {
         assert!(html.contains("Checkout Revamp"), "draft title renders");
         assert!(html.contains("Publish tree to GitHub"), "publish section renders");
         assert!(!html.contains("Proposed children"), "proposed section hidden when proposed_children is empty");
+    }
+
+    // ── Tier 2: contract regression tests (wiremock) ─────────────────────────────
+    // These pin the parse paths that were silently broken before the fix. Any
+    // future server-response shape change will fail these before it reaches prod.
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn api_design_blank_parses_design_id() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/designs/blank"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "design_id": "draft-x" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let result = super::api_design_blank("Epic", None, None).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(result.as_deref(), Some("draft-x"), "must return the design_id string");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn api_design_publish_parses_nodes_as_success() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/designs/root-1/publish"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(
+                    serde_json::json!({ "nodes": ["owner/repo#1", "owner/repo#2"], "warnings": [] }),
+                ),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let (ok, msg) = super::api_design_publish("root-1", "owner/repo").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok, "nodes present => success");
+        assert!(msg.contains("2"), "message must mention the count of published nodes");
     }
 
     #[test]
