@@ -119,6 +119,13 @@ async fn fetch_checkout(project_id: &str) -> Option<Vec<RepoCheckout>> {
     .ok()
 }
 
+/// Public wrapper over the internal `clone_project` for the readiness gate's Clone path, which
+/// reuses this exact checkout flow (do NOT reimplement cloning). Returns `true` when the checkout
+/// call succeeded (a repo list came back).
+pub async fn clone_project_public(project_id: &str) -> bool {
+    clone_project(project_id).await.is_some()
+}
+
 async fn clone_project(project_id: &str) -> Option<Vec<RepoCheckout>> {
     reqwest::Client::new()
         .post(format!(

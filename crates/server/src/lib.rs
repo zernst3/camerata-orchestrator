@@ -762,6 +762,9 @@ pub fn router(state: AppState) -> Router {
             "/api/projects/:id/checkout",
             get(checkout_status).post(checkout_project),
         )
+        // Derived readiness gate + "link existing local clone" (readiness-gate ADR).
+        .route("/api/projects/:id/readiness", get(project_readiness))
+        .route("/api/projects/:id/repos/:repo/link", post(link_repo))
         .route("/api/projects/:id/branch", post(checkout_branch))
         .route("/api/projects/:id/ship", post(ship_repo))
         // ── Local git controls (issue #37) ───────────────────────────────────
@@ -4774,6 +4777,144 @@ async fn set_repo_path(
     )
     .await;
     Json(serde_json::json!({ "ok": true, "resolution": res }))
+}
+
+/// `GET /api/projects/:id/readiness` — the project's DERIVED readiness gate (ADR
+/// `2026-07-01_project-readiness-gate`).
+///
+/// Readiness is derived from whether each in-scope repo resolves to a real local git clone
+/// (honoring the machine-local per-repo path override, else `<workspace_root>/<owner>/<repo>`, and
+/// validating the folder's `origin` matches the repo). The pure classifier lives in
+/// `camerata_app_core::readiness`; this adapter supplies the per-repo booleans via
+/// `workspace::repo_resolution` (the same signal `project_repo_health` uses).
+///
+/// NOTE ON EXPOSURE: a SEPARATE route (not an extension of `GET .../checkout`). The `checkout`
+/// response is built from `workspace::checkout_status`, which keys off `<root>/<owner>/<repo>`
+/// ONLY and does NOT honor per-repo path overrides — so deriving readiness from it would be wrong
+/// for any linked (overridden) repo. `repo_resolution` is the correct signal, and it is what the
+/// health banner already uses, so a dedicated `readiness` route keyed off the SAME resolution is
+/// the least-disruptive, correct exposure.
+///
+/// Response: `{ "ok": true, "readiness": "ready"|"unlinked"|"partial", "repos": [<RepoResolution>] }`
+/// (the per-repo resolutions are included so the resolve modal can show exactly which repos need
+/// linking). `{ "ok": false, "message": ... }` when the project id is unknown.
+async fn project_readiness(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let Some(project) = state.projects.get(&id) else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": "unknown project",
+            "readiness": camerata_app_core::readiness::ProjectReadiness::Unlinked,
+            "repos": [],
+        }));
+    };
+    let workspace_root = state.settings.workspace_root();
+    let mut resolutions = Vec::with_capacity(project.repos.len());
+    let mut resolved_flags = Vec::with_capacity(project.repos.len());
+    for repo in &project.repos {
+        let override_path = state.settings.repo_path(repo);
+        let res = crate::workspace::repo_resolution(
+            override_path.as_deref(),
+            workspace_root.as_deref(),
+            repo,
+        )
+        .await;
+        resolved_flags.push(res.resolved);
+        resolutions.push(res);
+    }
+    let readiness = camerata_app_core::readiness::classify_readiness(&resolved_flags);
+    Json(serde_json::json!({
+        "ok": true,
+        "readiness": readiness,
+        "repos": resolutions,
+    }))
+}
+
+/// Compute a project's derived readiness from the on-disk resolution of its repos. Shared by the
+/// `readiness` endpoint's return value and the `link` endpoint (so a successful link returns the
+/// FRESHLY-derived readiness). Returns `None` when the project id is unknown.
+async fn derive_project_readiness(
+    state: &AppState,
+    id: &str,
+) -> Option<camerata_app_core::readiness::ProjectReadiness> {
+    let project = state.projects.get(id)?;
+    let workspace_root = state.settings.workspace_root();
+    let mut flags = Vec::with_capacity(project.repos.len());
+    for repo in &project.repos {
+        let override_path = state.settings.repo_path(repo);
+        let res = crate::workspace::repo_resolution(
+            override_path.as_deref(),
+            workspace_root.as_deref(),
+            repo,
+        )
+        .await;
+        flags.push(res.resolved);
+    }
+    Some(camerata_app_core::readiness::classify_readiness(&flags))
+}
+
+#[derive(serde::Deserialize)]
+struct LinkRepoReq {
+    /// Absolute path to an existing local clone the architect selected.
+    path: String,
+}
+
+/// `POST /api/projects/:id/repos/:repo/link` — LINK an existing local clone to a repo (ADR
+/// `2026-07-01_project-readiness-gate`, the "Select existing" resolve path). `:repo` is
+/// percent-encoded into one path segment (axum's `Path` extractor decodes it), matching the
+/// repo-rule-override route convention.
+///
+/// Body: `{ "path": "/abs/path/to/clone" }`.
+///
+/// Validates the folder is a git clone whose `origin` matches the project's identity for `:repo`
+/// (accepts both `https://github.com/owner/repo(.git)` and `git@github.com:owner/repo(.git)`,
+/// normalized case-insensitively). On match it records the folder as this repo's machine-local
+/// per-repo path OVERRIDE (via `settings.set_repo_path` — NOT on `Project`, so it is never
+/// exported) and returns the freshly-derived readiness. On any failure NOTHING is recorded.
+///
+/// Success (200): `{ "ok": true, "readiness": "ready"|"unlinked"|"partial" }`
+/// Failure (400): `{ "ok": false, "error": "<reason>" }` — bad path / not a git repo / origin
+/// mismatch. The Clone path is a SEPARATE action (reuses `POST .../checkout`); this endpoint never
+/// clones.
+async fn link_repo(
+    State(state): State<AppState>,
+    Path((id, repo)): Path<(String, String)>,
+    Json(req): Json<LinkRepoReq>,
+) -> impl IntoResponse {
+    // The project must exist.
+    if state.projects.get(&id).is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "unknown project" })),
+        );
+    }
+    let path = req.path.trim();
+    if path.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "path must not be empty" })),
+        );
+    }
+    // VALIDATE before recording anything: the folder must be a git clone whose origin matches.
+    let folder = std::path::PathBuf::from(path);
+    if let Err(reason) = crate::workspace::validate_link_target(&folder, &repo).await {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": reason })),
+        );
+    }
+    // Match: record the machine-local per-repo override and persist.
+    state.settings.set_repo_path(&repo, Some(path.to_string()));
+    // Return the FRESH readiness so the UI can activate the project without a second round trip.
+    let readiness = derive_project_readiness(&state, &id)
+        .await
+        .unwrap_or(camerata_app_core::readiness::ProjectReadiness::Unlinked);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "ok": true, "readiness": readiness })),
+    )
 }
 
 /// Load the saved onboarding draft (scan + audit + selections + dispositions), or `null`.

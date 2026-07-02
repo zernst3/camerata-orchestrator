@@ -179,6 +179,45 @@ pub async fn detect_remote_repo(path: &Path) -> Result<String, String> {
         .ok_or_else(|| format!("the origin remote isn't a GitHub URL: {}", url.trim()))
 }
 
+/// Whether a git remote URL's `origin` refers to the same GitHub repo as `owner/repo`.
+///
+/// Normalizes BOTH forms before comparing: `https://github.com/owner/repo(.git)(/)` and
+/// `git@github.com:owner/repo(.git)`. The compare is case-insensitive on the whole
+/// `owner/repo` (GitHub owners/repos are case-insensitive) and ignores a trailing `.git` /
+/// trailing slash (both handled by [`parse_owner_repo`]). Returns `false` when `remote_url`
+/// isn't a parseable GitHub URL. Pure — the "link existing clone" endpoint uses this to VALIDATE
+/// a chosen folder's `origin` matches the project's stored identity before recording the override.
+pub fn origin_matches_repo(remote_url: &str, repo: &str) -> bool {
+    match parse_owner_repo(remote_url) {
+        Some(found) => found.eq_ignore_ascii_case(repo.trim()),
+        None => false,
+    }
+}
+
+/// Validate that `path` is a local git clone whose `origin` remote matches the project's identity
+/// for `repo` (`owner/repo`). Used by the "Select existing local clone" resolve path (ADR
+/// `2026-07-01_project-readiness-gate`): the caller records the per-repo path override ONLY on
+/// `Ok`. Returns a specific human error on a bad path / non-git folder / missing-or-mismatched
+/// origin so the endpoint can surface exactly why the link was refused (nothing is recorded on
+/// `Err`).
+pub async fn validate_link_target(path: &Path, repo: &str) -> Result<(), String> {
+    if !is_git_repo(path) {
+        return Err(format!(
+            "{} is not a git clone (no .git) — choose the folder that was cloned from GitHub",
+            path.display()
+        ));
+    }
+    // `detect_remote_repo` reads `origin` and returns the parsed `owner/repo`, or a human error.
+    let found = detect_remote_repo(path).await?;
+    if found.eq_ignore_ascii_case(repo.trim()) {
+        Ok(())
+    } else {
+        Err(format!(
+            "that folder's origin is {found}, not {repo} — pick the clone of {repo}"
+        ))
+    }
+}
+
 /// Parse `owner/repo` from a GitHub remote URL (https or ssh form), tolerant of a
 /// trailing `.git` and extra path segments.
 fn parse_owner_repo(url: &str) -> Option<String> {
@@ -238,8 +277,12 @@ pub async fn repo_resolution(
         };
     };
     let path_str = dir.to_string_lossy().into_owned();
+    // `detect_remote_repo` returns the already-parsed `owner/repo` string (from the origin
+    // URL). Compare case-insensitively so a clone whose origin casing differs from the stored
+    // project identity (e.g. stored `Owner/Repo`, origin `owner/repo`) still resolves as
+    // expected — matching the same invariant enforced by `validate_link_target`.
     match detect_remote_repo(&dir).await {
-        Ok(found) if found == repo => RepoResolution {
+        Ok(found) if found.eq_ignore_ascii_case(repo.trim()) => RepoResolution {
             repo: repo.to_string(),
             path: Some(path_str),
             resolved: true,
@@ -2154,5 +2197,142 @@ mod tests {
         let msg = String::from_utf8_lossy(&log.stdout);
         assert!(msg.contains("camerata: snapshot dev-implement iteration 2"), "commit msg must contain task label; got: {msg}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Link-existing-clone origin validation (readiness-gate ADR) ──────────────────
+
+    #[test]
+    fn origin_matches_repo_normalizes_https_and_ssh_and_git_suffix() {
+        // https, with and without a trailing `.git` / slash.
+        assert!(origin_matches_repo("https://github.com/me/api.git", "me/api"));
+        assert!(origin_matches_repo("https://github.com/me/api", "me/api"));
+        assert!(origin_matches_repo("https://github.com/me/api/", "me/api"));
+        // ssh form, with and without `.git`.
+        assert!(origin_matches_repo("git@github.com:me/api.git", "me/api"));
+        assert!(origin_matches_repo("git@github.com:me/api", "me/api"));
+        // Case-insensitive on the whole owner/repo.
+        assert!(origin_matches_repo("https://github.com/Me/API.git", "me/api"));
+        assert!(origin_matches_repo("git@github.com:ME/Api", "me/API"));
+    }
+
+    #[test]
+    fn origin_matches_repo_rejects_different_repo_and_non_github() {
+        // A DIFFERENT repo must not match — this is the guard against linking the wrong folder.
+        assert!(!origin_matches_repo("https://github.com/me/other.git", "me/api"));
+        assert!(!origin_matches_repo("git@github.com:someone/api.git", "me/api"));
+        // Non-GitHub / unparseable remotes never match.
+        assert!(!origin_matches_repo("https://gitlab.com/me/api.git", "me/api"));
+        assert!(!origin_matches_repo("not-a-url", "me/api"));
+        assert!(!origin_matches_repo("", "me/api"));
+    }
+
+    /// Build a throwaway git repo with a specific `origin` remote URL (no commit needed —
+    /// validation only reads `remote.origin.url`).
+    #[cfg(test)]
+    fn init_repo_with_origin(dir: &Path, origin: &str) {
+        let g = |args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git runs")
+        };
+        std::fs::create_dir_all(dir).unwrap();
+        g(&["init", "-q", "-b", "main"]);
+        g(&["remote", "add", "origin", origin]);
+    }
+
+    #[tokio::test]
+    async fn validate_link_target_accepts_matching_origin_https_and_ssh() {
+        let base = std::env::temp_dir().join(format!("cam-link-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        // https origin with `.git` suffix → matches the bare `owner/repo`.
+        let https = base.join("https");
+        init_repo_with_origin(&https, "https://github.com/me/api.git");
+        assert!(
+            validate_link_target(&https, "me/api").await.is_ok(),
+            "an https clone of me/api must validate"
+        );
+
+        // ssh origin (no `.git`) → also matches after normalization.
+        let ssh = base.join("ssh");
+        init_repo_with_origin(&ssh, "git@github.com:me/api");
+        assert!(
+            validate_link_target(&ssh, "me/api").await.is_ok(),
+            "an ssh clone of me/api must validate (ssh vs https normalization)"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn validate_link_target_rejects_mismatched_origin() {
+        let base = std::env::temp_dir().join(format!("cam-link-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("clone");
+        // A clone of a DIFFERENT repo.
+        init_repo_with_origin(&dir, "https://github.com/me/other.git");
+        let err = validate_link_target(&dir, "me/api")
+            .await
+            .expect_err("a mismatched origin must be rejected");
+        assert!(
+            err.contains("me/other"),
+            "the error names the actual origin so the user sees why; got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn validate_link_target_rejects_non_git_folder() {
+        let base = std::env::temp_dir().join(format!("cam-link-nogit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        // A plain folder, not a git clone.
+        let err = validate_link_target(&base, "me/api")
+            .await
+            .expect_err("a non-git folder must be rejected");
+        assert!(
+            err.contains("not a git clone"),
+            "the error explains it is not a git clone; got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── Bug regression: repo_resolution must be case-insensitive on origin (Bug 1) ─────────────
+    //
+    // `validate_link_target` accepts a link when the folder's origin casing DIFFERS from the stored
+    // project identity (e.g. stored `Owner/Repo`, origin `owner/repo`), because it uses
+    // `eq_ignore_ascii_case`. Before the fix, `repo_resolution` used `==` (case-sensitive), so a
+    // successfully-linked repo would still fail the resolution check and leave the project stuck
+    // Unlinked/Partial (paused) forever. This test is the regression guard.
+    #[tokio::test]
+    async fn repo_resolution_resolved_when_origin_casing_differs_from_stored_repo() {
+        let base =
+            std::env::temp_dir().join(format!("cam-res-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("clone");
+
+        // Clone whose origin uses LOWER-CASE `owner/repo` (what GitHub actually stores).
+        init_repo_with_origin(&dir, "https://github.com/owner/repo.git");
+
+        // But the project stores the identity with UPPER-CASE `Owner/Repo` (e.g. typed by the
+        // user or imported from a GitHub API response that preserves display casing).
+        let stored_repo = "Owner/Repo";
+
+        let resolution = repo_resolution(
+            Some(&dir.to_string_lossy()),
+            None,  // no workspace root — use the explicit override path
+            stored_repo,
+        )
+        .await;
+
+        assert!(
+            resolution.resolved,
+            "repo_resolution must resolve when origin casing differs from stored identity; reason: {}",
+            resolution.reason
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
