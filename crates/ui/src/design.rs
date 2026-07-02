@@ -4,6 +4,7 @@
 //! Backend APIs are under `/api/designs/*`; all nodes are `UnitOfWork`s linked by
 //! `draft_parent_id` (draft story_id). The root node has no `draft_parent_id`.
 
+use camerata_ui_core::designs::{short_updated, DesignSummary};
 use dioxus::prelude::*;
 
 // ── Data models ───────────────────────────────────────────────────────────────
@@ -228,6 +229,130 @@ async fn api_design_publish(root_id: &str, repo: &str) -> (bool, String) {
     }
 }
 
+// ── Saved-designs list API (designs persistence) ─────────────────────────────
+
+/// Resolve the active project id via `GET /api/projects/active`. Returns `None` when there is
+/// no active project or on any network error. Shared by the designs-list fetch.
+async fn api_active_project_id() -> Option<String> {
+    let active: serde_json::Value =
+        reqwest::get(format!("{}/api/projects/active", crate::bff_base()))
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+    active
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+}
+
+/// `GET /api/projects/:id/designs` → the project's saved designs (server sorts newest-first,
+/// falls back to "Untitled design" for a missing title). Returns an empty vec on any error.
+async fn fetch_designs(project_id: &str) -> Vec<DesignSummary> {
+    let v: serde_json::Value = match reqwest::get(format!(
+        "{}/api/projects/{}/designs",
+        crate::bff_base(),
+        project_id,
+    ))
+    .await
+    .ok()
+    {
+        Some(r) => r.json().await.unwrap_or_default(),
+        None => return Vec::new(),
+    };
+    v.get("designs")
+        .and_then(|d| serde_json::from_value(d.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// `DELETE /api/designs/:id` → deletes the whole design tree. Returns `true` on a 2xx
+/// `{ "ok": true }`, `false` otherwise (404 / network error).
+async fn delete_design(id: &str) -> bool {
+    let v: serde_json::Value = match reqwest::Client::new()
+        .delete(format!("{}/api/designs/{}", crate::bff_base(), id))
+        .send()
+        .await
+        .ok()
+    {
+        Some(r) => r.json().await.unwrap_or_default(),
+        None => return false,
+    };
+    v.get("ok").and_then(|o| o.as_bool()).unwrap_or(false)
+}
+
+/// `POST /api/designs/:id/status` `{ "status": ... }` → set a design's lifecycle status
+/// (draft | published | archived). Returns `true` on a 2xx response, `false` on 400/404/network.
+async fn set_design_status(id: &str, status: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/designs/{}/status", crate::bff_base(), id))
+        .json(&serde_json::json!({ "status": status }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
+// ── SavedDesignRow ────────────────────────────────────────────────────────────
+
+/// One saved-design row in the tree pane's empty state: title + status badge, a
+/// "Type · N nodes" meta line + trimmed updated date, and a two-step inline delete.
+/// Purely presentational — all mutations are raised to the parent via event handlers.
+#[component]
+fn SavedDesignRow(
+    design: DesignSummary,
+    pending: bool,
+    on_open: EventHandler<()>,
+    on_request_delete: EventHandler<()>,
+    on_confirm_delete: EventHandler<()>,
+) -> Element {
+    let title = design.title.clone();
+    let meta = design.meta_label();
+    let updated = short_updated(&design.updated);
+    let badge_cls = design.status_badge_class();
+    let badge_label = design.status_label();
+
+    rsx! {
+        div {
+            class: "design-saved-row",
+            onclick: move |_| on_open.call(()),
+            div { class: "design-saved-main",
+                div { class: "design-saved-titlerow",
+                    span { class: "design-saved-title", "{title}" }
+                    span { class: "{badge_cls}", "{badge_label}" }
+                }
+                div { class: "design-saved-meta",
+                    span { class: "design-saved-metatext", "{meta}" }
+                    if !updated.is_empty() {
+                        span { class: "design-saved-updated", "{updated}" }
+                    }
+                }
+            }
+            if pending {
+                button {
+                    class: "design-saved-confirm",
+                    title: "Confirm delete of this design and its whole tree",
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        on_confirm_delete.call(());
+                    },
+                    "Confirm?"
+                }
+            } else {
+                button {
+                    class: "design-saved-del",
+                    title: "Delete this design and its whole tree",
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        on_request_delete.call(());
+                    },
+                    "🗑"
+                }
+            }
+        }
+    }
+}
+
 // ── DesignCanvasView ──────────────────────────────────────────────────────────
 
 /// The Design canvas: create / navigate a draft work-hierarchy tree on the left,
@@ -242,6 +367,29 @@ pub fn DesignCanvasView() -> Element {
     let mut new_root_type = use_signal(|| "Epic".to_string());
     let mut creating = use_signal(|| false);
     let mut load_input = use_signal(String::new);
+
+    // Which saved-design row is awaiting delete confirmation (two-step inline confirm).
+    let mut confirm_delete: Signal<Option<String>> = use_signal(|| None);
+    // Bumped after create/delete/status change to re-fetch the saved-designs list.
+    let mut designs_refresh = use_signal(|| 0u32);
+
+    // The active project id — resolved once; drives the saved-designs fetch and new-design create.
+    let active_pid_res = use_resource(move || async move { api_active_project_id().await });
+    let active_pid = active_pid_res.read().clone().flatten();
+
+    // The project's saved designs, shown in the empty state so they're discoverable + manageable.
+    // Re-fetched whenever the active project resolves or `designs_refresh` bumps.
+    let designs_res = use_resource(move || {
+        let _dep = designs_refresh();
+        let pid = active_pid_res.read().clone().flatten();
+        async move {
+            match pid {
+                Some(id) => fetch_designs(&id).await,
+                None => Vec::new(),
+            }
+        }
+    });
+    let designs = designs_res.read().clone().unwrap_or_default();
 
     // Tree nodes: fetched whenever root_id or refresh changes.
     let nodes_res = use_resource(move || {
@@ -266,6 +414,14 @@ pub fn DesignCanvasView() -> Element {
         nodes.iter().find(|n| &n.story_id == id).cloned()
     });
 
+    // The saved-design summary for the currently-open tree (matched by root id), used to show
+    // its status badge + drive the Archive toggle in the header. Falls back to "draft" when the
+    // design isn't in the fetched list yet (e.g. just created before the list re-fetches).
+    let open_summary = root_id()
+        .as_ref()
+        .and_then(|rid| designs.iter().find(|d| &d.id == rid).cloned());
+    let mut archiving = use_signal(|| false);
+
     rsx! {
         div { class: "design-canvas",
             // ── Left: tree pane ──────────────────────────────────────────────
@@ -273,6 +429,41 @@ pub fn DesignCanvasView() -> Element {
                 div { class: "design-tree-head",
                     p { class: "section-label", "Design Tree" }
                     if root_id().is_some() {
+                        div { class: "design-head-status",
+                            {
+                                let status = open_summary
+                                    .as_ref()
+                                    .map(|s| s.status.clone())
+                                    .filter(|s| !s.is_empty())
+                                    .unwrap_or_else(|| "draft".to_string());
+                                let badge_cls = camerata_ui_core::designs::status_badge_class(&status);
+                                let badge_label = camerata_ui_core::designs::status_label(&status);
+                                let is_archived = status == "archived";
+                                let rid = root_id().unwrap_or_default();
+                                rsx! {
+                                    span { class: "{badge_cls}", "{badge_label}" }
+                                    // Auto-save reassurance: the design persists server-side on every
+                                    // author / materialize turn — this indicator just confirms it.
+                                    span { class: "design-autosave", title: "This design is saved automatically on every change", "✓ Saved" }
+                                    button {
+                                        class: "design-archive-btn",
+                                        disabled: archiving() || open_summary.is_none(),
+                                        title: if is_archived { "Restore this design to draft" } else { "Archive this design" },
+                                        onclick: move |_| {
+                                            let id = rid.clone();
+                                            let next = if is_archived { "draft" } else { "archived" };
+                                            archiving.set(true);
+                                            spawn(async move {
+                                                set_design_status(&id, next).await;
+                                                archiving.set(false);
+                                                designs_refresh += 1;
+                                            });
+                                        },
+                                        if is_archived { "Unarchive" } else { "Archive" }
+                                    }
+                                }
+                            }
+                        }
                         p { class: "design-root-id",
                             "Root: {root_id().unwrap_or_default()}"
                         }
@@ -281,12 +472,9 @@ pub fn DesignCanvasView() -> Element {
 
                 if root_id().is_none() {
                     div { class: "design-tree-empty",
-                        p { class: "ws-hint",
-                            "Start a new design tree or enter an existing root node ID."
-                        }
-                        // New tree creation.
+                        // New tree creation — the primary "New design" action, kept prominent.
                         div { class: "design-new-root",
-                            p { class: "design-input-label", "Root node type" }
+                            p { class: "design-input-label", "New design — root node type" }
                             input {
                                 class: "design-input",
                                 placeholder: "Epic",
@@ -299,22 +487,69 @@ pub fn DesignCanvasView() -> Element {
                                 onclick: move |_| {
                                     let nt = new_root_type().trim().to_string();
                                     if nt.is_empty() { return; }
+                                    let pid = active_pid.clone();
                                     creating.set(true);
                                     spawn(async move {
-                                        if let Some(id) = api_design_blank(&nt, None, None).await {
+                                        if let Some(id) = api_design_blank(&nt, None, pid.as_deref()).await {
                                             root_id.set(Some(id.clone()));
                                             selected_node_id.set(Some(id));
                                             refresh += 1;
+                                            designs_refresh += 1;
                                         }
                                         creating.set(false);
                                     });
                                 },
-                                if creating() { "Creating…" } else { "New tree" }
+                                if creating() { "Creating…" } else { "New design" }
                             }
                         }
-                        // Load existing.
-                        div { class: "design-new-root",
-                            p { class: "design-input-label", "Or load by root ID" }
+
+                        // ── Saved designs for the active project ─────────────────
+                        div { class: "design-saved",
+                            p { class: "section-label", "Saved designs" }
+                            if active_pid.is_none() {
+                                p { class: "ws-hint", "Select a project to see its designs." }
+                            } else if designs.is_empty() {
+                                p { class: "ws-hint", "No saved designs yet. Create one above." }
+                            } else {
+                                for d in designs.iter() {
+                                    {
+                                        let d = d.clone();
+                                        let did_open = d.id.clone();
+                                        let did_del = d.id.clone();
+                                        let did_conf = d.id.clone();
+                                        let pending = confirm_delete().as_deref() == Some(d.id.as_str());
+                                        rsx! {
+                                            SavedDesignRow {
+                                                key: "{d.id}",
+                                                design: d,
+                                                pending,
+                                                on_open: move |_| {
+                                                    root_id.set(Some(did_open.clone()));
+                                                    selected_node_id.set(None);
+                                                    refresh += 1;
+                                                },
+                                                on_request_delete: move |_| {
+                                                    confirm_delete.set(Some(did_conf.clone()));
+                                                },
+                                                on_confirm_delete: move |_| {
+                                                    let id = did_del.clone();
+                                                    confirm_delete.set(None);
+                                                    spawn(async move {
+                                                        delete_design(&id).await;
+                                                        designs_refresh += 1;
+                                                    });
+                                                },
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Load existing by root ID — secondary/advanced fallback (the list above is
+                        // the primary way to reopen a design; this stays for pasted/known IDs).
+                        div { class: "design-new-root design-load-advanced",
+                            p { class: "design-input-label", "Advanced — load by root ID" }
                             input {
                                 class: "design-input",
                                 placeholder: "draft-xxxxxxxx",
@@ -439,8 +674,10 @@ pub fn DesignCanvasView() -> Element {
                         onclick: move |_| {
                             root_id.set(None);
                             selected_node_id.set(None);
+                            confirm_delete.set(None);
+                            designs_refresh += 1;
                         },
-                        "← New tree"
+                        "← Designs"
                     }
                 }
             }
@@ -848,8 +1085,12 @@ mod tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("Design Tree"), "tree pane label renders");
-        assert!(html.contains("New tree"), "new tree button renders");
-        assert!(html.contains("Or load by root ID"), "load input renders");
+        assert!(html.contains("New design"), "new design button renders");
+        assert!(html.contains("Saved designs"), "saved-designs section renders");
+        assert!(
+            html.contains("Advanced — load by root ID"),
+            "load-by-root-ID fallback still renders as advanced"
+        );
     }
 
     #[test]
@@ -968,5 +1209,214 @@ mod tests {
             "proposed child body is displayed in rendered HTML"
         );
         assert!(html.contains("Materialize 1 child"), "materialize button renders");
+    }
+
+    // ── Designs-persistence: saved-designs list ──────────────────────────────────
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_designs_parses_summaries_array() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-7/designs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "designs": [
+                    {
+                        "id": "draft-a",
+                        "title": "Checkout Revamp",
+                        "node_type": "Epic",
+                        "status": "draft",
+                        "node_count": 3,
+                        "updated": "2026-07-02T14:31:07Z",
+                    },
+                    {
+                        "id": "draft-b",
+                        "title": "Untitled design",
+                        "node_type": serde_json::Value::Null,
+                        "status": "published",
+                        "node_count": 1,
+                        "updated": "2026-07-01T09:00:00Z",
+                    },
+                ],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_designs("proj-7").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(out.len(), 2, "both designs parse");
+        assert_eq!(out[0].id, "draft-a");
+        assert_eq!(out[0].title, "Checkout Revamp");
+        assert_eq!(out[0].node_type.as_deref(), Some("Epic"));
+        assert_eq!(out[0].status, "draft");
+        assert_eq!(out[0].node_count, 3);
+        assert_eq!(out[0].meta_label(), "Epic · 3 nodes");
+        // A null node_type deserializes to None and the meta label drops the type prefix.
+        assert_eq!(out[1].node_type, None);
+        assert_eq!(out[1].meta_label(), "1 node");
+        assert_eq!(out[1].status, "published");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_designs_empty_array_yields_empty_vec() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-7/designs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "designs": [] })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_designs("proj-7").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(out.is_empty(), "empty designs array => empty vec");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn delete_design_returns_true_on_ok_body() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/designs/draft-a"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "ok": true })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::delete_design("draft-a").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok, "{{ ok: true }} => delete succeeded");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn delete_design_returns_false_on_404() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/designs/missing"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_json(serde_json::json!({ "error": "not found" })),
+            )
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::delete_design("missing").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(!ok, "404 (no ok:true) => false");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_design_status_posts_status_and_reads_success() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/designs/draft-a/status"))
+            .and(body_json(serde_json::json!({ "status": "archived" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "draft-a",
+                "status": "archived",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let ok = super::set_design_status("draft-a", "archived").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok, "2xx => status update succeeded");
+    }
+
+    #[test]
+    fn saved_design_row_renders_title_badge_and_meta() {
+        fn harness() -> Element {
+            rsx! {
+                SavedDesignRow {
+                    design: DesignSummary {
+                        id: "draft-a".to_string(),
+                        title: "Checkout Revamp".to_string(),
+                        node_type: Some("Epic".to_string()),
+                        status: "published".to_string(),
+                        node_count: 3,
+                        updated: "2026-07-02T14:31:07Z".to_string(),
+                    },
+                    pending: false,
+                    on_open: |_| {},
+                    on_request_delete: |_| {},
+                    on_confirm_delete: |_| {},
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Checkout Revamp"), "design title renders");
+        assert!(html.contains("Published"), "status badge label renders");
+        assert!(
+            html.contains("design-status-badge published"),
+            "published status badge class renders"
+        );
+        assert!(html.contains("Epic · 3 nodes"), "node_count meta label renders");
+        assert!(html.contains("2026-07-02"), "trimmed updated date renders");
+        // Not in confirm state → shows the trash affordance, not the confirm button.
+        assert!(!html.contains("Confirm?"), "delete-confirm hidden until requested");
+    }
+
+    #[test]
+    fn saved_design_row_pending_shows_confirm() {
+        fn harness() -> Element {
+            rsx! {
+                SavedDesignRow {
+                    design: DesignSummary {
+                        id: "draft-a".to_string(),
+                        title: "Checkout Revamp".to_string(),
+                        node_type: None,
+                        status: "draft".to_string(),
+                        node_count: 1,
+                        updated: String::new(),
+                    },
+                    pending: true,
+                    on_open: |_| {},
+                    on_request_delete: |_| {},
+                    on_confirm_delete: |_| {},
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Confirm?"), "confirm button shows in pending state");
+        assert!(html.contains("Draft"), "draft badge renders");
+        // No node_type → meta drops the type prefix and pluralizes correctly.
+        assert!(html.contains("1 node"), "singular node label renders");
     }
 }

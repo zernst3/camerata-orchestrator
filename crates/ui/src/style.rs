@@ -5572,6 +5572,39 @@ select:focus {
 .design-proposed-body { font-size: 12.5px; color: var(--ink-soft); line-height: 1.6; }
 .design-publish-section { display: flex; flex-direction: column; gap: 8px; padding-top: 16px; border-top: 1px solid var(--line-soft); }
 .design-publish-row { display: flex; gap: 10px; align-items: center; }
+
+/* ── Saved-designs list (per-project designs persistence) ─────────────────────
+ * Shown in the tree pane's empty state: each saved design is a clickable row with a
+ * status badge, a "Type · N nodes" meta line, a trimmed updated date, and a two-step
+ * inline delete. Mirrors the design-node-row rhythm; badges reuse the spine-badge scale. */
+.design-saved { display: flex; flex-direction: column; gap: 4px; }
+.design-saved-row { display: flex; align-items: center; gap: 8px; padding: 10px 10px; border: 1px solid var(--line-soft); border-radius: 8px; background: var(--paper); cursor: pointer; min-width: 0; }
+.design-saved-row:hover { background: var(--paper-raise); border-color: var(--line); }
+.design-saved-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.design-saved-titlerow { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.design-saved-title { font-size: 13px; font-weight: 700; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.design-saved-meta { display: flex; align-items: center; gap: 8px; }
+.design-saved-metatext { font-size: 11px; color: var(--ink-soft); }
+.design-saved-updated { font-size: 10.5px; color: var(--ink-faint); }
+.design-saved-del { background: none; border: none; cursor: pointer; color: var(--ink-faint); font-size: 13px; line-height: 1; padding: 2px 4px; flex-shrink: 0; border-radius: 5px; }
+.design-saved-del:hover { color: var(--bad); background: var(--paper-raise); }
+.design-saved-confirm { flex-shrink: 0; font-size: 11px; font-weight: 700; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--bad); background: rgba(176,67,46,0.12); color: var(--bad); cursor: pointer; }
+.design-saved-confirm:hover { background: rgba(176,67,46,0.20); }
+.design-load-advanced { padding-top: 12px; border-top: 1px solid var(--line-soft); }
+
+/* Status badge — draft = neutral/muted-accent, published = green, archived = muted gray.
+ * Same pill geometry as spine-badge; colors track the badge design tokens. */
+.design-status-badge { font-size: 9.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; padding: 2px 7px; border-radius: 999px; white-space: nowrap; flex-shrink: 0; }
+.design-status-badge.draft { background: rgba(47,95,158,0.18); color: #7ca8e0; }
+.design-status-badge.published { background: rgba(22,163,74,0.18); color: #4ade80; }
+.design-status-badge.archived { background: rgba(140,128,117,0.18); color: var(--ink-faint); }
+
+/* Open-design header: status badge + auto-save indicator + archive toggle. */
+.design-head-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+.design-autosave { font-size: 10.5px; font-weight: 600; color: #4ade80; letter-spacing: .02em; }
+.design-archive-btn { font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 6px; border: 1px solid var(--line); background: var(--paper); color: var(--ink-soft); cursor: pointer; }
+.design-archive-btn:hover:not(:disabled) { background: var(--paper-raise); color: var(--ink); border-color: var(--ink-faint); }
+.design-archive-btn:disabled { opacity: .5; cursor: default; }
 .mockup-panel { margin-top: 20px; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
 .mockup-toggle { width: 100%; padding: 10px 14px; background: var(--surface); border: none; cursor: pointer; font-size: 13px; font-weight: 600; color: var(--ink-soft); text-align: left; }
 .mockup-toggle:hover { background: var(--paper-raise); color: var(--ink); }
