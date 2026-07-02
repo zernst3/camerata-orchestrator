@@ -7,7 +7,10 @@
 //!
 //! Two reviewers live here:
 //! - **`run_l3_review`** (R7): the Layer-3 agentic code reviewer, which verifies a diff
-//!   against story intent + rules. Opt-in per project (see `Project::l3_review`).
+//!   against story intent + rules + COMPLETENESS (for a cross-cutting story, a narrow spot-fix
+//!   is bounced with a request to sweep the codebase for the remaining instances — the general
+//!   "did you catch them all?" check, done by reasoning rather than a per-defect linter).
+//!   Opt-in per project (see `Project::l3_review`).
 //! - **`run_integration_gate_review`** (R3.e): the cross-repo contract verifier. Takes
 //!   the prose contract + per-repo assembled outputs and returns a `ReviewVerdict`.
 //!   The live result maps to `IntegrationGateResult` via `check_integration_gate_live`.
@@ -66,8 +69,9 @@ const L3_SYSTEM_PROMPT: &str = "\
 You are an expert code reviewer performing a Layer-3 agentic review. Your job is to verify that the submitted diff:
 1. Conforms to the provided rules (the SSOT).
 2. Fulfills the story's intent (requirements, contract, integrations, acceptance criteria).
+3. Addresses the story's FULL SCOPE (completeness). If the story describes a cross-cutting change — a pattern, invariant, or class of defect that should apply EVERYWHERE it occurs (signals like \"every\", \"all\", \"across the app\", \"anywhere that\", or a fix for a mistake likely repeated elsewhere) — check that the diff addresses the WHOLE class, not just a single instance. A spot-fix for what the story frames as a pervasive pattern is INCOMPLETE: bounce it and say to sweep the codebase for the remaining instances. If the story is genuinely local and bounded, do NOT manufacture a completeness concern.
 
-You see ONLY: the story, the rules, and the diff. You do NOT have access to any other agent's reasoning, implementation notes, or context — this isolation is intentional.
+You see ONLY: the story, the rules, and the diff. You do NOT have access to any other agent's reasoning, implementation notes, or context — this isolation is intentional. You also cannot see the rest of the codebase, so judge completeness by whether the diff's breadth plausibly matches the story's implied scope; when a cross-cutting story is addressed by a narrow diff, bounce and ask to confirm the sweep covered every instance.
 
 Return your verdict in this exact format:
 PASS
@@ -340,6 +344,27 @@ mod tests {
         assert!(
             !prompt.contains("developer reasoning"),
             "prompt must NOT contain developer reasoning"
+        );
+    }
+
+    /// The L3 reviewer must carry the COMPLETENESS / full-scope dimension: for a cross-cutting
+    /// story (a pattern that should apply everywhere / a defect class with likely siblings), a
+    /// narrow spot-fix should be bounced with a request to sweep for the rest. This is the general
+    /// "did you catch them all?" check — reasoning, not a linter (see the L3-completeness decision).
+    #[test]
+    fn l3_system_prompt_carries_completeness_check() {
+        let p = L3_SYSTEM_PROMPT;
+        assert!(
+            p.contains("FULL SCOPE") || p.to_ascii_lowercase().contains("completeness"),
+            "L3 prompt must ask for full-scope/completeness verification"
+        );
+        assert!(
+            p.to_ascii_lowercase().contains("sweep"),
+            "L3 prompt must tell the reviewer to bounce a spot-fix and request a codebase sweep"
+        );
+        assert!(
+            p.to_ascii_lowercase().contains("cross-cutting"),
+            "L3 prompt must scope the completeness check to cross-cutting stories (not local ones)"
         );
     }
 
