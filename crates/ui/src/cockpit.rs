@@ -2969,8 +2969,8 @@ pub use uow::*;
 #[cfg(test)]
 mod tests {
     use super::{
-        dev_run_body, is_enforced_floor, run_status_badge, FindingView, JobStatusEnvelope,
-        JobStateView, RunGateEvent, RunView, StallThresholdsView, TierMapView,
+        dev_run_body, is_enforced_floor, run_is_cancellable, run_status_badge, FindingView,
+        JobStatusEnvelope, JobStateView, RunGateEvent, RunView, StallThresholdsView, TierMapView,
     };
 
     /// The job-state view deserializes the server's `deterministic` progress section
@@ -3857,6 +3857,45 @@ mod tests {
         let rv: RunView = serde_json::from_str(json).unwrap();
         assert_eq!(rv.status, "failed");
         assert_eq!(rv.failure_reason.as_deref(), Some("Stall timeout exceeded"));
+    }
+
+    /// BUG 1 contract regression: a FAILED run's real wire shape parses into `RunView`
+    /// and the failed-run render path is reachable.
+    ///
+    /// The server's `RunStatus::Failed { reason }` now serializes to the BARE string
+    /// `"failed"` (app-core custom `Serialize`), and the reason travels separately in
+    /// the flattened `Run.failure_reason`. Before the fix, `Failed` serialized to the
+    /// OBJECT `{"failed":{"reason":"…"}}`, which the string-typed `RunView.status` could
+    /// NOT deserialize → `fetch_run` returned None → the "Run failed" banner + Stop
+    /// button never rendered. This JSON is exactly what `RunStatusResponse`
+    /// (`#[serde(flatten)] run: Run` + top-level stall/failure fields) emits for a
+    /// failed run today.
+    #[test]
+    fn run_view_parses_real_failed_wire_shape_and_banner_reachable() {
+        // The REAL wire shape (post-fix): status is the plain string "failed", NOT an
+        // object; the reason is carried in the separate `failure_reason` field.
+        let json = r#"{
+            "id":"r7","story_id":"s1","status":"failed","events":[],"done":true,"mode":"live",
+            "idle_ms":0,"stalled":false,"stall_threshold_ms":120000,
+            "stall_policy":"cancel","failure_reason":"Stall timeout exceeded"
+        }"#;
+        let rv: RunView = serde_json::from_str(json).expect("failed-run wire shape must parse");
+
+        // Deserialized cleanly (the pre-fix object shape would have errored here).
+        assert_eq!(rv.status, "failed");
+        assert_eq!(rv.failure_reason.as_deref(), Some("Stall timeout exceeded"));
+
+        // The failed-render path is now reachable: the badge resolves to FAILED, the
+        // reason is available for the banner, and the run is (correctly) not cancellable.
+        let (label, cls) = run_status_badge(&rv.status);
+        assert_eq!(label, "FAILED");
+        assert_eq!(cls, "error");
+        assert!(
+            !run_is_cancellable(&rv.status, rv.done),
+            "a failed/done run is terminal — no Stop button"
+        );
+        let failure_reason = rv.failure_reason.clone().unwrap_or_default();
+        assert_eq!(failure_reason, "Stall timeout exceeded");
     }
 
     /// `run_status_badge` maps `failed` and `cancelled` to their correct badge variants.

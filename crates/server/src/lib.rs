@@ -10902,12 +10902,23 @@ struct StoryDevContext {
     decisions_approved: bool,
     /// Number of decision records on this UoW.
     decision_count: usize,
-    /// Whether a gate-provenance record exists (a governed run completed).
-    has_gate_provenance: bool,
-    /// Whether the architect has signed off this story's governed run.
-    signed_off: bool,
-    /// RFC 3339 timestamp of the last UoW mutation. Empty string if not set.
-    last_activity: String,
+    /// The full sign-off record (architect handle, timestamp, run id, note) when the
+    /// story has been signed off, else `None`. The chat client (`UowSnapshot.sign_off`)
+    /// reads presence of this field to show "signed off" state. BUG 2 fix: previously
+    /// the endpoint emitted a boolean `signed_off`, but the client parses `sign_off`
+    /// (an object), so it always defaulted to "not signed off".
+    sign_off: Option<crate::uow::SignOff>,
+    /// RFC 3339 timestamp of the last UoW mutation. Empty string if not set. BUG 2 fix:
+    /// the client parses `updated`; the endpoint previously emitted `last_activity`, so
+    /// the client always showed "(unknown)".
+    updated: String,
+    /// The frozen gate provenance from the most recent completed governed run, else
+    /// `None`. BUG 2 fix: the client parses `gate_provenance` (an object with
+    /// allow/deny/bounce counts + rules_fired + mode); the endpoint previously emitted
+    /// only a boolean `has_gate_provenance`, so the client always showed "no run yet".
+    /// `GateProvenance` serializes to a superset of the client's `GateProvenanceLite`
+    /// (extra `run_id`/`recorded` fields are ignored by the client's `#[serde(default)]`).
+    gate_provenance: Option<crate::uow::GateProvenance>,
 }
 
 /// `GET /api/development/context` — ALL Units of Work state for the chat.
@@ -10930,9 +10941,13 @@ struct StoryDevContext {
 ///       "branch": "feat/S-42-add-rule",
 ///       "decisions_approved": true,
 ///       "decision_count": 3,
-///       "has_gate_provenance": true,
-///       "signed_off": false,
-///       "last_activity": "2026-06-21T10:00:00Z"
+///       "sign_off": null,
+///       "updated": "2026-06-21T10:00:00Z",
+///       "gate_provenance": {
+///         "run_id": "run-7", "mode": "scripted",
+///         "allow_count": 5, "deny_count": 0, "total_bounces": 0,
+///         "rules_fired": [], "recorded": "2026-06-21T09:59:00Z"
+///       }
 ///     }
 ///   ]
 /// }
@@ -10963,9 +10978,9 @@ async fn development_context(State(state): State<AppState>) -> Json<serde_json::
                 branch: uow.branch.clone(),
                 decisions_approved,
                 decision_count: uow.decisions.len(),
-                has_gate_provenance: uow.gate_provenance.is_some(),
-                signed_off: uow.sign_off.is_some(),
-                last_activity: uow.updated.clone(),
+                sign_off: uow.sign_off.clone(),
+                updated: uow.updated.clone(),
+                gate_provenance: uow.gate_provenance.clone(),
             }
         })
         .collect();
@@ -11940,6 +11955,99 @@ mod tests {
         assert_eq!(mem[0].text, "Captured from the chat.");
         assert_eq!(mem[0].status, crate::project::MemoryStatus::Approved);
         assert_eq!(mem[0].source, "human");
+    }
+
+    /// BUG 2 contract regression: `GET /api/development/context` must emit the field
+    /// names the chat client (`UowSnapshot`) parses — `sign_off`, `updated`, and
+    /// `gate_provenance` — NOT the old `signed_off` / `last_activity` /
+    /// `has_gate_provenance` shape the client silently defaulted past. Before the fix
+    /// every story showed "not signed off" / "(unknown)" / "no run yet" even when true,
+    /// because the client's `#[serde(default)]` fields never matched the wire keys.
+    ///
+    /// Drives a UoW scoped to the active project, records a gate provenance and a
+    /// sign-off, then asserts the response item carries the client-shaped keys with
+    /// real values (and none of the stale keys).
+    #[tokio::test]
+    async fn development_context_emits_client_expected_field_names() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec![]).expect("project created");
+
+        // A UoW scoped to the active project (project_id match), with a recorded gate
+        // provenance and a sign-off so all three client-expected fields are populated.
+        let uow = state
+            .uow
+            .create_blank_with_parent(None, Some(p.id.clone()));
+        let story_id = uow.story_id.clone();
+        state.uow.record_gate_provenance(
+            &story_id,
+            crate::uow::GateProvenance::new(
+                "run-9",
+                "scripted",
+                4,
+                1,
+                vec!["SEC-NO-PATH-ESCAPE-1".to_string()],
+                "2026-06-21T09:59:00Z",
+            ),
+        );
+        state
+            .uow
+            .sign_off(&story_id, "zach", "run-9", Some("gate held"));
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/development/context")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+
+        assert_eq!(body["ok"], true);
+        let items = body["units_of_work"].as_array().expect("units_of_work array");
+        let item = items
+            .iter()
+            .find(|u| u["story_id"] == serde_json::json!(story_id))
+            .expect("the seeded UoW appears in the active project's context");
+
+        // The client-expected keys are present with real values.
+        assert!(
+            item.get("sign_off").is_some() && !item["sign_off"].is_null(),
+            "must emit `sign_off` (object) for a signed-off story, got: {item}"
+        );
+        assert_eq!(item["sign_off"]["by"], "zach");
+        assert_eq!(item["sign_off"]["run_id"], "run-9");
+
+        assert!(
+            item.get("updated").is_some() && item["updated"].is_string(),
+            "must emit `updated` (RFC 3339 string), got: {item}"
+        );
+
+        assert!(
+            item.get("gate_provenance").is_some() && !item["gate_provenance"].is_null(),
+            "must emit `gate_provenance` (object), got: {item}"
+        );
+        assert_eq!(item["gate_provenance"]["allow_count"], 4);
+        assert_eq!(item["gate_provenance"]["deny_count"], 1);
+        assert_eq!(item["gate_provenance"]["total_bounces"], 1);
+        assert_eq!(item["gate_provenance"]["mode"], "scripted");
+
+        // The stale wire keys the client never read are GONE.
+        assert!(
+            item.get("signed_off").is_none(),
+            "stale boolean `signed_off` must be replaced by `sign_off`"
+        );
+        assert!(
+            item.get("last_activity").is_none(),
+            "stale `last_activity` must be replaced by `updated`"
+        );
+        assert!(
+            item.get("has_gate_provenance").is_none(),
+            "stale boolean `has_gate_provenance` must be replaced by `gate_provenance`"
+        );
     }
 
     /// End-to-end THROUGH THE HTTP ROUTER: the design-page hierarchy round-trips — GET returns the
