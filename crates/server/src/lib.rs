@@ -528,6 +528,14 @@ impl AppState {
             let dir = data.join("camerata");
             state.projects = crate::project::ProjectStore::load_or_new(dir.join("projects.json"));
             state.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
+            // Hydrate the LLM-backend env var from the persisted setting so the existing
+            // env-driven selection sites (`Llm::from_env`, the agent driver's
+            // `anthropic_api_backend_key`) honor the stored choice unchanged. Making the
+            // stored setting authoritative on boot gives the precedence: setting > `.env` >
+            // default `cli`. Edition 2021, so `set_var` is safe (single-threaded startup).
+            if let Some(backend) = state.settings.llm_backend() {
+                std::env::set_var("CAMERATA_LLM_BACKEND", backend);
+            }
             state.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
             state.uow = crate::uow::UowStore::at(dir.join("uow.json"));
             // Clarifications persist too: every open structured question is a resumable
@@ -758,6 +766,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/settings", get(get_settings))
         .route("/api/settings/workspace", post(set_workspace_root))
         .route("/api/settings/chat-model", post(set_chat_model))
+        .route("/api/settings/llm-backend", post(set_llm_backend))
         .route(
             "/api/projects/:id/checkout",
             get(checkout_status).post(checkout_project),
@@ -7232,9 +7241,63 @@ async fn usage(State(state): State<AppState>) -> Json<crate::usage_ledger::Usage
 
 // ── local workspace (checkouts) ───────────────────────────────────────────────
 
-/// The current app settings (incl. the workspace root).
-async fn get_settings(State(state): State<AppState>) -> Json<crate::settings::Settings> {
-    Json(state.settings.get())
+/// Whether an Anthropic API key is available for the `api` backend. Today the key is
+/// **env-only** (`ANTHROPIC_API_KEY`) — it is NOT in the keychain credential allowlist
+/// (`ALL_CREDENTIALS` is OpenRouter + GitHub only), so this reports env presence. If the
+/// Anthropic key ever becomes keychain-sourced, add the keychain check here.
+fn anthropic_api_key_present() -> bool {
+    std::env::var("ANTHROPIC_API_KEY")
+        .ok()
+        .map(|k| !k.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// The effective LLM backend the app will use: the stored setting if present, else the
+/// current `CAMERATA_LLM_BACKEND` env var, else the `"cli"` default. Mirrors the precedence
+/// the boot-time hydration establishes (setting > `.env` > default).
+fn effective_llm_backend(settings: &crate::settings::SettingsStore) -> String {
+    settings
+        .llm_backend()
+        .or_else(|| {
+            std::env::var("CAMERATA_LLM_BACKEND")
+                .ok()
+                .filter(|b| !b.trim().is_empty())
+        })
+        .unwrap_or_else(|| "cli".to_string())
+}
+
+/// The `GET /api/settings` response: the persisted [`crate::settings::Settings`] fields, plus
+/// two derived fields the settings UI needs — the EFFECTIVE `llm_backend` (stored, else env,
+/// else `cli`) and whether an Anthropic API key is present (for the api-backend warning).
+///
+/// The settings fields are listed explicitly (not `#[serde(flatten)]`) so the top-level
+/// `llm_backend` — the EFFECTIVE value — is the single authoritative one, with no duplicate
+/// JSON key from the stored `Settings::llm_backend`.
+#[derive(serde::Serialize)]
+struct SettingsResp {
+    workspace_root: Option<String>,
+    repo_paths: std::collections::HashMap<String, String>,
+    chat_model: Option<String>,
+    /// The effective backend (`"cli"` | `"api"`) after applying precedence
+    /// (stored setting > env > default). This is the value the UI reads and toggles.
+    llm_backend: String,
+    /// Whether an Anthropic API key is available (env-only today; see
+    /// [`anthropic_api_key_present`]).
+    api_key_present: bool,
+}
+
+/// The current app settings (incl. the workspace root), plus the effective LLM backend and
+/// whether an Anthropic API key is present.
+async fn get_settings(State(state): State<AppState>) -> Json<SettingsResp> {
+    let settings = state.settings.get();
+    let llm_backend = effective_llm_backend(&state.settings);
+    Json(SettingsResp {
+        workspace_root: settings.workspace_root,
+        repo_paths: settings.repo_paths,
+        chat_model: settings.chat_model,
+        llm_backend,
+        api_key_present: anthropic_api_key_present(),
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -7262,6 +7325,43 @@ async fn set_chat_model(
     Json(req): Json<ChatModelReq>,
 ) -> Json<crate::settings::Settings> {
     Json(state.settings.set_chat_model(req.model))
+}
+
+#[derive(serde::Deserialize)]
+struct LlmBackendReq {
+    backend: String,
+}
+
+/// Set the APP-LEVEL LLM backend (`"cli"` | `"api"`). Persists the choice AND hydrates the
+/// `CAMERATA_LLM_BACKEND` env var so it takes effect for subsequent runs WITHOUT a restart
+/// (the env-driven selection sites re-read it at construction time). Rejects any value other
+/// than `"cli"`/`"api"` with 400. Returns the stored backend plus `api_key_present` so the UI
+/// can immediately warn when `api` is selected with no Anthropic key.
+async fn set_llm_backend(
+    State(state): State<AppState>,
+    Json(req): Json<LlmBackendReq>,
+) -> impl IntoResponse {
+    let backend = req.backend.trim().to_ascii_lowercase();
+    if backend != "cli" && backend != "api" {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": format!("invalid backend: {:?} (expected \"cli\" or \"api\")", req.backend)
+            })),
+        );
+    }
+    state.settings.set_llm_backend(Some(backend.clone()));
+    // Take effect for subsequent runs without a restart: the selection sites read this env
+    // var at construction time. Edition 2021, so `set_var` is safe here.
+    std::env::set_var("CAMERATA_LLM_BACKEND", &backend);
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "backend": backend,
+            "api_key_present": anthropic_api_key_present(),
+        })),
+    )
 }
 
 // ── Credential manager endpoints ──────────────────────────────────────────────
@@ -11746,6 +11846,84 @@ mod tests {
             conformance: None,
             repos: repos.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    /// `GET /api/settings` includes the effective `llm_backend` and `api_key_present`.
+    /// A stored backend takes precedence over any ambient env, so this is deterministic
+    /// regardless of the process env var.
+    #[tokio::test]
+    async fn get_settings_includes_llm_backend_and_api_key_present() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // Store an explicit backend; it should surface as the effective value (precedence
+        // setting > env > default), independent of the ambient CAMERATA_LLM_BACKEND.
+        state.settings.set_llm_backend(Some("api".to_string()));
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["llm_backend"], "api", "stored backend surfaces as effective");
+        assert!(
+            json["api_key_present"].is_boolean(),
+            "api_key_present is present and boolean"
+        );
+    }
+
+    /// `POST /api/settings/llm-backend` persists a valid backend and echoes it plus
+    /// `api_key_present`; the stored setting reflects the new value.
+    #[tokio::test]
+    async fn post_llm_backend_persists_valid_value() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/settings/llm-backend")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"backend":"api"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["backend"], "api");
+        assert!(json["api_key_present"].is_boolean());
+        // Persisted on the settings store.
+        assert_eq!(state.settings.llm_backend().as_deref(), Some("api"));
+    }
+
+    /// `POST /api/settings/llm-backend` rejects a bogus backend with 400 and does not
+    /// mutate the stored setting.
+    #[tokio::test]
+    async fn post_llm_backend_rejects_bogus_value() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/settings/llm-backend")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"backend":"gemini"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // The store was left untouched (still None).
+        assert!(state.settings.llm_backend().is_none());
     }
 
     #[test]
