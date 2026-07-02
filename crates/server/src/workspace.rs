@@ -125,6 +125,94 @@ pub async fn checkout_status(root: &Path, repo: &str) -> RepoCheckout {
     }
 }
 
+/// Override-aware checkout status (issue #33 / #38): resolve the repo's local folder via the
+/// per-repo override first, falling back to `<workspace_root>/<owner>/<repo>`. A folder only counts
+/// as `cloned` when it's a git checkout whose `origin` matches `owner/repo` — a git repo with the
+/// WRONG origin is reported not-cloned with a clear reason. When it IS a matching checkout, the
+/// live branch/dirty enrichment runs on the RESOLVED dir. When neither an override nor a workspace
+/// root is available, the repo reports not-cloned with a helpful reason (no hard error).
+///
+/// This unifies the Workspace status path with the readiness-gate resolution primitives so a clone
+/// living at a non-standard path (a flat `.../repo`, or the workspace folder itself) is recognized.
+pub async fn checkout_status_resolved(
+    override_path: Option<&str>,
+    workspace_root: Option<&str>,
+    repo: &str,
+) -> RepoCheckout {
+    let Some(dir) = resolve_repo_dir(override_path, workspace_root, repo) else {
+        return RepoCheckout {
+            repo: repo.to_string(),
+            cloned: false,
+            path: String::new(),
+            branch: None,
+            dirty: false,
+            detail: "no local path set — link the repo's folder (or set a workspace root)"
+                .to_string(),
+        };
+    };
+    let path_str = dir.to_string_lossy().into_owned();
+
+    if !is_git_repo(&dir) {
+        return RepoCheckout {
+            repo: repo.to_string(),
+            cloned: false,
+            path: path_str,
+            branch: None,
+            dirty: false,
+            detail: "not cloned yet".to_string(),
+        };
+    }
+
+    // A git folder with the WRONG origin must NOT count as cloned.
+    match detect_remote_repo(&dir).await {
+        Ok(found) if found.eq_ignore_ascii_case(repo.trim()) => {}
+        Ok(found) => {
+            return RepoCheckout {
+                repo: repo.to_string(),
+                cloned: false,
+                path: path_str,
+                branch: None,
+                dirty: false,
+                detail: format!("that folder is a different repo (origin: {found})"),
+            };
+        }
+        Err(e) => {
+            return RepoCheckout {
+                repo: repo.to_string(),
+                cloned: false,
+                path: path_str,
+                branch: None,
+                dirty: false,
+                detail: e,
+            };
+        }
+    }
+
+    // Matching git checkout — enrich with the live branch + dirty state on the RESOLVED dir.
+    let branch = git(Some(&dir), &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let dirty = git(Some(&dir), &["status", "--porcelain"])
+        .await
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+    let detail = match (&branch, dirty) {
+        (Some(b), true) => format!("on {b} · uncommitted changes"),
+        (Some(b), false) => format!("on {b} · clean"),
+        (None, _) => "cloned".to_string(),
+    };
+    RepoCheckout {
+        repo: repo.to_string(),
+        cloned: true,
+        path: path_str,
+        branch,
+        dirty,
+        detail,
+    }
+}
+
 /// Clone the repo into the workspace, or fast-forward an existing clone. Returns the
 /// resulting status. The token is used only for this network step and is scrubbed
 /// from the persisted remote.
@@ -2331,6 +2419,91 @@ mod tests {
             resolution.resolved,
             "repo_resolution must resolve when origin casing differs from stored identity; reason: {}",
             resolution.reason
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── Override-aware checkout_status_resolved (issue #38) ─────────────────────────────────────
+    //
+    // The Workspace status handler used to check only the DERIVED path
+    // `<workspace_root>/<owner>/<repo>`, so a clone at a non-standard path was reported "not
+    // cloned" forever. `checkout_status_resolved` resolves via the per-repo override first.
+
+    #[tokio::test]
+    async fn resolved_status_reports_cloned_via_override_matching_origin() {
+        let base = std::env::temp_dir().join(format!("cam-rstat-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // A clone of me/api at a FLAT, non-`<owner>/<repo>` path.
+        let dir = base.join("flat-checkout");
+        init_repo_with_origin(&dir, "https://github.com/me/api.git");
+
+        let st = checkout_status_resolved(
+            Some(&dir.to_string_lossy()),
+            None, // no workspace root — resolve purely via the override
+            "me/api",
+        )
+        .await;
+
+        assert!(
+            st.cloned,
+            "an override pointing at a real matching checkout must report cloned; detail: {}",
+            st.detail
+        );
+        assert_eq!(
+            st.path,
+            dir.to_string_lossy(),
+            "the reported path must be the resolved override path, not the derived one"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn resolved_status_not_cloned_when_override_points_at_wrong_origin() {
+        let base = std::env::temp_dir().join(format!("cam-rstat-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("other-checkout");
+        // A git checkout, but of a DIFFERENT repo.
+        init_repo_with_origin(&dir, "https://github.com/me/other.git");
+
+        let st =
+            checkout_status_resolved(Some(&dir.to_string_lossy()), None, "me/api").await;
+
+        assert!(
+            !st.cloned,
+            "a git folder with the wrong origin must NOT count as cloned"
+        );
+        assert!(
+            st.detail.contains("me/other") || st.detail.contains("different repo"),
+            "the detail must explain it's a different repo; got: {}",
+            st.detail
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[tokio::test]
+    async fn resolved_status_does_not_error_when_no_workspace_root_but_override_resolves() {
+        // Regression for the relaxed error: with NO workspace root, a per-repo override still
+        // resolves and reports cloned (the old handler hard-errored the whole endpoint here).
+        let base = std::env::temp_dir().join(format!("cam-rstat-noroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("checkout");
+        init_repo_with_origin(&dir, "https://github.com/me/api.git");
+
+        let st =
+            checkout_status_resolved(Some(&dir.to_string_lossy()), None, "me/api").await;
+        assert!(st.cloned, "override must resolve with no workspace root; detail: {}", st.detail);
+
+        // And with NEITHER an override NOR a workspace root: not-cloned with a helpful reason,
+        // never a panic/error.
+        let none = checkout_status_resolved(None, None, "me/api").await;
+        assert!(!none.cloned);
+        assert!(
+            none.detail.contains("no local path"),
+            "detail should guide the user to link a folder; got: {}",
+            none.detail
         );
 
         let _ = std::fs::remove_dir_all(&base);

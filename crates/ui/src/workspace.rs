@@ -534,14 +534,14 @@ pub fn WorkspaceView() -> Element {
             }
 
             // ── Project + repo checkouts ─────────────────────────────────────
-            match (&workspace_root, &project) {
-                (None, _) => rsx! {
-                    p { class: "ws-hint", "Pick a workspace folder above to start cloning repos locally." }
-                },
-                (Some(_), None) => rsx! {
+            // Repos render whenever there's an active project — even with no workspace root — because
+            // a repo can resolve via a per-repo path override ("Link to this folder"). A workspace
+            // root is only needed for the derived `<owner>/<repo>` clone layout.
+            match &project {
+                None => rsx! {
                     p { class: "ws-hint", "No active project. Create a project (and add its repos) first, then come back to clone them here." }
                 },
-                (Some(_), Some(proj)) => {
+                Some(proj) => {
                     let pid = proj.id.clone();
                     rsx! {
                         div { class: "ws-project",
@@ -590,12 +590,21 @@ pub fn WorkspaceView() -> Element {
                             if proj.repos.is_empty() {
                                 p { class: "ws-hint", "This project has no repos yet. Add repos to it (via onboarding) to clone them." }
                             }
+                            if workspace_root.is_none() && !proj.repos.is_empty() {
+                                p { class: "ws-hint", "No workspace folder set. You can still \"Link to this folder\" per repo below to point at an existing clone, or pick a workspace folder above to clone into the standard layout." }
+                            }
                             for repo in proj.repos.iter() {
                                 {
                                     let status = checkouts.iter().find(|c| &c.repo == repo).cloned();
                                     let project_id = proj.id.clone();
                                     rsx! {
-                                        RepoCard { key: "{repo}", repo: repo.clone(), project_id, status }
+                                        RepoCard {
+                                            key: "{repo}",
+                                            repo: repo.clone(),
+                                            project_id,
+                                            status,
+                                            on_linked: move |_| { refresh += 1; },
+                                        }
                                     }
                                 }
                             }
@@ -610,12 +619,21 @@ pub fn WorkspaceView() -> Element {
 // ── RepoCard ──────────────────────────────────────────────────────────────────
 
 #[component]
-fn RepoCard(repo: String, project_id: String, status: Option<RepoCheckout>) -> Element {
+fn RepoCard(
+    repo: String,
+    project_id: String,
+    status: Option<RepoCheckout>,
+    on_linked: EventHandler<()>,
+) -> Element {
     let mut branch = use_signal(|| "camerata/work".to_string());
     let mut title = use_signal(|| "Camerata: changes".to_string());
     let mut pr_url = use_signal(String::new);
     let mut msg = use_signal(String::new);
     let mut working = use_signal(|| false);
+    // Inline error surfaced from a rejected "Link to this folder" (origin mismatch / not-a-git
+    // folder). Cleared on the next attempt; never mutates the checkout status on failure.
+    let mut link_err = use_signal(String::new);
+    let mut linking = use_signal(|| false);
 
     let cloned = status.as_ref().map(|s| s.cloned).unwrap_or(false);
     let detail = status
@@ -715,7 +733,47 @@ fn RepoCard(repo: String, project_id: String, status: Option<RepoCheckout>) -> E
                     project_id: project_id.clone(),
                 }
             } else {
-                p { class: "ws-hint", "Not cloned. Use \"Clone / update all repos\" above to create the local working copy." }
+                p { class: "ws-hint", "Not cloned. Use \"Clone / update all repos\" above to create a local working copy, or link an existing clone below." }
+                div { class: "ws-repo-actions",
+                    button {
+                        class: "btn-edit-sm",
+                        disabled: linking(),
+                        title: "Point this repo at an existing local clone (validates the clone's origin)",
+                        onclick: {
+                            let (pid, rp) = (project_id.clone(), repo.clone());
+                            move |_| {
+                                let (pid, rp) = (pid.clone(), rp.clone());
+                                link_err.set(String::new());
+                                spawn(async move {
+                                    let Some(folder) = rfd::AsyncFileDialog::new()
+                                        .set_title("Select the existing local clone of this repo")
+                                        .pick_folder()
+                                        .await
+                                    else {
+                                        return; // user cancelled — no state change
+                                    };
+                                    let path = folder.path().to_string_lossy().to_string();
+                                    linking.set(true);
+                                    match crate::readiness_gate::link_repo(&pid, &rp, &path).await {
+                                        crate::readiness_gate::LinkOutcome::Linked(_) => {
+                                            // Re-fetch checkout status so the row flips to
+                                            // cloned/linked with its real resolved path.
+                                            on_linked.call(());
+                                        }
+                                        crate::readiness_gate::LinkOutcome::Rejected(e) => {
+                                            link_err.set(e);
+                                        }
+                                    }
+                                    linking.set(false);
+                                });
+                            }
+                        },
+                        if linking() { "Linking…" } else { "Link to this folder…" }
+                    }
+                }
+                if !link_err().is_empty() {
+                    p { class: "ws-repo-msg ws-repo-link-err", "{link_err}" }
+                }
             }
         }
     }
@@ -1699,6 +1757,7 @@ mod tests {
                     repo: "zernst3/agora".to_string(),
                     project_id: "proj-7".to_string(),
                     status: None,
+                    on_linked: move |_| {},
                 }
             }
         }
@@ -1708,6 +1767,10 @@ mod tests {
         assert!(html.contains("zernst3/agora"), "repo name renders");
         assert!(html.contains("not cloned yet"), "uncloned detail renders");
         assert!(html.contains("Not cloned"), "the not-cloned hint renders");
+        assert!(
+            html.contains("Link to this folder"),
+            "the link-existing-clone affordance renders on an uncloned repo"
+        );
     }
 
     // GitPanel uses use_context::<Signal<Vec<Toast>>> and three use_resource fetches.

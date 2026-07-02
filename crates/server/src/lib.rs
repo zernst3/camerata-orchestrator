@@ -7491,15 +7491,22 @@ async fn checkout_status(
         .projects
         .get(&id)
         .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
-    let Some(root) = state.settings.workspace_root() else {
-        return Err(AppError(anyhow::anyhow!(
-            "no workspace folder is set — pick one first"
-        )));
-    };
-    let root = std::path::PathBuf::from(root);
+    // Override-aware (issue #33/#38): resolve each repo via its per-repo path override first,
+    // falling back to `<workspace_root>/<owner>/<repo>`. A repo can resolve via an override even
+    // when no workspace root is set, so we do NOT hard-fail on a missing workspace root — repos
+    // that resolve via neither report not-cloned with a helpful reason instead.
+    let workspace_root = state.settings.workspace_root();
     let mut out = Vec::with_capacity(project.repos.len());
     for repo in &project.repos {
-        out.push(crate::workspace::checkout_status(&root, repo).await);
+        let override_path = state.settings.repo_path(repo);
+        out.push(
+            crate::workspace::checkout_status_resolved(
+                override_path.as_deref(),
+                workspace_root.as_deref(),
+                repo,
+            )
+            .await,
+        );
     }
     Ok(Json(out))
 }
@@ -7524,9 +7531,31 @@ async fn checkout_project(
             "no GitHub token — set CAMERATA_GITHUB_TOKEN to clone"
         )));
     }
+    let workspace_root = state.settings.workspace_root();
     let root = std::path::PathBuf::from(root);
     let mut out = Vec::with_capacity(project.repos.len());
     for repo in &project.repos {
+        // If the repo ALREADY resolves (override-aware git checkout with a matching origin), don't
+        // clone a second copy into the derived path — report its resolved status. Only repos that
+        // do not already resolve get cloned into `<root>/<owner>/<repo>` (issue #38).
+        let override_path = state.settings.repo_path(repo);
+        let resolution = crate::workspace::repo_resolution(
+            override_path.as_deref(),
+            workspace_root.as_deref(),
+            repo,
+        )
+        .await;
+        if resolution.resolved {
+            out.push(
+                crate::workspace::checkout_status_resolved(
+                    override_path.as_deref(),
+                    workspace_root.as_deref(),
+                    repo,
+                )
+                .await,
+            );
+            continue;
+        }
         out.push(crate::workspace::clone_or_pull(&root, repo, &token).await);
     }
     Ok(Json(out))
