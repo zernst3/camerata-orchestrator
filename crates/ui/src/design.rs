@@ -47,7 +47,64 @@ struct ProposedChild {
     pub title: String,
 }
 
+/// The project's work-hierarchy schema (mirrors the server `HierarchySchema` shape): the
+/// allowed parent→child nestings. Used to drive the "+ Add child node" type off the schema
+/// instead of hardcoding one, so the child is always valid under the selected node's type.
+#[derive(Clone, PartialEq, serde::Deserialize, Default, Debug)]
+struct HierarchySchema {
+    #[serde(default)]
+    relations: Vec<TypeRelation>,
+}
+
+#[derive(Clone, PartialEq, serde::Deserialize, Default, Debug)]
+struct TypeRelation {
+    #[serde(default)]
+    parent: String,
+    #[serde(default)]
+    child: String,
+}
+
+impl HierarchySchema {
+    /// The child types allowed directly under `parent_type`, in schema order.
+    fn allowed_children(&self, parent_type: &str) -> Vec<String> {
+        self.relations
+            .iter()
+            .filter(|r| r.parent == parent_type)
+            .map(|r| r.child.clone())
+            .collect()
+    }
+}
+
 // ── API helpers ───────────────────────────────────────────────────────────────
+
+/// Fetch the active project's effective hierarchy schema. Resolves the active project id via
+/// `GET /api/projects/active`, then `GET /api/projects/:id/hierarchy` (the server resolves an
+/// empty/absent schema to the seeded default ladder). Returns `None` when there is no active
+/// project or on any network error.
+async fn api_fetch_active_hierarchy() -> Option<HierarchySchema> {
+    let active: serde_json::Value = reqwest::get(format!(
+        "{}/api/projects/active",
+        crate::bff_base(),
+    ))
+    .await
+    .ok()?
+    .json()
+    .await
+    .ok()?;
+    let project_id = active.get("id").and_then(|v| v.as_str())?.to_string();
+    let v: serde_json::Value = reqwest::get(format!(
+        "{}/api/projects/{}/hierarchy",
+        crate::bff_base(),
+        project_id,
+    ))
+    .await
+    .ok()?
+    .json()
+    .await
+    .ok()?;
+    v.get("hierarchy")
+        .and_then(|h| serde_json::from_value(h.clone()).ok())
+}
 
 async fn api_design_blank(
     root_type: &str,
@@ -197,6 +254,11 @@ pub fn DesignCanvasView() -> Element {
     });
     let nodes = nodes_res.read().clone().unwrap_or_default();
 
+    // The active project's hierarchy schema — drives the "+ Add child node" type so the child
+    // is always valid under the selected node's type (no hardcoded, schema-invalid child).
+    let schema_res = use_resource(move || async move { api_fetch_active_hierarchy().await });
+    let schema = schema_res.read().clone().flatten().unwrap_or_default();
+
     // Selected node (pulled from tree for display).
     let selected = selected_node_id().as_ref().and_then(|id| {
         nodes.iter().find(|n| &n.story_id == id).cloned()
@@ -317,37 +379,51 @@ pub fn DesignCanvasView() -> Element {
                                 }
                             }
                         }
-                        // "Add child" button at the bottom of a selected node.
+                        // "Add child" button at the bottom of a selected node. The child type is
+                        // derived from the selected node's type via the project schema (the FIRST
+                        // allowed child), NOT hardcoded — a hardcoded child that the schema forbids
+                        // is rejected by materialize validation, giving a dead-end button.
                         if let Some(sel_id) = selected_node_id() {
                             {
                                 let rid = root_id().unwrap_or_default();
-                                rsx! {
-                                    div { class: "design-add-child",
-                                        button {
-                                            class: "btn-edit-sm",
-                                            onclick: move |_| {
-                                                let r = rid.clone();
-                                                let p = sel_id.clone();
-                                                spawn(async move {
-                                                    if let Some(new_id) = api_design_blank("Story", Some(&p), None).await {
-                                                        // Materialize it by re-fetching; the blank node is already in the store.
-                                                        let _ = api_design_materialize(
-                                                            &r,
-                                                            &p,
-                                                            vec![serde_json::json!({
-                                                                "node_type": "Story",
-                                                                "title": "",
-                                                                "body": "",
-                                                            })],
-                                                        ).await;
-                                                        selected_node_id.set(Some(new_id));
-                                                        refresh += 1;
-                                                    }
-                                                });
-                                            },
-                                            "+ Add child node"
+                                let sel_type = nodes
+                                    .iter()
+                                    .find(|n| n.story_id == sel_id)
+                                    .and_then(|n| n.node_type.clone())
+                                    .unwrap_or_default();
+                                let child_type = schema.allowed_children(&sel_type).into_iter().next();
+                                match child_type {
+                                    Some(ct) => rsx! {
+                                        div { class: "design-add-child",
+                                            button {
+                                                class: "btn-edit-sm",
+                                                onclick: move |_| {
+                                                    let r = rid.clone();
+                                                    let p = sel_id.clone();
+                                                    let ct = ct.clone();
+                                                    spawn(async move {
+                                                        if let Some(new_id) = api_design_blank(&ct, Some(&p), None).await {
+                                                            // Materialize it by re-fetching; the blank node is already in the store.
+                                                            let _ = api_design_materialize(
+                                                                &r,
+                                                                &p,
+                                                                vec![serde_json::json!({
+                                                                    "node_type": ct,
+                                                                    "title": "",
+                                                                    "body": "",
+                                                                })],
+                                                            ).await;
+                                                            selected_node_id.set(Some(new_id));
+                                                            refresh += 1;
+                                                        }
+                                                    });
+                                                },
+                                                "+ Add {ct}"
+                                            }
                                         }
-                                    }
+                                    },
+                                    // Leaf type in the schema (no allowed children): no add button.
+                                    None => rsx! {},
                                 }
                             }
                         }
@@ -710,6 +786,27 @@ fn MockupPanel(uow_id: String) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn allowed_children_drives_add_child_type_from_schema() {
+        // The "+ Add child node" button reads the child type off the schema instead of
+        // hardcoding "Story" (which the default ladder forbids under Epic → dead-end button).
+        let schema = HierarchySchema {
+            relations: vec![
+                TypeRelation { parent: "Epic".into(), child: "Feature".into() },
+                TypeRelation { parent: "Feature".into(), child: "Story".into() },
+                TypeRelation { parent: "Feature".into(), child: "Defect".into() },
+            ],
+        };
+        assert_eq!(schema.allowed_children("Epic"), vec!["Feature".to_string()]);
+        assert_eq!(
+            schema.allowed_children("Feature"),
+            vec!["Story".to_string(), "Defect".to_string()],
+        );
+        // Leaf type (no allowed children) → no add button is rendered.
+        assert!(schema.allowed_children("Story").is_empty());
+        assert!(schema.allowed_children("Unknown").is_empty());
+    }
 
     #[test]
     fn mockup_panel_renders_collapsed() {

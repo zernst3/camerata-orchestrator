@@ -214,7 +214,10 @@ impl ProjectStore {
                 existing.product_brief = import.product_brief;
                 existing.operating_principles = import.operating_principles;
                 existing.memory = import.memory;
-                existing.hierarchy_schema = import.hierarchy_schema;
+                // Seed the default ladder when the import omitted a schema (empty), but keep an
+                // intentionally-provided non-empty imported schema untouched — resolve_effective
+                // only substitutes when the schema is unusable.
+                existing.hierarchy_schema = import.hierarchy_schema.resolve_effective();
                 let updated = existing.clone();
                 s.active = Some(updated.id.clone());
                 ImportOutcome::Overwritten(updated)
@@ -238,7 +241,9 @@ impl ProjectStore {
                     product_brief: import.product_brief,
                     operating_principles: import.operating_principles,
                     memory: import.memory,
-                    hierarchy_schema: import.hierarchy_schema,
+                    // Seed the default ladder when the import omitted a schema (empty), but keep
+                    // an intentionally-provided non-empty imported schema untouched.
+                    hierarchy_schema: import.hierarchy_schema.resolve_effective(),
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -476,6 +481,45 @@ mod tests {
         assert_eq!(
             project.hierarchy_schema, custom,
             "the schema travels through import (portable project-level field)"
+        );
+    }
+
+    #[test]
+    fn import_without_schema_seeds_the_default_ladder() {
+        // The design-canvas "planner proposes zero children" bug: a project imported without a
+        // schema used to get the EMPTY `HierarchySchema::default()`, which makes design-author
+        // emit `ALLOWED_CHILD_TYPES: []`. It must now seed the default ladder instead.
+        let store = ProjectStore::new();
+
+        // (a) The `import()` convenience path (`..Default::default()` → empty schema).
+        let project = store
+            .import("Imported", vec![], ProjectRuleset::default())
+            .expect("imported");
+        assert!(
+            project.hierarchy_schema.is_usable(),
+            "imported project seeds a usable (non-empty) hierarchy schema",
+        );
+        assert_eq!(
+            project.hierarchy_schema, default_hierarchy_schema(),
+            "the seeded schema is the default ladder",
+        );
+
+        // (b) An explicit EMPTY schema on `import_or_overwrite` is also seeded (not clobbered
+        //     when non-empty, but seeded when empty).
+        let empty = store
+            .import_or_overwrite(
+                "Imported2",
+                ProjectImport {
+                    hierarchy_schema: HierarchySchema::default(),
+                    ..Default::default()
+                },
+                false,
+            )
+            .unwrap()
+            .into_project();
+        assert_eq!(
+            empty.hierarchy_schema, default_hierarchy_schema(),
+            "an empty imported schema is seeded to the default ladder",
         );
     }
 

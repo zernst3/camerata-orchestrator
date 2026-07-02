@@ -297,6 +297,28 @@ pub struct HierarchySchema {
     pub relations: Vec<TypeRelation>,
 }
 
+impl HierarchySchema {
+    /// Whether this schema is usable for design-mode child proposal / validation: it needs at
+    /// least one type AND one parent→child relation. An empty schema (no types or no relations)
+    /// makes the design-author prompt emit `ALLOWED_CHILD_TYPES: []` and makes materialize
+    /// validation reject every child — a bug source, not a valid configuration.
+    pub fn is_usable(&self) -> bool {
+        !self.types.is_empty() && !self.relations.is_empty()
+    }
+
+    /// Resolve the EFFECTIVE schema: this one if it is usable, otherwise the seeded default
+    /// ladder ([`default_hierarchy_schema`]). Centralizes the "empty schema → default ladder"
+    /// fallback so the design-author handler, the materialize handler, and any hierarchy read
+    /// can't drift. Does NOT mutate/persist; it only chooses which schema to use in-flight.
+    pub fn resolve_effective(self) -> HierarchySchema {
+        if self.is_usable() {
+            self
+        } else {
+            default_hierarchy_schema()
+        }
+    }
+}
+
 /// The seeded default hierarchy schema: the common Scrum/ADO ladder as a starting point the
 /// architect can edit via the drag-and-drop builder. `Initiative` and `Epic` are design roots.
 pub fn default_hierarchy_schema() -> HierarchySchema {
@@ -835,6 +857,48 @@ mod tests {
             repos: vec!["me/api".to_string()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn resolve_effective_seeds_default_ladder_only_when_empty() {
+        // The empty-schema fallback that fixes the design-canvas "planner proposes zero
+        // children" bug: an empty (or partially-empty) schema resolves to the default ladder;
+        // a usable custom schema is used verbatim.
+
+        // Fully empty → default ladder (Epic → Feature exists).
+        let resolved = HierarchySchema::default().resolve_effective();
+        assert_eq!(resolved, default_hierarchy_schema());
+        assert!(resolved
+            .relations
+            .iter()
+            .any(|r| r.parent == "Epic" && r.child == "Feature"));
+
+        // Types but no relations → still unusable → default ladder.
+        let types_only = HierarchySchema {
+            types: vec![WorkType {
+                name: "Objective".into(),
+                builtin: false,
+                is_design_root: true,
+            }],
+            relations: vec![],
+        };
+        assert!(!types_only.is_usable());
+        assert_eq!(types_only.resolve_effective(), default_hierarchy_schema());
+
+        // A usable custom schema is returned unchanged (not clobbered).
+        let custom = HierarchySchema {
+            types: vec![WorkType {
+                name: "Objective".into(),
+                builtin: false,
+                is_design_root: true,
+            }],
+            relations: vec![TypeRelation {
+                parent: "Objective".into(),
+                child: "KeyResult".into(),
+            }],
+        };
+        assert!(custom.is_usable());
+        assert_eq!(custom.clone().resolve_effective(), custom);
     }
 
     #[test]

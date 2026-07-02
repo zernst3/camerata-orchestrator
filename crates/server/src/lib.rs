@@ -453,6 +453,25 @@ impl AppState {
         dirs
     }
 
+    /// The EFFECTIVE work-hierarchy schema to use for design-mode child proposal +
+    /// materialization validation. Resolves the active project's stored schema, but falls
+    /// back to the seeded default ladder ([`crate::project::default_hierarchy_schema`]) when
+    /// there is NO active project OR the stored schema is empty (no types or no relations).
+    ///
+    /// An empty schema is a bug source, not a valid configuration: it makes the design-author
+    /// prompt emit `ALLOWED_CHILD_TYPES: []` (so the model proposes nothing, and any proposals
+    /// are stripped) and makes materialize validation reject every child. A project can end up
+    /// empty via a bare import that omitted a schema. Resolving empty → default here keeps the
+    /// design-author handler, the materialize handler, and validation in agreement. This does
+    /// NOT persist the default onto the project; it only affects the in-flight resolution.
+    pub(crate) fn effective_hierarchy_schema(&self) -> crate::project::HierarchySchema {
+        self.projects
+            .active()
+            .map(|p| p.hierarchy_schema)
+            .unwrap_or_default()
+            .resolve_effective()
+    }
+
     /// Store the last completed scan report for the given project. Called the instant a
     /// scan handler finishes on either the synchronous or async path. Fail-soft on lock
     /// poisoning: recovers the inner value rather than panicking the handler.
@@ -3033,7 +3052,12 @@ async fn get_hierarchy_handler(
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
     match state.projects.get(&id) {
-        Some(p) => Json(serde_json::json!({ "ok": true, "hierarchy": p.hierarchy_schema })),
+        // Resolve empty → default ladder so a project seeded/imported without a schema still
+        // reports the usable default (the same fallback design-author + materialize apply).
+        Some(p) => Json(serde_json::json!({
+            "ok": true,
+            "hierarchy": p.hierarchy_schema.resolve_effective(),
+        })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
     }
 }
@@ -9061,11 +9085,7 @@ async fn design_author(
     // Inject schema context: which child types are allowed under this node's type.
     let node_type = before.node_type.clone().unwrap_or_default();
     let (schema_context, allowed_child_types) = {
-        let schema = state
-            .projects
-            .active()
-            .map(|p| p.hierarchy_schema)
-            .unwrap_or_default();
+        let schema = state.effective_hierarchy_schema();
         let allowed: Vec<String> = schema
             .relations
             .iter()
@@ -9166,12 +9186,9 @@ async fn design_materialize_nodes(
     let parent = state.uow.get_or_create(&req.parent_draft_id);
     let parent_type = parent.node_type.as_deref().unwrap_or("");
 
-    // Get the active schema for validation.
-    let schema = state
-        .projects
-        .active()
-        .map(|p| p.hierarchy_schema)
-        .unwrap_or_default();
+    // Get the effective schema for validation (falls back to the default ladder when the
+    // active project has no/empty stored schema, matching design_author).
+    let schema = state.effective_hierarchy_schema();
 
     let project_id = state.projects.active().map(|p| p.id);
 
@@ -12272,6 +12289,82 @@ mod tests {
         assert_eq!(
             doc["hierarchy_schema"]["types"][0]["name"], "Objective",
             "the schema travels in the project export"
+        );
+    }
+
+    /// The empty-hierarchy-schema bug fix (design canvas "planner proposes zero children"):
+    /// `effective_hierarchy_schema` must resolve to the seeded DEFAULT ladder — so an `Epic`
+    /// resolves allowed children `["Feature"]`, NOT `[]` — in every degenerate case:
+    ///   (a) no active project at all,
+    ///   (b) an active project whose stored schema was seeded EMPTY (e.g. a bare import).
+    /// An empty schema is what made design-author emit `ALLOWED_CHILD_TYPES: []` and strip every
+    /// proposal, and made materialize reject every child.
+    #[test]
+    fn effective_hierarchy_schema_falls_back_to_default_ladder() {
+        let allowed_children = |schema: &crate::project::HierarchySchema, parent: &str| -> Vec<String> {
+            schema
+                .relations
+                .iter()
+                .filter(|r| r.parent == parent)
+                .map(|r| r.child.clone())
+                .collect::<Vec<_>>()
+        };
+
+        // (a) No active project → default ladder.
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        assert!(state.projects.active().is_none(), "no project yet");
+        let schema = state.effective_hierarchy_schema();
+        assert!(!schema.types.is_empty(), "must not be the empty default");
+        assert_eq!(
+            allowed_children(&schema, "Epic"),
+            vec!["Feature".to_string()],
+            "Epic's allowed children resolve to the default ladder, not []",
+        );
+
+        // (b) Active project with an EMPTY stored schema (bare-import shape) → default ladder.
+        let p = state.projects.create("Acme", vec![]).expect("project created");
+        state
+            .projects
+            .set_hierarchy_schema(&p.id, crate::project::HierarchySchema::default())
+            .expect("schema set");
+        assert!(
+            state.projects.active().unwrap().hierarchy_schema.types.is_empty(),
+            "stored schema is empty",
+        );
+        let schema = state.effective_hierarchy_schema();
+        assert_eq!(
+            allowed_children(&schema, "Epic"),
+            vec!["Feature".to_string()],
+            "an empty stored schema still resolves to the default ladder",
+        );
+
+        // (c) Active project with a real custom schema → used verbatim (no clobbering).
+        state
+            .projects
+            .set_hierarchy_schema(
+                &p.id,
+                crate::project::HierarchySchema {
+                    types: vec![crate::project::WorkType {
+                        name: "Objective".into(),
+                        builtin: false,
+                        is_design_root: true,
+                    }],
+                    relations: vec![crate::project::TypeRelation {
+                        parent: "Objective".into(),
+                        child: "KeyResult".into(),
+                    }],
+                },
+            )
+            .expect("schema set");
+        let schema = state.effective_hierarchy_schema();
+        assert_eq!(
+            allowed_children(&schema, "Objective"),
+            vec!["KeyResult".to_string()],
+            "a usable custom schema is used verbatim",
+        );
+        assert!(
+            allowed_children(&schema, "Epic").is_empty(),
+            "the custom schema does not carry the default ladder's Epic relation",
         );
     }
 
