@@ -480,6 +480,7 @@ fn DesignNodeAuthorPanel(
                             sending.set(true);
                             message.set(String::new());
                             spawn(async move {
+                                let _guard = crate::loading::LoadingGuard::new();
                                 api_design_author(&nid, &msg).await;
                                 sending.set(false);
                                 on_refresh.call(());
@@ -497,6 +498,7 @@ fn DesignNodeAuthorPanel(
                         sending.set(true);
                         message.set(String::new());
                         spawn(async move {
+                            let _guard = crate::loading::LoadingGuard::new();
                             api_design_author(&nid, &msg).await;
                             sending.set(false);
                             on_refresh.call(());
@@ -662,6 +664,7 @@ fn MockupPanel(uow_id: String) -> Element {
                                     generating.set(true);
                                     error_msg.set(String::new());
                                     spawn(async move {
+                                        let _guard = crate::loading::LoadingGuard::new();
                                         match api_generate_mockup(&uid, &msg).await {
                                             Some(html) => mockup_html.set(Some(html)),
                                             None => error_msg.set("AI generation failed or no token configured.".to_string()),

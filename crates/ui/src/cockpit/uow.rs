@@ -2682,6 +2682,7 @@ pub(super) fn StoryAuthoringPanel(
                                     let mut refresh = refresh;
                                     let md = send_model();
                                     spawn(async move {
+                                        let _guard = crate::loading::LoadingGuard::new();
                                         // Re-read the now-answered clarification to get its summary,
                                         // then feed it back as the author's reply.
                                         let answer_text = fetch_clarifications_for_story(&id)
@@ -4591,6 +4592,7 @@ pub(super) fn DevelopmentPhaseView(
                                 let skip_l2 = bootstrap_skip_layer2();
                                 let toasts = toasts;
                                 spawn(async move {
+                                    let _guard = crate::loading::LoadingGuard::new();
                                     match start_dev_run(&sid, &tm, skip_l2).await {
                                         StartRunOutcome::Started(rid) => {
                                             poll_run_to_done(rid, active_run, uow_refresh, Some(toasts)).await
@@ -4764,6 +4766,7 @@ pub(super) fn DevelopmentPhaseView(
                                     let toasts = toasts;
                                     bug_fix_running.set(true);
                                     spawn(async move {
+                                        let _guard = crate::loading::LoadingGuard::new();
                                         // TODO(#105): use a dedicated bug-fix endpoint that threads
                                         // the bug report into the agent context. Today we reuse
                                         // start_dev_run on the same branch (the orchestrator sees
@@ -5597,6 +5600,7 @@ pub(super) fn UowUpdateBranchControl(
                             let md = model();
                             updating.set(true);
                             spawn(async move {
+                                let _guard = crate::loading::LoadingGuard::new();
                                 match start_update_branch_run(&sid, &branch, &source, &md).await {
                                     StartRunOutcome::Started(rid) => {
                                         poll_run_to_done(rid, active_run, uow_refresh, None).await;
@@ -5856,6 +5860,7 @@ pub(super) fn UowPrControl(
                         let md = resolve_model();
                         resolving.set(true);
                         spawn(async move {
+                            let _guard = crate::loading::LoadingGuard::new();
                             match start_pr_resolve_run(&sid, &md).await {
                                 StartRunOutcome::Started(rid) => {
                                     poll_run_to_done(rid, active_run, uow_refresh, None).await;

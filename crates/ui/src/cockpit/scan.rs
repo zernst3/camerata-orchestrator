@@ -2720,6 +2720,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 // from any single request.
                                 let mut active_audit_job = active_audit_job;
                                 spawn(async move {
+                                    let _guard = crate::loading::LoadingGuard::new();
                                     let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough, incremental, deep, ai, det).await else {
                                         auditing.set(false);
                                         return;
@@ -3424,6 +3425,7 @@ pub(super) fn DeepReportExportPanel(project_id: String, soc2_enabled: bool) -> E
                     let pid = project_id.clone();
                     loading.set(true);
                     spawn(async move {
+                        let _guard = crate::loading::LoadingGuard::new();
                         // SOC-2 inclusion is feature-flag-driven server-side; no client param.
                         match fetch_deep_report(&pid).await {
                             Some(md) => report_md.set(Some(md)),

@@ -838,6 +838,7 @@ pub fn RoutineDashboard() -> Element {
                                         onclick: move |_| {
                                             let id = id_run.clone();
                                             spawn(async move {
+                                                let _guard = crate::loading::LoadingGuard::new();
                                                 if run_now(&id).await.is_some() {
                                                     refresh += 1;
                                                 }
@@ -1280,6 +1281,7 @@ pub fn RoutineDashboard() -> Element {
                             if i.trim().is_empty() { return; }
                             drafting.set(true);
                             spawn(async move {
+                                let _guard = crate::loading::LoadingGuard::new();
                                 if let Some((p, by)) = draft_prompt(&i, &sc, &md).await {
                                     prompt.set(p);
                                     authored_by.set(by);

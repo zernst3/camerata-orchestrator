@@ -235,6 +235,7 @@ pub(super) fn UowReviewPanel(
                         if msg.trim().is_empty() { return; }
                         chatting.set(true);
                         spawn(async move {
+                            let _guard = crate::loading::LoadingGuard::new();
                             if let Some(updated) = chat_uow_escalation(&id, &msg, &md).await {
                                 esc_view.set(updated);
                                 chat_input.set(String::new());
