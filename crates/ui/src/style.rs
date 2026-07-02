@@ -5442,6 +5442,39 @@ select:focus {
   min-width: 52px;
 }
 /* ON/OFF toggle button */
+/* Model backend CLI ⟷ API segmented control */
+.backend-toggle {
+  display: inline-flex;
+  gap: 0;
+  border: 1.5px solid var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+.backend-seg {
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .05em;
+  padding: 6px 22px;
+  border: none;
+  background: var(--paper);
+  color: var(--ink-soft);
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+.backend-seg:hover:not(.backend-seg-active) {
+  color: var(--accent-ink);
+}
+.backend-seg-active {
+  background: var(--accent);
+  color: #fff;
+  cursor: default;
+}
+.backend-key-warning {
+  margin-top: 8px;
+  font-size: 13px;
+}
 .bombe-toggle-btn {
   font: inherit;
   font-size: 13px;

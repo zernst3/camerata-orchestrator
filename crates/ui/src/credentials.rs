@@ -9,6 +9,8 @@
 
 use dioxus::prelude::*;
 
+use camerata_ui_core::llm_backend::{show_api_key_warning, LlmBackend};
+
 use crate::loading::{BombeEnabled, BombePreview};
 use crate::toast::{push_toast, ToastKind};
 
@@ -43,6 +45,49 @@ async fn fetch_credentials() -> Option<Vec<CredentialListItem>> {
         .json::<Vec<CredentialListItem>>()
         .await
         .ok()
+}
+
+// ── LLM backend (Model backend) settings ────────────────────────────────────
+
+/// The subset of `GET /api/settings` the Model-backend control reads: the EFFECTIVE backend
+/// (stored setting > env > default `cli`) and whether an Anthropic API key is present.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct BackendSettingsView {
+    #[serde(default)]
+    llm_backend: Option<String>,
+    #[serde(default)]
+    api_key_present: bool,
+}
+
+/// Fetch the effective LLM backend + api-key presence from `GET /api/settings`.
+async fn fetch_backend_settings() -> Option<BackendSettingsView> {
+    reqwest::get(format!("{}/api/settings", crate::bff_base()))
+        .await
+        .ok()?
+        .json::<BackendSettingsView>()
+        .await
+        .ok()
+}
+
+/// Persist the LLM backend via `POST /api/settings/llm-backend`. Returns the server-echoed
+/// (backend, api_key_present) on success. `None` on any transport/parse error or non-2xx.
+async fn set_backend(backend: LlmBackend) -> Option<(LlmBackend, bool)> {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/settings/llm-backend", crate::bff_base()))
+        .json(&serde_json::json!({ "backend": backend.as_wire() }))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: serde_json::Value = resp.json().await.ok()?;
+    let backend = LlmBackend::parse(v.get("backend").and_then(|b| b.as_str()).unwrap_or("cli"));
+    let api_key_present = v
+        .get("api_key_present")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+    Some((backend, api_key_present))
 }
 
 async fn post_credential(name: &str, value: &str) -> Result<String, String> {
@@ -123,8 +168,116 @@ pub fn CredentialsSettings() -> Element {
                 },
             }
 
+            // ── Model backend (CLI ⟷ API) ─────────────────────────────────
+            ModelBackendSettings {}
+
             // ── Bombe animation settings ──────────────────────────────────
             BombeSettings {}
+        }
+    }
+}
+
+// ── ModelBackendSettings ────────────────────────────────────────────────────
+
+/// The "Model backend" control: a CLI ⟷ API segmented toggle for the app-level LLM backend.
+///
+/// - **CLI** uses the logged-in Claude Code subscription (no key).
+/// - **API** uses the Anthropic API and requires an `ANTHROPIC_API_KEY`.
+///
+/// Reads the current effective backend + key presence from `GET /api/settings`, and writes the
+/// choice via `POST /api/settings/llm-backend`. When `api` is selected with no key present the
+/// server silently falls back to CLI, so an inline warning is shown (pure view logic lives in
+/// `camerata_ui_core::llm_backend`).
+#[component]
+fn ModelBackendSettings() -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut settings_res = use_resource(fetch_backend_settings);
+    let mut saving = use_signal(|| false);
+
+    // Snapshot the resource into an owned value so the read guard is dropped before the rsx
+    // body (whose onclick closures call `settings_res.restart()`, which needs a fresh borrow).
+    let snapshot = settings_res.read().clone();
+    match snapshot {
+        None => rsx! {
+            div { class: "credentials-field-section",
+                div { class: "credentials-field-header",
+                    label { class: "credentials-label", "Model backend" }
+                }
+                p { class: "ink-soft", "Loading…" }
+            }
+        },
+        Some(None) => rsx! {
+            div { class: "credentials-field-section",
+                div { class: "credentials-field-header",
+                    label { class: "credentials-label", "Model backend" }
+                }
+                p { class: "ink-soft warn", "Could not reach the server." }
+            }
+        },
+        Some(Some(view)) => {
+            let selected = LlmBackend::parse(view.llm_backend.as_deref().unwrap_or("cli"));
+            let api_key_present = view.api_key_present;
+            let warn = show_api_key_warning(selected, api_key_present);
+
+            let seg = move |backend: LlmBackend, label: &'static str| {
+                let is_active = selected == backend;
+                rsx! {
+                    button {
+                        key: "{label}",
+                        class: if is_active {
+                            "backend-seg backend-seg-active"
+                        } else {
+                            "backend-seg"
+                        },
+                        disabled: saving() || is_active,
+                        onclick: move |_| {
+                            if is_active { return; }
+                            saving.set(true);
+                            spawn(async move {
+                                match set_backend(backend).await {
+                                    Some((b, _)) => {
+                                        push_toast(
+                                            toasts,
+                                            ToastKind::Info,
+                                            format!("Model backend set to {}.", b.label()),
+                                        );
+                                        settings_res.restart();
+                                    }
+                                    None => {
+                                        push_toast(
+                                            toasts,
+                                            ToastKind::Error,
+                                            "Could not update the model backend.".to_string(),
+                                        );
+                                    }
+                                }
+                                saving.set(false);
+                            });
+                        },
+                        "{label}"
+                    }
+                }
+            };
+
+            rsx! {
+                div { class: "credentials-field-section",
+                    div { class: "credentials-field-header",
+                        label { class: "credentials-label", "Model backend" }
+                    }
+                    p { class: "credentials-intro",
+                        "CLI uses your logged-in Claude Code subscription. API uses the Anthropic API and requires an API key."
+                    }
+                    div { class: "backend-toggle",
+                        {seg(LlmBackend::Cli, "CLI")}
+                        {seg(LlmBackend::Api, "API")}
+                    }
+                    if warn {
+                        p { class: "ink-soft warn backend-key-warning",
+                            "API backend needs an ANTHROPIC_API_KEY — the app will fall back to CLI until one is configured."
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -425,6 +578,84 @@ mod tests {
         assert_eq!(result, Err("invalid token format".to_string()));
     }
 
+    // POST /api/settings/llm-backend — asserts the body is exactly {"backend":"api"} and
+    // that the echoed (backend, api_key_present) parse back.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_backend_posts_backend_and_parses_response() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/settings/llm-backend"))
+            .and(body_json(serde_json::json!({ "backend": "api" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "backend": "api", "api_key_present": true }),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::set_backend(LlmBackend::Api).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let (backend, key) = out.expect("backend echo parsed");
+        assert_eq!(backend, LlmBackend::Api);
+        assert!(key, "api_key_present reflected");
+    }
+
+    // A non-2xx from the endpoint collapses to None (the UI toasts an error).
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_backend_returns_none_on_error_status() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/settings/llm-backend"))
+            .respond_with(
+                ResponseTemplate::new(400)
+                    .set_body_json(serde_json::json!({ "ok": false, "message": "invalid backend" })),
+            )
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::set_backend(LlmBackend::Api).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(out.is_none(), "a 400 collapses to None");
+    }
+
+    // GET /api/settings — the backend view parses the effective backend + api_key_present.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_backend_settings_parses_backend_and_key_flag() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/settings"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                serde_json::json!({ "llm_backend": "api", "api_key_present": false }),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_backend_settings().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let view = out.expect("backend settings parsed");
+        assert_eq!(view.llm_backend.as_deref(), Some("api"));
+        assert!(!view.api_key_present);
+    }
+
     // ── Tier 1: render tests (dioxus-ssr) ───────────────────────────────────────
     // Render components headlessly to an HTML string and assert KEY static
     // structure. SSR is static (no clicks, no async-loaded data): use_resource is
@@ -563,6 +794,38 @@ mod tests {
         assert!(
             html.contains("Background Animation"),
             "the Bombe settings section renders below; html=\n{html}"
+        );
+        // The Model backend control renders below the credentials too.
+        assert!(
+            html.contains("Model backend"),
+            "the Model backend control renders; html=\n{html}"
+        );
+    }
+
+    // ModelBackendSettings consumes the toasts context and a use_resource. On first SSR
+    // render the resource is pending, so it renders the loading branch — but the "Model
+    // backend" label is always present. The pure CLI/API + warning logic is unit-tested in
+    // camerata_ui_core::llm_backend; here we lock the label + loading scaffold.
+    fn model_backend_harness() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        rsx! {
+            ModelBackendSettings {}
+        }
+    }
+
+    #[test]
+    fn model_backend_settings_renders_label_and_loading_branch() {
+        let mut vdom = VirtualDom::new(model_backend_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("Model backend"),
+            "the Model backend label renders; html=\n{html}"
+        );
+        // use_resource is pending on first render → loading branch.
+        assert!(
+            html.contains("Loading"),
+            "the pending-resource loading branch renders; html=\n{html}"
         );
     }
 }

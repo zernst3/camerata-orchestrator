@@ -29,6 +29,16 @@ pub struct Settings {
     /// per-request `model` on the chat POST still overrides this (highest precedence).
     #[serde(default)]
     pub chat_model: Option<String>,
+    /// APP-LEVEL LLM backend selection: `"cli"` (spawn the logged-in Claude Code CLI, no
+    /// API key) or `"api"` (Anthropic Messages API + `ANTHROPIC_API_KEY`). `None` means
+    /// "not chosen here" — the selection then falls back to the `CAMERATA_LLM_BACKEND` env
+    /// var, else the `cli` default. Only `"cli"`/`"api"` are ever stored; anything else is
+    /// rejected at the setter (clamped to `None`). On boot this hydrates the env var so the
+    /// existing env-driven selection sites ([`crate::llm::Llm::from_env`] and the agent
+    /// driver) honor the stored choice unchanged (precedence: stored setting > `.env` >
+    /// default `cli`).
+    #[serde(default)]
+    pub llm_backend: Option<String>,
 }
 
 /// Clone-shareable settings store, persisted to a JSON file so the workspace choice
@@ -117,6 +127,33 @@ impl SettingsStore {
         updated
     }
 
+    /// The app-level LLM backend selection (`"cli"` or `"api"`), if one is stored.
+    /// `None` when unset (the selection then falls back to env / the `cli` default).
+    pub fn llm_backend(&self) -> Option<String> {
+        self.get().llm_backend.filter(|b| !b.trim().is_empty())
+    }
+
+    /// Set (or clear) the app-level LLM backend, persisting the change. Only `"cli"` and
+    /// `"api"` are accepted (case-insensitively, trimmed); any other value — including an
+    /// empty string — clears the setting to `None`. Returns the updated settings.
+    pub fn set_llm_backend(&self, backend: Option<String>) -> Settings {
+        let normalized = backend.and_then(|b| match b.trim().to_ascii_lowercase().as_str() {
+            "cli" => Some("cli".to_string()),
+            "api" => Some("api".to_string()),
+            _ => None,
+        });
+        let updated = {
+            let mut s = match self.inner.lock() {
+                Ok(s) => s,
+                Err(_) => return Settings::default(),
+            };
+            s.llm_backend = normalized;
+            s.clone()
+        };
+        self.save();
+        updated
+    }
+
     /// The machine-local override path for `repo` (`owner/repo`), if one was set.
     pub fn repo_path(&self, repo: &str) -> Option<String> {
         self.get()
@@ -170,6 +207,44 @@ mod tests {
         // Empty / whitespace clears it.
         store.set_chat_model(Some("   ".to_string()));
         assert!(store.chat_model().is_none());
+    }
+
+    #[test]
+    fn set_and_get_llm_backend() {
+        let store = SettingsStore::new();
+        assert!(store.llm_backend().is_none());
+        store.set_llm_backend(Some("api".to_string()));
+        assert_eq!(store.llm_backend().as_deref(), Some("api"));
+        // Case-insensitive + trimmed normalization to the canonical lowercase form.
+        store.set_llm_backend(Some("  CLI ".to_string()));
+        assert_eq!(store.llm_backend().as_deref(), Some("cli"));
+        // A bogus value clears it (clamped to None), never stored.
+        store.set_llm_backend(Some("gemini".to_string()));
+        assert!(store.llm_backend().is_none());
+        // Empty / whitespace clears it too.
+        store.set_llm_backend(Some("api".to_string()));
+        store.set_llm_backend(Some("   ".to_string()));
+        assert!(store.llm_backend().is_none());
+        // Explicit None clears it.
+        store.set_llm_backend(Some("cli".to_string()));
+        store.set_llm_backend(None);
+        assert!(store.llm_backend().is_none());
+    }
+
+    #[test]
+    fn llm_backend_persists_across_reload() {
+        let dir =
+            std::env::temp_dir().join(format!("camerata-settings-llm-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        {
+            let store = SettingsStore::load_or_new(path.clone());
+            store.set_llm_backend(Some("api".to_string()));
+        }
+        // A fresh load sees the persisted backend.
+        let reloaded = SettingsStore::load_or_new(path);
+        assert_eq!(reloaded.llm_backend().as_deref(), Some("api"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
