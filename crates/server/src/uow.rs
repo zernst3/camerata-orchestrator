@@ -177,6 +177,28 @@ pub struct UnitOfWork {
     /// Empty for normal (non-design) UoWs. Serde default for back-compat.
     #[serde(default)]
     pub proposed_children: Vec<ProposedChild>,
+    /// `true` when this UoW is the ROOT of a Design-Canvas design tree — i.e. it was
+    /// created via [`UowStore::create_blank_design`] with NO `draft_parent_id`.
+    ///
+    /// This is the reliable marker that distinguishes a DESIGN ROOT from every other
+    /// `draft-<token>` UoW. A plain AI-authored draft story (`create_blank*`) never sets
+    /// it, and a design CHILD node (created with a `draft_parent_id`) never sets it, so
+    /// the design-list / design-status / design-delete endpoints can enumerate exactly the
+    /// designs of a project by `is_design_root && project_id == :id && draft_parent_id is None`.
+    /// The `draft-` story_id prefix alone is NOT reliable (it is shared with AI draft
+    /// stories), so an explicit marker is used. Serde default `false` so legacy `uow.json`
+    /// records load unchanged (they are treated as non-design, which is correct — no design
+    /// canvas existed when they were written).
+    #[serde(default)]
+    pub is_design_root: bool,
+    /// The Design-Canvas status lifecycle for a design ROOT: one of `"draft"` (the
+    /// default when absent), `"published"`, or `"archived"`. Set only on design roots;
+    /// `None` for every non-design UoW and for design child nodes. Distinct from the
+    /// dev-run [`UowStage`] / [`DevStatus`], which drive the DEVELOPMENT lifecycle — this
+    /// is the DESIGN's own publish/archive lifecycle. `None` reads as `"draft"`. Serde
+    /// default `None` so legacy `uow.json` records load unchanged.
+    #[serde(default)]
+    pub design_status: Option<String>,
     /// Files attached to this UoW. Stored inline (UTF-8 or base64 content), portable
     /// (travels with the UoW in JSON), and embedded into the published GitHub issue body
     /// as a collapsed `<details>` block at publish time. Empty by default. Serde default
@@ -1684,6 +1706,15 @@ impl UowStore {
     ) -> UnitOfWork {
         let id = format!("draft-{}", Self::next_draft_token());
         let now = Self::now_rfc3339();
+        // A design node with NO draft parent IS the design root: stamp the explicit
+        // marker + default the design status to draft. A child node (draft_parent_id
+        // set) is never a root, so it carries neither.
+        let is_design_root = draft_parent_id.is_none();
+        let design_status = if is_design_root {
+            Some("draft".to_string())
+        } else {
+            None
+        };
         let uow = {
             let mut map = self.mem.lock().expect("uow mutex poisoned");
             let uow = UnitOfWork {
@@ -1692,6 +1723,8 @@ impl UowStore {
                 node_type,
                 draft_parent_id,
                 project_id,
+                is_design_root,
+                design_status,
                 updated: now,
                 ..Default::default()
             };
@@ -1789,6 +1822,55 @@ impl UowStore {
             self.flush();
         }
         ids
+    }
+
+    /// Enumerate the DESIGN ROOTS owned by `project_id`.
+    ///
+    /// A UoW qualifies iff it is a design root (`is_design_root == true`), has no
+    /// `draft_parent_id` (defensive: a root never has a parent), and was created by
+    /// this project (`project_id == Some(project_id)`). This deliberately excludes
+    /// child design nodes, other projects' designs, and non-design draft UoWs. The
+    /// caller sorts (the design-list endpoint sorts newest-first by `updated`).
+    pub fn list_design_roots_for_project(&self, project_id: &str) -> Vec<UnitOfWork> {
+        self.mem
+            .lock()
+            .expect("uow mutex poisoned")
+            .values()
+            .filter(|u| {
+                u.is_design_root
+                    && u.draft_parent_id.is_none()
+                    && u.project_id.as_deref() == Some(project_id)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Return the design ROOT for `story_id`, or `None` when the id is not a known
+    /// design root (unknown id, or a UoW that is not a design root). Used by the
+    /// design-status and design-delete endpoints to 404 non-design ids.
+    pub fn get_design_root(&self, story_id: &str) -> Option<UnitOfWork> {
+        let map = self.mem.lock().expect("uow mutex poisoned");
+        map.get(story_id)
+            .filter(|u| u.is_design_root)
+            .cloned()
+    }
+
+    /// Set the Design-Canvas status (`"draft"` | `"published"` | `"archived"`) on a
+    /// design ROOT. Returns the updated root, or `None` when `story_id` is not a design
+    /// root (so the caller can 404). Validation of the status STRING is the caller's job
+    /// (the endpoint rejects unknown values with 400); this method trusts its input.
+    /// Persists on success.
+    pub fn set_design_status(&self, story_id: &str, status: &str) -> Option<UnitOfWork> {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map.get_mut(story_id).filter(|u| u.is_design_root)?;
+            uow.design_status = Some(status.to_string());
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        Some(updated)
     }
 }
 
@@ -3528,5 +3610,107 @@ mod concurrency_regression_tests {
         let store = UowStore::new();
         let removed = store.remove_design_subtree("draft-nonexistent");
         assert!(removed.is_empty());
+    }
+
+    // ── design-root marker + per-project designs list + status + delete ─────────
+
+    #[test]
+    fn create_blank_design_marks_root_and_defaults_status() {
+        let store = UowStore::new();
+        // A root (no draft_parent_id) is marked + defaults to draft status.
+        let root = store.create_blank_design(Some("Epic".to_string()), None, Some("p".to_string()));
+        assert!(root.is_design_root, "root is marked");
+        assert_eq!(root.design_status.as_deref(), Some("draft"), "default status");
+
+        // A child (has draft_parent_id) is NOT a root and carries no status.
+        let child = store.create_blank_design(
+            Some("Feature".to_string()),
+            Some(root.story_id.clone()),
+            Some("p".to_string()),
+        );
+        assert!(!child.is_design_root, "child is not a root");
+        assert!(child.design_status.is_none(), "child has no design status");
+
+        // A plain (non-design) draft is not a design root either.
+        let plain = store.create_blank();
+        assert!(!plain.is_design_root, "plain draft is not a design root");
+        assert!(plain.design_status.is_none());
+    }
+
+    #[test]
+    fn list_design_roots_for_project_filters_correctly() {
+        let store = UowStore::new();
+        // Two roots in project p1, one child under the first, one root in p2,
+        // plus a plain (non-design) draft scoped to p1.
+        let r1 = store.create_blank_design(Some("Epic".to_string()), None, Some("p1".to_string()));
+        let r2 = store.create_blank_design(Some("Epic".to_string()), None, Some("p1".to_string()));
+        let _child = store.create_blank_design(
+            Some("Feature".to_string()),
+            Some(r1.story_id.clone()),
+            Some("p1".to_string()),
+        );
+        let r_other =
+            store.create_blank_design(Some("Epic".to_string()), None, Some("p2".to_string()));
+        let _plain = store.create_blank_with_parent(None, Some("p1".to_string()));
+
+        let roots = store.list_design_roots_for_project("p1");
+        let ids: Vec<&str> = roots.iter().map(|u| u.story_id.as_str()).collect();
+        assert_eq!(roots.len(), 2, "only the two p1 roots (no child, no plain, no p2)");
+        assert!(ids.contains(&r1.story_id.as_str()));
+        assert!(ids.contains(&r2.story_id.as_str()));
+        assert!(!ids.contains(&r_other.story_id.as_str()), "other project excluded");
+    }
+
+    #[test]
+    fn set_design_status_persists_and_guards_non_roots() {
+        let store = UowStore::new();
+        let root = store.create_blank_design(Some("Epic".to_string()), None, Some("p".to_string()));
+
+        // Setter updates the root and returns it.
+        let updated = store.set_design_status(&root.story_id, "archived");
+        assert_eq!(
+            updated.as_ref().and_then(|u| u.design_status.as_deref()),
+            Some("archived")
+        );
+        // Re-read confirms persistence in the map.
+        let refetched = store.get_design_root(&root.story_id).unwrap();
+        assert_eq!(refetched.design_status.as_deref(), Some("archived"));
+
+        // Setting status on a child node (not a root) is a no-op returning None.
+        let child = store.create_blank_design(
+            Some("Feature".to_string()),
+            Some(root.story_id.clone()),
+            Some("p".to_string()),
+        );
+        assert!(store.set_design_status(&child.story_id, "published").is_none());
+        // Unknown id also returns None.
+        assert!(store.set_design_status("draft-nope", "draft").is_none());
+    }
+
+    #[test]
+    fn design_root_delete_removes_whole_tree_and_delists() {
+        let store = UowStore::new();
+        let root = store.create_blank_design(Some("Epic".to_string()), None, Some("p".to_string()));
+        let child = store.create_blank_design(
+            Some("Feature".to_string()),
+            Some(root.story_id.clone()),
+            Some("p".to_string()),
+        );
+        let grandchild = store.create_blank_design(
+            Some("Story".to_string()),
+            Some(child.story_id.clone()),
+            Some("p".to_string()),
+        );
+
+        // Deleting the root removes the whole tree (root + child + grandchild).
+        let removed = store.remove_design_subtree(&root.story_id);
+        assert_eq!(removed.len(), 3, "root + child + grandchild removed");
+        assert!(removed.contains(&root.story_id));
+        assert!(removed.contains(&child.story_id));
+        assert!(removed.contains(&grandchild.story_id));
+
+        // The root no longer lists and is no longer resolvable as a design root.
+        assert!(store.list_design_roots_for_project("p").is_empty());
+        assert!(store.get_design_root(&root.story_id).is_none());
     }
 }

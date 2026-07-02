@@ -833,6 +833,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/designs/:id/nodes", get(design_list_nodes).post(design_materialize_nodes))
         .route("/api/designs/:id/nodes/:node_id", axum::routing::delete(design_delete_node))
         .route("/api/designs/:id/publish", post(design_publish))
+        .route("/api/designs/:id/status", post(design_set_status))
+        .route(
+            "/api/designs/:id",
+            axum::routing::delete(design_delete),
+        )
+        .route("/api/projects/:id/designs", get(list_project_designs))
         .route(
             "/api/uow/:story_id/set-draft-parent",
             post(uow_set_draft_parent),
@@ -9572,10 +9578,121 @@ async fn design_publish(
         node_refs.push(format!("{}#{number}", req.repo));
     }
 
+    // Mark the design root as published now that the tree was published to the board.
+    // Best-effort: no-op if `design_id` is not a design root (e.g. a legacy tree whose
+    // root predates the marker), so a successful publish is never turned into an error.
+    state.uow.set_design_status(&design_id, "published");
+
     Ok(Json(serde_json::json!({
         "nodes": node_refs,
         "warnings": warnings,
     })))
+}
+
+/// The valid Design-Canvas statuses. `None`/absent reads as `"draft"`.
+const DESIGN_STATUSES: [&str; 3] = ["draft", "published", "archived"];
+
+/// The current design status, defaulting to `"draft"` when unset.
+fn design_status_of(uow: &crate::uow::UnitOfWork) -> String {
+    uow.design_status
+        .clone()
+        .unwrap_or_else(|| "draft".to_string())
+}
+
+/// Build the compact design summary the list + status endpoints return.
+/// `node_count` is the full-tree size (root + descendants).
+fn design_summary(state: &AppState, root: &crate::uow::UnitOfWork) -> serde_json::Value {
+    let node_count = state.uow.list_design_tree(&root.story_id).len();
+    let title = root
+        .authoring
+        .as_ref()
+        .map(|a| a.draft_title.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "Untitled design".to_string());
+    serde_json::json!({
+        "id": root.story_id,
+        "title": title,
+        "node_type": root.node_type,
+        "status": design_status_of(root),
+        "node_count": node_count,
+        "updated": root.updated,
+    })
+}
+
+/// `GET /api/projects/:id/designs` -- list every DESIGN ROOT owned by the project,
+/// newest-first by `updated`. Returns
+/// `{ "designs": [ { id, title, node_type, status, node_count, updated }, ... ] }`.
+async fn list_project_designs(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+) -> Json<serde_json::Value> {
+    let mut roots = state.uow.list_design_roots_for_project(&project_id);
+    // Newest-first by the root's `updated` timestamp (RFC 3339 strings sort chronologically).
+    roots.sort_by(|a, b| b.updated.cmp(&a.updated));
+    let designs: Vec<serde_json::Value> =
+        roots.iter().map(|r| design_summary(&state, r)).collect();
+    Json(serde_json::json!({ "designs": designs }))
+}
+
+#[derive(serde::Deserialize)]
+struct DesignStatusReq {
+    /// One of `"draft"`, `"published"`, `"archived"`.
+    status: String,
+}
+
+/// `POST /api/designs/:id/status` -- set a design root's status (archive/unarchive/etc).
+/// Validates the status (400 on unknown), 404s when `:id` is not a design root, and
+/// returns the updated design summary on success.
+async fn design_set_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<DesignStatusReq>,
+) -> Response {
+    let status = req.status.trim();
+    if !DESIGN_STATUSES.contains(&status) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!(
+                    "unknown design status {:?}; expected one of: {}",
+                    req.status,
+                    DESIGN_STATUSES.join(", ")
+                )
+            })),
+        )
+            .into_response();
+    }
+    match state.uow.set_design_status(&id, status) {
+        Some(root) => (StatusCode::OK, Json(design_summary(&state, &root))).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("design `{id}` not found (not a design root)")
+            })),
+        )
+            .into_response(),
+    }
+}
+
+/// `DELETE /api/designs/:id` -- delete an ENTIRE design (root + all descendants).
+/// 404 when `:id` is not a design root (a child node is deleted via the
+/// `DELETE /api/designs/:id/nodes/:node_id` route instead). Returns `{ "ok": true }`.
+async fn design_delete(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Response {
+    if state.uow.get_design_root(&id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": format!("design `{id}` not found (not a design root)")
+            })),
+        )
+            .into_response();
+    }
+    // `remove_design_subtree` removes the node itself AND every descendant.
+    state.uow.remove_design_subtree(&id);
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
 }
 
 #[derive(serde::Deserialize)]
@@ -17718,6 +17835,179 @@ mod tests {
             msg.contains("GitHub") || msg.contains("token"),
             "error field mentions GitHub/token; got: {msg}"
         );
+    }
+
+    /// End-to-end through the HTTP router: per-project designs list + status lifecycle
+    /// + whole-design delete. Exercises GET /api/projects/:id/designs, POST
+    /// /api/designs/:id/status (valid + bogus), and DELETE /api/designs/:id (root + 404).
+    #[tokio::test]
+    async fn designs_list_status_delete_http_round_trip() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec![]).expect("project created");
+        let app = router(state.clone());
+        let id = p.id.clone();
+
+        // Create a design root (Epic) with a title, plus one child node.
+        let root =
+            state
+                .uow
+                .create_blank_design(Some("Epic".to_string()), None, Some(id.clone()));
+        state.uow.append_authoring_turn(
+            &root.story_id,
+            "(seed)",
+            "ok",
+            "Checkout redesign",
+            "The body.",
+        );
+        let child = state.uow.create_blank_design(
+            Some("Feature".to_string()),
+            Some(root.story_id.clone()),
+            Some(id.clone()),
+        );
+        let design_id = root.story_id.clone();
+
+        // GET /api/projects/:id/designs -- one design, node_count 2 (root + child), draft.
+        let list_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{id}/designs"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = body_json(list_resp).await;
+        let designs = list_body["designs"].as_array().expect("designs array");
+        assert_eq!(designs.len(), 1, "one design root for the project");
+        let d = &designs[0];
+        assert_eq!(d["id"].as_str().unwrap(), design_id);
+        assert_eq!(d["title"].as_str().unwrap(), "Checkout redesign");
+        assert_eq!(d["node_type"].as_str().unwrap(), "Epic");
+        assert_eq!(d["status"].as_str().unwrap(), "draft", "default status");
+        assert_eq!(d["node_count"].as_u64().unwrap(), 2, "root + 1 child");
+        assert!(d["updated"].as_str().is_some(), "updated present");
+
+        // POST /api/designs/:id/status -- archive it; returns the updated summary.
+        let arch_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/designs/{design_id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"status":"archived"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(arch_resp.status(), StatusCode::OK);
+        let arch_body = body_json(arch_resp).await;
+        assert_eq!(arch_body["status"].as_str().unwrap(), "archived");
+        // Persisted: re-reading the root shows archived.
+        assert_eq!(
+            state
+                .uow
+                .get_design_root(&design_id)
+                .unwrap()
+                .design_status
+                .as_deref(),
+            Some("archived")
+        );
+
+        // POST status with a bogus value -> 400.
+        let bogus_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/designs/{design_id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"status":"nope"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(bogus_resp.status(), StatusCode::BAD_REQUEST);
+
+        // POST status on the child (not a root) -> 404.
+        let child_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/designs/{}/status", child.story_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"status":"draft"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(child_resp.status(), StatusCode::NOT_FOUND);
+
+        // DELETE the child via the whole-design route -> 404 (child is not a root).
+        let del_child_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/designs/{}", child.story_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_child_resp.status(), StatusCode::NOT_FOUND);
+
+        // DELETE /api/designs/:id -- delete the whole design (root + child).
+        let del_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/designs/{design_id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(del_resp.status(), StatusCode::OK);
+        assert_eq!(body_json(del_resp).await["ok"], true);
+
+        // The design is gone: list is empty and the tree is empty.
+        let list2_resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{id}/designs"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            body_json(list2_resp).await["designs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0,
+            "design removed from the list"
+        );
+        assert!(state.uow.list_design_tree(&design_id).is_empty(), "tree gone");
+    }
+
+    /// `design_publish` sets the design root's status to `published` on success.
+    /// We can't run a real publish (needs a GitHub token), so we assert the store-level
+    /// transition the publish handler drives: `set_design_status(root, "published")`.
+    #[test]
+    fn publish_sets_design_root_status_to_published() {
+        let store = crate::uow::UowStore::new();
+        let root =
+            store.create_blank_design(Some("Epic".to_string()), None, Some("p".to_string()));
+        assert_eq!(root.design_status.as_deref(), Some("draft"));
+        let updated = store.set_design_status(&root.story_id, "published");
+        assert_eq!(updated.unwrap().design_status.as_deref(), Some("published"));
     }
 
     // ── Rule-drift contract (bugs A & B) ─────────────────────────────────────────
