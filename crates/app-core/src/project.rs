@@ -210,7 +210,7 @@ impl CustomRule {
 
 /// One selected BASE rule: which corpus/gate rule, the chosen alternative (if it
 /// has options), and the repos it installs into.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuleSelection {
     /// The rule id.
     pub rule_id: String,
@@ -220,6 +220,21 @@ pub struct RuleSelection {
     /// The repos this rule installs into (its placement).
     #[serde(default)]
     pub repos: Vec<String>,
+    /// The corpus content-hash baselined for this selection — the fingerprint of the
+    /// corpus rule as it stood when the architect last ACCEPTED it (via onboarding or
+    /// the rule-drift "Update this rule" action). Drift detection compares this against
+    /// the current corpus hash: when it is `Some(h)` and `h` differs from the current
+    /// hash, the rule has drifted upstream. `None` means "never baselined" and is treated
+    /// as in-sync (a freshly selected rule does not report drift until it is baselined).
+    /// Serde default keeps projects persisted before this field existed loading cleanly.
+    #[serde(default)]
+    pub applied_hash: Option<String>,
+    /// The resolved directive text as it stood when this selection was last baselined.
+    /// Carried alongside `applied_hash` so the rule-drift notice can render a real
+    /// before/after diff (applied vs. current corpus directive) rather than just a hash.
+    /// `None` when never baselined. Serde default for back-compat.
+    #[serde(default)]
+    pub applied_directive: Option<String>,
 }
 
 /// The project's full ruleset — the single source of truth that emit upserts.
@@ -818,6 +833,7 @@ mod tests {
             rule_id: id.to_string(),
             chosen_option: None,
             repos: vec!["me/api".to_string()],
+            ..Default::default()
         }
     }
 

@@ -248,6 +248,7 @@ pub fn adopt_from_applied(
                 rule_id: a.id.clone(),
                 chosen_option: a.chosen_option.clone(),
                 repos: Vec::new(),
+                ..Default::default()
             });
             if entry.chosen_option.is_none() {
                 entry.chosen_option = a.chosen_option.clone();

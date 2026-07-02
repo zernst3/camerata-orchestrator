@@ -868,6 +868,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/development/context", get(development_context))
         // ── Update detection ─────────────────────────────────────────────────
         .route("/api/updates/check", get(updates_check))
+        // ── Applied-rule drift (project-scoped) ───────────────────────────────
+        .route("/api/projects/:id/rule-drift", get(project_rule_drift))
+        .route(
+            "/api/projects/:id/rule-drift/:rule_id/accept",
+            post(accept_rule_drift),
+        )
         // ── Single-rule overrides ─────────────────────────────────────────────
         .route(
             "/api/projects/:id/rules/:rule_id",
@@ -5057,6 +5063,7 @@ async fn onboard_complete(State(state): State<AppState>) -> Json<serde_json::Val
                 rule_id: rule_id.clone(),
                 chosen_option: pr.default_option.clone(),
                 repos,
+                ..Default::default()
             };
             match pr.scope.as_str() {
                 "cross-repo" => cross_repo.push(sel),
@@ -5874,6 +5881,7 @@ fn save_armed_to_project(
             rule_id: r.id.clone(),
             chosen_option: r.option.clone(),
             repos: r.repos.clone(),
+            ..Default::default()
         };
         for repo in &r.repos {
             all_repos.insert(repo.clone());
@@ -11008,8 +11016,8 @@ async fn updates_check(State(state): State<AppState>) -> Json<serde_json::Value>
     // ── App-version check ─────────────────────────────────────────────────────
     let app_update = check_github_release().await;
 
-    // ── Applied-rule drift ────────────────────────────────────────────────────
-    let drift = compute_rule_drift(&state).await;
+    // ── Applied-rule drift (global: all projects) ─────────────────────────────
+    let drift = compute_rule_drift(&state, None).await;
 
     Json(serde_json::json!({
         "ok": true,
@@ -11076,9 +11084,33 @@ async fn check_github_release() -> Option<serde_json::Value> {
     }))
 }
 
-/// Compute applied-rule drift for the active project: compare the hash of each
-/// selected rule against the current corpus. Returns only drifted rules.
-async fn compute_rule_drift(state: &AppState) -> Vec<serde_json::Value> {
+/// The resolved directive text for a selection against a corpus rule: the chosen
+/// (or default) option's `directive`, falling back to the rule's one-paragraph
+/// `summary` when the rule has no options. This is the human-facing text the
+/// rule-drift diff renders.
+fn resolved_directive(rule: &camerata_rules::Rule, chosen_option: Option<&str>) -> String {
+    rule.resolved_option(chosen_option)
+        .map(|o| o.directive.clone())
+        .unwrap_or_else(|| rule.summary.clone())
+}
+
+/// Compute applied-rule drift: for each selected rule that has been BASELINED
+/// (`applied_hash` is `Some`), compare the baselined corpus hash against the
+/// current corpus hash and report the rule when they differ (or the rule was
+/// removed from the corpus). Selections that were never baselined (`applied_hash`
+/// is `None`) are treated as in-sync and are not reported — a freshly selected
+/// rule does not drift until it is accepted.
+///
+/// When `project_filter` is `Some(id)`, only that project's selections are scanned
+/// (the project-scoped `GET /api/projects/:id/rule-drift` route); when `None`, all
+/// projects are scanned (the global `GET /api/updates/check` route).
+///
+/// Each returned entry matches the UI's `RuleDriftEntry` contract:
+/// `{ rule_id, project_id, title, applied_directive, corpus_directive, repos, changed }`.
+async fn compute_rule_drift(
+    state: &AppState,
+    project_filter: Option<&str>,
+) -> Vec<serde_json::Value> {
     let corpus_path = camerata_rules::corpus_path();
     if !corpus_path.exists() {
         return Vec::new();
@@ -11087,38 +11119,109 @@ async fn compute_rule_drift(state: &AppState) -> Vec<serde_json::Value> {
 
     let mut drift = Vec::new();
     for project in state.projects.list() {
+        if let Some(pid) = project_filter {
+            if project.id != pid {
+                continue;
+            }
+        }
         for selection in &project.ruleset.selections {
             let rule_id = &selection.rule_id;
+            // Only baselined selections can drift. A `None` baseline means the rule
+            // has never been accepted, so there is nothing to compare against.
+            let Some(applied_hash) = selection.applied_hash.as_deref() else {
+                continue;
+            };
             let Some(rule) = corpus.get_by_id(rule_id) else {
                 // Rule removed from corpus — report as drifted.
                 drift.push(serde_json::json!({
                     "rule_id": rule_id,
                     "project_id": project.id,
-                    "content_hash_applied": selection.chosen_option.as_deref().unwrap_or(""),
-                    "content_hash_current": "(removed from corpus)",
+                    "title": "",
+                    "applied_directive": selection.applied_directive.clone().unwrap_or_default(),
+                    "corpus_directive": "(removed from corpus)",
+                    "repos": selection.repos,
                     "changed": true,
                 }));
                 continue;
             };
             let current_hash = rule_content_hash(rule);
-            // The `chosen_option` field stores the architect's option choice, not a
-            // content hash. We use a separate derived field: the rule's `rule_id`
-            // serves as a stable key; we store the hash in a virtual field. Since
-            // we don't yet persist applied hashes, we ALWAYS report the current hash
-            // and mark `changed: false` (no baseline to compare). When the project
-            // persists hashes (future), we can compare. This gives the UI the current
-            // corpus hash it can display in a "last seen" diff.
+            if current_hash == applied_hash {
+                // In sync — the baselined hash matches the current corpus.
+                continue;
+            }
             drift.push(serde_json::json!({
                 "rule_id": rule_id,
                 "project_id": project.id,
-                "content_hash_current": current_hash,
                 "title": rule.title,
+                "applied_directive": selection.applied_directive.clone().unwrap_or_default(),
+                "corpus_directive": resolved_directive(rule, selection.chosen_option.as_deref()),
+                "repos": selection.repos,
                 "verification": rule.verification().as_str(),
-                "changed": false,  // true when a stored applied-hash differs (future)
+                "changed": true,
             }));
         }
     }
     drift
+}
+
+/// `GET /api/projects/:id/rule-drift` — project-scoped applied-rule drift.
+///
+/// Returns `{ ok: true, drift: [<RuleDriftEntry>...] }` where each entry matches
+/// the UI's `RuleDriftEntry` deserialization contract. Reuses [`compute_rule_drift`]
+/// filtered to `:id`. When the project does not exist, returns an empty drift list
+/// under `ok: true` (no drift for a project that isn't there).
+async fn project_rule_drift(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Json<serde_json::Value> {
+    let drift = compute_rule_drift(&state, Some(&id)).await;
+    Json(serde_json::json!({
+        "ok": true,
+        "drift": drift,
+    }))
+}
+
+/// `POST /api/projects/:id/rule-drift/:rule_id/accept` — accept the corpus update
+/// for a drifted rule.
+///
+/// Baselines the project's selection(s) for `rule_id`: sets `applied_hash` to the
+/// current corpus content hash and `applied_directive` to the current resolved
+/// directive text, so a subsequent [`compute_rule_drift`] no longer reports the
+/// rule as drifted. Persists via [`ProjectStore::update`]. Returns `{ ok: true }`
+/// on success (the client reads HTTP status for its bool check).
+async fn accept_rule_drift(
+    State(state): State<AppState>,
+    Path((id, rule_id)): Path<(String, String)>,
+) -> Json<serde_json::Value> {
+    // Resolve the current corpus hash + directive for this rule up-front (async
+    // corpus load must happen outside the synchronous `update` closure).
+    let corpus_path = camerata_rules::corpus_path();
+    if !corpus_path.exists() {
+        return Json(serde_json::json!({ "ok": false, "message": "corpus not found" }));
+    }
+    let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+    let Some(rule) = corpus.get_by_id(&rule_id) else {
+        return Json(serde_json::json!({ "ok": false, "message": "rule not in corpus" }));
+    };
+    let current_hash = rule_content_hash(rule);
+
+    let updated = state.projects.update(&id, |p| {
+        // Baseline every selection for this rule (project-level and any repo-scoped),
+        // so the rule is cleared of drift across all its placements.
+        for sel in p
+            .ruleset
+            .selections
+            .iter_mut()
+            .filter(|s| s.rule_id == rule_id)
+        {
+            sel.applied_directive = Some(resolved_directive(rule, sel.chosen_option.as_deref()));
+            sel.applied_hash = Some(current_hash.clone());
+        }
+    });
+    match updated {
+        Some(_) => Json(serde_json::json!({ "ok": true })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
 }
 
 // ── Single-rule overrides ─────────────────────────────────────────────────────
@@ -11203,6 +11306,7 @@ async fn set_rule_override(
                 rule_id: rule_id.clone(),
                 chosen_option: req.chosen_option.filter(|s| !s.trim().is_empty()),
                 repos: Vec::new(),
+                ..Default::default()
             });
         }
     });
@@ -11267,6 +11371,7 @@ async fn set_repo_rule_override(
                 rule_id: rule_id.clone(),
                 chosen_option: req.chosen_option.filter(|s| !s.trim().is_empty()),
                 repos: vec![repo.clone()],
+                ..Default::default()
             });
         }
     });
@@ -12143,6 +12248,7 @@ mod tests {
                 rule_id: "RUST-DOMAIN-6".to_string(),
                 chosen_option: None,
                 repos: vec!["me/api".to_string()],
+                ..Default::default()
             });
             proj.mark_onboarded(&["me/api".to_string()]);
         });
@@ -16901,5 +17007,159 @@ mod tests {
             msg.contains("GitHub") || msg.contains("token"),
             "error field mentions GitHub/token; got: {msg}"
         );
+    }
+
+    // ── Rule-drift contract (bugs A & B) ─────────────────────────────────────────
+
+    /// Load the bundled corpus and return the id + current content hash of some rule
+    /// that resolves through `get_by_id`, so drift tests don't hard-code an id that
+    /// could be renamed. `None` when the corpus isn't available (test skips).
+    async fn any_corpus_rule() -> Option<(String, String)> {
+        let path = camerata_rules::corpus_path();
+        if !path.exists() {
+            return None;
+        }
+        let (corpus, _errs) = camerata_rules::load_corpus_lenient(&path).await;
+        let rule = corpus.iter().next()?;
+        Some((rule.id.0.clone(), rule_content_hash(rule)))
+    }
+
+    /// BUG A: `GET /api/projects/:id/rule-drift` returns `{ ok:true, drift:[...] }`
+    /// with the entry shape the UI's `RuleDriftEntry` deserializes: a baselined
+    /// selection whose stored hash no longer matches the corpus is reported drifted.
+    #[tokio::test]
+    async fn project_rule_drift_route_reports_baselined_mismatch() {
+        let Some((rule_id, _current_hash)) = any_corpus_rule().await else {
+            eprintln!("corpus unavailable; skipping project_rule_drift_route_reports_baselined_mismatch");
+            return;
+        };
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Drift", vec!["me/api".to_string()]).unwrap();
+        // Seed a selection baselined to a STALE hash (guaranteed != current).
+        state.projects.update(&p.id, |proj| {
+            proj.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: rule_id.clone(),
+                chosen_option: None,
+                repos: vec!["me/api".to_string()],
+                applied_hash: Some("stale-baseline-hash".to_string()),
+                applied_directive: Some("old directive text".to_string()),
+            });
+        });
+        let app = router(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/projects/{}/rule-drift", p.id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], true);
+        let drift = json["drift"].as_array().expect("drift is an array");
+        assert_eq!(drift.len(), 1, "the single baselined-mismatch rule is reported");
+        let entry = &drift[0];
+        // The exact keys the UI's RuleDriftEntry reads.
+        assert_eq!(entry["rule_id"], rule_id);
+        assert!(entry["title"].is_string(), "title present");
+        assert_eq!(entry["applied_directive"], "old directive text");
+        assert!(entry["corpus_directive"].is_string(), "corpus_directive present");
+        assert_eq!(entry["repos"][0], "me/api");
+    }
+
+    /// BUG B: `POST /api/projects/:id/rule-drift/:rule_id/accept` baselines the rule
+    /// to the current corpus hash so a subsequent drift check no longer reports it.
+    #[tokio::test]
+    async fn accept_rule_drift_clears_the_drift() {
+        let Some((rule_id, current_hash)) = any_corpus_rule().await else {
+            eprintln!("corpus unavailable; skipping accept_rule_drift_clears_the_drift");
+            return;
+        };
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Drift", vec!["me/api".to_string()]).unwrap();
+        state.projects.update(&p.id, |proj| {
+            proj.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: rule_id.clone(),
+                chosen_option: None,
+                repos: vec!["me/api".to_string()],
+                applied_hash: Some("stale-baseline-hash".to_string()),
+                applied_directive: Some("old".to_string()),
+            });
+        });
+        let app = router(state.clone());
+
+        // Pre-condition: the rule is drifted.
+        let pre = compute_rule_drift(&state, Some(&p.id)).await;
+        assert_eq!(pre.len(), 1, "drifted before accept");
+
+        // Accept the update.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/rule-drift/{}/accept", p.id, rule_id))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], true);
+
+        // Persistence: the selection is now baselined to the CURRENT corpus hash.
+        let stored = state.projects.get(&p.id).unwrap();
+        let sel = stored
+            .ruleset
+            .selections
+            .iter()
+            .find(|s| s.rule_id == rule_id)
+            .expect("selection persisted");
+        assert_eq!(sel.applied_hash.as_deref(), Some(current_hash.as_str()));
+
+        // Post-condition: a fresh drift computation no longer reports the rule.
+        let post = compute_rule_drift(&state, Some(&p.id)).await;
+        assert!(post.is_empty(), "accept cleared the drift; got {post:?}");
+    }
+
+    /// BUG C: `set_repo_rule_override` (the repo-level route the fixed client now
+    /// targets) reads `{ chosen_option }` and lands a REPO-SCOPED selection.
+    #[tokio::test]
+    async fn set_repo_rule_override_reads_chosen_option_and_scopes_to_repo() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("RepoOverride", vec!["me/api".to_string()]).unwrap();
+        let app = router(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    // `owner/repo` is percent-encoded into one path segment; axum's
+                    // Path extractor decodes `%2F` back to `/` (see the UoW-id test).
+                    .uri(format!("/api/projects/{}/repos/me%2Fapi/rules/RUST-FMT-1", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"chosen_option":"b"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], true);
+
+        // The override landed as a REPO-SCOPED selection (repos carries the repo),
+        // not a bare project-level one.
+        let stored = state.projects.get(&p.id).unwrap();
+        let sel = stored
+            .ruleset
+            .selections
+            .iter()
+            .find(|s| s.rule_id == "RUST-FMT-1")
+            .expect("repo override persisted");
+        assert_eq!(sel.chosen_option.as_deref(), Some("b"));
+        assert_eq!(sel.repos, vec!["me/api".to_string()], "scoped to the repo");
     }
 }

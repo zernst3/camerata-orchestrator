@@ -32,6 +32,7 @@ fn sel(id: &str, option: Option<&str>, repos: &[&str]) -> RuleSelection {
         rule_id: id.to_string(),
         chosen_option: option.map(|s| s.to_string()),
         repos: repos.iter().map(|s| s.to_string()).collect(),
+        ..Default::default()
     }
 }
 
