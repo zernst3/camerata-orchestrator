@@ -8857,33 +8857,112 @@ struct MockupReq {
     model: Option<String>,
 }
 
+/// Build the grounding prompt for the mockup generator. Pure (no I/O) so it is unit-testable.
+///
+/// Grounding order: PARENT epic/story context first (so the model reads the broader story),
+/// then this node's type, title, body, and original requirements prompt, then the instruction.
+/// When `message` is empty a synthesized "represent this work item" instruction is used, so a
+/// mockup still generates from the story alone.
+fn build_mockup_prompt(
+    authoring: &camerata_app_core::uow::AuthoringState,
+    node_type: Option<&str>,
+    parent: Option<&crate::uow::UnitOfWork>,
+    message: &str,
+) -> String {
+    let mut p = String::new();
+
+    // Parent epic/story context first, so the model reads the broader story before
+    // this node's specifics.
+    if let Some(parent) = parent {
+        if let Some(pa) = parent.authoring.as_ref() {
+            let pt = pa.draft_title.trim();
+            let pb = pa.draft_body.trim();
+            if !pt.is_empty() || !pb.is_empty() {
+                let ptype = parent.node_type.as_deref().unwrap_or("Parent").trim();
+                let ptype = if ptype.is_empty() { "Parent" } else { ptype };
+                p.push_str(&format!("Parent {ptype}: {pt}\n"));
+                if !pb.is_empty() {
+                    p.push_str(&format!("{pb}\n"));
+                }
+                p.push('\n');
+            }
+        }
+    }
+
+    if let Some(nt) = node_type.map(str::trim) {
+        if !nt.is_empty() {
+            p.push_str(&format!("Work item type: {nt}\n\n"));
+        }
+    }
+    if !authoring.draft_title.trim().is_empty() {
+        p.push_str(&format!("Work item title: {}\n\n", authoring.draft_title.trim()));
+    }
+    if !authoring.draft_body.trim().is_empty() {
+        p.push_str(&format!("Work item body:\n{}\n\n", authoring.draft_body.trim()));
+    }
+    if !authoring.requirements_prompt.trim().is_empty() {
+        p.push_str(&format!(
+            "Original requirements prompt:\n{}\n\n",
+            authoring.requirements_prompt.trim()
+        ));
+    }
+    if message.trim().is_empty() {
+        p.push_str(
+            "Instruction: Generate an HTML mockup that best represents this work item \
+based on its title, body, and parent context.\n\nGenerate the HTML mockup now.",
+        );
+    } else {
+        p.push_str(&format!(
+            "Instruction: {}\n\nGenerate the HTML mockup now.",
+            message.trim()
+        ));
+    }
+    p
+}
+
 /// `POST /api/uow/:story_id/mockup` -- generate a self-contained HTML mockup via AI,
 /// save it as the `mockup.html` attachment on the UoW, and return `{ html, uow }`.
-/// Uses the UoW's draft title + body as grounding context. Fail-hard: returns AppError
-/// if the AI call fails (caller decides whether to show a toast or retry).
+/// Grounds the mockup in this node's draft title + body + original requirements prompt
+/// AND its parent epic/story context (resolved via `draft_parent_id`). The user's
+/// `message` is an optional instruction: when empty, a synthesized "represent this work
+/// item" instruction is used, so a mockup still generates from the story alone. Only
+/// fails the request outright when the message is empty AND there is no node context at
+/// all to ground on. Fail-hard: returns AppError if the AI call fails (caller decides
+/// whether to show a toast or retry).
 async fn uow_generate_mockup(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
     Json(req): Json<MockupReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let message = req.message.trim().to_string();
-    if message.is_empty() {
-        return Err(AppError(anyhow::anyhow!("message must not be empty")));
-    }
     let uow = state.uow.get_or_create(&story_id);
     let authoring = uow.authoring.clone().unwrap_or_default();
 
-    let prompt = {
-        let mut p = String::new();
-        if !authoring.draft_title.trim().is_empty() {
-            p.push_str(&format!("Work item title: {}\n\n", authoring.draft_title.trim()));
-        }
-        if !authoring.draft_body.trim().is_empty() {
-            p.push_str(&format!("Work item body:\n{}\n\n", authoring.draft_body.trim()));
-        }
-        p.push_str(&format!("Instruction: {message}\n\nGenerate the HTML mockup now."));
-        p
-    };
+    // The new contract: an empty message is allowed AS LONG AS there is usable node
+    // context to ground the mockup on (this node's title/body/requirements, or a parent).
+    // Only fail when the message is empty AND there is nothing at all to ground on.
+    let has_node_context = !authoring.draft_title.trim().is_empty()
+        || !authoring.draft_body.trim().is_empty()
+        || !authoring.requirements_prompt.trim().is_empty();
+    if message.is_empty() && !has_node_context {
+        return Err(AppError(anyhow::anyhow!(
+            "message must not be empty when there is no node context to ground on"
+        )));
+    }
+
+    // Resolve the PARENT (epic/story) so the mockup is grounded in its context, not just
+    // this node's title/body.
+    let parent = uow
+        .draft_parent_id
+        .as_ref()
+        .map(|pid| state.uow.get_or_create(pid));
+
+    let prompt = build_mockup_prompt(
+        &authoring,
+        uow.node_type.as_deref(),
+        parent.as_ref(),
+        &message,
+    );
     let model = match req.model.as_deref().map(str::trim) {
         Some(m) if !m.is_empty() => m.to_string(),
         _ => step_model(&state, crate::project::StepKind::StoryAuthoring),
@@ -17015,12 +17094,13 @@ mod tests {
         assert!(get3_body["diagram"].is_null(), "diagram cleared");
     }
 
-    /// Mockup endpoint rejects an empty message (no AI call needed).
+    /// New contract: an empty message is rejected ONLY when there is no node context at
+    /// all to ground the mockup on (a truly blank UoW). The rejection explains why.
     #[tokio::test]
-    async fn uow_mockup_rejects_empty_message() {
+    async fn uow_mockup_rejects_empty_message_when_no_node_context() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         let app = router(state.clone());
-        // Create blank UoW.
+        // Create blank UoW (no title/body/requirements).
         let blank_resp = app
             .clone()
             .oneshot(
@@ -17036,7 +17116,7 @@ mod tests {
         let blank_body = body_json(blank_resp).await;
         let uow_id = blank_body["uow_id"].as_str().expect("uow_id").to_string();
 
-        // POST with empty message.
+        // POST with empty message + no node context -> still rejected (no AI call reached).
         let resp = app
             .clone()
             .oneshot(
@@ -17053,7 +17133,89 @@ mod tests {
         let body = body_json(resp).await;
         assert!(
             body["error"].as_str().unwrap_or("").contains("must not be empty"),
-            "error message explains why"
+            "error message explains why an empty message with no context is rejected"
+        );
+    }
+
+    /// New contract: an empty message is ACCEPTED past the guard when the node carries
+    /// context (title/body). The request must NOT be rejected with the empty-message
+    /// error — it proceeds to the AI step (which may fail in a token-free test env, but
+    /// the failure is NOT the "must not be empty" rejection). We assert on the prompt
+    /// builder directly (`build_mockup_prompt`) so this is deterministic and does not
+    /// depend on a live model.
+    #[test]
+    fn build_mockup_prompt_accepts_empty_message_with_node_context() {
+        let authoring = camerata_app_core::uow::AuthoringState {
+            requirements_prompt: String::new(),
+            chat: Vec::new(),
+            draft_title: "Login screen".to_string(),
+            draft_body: "Email + password fields, submit button.".to_string(),
+        };
+        let prompt = build_mockup_prompt(&authoring, Some("Story"), None, "");
+        assert!(prompt.contains("Work item title: Login screen"), "node title present");
+        assert!(prompt.contains("Email + password"), "node body present");
+        assert!(prompt.contains("Work item type: Story"), "node type present");
+        assert!(
+            prompt.contains("best represents this work item"),
+            "empty message -> synthesized instruction, not a rejection"
+        );
+    }
+
+    /// The parent epic/story context IS included in the generated prompt, so the mockup is
+    /// grounded in the broader story, not just this node.
+    #[test]
+    fn build_mockup_prompt_includes_parent_context() {
+        let parent = crate::uow::UnitOfWork {
+            story_id: "draft-parent".to_string(),
+            node_type: Some("Epic".to_string()),
+            authoring: Some(camerata_app_core::uow::AuthoringState {
+                requirements_prompt: String::new(),
+                chat: Vec::new(),
+                draft_title: "Checkout revamp".to_string(),
+                draft_body: "Overhaul the checkout flow end to end.".to_string(),
+            }),
+            ..Default::default()
+        };
+        let child_authoring = camerata_app_core::uow::AuthoringState {
+            requirements_prompt: "Seed: make the payment step".to_string(),
+            chat: Vec::new(),
+            draft_title: "Payment step".to_string(),
+            draft_body: "Card entry form.".to_string(),
+        };
+        let prompt =
+            build_mockup_prompt(&child_authoring, Some("Story"), Some(&parent), "");
+
+        // Parent context is present and comes BEFORE the node's own title.
+        assert!(prompt.contains("Parent Epic: Checkout revamp"), "parent title present");
+        assert!(prompt.contains("Overhaul the checkout flow"), "parent body present");
+        let parent_idx = prompt.find("Parent Epic").expect("parent header");
+        let node_idx = prompt.find("Work item title:").expect("node title header");
+        assert!(parent_idx < node_idx, "parent context precedes node context");
+
+        // The original requirements prompt is also folded in.
+        assert!(
+            prompt.contains("Original requirements prompt:")
+                && prompt.contains("Seed: make the payment step"),
+            "requirements prompt present"
+        );
+    }
+
+    /// A non-empty message keeps the user's own instruction verbatim (not the synthesized one).
+    #[test]
+    fn build_mockup_prompt_keeps_user_instruction_when_present() {
+        let authoring = camerata_app_core::uow::AuthoringState {
+            draft_title: "Dashboard".to_string(),
+            ..Default::default()
+        };
+        let prompt =
+            build_mockup_prompt(&authoring, None, None, "make it a dark grid of cards");
+        assert!(
+            prompt.contains("Instruction: make it a dark grid of cards"),
+            "user instruction preserved verbatim"
+        );
+        assert!(
+            !prompt.contains("best represents this work item"),
+            "synthesized instruction NOT used when the user typed one"
         );
     }
 

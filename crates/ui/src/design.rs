@@ -719,12 +719,13 @@ fn MockupPanel(uow_id: String) -> Element {
                     div { class: "mockup-left",
                         p { class: "section-label", "Generate HTML mockup" }
                         p { class: "ws-hint",
-                            "Describe the UI you want. The AI generates self-contained HTML \
+                            "Describe the UI you want — or leave blank to generate from this \
+                             item's story + parent context. The AI generates self-contained HTML \
                              and saves it as a mockup.html attachment on this node."
                         }
                         textarea {
                             class: "design-input-area",
-                            placeholder: "Describe the screen, layout, or component…",
+                            placeholder: "Describe the screen, layout, or component… (or leave blank to use this item's story + parent context)",
                             disabled: generating(),
                             value: "{message}",
                             oninput: move |e| message.set(e.value()),
@@ -734,8 +735,10 @@ fn MockupPanel(uow_id: String) -> Element {
                                 class: "btn-run",
                                 disabled: generating(),
                                 onclick: move |_| {
+                                    // Empty is allowed: the server grounds the mockup in this
+                                    // node's story + parent-epic context when no instruction is
+                                    // typed. No early return — the button fires regardless.
                                     let msg = message().trim().to_string();
-                                    if msg.is_empty() { return; }
                                     let uid = uow_id.clone();
                                     generating.set(true);
                                     error_msg.set(String::new());
