@@ -8,6 +8,7 @@
 //! modules are added here as each surface's logic moves over.
 
 pub mod designs;
+pub mod git;
 pub mod llm_backend;
 pub mod models;
 pub mod readiness;

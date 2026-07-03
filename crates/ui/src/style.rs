@@ -2605,6 +2605,10 @@ html, body {
 .ws-repo-state.cloned { color: var(--good); font-weight: 600; }
 .ws-repo-path { font-size: 11.5px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 6px 0 10px; word-break: break-all; }
 .ws-repo-actions { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+/* Ship (.btn-run) sits in this flex-end action row beside the Branch input + Start-branch button.
+   Drop btn-run's standalone bottom margin (meant for solo primaries) so it aligns on the same
+   baseline as its neighbours instead of floating up. Same fix pattern as the readiness/onboard rows. */
+.ws-repo-actions .btn-run { margin-bottom: 0; }
 .ws-branch { width: 180px; }
 .ws-title-field { flex: 1; min-width: 180px; }
 .ws-repo-dirty { font-size: 12.5px; color: var(--accent-ink); margin: 10px 0 0; }
@@ -2619,9 +2623,21 @@ html, body {
 .ws-health-stat.bad  { background: rgba(220,38,38,0.14); border-color: rgba(220,38,38,0.28); color: #f87171; }
 .ws-health-dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
 
+/* Per-repo scope selector: the page shows one repo's slice at a time; this switches which. */
+.ws-repo-select { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.ws-repo-select-label { font-size: 12px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-faint); }
+.ws-repo-select-input { font: inherit; font-size: 13px; padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--ink); min-width: 220px; cursor: pointer; }
+.ws-repo-select-input:hover { border-color: var(--accent); }
+
 /* ---- Git panel (issue #37) ------------------------------------------------ */
 /* Compact panels that sit beneath the branch+ship row inside each .ws-repo.    */
 .git-panel { margin-top: 18px; border-top: 1px solid var(--line-soft); padding-top: 14px; display: flex; flex-direction: column; gap: 14px; }
+/* Repo label at the top of the sync/git area, so the scoped repo is evident here too. */
+.git-panel-repo { display: flex; align-items: baseline; gap: 6px; }
+.git-panel-repo-label { font-size: 11px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-faint); }
+.git-panel-repo-name { font-size: 13px; font-weight: 700; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+/* Branch/commit filter inputs: compact, full-width above their list. */
+.git-filter-input { width: 100%; box-sizing: border-box; font-size: 12.5px; padding: 6px 10px; }
 .git-section { display: flex; flex-direction: column; gap: 8px; }
 .git-section-label { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); margin: 0; }
 .git-log-hint { font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 11px; color: var(--ink-faint); }

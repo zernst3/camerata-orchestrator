@@ -467,6 +467,12 @@ pub fn WorkspaceView() -> Element {
 
     let busy = use_signal(|| false);
 
+    // Which repo the page is scoped to. A project can hold several repos; rather than stacking a
+    // RepoCard per repo, the page shows exactly one repo's slice (checkout + branches + commits +
+    // sync) and a `<select>` switches between them. Empty string = "not yet chosen" → we fall back
+    // to the first repo when rendering. Kept as the repo slug so it survives project refreshes.
+    let mut selected_repo = use_signal(String::new);
+
     rsx! {
         div { class: "page page-wide",
             p { class: "eyebrow", "Local" }
@@ -593,14 +599,42 @@ pub fn WorkspaceView() -> Element {
                             if workspace_root.is_none() && !proj.repos.is_empty() {
                                 p { class: "ws-hint", "No workspace folder set. You can still \"Link to this folder\" per repo below to point at an existing clone, or pick a workspace folder above to clone into the standard layout." }
                             }
-                            for repo in proj.repos.iter() {
+
+                            // ── Per-repo scope selector ──────────────────────
+                            // Pick which repo the page is about; only that repo's RepoCard renders
+                            // below. Defaults to the first repo when nothing is chosen yet.
+                            if !proj.repos.is_empty() {
                                 {
-                                    let status = checkouts.iter().find(|c| &c.repo == repo).cloned();
+                                    let repos = proj.repos.clone();
+                                    let chosen = selected_repo();
+                                    let active_repo = repos
+                                        .iter()
+                                        .find(|r| **r == chosen)
+                                        .cloned()
+                                        .unwrap_or_else(|| repos[0].clone());
+                                    let active_for_select = active_repo.clone();
+                                    let status = checkouts.iter().find(|c| c.repo == active_repo).cloned();
                                     let project_id = proj.id.clone();
                                     rsx! {
+                                        div { class: "ws-repo-select",
+                                            label { class: "ws-repo-select-label", "Repo" }
+                                            select {
+                                                class: "ws-repo-select-input",
+                                                value: "{active_for_select}",
+                                                onchange: move |e| selected_repo.set(e.value()),
+                                                for r in repos.iter() {
+                                                    option {
+                                                        key: "{r}",
+                                                        value: "{r}",
+                                                        selected: *r == active_for_select,
+                                                        "{r}"
+                                                    }
+                                                }
+                                            }
+                                        }
                                         RepoCard {
-                                            key: "{repo}",
-                                            repo: repo.clone(),
+                                            key: "{active_repo}",
+                                            repo: active_repo.clone(),
                                             project_id,
                                             status,
                                             on_linked: move |_| { refresh += 1; },
@@ -801,6 +835,11 @@ fn GitPanel(repo: String, project_id: String) -> Element {
     // Push / pull state
     let mut net_working = use_signal(|| false);
 
+    // Filter queries: narrow the branch chips + commit rows by a case-insensitive substring. The
+    // pure predicates live in `camerata_ui_core::git`; here we just hold the query text.
+    let mut branch_filter = use_signal(String::new);
+    let mut commit_filter = use_signal(String::new);
+
     // Drag-and-drop: stash the SHA of the row being dragged
     let mut dragged_sha = use_signal(String::new);
 
@@ -843,6 +882,12 @@ fn GitPanel(repo: String, project_id: String) -> Element {
 
     rsx! {
         div { class: "git-panel",
+            // Repo the git/sync area is scoped to — echoed at the top of the sync area (not just the
+            // checkout head above) so the active repo is unambiguous while operating the git panel.
+            div { class: "git-panel-repo",
+                span { class: "git-panel-repo-label", "repo:" }
+                span { class: "git-panel-repo-name", "{repo}" }
+            }
             // ── Status bar (branch · ahead/behind · dirty) ────────────────
             {
                 let status_detail = git_status.as_ref().map(|s| s.detail.clone()).unwrap_or_default();
@@ -880,9 +925,17 @@ fn GitPanel(repo: String, project_id: String) -> Element {
             div { class: "git-section",
                 p { class: "git-section-label", "Branches" }
 
+                // Filter branches by a case-insensitive substring (pure predicate in ui-core).
+                input {
+                    class: "addressee-input git-filter-input",
+                    placeholder: "Filter branches…",
+                    value: "{branch_filter}",
+                    oninput: move |e| branch_filter.set(e.value()),
+                }
+
                 // Existing branches: click to switch; each is also a drop target for cherry-pick
                 div { class: "git-branch-list",
-                    for br in branch_list.branches.iter() {
+                    for br in branch_list.branches.iter().filter(|b| camerata_ui_core::git::branch_matches(b, &branch_filter())) {
                         {
                             let br_name = br.clone();
                             let is_current = *br == current_branch;
@@ -947,6 +1000,8 @@ fn GitPanel(repo: String, project_id: String) -> Element {
                     }
                     if branch_list.branches.is_empty() {
                         p { class: "ws-hint", "No local branches (clone / update first)." }
+                    } else if !branch_list.branches.iter().any(|b| camerata_ui_core::git::branch_matches(b, &branch_filter())) {
+                        p { class: "ws-hint", "No branches match this filter." }
                     }
                 }
 
@@ -1059,7 +1114,7 @@ fn GitPanel(repo: String, project_id: String) -> Element {
                         if net_working() { "Working…" } else { "Pull" }
                     }
                     button {
-                        class: "btn-run btn-run-sm",
+                        class: "btn-run-sm",
                         disabled: net_working() || current_branch.is_empty(),
                         onclick: {
                             let pid = project_id.clone();
@@ -1093,8 +1148,16 @@ fn GitPanel(repo: String, project_id: String) -> Element {
                     "Recent commits"
                     span { class: "git-log-hint", " — drag a row onto a branch to cherry-pick it, or use the button" }
                 }
+                // Search commits by a case-insensitive substring over short-sha / subject / author
+                // (pure predicate in ui-core).
+                input {
+                    class: "addressee-input git-filter-input",
+                    placeholder: "Search commits…",
+                    value: "{commit_filter}",
+                    oninput: move |e| commit_filter.set(e.value()),
+                }
                 div { class: "git-log",
-                    for commit in commits.iter() {
+                    for commit in commits.iter().filter(|c| camerata_ui_core::git::commit_matches(&c.short, &c.subject, &c.author, &commit_filter())) {
                         {
                             let sha = commit.sha.clone();
                             let short = commit.short.clone();
@@ -1153,6 +1216,8 @@ fn GitPanel(repo: String, project_id: String) -> Element {
                     }
                     if commits.is_empty() {
                         p { class: "ws-hint", "No commits yet." }
+                    } else if !commits.iter().any(|c| camerata_ui_core::git::commit_matches(&c.short, &c.subject, &c.author, &commit_filter())) {
+                        p { class: "ws-hint", "No commits match this search." }
                     }
                 }
             }
@@ -1792,6 +1857,21 @@ mod tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(html.contains("git-panel"), "panel root renders");
+        // The scoped repo is echoed at the top of the sync/git area (not just the checkout head).
+        assert!(html.contains("git-panel-repo"), "repo header renders in the git panel");
+        assert!(
+            html.contains("zernst3/agora"),
+            "the scoped repo slug renders in the git-panel repo header"
+        );
+        // The branch/commit filter inputs render above their respective lists.
+        assert!(
+            html.contains("Filter branches…"),
+            "the branch filter input renders"
+        );
+        assert!(
+            html.contains("Search commits…"),
+            "the commit search input renders"
+        );
         assert!(html.contains("Branches"), "branches section label renders");
         assert!(html.contains("Commit"), "commit section label renders");
         assert!(html.contains("Recent commits"), "log section label renders");
