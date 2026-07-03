@@ -511,6 +511,104 @@ pub(super) fn apply_chosen_option(
     true
 }
 
+/// Add or remove a single `repo` from a REPO-LOCAL rule's selection IN PLACE, returning
+/// `true` when the ruleset changed (a save is warranted).
+///
+/// This is the pure transform behind the rule-detail modal's "Applies to repos" picker.
+/// It is the repo-scoping counterpart to `apply_chosen_option`: both are the single
+/// authoritative transforms so the UI and any future persist path can't diverge, and both
+/// are pure (no signals, no async, no rendering) so they're unit-testable without a Dioxus
+/// context.
+///
+/// Model (see `bucket_of`):
+///   * REPO-LOCAL (`Selections`) rules are emitted into each chosen repo's files, scoped by
+///     the selection's `repos`. This function is the ONLY way to change that repo list from
+///     the modal. `repo` is a real `owner/repo` string — never a sentinel.
+///   * PROJECT-LEVEL rules (`cross_repo` / `process`) apply project-wide and are NOT scoped
+///     to specific repos from this picker. This transform leaves them untouched and returns
+///     `false` — enforcing "never scope a project-level rule to specific repos."
+///
+/// Behaviour for a repo-local rule:
+///   * `add = true`: ensure a `selections` entry for `rule_id` exists (creating it with
+///     `chosen_option`, the caller's current pick or the corpus default) and that it
+///     includes `repo`. Idempotent: adding an already-present repo is a no-op (`false`).
+///   * `add = false`: remove `repo` from the entry's `repos`; if that empties the list,
+///     DROP the whole selection (removing the last repo = unselecting the rule, matching
+///     the repos-empty GC). Idempotent: removing a repo the rule isn't scoped to (or a
+///     rule with no selection) is a no-op (`false`).
+///
+/// `corpus` maps `rule_id -> ProposedRuleView` so the scope can be classified and the
+/// default option resolved when creating a fresh selection. A rule id absent from the
+/// corpus (unknown / not loaded) is treated conservatively: it can still have an EXISTING
+/// repo-local selection edited, but a fresh add is skipped (its scope can't be confirmed
+/// repo-local, and we must never scope a project-level rule here).
+pub(super) fn apply_repo_scope(
+    project: &mut ProjectView,
+    rule_id: &str,
+    repo: &str,
+    add: bool,
+    corpus: &std::collections::HashMap<String, ProposedRuleView>,
+) -> bool {
+    // A repo-local rule can only ever live in the `selections` bucket. If the rule is
+    // already present in a PROJECT-LEVEL bucket, this picker must never touch it.
+    let in_project_level = project
+        .ruleset
+        .cross_repo
+        .iter()
+        .chain(project.ruleset.process.iter())
+        .any(|s| s.rule_id == rule_id);
+    if in_project_level {
+        return false;
+    }
+
+    // Locate any existing repo-local selection for this rule.
+    let existing_idx = project
+        .ruleset
+        .selections
+        .iter()
+        .position(|s| s.rule_id == rule_id);
+
+    if add {
+        if let Some(idx) = existing_idx {
+            let sel = &mut project.ruleset.selections[idx];
+            if sel.repos.iter().any(|r| r == repo) {
+                return false; // already scoped to this repo — no-op.
+            }
+            sel.repos.push(repo.to_string());
+            return true;
+        }
+        // No selection yet — create one, but only for a rule the corpus confirms is
+        // repo-local (never adopt a project-level or unknown-scope rule via this path).
+        let Some(corpus_rule) = corpus.get(rule_id) else {
+            return false;
+        };
+        if bucket_of(corpus_rule) != SelectionBucket::Selections {
+            return false;
+        }
+        project.ruleset.selections.push(RuleSelectionView {
+            rule_id: rule_id.to_string(),
+            chosen_option: corpus_rule.default_option.clone(),
+            repos: vec![repo.to_string()],
+        });
+        true
+    } else {
+        let Some(idx) = existing_idx else {
+            return false; // nothing to remove from.
+        };
+        let sel = &mut project.ruleset.selections[idx];
+        let before = sel.repos.len();
+        sel.repos.retain(|r| r != repo);
+        if sel.repos.len() == before {
+            return false; // repo wasn't scoped — no-op.
+        }
+        // Removing the last repo drops the whole selection (repos-empty GC): unselecting.
+        if sel.repos.is_empty() {
+            project.ruleset.selections.remove(idx);
+        }
+        true
+    }
+}
+
 // SelectionBucket, bucket_of moved to camerata-ui-core::rules (re-exported above).
 
 /// True when this rule id is a *truly inline* rule built by `propose_rules` and is
@@ -1394,16 +1492,36 @@ pub(super) fn AllRulesTable(
     }
 }
 
+/// Context payload for the modal's "Applies to repos" picker. `project_repos` is the
+/// project's full repo list (real `owner/repo` strings, never a sentinel); `applied` maps
+/// each rule id to the repos its repo-local selection currently covers. The parent
+/// (`RulesView`) rebuilds this from the live `ProjectView` each render, so the modal always
+/// reflects the persisted state and re-renders after a toggle round-trips through `refresh`.
+#[derive(Clone, PartialEq, Default)]
+pub(super) struct RepoScopeData {
+    pub project_repos: Vec<String>,
+    pub applied: std::collections::HashMap<String, Vec<String>>,
+}
+
 /// A thin modal wrapper for `RulesView`: provides the `detail_rule` + `chosen` contexts
 /// that `RuleDetailModal` reads, and renders the modal outside the table subtree
 /// (same ghost-click rationale as `ScanResults`).
 ///
 /// After the user picks an option the caller's `on_option_picked` callback is invoked
 /// with `(rule_id, option_id)` so the parent can POST the updated ruleset.
+///
+/// The "Applies to repos" picker (repo-local rules only) reads the project's repos +
+/// currently-applied repos from the `RepoScopeData` context and REQUESTS a toggle by
+/// setting the `repo_scope_pending` context signal to `(rule_id, repo, add)`. The parent
+/// owns persistence: a `use_effect` in `RulesView` consumes the request, applies
+/// `apply_repo_scope`, POSTs via `save_ruleset`, and bumps `refresh` — mirroring the
+/// `add_pending` pattern so the modal itself stays free of `ProjectView`/persist wiring.
 #[component]
 pub(super) fn RulesDetailModalHost(on_option_picked: EventHandler<(String, String)>) -> Element {
     let detail_rule = use_context::<Signal<Option<ProposedRuleView>>>();
     let chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
+    let repo_scope = use_context::<Signal<RepoScopeData>>();
+    let repo_scope_pending = use_context::<Signal<Option<(String, String, bool)>>>();
     let Some(r) = detail_rule() else {
         return rsx! {};
     };
@@ -1435,6 +1553,60 @@ pub(super) fn RulesDetailModalHost(on_option_picked: EventHandler<(String, Strin
                             title: "{enforcement_tooltip(&r.enforcement)}",
                             "enforcement \u{00b7} {r.enforcement}"
                         }
+                    }
+                }
+                // "Applies to repos" — per-repo scoping for repo-local rules, chosen right on
+                // the rule. Project-level (cross-repo / process) rules apply project-wide and
+                // must never be scoped to specific repos, so they show a static line instead.
+                {
+                    let scope_data = repo_scope();
+                    let mut repo_scope_pending = repo_scope_pending;
+                    match bucket_of(&r) {
+                        SelectionBucket::Selections => {
+                            let applied: std::collections::HashSet<String> = scope_data
+                                .applied
+                                .get(&r.id)
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect();
+                            rsx! {
+                                div { class: "rule-modal-section",
+                                    span { class: "rule-modal-label", "Applies to repos" }
+                                    if scope_data.project_repos.is_empty() {
+                                        p { class: "rule-modal-note", "This project has no repos yet — onboard a repo to scope this rule." }
+                                    } else {
+                                        div { class: "rule-modal-repo-scope",
+                                            for repo in scope_data.project_repos.iter() {
+                                                {
+                                                    let repo = repo.clone();
+                                                    let rid = r.id.clone();
+                                                    let checked = applied.contains(&repo);
+                                                    rsx! {
+                                                        label { key: "{repo}", class: "rule-modal-repo-check",
+                                                            input {
+                                                                r#type: "checkbox",
+                                                                checked,
+                                                                onchange: move |e: Event<FormData>| {
+                                                                    repo_scope_pending.set(Some((rid.clone(), repo.clone(), e.checked())));
+                                                                },
+                                                            }
+                                                            span { "{repo}" }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        SelectionBucket::CrossRepo | SelectionBucket::Process => rsx! {
+                            div { class: "rule-modal-section",
+                                span { class: "rule-modal-label", "Applies to repos" }
+                                p { class: "rule-modal-note", "Applies project-wide (all repos)" }
+                            }
+                        },
                     }
                 }
                 // Sources: the cited corpus source(s) backing this rule's grounding, shown
@@ -2579,12 +2751,96 @@ pub(super) fn RulesView() -> Element {
         use_signal(std::collections::HashMap::new);
     use_context_provider(|| chosen);
 
+    // Shared context for the modal's "Applies to repos" picker: the project's repos + the
+    // repos each rule is currently scoped to. Rebuilt from the live project below and kept
+    // in a signal so the modal re-renders after a toggle round-trips through `refresh`.
+    let repo_scope_data: Signal<RepoScopeData> = use_signal(RepoScopeData::default);
+    use_context_provider(|| repo_scope_data);
+    // The modal REQUESTS a repo-scope toggle by setting this to (rule_id, repo, add); the
+    // effect below owns persistence (mirrors the `add_pending` pattern).
+    let repo_scope_pending: Signal<Option<(String, String, bool)>> = use_signal(|| None);
+    use_context_provider(|| repo_scope_pending);
+
     // Signal from Table 2 to Table 1: "go to this repo".
     let goto_repo: Signal<Option<String>> = use_signal(|| None);
 
     let proj = active.read().clone().flatten();
     let proj_list = projects.read().clone().flatten().unwrap_or_default();
     let corpus = corpus_res.read().clone().flatten().unwrap_or_default();
+
+    // Keep the modal's "Applies to repos" data in sync with the live project. The applied
+    // map covers only repo-local `selections` (the sole bucket the picker edits); cross-repo
+    // and process are project-wide and show a static line, so they need no entry here.
+    {
+        let mut repo_scope_data = repo_scope_data;
+        let next = proj
+            .as_ref()
+            .map(|p| RepoScopeData {
+                project_repos: p.repos.clone(),
+                applied: p
+                    .ruleset
+                    .selections
+                    .iter()
+                    .map(|s| {
+                        (
+                            s.rule_id.clone(),
+                            resolve_selection_repos(&s.repos, &p.repos),
+                        )
+                    })
+                    .collect(),
+            })
+            .unwrap_or_default();
+        use_effect(move || {
+            if *repo_scope_data.peek() != next {
+                repo_scope_data.set(next.clone());
+            }
+        });
+    }
+
+    // Consume a repo-scope toggle requested by the modal picker and persist it. Mirrors the
+    // `add_pending` effect: find/create the repo-local selection for the rule (chosen_option
+    // from the corpus default), add/remove the repo (dropping the selection when its repos
+    // empty), POST via `save_ruleset`, toast, and bump `refresh` so the modal re-renders.
+    {
+        let mut repo_scope_pending = repo_scope_pending;
+        let corpus_scope = corpus.clone();
+        let proj_scope = proj.clone();
+        let mut refresh_scope = refresh;
+        use_effect(move || {
+            let Some((rule_id, repo, add)) = repo_scope_pending.read().clone() else {
+                return;
+            };
+            repo_scope_pending.set(None);
+            let Some(mut p) = proj_scope.clone() else {
+                return;
+            };
+            let corpus_by_id: std::collections::HashMap<String, ProposedRuleView> =
+                corpus_scope.iter().map(|r| (r.id.clone(), r.clone())).collect();
+            let changed = apply_repo_scope(&mut p, &rule_id, &repo, add, &corpus_by_id);
+            if !changed {
+                return;
+            }
+            let pid = p.id.clone();
+            let body = build_ruleset_json(&p);
+            let verb = if add { "Added rule to" } else { "Removed rule from" };
+            spawn(async move {
+                if save_ruleset(&pid, body).await {
+                    crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Info,
+                        format!("{verb} {repo}."),
+                    );
+                    refresh_scope += 1;
+                } else {
+                    crate::toast::push_toast(
+                        toasts,
+                        crate::toast::ToastKind::Error,
+                        "Could not update the ruleset.",
+                    );
+                }
+            });
+        });
+    }
 
     rsx! {
         div { class: "page page-wide",
@@ -6643,6 +6899,164 @@ mod render_tests {
             project.ruleset.selections.iter().all(|s| s.rule_id != "RUST-DIOXUS-99"),
             "and it is not added to any bucket"
         );
+    }
+
+    // ── apply_repo_scope (the "Applies to repos" picker transform) ─────────────
+    // The one shared, pure transform behind the modal's repo checkboxes. Mirrors
+    // `apply_chosen_option`: add/remove a real repo on a repo-local selection, create the
+    // selection on first add, drop it when its repos empty, and NEVER touch project-level
+    // rules.
+
+    /// A corpus map for the repo-scope tests: a repo-local rule (with a default option) and a
+    /// process rule (project-level, must never be repo-scoped by this path).
+    fn repo_scope_corpus() -> std::collections::HashMap<String, ProposedRuleView> {
+        let mut repo_local = proposed_rule("RUST-FMT-1", "Format with rustfmt", "rust", "repo-local");
+        repo_local.default_option = Some("a".to_string());
+        [
+            ("RUST-FMT-1".to_string(), repo_local),
+            (
+                "PROCESS-BRANCH-NAMING-1".to_string(),
+                proposed_rule("PROCESS-BRANCH-NAMING-1", "Branch naming", "process", "process"),
+            ),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn apply_repo_scope_add_creates_repo_local_selection_with_chosen_option() {
+        // A project with two repos and NO selection for the repo-local rule yet.
+        let mut project: ProjectView = serde_json::from_value(serde_json::json!({
+            "id": "proj-1", "name": "Acme", "repos": ["me/api", "me/web"],
+            "ruleset": { "selections": [], "cross_repo": [], "process": [], "custom": [] }
+        }))
+        .expect("valid ProjectView");
+        let corpus = repo_scope_corpus();
+
+        // Add me/api → a fresh selection is created, carrying the corpus default option.
+        let changed = apply_repo_scope(&mut project, "RUST-FMT-1", "me/api", true, &corpus);
+        assert!(changed, "adding a repo to an unselected repo-local rule mutates the ruleset");
+        assert_eq!(project.ruleset.selections.len(), 1, "one repo-local selection created");
+        let sel = &project.ruleset.selections[0];
+        assert_eq!(sel.rule_id, "RUST-FMT-1");
+        assert_eq!(sel.chosen_option.as_deref(), Some("a"), "the corpus default option is carried");
+        assert_eq!(sel.repos, vec!["me/api".to_string()]);
+
+        // Add me/web → extends the SAME selection (no duplicate entry).
+        let changed = apply_repo_scope(&mut project, "RUST-FMT-1", "me/web", true, &corpus);
+        assert!(changed);
+        assert_eq!(project.ruleset.selections.len(), 1, "still one selection, extended");
+        assert_eq!(
+            project.ruleset.selections[0].repos,
+            vec!["me/api".to_string(), "me/web".to_string()]
+        );
+
+        // Idempotent: re-adding an already-scoped repo is a no-op.
+        let again = apply_repo_scope(&mut project, "RUST-FMT-1", "me/api", true, &corpus);
+        assert!(!again, "re-adding a scoped repo reports no change");
+    }
+
+    #[test]
+    fn apply_repo_scope_removing_last_repo_drops_the_selection() {
+        // A repo-local selection scoped to exactly one repo.
+        let mut project = project_with_selection(); // selections: RUST-DIOXUS-12 -> [me/api]
+        let mut repo_local = proposed_rule("RUST-DIOXUS-12", "Icons", "rust", "repo-local");
+        repo_local.default_option = Some("a".to_string());
+        let corpus: std::collections::HashMap<String, ProposedRuleView> =
+            [("RUST-DIOXUS-12".to_string(), repo_local)].into_iter().collect();
+
+        // Removing a repo the rule ISN'T scoped to is a no-op.
+        let noop = apply_repo_scope(&mut project, "RUST-DIOXUS-12", "me/other", false, &corpus);
+        assert!(!noop, "removing an unscoped repo reports no change");
+        assert_eq!(project.ruleset.selections.len(), 1, "selection untouched");
+
+        // Removing the LAST scoped repo drops the whole selection (repos-empty GC).
+        let changed = apply_repo_scope(&mut project, "RUST-DIOXUS-12", "me/api", false, &corpus);
+        assert!(changed, "removing the last repo mutates the ruleset");
+        assert!(
+            project.ruleset.selections.is_empty(),
+            "the emptied selection is dropped (unselecting the rule)"
+        );
+    }
+
+    #[test]
+    fn apply_repo_scope_never_touches_project_level_rules() {
+        // A project with a PROCESS rule already selected (project-level).
+        let mut project = project_with_selection();
+        project.ruleset.process.push(RuleSelectionView {
+            rule_id: "PROCESS-BRANCH-NAMING-1".to_string(),
+            chosen_option: Some("b".to_string()),
+            repos: vec!["me/api".to_string()],
+        });
+        let corpus = repo_scope_corpus();
+
+        // Trying to add OR remove a repo on the process rule is a no-op — project-level rules
+        // apply project-wide and are never scoped to specific repos from this picker.
+        let added = apply_repo_scope(&mut project, "PROCESS-BRANCH-NAMING-1", "me/web", true, &corpus);
+        assert!(!added, "a project-level rule is not repo-scoped by this path");
+        let removed = apply_repo_scope(&mut project, "PROCESS-BRANCH-NAMING-1", "me/api", false, &corpus);
+        assert!(!removed, "a project-level rule is not repo-unscoped by this path");
+        // The process selection is byte-for-byte unchanged, and no stray repo-local selection
+        // was created for the process rule.
+        assert_eq!(project.ruleset.process.len(), 1);
+        assert_eq!(project.ruleset.process[0].repos, vec!["me/api".to_string()]);
+        assert!(
+            project.ruleset.selections.iter().all(|s| s.rule_id != "PROCESS-BRANCH-NAMING-1"),
+            "the process rule never leaks into the repo-local selections bucket"
+        );
+    }
+
+    // ── The modal's "Applies to repos" section (SSR) ───────────────────────────
+    // Provide the four contexts RulesDetailModalHost reads, open a rule, and assert the
+    // section renders checkboxes for a repo-local rule and the project-wide line for a
+    // process rule.
+
+    fn provide_modal_scope_contexts(open: ProposedRuleView, repos: Vec<String>) {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        use_context_provider(|| Signal::new(Some(open)));
+        use_context_provider(|| Signal::new(std::collections::HashMap::<String, String>::new()));
+        use_context_provider(|| Signal::new(RepoScopeData { project_repos: repos, applied: std::collections::HashMap::new() }));
+        use_context_provider(|| Signal::new(Option::<(String, String, bool)>::None));
+    }
+
+    #[test]
+    fn modal_shows_repo_checkboxes_for_repo_local_rule() {
+        fn harness() -> Element {
+            let rule = proposed_rule("RUST-FMT-1", "Format with rustfmt", "rust", "repo-local");
+            provide_modal_scope_contexts(rule, vec!["me/api".to_string(), "me/web".to_string()]);
+            rsx! {
+                RulesDetailModalHost { on_option_picked: move |_: (String, String)| {} }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Applies to repos"), "the section label; html=\n{html}");
+        assert!(html.contains("rule-modal-repo-scope"), "the checkbox container; html=\n{html}");
+        assert!(html.contains("type=\"checkbox\""), "at least one checkbox; html=\n{html}");
+        // Both project repos are offered.
+        assert!(html.contains("me/api"), "first repo checkbox; html=\n{html}");
+        assert!(html.contains("me/web"), "second repo checkbox; html=\n{html}");
+        // A repo-local rule must NOT show the project-wide line.
+        assert!(!html.contains("Applies project-wide"), "no project-wide line for repo-local; html=\n{html}");
+    }
+
+    #[test]
+    fn modal_shows_project_wide_line_for_process_rule() {
+        fn harness() -> Element {
+            let rule = proposed_rule("PROCESS-BRANCH-NAMING-1", "Branch naming", "process", "process");
+            provide_modal_scope_contexts(rule, vec!["me/api".to_string()]);
+            rsx! {
+                RulesDetailModalHost { on_option_picked: move |_: (String, String)| {} }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Applies to repos"), "the section label; html=\n{html}");
+        assert!(html.contains("Applies project-wide (all repos)"), "the project-wide line; html=\n{html}");
+        // A project-level rule must NOT render repo checkboxes.
+        assert!(!html.contains("rule-modal-repo-scope"), "no per-repo checkboxes for a process rule; html=\n{html}");
     }
 
     /// The APPLIED-ROW rendering + SEARCH layer. Once a process rule is in
