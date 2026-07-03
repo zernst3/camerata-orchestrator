@@ -618,6 +618,20 @@ impl AppState {
         // living in any file on disk.
         state.credential_store =
             Arc::new(crate::credentials::KeyringCredentialStore);
+        // Hydrate the Anthropic API key from the keychain into the `ANTHROPIC_API_KEY`
+        // env var so the existing env-driven selection sites (the agent driver's
+        // `anthropic_api_backend_key`) honor a keychain-stored key. The keychain wins
+        // over any pre-existing env value (set_var runs after dotenv load), matching the
+        // backend-setting precedence above (keychain/setting > `.env` > default).
+        // Edition 2021, so `set_var` is safe (single-threaded startup).
+        if let Ok(Some(key)) = state
+            .credential_store
+            .get(crate::credentials::ANTHROPIC_API_KEY)
+        {
+            if !key.trim().is_empty() {
+                std::env::set_var("ANTHROPIC_API_KEY", key);
+            }
+        }
         state
     }
 }
@@ -7333,11 +7347,19 @@ async fn usage(State(state): State<AppState>) -> Json<crate::usage_ledger::Usage
 
 // ── local workspace (checkouts) ───────────────────────────────────────────────
 
-/// Whether an Anthropic API key is available for the `api` backend. Today the key is
-/// **env-only** (`ANTHROPIC_API_KEY`) — it is NOT in the keychain credential allowlist
-/// (`ALL_CREDENTIALS` is OpenRouter + GitHub only), so this reports env presence. If the
-/// Anthropic key ever becomes keychain-sourced, add the keychain check here.
-fn anthropic_api_key_present() -> bool {
+/// Whether an Anthropic API key is available for the `api` backend. The key can live in
+/// EITHER the keychain (the `anthropic_api_key` credential) OR the `ANTHROPIC_API_KEY`
+/// env var. Startup + on-save hydration mirrors the keychain into the env var, so the env
+/// check usually suffices; the keychain is checked too so this is correct even before any
+/// hydration has run.
+fn anthropic_api_key_present(store: &dyn crate::credentials::CredentialStore) -> bool {
+    // Keychain-stored key.
+    if let Ok(Some(k)) = store.get(crate::credentials::ANTHROPIC_API_KEY) {
+        if !k.trim().is_empty() {
+            return true;
+        }
+    }
+    // Env var (back-compat: existing dotenv/CI setups keep working).
     std::env::var("ANTHROPIC_API_KEY")
         .ok()
         .map(|k| !k.trim().is_empty())
@@ -7373,8 +7395,9 @@ struct SettingsResp {
     /// The effective backend (`"cli"` | `"api"`) after applying precedence
     /// (stored setting > env > default). This is the value the UI reads and toggles.
     llm_backend: String,
-    /// Whether an Anthropic API key is available (env-only today; see
-    /// [`anthropic_api_key_present`]).
+    /// Whether an Anthropic API key is available — in the keychain (the
+    /// `anthropic_api_key` credential) or the `ANTHROPIC_API_KEY` env var. See
+    /// [`anthropic_api_key_present`].
     api_key_present: bool,
 }
 
@@ -7388,7 +7411,7 @@ async fn get_settings(State(state): State<AppState>) -> Json<SettingsResp> {
         repo_paths: settings.repo_paths,
         chat_model: settings.chat_model,
         llm_backend,
-        api_key_present: anthropic_api_key_present(),
+        api_key_present: anthropic_api_key_present(state.credential_store.as_ref()),
     })
 }
 
@@ -7451,7 +7474,7 @@ async fn set_llm_backend(
         StatusCode::OK,
         Json(serde_json::json!({
             "backend": backend,
-            "api_key_present": anthropic_api_key_present(),
+            "api_key_present": anthropic_api_key_present(state.credential_store.as_ref()),
         })),
     )
 }
@@ -7515,6 +7538,13 @@ async fn set_credential(
                 "message": format!("failed to store credential: {e}")
             })),
         );
+    }
+    // Hydrate the Anthropic key into the env var on save so switching to the `api`
+    // backend + entering a key takes effect immediately for subsequent runs, with no
+    // restart. Scoped to the anthropic key only — the github token has its own
+    // `CAMERATA_GITHUB_TOKEN` handling and must not be mirrored into an env var here.
+    if name == crate::credentials::ANTHROPIC_API_KEY && !req.value.trim().is_empty() {
+        std::env::set_var("ANTHROPIC_API_KEY", &req.value);
     }
     // Return the masked form so the UI can confirm what was stored.
     let masked = state
@@ -17211,6 +17241,36 @@ mod tests {
             Some("env_token"),
             "must fall back to env var when store is empty"
         );
+    }
+
+    /// `anthropic_api_key_present` returns true when the keychain holds the key, even
+    /// with no `ANTHROPIC_API_KEY` env var set.
+    #[test]
+    fn anthropic_api_key_present_true_when_keychain_has_it() {
+        let store = crate::credentials::MemoryCredentialStore::new();
+        crate::credentials::CredentialStore::set(
+            &store,
+            crate::credentials::ANTHROPIC_API_KEY,
+            "sk-ant-keychain",
+        )
+        .expect("set must succeed");
+        // The env var is irrelevant here: the keychain path returns true first.
+        assert!(anthropic_api_key_present(&store));
+    }
+
+    /// `anthropic_api_key_present` returns true when only the env var is set (empty
+    /// keychain), and false when neither source has a key.
+    #[test]
+    fn anthropic_api_key_present_reflects_env_when_keychain_empty() {
+        let store = crate::credentials::MemoryCredentialStore::new();
+        // Neither source set → false.
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        assert!(!anthropic_api_key_present(&store));
+        // Env-only → true.
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-env");
+        let present = anthropic_api_key_present(&store);
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        assert!(present, "env var alone makes the key present");
     }
 
     // ── Attachment tests ──────────────────────────────────────────────────────

@@ -21,6 +21,10 @@ const BOMBE_ENABLED_KEY: &str = "camerata.bombe.enabled";
 
 const OPENROUTER_API_KEY: &str = "openrouter_api_key";
 const GITHUB_TOKEN: &str = "github_token";
+/// The Anthropic API key credential. NOT in the always-shown [`ALL_CREDENTIALS`] list —
+/// it's revealed contextually inside [`ModelBackendSettings`] only when the `api` Claude
+/// backend is selected.
+const ANTHROPIC_API_KEY: &str = "anthropic_api_key";
 
 const ALL_CREDENTIALS: &[(&str, &str)] = &[
     (OPENROUTER_API_KEY, "OpenRouter API Key"),
@@ -168,7 +172,7 @@ pub fn CredentialsSettings() -> Element {
                 },
             }
 
-            // ── Model backend (CLI ⟷ API) ─────────────────────────────────
+            // ── Claude backend (CLI ⟷ API) ────────────────────────────────
             ModelBackendSettings {}
 
             // ── Bombe animation settings ──────────────────────────────────
@@ -179,19 +183,23 @@ pub fn CredentialsSettings() -> Element {
 
 // ── ModelBackendSettings ────────────────────────────────────────────────────
 
-/// The "Model backend" control: a CLI ⟷ API segmented toggle for the app-level LLM backend.
+/// The "Claude backend" control: a CLI ⟷ API segmented toggle for how Claude runs.
 ///
-/// - **CLI** uses the logged-in Claude Code subscription (no key).
-/// - **API** uses the Anthropic API and requires an `ANTHROPIC_API_KEY`.
+/// - **CLI** runs Claude via the logged-in Claude Code subscription (no key).
+/// - **API** runs Claude via the Anthropic API and requires an Anthropic API key.
 ///
 /// Reads the current effective backend + key presence from `GET /api/settings`, and writes the
-/// choice via `POST /api/settings/llm-backend`. When `api` is selected with no key present the
-/// server silently falls back to CLI, so an inline warning is shown (pure view logic lives in
+/// choice via `POST /api/settings/llm-backend`. When `api` is selected the Anthropic API key
+/// input is revealed inline (reusing [`CredentialRow`], stored in the keychain under
+/// `anthropic_api_key`). When `api` is selected with no key present the server silently falls
+/// back to CLI, so an inline warning is shown until a key is saved (pure view logic lives in
 /// `camerata_ui_core::llm_backend`).
 #[component]
 fn ModelBackendSettings() -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut settings_res = use_resource(fetch_backend_settings);
+    // The credentials list drives the revealed Anthropic key row's is_set/masked state.
+    let mut creds_res = use_resource(fetch_credentials);
     let mut saving = use_signal(|| false);
 
     // Snapshot the resource into an owned value so the read guard is dropped before the rsx
@@ -201,7 +209,7 @@ fn ModelBackendSettings() -> Element {
         None => rsx! {
             div { class: "credentials-field-section",
                 div { class: "credentials-field-header",
-                    label { class: "credentials-label", "Model backend" }
+                    label { class: "credentials-label", "Claude backend" }
                 }
                 p { class: "ink-soft", "Loading…" }
             }
@@ -209,7 +217,7 @@ fn ModelBackendSettings() -> Element {
         Some(None) => rsx! {
             div { class: "credentials-field-section",
                 div { class: "credentials-field-header",
-                    label { class: "credentials-label", "Model backend" }
+                    label { class: "credentials-label", "Claude backend" }
                 }
                 p { class: "ink-soft warn", "Could not reach the server." }
             }
@@ -239,7 +247,7 @@ fn ModelBackendSettings() -> Element {
                                         push_toast(
                                             toasts,
                                             ToastKind::Info,
-                                            format!("Model backend set to {}.", b.label()),
+                                            format!("Claude backend set to {}.", b.label()),
                                         );
                                         settings_res.restart();
                                     }
@@ -247,7 +255,7 @@ fn ModelBackendSettings() -> Element {
                                         push_toast(
                                             toasts,
                                             ToastKind::Error,
-                                            "Could not update the model backend.".to_string(),
+                                            "Could not update the Claude backend.".to_string(),
                                         );
                                     }
                                 }
@@ -259,21 +267,52 @@ fn ModelBackendSettings() -> Element {
                 }
             };
 
+            // When API is selected, look up the Anthropic key credential's state from the
+            // credentials list so the revealed row shows the correct set/masked badge.
+            let anthropic_item = match &*creds_res.read() {
+                Some(Some(items)) => items
+                    .iter()
+                    .find(|i| i.name == ANTHROPIC_API_KEY)
+                    .cloned(),
+                _ => None,
+            };
+            let anthropic_is_set = anthropic_item.as_ref().map(|i| i.is_set).unwrap_or(false);
+            let anthropic_masked = anthropic_item.and_then(|i| i.masked);
+            let show_api = selected == LlmBackend::Api;
+
             rsx! {
                 div { class: "credentials-field-section",
                     div { class: "credentials-field-header",
-                        label { class: "credentials-label", "Model backend" }
+                        label { class: "credentials-label", "Claude backend" }
                     }
                     p { class: "credentials-intro",
-                        "CLI uses your logged-in Claude Code subscription. API uses the Anthropic API and requires an API key."
+                        "Claude runs via the CLI (your logged-in Claude Code subscription) or the Anthropic API (needs an Anthropic API key)."
                     }
                     div { class: "backend-toggle",
                         {seg(LlmBackend::Cli, "CLI")}
                         {seg(LlmBackend::Api, "API")}
                     }
-                    if warn {
-                        p { class: "ink-soft warn backend-key-warning",
-                            "API backend needs an ANTHROPIC_API_KEY — the app will fall back to CLI until one is configured."
+                    // When API is selected: either reveal the key input (once we know the key
+                    // isn't present) or, if a key IS present, show the set/masked row. The
+                    // warning shows only while API is selected AND no key is present.
+                    if show_api {
+                        if warn {
+                            p { class: "ink-soft warn backend-key-warning",
+                                "API backend needs an ANTHROPIC_API_KEY — the app will fall back to CLI until one is configured."
+                            }
+                        }
+                        CredentialRow {
+                            name: ANTHROPIC_API_KEY.to_string(),
+                            label: "Anthropic API Key".to_string(),
+                            is_set: anthropic_is_set,
+                            current_masked: anthropic_masked,
+                            toasts,
+                            on_saved: move |_| {
+                                // Re-fetch both the key state (updates the row's badge) and the
+                                // backend settings (clears the `api_key_present` warning).
+                                creds_res.restart();
+                                settings_res.restart();
+                            },
                         }
                     }
                 }
@@ -795,15 +834,15 @@ mod tests {
             html.contains("Background Animation"),
             "the Bombe settings section renders below; html=\n{html}"
         );
-        // The Model backend control renders below the credentials too.
+        // The Claude backend control renders below the credentials too.
         assert!(
-            html.contains("Model backend"),
-            "the Model backend control renders; html=\n{html}"
+            html.contains("Claude backend"),
+            "the Claude backend control renders; html=\n{html}"
         );
     }
 
     // ModelBackendSettings consumes the toasts context and a use_resource. On first SSR
-    // render the resource is pending, so it renders the loading branch — but the "Model
+    // render the resource is pending, so it renders the loading branch — but the "Claude
     // backend" label is always present. The pure CLI/API + warning logic is unit-tested in
     // camerata_ui_core::llm_backend; here we lock the label + loading scaffold.
     fn model_backend_harness() -> Element {
@@ -819,13 +858,74 @@ mod tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(
-            html.contains("Model backend"),
-            "the Model backend label renders; html=\n{html}"
+            html.contains("Claude backend"),
+            "the Claude backend label renders; html=\n{html}"
         );
         // use_resource is pending on first render → loading branch.
         assert!(
             html.contains("Loading"),
             "the pending-resource loading branch renders; html=\n{html}"
+        );
+    }
+
+    // The Anthropic key input is revealed inside ModelBackendSettings ONLY when the `api`
+    // backend is selected. SSR keeps `use_resource` pending, so we can't drive the resolved
+    // branch here; instead we render the reveal sub-tree directly — a `CredentialRow` wired
+    // exactly as the API branch wires it (name `anthropic_api_key`, label "Anthropic API
+    // Key") — and, for the `cli` case, an empty tree. This locks the contract that the
+    // Anthropic key input appears for API and is absent for CLI.
+    #[component]
+    fn AnthropicKeyRevealProbe(backend: LlmBackend) -> Element {
+        let toasts = use_signal(Vec::<crate::toast::Toast>::new);
+        if backend == LlmBackend::Api {
+            rsx! {
+                CredentialRow {
+                    name: ANTHROPIC_API_KEY.to_string(),
+                    label: "Anthropic API Key".to_string(),
+                    is_set: false,
+                    current_masked: None,
+                    toasts,
+                    on_saved: move |_| {},
+                }
+            }
+        } else {
+            rsx! {}
+        }
+    }
+
+    fn anthropic_reveal_api_harness() -> Element {
+        rsx! {
+            AnthropicKeyRevealProbe { backend: LlmBackend::Api }
+        }
+    }
+
+    fn anthropic_reveal_cli_harness() -> Element {
+        rsx! {
+            AnthropicKeyRevealProbe { backend: LlmBackend::Cli }
+        }
+    }
+
+    #[test]
+    fn anthropic_key_input_shown_when_backend_is_api() {
+        let mut vdom = VirtualDom::new(anthropic_reveal_api_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("Anthropic API Key"),
+            "the Anthropic key input is revealed for the API backend; html=\n{html}"
+        );
+        // The revealed row is an actual credential input (password field + Save button).
+        assert!(html.contains("Save"), "the key input has a Save button; html=\n{html}");
+    }
+
+    #[test]
+    fn anthropic_key_input_hidden_when_backend_is_cli() {
+        let mut vdom = VirtualDom::new(anthropic_reveal_cli_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            !html.contains("Anthropic API Key"),
+            "the Anthropic key input is NOT shown for the CLI backend; html=\n{html}"
         );
     }
 }
