@@ -872,6 +872,8 @@ pub(super) fn ProjectRulesTable(
     let pid_opt = project_id.clone();
     let toasts_opt = toasts;
     let mut refresh_opt = refresh;
+    let corpus_for_opt = corpus_by_id.clone();
+    let project_repos_for_opt = project_repos.clone();
     use_effect(move || {
         // Build the updated ruleset with any chosen-option changes applied.
         let chosen = chosen_ctx.read().clone();
@@ -899,6 +901,45 @@ pub(super) fn ProjectRulesTable(
                     sel.chosen_option = Some(opt.clone());
                     changed = true;
                 }
+            }
+        }
+        // Insert-if-absent for PROJECT-LEVEL rules. If the user picked an option on a
+        // rule that is not yet in ANY bucket, the three loops above matched nothing —
+        // so the rule never appeared in the selected ruleset ("top table"). For
+        // project-level rules (process / cross-repo) an option pick is an unambiguous
+        // adopt, so we add them here. Repo-local (Selections) rules stay on their
+        // explicit per-repo add flow (which repo would an option-pick target?) and are
+        // intentionally NOT auto-added — `project_level_insert` returns None for them.
+        for (rule_id, opt) in chosen.iter() {
+            let already_present = p.ruleset.selections.iter().any(|s| &s.rule_id == rule_id)
+                || p.ruleset.cross_repo.iter().any(|s| &s.rule_id == rule_id)
+                || p.ruleset.process.iter().any(|s| &s.rule_id == rule_id);
+            if already_present {
+                continue;
+            }
+            let Some(corpus_rule) = corpus_for_opt.get(rule_id) else {
+                // The rule id isn't in the corpus (e.g. corpus not loaded yet, or a
+                // custom/unknown id) — we can't classify its scope, so skip.
+                continue;
+            };
+            // `project_level_insert` decides adopt-vs-skip: project-level buckets adopt
+            // (with the project's real repos so the selection survives repos-empty GC);
+            // repo-local and empty-repos cases return None.
+            if let Some((bucket, repos)) =
+                project_level_insert(bucket_of(corpus_rule), &project_repos_for_opt)
+            {
+                let new_sel = RuleSelectionView {
+                    rule_id: rule_id.clone(),
+                    chosen_option: Some(opt.clone()),
+                    repos,
+                };
+                match bucket {
+                    SelectionBucket::Process => p.ruleset.process.push(new_sel),
+                    SelectionBucket::CrossRepo => p.ruleset.cross_repo.push(new_sel),
+                    // Selections never returned by project_level_insert; guard anyway.
+                    SelectionBucket::Selections => continue,
+                }
+                changed = true;
             }
         }
         if changed {
@@ -3028,7 +3069,7 @@ pub(super) fn RuleCount(label: String, n: usize) -> Element {
 // (RUST-HEADLESS-CORE-1); re-exported here so all call sites are unchanged.
 pub(super) use camerata_ui_core::rules::{
     split_needs_review, verif_badge,
-    SelectionBucket, bucket_of, RuleOptionView, RuleSourceView, ProposedRuleView, default_draft,
+    SelectionBucket, bucket_of, project_level_insert, RuleOptionView, RuleSourceView, ProposedRuleView, default_draft,
     rules_csv, csv_field,
 };
 

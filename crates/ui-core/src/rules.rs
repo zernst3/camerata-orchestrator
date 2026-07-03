@@ -51,6 +51,44 @@ pub fn bucket_of(rule: &ProposedRuleView) -> SelectionBucket {
     }
 }
 
+/// Decide whether choosing an OPTION on a rule that is not yet present in any of the
+/// project's three ruleset buckets should auto-select (adopt) that rule, and if so
+/// into which bucket with which repos.
+///
+/// The model: `cross_repo` and `process` are PROJECT-LEVEL buckets — they apply
+/// project-wide and are chosen unambiguously by engaging with the rule, so picking an
+/// option on such a rule adopts it. Repo-local `Selections` are chosen per-repo via a
+/// separate add flow (which repo would an option-pick target?), so they are NEVER
+/// auto-added here.
+///
+/// Project-level selections MUST carry a non-empty `repos` list — a downstream
+/// garbage-collection step drops selections whose repos become empty. So the returned
+/// repos are ALL the project's real repos. If the project has no repos, there is
+/// nothing sensible to scope to, so we return `None` (skip the add) rather than
+/// persist a selection that would be immediately dropped.
+///
+/// Returns `Some((bucket, repos))` when the rule should be inserted, `None` otherwise.
+/// The returned repos are cloned from `project_repos` (real `owner/repo` strings) — the
+/// caller must never substitute a sentinel key here.
+pub fn project_level_insert(
+    bucket: SelectionBucket,
+    project_repos: &[String],
+) -> Option<(SelectionBucket, Vec<String>)> {
+    match bucket {
+        // Repo-local rules are chosen per-repo elsewhere; never auto-add from an option pick.
+        SelectionBucket::Selections => None,
+        SelectionBucket::CrossRepo | SelectionBucket::Process => {
+            if project_repos.is_empty() {
+                // Nothing sensible to scope a project-level selection to; a repos-empty
+                // selection would be garbage-collected, so skip the add entirely.
+                None
+            } else {
+                Some((bucket, project_repos.to_vec()))
+            }
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct RuleOptionView {
     pub id: String,
@@ -263,6 +301,41 @@ mod tests {
         assert_eq!(bucket_of(&rule_with_scope("repo-local")), SelectionBucket::Selections);
         // An unknown scope defaults to the repo-local Selections bucket.
         assert_eq!(bucket_of(&rule_with_scope("whatever")), SelectionBucket::Selections);
+    }
+
+    // ── project_level_insert ──────────────────────────────────────────────────
+    // Decides whether picking an OPTION on an unselected rule adopts it. Only
+    // project-level buckets (process / cross-repo) auto-add, and only with a
+    // non-empty repos list (so the selection survives repos-empty GC).
+
+    #[test]
+    fn project_level_insert_process_adds_with_project_repos() {
+        let repos = vec!["me/api".to_string(), "me/web".to_string()];
+        let got = project_level_insert(SelectionBucket::Process, &repos);
+        assert_eq!(got, Some((SelectionBucket::Process, repos.clone())));
+    }
+
+    #[test]
+    fn project_level_insert_cross_repo_adds_with_project_repos() {
+        let repos = vec!["me/api".to_string()];
+        let got = project_level_insert(SelectionBucket::CrossRepo, &repos);
+        assert_eq!(got, Some((SelectionBucket::CrossRepo, repos.clone())));
+    }
+
+    #[test]
+    fn project_level_insert_repo_local_never_auto_adds() {
+        // Repo-local selections are chosen per-repo via a separate flow; an option
+        // pick must not auto-add them (which repo would it target?).
+        let repos = vec!["me/api".to_string(), "me/web".to_string()];
+        assert_eq!(project_level_insert(SelectionBucket::Selections, &repos), None);
+    }
+
+    #[test]
+    fn project_level_insert_empty_repos_skips_project_level() {
+        // With no project repos there is nothing sensible to scope to, and a
+        // repos-empty selection would be garbage-collected downstream — so skip.
+        assert_eq!(project_level_insert(SelectionBucket::Process, &[]), None);
+        assert_eq!(project_level_insert(SelectionBucket::CrossRepo, &[]), None);
     }
 
     // ── rules_csv ─────────────────────────────────────────────────────────────
