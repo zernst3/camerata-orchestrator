@@ -675,6 +675,64 @@ mod tests {
         assert_eq!(store.get(&p.id).unwrap().onboarded, onboarded);
     }
 
+    // ── process-bucket round-trip (adopting a process option in the UI) ────────
+
+    /// Regression guard for "adopting an option in the All rules table reflects in the
+    /// Project Rules (Applied) table". The UI persists a picked option by POSTing a full
+    /// ruleset (build_ruleset_json → import_project_ruleset → upsert_base_rules). This is
+    /// the SERVER-ROUND-TRIP layer of that chain: a ruleset carrying a PROCESS selection
+    /// with a chosen_option must persist and read back with the process bucket intact.
+    ///
+    /// Before the fix the UI dropped a not-yet-selected process rule on the way in, so
+    /// nothing ever reached this bucket; this test locks the server end so the only place
+    /// a regression can live is the UI transform (covered by the ui-crate test).
+    #[test]
+    fn adopting_process_option_persists_to_ruleset() {
+        let store = ProjectStore::new();
+        let p = store.create("Acme", vec!["me/api".into()]).unwrap();
+
+        // Mirror what import_project_ruleset does with the body build_ruleset_json produces
+        // when the user adopts PROCESS-BRANCH-NAMING-1 with option "b".
+        let process_sel = RuleSelection {
+            rule_id: "PROCESS-BRANCH-NAMING-1".to_string(),
+            chosen_option: Some("b".to_string()),
+            repos: vec!["me/api".to_string()],
+            ..Default::default()
+        };
+        let updated = store
+            .update(&p.id, |proj| {
+                proj.upsert_base_rules(vec![], vec![], vec![process_sel.clone()]);
+            })
+            .expect("project exists");
+
+        // The update return carries the new process bucket.
+        assert_eq!(
+            updated.ruleset.process.len(),
+            1,
+            "the process bucket has the adopted rule"
+        );
+        let got = &updated.ruleset.process[0];
+        assert_eq!(got.rule_id, "PROCESS-BRANCH-NAMING-1");
+        assert_eq!(
+            got.chosen_option.as_deref(),
+            Some("b"),
+            "the chosen option persists on the process selection"
+        );
+
+        // And it reads back off the store (the GET path returns p.ruleset verbatim).
+        let reread = store.get(&p.id).expect("project exists");
+        assert_eq!(
+            reread.ruleset.process.len(),
+            1,
+            "the adopted process rule survives a store read-back (GET path)"
+        );
+        assert_eq!(reread.ruleset.process[0].rule_id, "PROCESS-BRANCH-NAMING-1");
+        assert_eq!(
+            reread.ruleset.process[0].chosen_option.as_deref(),
+            Some("b")
+        );
+    }
+
     // ── StepModels (per-project, per-step model config) ────────────────────────
 
     #[test]

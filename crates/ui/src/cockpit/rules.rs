@@ -440,6 +440,77 @@ pub(super) fn build_ruleset_json(project: &ProjectView) -> serde_json::Value {
     })
 }
 
+/// Apply a single chosen option `(rule_id, option)` to a project's ruleset IN PLACE,
+/// adopting the rule when it is not yet present.
+///
+/// This is the one authoritative "adopt an option" transform, shared by BOTH persist
+/// paths so they can never diverge:
+///   * the immediate `on_option_picked` handler in `RulesView` (fires on the modal click), and
+///   * the `chosen_ctx` watcher effect in `ProjectRulesTable` (the safety net).
+///
+/// Behaviour:
+///   * If `rule_id` is already in ANY bucket, set its `chosen_option` (idempotent).
+///   * If `rule_id` is ABSENT and `bucket_of(corpus_rule)` is PROJECT-LEVEL
+///     (process / cross-repo), ADOPT it: push a new selection scoped to the project's
+///     real repos (so it survives the repos-empty GC) with the chosen option. This is
+///     the fix for "picking an option on a not-yet-selected process rule never
+///     appeared in the Project Rules (Applied) table."
+///   * Repo-local `Selections` rules are NEVER auto-added from an option pick (which
+///     repo would it target?), and an empty project-repos list skips the project-level
+///     add — both via `project_level_insert` returning `None`.
+///
+/// `corpus` maps `rule_id -> ProposedRuleView` so the scope can be classified; if the
+/// rule id is absent from the corpus (not loaded / custom / unknown) the adopt is
+/// skipped. Returns `true` when the ruleset was mutated (a save is warranted).
+///
+/// Pure (no signals, no async, no rendering) so it is unit-testable without a Dioxus
+/// context — the regression guard for the adopt→persist chain drives it directly.
+pub(super) fn apply_chosen_option(
+    project: &mut ProjectView,
+    rule_id: &str,
+    option: &str,
+    corpus: &std::collections::HashMap<String, ProposedRuleView>,
+) -> bool {
+    // Update-in-place: if the rule is already selected in any bucket, just set its option.
+    for sel in project
+        .ruleset
+        .selections
+        .iter_mut()
+        .chain(project.ruleset.cross_repo.iter_mut())
+        .chain(project.ruleset.process.iter_mut())
+    {
+        if sel.rule_id == rule_id {
+            if sel.chosen_option.as_deref() == Some(option) {
+                return false; // already exactly this — no change, no save.
+            }
+            sel.chosen_option = Some(option.to_string());
+            return true;
+        }
+    }
+    // Insert-if-absent for PROJECT-LEVEL rules (process / cross-repo). An option pick on
+    // such a rule is an unambiguous adopt.
+    let Some(corpus_rule) = corpus.get(rule_id) else {
+        // Unknown scope (corpus not loaded / custom / unknown id) — cannot classify; skip.
+        return false;
+    };
+    let Some((bucket, repos)) = project_level_insert(bucket_of(corpus_rule), &project.repos) else {
+        // Repo-local, or the project has no repos — nothing to adopt here.
+        return false;
+    };
+    let new_sel = RuleSelectionView {
+        rule_id: rule_id.to_string(),
+        chosen_option: Some(option.to_string()),
+        repos,
+    };
+    match bucket {
+        SelectionBucket::Process => project.ruleset.process.push(new_sel),
+        SelectionBucket::CrossRepo => project.ruleset.cross_repo.push(new_sel),
+        // Selections is never returned by project_level_insert; guard anyway.
+        SelectionBucket::Selections => return false,
+    }
+    true
+}
+
 // SelectionBucket, bucket_of moved to camerata-ui-core::rules (re-exported above).
 
 /// True when this rule id is a *truly inline* rule built by `propose_rules` and is
@@ -873,74 +944,17 @@ pub(super) fn ProjectRulesTable(
     let toasts_opt = toasts;
     let mut refresh_opt = refresh;
     let corpus_for_opt = corpus_by_id.clone();
-    let project_repos_for_opt = project_repos.clone();
     use_effect(move || {
-        // Build the updated ruleset with any chosen-option changes applied.
+        // Build the updated ruleset with any chosen-option changes applied. This is the
+        // safety-net path (the immediate on_option_picked handler is the primary one);
+        // both go through the SAME `apply_chosen_option` transform so they can't diverge.
+        // For every chosen (rule_id, option): update it in place if present, or ADOPT it
+        // when it's a not-yet-selected project-level (process / cross-repo) rule.
         let chosen = chosen_ctx.read().clone();
         let mut p = project_for_opt.clone();
         let mut changed = false;
-        for sel in p.ruleset.selections.iter_mut() {
-            if let Some(opt) = chosen.get(&sel.rule_id) {
-                if sel.chosen_option.as_deref() != Some(opt.as_str()) {
-                    sel.chosen_option = Some(opt.clone());
-                    changed = true;
-                }
-            }
-        }
-        for sel in p.ruleset.cross_repo.iter_mut() {
-            if let Some(opt) = chosen.get(&sel.rule_id) {
-                if sel.chosen_option.as_deref() != Some(opt.as_str()) {
-                    sel.chosen_option = Some(opt.clone());
-                    changed = true;
-                }
-            }
-        }
-        for sel in p.ruleset.process.iter_mut() {
-            if let Some(opt) = chosen.get(&sel.rule_id) {
-                if sel.chosen_option.as_deref() != Some(opt.as_str()) {
-                    sel.chosen_option = Some(opt.clone());
-                    changed = true;
-                }
-            }
-        }
-        // Insert-if-absent for PROJECT-LEVEL rules. If the user picked an option on a
-        // rule that is not yet in ANY bucket, the three loops above matched nothing —
-        // so the rule never appeared in the selected ruleset ("top table"). For
-        // project-level rules (process / cross-repo) an option pick is an unambiguous
-        // adopt, so we add them here. Repo-local (Selections) rules stay on their
-        // explicit per-repo add flow (which repo would an option-pick target?) and are
-        // intentionally NOT auto-added — `project_level_insert` returns None for them.
         for (rule_id, opt) in chosen.iter() {
-            let already_present = p.ruleset.selections.iter().any(|s| &s.rule_id == rule_id)
-                || p.ruleset.cross_repo.iter().any(|s| &s.rule_id == rule_id)
-                || p.ruleset.process.iter().any(|s| &s.rule_id == rule_id);
-            if already_present {
-                continue;
-            }
-            let Some(corpus_rule) = corpus_for_opt.get(rule_id) else {
-                // The rule id isn't in the corpus (e.g. corpus not loaded yet, or a
-                // custom/unknown id) — we can't classify its scope, so skip.
-                continue;
-            };
-            // `project_level_insert` decides adopt-vs-skip: project-level buckets adopt
-            // (with the project's real repos so the selection survives repos-empty GC);
-            // repo-local and empty-repos cases return None.
-            if let Some((bucket, repos)) =
-                project_level_insert(bucket_of(corpus_rule), &project_repos_for_opt)
-            {
-                let new_sel = RuleSelectionView {
-                    rule_id: rule_id.clone(),
-                    chosen_option: Some(opt.clone()),
-                    repos,
-                };
-                match bucket {
-                    SelectionBucket::Process => p.ruleset.process.push(new_sel),
-                    SelectionBucket::CrossRepo => p.ruleset.cross_repo.push(new_sel),
-                    // Selections never returned by project_level_insert; guard anyway.
-                    SelectionBucket::Selections => continue,
-                }
-                changed = true;
-            }
+            changed |= apply_chosen_option(&mut p, rule_id, opt, &corpus_for_opt);
         }
         if changed {
             let body = build_ruleset_json(&p);
@@ -2644,25 +2658,27 @@ pub(super) fn RulesView() -> Element {
                     let p_t2 = p_owned.clone();
                     let corpus_t1 = corpus.clone();
                     let corpus_t2 = corpus.clone();
+                    // Corpus keyed by rule id — the immediate on_option_picked handler needs it to
+                    // classify the scope of a not-yet-selected rule (so it can ADOPT project-level
+                    // process/cross-repo rules on the pick, not just update existing selections).
+                    let corpus_by_id_modal: std::collections::HashMap<String, ProposedRuleView> =
+                        corpus.iter().map(|r| (r.id.clone(), r.clone())).collect();
                     rsx! {
                         // The modal host is rendered at this subtree root (outside the chorale
                         // tables) to avoid the ghost-click-eater bug. option_picked persists
                         // the chosen option immediately on every pick.
                         RulesDetailModalHost {
                             on_option_picked: move |(rule_id, opt_id): (String, String)| {
-                                // Build a ruleset with the new option applied to the right selection.
+                                // Apply the pick to a fresh copy of the project ruleset. This uses
+                                // the SHARED `apply_chosen_option` transform, so picking an option
+                                // on a project-level (process / cross-repo) rule that is NOT yet in
+                                // the ruleset ADOPTS it (adds it to the right bucket, scoped to the
+                                // project repos) rather than silently dropping it. Previously this
+                                // handler only updated selections that ALREADY existed, so a fresh
+                                // process rule never reached the Project Rules (Applied) table.
                                 let mut p2 = p_modal.clone();
-                                let mut saved = false;
-                                for sel in p2.ruleset.selections.iter_mut()
-                                    .chain(p2.ruleset.cross_repo.iter_mut())
-                                    .chain(p2.ruleset.process.iter_mut())
-                                {
-                                    if sel.rule_id == rule_id {
-                                        sel.chosen_option = Some(opt_id.clone());
-                                        saved = true;
-                                    }
-                                }
-                                if saved {
+                                let changed = apply_chosen_option(&mut p2, &rule_id, &opt_id, &corpus_by_id_modal);
+                                if changed {
                                     let body = build_ruleset_json(&p2);
                                     let pid2 = p2.id.clone();
                                     let mut refresh = refresh;
@@ -2702,7 +2718,7 @@ pub(super) fn RulesView() -> Element {
                             // modal show a stub for every rule. Keying on `corpus.len()`
                             // remounts the table the moment the corpus resolves, re-minting the
                             // rows with their real corpus join. (Table 2's key already does this.)
-                            let t1_key = format!("pt-{}-{}-{}-{}", refresh(), p_owned.ruleset.selections.len(), p_owned.ruleset.cross_repo.len(), corpus.len());
+                            let t1_key = format!("pt-{}-{}-{}-{}-{}", refresh(), p_owned.ruleset.selections.len(), p_owned.ruleset.cross_repo.len(), p_owned.ruleset.process.len(), corpus.len());
                             rsx! {
                                 div {
                                     key: "{t1_key}",
@@ -6555,5 +6571,148 @@ mod render_tests {
         // Real corpus rows render (synchronous prop data, not async).
         assert!(html.contains("SEC-NO-HARDCODED-SECRETS-1"), "a corpus row; html=\n{html}");
         assert!(html.contains("RUST-FMT-1"), "a corpus row; html=\n{html}");
+    }
+
+    // ── Adopt-an-option regression guard (bug: picking a process option in the All
+    //    rules table never showed up in the Project Rules (Applied) table) ──────────
+    //
+    // These two pure/SSR tests, together with the server round-trip test
+    // (`camerata_server::project::tests::adopting_process_option_persists_to_ruleset`),
+    // prove the whole chain: pick → transform adopts the process rule into the ruleset →
+    // persist (server) → Applied table renders it AND the search finds it.
+
+    /// The UI ADOPT-TRANSFORM layer. `apply_chosen_option` is the one shared transform both
+    /// persist paths use. Applying a chosen option to a project whose ruleset does NOT yet
+    /// contain a process rule must ADOPT it into the `process` bucket (scoped to the
+    /// project's repos) with the chosen option — the exact thing that was silently dropped.
+    #[test]
+    fn adopting_process_option_persists_to_ruleset() {
+        let mut project = project_with_selection(); // repos: ["me/api"], process: []
+        assert!(
+            project.ruleset.process.is_empty(),
+            "precondition: no process rule selected yet"
+        );
+        // A PROCESS-scope corpus rule the user opens in the All rules table.
+        let corpus: std::collections::HashMap<String, ProposedRuleView> = [(
+            "PROCESS-BRANCH-NAMING-1".to_string(),
+            proposed_rule("PROCESS-BRANCH-NAMING-1", "Branch naming", "process", "process"),
+        )]
+        .into_iter()
+        .collect();
+
+        let changed =
+            apply_chosen_option(&mut project, "PROCESS-BRANCH-NAMING-1", "b", &corpus);
+
+        assert!(changed, "adopting a fresh process rule mutates the ruleset");
+        assert_eq!(
+            project.ruleset.process.len(),
+            1,
+            "the process rule is adopted into the process bucket"
+        );
+        let sel = &project.ruleset.process[0];
+        assert_eq!(sel.rule_id, "PROCESS-BRANCH-NAMING-1");
+        assert_eq!(
+            sel.chosen_option.as_deref(),
+            Some("b"),
+            "the chosen option is carried onto the adopted selection"
+        );
+        assert_eq!(
+            sel.repos,
+            vec!["me/api".to_string()],
+            "adopted project-level selection is scoped to the project's real repos (survives GC)"
+        );
+        // Idempotent: re-applying the same option is a no-op (no duplicate, no spurious save).
+        let again = apply_chosen_option(&mut project, "PROCESS-BRANCH-NAMING-1", "b", &corpus);
+        assert!(!again, "re-adopting the same option does not report a change");
+        assert_eq!(project.ruleset.process.len(), 1, "no duplicate process selection");
+
+        // Repo-local rules are NEVER auto-adopted from an option pick (no target repo).
+        let repo_local: std::collections::HashMap<String, ProposedRuleView> = [(
+            "RUST-DIOXUS-99".to_string(),
+            proposed_rule("RUST-DIOXUS-99", "Some repo-local rule", "rust", "repo-local"),
+        )]
+        .into_iter()
+        .collect();
+        let adopted_repo_local =
+            apply_chosen_option(&mut project, "RUST-DIOXUS-99", "a", &repo_local);
+        assert!(
+            !adopted_repo_local,
+            "a repo-local rule is not auto-adopted from an option pick"
+        );
+        assert!(
+            project.ruleset.selections.iter().all(|s| s.rule_id != "RUST-DIOXUS-99"),
+            "and it is not added to any bucket"
+        );
+    }
+
+    /// The APPLIED-ROW rendering + SEARCH layer. Once a process rule is in
+    /// `project.ruleset.process`, the Applied table must (1) render a row for it, and
+    /// (2) match it by rule id through the SAME text-filter predicate the search box uses
+    /// (so the user who "searched for it" actually finds it).
+    #[test]
+    fn applied_table_includes_and_finds_process_rules() {
+        // (1) It RENDERS: mount ProjectRulesTable with a process rule in the ruleset.
+        fn harness() -> Element {
+            provide_rule_table_contexts();
+            let mut project = project_with_selection();
+            project.ruleset.process.push(RuleSelectionView {
+                rule_id: "PROCESS-BRANCH-NAMING-1".to_string(),
+                chosen_option: Some("b".to_string()),
+                repos: vec!["me/api".to_string()],
+            });
+            let corpus = vec![proposed_rule(
+                "PROCESS-BRANCH-NAMING-1",
+                "Branch naming",
+                "process",
+                "process",
+            )];
+            let refresh = use_signal(|| 0u32);
+            let goto_repo = use_signal(|| Option::<String>::None);
+            rsx! {
+                ProjectRulesTable { project, corpus, refresh, goto_repo }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("PROCESS-BRANCH-NAMING-1"),
+            "the adopted process rule renders as an Applied-table row; html=\n{html}"
+        );
+
+        // (2) The SEARCH finds it: drive the ACTUAL "Rule" column filter predicate the
+        // search box uses (FilterKind::Text → CellValue::matches_filter(FilterValue::Text)).
+        let process_row = AppliedRuleRow {
+            selection: RuleSelectionView {
+                rule_id: "PROCESS-BRANCH-NAMING-1".to_string(),
+                chosen_option: Some("b".to_string()),
+                repos: vec!["me/api".to_string()],
+            },
+            bucket: SelectionBucket::Process,
+            corpus: Some(proposed_rule(
+                "PROCESS-BRANCH-NAMING-1",
+                "Branch naming",
+                "process",
+                "process",
+            )),
+        };
+        let cols = applied_rule_columns(vec![], vec![], vec![]);
+        let rule_col = cols
+            .iter()
+            .find(|c| c.id == ColumnId("rule"))
+            .expect("the Applied table has a Rule column");
+        let cell = (rule_col.accessor)(&process_row);
+        // The user typed the rule id into the Rule-column search.
+        let query = chorale_core::FilterValue::Text("PROCESS-BRANCH-NAMING-1".to_string());
+        assert!(
+            cell.matches_filter(&query),
+            "searching the Rule column for the process rule id matches its row; cell={cell:?}"
+        );
+        // A case-insensitive substring also matches (the filter lowercases both sides).
+        let partial = chorale_core::FilterValue::Text("branch-naming".to_string());
+        assert!(
+            cell.matches_filter(&partial),
+            "a case-insensitive substring of the rule id also finds the row; cell={cell:?}"
+        );
     }
 }
