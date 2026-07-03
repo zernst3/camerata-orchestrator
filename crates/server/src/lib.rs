@@ -4597,12 +4597,25 @@ async fn onboard_arm(
     save_armed_to_project(&state, &req.rules, &req.custom);
 
     // Only repo-local rules emit into repo files; cross-repo + process rules are
-    // project-level (the gates read them from the project store).
+    // project-level (the gates read them from the project store). Defensively normalize the
+    // leaked single-repo sentinel out of the incoming rules' repos (mapping it to the active
+    // project's real repos) BEFORE the clone loop — shared helper, so no drift with
+    // `resolve_project_arm_rules` / `onboard_apply`.
+    let project_repos = state
+        .projects
+        .active()
+        .map(|p| p.repos)
+        .unwrap_or_default();
     let repo_local: Vec<crate::arm::ArmRule> = req
         .rules
         .iter()
         .filter(|r| r.scope != "cross-repo" && r.scope != "process")
-        .cloned()
+        .map(|r| {
+            let mut r = r.clone();
+            r.repos = normalize_repos(&r.repos, &project_repos);
+            r
+        })
+        .filter(|r| !r.repos.is_empty())
         .collect();
     let mut repos: Vec<String> = repo_local.iter().flat_map(|r| r.repos.clone()).collect();
     repos.sort();
@@ -4653,11 +4666,25 @@ async fn onboard_apply(
     // Source of truth: save the armed ruleset to the active project (create one if none).
     save_armed_to_project(&state, &req.rules, &req.custom);
 
+    // Defensively normalize the leaked single-repo sentinel out of the INCOMING rules'
+    // repos (the UI can POST it directly) BEFORE any clone loop, mapping it to the active
+    // project's real repos. Uses the same helper as `resolve_project_arm_rules` so the two
+    // paths can't drift.
+    let project_repos = state
+        .projects
+        .active()
+        .map(|p| p.repos)
+        .unwrap_or_default();
     let repo_local: Vec<crate::arm::ArmRule> = req
         .rules
         .iter()
         .filter(|r| r.scope != "cross-repo" && r.scope != "process")
-        .cloned()
+        .map(|r| {
+            let mut r = r.clone();
+            r.repos = normalize_repos(&r.repos, &project_repos);
+            r
+        })
+        .filter(|r| !r.repos.is_empty())
         .collect();
     let mut repos: Vec<String> = repo_local.iter().flat_map(|r| r.repos.clone()).collect();
     repos.sort();
@@ -6151,6 +6178,38 @@ async fn emit_to_repos(
     results
 }
 
+/// Defensively normalize a rule's `repos` list against the project's actual repos.
+///
+/// The UI keys a SINGLE-repo scan's selection under an internal sentinel
+/// (`"\u{0}__single_repo__"`, deliberately NUL-prefixed so it can never collide with a
+/// real `owner/repo`). That sentinel is a UI-internal MAP KEY, never a real repo — but a
+/// bug let it leak into a selection's persisted `repos`, from where it reached the emit /
+/// clone path and blew up with `git clone "\0__single_repo__"` ("nul byte found in
+/// provided data").
+///
+/// Any entry that contains a NUL byte is the leaked sentinel: replace it with the
+/// project's actual repos (`project_repos`). The sentinel only ever meant "the
+/// single/default repo", so expanding it to ALL of the project's repos is the safe
+/// fallback (single-repo project → the one repo; multi-repo → all of them). Real
+/// `owner/repo` entries pass through untouched. The result is deduped (order-preserving)
+/// so a sentinel + a real duplicate can't double-emit.
+fn normalize_repos(repos: &[String], project_repos: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(repos.len());
+    for repo in repos {
+        if repo.contains('\0') {
+            // Leaked internal sentinel — never a real repo. Expand to the project's repos.
+            for real in project_repos {
+                if !real.contains('\0') && !out.contains(real) {
+                    out.push(real.clone());
+                }
+            }
+        } else if !out.contains(repo) {
+            out.push(repo.clone());
+        }
+    }
+    out
+}
+
 /// Resolve a project's base selections into emittable rules: the directive comes
 /// from the corpus rule's chosen alternative (or default), or the gateway content
 /// rule's description. The rule-bank is the source; the project stores only the
@@ -6186,7 +6245,7 @@ async fn resolve_project_arm_rules(project: &crate::project::Project) -> Vec<cra
                 enforcement: enforcement.to_string(),
                 scope: "repo-local".to_string(),
                 conformance: None,
-                repos: sel.repos.clone(),
+                repos: normalize_repos(&sel.repos, &project.repos),
             });
             continue;
         }
@@ -6205,9 +6264,12 @@ async fn resolve_project_arm_rules(project: &crate::project::Project) -> Vec<cra
             enforcement: "mechanical".to_string(),
             scope: "repo-local".to_string(),
             conformance: None,
-            repos: sel.repos.clone(),
+            repos: normalize_repos(&sel.repos, &project.repos),
         });
     }
+    // Drop any rule whose repos normalized to empty (a leaked sentinel on a project with
+    // no real repos): it has nowhere to emit and would only be dead weight downstream.
+    out.retain(|r| !r.repos.is_empty());
     out
 }
 
@@ -18162,5 +18224,114 @@ mod tests {
             .expect("repo override persisted");
         assert_eq!(sel.chosen_option.as_deref(), Some("b"));
         assert_eq!(sel.repos, vec!["me/api".to_string()], "scoped to the repo");
+    }
+
+    // ── Single-repo sentinel normalization (fix/rules-single-repo-sentinel) ──────
+
+    /// A leaked single-repo sentinel is replaced by the project's real repos; real repos
+    /// pass through; a mix keeps the reals and expands the sentinel, deduping the result.
+    #[test]
+    fn normalize_repos_replaces_sentinel_keeps_real_and_dedups() {
+        let sentinel = "\u{0}__single_repo__".to_string();
+        let project_repos = vec!["me/api".to_string()];
+
+        // Pure sentinel → the project's single repo.
+        assert_eq!(
+            normalize_repos(&[sentinel.clone()], &project_repos),
+            vec!["me/api".to_string()]
+        );
+
+        // A real repo passes straight through untouched.
+        assert_eq!(
+            normalize_repos(&["owner/repo".to_string()], &project_repos),
+            vec!["owner/repo".to_string()]
+        );
+
+        // Multi-repo project: the sentinel expands to ALL of the project's repos.
+        let multi = vec!["me/api".to_string(), "me/web".to_string()];
+        assert_eq!(
+            normalize_repos(&[sentinel.clone()], &multi),
+            vec!["me/api".to_string(), "me/web".to_string()]
+        );
+
+        // Mixed: sentinel replaced (expanded to project repos), the real one kept, deduped so
+        // the sentinel-expansion of `me/api` doesn't duplicate the explicit `me/api`.
+        assert_eq!(
+            normalize_repos(&["me/api".to_string(), sentinel.clone()], &multi),
+            vec!["me/api".to_string(), "me/web".to_string()],
+        );
+
+        // A sentinel on a project with no real repos normalizes to empty.
+        assert!(normalize_repos(&[sentinel], &[]).is_empty());
+    }
+
+    /// `resolve_project_arm_rules` on a project whose selection carries the nul-byte sentinel
+    /// yields ArmRules targeting the project's REAL repo, never the sentinel. Uses a rule id
+    /// with no corpus/registry entry so the minimal-emit fallback path runs (no corpus file
+    /// needed in the test).
+    #[tokio::test]
+    async fn resolve_project_arm_rules_normalizes_leaked_sentinel() {
+        let sentinel = "\u{0}__single_repo__".to_string();
+        let project: crate::project::Project = serde_json::from_value(serde_json::json!({
+            "id": "p1",
+            "name": "P",
+            "repos": ["me/api"],
+            "ruleset": {
+                "selections": [
+                    { "rule_id": "ZZ-NONCORPUS-RULE-1", "chosen_option": null, "repos": [sentinel] }
+                ]
+            }
+        }))
+        .expect("project deserializes");
+
+        let rules = resolve_project_arm_rules(&project).await;
+        assert_eq!(rules.len(), 1, "the one selection resolves to one ArmRule");
+        assert_eq!(
+            rules[0].repos,
+            vec!["me/api".to_string()],
+            "the sentinel was normalized to the project's real repo"
+        );
+        assert!(
+            !rules[0].repos.iter().any(|r| r.contains('\0')),
+            "no nul-byte sentinel survives into the emit rules"
+        );
+    }
+
+    /// The low-level clone helper rejects a nul-byte repo with the clear error WITHOUT ever
+    /// shelling out to git (which would panic with the opaque "nul byte found in provided data").
+    #[tokio::test]
+    async fn clone_or_pull_rejects_nul_byte_repo() {
+        let tmp = std::env::temp_dir();
+        let res =
+            crate::workspace::clone_or_pull(&tmp, "\u{0}__single_repo__", "unused-token").await;
+        assert!(!res.cloned);
+        assert!(
+            res.detail.contains("internal sentinel leaked"),
+            "clear sentinel error, not an opaque git failure: {}",
+            res.detail
+        );
+    }
+
+    /// `apply_local` likewise bails with the clear error for a nul-byte repo (no git call).
+    #[tokio::test]
+    async fn apply_local_rejects_nul_byte_repo() {
+        let tmp = std::env::temp_dir();
+        let err = crate::workspace::apply_local(
+            &tmp,
+            "\u{0}__single_repo__",
+            None,
+            "camerata/onboard-governance",
+            &[],
+            "msg",
+            "unused-token",
+            true,
+            false,
+        )
+        .await
+        .expect_err("nul-byte repo must be rejected");
+        assert!(
+            err.to_string().contains("internal sentinel leaked"),
+            "clear sentinel error: {err}"
+        );
     }
 }

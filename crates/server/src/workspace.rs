@@ -217,6 +217,18 @@ pub async fn checkout_status_resolved(
 /// resulting status. The token is used only for this network step and is scrubbed
 /// from the persisted remote.
 pub async fn clone_or_pull(root: &Path, repo: &str, token: &str) -> RepoCheckout {
+    // Belt-and-suspenders: a `repo` containing a NUL byte is never a real `owner/repo` — it
+    // is the UI-internal single-repo sentinel (`"\u{0}__single_repo__"`) that leaked into an
+    // emit path. Fail loud + safe here rather than shelling out to `git clone` and getting the
+    // opaque "nul byte found in provided data" panic-message. The server-side `normalize_repos`
+    // should have stripped it upstream; this is the last line of defence.
+    if repo.contains('\0') {
+        return RepoCheckout::error(
+            root,
+            repo,
+            "invalid repo identifier (internal sentinel leaked) — reselect the rule".to_string(),
+        );
+    }
     let dir = repo_dir(root, repo);
     let authed = authed_url(repo, token);
 
@@ -458,6 +470,13 @@ pub async fn apply_local(
     do_branch: bool,
     do_push: bool,
 ) -> anyhow::Result<String> {
+    // Belt-and-suspenders: a `repo` containing a NUL byte is never a real `owner/repo` — it is
+    // the UI-internal single-repo sentinel (`"\u{0}__single_repo__"`) that leaked into the emit
+    // path. Fail loud + safe here (a clear error) instead of shelling out to git and getting the
+    // opaque "nul byte found in provided data" panic-message. `normalize_repos` strips it upstream.
+    if repo.contains('\0') {
+        anyhow::bail!("invalid repo identifier (internal sentinel leaked) — reselect the rule");
+    }
     // The repo must be local. With a workspace root (`clone_root`), clone it into that root if
     // it isn't on disk yet. With a per-repo path override (`clone_root = None`), the folder must
     // already be a local clone — we never clone over an explicitly-chosen path.

@@ -420,15 +420,19 @@ pub(super) fn SuppressionsPanel(project_id: String) -> Element {
 /// Merges the current project's selections with the provided override and
 /// always preserves the custom rules array unchanged.
 pub(super) fn build_ruleset_json(project: &ProjectView) -> serde_json::Value {
+    // Resolve the single-repo sentinel to the project's real repo at THIS persist boundary — it
+    // is a valid internal selection-map key but must never be written into the saved ruleset (it
+    // reaches the server clone path and fails as `git clone "\0__single_repo__"`).
+    let all_repos = &project.repos;
     serde_json::json!({
         "selections": project.ruleset.selections.iter().map(|s| serde_json::json!({
-            "rule_id": s.rule_id, "chosen_option": s.chosen_option, "repos": s.repos
+            "rule_id": s.rule_id, "chosen_option": s.chosen_option, "repos": resolve_selection_repos(&s.repos, all_repos)
         })).collect::<Vec<_>>(),
         "cross_repo": project.ruleset.cross_repo.iter().map(|s| serde_json::json!({
-            "rule_id": s.rule_id, "chosen_option": s.chosen_option, "repos": s.repos
+            "rule_id": s.rule_id, "chosen_option": s.chosen_option, "repos": resolve_selection_repos(&s.repos, all_repos)
         })).collect::<Vec<_>>(),
         "process": project.ruleset.process.iter().map(|s| serde_json::json!({
-            "rule_id": s.rule_id, "chosen_option": s.chosen_option, "repos": s.repos
+            "rule_id": s.rule_id, "chosen_option": s.chosen_option, "repos": resolve_selection_repos(&s.repos, all_repos)
         })).collect::<Vec<_>>(),
         "custom": project.ruleset.custom.iter().map(|c| serde_json::json!({
             "name": c.name, "body": c.body, "domain": c.domain
@@ -3349,6 +3353,37 @@ pub(super) fn selection_key(view_repo: &str) -> String {
     }
 }
 
+/// Translate the single-repo sentinel out of a `repos` list at the persist / emit boundary.
+///
+/// [`SINGLE_REPO_SELECTION_KEY`] is a legitimate INTERNAL map key (it's what lets a
+/// single-repo table's manual picks survive a remount), but it must NEVER be written into
+/// the ruleset that's SAVED to the project or POSTed to the server to emit — it's NUL-prefixed
+/// and reaches the clone path as `git clone "\0__single_repo__"`, which fails with "nul byte
+/// found in provided data".
+///
+/// So at every persist/emit site, resolve any sentinel entry to the project's actual single
+/// repo (`all_repos[0]` when there's exactly one repo — the only case the sentinel is ever
+/// used). If `all_repos` is unexpectedly empty we DROP the sentinel entry rather than persist
+/// it (persisting the raw sentinel is the bug we're fixing). Real `owner/repo` entries pass
+/// through untouched; the result is deduped, order-preserving.
+pub(super) fn resolve_selection_repos(repos: &[String], all_repos: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(repos.len());
+    for repo in repos {
+        if repo == SINGLE_REPO_SELECTION_KEY {
+            // Sentinel → the project's single real repo (its only meaning). Empty all_repos →
+            // drop it (never persist the raw sentinel).
+            if let Some(real) = all_repos.first() {
+                if !out.contains(real) {
+                    out.push(real.clone());
+                }
+            }
+        } else if !out.contains(repo) {
+            out.push(repo.clone());
+        }
+    }
+    out
+}
+
 /// The proposed-rules table with SELECTION (chorale checkboxes) — accept/reject
 /// each rule into the approved starter set.
 ///
@@ -3839,6 +3874,20 @@ pub(super) fn ProposedRulesTable(
                     // wins). The current repo's live table selection is authoritative for it.
                     let live_ids: Vec<String> = handle.selected_ids().iter()
                         .filter_map(|id| id_map.get(id).map(|r| r.id.clone())).collect();
+                    // The project's REAL repos (distinct, non-sentinel) known to this table — used
+                    // to resolve the single-repo sentinel out of the emit payload below. In the
+                    // single-repo case this is exactly the one repo.
+                    let arm_real_repos: Vec<String> = {
+                        let mut seen: Vec<String> = Vec::new();
+                        for r in all_by_id.values() {
+                            for repo in &r.repos {
+                                if repo != SINGLE_REPO_SELECTION_KEY && !seen.contains(repo) {
+                                    seen.push(repo.clone());
+                                }
+                            }
+                        }
+                        seen
+                    };
                     // rule id -> the repos that selected it.
                     let mut rule_repos: std::collections::BTreeMap<String, Vec<String>> = Default::default();
                     if view_repo.is_empty() {
@@ -3887,6 +3936,12 @@ pub(super) fn ProposedRulesTable(
                         // Architect's explicit placement override wins; otherwise arm to the
                         // repos that selected this rule. A rule routed to zero repos is skipped.
                         let target_repos = placement.read().get(&r.id).cloned().unwrap_or_else(|| selected_repos.clone());
+                        // Resolve the single-repo sentinel out of the target repos BEFORE the POST:
+                        // the sentinel is a valid internal selection-map key, but must never be
+                        // sent to emit (it reaches the server clone path as `git clone
+                        // "\0__single_repo__"`). Map it to the project's real repo(s) — the
+                        // distinct non-sentinel repos this table knows about (single-repo → the one).
+                        let target_repos = resolve_selection_repos(&target_repos, &arm_real_repos);
                         // One arm request PER REPO, each carrying THAT repo's chosen directive —
                         // option choices are per-repo, so a rule armed to two repos can adopt a
                         // different alternative in each.
@@ -4685,9 +4740,10 @@ pub(super) fn SingleRuleEditor(
 mod tests {
     use super::{
         applied_rule_columns, apply_repos_to_ruleset, corpus_columns, custom_columns,
-        default_draft, domain_from_rule_id, is_inline_only_rule_id, rule_columns, selection_key,
-        AppliedRuleRow, CellValue, ColumnId, CustomRuleView, ProposedRuleView, RuleOptionView,
-        RuleSelectionView, SelectionBucket, SINGLE_REPO_SELECTION_KEY,
+        default_draft, domain_from_rule_id, is_inline_only_rule_id, resolve_selection_repos,
+        rule_columns, selection_key, AppliedRuleRow, CellValue, ColumnId, CustomRuleView,
+        ProposedRuleView, RuleOptionView, RuleSelectionView, SelectionBucket,
+        SINGLE_REPO_SELECTION_KEY,
     };
 
     /// Find a column by its `ColumnId` string and run its `accessor` against `row`,
@@ -4713,6 +4769,40 @@ mod tests {
     #[test]
     fn selection_key_empty_returns_sentinel() {
         assert_eq!(selection_key(""), SINGLE_REPO_SELECTION_KEY);
+    }
+
+    /// The single-repo sentinel resolves to the project's single real repo at the persist/emit
+    /// boundary; real repos pass through untouched; an empty `all_repos` drops the sentinel
+    /// (never persist the raw NUL-prefixed key, which is the bug being fixed).
+    #[test]
+    fn resolve_selection_repos_translates_sentinel_at_persist_boundary() {
+        let sentinel = SINGLE_REPO_SELECTION_KEY.to_string();
+        let all_repos = vec!["me/api".to_string()];
+
+        // Sentinel → the one real repo.
+        assert_eq!(
+            resolve_selection_repos(&[sentinel.clone()], &all_repos),
+            vec!["me/api".to_string()]
+        );
+
+        // Real repos pass straight through.
+        assert_eq!(
+            resolve_selection_repos(&["owner/repo".to_string()], &all_repos),
+            vec!["owner/repo".to_string()]
+        );
+
+        // Empty all_repos → the sentinel is DROPPED, never persisted.
+        assert!(resolve_selection_repos(&[sentinel.clone()], &[]).is_empty());
+
+        // A real repo alongside the sentinel dedups against the sentinel's expansion.
+        assert_eq!(
+            resolve_selection_repos(&["me/api".to_string(), sentinel], &all_repos),
+            vec!["me/api".to_string()],
+        );
+
+        // The resolved output never carries a NUL byte.
+        let resolved = resolve_selection_repos(&[SINGLE_REPO_SELECTION_KEY.to_string()], &all_repos);
+        assert!(!resolved.iter().any(|r| r.contains('\0')));
     }
 
     #[test]
