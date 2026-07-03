@@ -177,6 +177,21 @@ pub struct UnitOfWork {
     /// Empty for normal (non-design) UoWs. Serde default for back-compat.
     #[serde(default)]
     pub proposed_children: Vec<ProposedChild>,
+    /// Children the AI proposed during design-mode authoring that were DROPPED because
+    /// their `node_type` is not allowed under this node's type per the project's
+    /// hierarchy schema. Persisted alongside `proposed_children` (the KEPT set) so the
+    /// Design Canvas can render the drop as a visible outcome instead of silently
+    /// showing nothing. Empty for normal (non-design) UoWs and whenever no child was
+    /// dropped. Serde default for back-compat.
+    #[serde(default)]
+    pub dropped_children: Vec<ProposedChild>,
+    /// The per-node repo assignment for design publish: the `owner/repo` targets this
+    /// node's issue should be created in. Empty means "not chosen yet", in which case
+    /// publish falls back to the design's project repos. Set via
+    /// `POST /api/uow/:id/publish-repos`. Empty for normal (non-design) UoWs. Serde
+    /// default for back-compat.
+    #[serde(default)]
+    pub publish_repos: Vec<String>,
     /// `true` when this UoW is the ROOT of a Design-Canvas design tree — i.e. it was
     /// created via [`UowStore::create_blank_design`] with NO `draft_parent_id`.
     ///
@@ -1736,11 +1751,27 @@ impl UowStore {
     }
 
     /// Replace the proposed children on a design node. Called after the design-mode
-    /// author endpoint parses the AI's response. Persists immediately.
+    /// author endpoint parses the AI's response. Clears any previously-dropped set (a
+    /// fresh author turn recomputes both). Persists immediately.
     pub fn set_proposed_children(
         &self,
         story_id: &str,
         children: Vec<ProposedChild>,
+    ) -> UnitOfWork {
+        self.set_proposed_and_dropped_children(story_id, children, Vec::new())
+    }
+
+    /// Replace BOTH the kept (`proposed_children`) and dropped (`dropped_children`) sets
+    /// on a design node in one write. The design-mode author endpoint computes the
+    /// dropped set (children whose `node_type` is not allowed under this node's type) and
+    /// the kept set (the remainder) and persists them together so the Design Canvas can
+    /// render the drop as a visible outcome rather than showing nothing. Persists
+    /// immediately.
+    pub fn set_proposed_and_dropped_children(
+        &self,
+        story_id: &str,
+        proposed: Vec<ProposedChild>,
+        dropped: Vec<ProposedChild>,
     ) -> UnitOfWork {
         let now = Self::now_rfc3339();
         let updated = {
@@ -1752,7 +1783,30 @@ impl UowStore {
                     authoring: Some(AuthoringState::default()),
                     ..Default::default()
                 });
-            uow.proposed_children = children;
+            uow.proposed_children = proposed;
+            uow.dropped_children = dropped;
+            uow.updated = now;
+            uow.clone()
+        };
+        self.flush();
+        updated
+    }
+
+    /// Replace the per-node publish repo assignment (`owner/repo` targets). An empty list
+    /// means "not chosen yet"; publish then falls back to the design's project repos.
+    /// Creates the UoW if needed. Returns the updated UoW. Persists immediately.
+    pub fn set_publish_repos(&self, story_id: &str, repos: Vec<String>) -> UnitOfWork {
+        let now = Self::now_rfc3339();
+        let updated = {
+            let mut map = self.mem.lock().expect("uow mutex poisoned");
+            let uow = map
+                .entry(story_id.to_string())
+                .or_insert_with(|| UnitOfWork {
+                    story_id: story_id.to_string(),
+                    authoring: Some(AuthoringState::default()),
+                    ..Default::default()
+                });
+            uow.publish_repos = repos;
             uow.updated = now;
             uow.clone()
         };

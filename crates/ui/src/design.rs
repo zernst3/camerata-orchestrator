@@ -18,6 +18,14 @@ struct DesignNode {
     draft_parent_id: Option<String>,
     #[serde(default)]
     proposed_children: Vec<ProposedChild>,
+    /// Children the AI proposed that were DROPPED as schema-invalid under this node's type.
+    /// Rendered as a visible warning so a drop is never silent (mirrors the server field).
+    #[serde(default)]
+    dropped_children: Vec<ProposedChild>,
+    /// The per-node publish repo assignment (`owner/repo`). Empty means "not chosen yet";
+    /// publish falls back to the project repos.
+    #[serde(default)]
+    publish_repos: Vec<String>,
     #[serde(default)]
     authoring: Option<Authoring>,
 }
@@ -191,10 +199,13 @@ async fn api_design_delete_node(root_id: &str, node_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-async fn api_design_publish(root_id: &str, repo: &str) -> (bool, String) {
+/// Publish the whole design tree. Sends an EMPTY body: the server reads each node's own
+/// `publish_repos` assignment (falling back to the project repos), so no repo is passed
+/// from the UI. Returns `(ok, human-readable message)`.
+async fn api_design_publish(root_id: &str) -> (bool, String) {
     let v: serde_json::Value = match reqwest::Client::new()
         .post(format!("{}/api/designs/{}/publish", crate::bff_base(), root_id))
-        .json(&serde_json::json!({ "repo": repo }))
+        .json(&serde_json::json!({}))
         .send()
         .await
         .ok()
@@ -245,6 +256,38 @@ async fn api_active_project_id() -> Option<String> {
         .get("id")
         .and_then(|v| v.as_str())
         .map(String::from)
+}
+
+/// Fetch the active project's connected repos. Resolves the active project via
+/// `GET /api/projects/active` (which returns the full project including `repos`) and reads
+/// its `repos` array. Returns an empty vec when there is no active project or on any error.
+/// `_project_id` is accepted so callers can pass the resolved id; the active-project
+/// endpoint is authoritative for the repo list.
+async fn fetch_project_repos(_project_id: &str) -> Vec<String> {
+    let active: serde_json::Value =
+        match reqwest::get(format!("{}/api/projects/active", crate::bff_base()))
+            .await
+            .ok()
+        {
+            Some(r) => r.json().await.unwrap_or_default(),
+            None => return Vec::new(),
+        };
+    active
+        .get("repos")
+        .and_then(|r| serde_json::from_value(r.clone()).ok())
+        .unwrap_or_default()
+}
+
+/// `POST /api/uow/:id/publish-repos` `{ repos: [...] }` → set a node's per-node publish
+/// repo assignment. Returns `true` on a 2xx response, `false` otherwise.
+async fn api_set_publish_repos(node_id: &str, repos: Vec<String>) -> bool {
+    reqwest::Client::new()
+        .post(format!("{}/api/uow/{}/publish-repos", crate::bff_base(), node_id))
+        .json(&serde_json::json!({ "repos": repos }))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
 }
 
 /// `GET /api/projects/:id/designs` → the project's saved designs (server sorts newest-first,
@@ -725,12 +768,47 @@ fn DesignNodeAuthorPanel(
     let draft_title = authoring.draft_title.clone();
     let draft_body = authoring.draft_body.clone();
     let proposed = node.proposed_children.clone();
+    let dropped = node.dropped_children.clone();
+    let node_publish_repos = node.publish_repos.clone();
 
     let mut message = use_signal(String::new);
     let mut sending = use_signal(|| false);
-    let mut publish_repo = use_signal(String::new);
     let mut publishing = use_signal(|| false);
     let mut pub_msg = use_signal(String::new);
+
+    // The active project's connected repos + its hierarchy schema — drive the per-node
+    // repo assignment and the no-children leaf/atomic distinction respectively.
+    let project_repos_res = use_resource(move || async move {
+        match api_active_project_id().await {
+            Some(pid) => fetch_project_repos(&pid).await,
+            None => Vec::new(),
+        }
+    });
+    let project_repos = project_repos_res.read().clone().unwrap_or_default();
+
+    let schema_res = use_resource(move || async move { api_fetch_active_hierarchy().await });
+    let schema = schema_res.read().clone().flatten().unwrap_or_default();
+
+    // The whole design tree — used only to derive the read-only publish summary
+    // ("Publishes N nodes across: repoA (x nodes), ..."). Re-fetched when the root changes.
+    let tree_root = root_id.clone();
+    let tree_res = use_resource(move || {
+        let rid = tree_root.clone();
+        async move { api_fetch_design_nodes(&rid).await }
+    });
+    let tree_nodes = tree_res.read().clone().unwrap_or_default();
+
+    // The child types the schema allows under this node's type (drives the no-children
+    // messaging: a leaf type has none, a non-leaf type has at least one).
+    let allowed_here = schema.allowed_children(&node_type);
+
+    // A node whose per-node list is empty defaults to "all project repos" (matching the
+    // publish fallback). Bumped after each toggle-save to re-read the persisted selection.
+    let selected_repos: Vec<String> = if node_publish_repos.is_empty() {
+        project_repos.clone()
+    } else {
+        node_publish_repos.clone()
+    };
 
     // Clones needed because node_id is moved into two separate closures.
     let node_id_kd = node_id.clone();
@@ -823,7 +901,10 @@ fn DesignNodeAuthorPanel(
                 }
             }
 
-            // Proposed children section
+            // Proposed children outcome — ALWAYS visible. One of three states:
+            //   1. children proposed  → the click-through list + Materialize button
+            //   2. children dropped   → a warning naming each dropped type + the allowed set
+            //   3. none of either     → a leaf-vs-atomic explanation off the schema
             if !proposed.is_empty() {
                 div { class: "design-proposed-section",
                     p { class: "section-label", "Proposed children" }
@@ -883,45 +964,172 @@ fn DesignNodeAuthorPanel(
                         }
                     }
                 }
+            } else if !dropped.is_empty() {
+                {
+                    // State 2: the AI proposed children, but they were invalid under this
+                    // node's type and were dropped. Name each so the drop is never silent.
+                    let dropped_list = dropped
+                        .iter()
+                        .map(|c| {
+                            let title = if c.title.is_empty() { "(untitled)" } else { c.title.as_str() };
+                            format!("{}: {}", c.node_type, title)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let allowed_str = if allowed_here.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        allowed_here.join(", ")
+                    };
+                    let count = dropped.len();
+                    rsx! {
+                        div { class: "design-proposed-section design-proposed-dropped",
+                            p { class: "section-label", "Proposed children" }
+                            p { class: "ws-hint",
+                                "The AI proposed {count} child story(ies), but they were not valid "
+                                "under this {node_type} and were dropped: {dropped_list}. "
+                                "Allowed child types here: [{allowed_str}]."
+                            }
+                        }
+                    }
+                }
+            } else {
+                {
+                    // State 3: nothing proposed and nothing dropped. Distinguish a leaf type
+                    // (schema defines no children) from an atomic judgement on a non-leaf.
+                    let is_leaf = allowed_here.is_empty();
+                    let allowed_str = allowed_here.join(", ");
+                    rsx! {
+                        div { class: "design-proposed-section design-proposed-none",
+                            p { class: "section-label", "Proposed children" }
+                            if is_leaf {
+                                p { class: "ws-hint",
+                                    "This is a leaf-level {node_type}; your hierarchy defines no "
+                                    "child types under it, so no children are expected."
+                                }
+                            } else {
+                                p { class: "ws-hint",
+                                    "The AI proposed no child stories for this node (it judged the "
+                                    "work atomic). Use + Add child to add one manually if you want "
+                                    "to break it down. Allowed child types: [{allowed_str}]."
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Assign-to-repos section: one checkbox per project repo. Initialized from the
+            // node's `publish_repos` (empty = all project repos, matching the publish
+            // fallback). Toggling auto-saves via POST /api/uow/:id/publish-repos + refreshes.
+            if !project_repos.is_empty() {
+                div { class: "design-assign-repos-section",
+                    p { class: "section-label", "Assign to repos" }
+                    p { class: "ws-hint",
+                        "This node's issue is created in each checked repo. Leave all checked "
+                        "to publish everywhere this project is connected."
+                    }
+                    div { class: "design-assign-repos",
+                        for repo in project_repos.iter() {
+                            {
+                                let repo = repo.clone();
+                                let checked = selected_repos.iter().any(|r| r == &repo);
+                                let current = selected_repos.clone();
+                                let nid = node.story_id.clone();
+                                rsx! {
+                                    label { class: "design-assign-repo",
+                                        input {
+                                            r#type: "checkbox",
+                                            checked,
+                                            onchange: move |_| {
+                                                // Toggle this repo in the node's selection, then persist.
+                                                let mut next: Vec<String> = current.clone();
+                                                if let Some(pos) = next.iter().position(|r| r == &repo) {
+                                                    next.remove(pos);
+                                                } else {
+                                                    next.push(repo.clone());
+                                                }
+                                                let nid = nid.clone();
+                                                spawn(async move {
+                                                    api_set_publish_repos(&nid, next).await;
+                                                    on_refresh.call(());
+                                                });
+                                            },
+                                        }
+                                        span { "{repo}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // Publish section
-            div { class: "design-publish-section",
-                p { class: "section-label", "Publish tree to GitHub" }
-                p { class: "ws-hint",
-                    "Creates GitHub issues for every node top-down, links sub-issues, and applies type labels."
-                }
-                div { class: "design-publish-row",
-                    input {
-                        class: "design-input",
-                        placeholder: "owner/repo",
-                        value: "{publish_repo}",
-                        oninput: move |e| publish_repo.set(e.value()),
-                    }
-                    button {
-                        class: "btn-run",
-                        disabled: publishing(),
-                        onclick: move |_| {
-                            let repo = publish_repo().trim().to_string();
-                            if repo.is_empty() { return; }
-                            let root = root_id.clone();
-                            publishing.set(true);
-                            pub_msg.set(String::new());
-                            spawn(async move {
-                                let (ok, msg) = api_design_publish(&root, &repo).await;
-                                publishing.set(false);
-                                pub_msg.set(if ok {
-                                    msg
-                                } else {
-                                    format!("Error: {msg}")
-                                });
-                            });
-                        },
-                        if publishing() { "Publishing…" } else { "Publish all" }
+            {
+                // Read-only summary of where the whole tree will publish, derived from every
+                // node's effective repo selection (its own list, or all project repos when
+                // empty — the same fallback the server applies).
+                let mut counts: Vec<(String, usize)> = Vec::new();
+                for n in tree_nodes.iter() {
+                    let eff = if n.publish_repos.is_empty() {
+                        project_repos.clone()
+                    } else {
+                        n.publish_repos.clone()
+                    };
+                    for r in eff {
+                        match counts.iter_mut().find(|(name, _)| name == &r) {
+                            Some((_, c)) => *c += 1,
+                            None => counts.push((r, 1)),
+                        }
                     }
                 }
-                if !pub_msg().is_empty() {
-                    p { class: "ws-hint", "{pub_msg}" }
+                let node_count = tree_nodes.len();
+                let summary = if counts.is_empty() {
+                    "No repos assigned yet. Check a repo above (or connect repos to the project) to publish.".to_string()
+                } else {
+                    let parts = counts
+                        .iter()
+                        .map(|(r, c)| format!("{r} ({c} node(s))"))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("Publishes {node_count} node(s) across: {parts}")
+                };
+                let can_publish = !counts.is_empty();
+                let root = root_id.clone();
+                rsx! {
+                    div { class: "design-publish-section",
+                        p { class: "section-label", "Publish tree to GitHub" }
+                        p { class: "ws-hint",
+                            "Creates GitHub issues for every node in its assigned repos, links "
+                            "sub-issues within a repo, and applies type labels."
+                        }
+                        p { class: "ws-hint", "{summary}" }
+                        div { class: "design-publish-row",
+                            button {
+                                class: "btn-run",
+                                disabled: publishing() || !can_publish,
+                                onclick: move |_| {
+                                    let root = root.clone();
+                                    publishing.set(true);
+                                    pub_msg.set(String::new());
+                                    spawn(async move {
+                                        let (ok, msg) = api_design_publish(&root).await;
+                                        publishing.set(false);
+                                        pub_msg.set(if ok {
+                                            msg
+                                        } else {
+                                            format!("Error: {msg}")
+                                        });
+                                    });
+                                },
+                                if publishing() { "Publishing…" } else { "Publish all" }
+                            }
+                        }
+                        if !pub_msg().is_empty() {
+                            p { class: "ws-hint", "{pub_msg}" }
+                        }
+                    }
                 }
             }
 
@@ -1108,6 +1316,7 @@ mod tests {
                             draft_body: String::new(),
                             chat: vec![],
                         }),
+                        ..Default::default()
                     },
                     root_id: "draft-abc".to_string(),
                     on_refresh: |_| {},
@@ -1120,7 +1329,16 @@ mod tests {
         assert!(html.contains("Epic"), "node type renders");
         assert!(html.contains("Checkout Revamp"), "draft title renders");
         assert!(html.contains("Publish tree to GitHub"), "publish section renders");
-        assert!(!html.contains("Proposed children"), "proposed section hidden when proposed_children is empty");
+        // The proposed-children outcome is now ALWAYS visible: with neither proposed nor
+        // dropped children the panel renders the no-children explanation (never silent).
+        assert!(
+            html.contains("Proposed children"),
+            "proposed-children outcome section always renders"
+        );
+        assert!(
+            html.contains("no children are expected") || html.contains("judged the work atomic"),
+            "no-children state explains leaf-vs-atomic instead of showing nothing"
+        );
     }
 
     // ── Tier 2: contract regression tests (wiremock) ─────────────────────────────
@@ -1170,7 +1388,7 @@ mod tests {
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let (ok, msg) = super::api_design_publish("root-1", "owner/repo").await;
+        let (ok, msg) = super::api_design_publish("root-1").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok, "nodes present => success");
@@ -1194,6 +1412,7 @@ mod tests {
                             },
                         ],
                         authoring: None,
+                        ..Default::default()
                     },
                     root_id: "draft-root".to_string(),
                     on_refresh: |_| {},
@@ -1209,6 +1428,40 @@ mod tests {
             "proposed child body is displayed in rendered HTML"
         );
         assert!(html.contains("Materialize 1 child"), "materialize button renders");
+    }
+
+    #[test]
+    fn design_node_author_panel_renders_dropped_children_warning() {
+        // No proposed children, but some were dropped as schema-invalid: the panel must
+        // render a visible warning naming each dropped type rather than showing nothing.
+        fn harness() -> Element {
+            rsx! {
+                DesignNodeAuthorPanel {
+                    node: DesignNode {
+                        story_id: "draft-root".to_string(),
+                        node_type: Some("Epic".to_string()),
+                        draft_parent_id: None,
+                        proposed_children: vec![],
+                        dropped_children: vec![
+                            ProposedChild {
+                                node_type: "Story".to_string(),
+                                title: "Login form".to_string(),
+                                body: String::new(),
+                            },
+                        ],
+                        authoring: None,
+                        ..Default::default()
+                    },
+                    root_id: "draft-root".to_string(),
+                    on_refresh: |_| {},
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("were dropped"), "dropped-children warning renders");
+        assert!(html.contains("Story: Login form"), "each dropped child is named");
     }
 
     // ── Designs-persistence: saved-designs list ──────────────────────────────────

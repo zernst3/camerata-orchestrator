@@ -862,6 +862,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/uow/:story_id", get(uow_get).delete(uow_delete))
         .route("/api/uow/:story_id/status", post(uow_set_status))
         .route("/api/uow/:story_id/branch", post(uow_set_branch))
+        .route("/api/uow/:story_id/publish-repos", post(uow_set_publish_repos))
         .route("/api/uow/:story_id/history", post(uow_append_history))
         // ── 3-phase cockpit state (#104 / #105) ───────────────────────────────
         .route("/api/uow/:story_id/intake/context", post(uow_set_intake_context))
@@ -9448,13 +9449,25 @@ async fn design_author(
         }
     };
 
-    // Strip any proposed children whose node_type is not in the allowed list (schema guard).
-    if !allowed_child_types.is_empty() {
-        proposed.retain(|c| allowed_child_types.contains(&c.node_type));
-    }
+    // Partition the proposed children into KEPT (node_type allowed under this node's
+    // type) and DROPPED (schema-invalid). Both are persisted so the Design Canvas can
+    // render the drop as a visible outcome instead of silently showing nothing. When no
+    // child types are allowed at all (leaf node type, or unknown type) nothing is
+    // dropped as invalid here; the empty-proposed leaf/atomic case is surfaced in the UI.
+    let dropped: Vec<crate::uow::ProposedChild> = if allowed_child_types.is_empty() {
+        Vec::new()
+    } else {
+        let (kept, dropped): (Vec<_>, Vec<_>) = proposed
+            .drain(..)
+            .partition(|c| allowed_child_types.contains(&c.node_type));
+        proposed = kept;
+        dropped
+    };
 
     state.uow.append_authoring_turn(&id, &message, &reply, &title, &body);
-    let updated = state.uow.set_proposed_children(&id, proposed);
+    let updated = state
+        .uow
+        .set_proposed_and_dropped_children(&id, proposed, dropped);
     Ok(Json(updated))
 }
 
@@ -9539,37 +9552,105 @@ async fn design_delete_node(
     Json(serde_json::json!({ "ok": true, "removed": removed }))
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Default)]
 struct DesignPublishReq {
-    /// The target repo (`owner/repo`).
-    repo: String,
+    /// An OPTIONAL explicit fallback override: the `owner/repo` targets used for any node
+    /// whose own `publish_repos` is empty. When this is also empty, publish falls back to
+    /// the design's PROJECT repos. Per-node `publish_repos` always take precedence over
+    /// this fallback.
+    #[serde(default)]
+    repos: Vec<String>,
 }
 
-/// `POST /api/designs/:id/publish` -- batch top-down publish of the design tree.
+/// One concrete publish step produced by [`plan_design_publish`]: create the node's
+/// issue in `repo`, and (when `link_to_parent`) link it as a sub-issue of its parent's
+/// already-published issue IN THAT SAME repo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PublishAction {
+    /// The `owner/repo` target this action creates the issue in.
+    repo: String,
+    /// The design node's draft story_id this action publishes.
+    node_story_id: String,
+    /// `true` iff this node has a `draft_parent_id` AND that parent's effective repos also
+    /// contain `repo` (so a sub-issue link is possible in this repo). `false` for a root, or
+    /// for a node whose parent does not live in this repo (standalone publish, not a warning).
+    link_to_parent: bool,
+}
+
+/// Pure, unit-testable publish planner. GitHub I/O stays OUT of this function.
 ///
-/// Walks the tree rooted at `:id` in BFS order (parents before children). For each
-/// node, creates a GitHub issue, applies a `type:<name>` label, and creates a native
-/// sub-issue link to the parent. Fail-soft per link: a failed sub-issue link is
-/// collected as a warning, not a publish failure. Returns
-/// `{ "nodes": ["owner/repo#N", ...], "warnings": [...] }`.
+/// For each repo `R` in the union of every node's effective repos, walk `tree` in its
+/// given order (BFS: parents precede children) and emit a [`PublishAction`] for every
+/// node whose effective repos contain `R`. `link_to_parent` is `true` iff the node has a
+/// `draft_parent_id` AND that parent's effective repos ALSO contain `R` — so a child that
+/// targets a repo its parent does not live in publishes STANDALONE in that repo (not a
+/// warning). Within a repo, a parent's action always precedes its child's (guaranteed by
+/// the BFS order of `tree`).
+fn plan_design_publish(
+    tree: &[crate::uow::UnitOfWork],
+    effective: impl Fn(&crate::uow::UnitOfWork) -> Vec<String>,
+) -> Vec<PublishAction> {
+    // Precompute each node's effective repos + a story_id -> effective-repos map for the
+    // parent-membership check.
+    let eff: std::collections::HashMap<String, Vec<String>> = tree
+        .iter()
+        .map(|n| (n.story_id.clone(), effective(n)))
+        .collect();
+
+    // The union of every node's effective repos, in first-seen order (stable output).
+    let mut repos_ordered: Vec<String> = Vec::new();
+    for n in tree {
+        for r in eff.get(&n.story_id).into_iter().flatten() {
+            if !repos_ordered.contains(r) {
+                repos_ordered.push(r.clone());
+            }
+        }
+    }
+
+    let mut actions: Vec<PublishAction> = Vec::new();
+    for repo in &repos_ordered {
+        for node in tree {
+            let node_repos = eff.get(&node.story_id).cloned().unwrap_or_default();
+            if !node_repos.iter().any(|r| r == repo) {
+                continue;
+            }
+            let link_to_parent = node
+                .draft_parent_id
+                .as_deref()
+                .and_then(|pid| eff.get(pid))
+                .is_some_and(|prepos| prepos.iter().any(|r| r == repo));
+            actions.push(PublishAction {
+                repo: repo.clone(),
+                node_story_id: node.story_id.clone(),
+                link_to_parent,
+            });
+        }
+    }
+    actions
+}
+
+/// `POST /api/designs/:id/publish` -- per-node, multi-repo publish of the design tree.
+///
+/// Each node carries its own `publish_repos` assignment (the project's connected repos it
+/// targets). A node with an empty assignment falls back to the request's `repos` override
+/// or, failing that, the design's PROJECT repos. [`plan_design_publish`] turns this into a
+/// flat list of [`PublishAction`]s (parents before children within each repo); the handler
+/// executes them, creating each node's issue in each of its repos and linking sub-issues
+/// only where BOTH the node and its parent were published in the SAME repo. A child that
+/// targets a repo its parent does not live in publishes STANDALONE there (not a warning).
+/// Returns `{ "nodes": ["owner/repo#N", ...], "warnings": [...] }`.
 async fn design_publish(
     State(state): State<AppState>,
     Path(design_id): Path<String>,
     Json(req): Json<DesignPublishReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let coord = camerata_worktracker::RepoCoord::parse(&req.repo).ok_or_else(|| {
-        AppError(anyhow::anyhow!(
-            "repo must be `owner/repo`, got `{}`",
-            req.repo
-        ))
-    })?;
     let token = state.github_token().ok_or_else(|| {
         AppError(anyhow::anyhow!(
             "Connect GitHub (set CAMERATA_GITHUB_TOKEN) to publish the design to the board."
         ))
     })?;
 
-    // Walk the tree in BFS order (parents always processed before children).
+    // Walk the tree in BFS order (parents always processed before children per repo).
     let tree = state.uow.list_design_tree(&design_id);
     if tree.is_empty() {
         return Err(AppError(anyhow::anyhow!(
@@ -9577,18 +9658,65 @@ async fn design_publish(
         )));
     }
 
-    // Map: draft_story_id -> published issue number (used to resolve draft_parent_id).
-    let mut published_numbers: std::collections::HashMap<String, u64> =
+    // The fallback repo set for any node with an empty `publish_repos`: the request's
+    // explicit override when present, else the design's PROJECT repos (resolved from the
+    // root's `project_id`).
+    let project_repos: Vec<String> = if !req.repos.is_empty() {
+        req.repos.clone()
+    } else {
+        tree.first()
+            .and_then(|root| root.project_id.clone())
+            .and_then(|pid| state.projects.get(&pid))
+            .map(|p| p.repos)
+            .unwrap_or_default()
+    };
+    if project_repos.is_empty() && tree.iter().all(|n| n.publish_repos.is_empty()) {
+        return Err(AppError(anyhow::anyhow!(
+            "no repos to publish into: assign repos per node, pass `repos`, or connect repos to the project"
+        )));
+    }
+
+    // Effective repos for a node: its own assignment, or the project fallback.
+    let fallback = project_repos.clone();
+    let plan = plan_design_publish(&tree, |node| {
+        if node.publish_repos.is_empty() {
+            fallback.clone()
+        } else {
+            node.publish_repos.clone()
+        }
+    });
+
+    // A quick lookup from draft story_id -> node for authoring/attachments/labels.
+    let by_id: std::collections::HashMap<&str, &crate::uow::UnitOfWork> =
+        tree.iter().map(|n| (n.story_id.as_str(), n)).collect();
+
+    // (repo, node_story_id) -> published issue number, for in-repo sub-issue linking.
+    let mut published: std::collections::HashMap<(String, String), u64> =
         std::collections::HashMap::new();
     let mut node_refs: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+    // Nodes we linked a work item for already (link once per node, at first success).
+    let mut linked: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for node in &tree {
+    for action in &plan {
+        let Some(node) = by_id.get(action.node_story_id.as_str()) else {
+            continue;
+        };
+        let coord = match camerata_worktracker::RepoCoord::parse(&action.repo) {
+            Some(c) => c,
+            None => {
+                warnings.push(format!(
+                    "node `{}` skipped in `{}`: repo must be `owner/repo`",
+                    node.story_id, action.repo
+                ));
+                continue;
+            }
+        };
         let authoring = node.authoring.clone().unwrap_or_default();
         if authoring.draft_title.trim().is_empty() {
             warnings.push(format!(
-                "node `{}` skipped: no drafted title",
-                node.story_id
+                "node `{}` skipped in `{}`: no drafted title",
+                node.story_id, action.repo
             ));
             continue;
         }
@@ -9629,51 +9757,61 @@ async fn design_publish(
             .await
             {
                 warnings.push(format!(
-                    "#{number}: label `{label}` could not be applied: {e}"
+                    "{}#{number}: label `{label}` could not be applied: {e}",
+                    action.repo
                 ));
             }
         }
 
-        // Sub-issue link to parent (fail-soft).
+        // Sub-issue link to parent, only when the plan says the parent lives in THIS repo.
         // `link_sub_issue` needs the parent's issue NUMBER and the child's DATABASE id.
-        // The parent number comes from `published_numbers`; the child db_id from creation.
-        if let Some(ref parent_draft_id) = node.draft_parent_id {
-            if let Some(&parent_number) = published_numbers.get(parent_draft_id) {
-                if let Err(e) = crate::github_issues::link_sub_issue(
-                    &coord.owner,
-                    &coord.repo,
-                    parent_number,
-                    child_db_id,
-                    &token,
-                )
-                .await
+        if action.link_to_parent {
+            if let Some(parent_draft_id) = node.draft_parent_id.as_deref() {
+                if let Some(&parent_number) =
+                    published.get(&(action.repo.clone(), parent_draft_id.to_string()))
                 {
-                    warnings.push(format!(
-                        "#{number}: sub-issue link to #{parent_number} failed: {e}"
-                    ));
+                    if let Err(e) = crate::github_issues::link_sub_issue(
+                        &coord.owner,
+                        &coord.repo,
+                        parent_number,
+                        child_db_id,
+                        &token,
+                    )
+                    .await
+                    {
+                        warnings.push(format!(
+                            "{}#{number}: sub-issue link to #{parent_number} failed: {e}",
+                            action.repo
+                        ));
+                    }
                 }
             }
         }
 
-        // Upsert the story onto the canonical spine.
+        // Upsert the story onto the canonical spine (per repo it was created in).
         let story = crate::github_issues::issue_to_story(
-            &req.repo,
+            &action.repo,
             number,
             &authoring.draft_title,
             &node_issue_body,
         );
         let work_item_story_id = story.id.clone();
         state.stories.upsert(story).await.map_err(AppError)?;
-        state.uow.link_work_item(&node.story_id, &work_item_story_id);
+        // Link the work item onto the UoW once (first successful action for this node).
+        if linked.insert(node.story_id.clone()) {
+            state.uow.link_work_item(&node.story_id, &work_item_story_id);
+        }
 
-        published_numbers.insert(node.story_id.clone(), number);
-        node_refs.push(format!("{}#{number}", req.repo));
+        published.insert((action.repo.clone(), node.story_id.clone()), number);
+        node_refs.push(format!("{}#{number}", action.repo));
     }
 
-    // Mark the design root as published now that the tree was published to the board.
-    // Best-effort: no-op if `design_id` is not a design root (e.g. a legacy tree whose
-    // root predates the marker), so a successful publish is never turned into an error.
-    state.uow.set_design_status(&design_id, "published");
+    // Mark the design root as published when at least one action succeeded. Best-effort:
+    // no-op if `design_id` is not a design root (e.g. a legacy tree whose root predates
+    // the marker), so a successful publish is never turned into an error.
+    if !node_refs.is_empty() {
+        state.uow.set_design_status(&design_id, "published");
+    }
 
     Ok(Json(serde_json::json!({
         "nodes": node_refs,
@@ -9823,6 +9961,24 @@ async fn uow_set_branch(
 ) -> Json<crate::uow::UnitOfWork> {
     state.uow.set_branch(&story_id, req.branch);
     Json(state.uow.get_or_create(&story_id))
+}
+
+#[derive(serde::Deserialize)]
+struct UowPublishReposReq {
+    /// The `owner/repo` targets this node's issue should be published into. Empty means
+    /// "not chosen yet" and publish falls back to the design's project repos.
+    #[serde(default)]
+    repos: Vec<String>,
+}
+
+/// `POST /api/uow/:story_id/publish-repos` body `{ repos: [...] }` — set the per-node
+/// publish repo assignment used by design publish. Returns the updated UoW.
+async fn uow_set_publish_repos(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    Json(req): Json<UowPublishReposReq>,
+) -> Json<crate::uow::UnitOfWork> {
+    Json(state.uow.set_publish_repos(&story_id, req.repos))
 }
 
 #[derive(serde::Deserialize)]
@@ -17662,6 +17818,113 @@ mod tests {
         assert!(
             !prompt.contains("best represents this work item"),
             "synthesized instruction NOT used when the user typed one"
+        );
+    }
+
+    // ── Design publish planner unit tests ────────────────────────────────────
+
+    /// Build a design UoW node with a story_id, optional draft parent, and a per-node
+    /// `publish_repos` assignment. Everything else is defaulted.
+    fn plan_node(story_id: &str, parent: Option<&str>, repos: &[&str]) -> crate::uow::UnitOfWork {
+        crate::uow::UnitOfWork {
+            story_id: story_id.to_string(),
+            draft_parent_id: parent.map(String::from),
+            publish_repos: repos.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// The effective-repos closure the handler uses: the node's own `publish_repos`, or
+    /// the given project fallback when the node's list is empty.
+    fn eff_with_fallback(
+        fallback: Vec<String>,
+    ) -> impl Fn(&crate::uow::UnitOfWork) -> Vec<String> {
+        move |n: &crate::uow::UnitOfWork| {
+            if n.publish_repos.is_empty() {
+                fallback.clone()
+            } else {
+                n.publish_repos.clone()
+            }
+        }
+    }
+
+    #[test]
+    fn plan_design_publish_cross_repo_child_publishes_standalone() {
+        // (a) epic in [A], childUI in [A], childApi in [B].
+        let tree = vec![
+            plan_node("epic", None, &["A"]),
+            plan_node("childUI", Some("epic"), &["A"]),
+            plan_node("childApi", Some("epic"), &["B"]),
+        ];
+        let actions = plan_design_publish(&tree, eff_with_fallback(vec![]));
+
+        // Repo A: epic (no parent) then childUI (links to epic, same repo).
+        let a: Vec<_> = actions.iter().filter(|x| x.repo == "A").collect();
+        assert_eq!(a.len(), 2, "A gets epic + childUI");
+        assert_eq!(a[0].node_story_id, "epic");
+        assert!(!a[0].link_to_parent, "epic is a root");
+        assert_eq!(a[1].node_story_id, "childUI");
+        assert!(a[1].link_to_parent, "childUI links to epic in A");
+
+        // Repo B: childApi ONLY, standalone (parent epic is not in B).
+        let b: Vec<_> = actions.iter().filter(|x| x.repo == "B").collect();
+        assert_eq!(b.len(), 1, "B gets only childApi");
+        assert_eq!(b[0].node_story_id, "childApi");
+        assert!(
+            !b[0].link_to_parent,
+            "childApi publishes standalone in B (parent not there)"
+        );
+
+        // Parent precedes child within A (BFS order preserved).
+        let idx_epic = actions.iter().position(|x| x.repo == "A" && x.node_story_id == "epic").unwrap();
+        let idx_child = actions.iter().position(|x| x.repo == "A" && x.node_story_id == "childUI").unwrap();
+        assert!(idx_epic < idx_child, "parent action precedes child within a repo");
+    }
+
+    #[test]
+    fn plan_design_publish_empty_nodes_fall_back_to_project_repos() {
+        // (b) all nodes empty publish_repos -> falls back to P for every node.
+        let tree = vec![
+            plan_node("epic", None, &[]),
+            plan_node("child", Some("epic"), &[]),
+        ];
+        let actions =
+            plan_design_publish(&tree, eff_with_fallback(vec!["P1".into(), "P2".into()]));
+
+        // Both nodes published into both fallback repos.
+        for repo in ["P1", "P2"] {
+            let r: Vec<_> = actions.iter().filter(|x| x.repo == repo).collect();
+            assert_eq!(r.len(), 2, "{repo} gets both nodes");
+            assert_eq!(r[0].node_story_id, "epic");
+            assert_eq!(r[1].node_story_id, "child");
+            assert!(r[1].link_to_parent, "child links to epic in {repo} (both present)");
+        }
+        assert_eq!(actions.len(), 4, "2 nodes x 2 fallback repos");
+    }
+
+    #[test]
+    fn plan_design_publish_child_without_parent_in_repo_is_unlinked() {
+        // (c) a node in a repo whose parent is NOT in that repo -> link_to_parent=false.
+        // epic in [A], child in [A, B]. In B the parent is absent -> standalone.
+        let tree = vec![
+            plan_node("epic", None, &["A"]),
+            plan_node("child", Some("epic"), &["A", "B"]),
+        ];
+        let actions = plan_design_publish(&tree, eff_with_fallback(vec![]));
+
+        let child_a = actions
+            .iter()
+            .find(|x| x.repo == "A" && x.node_story_id == "child")
+            .unwrap();
+        assert!(child_a.link_to_parent, "child links to epic in A (parent present)");
+
+        let child_b = actions
+            .iter()
+            .find(|x| x.repo == "B" && x.node_story_id == "child")
+            .unwrap();
+        assert!(
+            !child_b.link_to_parent,
+            "child is standalone in B (parent epic not in B)"
         );
     }
 
