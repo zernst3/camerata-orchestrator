@@ -83,6 +83,17 @@ cargo run -p camerata-ui
 The desktop app opens with its embedded server; the topbar shows the live connection status and
 which provider path is active.
 
+### Claude backend
+
+Camerata can call Claude in two ways, selected in **Settings → Claude backend**:
+
+| Option | How it works | API key needed? |
+|--------|-------------|-----------------|
+| **CLI** (default) | Spawns the `claude` CLI using your logged-in Claude Code subscription | No |
+| **API** | Calls the Anthropic Messages API directly | Yes, enter it below |
+
+When you select **API**, an **Anthropic API Key** input appears. Enter your key once; it is stored in the OS keychain (never in files or the repo) and hydrated into the server process automatically. If you select **API** but have not yet saved a key, the server falls back to CLI, and an inline warning stays visible until a key is present. The CLI path requires an active Claude Code subscription on the machine running Camerata; the API path works without one but consumes Anthropic API credits.
+
 **Local-first:** Camerata stores only configs + pointers (JSON in your OS app-data dir —
 `projects.json`, `settings.json`, `onboarding-draft.json`); your repo code lives on your own
 machine. Each repo a project references must resolve to a local git checkout (see §5).
@@ -413,6 +424,15 @@ enforcement kind. Tables use the dark Bletchley amber theme.
 
 The Rules view also hosts emit, reconcile, suppressions, custom rules, import/export, and the
 repo-path **health check** (§5).
+
+### Scope decides where a rule lives (and where it's emitted)
+
+Every corpus rule carries a **scope**, set by the rule's author. It is inherent to the rule, not a per-project switch. Scope sorts each rule into one of two levels:
+
+- **Repo-local rules** are emitted straight into each chosen repo's governance files (`AGENTS.md`, `CONVENTIONS.md`, and the checks manifest), scoped to exactly the repos you pick for them.
+- **Project-level rules** (process rules like branch/commit format, and cross-repo API contracts) apply **project-wide** and are **never written into an individual repo's files**. The gates read them from the project itself. They apply everywhere in the project, always.
+
+**Adopting a rule by picking an option:** click a rule and choose an option. For a **project-level** rule the target is unambiguous (the whole project), so the pick alone selects it and it appears in the **Project rules** table. For a **repo-local** rule the pick does **not** select it on its own (there would be no way to know which repo you meant), so you choose repos separately (see §10).
 
 ### Emit rules locally (with optional escalation to a branch / push / PR)
 
@@ -843,6 +863,36 @@ Strongest tier it is more expensive. Match the model to the risk.
 
 ---
 
+## 6b. Design Canvas (co-design a work tree, publish as a batch)
+
+The **Design Canvas** is where you co-design a hierarchy of work with an AI, then publish the whole tree into GitHub as a batch of linked issues. Where §6 authors a single story, the Design Canvas authors a **design**: a top node (usually an Epic or Initiative) plus the tree of work it decomposes into. Everything stays a draft until you publish, so you can iterate freely with nothing on the board.
+
+### Opening the canvas
+
+Open the Design Canvas from the cockpit. With an active project selected, the empty state lists that project's **saved designs**. Each row shows the design title, a **status badge** (draft is neutral, published is green, archived is muted), a "Type · N nodes" meta line, and when it was last updated. Click a row to open its tree. If no project is active you get a hint to pick one first.
+
+### Starting a new design
+
+The **New design** action is front and centre. Pick the **root node type** (Epic by default) and create it. A blank root node opens with its own authoring chat.
+
+### Designing the tree with the AI
+
+Talk the design through in the node's chat, the same author loop as story authoring. The AI proposes **child nodes at the types your project's hierarchy allows** (it drafts against your saved hierarchy schema, not a fixed Epic to Story shape). Each proposed child shows as a "NodeType: Title" heading with its drafted body rendered below. Accept the proposals to **materialize** them: each becomes a draft node linked under its parent, and the tree renders immediately in the relationship table with the hierarchy in place. The **+ Add child** button offers only the child types your schema permits for the selected node (a leaf type shows no button).
+
+### Mockups per node
+
+A node can carry a UI **mockup**. Open the mockup panel and describe the UI you want, or **leave the box blank**: a blank prompt still generates a mockup grounded in the node's own story plus its parent's context. The generated HTML previews live in a sandboxed frame and is saved on the node.
+
+### Auto-save, archive, and delete
+
+Designs are **saved automatically** on every change; the open design shows a subtle "Saved" indicator. In the header you can **Archive / Unarchive** a design (it moves between the `draft` and `archived` badges). Back in the list, a two-step inline delete (trash, then "Confirm?") removes an entire design (root plus every descendant). Design status (draft/published/archived) is separate from a story's development status: publishing a design is not the same as a story finishing a dev run.
+
+### Publishing
+
+When the tree is ready, **Publish all** walks it top-down and creates one GitHub issue per node, wiring parent/child as sub-issues (up to 8 deep) and applying a `type:<name>` label per node. Publishing is fail-soft per node: you get the created issue numbers plus any warnings, and the design is marked **published**. The result lands in the same grouped issues table as the rest of your work. (GitHub is the only publish target today.)
+
+---
+
 ## 7. The rules that govern it
 
 Five enforcement points, of which four are fully deterministic (binary pass/fail, no LLM judgement)
@@ -960,17 +1010,22 @@ Click any rule in the **Project rules** table to open its **detail modal**. You 
 - **Add custom sub-options** — for rules that support local overrides, you can tack on a custom directive (e.g., "allow X in this repo only").
 - **View the rule's full definition** — the decision question, all available options + rationale, the sources it's grounded in, and the enforcement kind.
 
-### Repo-scoped overrides
+### Repo-scoped overrides (choose repos right in the modal)
 
-A rule applies to **all repos in the project by default**. To override for a single repo:
-- **Remove the rule from just that repo** — a checkbox per repo in the applied-rules table.
-- **Add a custom rule that applies only to that repo** — a rule you author locally (e.g., "house style for tests in this codebase").
+A repo-local rule applies to **all the repos you scope it to**. You choose those repos **right in the rule detail modal**: open the rule and use the **"Applies to repos"** section, which shows **one checkbox per project repo**.
+
+- **Check a repo** to add the rule there (if the rule wasn't selected yet, checking a repo selects it with its default option).
+- **Uncheck a repo** to remove it. Unchecking the **last** repo drops the rule entirely (removing every repo is the same as unselecting the rule).
+
+The older per-row **"Add to repo..."** dropdown in the **All rules** table still works; the in-modal picker is simply a second, more direct path. To carve out a single repo you can also add a custom rule that applies only to that repo (a rule you author locally).
 
 ### Project-level rules (always apply everywhere)
 
-Some rules are marked as **project-level** and apply to **every repo** in the project:
-- Examples: process rules like commit format (`AB#{id}`), cross-repo API contracts, per-project security floor (baseline tech debt).
-- These rules are immutable at the repo level — you can only edit them in the **Project rules** table, and the change flows to all repos on the next emit.
+Some rules are **project-level** by their scope and apply to **every repo** in the project:
+- Examples: **process** rules like commit format (`AB#{id}`) and branch naming, and **cross-repo** API contracts.
+- They apply project-wide and are **never emitted into an individual repo's governance files**. The gates read them from the project itself.
+- In the rule detail modal they show a static **"Applies project-wide (all repos)"** line instead of the per-repo checkboxes.
+- You edit them only in the **Project rules** table, and the change flows to all repos on the next emit.
 
 ### Custom rules
 

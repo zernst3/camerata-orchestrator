@@ -1048,6 +1048,10 @@ function is pure; `Filter` variants include `ByIds`, `ByDomain`, `ByDomains`,
 `select_for_domains(rule_set, domains)` always includes rules with `domain = "*"`
 (universal rules) regardless of what domains are requested.
 
+### Selection scope, adoption, and the single-repo sentinel
+
+A corpus rule's `scope` field classifies its selection into one of three buckets via `bucket_of` (`crates/ui-core/src/rules.rs`): `"cross-repo"` maps to `CrossRepo`, `"process"` maps to `Process` (both project-level: applied project-wide, read by gates from the project store, never emitted into repo files), and every other scope maps to `Selections` (repo-local: emitted into each chosen repo, scoped by the selection's `repos`). Two pure transforms drive selection edits, both shared by every persist path so they cannot diverge: `apply_chosen_option` updates a rule's option in place and adopts a not-yet-selected project-level rule into its bucket (via `project_level_insert`, scoped to `project.repos` so it survives the repos-empty GC; repo-local rules are never auto-adopted), and `apply_repo_scope` adds or removes a single repo on a repo-local rule from the detail modal's "Applies to repos" picker (removing the last repo drops the selection). The UI-internal single-repo sentinel (`SINGLE_REPO_SELECTION_KEY = "\u{0}__single_repo__"`) is a HashMap key only; it is translated out at the UI save boundary by `resolve_selection_repos` and, defensively, on the server by `normalize_repos`, so a NUL-byte repo never reaches a persisted `repos` list or `git clone`.
+
 ### Role building from corpus
 
 `role_from_corpus(corpus_path, role_name, domains, rule_ids)` loads the corpus
@@ -1306,6 +1310,10 @@ digest so the agent reads the why before the what.
 All three are `#[serde(default)]` fields on `Project`, so they ride the existing export/import
 (`ProjectExportDoc` flatten + the `ProjectImport` upsert) with no migration. See
 `docs/PROJECT_CONTEXT_LAYERS.md`.
+
+### Design Canvas data model and endpoints
+
+A **design** reuses the `UnitOfWork` type (`crates/server/src/uow.rs`) with two design-specific fields. `is_design_root: bool` (serde default `false`) is stamped `true` by `create_blank_design` only when `draft_parent_id.is_none()`; it is the authoritative design marker because the `draft-<token>` story_id prefix is shared with ordinary AI-authored drafts. `design_status: Option<String>` holds the design's own lifecycle (`draft` | `published` | `archived`, per the `DESIGN_STATUSES` const), defaulting to `Some("draft")` at create time and distinct from the development-run lifecycle. Store methods: `list_design_roots_for_project`, `get_design_root`, `set_design_status` (root-guarded), and `remove_design_subtree`. Endpoints: `GET /api/projects/:id/designs` returns `{ designs: [ { id, title, node_type, status, node_count, updated } ] }` newest-first; `POST /api/designs/:id/status` (400 unknown status, 404 non-root); `DELETE /api/designs/:id` (whole tree, 404 non-root). Child proposal and materialization run against the project's `HierarchySchema`; resolution has a single owner, `AppState::effective_hierarchy_schema()`, which calls `HierarchySchema::resolve_effective` (`crates/app-core/src/project.rs`) to map an empty schema to `default_hierarchy_schema()`, backing the design-author handler, the materialize validator, `GET /api/projects/:id/hierarchy`, and import seeding, so proposal, validation, and the UI never disagree.
 
 ---
 
@@ -1919,6 +1927,8 @@ standard `<workspace_root>/<owner>/<repo>` convention.
 
 Repo health (`GET /api/projects/:id/repo-health`) checks which repos are cloned
 and reachable on the current machine, so path issues are surfaced immediately.
+
+**Override-aware resolution and the link endpoint.** `workspace::resolve_repo_dir(override, root, repo)` is the one resolution primitive: the per-repo path override wins, else `<workspace_root>/<owner>/<repo>`, else `None`. Both the Workspace status path (`checkout_status_resolved`) and the readiness/health path (`repo_resolution`) build on it, and both count a folder as the repo's clone only when it is a git checkout whose `origin` matches `owner/repo`, compared with `eq_ignore_ascii_case` on the parsed `owner/repo` (the same invariant `validate_link_target` enforces; a mismatch there was the stuck-paused bug). `checkout_status_resolved` never hard-fails on a missing workspace root: a repo can resolve via its override alone. `POST /api/projects/:id/repos/:repo/link` (handler `link_repo`) is the "link an existing clone" path: it calls `validate_link_target` (folder is a git clone AND its `origin` matches the repo) and records the folder as a per-repo override via `settings.set_repo_path` ONLY on success, returning the freshly derived readiness; on any failure it returns 400 with the reason and records nothing. It never clones.
 
 ---
 
