@@ -1,7 +1,7 @@
 id = "CSHARP-EFCORE-ASNOTRACKING-1"
 title = "Read-only queries use AsNoTracking; change tracking is reserved for entities that will be mutated"
 tag = "stack"
-domain = "csharp:aspnetcore"
+domain = "csharp:efcore"
 layer = "library"
 enforcement = "structured"
 default = true
