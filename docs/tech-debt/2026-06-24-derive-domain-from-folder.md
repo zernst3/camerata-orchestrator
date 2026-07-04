@@ -1,5 +1,15 @@
 # Tech debt: derive rule `domain` from the folder; retire the hand-typed field + the `"*"` sentinel
 
+## Resolved 2026-07-02
+
+Fully resolved by commit `0cdebf0`. Framework-specific rules are now filed in matching
+subfolders (`csharp/aspnet/`, `java/spring/`, `python/fastapi/`, `ruby/rails/`, etc.) so
+the folder-derived domain is the SSOT and the folder/field mismatch WARNINGs no longer
+fire. The stale `efcore` field was corrected in the same commit. Full scan confirms zero
+folder/field disagreements remain; corpus tests green.
+
+---
+
 > **Status: STAGED — not yet filed as a GitHub issue.**
 > On the next "GitHub push", create this as a **sub-issue of the Tech Debt Epic (#70)** using the title + body below.
 
