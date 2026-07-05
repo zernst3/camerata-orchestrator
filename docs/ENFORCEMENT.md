@@ -81,6 +81,25 @@ function plus one `RuleEntry`. Unknown rule ids are a **safe no-op** — the gat
 is permissive about rules it has not implemented, never about calls. The gate is
 sub-millisecond even over a 71-rule subset (see latency below).
 
+**Test-scope policy (GATE-F7, 2026-07-05):** the gateway's `test_scope_policy` function applies a
+rule-specific relief for violations inside genuine test code (`#[cfg(test)]` blocks, paths whose
+path-component is `tests`, `test`, `fixtures`, or similar). After the GATE-F7 fix:
+
+- `SEC-NO-DISABLED-TLS-1` and `SEC-NO-UNSAFE-DESERIALIZATION-1` now use **Downgrade** (not Waive)
+  in test scope: a violation demotes to low severity and is logged but does not block. The sole
+  write-time escape hatch is an explicit `// camerata:allow <RULE-ID> <reason>` annotation.
+- `examples/` is no longer considered test scope for any rule. Example code ships as documentation
+  and is read by users; it is treated as production code for gate purposes.
+- Other rules (`SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`, etc.) retain their
+  existing path-waivable Waive policy in genuine test scopes.
+
+**Per-run gate-events sink (LIFECYCLE-10, 2026-07-05):** gate-decision records from spawned
+gateway subprocesses are collected in a per-run JSONL file. Previously the sink path was published
+via `std::env::set_var` (process-global), so concurrent live runs could read each other's sink and
+cross-contaminate gate provenance. The sink path is now passed explicitly per-spawn via each
+gateway subprocess' `Command::env`. Two concurrent runs write to separate sinks and never see each
+other's decisions.
+
 ### Lane 2 — Layer-2 structured check (the `CheckRunner` bounce-and-revise)
 
 **Where:** `crates/checks` (`CheckRunner` impls) wired into
@@ -154,6 +173,7 @@ derived from the registry, so a newly added arm is applied everywhere with no ed
 | Layer-1 (gateway, content) | `SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`, `ARCH-NO-SECRETS-IN-URL-1` | Implemented, unit-tested, and live in every fleet/demo subset; each fires on matching file content. |
 | Layer-2 (checks) | `RUST-FMT`, `RUST-CLIPPY`, `RUST-TEST`; `LAYER2-JS-CHECKS-1`; `LAYER2-PY-CHECKS-1`; `LAYER2-GO-CHECKS-1` | Cross-language polyglot runners (`crates/checks/src/multilang.rs`): Rust via `cargo fmt`/`cargo clippy`/`cargo test`; JS/TS via lockfile-pinned npm; Python via ruff + pytest in an isolated venv; Go via gofmt/vet/test. The runner is selected per worktree language, fail-closed, repo-pinned. |
 | Cross-agent integration gate (**planned**; orchestrator-level concern, not one of the four numbered verification layers) | `INTEGRATION-*` family | NOT built. The integration gate that checks any invariant spanning AGENTS on the assembled tree before the branch ships: contract conformance (API contracts are one example), wiring completeness (events/config/DI/migrations with no dangling ends), convention coherence (casing, naming, dates, money), and cross-cutting policy (e.g. every UI-gated action maps to a guarded endpoint). Both tiers above are per-agent and cannot see between agents. See ADR `cross_agent_integration_gate`. |
+| VCS-action gate (commit / PR / branch process rules) | `PROCESS-CONVENTIONAL-COMMIT-1`, `PROCESS-COMMIT-DOC-1`, `PROCESS-BRANCH-NAMING-1`, ADO-link rules | **Enforced at server chokepoints as of 2026-07-05 (GAP-2 fix).** Human-initiated commits (`POST /api/git/commit`) and PR opens (`POST /api/pr/open`) HARD-BLOCK on any process-rule violation via `crates/server/src/vcs_choke.rs`. Machine-generated commits (snapshot, merge, onboarding governance PR) take an auditable `gate_or_bypass` path with a mandatory non-empty reason. The bypass endpoint (`POST /api/vcs-action-gate/bypass`) remains the explicit override. Previously the gate logic existed in `checks::vcs_action` but was only reachable via the bypass endpoint; no chokepoint called it. |
 | Prose (`AGENTS.md`) | `ORCH-*`, `SPIRIT-*`, `PROC-*` families | Agent-judgment only; no mechanical teeth by design. |
 
 **Everything else in the 71-rule subset is a no-op today** — carried, loaded,

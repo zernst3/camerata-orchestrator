@@ -430,7 +430,7 @@ repo-path **health check** (§5).
 Every corpus rule carries a **scope**, set by the rule's author. It is inherent to the rule, not a per-project switch. Scope sorts each rule into one of two levels:
 
 - **Repo-local rules** are emitted straight into each chosen repo's governance files (`AGENTS.md`, `CONVENTIONS.md`, and the checks manifest), scoped to exactly the repos you pick for them.
-- **Project-level rules** (process rules like branch/commit format, and cross-repo API contracts) apply **project-wide** and are **never written into an individual repo's files**. The gates read them from the project itself. They apply everywhere in the project, always.
+- **Project-level rules** (process rules like branch/commit format, and cross-repo API contracts) apply **project-wide** and are **never written into an individual repo's files**. The gates read them from the project itself. They apply everywhere in the project, always. As of 2026-07-05 (GAP-2 fix) the commit and PR gates are **enforced at server chokepoints**: a human-initiated commit or PR whose metadata violates a configured process rule is **hard-blocked** before git is touched. Previously these rules were configurable but had no enforcement path.
 
 **Adopting a rule by picking an option:** click a rule and choose an option. For a **project-level** rule the target is unambiguous (the whole project), so the pick alone selects it and it appears in the **Project rules** table. For a **repo-local** rule the pick does **not** select it on its own (there would be no way to know which repo you meant), so you choose repos separately (see §10).
 
@@ -904,7 +904,7 @@ and one (L3) is AI-driven:
 | **L2** (CheckRunner) | one task's diff, after | the repo's own format/lint/test (e.g. `cargo fmt`/`clippy`/`test`, `ruff`/`pytest`, `npm run lint`/`test`, `gofmt`/`go vet`/`go test`, `bundle exec rubocop`/`rspec`, `./mvnw verify`/`./gradlew check`, `dotnet format`/`build`/`test`) |
 | **L3** (AI code reviewer, opt-in) | diff + story + rules, per iteration | rule violation or spec non-conformance the agent missed (see §6a) |
 | **Integration gate** | the assembled per-repo outputs vs. the prose contract | API contract between repo A and repo B agrees; live check in progress (#105-followup) |
-| **VCS-action gate** | commit/PR/branch metadata | the PR title + commit subject carry the ticket id |
+| **VCS-action gate** | commit/PR/branch metadata | the PR title + commit subject carry the ticket id — **enforced at server chokepoints as of 2026-07-05**: a non-compliant human-initiated commit or PR open is hard-blocked before git is touched; machine-generated commits use an auditable bypass |
 
 > **Layer numbering note — reconciled.** The canonical stages are **L1** Security · **L2** Mechanical ·
 > **L3** AI code review · **L4** Origin/CI, and this guide is now reconciled to them: every prose
@@ -1023,7 +1023,7 @@ The older per-row **"Add to repo..."** dropdown in the **All rules** table still
 
 Some rules are **project-level** by their scope and apply to **every repo** in the project:
 - Examples: **process** rules like commit format (`AB#{id}`) and branch naming, and **cross-repo** API contracts.
-- They apply project-wide and are **never emitted into an individual repo's governance files**. The gates read them from the project itself.
+- They apply project-wide and are **never emitted into an individual repo's governance files**. The gates read them from the project itself. The commit and PR variants are enforced at server chokepoints (see §7).
 - In the rule detail modal they show a static **"Applies project-wide (all repos)"** line instead of the per-repo checkboxes.
 - You edit them only in the **Project rules** table, and the change flows to all repos on the next emit.
 
