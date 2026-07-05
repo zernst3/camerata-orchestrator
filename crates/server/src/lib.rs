@@ -10231,6 +10231,11 @@ async fn uow_intake_ship(
     let uow = state.uow.get_or_create(&story_id);
     let workspace_root = state.settings.workspace_root();
 
+    // GAP-2: Camerata authors these Ship PRs, so make their title/body COMPLIANT with the
+    // project's active process rules and HARD-BLOCK gate them at each PR-open site.
+    let vcs_config = process_rule_config_for(&state, &active_project_id(&state));
+    let numeric_id = crate::vcs_choke::numeric_story_id(&story_id);
+
     // ── Multi-repo path: intake.repos has explicit selections ─────────────────
     if !uow.intake.repos.is_empty() {
         let mut results: Vec<RepoShipResult> = Vec::new();
@@ -10279,12 +10284,24 @@ async fn uow_intake_ship(
                 continue;
             }
 
-            // Open (or discover) the PR.
-            let title = format!("Camerata: {story_id} ({})", scope.repo);
-            let body = format!(
-                "Opened by Camerata for story `{story_id}` in repo `{}`.",
-                scope.repo
+            // Open (or discover) the PR. Compliant machine title/body + HARD-BLOCK gate.
+            let (title, body) = crate::vcs_choke::compliant_machine_pr(
+                &vcs_config,
+                &format!("Camerata: {story_id} ({})", scope.repo),
+                &format!("Opened by Camerata for story `{story_id}` in repo `{}`.", scope.repo),
+                &numeric_id,
             );
+            if let Err(e) = crate::vcs_choke::gated_pr(&vcs_config, &title, &body) {
+                results.push(RepoShipResult {
+                    repo: scope.repo.clone(),
+                    branch: scope_branch.clone(),
+                    ok: false,
+                    pr_url: None,
+                    pr_number: None,
+                    error: Some(format!("VCS-action gate blocked the machine PR: {e}")),
+                });
+                continue;
+            }
             match crate::workspace::open_pr_with_base(
                 &scope.repo,
                 &scope_branch,
@@ -10360,8 +10377,16 @@ async fn uow_intake_ship(
     if let Err(e) = crate::workspace::push_branch(&dir, &repo, &branch, &token).await {
         return bad(format!("could not push `{branch}`: {e}"));
     }
-    let title = format!("Camerata: {story_id}");
-    let body = format!("Opened by Camerata for story `{story_id}`.");
+    // Compliant machine title/body + HARD-BLOCK gate (GAP-2).
+    let (title, body) = crate::vcs_choke::compliant_machine_pr(
+        &vcs_config,
+        &format!("Camerata: {story_id}"),
+        &format!("Opened by Camerata for story `{story_id}`."),
+        &numeric_id,
+    );
+    if let Err(e) = crate::vcs_choke::gated_pr(&vcs_config, &title, &body) {
+        return bad(format!("VCS-action gate blocked the machine PR: {e}"));
+    }
     match crate::workspace::open_pr_with_base(&repo, &branch, base_branch.as_deref(), &title, &body, &token).await {
         Ok(opened) => {
             state.uow.set_pr(&story_id, Some(opened.number), Some(opened.url.clone()));
@@ -11544,12 +11569,26 @@ async fn uow_pr_open(
         return bad(format!("could not push `{branch}`: {e}"));
     }
     // Open (or discover) the PR into the chosen base.
-    let title = uow
+    //
+    // GAP-2 chokepoint. Camerata authors this PR's title + body, so it makes them COMPLIANT
+    // with the project's active process rules and HARD-BLOCK gates them. A non-compliant
+    // machine PR surfaces as an error here rather than opening an ungated PR.
+    let vcs_config = process_rule_config_for(&state, &active_project_id(&state));
+    let numeric_id = crate::vcs_choke::numeric_story_id(&story_id);
+    let summary = uow
         .work_item
         .as_deref()
         .map(|w| format!("{w}: {story_id}"))
         .unwrap_or_else(|| format!("Camerata: {story_id}"));
-    let body = format!("Opened by Camerata for story `{story_id}`.");
+    let (title, body) = crate::vcs_choke::compliant_machine_pr(
+        &vcs_config,
+        &summary,
+        &format!("Opened by Camerata for story `{story_id}`."),
+        &numeric_id,
+    );
+    if let Err(e) = crate::vcs_choke::gated_pr(&vcs_config, &title, &body) {
+        return bad(format!("VCS-action gate blocked the machine PR: {e}"));
+    }
     let base = req.base_branch.as_deref();
     match crate::workspace::open_pr_with_base(&repo, &branch, base, &title, &body, &token).await {
         Ok(opened) => {
