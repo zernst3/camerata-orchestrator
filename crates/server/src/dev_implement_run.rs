@@ -811,8 +811,34 @@ pub async fn execute_dev_implement_run(
             "dev_implement",
             &format!("Brownfield implement failed: {detail}"),
         );
-        runs.set_status(&run_id, RunStatus::AwaitingQa, true);
+        // LIFECYCLE-2: a failure is a genuine FAILED terminal, not a silent AwaitingQa. This
+        // is what lets stamp_provenance_when_done withhold the stage advance + QA evidence
+        // for work that never completed, while still freezing the honest gate provenance.
+        runs.fail_with_reason(&run_id, detail);
     };
+    // LIFECYCLE-1: honor a cancel mid-run. The terminal Cancelled state is already set by
+    // RunStore::cancel; record it on the trail and stop BEFORE any git mutation (commit /
+    // push). We never advance to AwaitingQa on a cancel.
+    let cancelled_stop = |runs: &RunStore, uow: &UowStore, where_: &str| {
+        runs.push_event(
+            &run_id,
+            GateEvent {
+                seq: next_seq(),
+                layer: "dev-implement".to_string(),
+                verdict: "info".to_string(),
+                rule: None,
+                detail: format!("Run cancelled {where_}; stopped before any git mutation."),
+                content_hash: None,
+            },
+        );
+        uow.append_history(&story_id, "dev_implement", &format!("Cancelled {where_}."));
+    };
+
+    // Honor a cancel that arrived before the executor got scheduled.
+    if runs.is_cancelled(&run_id) {
+        cancelled_stop(&runs, &uow, "before start");
+        return;
+    }
 
     let approved_count = decisions
         .iter()
@@ -1490,6 +1516,14 @@ pub async fn execute_dev_implement_run(
         }
     }
 
+    // LIFECYCLE-1: cancel check IMMEDIATELY before the git mutation. A Stop that arrived
+    // while the agent ran (or during layer-2 / the test-tamper guard) must halt the run
+    // BEFORE the server commits anything to the worktree.
+    if runs.is_cancelled(&run_id) {
+        cancelled_stop(&runs, &uow, "before commit");
+        return;
+    }
+
     // The SERVER commits the agent's implementation (commit stays server-side, never
     // the agent — mirrors pr_resolve_run exactly).
     let commit_msg = format!("feat: implement story {story_id} on {target_branch}");
@@ -1509,6 +1543,14 @@ pub async fn execute_dev_implement_run(
             );
             return;
         }
+    }
+
+    // LIFECYCLE-1: cancel check IMMEDIATELY before the push (network git mutation). The
+    // commit above is local; a cancel here stops us short of publishing the branch, and the
+    // run stays in its terminal Cancelled state (never advances to AwaitingQa).
+    if runs.is_cancelled(&run_id) {
+        cancelled_stop(&runs, &uow, "before push (implementation committed locally)");
+        return;
     }
 
     // Optionally push so the branch is available for CI / PR opening. Token-gated:
@@ -1992,8 +2034,10 @@ mod tests {
 
         let run = runs.get(&run_id).expect("run exists");
 
-        // The run must complete (AwaitingQa).
-        assert_eq!(run.status, RunStatus::AwaitingQa);
+        // LIFECYCLE-2: an inability to implement (live mode off) is a genuine FAILED
+        // terminal, not a spurious AwaitingQa success. The stamper keys off this to withhold
+        // the stage advance + QA evidence for work that never happened.
+        assert!(matches!(run.status, RunStatus::Failed { .. }));
         assert!(run.done);
 
         // It must report an honest error — never fake a resolution.

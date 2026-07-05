@@ -221,7 +221,8 @@ pub async fn execute_live_run(
                     content_hash: None,
                 },
             );
-            store.set_status(&run_id, RunStatus::AwaitingQa, true);
+            // LIFECYCLE-2: a missing gateway binary is a genuine FAILED terminal.
+            store.fail_with_reason(&run_id, format!("live fleet needs the gateway binary: {e}"));
             return;
         }
     };
@@ -335,7 +336,8 @@ pub async fn execute_live_run_tiered(
                     content_hash: None,
                 },
             );
-            store.set_status(&run_id, RunStatus::AwaitingQa, true);
+            // LIFECYCLE-2: a missing gateway binary is a genuine FAILED terminal.
+            store.fail_with_reason(&run_id, format!("live fleet needs the gateway binary: {e}"));
             return;
         }
     };
@@ -615,26 +617,36 @@ fn build_event_to_gate_event(seq: usize, event: BuildEvent) -> Option<GateEvent>
     Some(ev)
 }
 
-/// Finalise a live run: record any error and mark it AwaitingQa. Shared terminal step.
+/// Finalise a live run. Shared terminal step. LIFECYCLE-2: a fleet error is a genuine
+/// FAILED terminal (`fail_with_reason`), not a silent AwaitingQa — so the provenance
+/// stamper withholds the stage advance + QA evidence for a run that never succeeded. A
+/// successful build advances to the AwaitingQa success terminal as before. A cancel that
+/// raced ahead of this is already terminal; the `set_status`/`fail_with_reason` terminal
+/// guards leave it Cancelled.
 fn finish_live_run(
     store: &RunStore,
     run_id: &str,
     result: anyhow::Result<camerata_fleet::BuildOutcome>,
 ) {
-    if let Err(e) = result {
-        store.push_event(
-            run_id,
-            GateEvent {
-                seq: 9999,
-                layer: "fleet".to_string(),
-                verdict: "error".to_string(),
-                rule: None,
-                detail: format!("Live fleet run failed: {e}"),
-                content_hash: None,
-            },
-        );
+    match result {
+        Err(e) => {
+            store.push_event(
+                run_id,
+                GateEvent {
+                    seq: 9999,
+                    layer: "fleet".to_string(),
+                    verdict: "error".to_string(),
+                    rule: None,
+                    detail: format!("Live fleet run failed: {e}"),
+                    content_hash: None,
+                },
+            );
+            store.fail_with_reason(run_id, format!("live fleet run failed: {e}"));
+        }
+        Ok(_) => {
+            store.set_status(run_id, RunStatus::AwaitingQa, true);
+        }
     }
-    store.set_status(run_id, RunStatus::AwaitingQa, true);
 }
 
 #[cfg(test)]
