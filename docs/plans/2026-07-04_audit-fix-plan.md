@@ -163,7 +163,7 @@ fixes every AUTO item, skips every ZACH item, and updates the Progress table bel
 
 | Area / PR | Findings | Status | PR / commit |
 |---|---|---|---|
-| UI contract + reactivity | cockpit-F1, UI-1,2,3,4,6,7,8,9,10,11,13,14,16, cockpit-F4,5,6 | not started | — |
+| UI contract + reactivity | cockpit-F1, UI-1,2,3,4,6,7,8,9,10,11,13,14,16, cockpit-F4,5,6 | done | branch fix/audit-ui-contract (commit 0b81e7c); 543 ui tests green |
 | Workspace panel | workspace-F1..F8 | not started | — |
 | Design double-create | ROUTES-3/UI-12 | not started | — |
 | Server contract + handlers | ROUTES-2,5,6,7,8,9 | not started | — |
