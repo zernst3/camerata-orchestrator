@@ -616,8 +616,11 @@ One `statvfs` syscall; no shell-out to `df`.
 
 **3. Terminal-state worktree teardown + startup sweep.**
 
-- **On sign-off teardown** — already in place (calls `remove_uow_worktree` at
-  `lib.rs`). No change.
+- **On sign-off teardown** — calls `remove_uow_worktree` in `sign_off_run` (`lib.rs`).
+  **Deferred while a run is live (LIFECYCLE-9):** the destructive teardown is withheld until
+  `run.done`, so a sign-off cannot yank the worktree out from under a still-running agent. The
+  sign-off itself is still recorded; only `remove_uow_worktree` is deferred (with an honest history
+  note) until the run reaches a terminal state.
 - **Startup sweep (extended):** Pass 1 — Terminal-state sweep: for every UoW in
   `SignedOff` state that has a branch, call `remove_uow_worktree` (reclaims
   worktrees that leaked through crashes between sign-off and the on-sign-off
@@ -894,6 +897,13 @@ push (a mid-merge cancel aborts the merge so no half-merged tree lingers). Final
 already `done` or `Cancelled` / `Failed`), so a late executor can no longer resurrect a
 cancelled run and advance it to `AwaitingQa`.
 
+**Single-flight per story (LIFECYCLE-9).** A story may have at most one active (non-`done`)
+run at a time — two concurrent runs would resolve the SAME per-UoW worktree and edit each
+other's files. `RunStore::active_run_for_story` returns the first non-`done` run on a story;
+`start_run` rejects a second start with **409** (naming the active run), BEFORE the development
+gate. The paused-then-resumed path is not blocked (a resume marks the paused run `done` before
+the resume run supersedes it). See `docs/decisions/2026-07-05_lifecycle-loop-and-concurrency.md`.
+
 ### Provenance stamping: completion-driven and success-gated
 
 When a governed run finishes, a per-run watcher (`stamp_provenance_when_done`, spawned by
@@ -985,9 +995,18 @@ intact. A SOFT-FLAG logs a run event and continues.
 **Resume = re-spawn from the checkpoint.** Resolving the review (`answer_escalation`) branches on the
 human's action: Approve/Amend call `resume_governed_run`, which re-spawns the implement run from the
 checkpoint's worktree with the human's translated directive injected into grounding (so the agent
-continues, not restarts), marking the checkpoint resumed once-only; Reject reverts the worktree
-(`git checkout -- . && git clean -fd`) and stops. Both fresh-start and resume go through one shared
-`spawn_brownfield_dev_run` helper, so they cannot drift.
+continues, not restarts), marking the checkpoint resumed once-only; Reject reverts the worktree and
+stops. Both fresh-start and resume go through one shared `spawn_brownfield_dev_run` helper, so they
+cannot drift.
+
+**Reject reverts COMMITTED snapshots too (LIFECYCLE-12).** The bounce loop makes a `camerata:
+snapshot` COMMIT per iteration, so discarding only uncommitted changes would leave the agent's work on
+the branch (pushable). `revert_worktree(worktree_dir, base_commit)` therefore runs
+`git reset --hard <checkpoint.base_commit>` FIRST — dropping every snapshot commit added since the
+branch point — THEN `git clean -fd`. Without a stored `base_commit` (older checkpoints) it falls back
+to the uncommitted-only revert (`git checkout -- . && git clean -fd`). The checkpoint always stores
+`base_commit`, so the Reject path always gets the full reset. See
+`docs/decisions/2026-07-05_lifecycle-loop-and-concurrency.md`.
 
 **UI.** The paused run surfaces in the Governed Development NEEDS YOU queue as a `UowReviewPanel`
 (Approve / Amend / Reject + a clarifying chat); a toast fires on the pause. See
@@ -2788,6 +2807,19 @@ In `execute_dev_implement_run` (`crates/server/src/dev_implement_run.rs`):
    loop.)
 4. If L3 bounces, the bounce reasons are fed back to the agent on the next iteration (shared
    bounce-and-revise budget with L2). A `layer-3 bounce` event is recorded in the run log.
+
+**The bounce loop feeds failures back into the re-prompt (LIFECYCLE-5).** The implement prompt is
+split into a stable `base_task` (built once — the cache-friendly prefix) and a per-pass `task`. On
+each bounce, `append_bounce_feedback(&base_task, iteration, &feedback)` rebuilds `task` with the
+failed iteration's feedback appended at the **tail**, so the re-run agent gets NEW information instead
+of re-reading the identical prompt. Tail placement keeps the KV-cache prefix warm (only the error
+delta is new). `feedback` is **stack-agnostic** — whatever the check emitted: the violated rule ids
+from Layer-2 (Rust clippy/test, tsc, pytest, go vet, manifest checks), the Layer-3 reviewer's
+findings, or the integration-gate contract-mismatch reason — applied at all five bounce points. It
+mirrors the `directive_grounding` tail-append from `resume_governed_run`. (Honest limit: the
+`CheckRunner` trait returns `Vec<RuleId>`, so Layer-2 feedback carries rule ids, not raw compiler
+stdout; L3 and the gate carry full reason text. Richer Layer-2 feedback awaits a trait change routed
+separately.)
 
 L3 therefore runs **once the change is code-complete and has passed L1+L2** (the reviewer never
 sees code that hasn't cleared the mechanical checks). It can run on more than one iteration only

@@ -1309,20 +1309,38 @@ pub fn ensure_development_gate(state: &AppState, story_id: &str) -> Result<(), S
 /// bounce) so a brownfield repo can install the tooling layer-2 needs. It skips ONLY
 /// layer 2: layer 1 (the deny-before-write gate) and the no-code-first decisions gate
 /// (`ensure_development_gate`, already enforced in the caller) are unchanged. The scripted
-/// Revert a paused run's uncommitted work in `worktree_dir` (used on Reject). Best-effort:
-/// discards tracked changes (`git checkout -- .`) and removes new untracked files (`git clean
-/// -fd`), leaving the branch at its committed state. Errors are swallowed (the worktree may be
-/// gone); the caller records the outcome regardless.
-async fn revert_worktree(worktree_dir: &str) {
+/// Revert a paused run's work in `worktree_dir` (used on Reject). Best-effort.
+///
+/// LIFECYCLE-12: the per-iteration bounce loop makes `camerata: snapshot` COMMITS, so
+/// discarding only uncommitted changes (`git checkout -- .` + `git clean -fd`) would leave
+/// the agent's committed work on the branch — where it could still be pushed. A Reject
+/// promises to "revert the agent's work", so when `base_commit` is known we FIRST
+/// `git reset --hard <base_commit>` to drop every commit the run added since the branch
+/// point, THEN clean untracked files. Without a base_commit (older checkpoints) we fall back
+/// to the uncommitted-only revert. Errors are swallowed (the worktree may be gone); the
+/// caller records the outcome regardless.
+async fn revert_worktree(worktree_dir: &str, base_commit: Option<&str>) {
     let dir = std::path::Path::new(worktree_dir);
     if !dir.exists() {
         return;
     }
-    let _ = tokio::process::Command::new("git")
-        .args(["checkout", "--", "."])
-        .current_dir(dir)
-        .output()
-        .await;
+    // Drop the run's committed snapshots first: reset the branch back to the branch-point
+    // commit so nothing the agent committed survives. Only when we actually have the base.
+    if let Some(base) = base_commit.filter(|b| !b.trim().is_empty()) {
+        let _ = tokio::process::Command::new("git")
+            .args(["reset", "--hard", base])
+            .current_dir(dir)
+            .output()
+            .await;
+    } else {
+        // No base commit recorded: discard tracked changes (uncommitted-only fallback).
+        let _ = tokio::process::Command::new("git")
+            .args(["checkout", "--", "."])
+            .current_dir(dir)
+            .output()
+            .await;
+    }
+    // Remove any new untracked files the agent left behind (a reset --hard leaves these).
     let _ = tokio::process::Command::new("git")
         .args(["clean", "-fd"])
         .current_dir(dir)
@@ -7242,13 +7260,18 @@ async fn answer_escalation(
                         // checkpoint, and record the abandonment on the UoW (routine_id holds the
                         // story_id for a UoW escalation).
                         let _ = state.checkpoints.mark_resumed(&ckpt.id);
-                        revert_worktree(&ckpt.worktree_dir).await;
+                        // LIFECYCLE-12: reset --hard to the checkpoint's base_commit FIRST so the
+                        // per-iteration snapshot COMMITS are reverted too (not just uncommitted
+                        // changes), matching the UI's "revert the agent's work" promise.
+                        revert_worktree(&ckpt.worktree_dir, Some(&ckpt.base_commit)).await;
                         state.uow.append_history(
                             &resolved.routine_id,
                             "dev_implement",
                             &format!(
-                                "Run REJECTED at review; reverted the worktree's uncommitted \
-                                 changes. {directive}"
+                                "Run REJECTED at review; reset the worktree to its base commit \
+                                 ({base}) — the agent's committed snapshots and uncommitted \
+                                 changes are fully reverted. {directive}",
+                                base = ckpt.base_commit,
                             ),
                         );
                     }
@@ -14193,6 +14216,104 @@ mod tests {
         );
         // A different story is unaffected.
         assert!(runs.active_run_for_story("S-B").is_none());
+    }
+
+    // ── LIFECYCLE-12: reject-after-bounce reverts committed snapshots ─────────────
+
+    /// Helper: run a git command in `dir`, returning trimmed stdout.
+    async fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = tokio::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// E2E (real git repo): after per-iteration snapshot COMMITS, a Reject resets the worktree
+    /// HARD to the checkpoint's base_commit — HEAD returns to base_commit and the snapshot
+    /// commits are gone. This is the LIFECYCLE-12 fix: without the reset, those committed
+    /// snapshots would survive a Reject and could be pushed.
+    #[tokio::test]
+    async fn lifecycle12_reject_hard_resets_to_base_commit() {
+        let dir = std::env::temp_dir().join(format!("cam-l12-reject-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init"]).await;
+        git_in(&dir, &["config", "user.email", "t@example.com"]).await;
+        git_in(&dir, &["config", "user.name", "Test"]).await;
+        std::fs::write(dir.join("README.md"), "base").unwrap();
+        git_in(&dir, &["add", "."]).await;
+        git_in(&dir, &["commit", "-m", "base"]).await;
+        let base_commit = git_in(&dir, &["rev-parse", "HEAD"]).await;
+
+        // The agent commits two per-iteration `camerata: snapshot` commits.
+        std::fs::write(dir.join("work.rs"), "fn a() {}").unwrap();
+        git_in(&dir, &["add", "."]).await;
+        git_in(&dir, &["commit", "-m", "camerata: snapshot iteration 0"]).await;
+        std::fs::write(dir.join("work.rs"), "fn a() {} fn b() {}").unwrap();
+        git_in(&dir, &["add", "."]).await;
+        git_in(&dir, &["commit", "-m", "camerata: snapshot iteration 1"]).await;
+        // Plus an uncommitted change on top.
+        std::fs::write(dir.join("untracked.rs"), "fn c() {}").unwrap();
+
+        // HEAD has moved past base and the snapshots exist.
+        assert_ne!(git_in(&dir, &["rev-parse", "HEAD"]).await, base_commit);
+
+        // Reject: revert with the base commit → hard reset + clean.
+        revert_worktree(&dir.to_string_lossy(), Some(&base_commit)).await;
+
+        // HEAD is back at base_commit; the snapshot commits are gone.
+        assert_eq!(
+            git_in(&dir, &["rev-parse", "HEAD"]).await,
+            base_commit,
+            "HEAD must be reset back to the checkpoint base_commit"
+        );
+        let log = git_in(&dir, &["log", "--oneline"]).await;
+        assert!(
+            !log.contains("snapshot"),
+            "the per-iteration snapshot commits must be gone after Reject: {log}"
+        );
+        // The agent's committed file and untracked file are both gone.
+        assert!(!dir.join("work.rs").exists(), "committed work file must be reverted");
+        assert!(!dir.join("untracked.rs").exists(), "untracked file must be cleaned");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without a base_commit (older checkpoints), revert_worktree falls back to the
+    /// uncommitted-only revert: committed work survives, only uncommitted changes are dropped.
+    #[tokio::test]
+    async fn lifecycle12_revert_without_base_only_drops_uncommitted() {
+        let dir = std::env::temp_dir().join(format!("cam-l12-nobase-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init"]).await;
+        git_in(&dir, &["config", "user.email", "t@example.com"]).await;
+        git_in(&dir, &["config", "user.name", "Test"]).await;
+        std::fs::write(dir.join("README.md"), "base").unwrap();
+        git_in(&dir, &["add", "."]).await;
+        git_in(&dir, &["commit", "-m", "base"]).await;
+        std::fs::write(dir.join("committed.rs"), "fn a() {}").unwrap();
+        git_in(&dir, &["add", "."]).await;
+        git_in(&dir, &["commit", "-m", "camerata: snapshot"]).await;
+        let head_with_commit = git_in(&dir, &["rev-parse", "HEAD"]).await;
+        // Uncommitted edit on top.
+        std::fs::write(dir.join("dirty.rs"), "fn d() {}").unwrap();
+
+        revert_worktree(&dir.to_string_lossy(), None).await;
+
+        // The committed snapshot SURVIVES (no base to reset to); only uncommitted is dropped.
+        assert_eq!(
+            git_in(&dir, &["rev-parse", "HEAD"]).await,
+            head_with_commit,
+            "without a base_commit, committed work is not reset (documented fallback)"
+        );
+        assert!(dir.join("committed.rs").exists(), "committed file survives the fallback");
+        assert!(!dir.join("dirty.rs").exists(), "uncommitted file is cleaned");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── Contract precondition (R3.g) ─────────────────────────────────────────────
