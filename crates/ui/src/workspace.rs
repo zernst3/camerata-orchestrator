@@ -369,14 +369,22 @@ async fn api_git_cherry_pick(project_id: &str, repo: &str, sha: &str) -> (bool, 
     (ok, out)
 }
 
+/// Result of an "Export JSON" attempt. A user-cancelled save dialog is NOT a failure, so it is
+/// kept distinct from a real error to avoid toasting a scary message on an intentional cancel.
+enum ExportOutcome {
+    Ok,
+    Cancelled,
+    Failed,
+}
+
 /// Export the active project as a JSON file via a native save dialog.
-async fn export_project_json(id: &str, name: &str) -> bool {
+async fn export_project_json(id: &str, name: &str) -> ExportOutcome {
     let Ok(resp) = reqwest::get(format!("{}/api/projects/{}/export", crate::bff_base(), id)).await
     else {
-        return false;
+        return ExportOutcome::Failed;
     };
     let Ok(text) = resp.text().await else {
-        return false;
+        return ExportOutcome::Failed;
     };
     let slug: String = name
         .to_lowercase()
@@ -393,8 +401,14 @@ async fn export_project_json(id: &str, name: &str) -> bool {
         .save_file()
         .await
     {
-        Some(file) => file.write(text.as_bytes()).await.is_ok(),
-        None => false,
+        Some(file) => {
+            if file.write(text.as_bytes()).await.is_ok() {
+                ExportOutcome::Ok
+            } else {
+                ExportOutcome::Failed
+            }
+        }
+        None => ExportOutcome::Cancelled,
     }
 }
 
@@ -438,6 +452,7 @@ fn RepoHealthPanel(checkouts: Vec<RepoCheckout>) -> Element {
 
 #[component]
 pub fn WorkspaceView() -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut refresh = use_signal(|| 0u32);
     let settings_res = use_resource(move || {
         let _dep = refresh();
@@ -565,9 +580,13 @@ pub fn WorkspaceView() -> Element {
                                             let mut busy = busy;
                                             busy.set(true);
                                             spawn(async move {
-                                                let _ = clone_project(&id).await;
+                                                let ok = clone_project(&id).await.is_some();
                                                 busy.set(false);
-                                                refresh += 1;
+                                                if ok {
+                                                    refresh += 1;
+                                                } else {
+                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not clone / update the repos (check the workspace folder and GitHub token).".to_string());
+                                                }
                                             });
                                         },
                                         if busy() { "Cloning…" } else { "Clone / update all repos" }
@@ -583,7 +602,11 @@ pub fn WorkspaceView() -> Element {
                                                     let id = export_id.clone();
                                                     let name = export_name.clone();
                                                     spawn(async move {
-                                                        export_project_json(&id, &name).await;
+                                                        match export_project_json(&id, &name).await {
+                                                            ExportOutcome::Ok => crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Exported {name} to JSON.")),
+                                                            ExportOutcome::Failed => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not export the project JSON.".to_string()),
+                                                            ExportOutcome::Cancelled => {}
+                                                        }
                                                     });
                                                 },
                                                 "Export JSON"
@@ -637,6 +660,7 @@ pub fn WorkspaceView() -> Element {
                                             repo: active_repo.clone(),
                                             project_id,
                                             status,
+                                            refresh: Some(refresh),
                                             on_linked: move |_| { refresh += 1; },
                                         }
                                     }
@@ -657,8 +681,14 @@ fn RepoCard(
     repo: String,
     project_id: String,
     status: Option<RepoCheckout>,
+    #[props(default)] refresh: Option<Signal<u32>>,
     on_linked: EventHandler<()>,
 ) -> Element {
+    // Shared page refresh so a Start-branch / Ship here re-fetches the checkout status AND the
+    // embedded GitPanel (branch list, ahead/behind). Falls back to a private signal when rendered
+    // standalone (tests) so the hook count stays stable and no context is required.
+    let local_refresh = use_signal(|| 0u32);
+    let mut refresh = refresh.unwrap_or(local_refresh);
     let mut branch = use_signal(|| "camerata/work".to_string());
     let mut title = use_signal(|| "Camerata: changes".to_string());
     let mut pr_url = use_signal(String::new);
@@ -709,7 +739,10 @@ fn RepoCard(
                                 working.set(true);
                                 spawn(async move {
                                     match start_branch(&pid, &rp, &br).await {
-                                        Some(_) => msg.set(format!("on branch {br}")),
+                                        Some(_) => {
+                                            msg.set(format!("on branch {br}"));
+                                            refresh += 1;
+                                        }
                                         None => msg.set("could not switch branch".to_string()),
                                     }
                                     working.set(false);
@@ -738,8 +771,11 @@ fn RepoCard(
                                 msg.set(String::new());
                                 spawn(async move {
                                     match ship(&pid, &rp, &br, &ti).await {
-                                        Some(url) if !url.is_empty() => pr_url.set(url),
-                                        _ => msg.set("ship failed — check the branch has commits and the token can push".to_string()),
+                                        Some(url) if !url.is_empty() => {
+                                            pr_url.set(url);
+                                            refresh += 1;
+                                        }
+                                        _ => msg.set("ship failed (check the branch has commits and the token can push)".to_string()),
                                     }
                                     working.set(false);
                                 });
@@ -765,6 +801,7 @@ fn RepoCard(
                 GitPanel {
                     repo: repo.clone(),
                     project_id: project_id.clone(),
+                    refresh: Some(refresh),
                 }
             } else {
                 p { class: "ws-hint", "Not cloned. Use \"Clone / update all repos\" above to create a local working copy, or link an existing clone below." }
@@ -818,15 +855,26 @@ fn RepoCard(
 /// The full local git control panel for one repo. Embedded inside RepoCard when cloned.
 /// Provides branch list, commit log, commit-all, push, pull, and cherry-pick.
 #[component]
-fn GitPanel(repo: String, project_id: String) -> Element {
+fn GitPanel(
+    repo: String,
+    project_id: String,
+    #[props(default)] refresh: Option<Signal<u32>>,
+) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
 
     // ── refresh counter (bumped after any mutating git op) ────────────────
-    let mut git_refresh = use_signal(|| 0u32);
+    // Shared with the parent page when provided so a commit / branch switch here also refreshes the
+    // RepoCard checkout status + health pills (and vice-versa). Falls back to a private signal when
+    // rendered standalone (tests).
+    let local_refresh = use_signal(|| 0u32);
+    let mut git_refresh = refresh.unwrap_or(local_refresh);
 
     // Branch panel state
     let mut new_branch_input = use_signal(String::new);
     let mut branch_working = use_signal(|| false);
+    // In-flight guard for cherry-pick (both the drop target and the per-commit button) so a
+    // double-fire cannot apply the same commit twice.
+    let mut cherry_working = use_signal(|| false);
 
     // Commit panel state
     let mut commit_msg = use_signal(String::new);
@@ -944,20 +992,30 @@ fn GitPanel(repo: String, project_id: String) -> Element {
                             rsx! {
                                 div {
                                     key: "{br_name}",
-                                    class: if is_current { "git-branch current" } else { "git-branch" },
-                                    // Drop target: cherry-pick the dragged commit onto the current branch
-                                    ondragover: move |evt| { evt.prevent_default(); },
+                                    class: if is_current { "git-branch current drop-target" } else { "git-branch" },
+                                    // Drop target: the server cherry-picks onto HEAD, so ONLY the current
+                                    // branch chip accepts a drop. Non-current chips do not `prevent_default`
+                                    // in `ondragover`, so the browser rejects the drop there entirely (a drop
+                                    // onto `release/x` while on `main` can no longer silently land on `main`).
+                                    ondragover: move |evt| { if is_current { evt.prevent_default(); } },
                                     ondrop: {
                                         let pid = pid_sw.clone();
                                         let rp = rp_sw.clone();
                                         move |evt| {
                                             evt.prevent_default();
+                                            if !is_current { return; }
                                             let sha = dragged_sha();
+                                            // Clear the stashed SHA immediately so a stray second drop of
+                                            // unrelated content cannot re-fire the same cherry-pick.
+                                            dragged_sha.set(String::new());
                                             if sha.is_empty() { return; }
+                                            if cherry_working() { return; }
                                             let pid = pid.clone();
                                             let rp = rp.clone();
+                                            cherry_working.set(true);
                                             spawn(async move {
                                                 let (ok, out) = api_git_cherry_pick(&pid, &rp, &sha).await;
+                                                cherry_working.set(false);
                                                 if ok {
                                                     crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Cherry-picked {sha} onto current branch."));
                                                     git_refresh += 1;
@@ -974,6 +1032,7 @@ fn GitPanel(repo: String, project_id: String) -> Element {
                                         let br2 = br_name.clone();
                                         move |_| {
                                             if is_current { return; }
+                                            if branch_working() { return; }
                                             let pid = pid.clone();
                                             let rp = rp.clone();
                                             let br2 = br2.clone();
@@ -1146,7 +1205,7 @@ fn GitPanel(repo: String, project_id: String) -> Element {
             div { class: "git-section",
                 p { class: "git-section-label",
                     "Recent commits"
-                    span { class: "git-log-hint", " — drag a row onto a branch to cherry-pick it, or use the button" }
+                    span { class: "git-log-hint", " (drag a row onto the current branch to cherry-pick it onto HEAD, or use the button)" }
                 }
                 // Search commits by a case-insensitive substring over short-sha / subject / author
                 // (pure predicate in ui-core).
@@ -1188,17 +1247,21 @@ fn GitPanel(repo: String, project_id: String) -> Element {
                                     // unavailable, and a convenience shortcut regardless
                                     button {
                                         class: "btn-edit-sm git-cherry-btn",
+                                        disabled: cherry_working(),
                                         title: "Cherry-pick {short} onto current branch",
                                         onclick: {
                                             let pid = pid_cp.clone();
                                             let rp = rp_cp.clone();
                                             let sha = sha_btn.clone();
                                             move |_| {
+                                                if cherry_working() { return; }
                                                 let pid = pid.clone();
                                                 let rp = rp.clone();
                                                 let sha = sha.clone();
+                                                cherry_working.set(true);
                                                 spawn(async move {
                                                     let (ok, out) = api_git_cherry_pick(&pid, &rp, &sha).await;
+                                                    cherry_working.set(false);
                                                     if ok {
                                                         crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Cherry-picked {sha}."));
                                                         git_refresh += 1;
@@ -1405,6 +1468,29 @@ mod tests {
         let rows = out.expect("clone result");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].detail, "cloned");
+    }
+
+    // A server error must surface as `None` so the caller can toast a failure (workspace-F4)
+    // instead of silently ending the spinner with no feedback.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn clone_project_returns_none_on_server_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-7/checkout"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::clone_project("proj-7").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(out.is_none(), "a 500 body yields None so the caller can toast a failure");
     }
 
     #[tokio::test]
