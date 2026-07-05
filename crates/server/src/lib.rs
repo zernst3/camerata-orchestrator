@@ -1182,6 +1182,27 @@ async fn start_run(
         None => (None, None, false),
     };
 
+    // LIFECYCLE-9 (single-flight guard): reject a second run on a story that already has an
+    // active (non-done) run. Two concurrent runs on one story would share a single worktree —
+    // corrupting each other's edits — and a sign-off could tear down a still-live run. The
+    // paused-then-resumed path is NOT blocked: a resume marks the paused run done before the
+    // resume run supersedes it (see `resume_governed_run` / escalation resolve). Enforced
+    // BEFORE the development gate so a duplicate start is refused as early as possible.
+    if let Some(active) = state.runs.active_run_for_story(&story_id) {
+        let body = Json(serde_json::json!({
+            "error": "a run is already active for this story",
+            "reason": format!(
+                "Run {} is still in progress for story {story_id} (status: {:?}). Only one \
+                 run may be active on a story at a time (concurrent runs would share one \
+                 worktree). Cancel or let the active run finish before starting another.",
+                active.id, active.status,
+            ),
+            "story_id": story_id,
+            "active_run_id": active.id,
+        }));
+        return (StatusCode::CONFLICT, body).into_response();
+    }
+
     // The no-code-first gate (Pillar 2): a governed run cannot start until every
     // DecisionRecord on this story's UoW is approved (decisions_approved_for_development).
     // We block + surface exactly why, rather than silently starting a run that the
@@ -2251,18 +2272,37 @@ async fn sign_off_run(
     // reclaimed. Best-effort + non-fatal: a missing worktree, an unresolved repo, or a
     // git error never blocks sign-off. The shared clone and the branch itself are left
     // intact (the branch may still be wanted for the PR); only the extra checkout is removed.
-    if let Some(branch) = uow.branch.as_deref().filter(|b| !b.trim().is_empty()) {
-        if let Some(repo) = repo_from_story_id(&run.story_id) {
-            let override_path = state.settings.repo_path(&repo);
-            let workspace_root = state.settings.workspace_root();
-            if let Some(clone) = crate::workspace::resolve_repo_dir(
-                override_path.as_deref(),
-                workspace_root.as_deref(),
-                &repo,
-            ) {
-                crate::workspace::remove_uow_worktree(&clone, branch).await;
+    //
+    // LIFECYCLE-9 (single-flight guard): NEVER tear down the worktree while the run is still
+    // live. A sign-off that arrives before the run reaches a terminal (`done`) state must not
+    // yank the worktree out from under the agent mid-edit. The sign-off itself is recorded
+    // above; only the destructive teardown is withheld until `run.done`.
+    let run_after_signoff = state.runs.get(&run.id).unwrap_or_else(|| run.clone());
+    if run_after_signoff.done {
+        if let Some(branch) = uow.branch.as_deref().filter(|b| !b.trim().is_empty()) {
+            if let Some(repo) = repo_from_story_id(&run.story_id) {
+                let override_path = state.settings.repo_path(&repo);
+                let workspace_root = state.settings.workspace_root();
+                if let Some(clone) = crate::workspace::resolve_repo_dir(
+                    override_path.as_deref(),
+                    workspace_root.as_deref(),
+                    &repo,
+                ) {
+                    crate::workspace::remove_uow_worktree(&clone, branch).await;
+                }
             }
         }
+    } else {
+        // The run is still live: record that teardown was deferred so the trail is honest.
+        state.uow.append_history(
+            &run.story_id,
+            "sign_off",
+            &format!(
+                "Sign-off recorded, but worktree teardown deferred: run {} is still live \
+                 (not done). The worktree stays intact until the run reaches a terminal state.",
+                run.id
+            ),
+        );
     }
 
     Ok(Json(uow).into_response())
@@ -13997,6 +14037,162 @@ mod tests {
             state.uow.get_or_create(story).stage,
             lifecycle::UowStage::Development
         );
+    }
+
+    // ── LIFECYCLE-9: single-flight guard per story ───────────────────────────────
+
+    /// A second start on a story that already has an active (non-done) run returns 409,
+    /// naming the active run — two runs must never share one worktree.
+    #[tokio::test]
+    async fn lifecycle9_second_start_with_active_run_returns_409() {
+        let state = AppState::seeded();
+        let story = "SF-1";
+        // Approve a decision so the development gate would otherwise pass.
+        seed_approved_decision(&state, story);
+        // Seed an ACTIVE (Planned, not done) run on the story — simulating a run already
+        // in flight.
+        let active = state.runs.create(story, "scripted", crate::run::RunKind::Watched);
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/stories/{story}/run"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "a second start with an active run must be rejected with 409"
+        );
+        let json = body_json(resp).await;
+        assert_eq!(json["active_run_id"], active);
+        assert!(json["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Only one"));
+    }
+
+    /// Once the active run is done, a fresh start proceeds (the guard only blocks LIVE runs).
+    #[tokio::test]
+    async fn lifecycle9_start_proceeds_once_prior_run_is_done() {
+        let state = AppState::seeded();
+        let story = "SF-2";
+        seed_approved_decision(&state, story);
+        // A prior run that has completed (done) must NOT block a new start.
+        let prior = state.runs.create(story, "scripted", crate::run::RunKind::Watched);
+        state.runs.mark_done(&prior);
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/stories/{story}/run"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a done prior run must not block a new start"
+        );
+    }
+
+    /// Sign-off on a story whose run is still LIVE (not done) must NOT tear down the
+    /// worktree — it records a deferral note instead. Once the run is done, sign-off proceeds
+    /// without the deferral note.
+    #[tokio::test]
+    async fn lifecycle9_signoff_defers_teardown_while_run_is_live() {
+        let state = AppState::seeded();
+        let story = "SF-3";
+        // A UoW branch so the teardown path would otherwise be reached.
+        state.uow.set_branch(story, Some("camerata/sf-3".to_string()));
+        // A LIVE run (Planned, not done).
+        let run_id = state.runs.create(story, "live", crate::run::RunKind::Watched);
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/runs/{run_id}/sign-off"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "sign-off itself still succeeds");
+
+        // A deferral history entry was recorded (teardown withheld while live).
+        let uow = state.uow.get_or_create(story);
+        assert!(
+            uow.history
+                .iter()
+                .any(|h| h.kind == "sign_off" && h.text.contains("teardown deferred")),
+            "a live run must defer worktree teardown and record why"
+        );
+    }
+
+    /// When the run is done, sign-off does NOT record the deferral note (teardown proceeds).
+    #[tokio::test]
+    async fn lifecycle9_signoff_tears_down_when_run_is_done() {
+        let state = AppState::seeded();
+        let story = "SF-4";
+        state.uow.set_branch(story, Some("camerata/sf-4".to_string()));
+        let run_id = state.runs.create(story, "live", crate::run::RunKind::Watched);
+        state
+            .runs
+            .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/runs/{run_id}/sign-off"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let uow = state.uow.get_or_create(story);
+        assert!(
+            !uow.history
+                .iter()
+                .any(|h| h.kind == "sign_off" && h.text.contains("teardown deferred")),
+            "a done run must not record a teardown-deferral note"
+        );
+    }
+
+    /// `active_run_for_story` returns the non-done run and ignores done runs.
+    #[test]
+    fn lifecycle9_active_run_for_story_ignores_done_runs() {
+        let runs = crate::run::RunStore::new();
+        let done = runs.create("S-A", "scripted", crate::run::RunKind::Watched);
+        runs.mark_done(&done);
+        assert!(
+            runs.active_run_for_story("S-A").is_none(),
+            "a story with only done runs has no active run"
+        );
+        let live = runs.create("S-A", "scripted", crate::run::RunKind::Watched);
+        assert_eq!(
+            runs.active_run_for_story("S-A").map(|r| r.id),
+            Some(live),
+            "the live run is surfaced as the active run"
+        );
+        // A different story is unaffected.
+        assert!(runs.active_run_for_story("S-B").is_none());
     }
 
     // ── Contract precondition (R3.g) ─────────────────────────────────────────────

@@ -104,6 +104,20 @@ impl RunStore {
         self.runs.lock().ok()?.get(id).cloned()
     }
 
+    /// LIFECYCLE-9 (single-flight guard): return the FIRST active (non-`done`) run on
+    /// `story_id`, if any. "Active" is simply `!run.done` — a run is done only once it
+    /// reaches a terminal state (AwaitingQa success, Failed, Cancelled) or is marked done
+    /// (a superseded paused run). A story with an active run must not start a second run
+    /// (two runs would share one worktree) and its worktree must not be torn down.
+    /// Returns a cloned snapshot so the caller holds no lock.
+    pub fn active_run_for_story(&self, story_id: &str) -> Option<Run> {
+        let guard = self.runs.lock().ok()?;
+        guard
+            .values()
+            .find(|r| r.story_id == story_id && !r.done)
+            .cloned()
+    }
+
     /// Return `true` when this status is a TERMINAL run status that must never be
     /// overwritten by a late executor (LIFECYCLE-1 / LIFECYCLE-2): an explicit
     /// `Cancelled` or `Failed`. `AwaitingQa` (the success terminal) is intentionally NOT
