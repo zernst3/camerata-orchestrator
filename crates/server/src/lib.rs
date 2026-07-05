@@ -7077,7 +7077,7 @@ async fn answer_escalation(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<crate::escalation::AnswerEscalationReq>,
-) -> Result<Json<crate::escalation::Escalation>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     let esc = state
         .escalations
         .get(&id)
@@ -7112,6 +7112,9 @@ async fn answer_escalation(
     // Act on the resolution by subject. A ROUTINE review returns the routine to Idle so the
     // scheduler can run its next slot. A UoW (Governed Development) review RESUMES the paused run
     // from its checkpoint (Approve/Amend) — or, on Reject, reverts the worktree and stops cleanly.
+    // On a successful Approve/Amend resume we capture the NEW run id (surfaced to the client) and
+    // mark the paused run terminal; a resume that cannot start is a 409, not a silent success.
+    let mut resume_run_id: Option<String> = None;
     match resolved.subject_kind {
         crate::escalation::SubjectKind::Routine => {
             let _ = state
@@ -7150,13 +7153,35 @@ async fn answer_escalation(
                     }
                     _ => {
                         // Approve / Amend: re-spawn from the checkpoint with the directive.
-                        let _ = resume_governed_run(&state, &ckpt, &directive).await;
+                        // A failed resume must NOT read as a successful resolution — surface it
+                        // as a 409 (the escalation is already resolved in the store, but the
+                        // client learns the run did not restart).
+                        match resume_governed_run(&state, &ckpt, &directive).await {
+                            Ok((new_run_id, _mode)) => {
+                                // The paused run is superseded by the resume run; close it out.
+                                state.runs.mark_done(&ckpt.run_id);
+                                resume_run_id = Some(new_run_id);
+                            }
+                            Err(reason) => {
+                                return Err(AppError::with_status(
+                                    StatusCode::CONFLICT,
+                                    anyhow::anyhow!("could not resume run from checkpoint: {reason}"),
+                                ));
+                            }
+                        }
                     }
                 }
             }
         }
     }
-    Ok(Json(resolved))
+    // Return the resolved escalation, annotated with the resumed run id (if any) so the client
+    // can follow the new run. Serialise to a Value so we can add the field without changing the
+    // persisted Escalation schema.
+    let mut body = serde_json::to_value(&resolved).map_err(|e| AppError(e.into()))?;
+    if let (Some(rid), Some(obj)) = (resume_run_id, body.as_object_mut()) {
+        obj.insert("resume_run_id".to_string(), serde_json::json!(rid));
+    }
+    Ok(Json(body))
 }
 
 /// Edit an existing routine (name / schedule / intent / prompt / scope).
@@ -8250,7 +8275,7 @@ async fn workitems_set_parent(
         Err(e) => {
             return Json(serde_json::json!({
                 "ok": false,
-                "message": e.0.to_string(),
+                "message": e.err.to_string(),
             }));
         }
     };
@@ -12275,12 +12300,33 @@ fn render_deep_report_markdown(deep: &crate::ai_audit::DeepReport, soc2_enabled:
 // ── error type ──────────────────────────────────────────────────────────────
 
 /// Maps any backend error to a 500 with a JSON body, so handlers can use `?`.
-struct AppError(anyhow::Error);
+struct AppError {
+    status: StatusCode,
+    err: anyhow::Error,
+}
+
+/// Construct a 500 `AppError` (the default). The `AppError(e)` call form is preserved via a
+/// same-named free function (types and values live in separate namespaces), so every existing
+/// call site keeps compiling; use [`AppError::with_status`] for a non-500 code.
+#[allow(non_snake_case)]
+fn AppError(err: anyhow::Error) -> AppError {
+    AppError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        err,
+    }
+}
+
+impl AppError {
+    /// An `AppError` that renders with a specific HTTP status (e.g. 409 Conflict).
+    fn with_status(status: StatusCode, err: anyhow::Error) -> Self {
+        AppError { status, err }
+    }
+}
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let body = Json(serde_json::json!({ "error": self.0.to_string() }));
-        (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+        let body = Json(serde_json::json!({ "error": self.err.to_string() }));
+        (self.status, body).into_response()
     }
 }
 
@@ -13248,7 +13294,12 @@ mod tests {
         .await
         .unwrap_or_else(|_| panic!("answer_escalation should succeed"))
         .0;
-        assert_eq!(resolved.status, crate::escalation::EscalationStatus::Resolved);
+        assert_eq!(resolved["status"], "resolved");
+        // A successful resume surfaces the NEW run id so the client can follow it.
+        assert!(
+            resolved["resume_run_id"].as_str().is_some_and(|s| !s.is_empty()),
+            "approve returns the resumed run id: {resolved}"
+        );
         // Approve RESUMES: the checkpoint is consumed (enforcing once-only resume) and no longer
         // shows in NEEDS YOU.
         assert!(
@@ -13284,7 +13335,12 @@ mod tests {
         .await
         .unwrap_or_else(|_| panic!("answer_escalation should succeed"))
         .0;
-        assert_eq!(resolved.status, crate::escalation::EscalationStatus::Resolved);
+        assert_eq!(resolved["status"], "resolved");
+        // Reject does NOT resume, so no run id is surfaced.
+        assert!(
+            resolved["resume_run_id"].is_null(),
+            "reject surfaces no resumed run id: {resolved}"
+        );
         // Reject consumes the checkpoint (stop cleanly; no resume).
         assert!(
             state.checkpoints.get(&ckpt_id).unwrap().resumed.is_some(),
@@ -14760,7 +14816,7 @@ mod tests {
             "github:zernst3/camerata-orchestrator#42",
         ) {
             Ok(v) => v,
-            Err(e) => panic!("valid id should parse: {}", e.0),
+            Err(e) => panic!("valid id should parse: {}", e.err),
         };
         assert_eq!(repo, "zernst3/camerata-orchestrator");
         assert_eq!(number, 42);
