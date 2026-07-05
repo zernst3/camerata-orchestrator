@@ -118,6 +118,17 @@ impl RunStore {
             .cloned()
     }
 
+    /// LIFECYCLE-6 (stall sweep): snapshot every ACTIVE (non-`done`) run. Returns cloned
+    /// snapshots so the caller (the background stall sweep) holds no lock while it evaluates
+    /// each run's stall decision and, when needed, cancels it. Done runs are excluded because
+    /// a terminal run can never stall.
+    pub fn snapshot_active(&self) -> Vec<Run> {
+        match self.runs.lock() {
+            Ok(guard) => guard.values().filter(|r| !r.done).cloned().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Return `true` when this status is a TERMINAL run status that must never be
     /// overwritten by a late executor (LIFECYCLE-1 / LIFECYCLE-2): an explicit
     /// `Cancelled` or `Failed`. `AwaitingQa` (the success terminal) is intentionally NOT

@@ -54,6 +54,7 @@ pub mod run;
 pub mod scan_cache;
 pub mod scan_routing;
 pub mod scan_tools;
+pub mod stall_sweep;
 // `schedule` (routine string parsing + is_due/next_fire) is now the framework-agnostic
 // `camerata_app_core::schedule` (RUST-HEADLESS-CORE-1); re-exported so `crate::schedule::*` call
 // sites (auto_fire, lib) are unchanged.
@@ -968,6 +969,12 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     // start firing routines. Cadence: CAMERATA_ROUTINE_TICK_SECS (default 60).
     crate::auto_fire::spawn_routine_scheduler(state.routines.clone(), state.escalations.clone());
 
+    // Stall sweep (LIFECYCLE-6): periodically auto-cancel AUTONOMOUS runs that have stalled
+    // (no activity past the active project's routine threshold). Watched runs stay alert-only.
+    // Spawned here (not in `router`) so tests that build the router don't auto-cancel runs.
+    // Cadence: CAMERATA_STALL_SWEEP_SECS (default 30).
+    crate::stall_sweep::spawn_stall_sweep(state.runs.clone(), state.projects.clone());
+
     // Per-UoW worktree housekeeping (Decision 1): on startup, prune stale worktree admin
     // records from every known repo clone AND remove worktrees for UoWs that are already
     // in a terminal state (SignedOff). Two cleanup passes, both best-effort + non-blocking:
@@ -1217,8 +1224,17 @@ async fn start_run(
         return (StatusCode::CONFLICT, body).into_response();
     }
 
-    let (run_id, mode) =
-        start_governed_run(&state, &story_id, model, tier_map, skip_layer2).await;
+    // Interactive HTTP start: Watched (alert-only on stall). The autonomous/routine path
+    // passes RunKind::Autonomous (see start_governed_run's `kind` param).
+    let (run_id, mode) = start_governed_run(
+        &state,
+        &story_id,
+        model,
+        tier_map,
+        skip_layer2,
+        crate::run::RunKind::Watched,
+    )
+    .await;
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id, "mode": mode }))
         .into_response()
 }
@@ -1639,10 +1655,14 @@ async fn start_governed_run(
     model: Option<String>,
     tier_map: Option<crate::model_tier::TierMap>,
     skip_layer2: bool,
+    // LIFECYCLE-6: the run kind decides the stall threshold + auto-cancel posture. Interactive
+    // (HTTP) starts pass `Watched` (alert-only); a routine-/scheduler-driven walk-away run passes
+    // `Autonomous` (longer threshold + auto-cancel by the background sweep).
+    kind: crate::run::RunKind,
 ) -> (String, &'static str) {
     let live = live_mode_enabled();
     let mode = if live { "live" } else { "scripted" };
-    let run_id = state.runs.create(story_id, mode, crate::run::RunKind::Watched);
+    let run_id = state.runs.create(story_id, mode, kind);
     let store = state.runs.clone();
     let rid = run_id.clone();
 
@@ -2086,13 +2106,26 @@ async fn get_run(
         .runs
         .get(&id)
         .ok_or_else(|| AppError(anyhow::anyhow!("run not found: {id}")))?;
-    let threshold_ms = crate::run::run_stall_threshold_ms();
+    // LIFECYCLE-6: the effective threshold comes from the ACTIVE project's per-kind stall
+    // setting (autonomous vs. watched), falling back to the env/default when no project is
+    // active. This is the SAME threshold the background sweep applies, so the reported
+    // `stalled` flag and the auto-cancel decision agree.
+    let threshold_ms = state
+        .projects
+        .active()
+        .map(|p| p.stall_threshold_ms(run.kind.is_autonomous()))
+        .unwrap_or_else(crate::run::run_stall_threshold_ms);
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
     let idle = crate::run::idle_ms(u128::from(run.tracker.last_activity_ms()), now_ms);
-    let stalled = crate::run::is_stalled(idle, threshold_ms);
+    // LIFECYCLE-7: a `done` run (success/failed/cancelled) or a PARKED run
+    // (AwaitingReview / AwaitingClarification, waiting on a human) is NEVER stalled — it is
+    // intentionally idle, not wedged. Only a live, in-flight run can stall.
+    let stalled = !run.done
+        && !run.status.is_parked()
+        && crate::run::is_stalled(idle, threshold_ms);
     let stall_policy = run.stall_policy.clone();
     let failure_reason = run.failure_reason.clone();
     Ok(Json(RunStatusResponse {
@@ -12655,6 +12688,49 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         // The store was left untouched (still None).
         assert!(state.settings.llm_backend().is_none());
+    }
+
+    /// LIFECYCLE-7: `GET /api/runs/:id` must NOT report `stalled` for a `done` run or a
+    /// PARKED run (AwaitingReview / AwaitingClarification), no matter how long idle. Only a
+    /// live, in-flight run can stall. A freshly-created (active, just-touched) run is also not
+    /// stalled. Exercises the handler's done/parked short-circuit end-to-end.
+    #[tokio::test]
+    async fn get_run_does_not_report_stalled_for_done_or_parked_runs() {
+        use crate::run::{RunKind, RunStatus};
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+
+        // Helper: GET a run and return its `stalled` flag.
+        async fn stalled_flag(state: &AppState, id: &str) -> bool {
+            let app = router(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/api/runs/{id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            body_json(resp).await["stalled"].as_bool().unwrap()
+        }
+
+        // A fresh, active dev-implement run (just touched activity) is not stalled.
+        let active = state.runs.create("CAM-live", "live", RunKind::Watched);
+        state.runs.set_status(&active, RunStatus::Executing, false);
+        state.runs.touch_activity(&active, None);
+        assert!(!stalled_flag(&state, &active).await, "fresh active run not stalled");
+
+        // A DONE run is never stalled (even though it will sit idle forever).
+        let done = state.runs.create("CAM-done", "live", RunKind::Watched);
+        state.runs.set_status(&done, RunStatus::AwaitingQa, true);
+        assert!(!stalled_flag(&state, &done).await, "done run never stalled");
+
+        // A run PARKED on human review is never stalled.
+        let parked = state.runs.create("CAM-parked", "live", RunKind::Watched);
+        state.runs.set_status(&parked, RunStatus::AwaitingReview, false);
+        assert!(!stalled_flag(&state, &parked).await, "parked run never stalled");
     }
 
     #[test]
