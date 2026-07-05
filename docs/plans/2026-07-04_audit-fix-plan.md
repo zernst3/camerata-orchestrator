@@ -166,7 +166,7 @@ fixes every AUTO item, skips every ZACH item, and updates the Progress table bel
 | UI contract + reactivity | cockpit-F1, UI-1,2,3,4,6,7,8,9,10,11,13,14,16, cockpit-F4,5,6 | not started | — |
 | Workspace panel | workspace-F1..F8 | not started | — |
 | Design double-create | ROUTES-3/UI-12 | not started | — |
-| Server contract + handlers | ROUTES-2,5,6,7,8,9 | not started | — |
+| Server contract + handlers | ROUTES-2,5,6,7,8,9 | partial | branch fix/audit-server-contract (commit 0388420); ROUTES-2, ROUTES-6 done (worktracker+ui green). ROUTES-5/7/8/9 deferred-needs-zach: ROUTES-7 (per-handler 4xx status-code judgment across ~40 sites), ROUTES-8 (per-handler read-vs-write classification of ~25 get_or_create sites + new store getter), ROUTES-5 (JobState data-model change), ROUTES-9 (concurrency/env semantics) |
 | GitHub token + publish + emit | ROUTES-1/PUBLISH-1, PUBLISH-2,3,4,5,6,7,8, GATE-F6 | not started | — |
 | Lifecycle minor (safe) | LIFECYCLE-11,13 | not started | — |
 | Doc accuracy sweep | GAP-9, GAP-5(doc) | not started | — |
