@@ -1334,6 +1334,9 @@ async fn resume_governed_run(
 
     if !live {
         // Scripted mode has no live agent to re-spawn; record the decision honestly and stop.
+        // LIFECYCLE-4: spawn the provenance watcher BEFORE the terminal transition so the
+        // resumed run gets provenance + stage advance on success, mirroring a fresh run.
+        spawn_provenance_watcher(state, &run_id, &story_id);
         state
             .runs
             .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
@@ -1363,6 +1366,11 @@ async fn resume_governed_run(
          worktree state (your prior work is still here) and apply this decision \
          exactly:\n\n{directive}"
     );
+    // LIFECYCLE-4: the resumed live run now gets the SAME completion-driven, success-gated
+    // provenance-stamping watcher a fresh run does — previously the resume path spawned none,
+    // so a resumed run never got provenance / evidence / a stage advance. Spawned BEFORE
+    // handing `story_id` to the implement run; the watcher awaits the run's terminal state.
+    spawn_provenance_watcher(state, &run_id, &story_id);
     spawn_brownfield_dev_run(
         state,
         run_id.clone(),
@@ -1543,7 +1551,12 @@ async fn spawn_brownfield_dev_run(
     let impl_registry = state.model_registry.clone();
     let impl_creds = state.credential_store.clone();
     let impl_limiter = state.rate_limiter.clone();
-    tokio::spawn(async move {
+    // LIFECYCLE-1: register the abort handle so a Stop can reap a run blocked inside the
+    // live implement agent subprocess (kill_on_drop). Cleared when the run finishes.
+    let runs_for_clear = state.runs.clone();
+    let rid_for_clear = run_id.clone();
+    let rid_for_clear2 = run_id.clone();
+    let handle = tokio::spawn(async move {
         crate::dev_implement_run::execute_dev_implement_run(
             store,
             uow_store,
@@ -1574,8 +1587,10 @@ async fn spawn_brownfield_dev_run(
             impl_projects,
             impl_project_id,
         )
-        .await
+        .await;
+        runs_for_clear.clear_abort(&rid_for_clear);
     });
+    state.runs.register_abort(&rid_for_clear2, handle.abort_handle());
 }
 
 /// path has no layer-2 bounce, so the flag is a no-op there.
@@ -1717,7 +1732,12 @@ async fn start_governed_run(
                     let live_registry = state.model_registry.clone();
                     let live_creds = state.credential_store.clone();
                     let live_limiter = state.rate_limiter.clone();
-                    tokio::spawn(async move {
+                    // LIFECYCLE-1: register the abort handle so a Stop reaps the greenfield
+                    // fleet's live agent subprocesses (kill_on_drop). Cleared on finish.
+                    let runs_for_clear = state.runs.clone();
+                    let rid_for_clear = rid.clone();
+                    let rid_register = rid.clone();
+                    let handle = tokio::spawn(async move {
                         live_fleet::execute_live_run_tiered(
                             store,
                             rid,
@@ -1731,12 +1751,18 @@ async fn start_governed_run(
                             live_creds,
                             live_limiter,
                         )
-                        .await
+                        .await;
+                        runs_for_clear.clear_abort(&rid_for_clear);
                     });
+                    state.runs.register_abort(&rid_register, handle.abort_handle());
                 }
                 // Single-model path (back-compat): one operator-wide model for every agent.
                 None => {
-                    tokio::spawn(async move {
+                    // LIFECYCLE-1: register the abort handle (see tiered arm above).
+                    let runs_for_clear = state.runs.clone();
+                    let rid_for_clear = rid.clone();
+                    let rid_register = rid.clone();
+                    let handle = tokio::spawn(async move {
                         live_fleet::execute_live_run(
                             store,
                             rid,
@@ -1746,8 +1772,10 @@ async fn start_governed_run(
                             max_iterations,
                             skip_layer2,
                         )
-                        .await
+                        .await;
+                        runs_for_clear.clear_abort(&rid_for_clear);
                     });
+                    state.runs.register_abort(&rid_register, handle.abort_handle());
                 }
             }
         }
@@ -1759,37 +1787,54 @@ async fn start_governed_run(
         tokio::spawn(async move { execute_run(store, transcripts, rid).await });
     }
 
-    // Provenance-stamping watcher (Pillar 2): once the run reaches its terminal
-    // (`done`) state, freeze the gate provenance onto the story's UoW and advance the
-    // lifecycle stage Development → AwaitingQa. This persists the honest accounting an
-    // architect reviews at QA, and survives the in-memory RunStore being lost. Runs as
-    // its own task so the run executor stays unaware of the UoW (keeps the layers thin).
-    //
-    // Evidence assembly (issue #53): the watcher also builds the SOC-2 evidence record
-    // from the run's gate decisions + provenance + scoped audit over the changed files,
-    // attaches it to the UoW, and posts it as a PR comment when a PR number is known
-    // from the UoW's branch. Graceful degradation: evidence failure never blocks the run.
-    //
-    // Enforcement-catch ledger capture: after the run is done, iterate its gate events
-    // and write one catch per deny to the enforcement ledger (best-effort, fail-soft).
-    {
-        let runs = state.runs.clone();
-        let uow = state.uow.clone();
-        let watch_id = run_id.clone();
-        let watch_story = story_id.to_string();
-        let ledger = state.enforcement_ledger.clone();
-        tokio::spawn(async move {
-            stamp_provenance_when_done(runs, uow, ledger, watch_id, watch_story).await;
-        });
-    }
+    // Provenance-stamping watcher (Pillar 2), shared by fresh + resume runs (LIFECYCLE-4).
+    spawn_provenance_watcher(state, &run_id, story_id);
 
     (run_id, mode)
 }
 
-/// Poll a run until it reports `done`, then freeze its gate provenance onto the story's
-/// UoW, advance the lifecycle stage to `AwaitingQa`, and assemble + attach the SOC-2
-/// evidence record (issue #53). Bounded poll loop so a never-completing run (e.g. a
-/// wedged live fleet) can't leak the task forever.
+/// Spawn the completion-driven, success-gated provenance-stamping watcher for `run_id`
+/// (Pillar 2). Called by BOTH [`start_governed_run`] (fresh) and [`resume_governed_run`]
+/// (resumed, LIFECYCLE-4) so a resumed run gets provenance + a stage advance on success
+/// exactly like a fresh one.
+///
+/// Once the run reaches its terminal state the watcher freezes the gate provenance onto the
+/// story's UoW and, ON SUCCESS ONLY, advances the lifecycle stage Development → AwaitingQa
+/// and attaches the SOC-2 QA evidence (issue #53) — see [`stamp_provenance_when_done`] for
+/// the full success/failure/cancel semantics. Runs as its own task so the run executor stays
+/// unaware of the UoW (keeps the layers thin). Graceful degradation throughout: evidence /
+/// ledger failures never block the run.
+fn spawn_provenance_watcher(state: &AppState, run_id: &str, story_id: &str) {
+    let runs = state.runs.clone();
+    let uow = state.uow.clone();
+    let watch_id = run_id.to_string();
+    let watch_story = story_id.to_string();
+    let ledger = state.enforcement_ledger.clone();
+    tokio::spawn(async move {
+        stamp_provenance_when_done(runs, uow, ledger, watch_id, watch_story).await;
+    });
+}
+
+/// Await a run's terminal state (COMPLETION-driven, LIFECYCLE-3) and then stamp its UoW
+/// according to the terminal STATUS (LIFECYCLE-2). Shared by BOTH a fresh governed run
+/// ([`start_governed_run`]) and a RESUMED one ([`resume_governed_run`], LIFECYCLE-4) so the
+/// two never drift.
+///
+/// LIFECYCLE-3 (completion signal, not a poll): the watcher awaits [`RunStore::wait_until_done`],
+/// which resolves the instant a terminal setter fires the per-run completion `Notify`. A live
+/// run that legitimately outlives the old 5-minute poll budget is still stamped. The generous
+/// `safety_timeout` is a backstop against a run that wedges without ever going terminal, never
+/// the normal path.
+///
+/// LIFECYCLE-2 (advance only on success):
+/// - SUCCESS (`AwaitingQa`): freeze gate provenance, `finish_development` (advance the stage),
+///   and assemble + attach the SOC-2 QA evidence.
+/// - FAILURE (`Failed`): still freeze gate provenance (an honest record of what the gate saw)
+///   but do NOT advance the stage and do NOT attach QA evidence — the work never completed.
+/// - CANCEL (`Cancelled`): freeze nothing, advance nothing, attach nothing.
+///
+/// In every terminal case the enforcement-catch ledger capture still runs (it is a record of
+/// the gate decisions the run produced, independent of whether the work advanced).
 async fn stamp_provenance_when_done(
     runs: RunStore,
     uow: crate::uow::UowStore,
@@ -1797,59 +1842,63 @@ async fn stamp_provenance_when_done(
     run_id: String,
     story_id: String,
 ) {
-    // Up to ~5 minutes of 500ms polls. The scripted path finishes in a few seconds;
-    // the live path is operator-driven and may legitimately take longer, but we cap to
-    // avoid an unbounded task. If it times out, no provenance is stamped (the architect
-    // can still read the live run + sign off; the durable copy is best-effort).
-    const MAX_POLLS: usize = 600;
-    for _ in 0..MAX_POLLS {
-        if let Some(run) = runs.get(&run_id) {
-            if run.done {
-                let rules = camerata_gateway::enforced_gate_rules();
-                let prov = run_provenance(&run, &rules);
-                let frozen = crate::uow::GateProvenance {
-                    run_id: prov.run_id.clone(),
-                    mode: prov.mode.clone(),
-                    allow_count: prov.allow_count,
-                    deny_count: prov.deny_count,
-                    total_bounces: prov.total_bounces,
-                    rules_fired: prov.rules_fired.clone(),
-                    recorded: chrono::Utc::now().to_rfc3339(),
-                };
-                uow.record_gate_provenance(&story_id, frozen);
-                // Advance Development → AwaitingQa (best-effort: only legal from
-                // Development; a UoW elsewhere is left as-is, never forced).
+    // Backstop only: the completion signal is the normal wake path (LIFECYCLE-3). 6 hours
+    // comfortably covers a long operator-driven live run without leaking the task forever.
+    const SAFETY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+    let run = match runs.wait_until_done(&run_id, SAFETY_TIMEOUT).await {
+        Some(run) => run,
+        // Wedged without ever going terminal, or an unknown run id. Nothing to stamp.
+        None => return,
+    };
+
+    let rules = camerata_gateway::enforced_gate_rules();
+    let prov = run_provenance(&run, &rules);
+
+    // Branch on the TERMINAL STATUS — this is the LIFECYCLE-2 fix. The old code advanced the
+    // stage + attached evidence on ANY `done` run (including failed and cancelled ones).
+    match &run.status {
+        // CANCEL: freeze nothing, advance nothing, attach nothing. The run stopped before
+        // any completed work; there is no honest gate accounting to record.
+        crate::run::RunStatus::Cancelled => {
+            // Ledger capture still records whatever gate decisions occurred before the stop.
+        }
+        // FAILURE and SUCCESS both freeze the gate provenance (the honest record of what the
+        // gate actually saw). Only SUCCESS advances the stage + attaches QA evidence.
+        crate::run::RunStatus::Failed { .. } | crate::run::RunStatus::AwaitingQa => {
+            let frozen = crate::uow::GateProvenance {
+                run_id: prov.run_id.clone(),
+                mode: prov.mode.clone(),
+                allow_count: prov.allow_count,
+                deny_count: prov.deny_count,
+                total_bounces: prov.total_bounces,
+                rules_fired: prov.rules_fired.clone(),
+                recorded: chrono::Utc::now().to_rfc3339(),
+            };
+            uow.record_gate_provenance(&story_id, frozen);
+
+            if matches!(run.status, crate::run::RunStatus::AwaitingQa) {
+                // SUCCESS ONLY: advance Development → AwaitingQa (best-effort: only legal
+                // from Development; a UoW elsewhere is left as-is, never forced).
                 let _ = uow.finish_development(&story_id);
 
-                // ── Evidence assembly (issue #53) ────────────────────────────────
-                // Build the SOC-2 evidence record from the run's gate decisions +
-                // provenance + a scoped audit over the changed files. Attach it to the
-                // UoW so the sign-off gate and PR renderer can use it. All steps are
-                // best-effort: a failure here never blocks the run's AwaitingQa state.
+                // SUCCESS ONLY — Evidence assembly (issue #53): build the SOC-2 evidence
+                // record and attach it. A failed run attaches NO QA evidence, so the sign-off
+                // gate can never mistake failed work for verified work.
                 let evidence = assemble_evidence_for_run(&run, &prov, &story_id);
                 uow.attach_evidence(&story_id, evidence);
-
-                // ── Enforcement-catch ledger capture (terminal point 1) ──────────
-                // After run is done, write one catch per deny/bounce gate event to the
-                // append-only enforcement ledger. Best-effort / fail-soft: errors are
-                // logged and swallowed inside `capture_run_finalization`; a ledger
-                // failure never affects the run's terminal state or provenance.
-                crate::enforcement_ledger::capture_run_finalization(
-                    &ledger,
-                    &run.events,
-                    &run.id,
-                    &story_id,
-                )
-                .await;
-
-                return;
             }
-        } else {
-            // The run vanished from the store; nothing to stamp.
-            return;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // A non-terminal status behind a `done` flag should not occur (the terminal guard in
+        // RunStore keeps done runs at a terminal status). Be conservative: stamp nothing.
+        _ => {}
     }
+
+    // ── Enforcement-catch ledger capture (terminal point 1) ──────────────────
+    // Write one catch per deny/bounce gate event to the append-only enforcement ledger,
+    // regardless of the terminal kind. Best-effort / fail-soft: errors are logged and
+    // swallowed inside `capture_run_finalization`; a ledger failure never affects state.
+    crate::enforcement_ledger::capture_run_finalization(&ledger, &run.events, &run.id, &story_id)
+        .await;
 }
 
 /// Build a [`crate::evidence::UowEvidenceRecord`] from a completed run's provenance
@@ -11393,7 +11442,11 @@ async fn uow_update_branch(
         let grounding = state.project_grounding().await;
         // MULTI-REPO READ scope: ALL the active project's local repo clones (read-only).
         let read_dirs = state.active_repo_dirs();
-        tokio::spawn(async move {
+        // LIFECYCLE-1: register the abort handle so a Stop can reap a run blocked inside the
+        // live agent subprocess (kill_on_drop). Cleared when the run finishes.
+        let runs_for_clear = state.runs.clone();
+        let rid_for_clear = run_id.clone();
+        let handle = tokio::spawn(async move {
             crate::update_branch_run::execute_update_branch_run(
                 runs,
                 uow_store,
@@ -11410,7 +11463,9 @@ async fn uow_update_branch(
                 read_dirs,
             )
             .await;
+            runs_for_clear.clear_abort(&rid_for_clear);
         });
+        state.runs.register_abort(&run_id, handle.abort_handle());
     }
 
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id })).into_response()
@@ -11665,7 +11720,11 @@ async fn uow_pr_resolve(
         let grounding = state.project_grounding().await;
         // MULTI-REPO READ scope: ALL the active project's local repo clones (read-only).
         let read_dirs = state.active_repo_dirs();
-        tokio::spawn(async move {
+        // LIFECYCLE-1: register the abort handle so a Stop can reap a run blocked inside the
+        // live agent subprocess (kill_on_drop). Cleared when the run finishes.
+        let runs_for_clear = state.runs.clone();
+        let rid_for_clear = run_id.clone();
+        let handle = tokio::spawn(async move {
             crate::pr_resolve_run::execute_pr_resolve_run(
                 runs,
                 uow_store,
@@ -11683,7 +11742,9 @@ async fn uow_pr_resolve(
                 read_dirs,
             )
             .await;
+            runs_for_clear.clear_abort(&rid_for_clear);
         });
+        state.runs.register_abort(&run_id, handle.abort_handle());
     }
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id })).into_response()
 }
@@ -14449,6 +14510,264 @@ mod tests {
         }
         store.set_status(&id, crate::run::RunStatus::AwaitingQa, true);
         id
+    }
+
+    // ── LIFECYCLE-2/3/4: completion-driven, success-gated provenance stamping ─────────
+
+    /// Drive a fresh in-memory UoW for `story` to the `Development` stage (the stage a
+    /// governed dev run stamps from). Seeds one APPROVED decision so the no-code-first
+    /// transitions succeed: Intake → Investigating → DecisionsApproved → Development.
+    fn uow_at_development(uow: &crate::uow::UowStore, story: &str) {
+        use camerata_worktracker::investigation::{
+            DecisionOutcome, DecisionRecord, RevisionActor, RevisionProvenance,
+        };
+        let decision = DecisionRecord {
+            artifact_id: format!("{story}/decision/d1"),
+            story_id: story.to_string(),
+            label: "d1".to_string(),
+            question: "Q?".to_string(),
+            rationale: "R".to_string(),
+            alternatives_considered: vec![],
+            outcome: DecisionOutcome::Approved,
+            provenance: RevisionProvenance::new(RevisionActor::Ai, chrono::Utc::now()),
+        };
+        uow.set_decisions(story, vec![decision]);
+        uow.begin_investigation(story).expect("→ Investigating");
+        uow.approve_decisions(story).expect("→ DecisionsApproved");
+        uow.start_development(story).expect("→ Development");
+        assert_eq!(
+            uow.get_or_create(story).stage,
+            lifecycle::UowStage::Development
+        );
+    }
+
+    /// LIFECYCLE-2 (success): a SUCCESSFUL run advances Development → AwaitingQa, freezes
+    /// gate provenance, AND attaches QA evidence. Driven through the SAME completion-driven
+    /// stamping path a real run uses (`stamp_provenance_when_done`), not a hand-stamp.
+    #[tokio::test]
+    async fn stamp_on_success_advances_stage_and_attaches_evidence() {
+        let runs = RunStore::new();
+        let uow = crate::uow::UowStore::new();
+        let story = "LIFE-SUCCESS";
+        uow_at_development(&uow, story);
+
+        // A completed (AwaitingQa) run with real gate events (1 allow, 2 deny).
+        let run_id = make_run(&runs, story, 1, 2);
+
+        stamp_provenance_when_done(
+            runs.clone(),
+            uow.clone(),
+            crate::enforcement_ledger::EnforcementLedger::none(),
+            run_id.clone(),
+            story.to_string(),
+        )
+        .await;
+
+        let stamped = uow.get_or_create(story);
+        // Stage advanced.
+        assert_eq!(stamped.stage, lifecycle::UowStage::AwaitingQa);
+        // Provenance frozen with the honest tallies.
+        let prov = stamped.gate_provenance.expect("provenance frozen on success");
+        assert_eq!(prov.deny_count, 2);
+        assert_eq!(prov.allow_count, 1);
+        // QA evidence attached.
+        assert!(stamped.evidence.is_some(), "QA evidence attached on success");
+    }
+
+    /// LIFECYCLE-2 (failure): a FAILED run (e.g. gateway binary missing) does NOT advance
+    /// to AwaitingQa and attaches NO QA evidence, but its gate provenance IS still frozen
+    /// (an honest record of what the gate saw). This is the core fix: the old code advanced
+    /// the stage + attached evidence for work that never completed.
+    #[tokio::test]
+    async fn stamp_on_failure_freezes_provenance_but_does_not_advance_or_attach() {
+        let runs = RunStore::new();
+        let uow = crate::uow::UowStore::new();
+        let story = "LIFE-FAIL";
+        uow_at_development(&uow, story);
+
+        // A run with gate events that then FAILS (genuine Failed terminal).
+        let run_id = make_run(&runs, story, 1, 2);
+        // make_run leaves it AwaitingQa; flip to a fresh run that fails instead so the
+        // terminal status is Failed (the terminal guard blocks re-setting a done run).
+        let run_id = {
+            let id = runs.create(story, "live", crate::run::RunKind::Watched);
+            for ev in runs.get(&run_id).unwrap().events {
+                runs.push_event(&id, ev);
+            }
+            runs.fail_with_reason(&id, "gateway binary missing".to_string());
+            id
+        };
+
+        stamp_provenance_when_done(
+            runs.clone(),
+            uow.clone(),
+            crate::enforcement_ledger::EnforcementLedger::none(),
+            run_id.clone(),
+            story.to_string(),
+        )
+        .await;
+
+        let stamped = uow.get_or_create(story);
+        // Stage did NOT advance — still Development.
+        assert_eq!(stamped.stage, lifecycle::UowStage::Development);
+        // Provenance IS frozen (honest record of what the gate saw).
+        assert!(
+            stamped.gate_provenance.is_some(),
+            "provenance frozen even on failure"
+        );
+        // NO QA evidence for work that never completed.
+        assert!(
+            stamped.evidence.is_none(),
+            "no QA evidence attached on failure"
+        );
+    }
+
+    /// LIFECYCLE-2 (cancel): a CANCELLED run freezes nothing, advances nothing, attaches
+    /// nothing — the run stopped before any completed work, so there is no honest gate
+    /// accounting to record.
+    #[tokio::test]
+    async fn stamp_on_cancel_does_nothing() {
+        let runs = RunStore::new();
+        let uow = crate::uow::UowStore::new();
+        let story = "LIFE-CANCEL";
+        uow_at_development(&uow, story);
+
+        let run_id = runs.create(story, "live", crate::run::RunKind::Watched);
+        runs.cancel(&run_id);
+
+        stamp_provenance_when_done(
+            runs.clone(),
+            uow.clone(),
+            crate::enforcement_ledger::EnforcementLedger::none(),
+            run_id.clone(),
+            story.to_string(),
+        )
+        .await;
+
+        let stamped = uow.get_or_create(story);
+        assert_eq!(stamped.stage, lifecycle::UowStage::Development);
+        assert!(stamped.gate_provenance.is_none(), "cancel freezes no provenance");
+        assert!(stamped.evidence.is_none(), "cancel attaches no evidence");
+    }
+
+    /// LIFECYCLE-3: the completion path stamps correctly for a run that reaches its terminal
+    /// state LATER (would exceed the old 5-minute poll budget). We drive the completion
+    /// signal directly — a background task flips the run terminal after the watcher is
+    /// already awaiting — proving the stamp is completion-driven, not wall-clock-driven.
+    #[tokio::test]
+    async fn stamp_is_completion_driven_not_polled() {
+        let runs = RunStore::new();
+        let uow = crate::uow::UowStore::new();
+        let story = "LIFE-LATE";
+        uow_at_development(&uow, story);
+
+        // Create a run that is NOT yet done and give it gate events.
+        let run_id = runs.create(story, "live", crate::run::RunKind::Watched);
+        runs.push_event(
+            &run_id,
+            crate::run::GateEvent {
+                seq: 1,
+                layer: "layer-1".to_string(),
+                verdict: "allow".to_string(),
+                rule: None,
+                detail: "src/late.rs".to_string(),
+                content_hash: None,
+            },
+        );
+
+        // Start the watcher; it parks on the completion signal (run is not done yet).
+        let watch = {
+            let runs = runs.clone();
+            let uow = uow.clone();
+            let rid = run_id.clone();
+            let sid = story.to_string();
+            tokio::spawn(async move {
+                stamp_provenance_when_done(
+                    runs,
+                    uow,
+                    crate::enforcement_ledger::EnforcementLedger::none(),
+                    rid,
+                    sid,
+                )
+                .await;
+            })
+        };
+
+        // Complete the run AFTER the watcher is already awaiting — the completion signal (not
+        // a poll) wakes it. A short sleep makes the ordering deterministic.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        runs.set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
+
+        watch.await.expect("watcher task completes");
+
+        let stamped = uow.get_or_create(story);
+        assert_eq!(stamped.stage, lifecycle::UowStage::AwaitingQa);
+        assert!(stamped.gate_provenance.is_some());
+        assert!(stamped.evidence.is_some());
+    }
+
+    /// LIFECYCLE-4: a RESUMED governed run gets the SAME completion-driven, success-gated
+    /// provenance watcher a fresh run does. Previously the resume path spawned none, so a
+    /// resumed run never got provenance / a stage advance. Exercised through the real
+    /// `resume_governed_run` in scripted mode (CI default): it completes the resumed run to
+    /// AwaitingQa and the watcher must then freeze provenance + advance the UoW stage.
+    #[tokio::test]
+    async fn resumed_run_gets_provenance_and_stage_advance_on_success() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let story = "me/api#7";
+        uow_at_development(&state.uow, story);
+
+        // Seed a resumable checkpoint (as a test-tamper pause would).
+        let esc = state.escalations.raise(
+            crate::escalation::RaiseEscalationReq {
+                subject_kind: crate::escalation::SubjectKind::Uow,
+                checkpoint_id: None,
+                routine_id: story.to_string(),
+                reason: "AGENTIC-NO-TEST-TAMPER-1".to_string(),
+                stopped_for: "review".to_string(),
+                suggestions: vec![],
+                raw_context: String::new(),
+            },
+            "story",
+        );
+        let ckpt = state.checkpoints.create(crate::checkpoint::NewCheckpoint {
+            story_id: story.to_string(),
+            run_id: "run-orig".to_string(),
+            escalation_id: esc.id.clone(),
+            pause_reason: "test-tamper".to_string(),
+            repo: "me/api".to_string(),
+            branch: "camerata/me-api-7".to_string(),
+            worktree_dir: "/camerata/nonexistent-wt".to_string(),
+            base_commit: "abc123".to_string(),
+            iteration: 0,
+            max_iterations: 1,
+            model: "claude-opus-4-8".to_string(),
+            project_id: None,
+        });
+
+        let (run_id, _mode) = resume_governed_run(&state, &ckpt, "Approved: proceed.")
+            .await
+            .expect("resume succeeds");
+
+        // The resumed run completes to AwaitingQa (scripted mode); wait for the spawned
+        // watcher to observe the completion signal and stamp.
+        let stamped = state.runs.get(&run_id).expect("resumed run exists");
+        assert!(stamped.done, "resumed scripted run is terminal");
+
+        // Poll briefly for the watcher's stamp (it runs on its own task).
+        let mut advanced = false;
+        for _ in 0..50 {
+            if state.uow.get_or_create(story).stage == lifecycle::UowStage::AwaitingQa {
+                advanced = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(advanced, "LIFECYCLE-4: resumed run's watcher advanced the stage");
+        assert!(
+            state.uow.get_or_create(story).gate_provenance.is_some(),
+            "LIFECYCLE-4: resumed run's watcher froze provenance"
+        );
     }
 
     #[test]
