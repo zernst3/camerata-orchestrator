@@ -665,7 +665,6 @@ pub fn DesignCanvasView() -> Element {
                         // is rejected by materialize validation, giving a dead-end button.
                         if let Some(sel_id) = selected_node_id() {
                             {
-                                let rid = root_id().unwrap_or_default();
                                 let sel_type = nodes
                                     .iter()
                                     .find(|n| n.story_id == sel_id)
@@ -678,21 +677,13 @@ pub fn DesignCanvasView() -> Element {
                                             button {
                                                 class: "btn-edit-sm",
                                                 onclick: move |_| {
-                                                    let r = rid.clone();
                                                     let p = sel_id.clone();
                                                     let ct = ct.clone();
                                                     spawn(async move {
+                                                        // `api_design_blank` with a parent already creates AND
+                                                        // parents the child node; a second materialize call here
+                                                        // created a duplicate sibling, so it is intentionally gone.
                                                         if let Some(new_id) = api_design_blank(&ct, Some(&p), None).await {
-                                                            // Materialize it by re-fetching; the blank node is already in the store.
-                                                            let _ = api_design_materialize(
-                                                                &r,
-                                                                &p,
-                                                                vec![serde_json::json!({
-                                                                    "node_type": ct,
-                                                                    "title": "",
-                                                                    "body": "",
-                                                                })],
-                                                            ).await;
                                                             selected_node_id.set(Some(new_id));
                                                             refresh += 1;
                                                         }

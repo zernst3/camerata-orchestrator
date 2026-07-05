@@ -165,7 +165,7 @@ fixes every AUTO item, skips every ZACH item, and updates the Progress table bel
 |---|---|---|---|
 | UI contract + reactivity | cockpit-F1, UI-1,2,3,4,6,7,8,9,10,11,13,14,16, cockpit-F4,5,6 | done | branch fix/audit-ui-contract (commit 0b81e7c); 543 ui tests green |
 | Workspace panel | workspace-F1..F8 | done | branch fix/audit-workspace (commit ad6ac56); 543 ui tests green. F6 fixed UI-only (restrict drop target to current branch + fix hint); server cherry_pick branch param NOT added (out of scope). |
-| Design double-create | ROUTES-3/UI-12 | not started | — |
+| Design double-create | ROUTES-3/UI-12 | done | branch fix/audit-design (commit e62d079); 542 ui tests green |
 | Server contract + handlers | ROUTES-2,5,6,7,8,9 | not started | — |
 | GitHub token + publish + emit | ROUTES-1/PUBLISH-1, PUBLISH-2,3,4,5,6,7,8, GATE-F6 | deferred (budget) | not started; server-heavy + judgment-sensitive (keychain/env/publish semantics). Ran out of budget before a verifiable server build was affordable. |
 | Lifecycle minor (safe) | LIFECYCLE-11,13 | deferred (budget) | not started; server runtime lifecycle edits need a green camerata-server build to verify, which the remaining budget could not cover. |
