@@ -2105,7 +2105,7 @@ async fn get_run(
     let run = state
         .runs
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("run not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("run not found: {id}")))?;
     // LIFECYCLE-6: the effective threshold comes from the ACTIVE project's per-kind stall
     // setting (autonomous vs. watched), falling back to the env/default when no project is
     // active. This is the SAME threshold the background sweep applies, so the reported
@@ -2167,7 +2167,7 @@ async fn get_run_provenance(
     let run = state
         .runs
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("run not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("run not found: {id}")))?;
     let rules = camerata_gateway::enforced_gate_rules();
     Ok(Json(run_provenance(&run, &rules)))
 }
@@ -2231,7 +2231,7 @@ async fn sign_off_run(
     let run = state
         .runs
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("run not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("run not found: {id}")))?;
 
     // ── Critical-finding sign-off gate (issue #53) ───────────────────────────
     // Read the UoW's attached evidence. If it has a critical scoped-scan finding,
@@ -2434,7 +2434,7 @@ async fn answer_clarification(
     let answered = state
         .clarifications
         .answer_structured(&cid, selection, &req.answered_by)
-        .ok_or_else(|| AppError(anyhow::anyhow!("clarification not found: {cid}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("clarification not found: {cid}")))?;
 
     // Phase 3b: if a gated run is PARKED on this clarification, resume it now. The resume
     // context is consumed (no double-resume); the re-spawned agent gets the original task
@@ -2543,7 +2543,7 @@ async fn export_project(
     let project = state
         .projects
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     let routines = state.routines.list_for_project(&id);
     Ok(Json(ProjectExportDoc { project, routines }))
 }
@@ -5286,7 +5286,7 @@ async fn onboard_ignore(
     Json(req): Json<IgnoreReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     if req.reason.trim().is_empty() {
-        return Err(AppError(anyhow::anyhow!(
+        return Err(AppError::bad_request(anyhow::anyhow!(
             "a reason is required to ignore a finding"
         )));
     }
@@ -5299,7 +5299,7 @@ async fn onboard_ignore(
     let (owner, name) = req
         .repo
         .split_once('/')
-        .ok_or_else(|| AppError(anyhow::anyhow!("repo must be owner/repo")))?;
+        .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("repo must be owner/repo")))?;
 
     let mut baseline = fetch_baseline(owner, name, &token).await;
     let now = chrono::Utc::now().to_rfc3339();
@@ -5339,7 +5339,7 @@ async fn project_suppressions(
     let project = state
         .projects
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     // Local-first: the waiver registry reads each repo's local working tree, not GitHub.
     let (sources, _notes) = resolve_local_sources(&state, &project.repos);
     // Refresh = best-effort fast-forward pull of each local repo so the listing reflects the
@@ -6819,7 +6819,7 @@ async fn adopt_issue(
 ) -> Result<Json<CanonicalStory>, AppError> {
     let repo = req.repo.trim();
     if camerata_worktracker::RepoCoord::parse(repo).is_none() {
-        return Err(AppError(anyhow::anyhow!(
+        return Err(AppError::bad_request(anyhow::anyhow!(
             "repo must be `owner/name`, got `{repo}`"
         )));
     }
@@ -6843,7 +6843,7 @@ async fn decompose_propose(
         .get(&story_id)
         .await
         .map_err(AppError)?
-        .ok_or_else(|| AppError(anyhow::anyhow!("story not found: {story_id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("story not found: {story_id}")))?;
     // AI decomposition (grounded children), with the deterministic propose as fallback.
     let llm = state.llm();
     // Decomposition is a NON-FLEET step: model from the active project's per-step config.
@@ -6875,7 +6875,7 @@ async fn suggest_clarifications(
         .get(&story_id)
         .await
         .map_err(AppError)?
-        .ok_or_else(|| AppError(anyhow::anyhow!("story not found: {story_id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("story not found: {story_id}")))?;
     let system = "You are the engineer about to build this story. List the clarifying \
         questions you GENUINELY need answered before writing code: ambiguities, missing \
         decisions, edge cases, unstated constraints. Be specific to this story. Return \
@@ -7066,7 +7066,7 @@ async fn instantiate_routine_from_template(
     let template = templates
         .iter()
         .find(|t| t.id == template_id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("template not found: {template_id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("template not found: {template_id}")))?;
     Ok(Json(crate::routine::instantiate_from_template(template)))
 }
 
@@ -7080,7 +7080,7 @@ async fn set_routine_enabled(
         .routines
         .set_enabled(&id, req.enabled)
         .map(Json)
-        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("routine not found: {id}")))
 }
 
 /// Provision a routine on this backend (the "Set up" action for one that arrived via a
@@ -7094,7 +7094,7 @@ async fn provision_routine(
         .routines
         .set_provisioned(&id)
         .map(Json)
-        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("routine not found: {id}")))
 }
 
 /// Run a routine now (a governed run via the real gate; records the summary). If the run
@@ -7107,7 +7107,7 @@ async fn run_routine_now(
     let routine = state
         .routines
         .run_now(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("routine not found: {id}")))?;
     // If the run blocked, raise a review and link it to this run's history entry.
     if let Some(esc_id) = crate::escalation::raise_if_blocked(&state.escalations, &routine) {
         let _ = state.routines.link_last_run_escalation(&id, &esc_id);
@@ -7124,7 +7124,7 @@ async fn routine_runs(
         .routines
         .runs(&id)
         .map(Json)
-        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("routine not found: {id}")))
 }
 
 /// Query for `GET /api/escalations`: `?open=true` returns only open reviews.
@@ -7158,7 +7158,7 @@ async fn raise_escalation(
         .into_iter()
         .find(|r| r.id == req.routine_id)
         .map(|r| r.name)
-        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {}", req.routine_id)))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("routine not found: {}", req.routine_id)))?;
     Ok(Json(state.escalations.raise_deduped(req, &name)))
 }
 
@@ -7182,7 +7182,7 @@ async fn chat_escalation(
     let esc = state
         .escalations
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("escalation not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("escalation not found: {id}")))?;
     // GROUNDING (the invariant): the lead-engineer review chat reasons about the ACTUAL
     // project — append the active project's repo + rule digest to the system prompt.
     let system = match state.project_grounding().await {
@@ -7218,7 +7218,7 @@ async fn chat_escalation(
         .escalations
         .append_turn(&id, &req.message, &reply)
         .map(Json)
-        .ok_or_else(|| AppError(anyhow::anyhow!("escalation not found: {id}")))
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("escalation not found: {id}")))
 }
 
 /// Resolve an escalation with the human's answer. The answer is run through the
@@ -7235,9 +7235,14 @@ async fn answer_escalation(
     let esc = state
         .escalations
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("escalation not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("escalation not found: {id}")))?;
     if esc.status != crate::escalation::EscalationStatus::Open {
-        return Err(AppError(anyhow::anyhow!("no open escalation: {id}")));
+        // The escalation EXISTS but is already resolved: a state conflict, not a missing
+        // resource. 409 (not 404), so a caller can distinguish "gone" from "already answered".
+        return Err(AppError::with_status(
+            StatusCode::CONFLICT,
+            anyhow::anyhow!("no open escalation: {id}"),
+        ));
     }
     // Translate the human answer into a structured resume payload via the real LLM seam
     // (model-selectable, with a deterministic fallback inside translate_answer_ai).
@@ -7262,7 +7267,7 @@ async fn answer_escalation(
     let resolved = state
         .escalations
         .resolve_with_payload(&id, &req.answer, &payload)
-        .ok_or_else(|| AppError(anyhow::anyhow!("no open escalation: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("no open escalation: {id}")))?;
     // Act on the resolution by subject. A ROUTINE review returns the routine to Idle so the
     // scheduler can run its next slot. A UoW (Governed Development) review RESUMES the paused run
     // from its checkpoint (Approve/Amend) — or, on Reject, reverts the worktree and stops cleanly.
@@ -7353,7 +7358,7 @@ async fn update_routine(
         .routines
         .update(&id, &req)
         .map(Json)
-        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("routine not found: {id}")))
 }
 
 /// Delete a routine.
@@ -7364,7 +7369,7 @@ async fn delete_routine(
     if state.routines.delete(&id) {
         Ok(Json(serde_json::json!({ "deleted": id })))
     } else {
-        Err(AppError(anyhow::anyhow!("routine not found: {id}")))
+        Err(AppError::not_found(anyhow::anyhow!("routine not found: {id}")))
     }
 }
 
@@ -7810,7 +7815,7 @@ async fn checkout_status(
     let project = state
         .projects
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     // Override-aware (issue #33/#38): resolve each repo via its per-repo path override first,
     // falling back to `<workspace_root>/<owner>/<repo>`. A repo can resolve via an override even
     // when no workspace root is set, so we do NOT hard-fail on a missing workspace root — repos
@@ -7839,7 +7844,7 @@ async fn checkout_project(
     let project = state
         .projects
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     let Some(root) = state.settings.workspace_root() else {
         return Err(AppError(anyhow::anyhow!(
             "no workspace folder is set — pick one first"
@@ -7896,7 +7901,7 @@ async fn checkout_branch(
     let _project = state
         .projects
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     let Some(root) = state.settings.workspace_root() else {
         return Err(AppError(anyhow::anyhow!("no workspace folder is set")));
     };
@@ -7932,7 +7937,7 @@ async fn ship_repo(
     let _project = state
         .projects
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     let Some(root) = state.settings.workspace_root() else {
         return Err(AppError(anyhow::anyhow!("no workspace folder is set")));
     };
@@ -8316,7 +8321,7 @@ async fn workitems_comment(
         .github_token()
         .ok_or_else(|| AppError(anyhow::anyhow!("no GitHub token — set CAMERATA_GITHUB_TOKEN")))?;
     if req.body.trim().is_empty() {
-        return Err(AppError(anyhow::anyhow!("comment body must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!("comment body must not be empty")));
     }
     let (repo, number) = parse_github_work_item_id(&req.work_item_id)?;
     let url = crate::github_issues::comment_on_issue(&repo, number, &req.body, &token)
@@ -8487,23 +8492,23 @@ async fn workitems_set_parent(
 /// Errors when the provider is not `github` or the shape is malformed.
 fn parse_github_work_item_id(work_item_id: &str) -> Result<(String, u64), AppError> {
     let rest = work_item_id.strip_prefix("github:").ok_or_else(|| {
-        AppError(anyhow::anyhow!(
+        AppError::bad_request(anyhow::anyhow!(
             "work_item_id must be `github:OWNER/REPO#NUMBER`, got `{work_item_id}`"
         ))
     })?;
     let (repo, num) = rest.rsplit_once('#').ok_or_else(|| {
-        AppError(anyhow::anyhow!(
+        AppError::bad_request(anyhow::anyhow!(
             "work_item_id missing `#NUMBER`: `{work_item_id}`"
         ))
     })?;
     if camerata_worktracker::RepoCoord::parse(repo).is_none() {
-        return Err(AppError(anyhow::anyhow!(
+        return Err(AppError::bad_request(anyhow::anyhow!(
             "work_item_id repo is not `owner/repo`: `{repo}`"
         )));
     }
     let number: u64 = num
         .parse()
-        .map_err(|_| AppError(anyhow::anyhow!("work_item_id number is not a u64: `{num}`")))?;
+        .map_err(|_| AppError::bad_request(anyhow::anyhow!("work_item_id number is not a u64: `{num}`")))?;
     Ok((repo.to_string(), number))
 }
 
@@ -8805,7 +8810,7 @@ async fn uow_author(
 ) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
     let message = req.message.trim().to_string();
     if message.is_empty() {
-        return Err(AppError(anyhow::anyhow!("message must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!("message must not be empty")));
     }
     // Snapshot the prior chat + draft so we can preserve the draft if the LLM is off/fails.
     let before = state.uow.get_or_create(&story_id);
@@ -8920,20 +8925,20 @@ async fn uow_publish(
     Json(req): Json<UowPublishReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let coord = camerata_worktracker::RepoCoord::parse(&req.repo).ok_or_else(|| {
-        AppError(anyhow::anyhow!(
+        AppError::bad_request(anyhow::anyhow!(
             "repo must be `owner/repo`, got `{}`",
             req.repo
         ))
     })?;
     let token = state.github_token().ok_or_else(|| {
-        AppError(anyhow::anyhow!(
+        AppError::bad_request(anyhow::anyhow!(
             "Connect GitHub (set CAMERATA_GITHUB_TOKEN) to publish the story to the board."
         ))
     })?;
     let uow = state.uow.get_or_create(&story_id);
     let authoring = uow.authoring.clone().unwrap_or_default();
     if authoring.draft_title.trim().is_empty() {
-        return Err(AppError(anyhow::anyhow!(
+        return Err(AppError::bad_request(anyhow::anyhow!(
             "The story has no drafted title yet. Author the story before publishing."
         )));
     }
@@ -9079,7 +9084,7 @@ async fn uow_add_attachment(
     Json(req): Json<AddAttachmentReq>,
 ) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
     if req.name.trim().is_empty() {
-        return Err(AppError(anyhow::anyhow!("attachment name must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!("attachment name must not be empty")));
     }
     let attachment = crate::uow::UowAttachment {
         name: req.name.trim().to_string(),
@@ -9376,7 +9381,7 @@ async fn uow_generate_mockup(
         || !authoring.draft_body.trim().is_empty()
         || !authoring.requirements_prompt.trim().is_empty();
     if message.is_empty() && !has_node_context {
-        return Err(AppError(anyhow::anyhow!(
+        return Err(AppError::bad_request(anyhow::anyhow!(
             "message must not be empty when there is no node context to ground on"
         )));
     }
@@ -9587,7 +9592,7 @@ async fn design_author(
 ) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
     let message = req.message.trim().to_string();
     if message.is_empty() {
-        return Err(AppError(anyhow::anyhow!("message must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!("message must not be empty")));
     }
     let before = state.uow.get_or_create(&id);
     let prior = before.authoring.clone().unwrap_or_default();
@@ -12495,15 +12500,23 @@ fn render_deep_report_markdown(deep: &crate::ai_audit::DeepReport, soc2_enabled:
 
 // ── error type ──────────────────────────────────────────────────────────────
 
-/// Maps any backend error to a 500 with a JSON body, so handlers can use `?`.
+/// A handler error carrying an explicit HTTP status + a JSON body, so handlers can use `?`.
+///
+/// ROUTES-7: this type used to map EVERY failure to 500, including not-found and bad-request
+/// conditions that handler docs promise as 4xx. The `status` field lets a handler classify:
+/// use [`AppError::not_found`] for a missing resource (404), [`AppError::bad_request`] for
+/// invalid input (400), and the bare `AppError(e)` / `?` conversion for a genuine internal
+/// fault (500). The response BODY shape is unchanged (`{ "error": "…" }`) — only the status
+/// code is corrected, so UI code that parses `{error}` keeps working.
 struct AppError {
     status: StatusCode,
     err: anyhow::Error,
 }
 
-/// Construct a 500 `AppError` (the default). The `AppError(e)` call form is preserved via a
-/// same-named free function (types and values live in separate namespaces), so every existing
-/// call site keeps compiling; use [`AppError::with_status`] for a non-500 code.
+/// Construct a 500 `AppError` (the default, for a genuine internal fault). The `AppError(e)`
+/// call form is preserved via a same-named free function (types and values live in separate
+/// namespaces), so every existing call site keeps compiling; use [`AppError::not_found`] /
+/// [`AppError::bad_request`] / [`AppError::with_status`] for a 4xx code.
 #[allow(non_snake_case)]
 fn AppError(err: anyhow::Error) -> AppError {
     AppError {
@@ -12516,6 +12529,17 @@ impl AppError {
     /// An `AppError` that renders with a specific HTTP status (e.g. 409 Conflict).
     fn with_status(status: StatusCode, err: anyhow::Error) -> Self {
         AppError { status, err }
+    }
+
+    /// ROUTES-7: a 404 for a missing resource (the message becomes the `{error}` body).
+    fn not_found(err: anyhow::Error) -> Self {
+        AppError { status: StatusCode::NOT_FOUND, err }
+    }
+
+    /// ROUTES-7: a 400 for invalid input / a request the server understood but can't act on
+    /// as posed (the message becomes the `{error}` body).
+    fn bad_request(err: anyhow::Error) -> Self {
+        AppError { status: StatusCode::BAD_REQUEST, err }
     }
 }
 
@@ -14049,6 +14073,9 @@ mod tests {
     }
 
     /// #20: a malformed repo (not `owner/name`) is rejected, not silently adopted.
+    ///
+    /// ROUTES-7: invalid REQUEST INPUT is a 400 Bad Request, not a 500. (Previously every
+    /// AppError mapped to 500; this asserts the corrected status for the bad-input class.)
     #[tokio::test]
     async fn adopt_issue_rejects_a_malformed_repo() {
         let app = router(AppState::new(
@@ -14068,7 +14095,46 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // The body shape is unchanged: UI parses `{error}`.
+        let json = body_json(resp).await;
+        assert!(json["error"].is_string(), "body keeps the {{error}} shape");
+    }
+
+    /// ROUTES-7: a GET for a missing run returns 404 Not Found (not 500), with the
+    /// unchanged `{error}` body shape the UI parses.
+    #[tokio::test]
+    async fn get_run_missing_returns_404_not_500() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/runs/does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let json = body_json(resp).await;
+        assert!(json["error"].is_string(), "body keeps the {{error}} shape");
+    }
+
+    /// ROUTES-7: the AppError constructors carry the right status while keeping the
+    /// `{error}` body — the single source of truth all handlers route through.
+    #[tokio::test]
+    async fn app_error_status_codes_map_correctly() {
+        use axum::response::IntoResponse;
+        let cases = [
+            (AppError(anyhow::anyhow!("boom")), StatusCode::INTERNAL_SERVER_ERROR),
+            (AppError::not_found(anyhow::anyhow!("gone")), StatusCode::NOT_FOUND),
+            (AppError::bad_request(anyhow::anyhow!("nope")), StatusCode::BAD_REQUEST),
+        ];
+        for (err, expected) in cases {
+            let resp = err.into_response();
+            assert_eq!(resp.status(), expected);
+        }
     }
 
     /// #20: with no GitHub token the list endpoint degrades gracefully — `ok:false`,
@@ -15594,7 +15660,7 @@ mod tests {
         std::env::set_var("CAMERATA_GITHUB_TOKEN", "ghp_test");
         let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
 
-        // Empty body → 500 (validation error).
+        // ROUTES-7: an empty body is invalid REQUEST INPUT → 400 Bad Request (was 500).
         let body = serde_json::json!({ "work_item_id": "github:o/r#20", "body": "  " }).to_string();
         let resp = app
             .clone()
@@ -15608,7 +15674,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         std::env::remove_var("CAMERATA_GITHUB_TOKEN");
     }
 
@@ -18719,7 +18785,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // ROUTES-7: an empty message with no node context is invalid input → 400 (was 500).
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = body_json(resp).await;
         assert!(
             body["error"].as_str().unwrap_or("").contains("must not be empty"),
