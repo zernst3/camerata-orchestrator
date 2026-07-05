@@ -49,6 +49,16 @@ pub use manifest::{CheckManifest, ManifestCheck};
 pub mod manifest_runner;
 pub use manifest_runner::ManifestCheckRunner;
 
+/// The cross-agent INTEGRATION GATE (GAP-6 / R3.e): the third enforcement tier.
+/// A stack-generalized reconciliation engine over the ASSEMBLED tree (all role
+/// agents' outputs combined), with pluggable per-stack extractors that normalize
+/// each repo's source into neutral produced/consumed lists. Deterministic
+/// verdicts; a seam with no extractor is review-tier, never a faked green.
+/// See `docs/decisions/2026-07-05_integration-gate-generic-engine.md` and
+/// `docs/decisions/2026-06-15_cross_agent_integration_gate.md`.
+pub mod integration;
+pub use integration::{run_gate, GateRepo, GateVerdict, GateWaiver, ReviewItem};
+
 pub mod parse;
 pub mod subprocess;
 

@@ -13,6 +13,14 @@ Zach approved every item. Recommendation [Rec] taken for all EXCEPT:
 Governing principle (standing): **never defer hardening/refining/correctness of Camerata; only defer
 net-new features outside MVP spirit.** So GAP-1/3/6/7/8 are all build-now (structural ones design-first).
 
+**GAP-6 landed on `fix/gap6-integration-gate`** (2026-07-05): the cross-agent integration gate is now a
+stack-generalized deterministic reconciliation engine (`crates/checks/src/integration/`) with pluggable
+per-stack extractors (endpoint + event built; schema/migration/config staged), the `INTEGRATION-*`
+corpus rules (`crates/rules/principles/integration/`), per-seam relational firing + `camerata:allow`
+waivers, and a review-tier fallback (no extractor -> human QA, never a faked green), wired into
+`run_multi_repo_integration_gate`. The old LLM-eyeballs-the-prose-contract path is demoted to an
+optional advisory. ADR: `docs/decisions/2026-07-05_integration-gate-generic-engine.md`.
+
 Implementation order: Batch 1 P0 gate (GAP-2, LIFECYCLE-10, GATE-F7) -> Batch 2 lifecycle provenance
 bundle (LIFECYCLE-1/2/3/4) -> Batch 3 lifecycle loop/concurrency (LIFECYCLE-5/7+6/9/12) -> Batch 4
 ROUTES (5/7/8/9) -> Batch 5 GAP features (4/6/8) -> Batch 6 structural (GAP-3 LlmPort+state, GAP-1

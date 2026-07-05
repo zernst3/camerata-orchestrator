@@ -152,15 +152,36 @@ pub struct L3ReviewBundle {
     pub llm: Arc<dyn Completer>,
 }
 
-/// Bundle for the optional integration-gate check (R3.e).
-/// Only passed when the UoW crosses a contract boundary AND a contract exists.
+/// Bundle for the integration-gate check (R3.e / GAP-6).
+///
+/// Two layers, deterministic-first:
+///
+/// 1. The DETERMINISTIC engine ([`camerata_checks::run_gate`]): the stack-generalized
+///    cross-agent reconciliation over the assembled tree, driven by the project's
+///    SELECTED `INTEGRATION-*` rules. This is the primary gate — a binary,
+///    reproducible verdict with no model in the loop (the ADR's hard line). It runs
+///    whenever at least one `INTEGRATION-*` rule is selected, regardless of whether a
+///    prose contract exists (broadens the old contract-only trigger).
+/// 2. The optional prose-contract advisory: when a prose contract exists AND an LLM is
+///    available, a model-backed pass supplements the deterministic verdict for the
+///    genuinely-semantic parts a static extractor cannot recover. It NEVER turns a
+///    deterministic pass into a fail on its own; a model opinion never shows up as the
+///    gate's green — undeterminable seams are review-tier.
 pub struct IntegrationGateBundle {
-    /// The prose cross-repo contract.
+    /// The SELECTED `INTEGRATION-*` corpus rule ids driving the deterministic engine.
+    /// Empty means no deterministic seam rule is on (the engine short-circuits and the
+    /// optional advisory carries the gate, if a contract + llm are present).
+    pub selected_integration_rules: Vec<String>,
+    /// Pre-parsed per-artifact `camerata:allow` waivers for the integration rules
+    /// (intentional-public endpoints etc.).
+    pub waivers: Vec<camerata_checks::GateWaiver>,
+    /// The prose cross-repo contract (may be empty when the gate is driven purely by
+    /// selected rules with no boundary contract).
     pub contract: String,
-    /// The model to use for the gate review.
+    /// The model to use for the optional prose-contract advisory pass.
     pub model: String,
-    /// The LLM seam.
-    pub llm: Arc<dyn Completer>,
+    /// The LLM seam. `None` disables the advisory pass (deterministic-only).
+    pub llm: Option<Arc<dyn Completer>>,
 }
 
 /// One in-scope repo's worktree, branch, and base commit — the per-repo wiring
@@ -352,8 +373,11 @@ async fn run_integration_gate_if_needed(
         .and_then(|n| n.to_str())
         .unwrap_or("repo");
     let repo_outputs: Vec<(&str, &str)> = vec![(repo_name, diff.as_str())];
+    // Superseded by `run_multi_repo_integration_gate` (which runs the deterministic
+    // engine first); this single-repo advisory path only runs when an LLM is present.
+    let llm = bundle.llm.as_ref()?;
     match crate::review_agent::check_integration_gate_live(
-        bundle.llm.as_ref(),
+        llm.as_ref(),
         Some(&bundle.contract),
         &repo_outputs,
         &bundle.model,
@@ -455,13 +479,127 @@ pub async fn run_multi_repo_integration_gate(
             verdict: "info".to_string(),
             rule: None,
             detail: format!(
-                "Integration gate (R3.e) starting — {} repo(s) (iteration {iteration}, model=`{}`).",
+                "Integration gate (R3.e / GAP-6) starting — {} repo(s), {} selected INTEGRATION rule(s) (iteration {iteration}).",
                 repo_worktrees.len(),
-                bundle.model
+                bundle.selected_integration_rules.len(),
             ),
             content_hash: None,
         },
     );
+
+    // ── LAYER 1: the DETERMINISTIC engine (the primary gate, no model) ──────────────
+    // Run the stack-generalized reconciliation over the assembled worktrees, driven by
+    // the SELECTED INTEGRATION-* rules. Binary, reproducible verdict. This runs FIRST
+    // and is authoritative: a deterministic FAIL bounces without ever consulting a model.
+    if !bundle.selected_integration_rules.is_empty() {
+        let gate_repos: Vec<camerata_checks::GateRepo> = repo_worktrees
+            .iter()
+            .map(|rw| camerata_checks::GateRepo {
+                repo: rw.repo.clone(),
+                dir: rw.dir.clone(),
+            })
+            .collect();
+        let rules = bundle.selected_integration_rules.clone();
+        let waivers = bundle.waivers.clone();
+        // The extractors walk the filesystem; run off the async runtime.
+        let verdict = tokio::task::spawn_blocking(move || {
+            camerata_checks::run_gate(&gate_repos, &rules, &waivers)
+        })
+        .await
+        .unwrap_or_else(|_| camerata_checks::GateVerdict {
+            failures: Vec::new(),
+            review: Vec::new(),
+            waived: Vec::new(),
+        });
+
+        // Review-tier seams: surfaced HONESTLY as info (routed to human QA), never green.
+        for item in &verdict.review {
+            runs.push_event(
+                run_id,
+                GateEvent {
+                    seq: next_seq(),
+                    layer: "integration-gate".to_string(),
+                    verdict: "review".to_string(),
+                    rule: Some(item.rule_id.clone()),
+                    detail: format!(
+                        "REVIEW-TIER (human QA, NOT passed): {}",
+                        item.detail
+                    ),
+                    content_hash: None,
+                },
+            );
+        }
+        // Waived findings: audit trail.
+        for w in &verdict.waived {
+            runs.push_event(
+                run_id,
+                GateEvent {
+                    seq: next_seq(),
+                    layer: "integration-gate".to_string(),
+                    verdict: "waived".to_string(),
+                    rule: Some(w.rule_id.clone()),
+                    detail: format!("Waived by camerata:allow: {} ({})", w.artifact, w.location),
+                    content_hash: None,
+                },
+            );
+        }
+
+        if !verdict.passed() {
+            // Deterministic FAIL → bounce with the specific per-agent deltas (the same
+            // bounce-and-revise loop as Layer 2). A genuine two-sides-incompatible fork is
+            // for the architect; here we surface the deltas grouped by responsible repo.
+            let targets = verdict.bounce_targets();
+            let reason = targets
+                .iter()
+                .map(|(repo, deltas)| format!("{repo}: {}", deltas.join(" | ")))
+                .collect::<Vec<_>>()
+                .join(" || ");
+            runs.push_event(
+                run_id,
+                GateEvent {
+                    seq: next_seq(),
+                    layer: "integration-gate".to_string(),
+                    verdict: "fail".to_string(),
+                    rule: None,
+                    detail: format!(
+                        "Integration gate (deterministic): BOUNCE — {} ({})",
+                        verdict.summary(),
+                        reason,
+                    ),
+                    content_hash: None,
+                },
+            );
+            return Some(Err(reason));
+        }
+
+        runs.push_event(
+            run_id,
+            GateEvent {
+                seq: next_seq(),
+                layer: "integration-gate".to_string(),
+                verdict: "pass".to_string(),
+                rule: None,
+                detail: format!(
+                    "Integration gate (deterministic): PASS across {} repo(s) — {}.",
+                    repo_worktrees.len(),
+                    verdict.summary(),
+                ),
+                content_hash: None,
+            },
+        );
+    }
+
+    // ── LAYER 2: the OPTIONAL prose-contract advisory (model-backed, non-authoritative)
+    // Only when a prose contract AND an LLM are present. Supplements the deterministic
+    // verdict for the genuinely-semantic parts a static extractor cannot recover. A model
+    // error is advisory (does not block); it never renders as the gate's green.
+    let Some(llm) = bundle.llm.as_ref() else {
+        // Deterministic-only: the gate's verdict already stands.
+        return Some(Ok(()));
+    };
+    if bundle.contract.trim().is_empty() {
+        return Some(Ok(()));
+    }
 
     // Collect per-repo diffs concurrently. Each entry is (repo_name, diff_text).
     // Repos with an empty diff (no changes since base) are included with an explicit
@@ -490,7 +628,7 @@ pub async fn run_multi_repo_integration_gate(
         .collect();
 
     match crate::review_agent::check_integration_gate_live(
-        bundle.llm.as_ref(),
+        llm.as_ref(),
         Some(&bundle.contract),
         &repo_output_refs,
         &bundle.model,
@@ -2328,9 +2466,11 @@ mod tests {
 
         let llm: Arc<dyn crate::llm::Completer> = Arc::new(PassLlm);
         let bundle = Some(IntegrationGateBundle {
+            selected_integration_rules: Vec::new(), // model-advisory-only path here
+            waivers: Vec::new(),
             contract: "GET /api/users returns [{id, name, email}]".to_string(),
             model: "claude-sonnet-4-6".to_string(),
-            llm,
+            llm: Some(llm),
         });
         // Two repos; empty base_commits mean diff returns "" (short-circuit in worktree_diff_from_base).
         let worktrees = vec![
@@ -2374,9 +2514,11 @@ mod tests {
 
         let llm: Arc<dyn crate::llm::Completer> = Arc::new(MismatchLlm);
         let bundle = Some(IntegrationGateBundle {
+            selected_integration_rules: Vec::new(),
+            waivers: Vec::new(),
             contract: "GET /api/users returns [{id, name, email}]".to_string(),
             model: "claude-sonnet-4-6".to_string(),
-            llm,
+            llm: Some(llm),
         });
         let worktrees = vec![
             RepoWorktree {
@@ -2404,6 +2546,125 @@ mod tests {
         );
     }
 
+    /// DETERMINISTIC path (GAP-6): selected INTEGRATION rules drive the stack-generalized
+    /// engine over the assembled worktrees, with NO model in the loop. A matching
+    /// producer/consumer pair passes; a drifting pair bounces to the consumer.
+    #[tokio::test]
+    async fn deterministic_gate_matching_pair_passes_drifting_pair_bounces() {
+        use std::io::Write;
+        fn repo(files: &[(&str, &str)]) -> tempfile::TempDir {
+            let td = tempfile::tempdir().unwrap();
+            std::fs::write(td.path().join("package.json"), "{\"name\":\"x\"}").unwrap();
+            for (name, content) in files {
+                let p = td.path().join(name);
+                let mut f = std::fs::File::create(&p).unwrap();
+                f.write_all(content.as_bytes()).unwrap();
+            }
+            td
+        }
+
+        // MATCHING pair: producer serves POST /members/export, consumer calls it.
+        let api = repo(&[("routes.js", "app.post('/members/export', h)\n")]);
+        let ui = repo(&[("client.js", "axios.post('/members/export', body)\n")]);
+        let worktrees = vec![
+            RepoWorktree {
+                repo: "acme/api".to_string(),
+                branch: "b".to_string(),
+                dir: api.path().to_path_buf(),
+                base_commit: String::new(),
+            },
+            RepoWorktree {
+                repo: "acme/ui".to_string(),
+                branch: "b".to_string(),
+                dir: ui.path().to_path_buf(),
+                base_commit: String::new(),
+            },
+        ];
+        let bundle = Some(IntegrationGateBundle {
+            selected_integration_rules: vec!["INTEGRATION-API-CONTRACT-1".to_string()],
+            waivers: Vec::new(),
+            contract: String::new(), // deterministic-only, no model advisory
+            model: String::new(),
+            llm: None,
+        });
+        let runs = RunStore::new();
+        let run_id = runs.create("acme/api#1", "test", crate::run::RunKind::Watched);
+        let seq = std::sync::atomic::AtomicUsize::new(0);
+        let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let result =
+            run_multi_repo_integration_gate(&runs, &run_id, &next_seq, &bundle, &worktrees, 0).await;
+        assert!(matches!(result, Some(Ok(()))), "matching pair passes deterministically");
+
+        // DRIFTING pair: consumer calls a route the producer never exposes.
+        let ui2 = repo(&[("client.js", "axios.post('/members/csv', body)\n")]);
+        let worktrees2 = vec![
+            RepoWorktree {
+                repo: "acme/api".to_string(),
+                branch: "b".to_string(),
+                dir: api.path().to_path_buf(),
+                base_commit: String::new(),
+            },
+            RepoWorktree {
+                repo: "acme/ui".to_string(),
+                branch: "b".to_string(),
+                dir: ui2.path().to_path_buf(),
+                base_commit: String::new(),
+            },
+        ];
+        let runs2 = RunStore::new();
+        let run_id2 = runs2.create("acme/api#2", "test", crate::run::RunKind::Watched);
+        let seq2 = std::sync::atomic::AtomicUsize::new(0);
+        let next_seq2 = || seq2.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let result2 =
+            run_multi_repo_integration_gate(&runs2, &run_id2, &next_seq2, &bundle, &worktrees2, 0)
+                .await;
+        match result2 {
+            Some(Err(reason)) => assert!(reason.contains("acme/ui"), "consumer bounced: {reason}"),
+            other => panic!("drifting pair must bounce, got {other:?}"),
+        }
+        let run = runs2.get(&run_id2).unwrap();
+        assert!(run
+            .events
+            .iter()
+            .any(|e| e.layer == "integration-gate" && e.verdict == "fail"));
+    }
+
+    /// DETERMINISTIC review-tier (GAP-6): a repo whose stack has no extractor is reported
+    /// review-tier (an honest info event), NOT a silent green.
+    #[tokio::test]
+    async fn deterministic_gate_no_extractor_is_review_tier() {
+        let mystery = tempfile::tempdir().unwrap();
+        std::fs::write(mystery.path().join("README.txt"), "no manifest").unwrap();
+        let worktrees = vec![RepoWorktree {
+            repo: "acme/mystery".to_string(),
+            branch: "b".to_string(),
+            dir: mystery.path().to_path_buf(),
+            base_commit: String::new(),
+        }];
+        let bundle = Some(IntegrationGateBundle {
+            selected_integration_rules: vec!["INTEGRATION-API-CONTRACT-1".to_string()],
+            waivers: Vec::new(),
+            contract: String::new(),
+            model: String::new(),
+            llm: None,
+        });
+        let runs = RunStore::new();
+        let run_id = runs.create("acme/mystery#1", "test", crate::run::RunKind::Watched);
+        let seq = std::sync::atomic::AtomicUsize::new(0);
+        let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let result =
+            run_multi_repo_integration_gate(&runs, &run_id, &next_seq, &bundle, &worktrees, 0).await;
+        // No deterministic FAIL, but a review-tier event must be present.
+        assert!(matches!(result, Some(Ok(()))), "no mechanical failure");
+        let run = runs.get(&run_id).unwrap();
+        assert!(
+            run.events
+                .iter()
+                .any(|e| e.layer == "integration-gate" && e.verdict == "review"),
+            "uncovered stack must surface a review-tier event, not a silent pass"
+        );
+    }
+
     /// Single-repo synthetic worktree slice (the repo_worktrees.is_empty() fallback):
     /// the integration gate treats a single entry exactly like the multi-repo path.
     #[tokio::test]
@@ -2415,9 +2676,11 @@ mod tests {
 
         let llm: Arc<dyn crate::llm::Completer> = Arc::new(PassLlm);
         let bundle = Some(IntegrationGateBundle {
+            selected_integration_rules: Vec::new(),
+            waivers: Vec::new(),
             contract: "single-repo contract".to_string(),
             model: "claude-sonnet-4-6".to_string(),
-            llm,
+            llm: Some(llm),
         });
         let single = vec![RepoWorktree {
             repo: "acme/api".to_string(),

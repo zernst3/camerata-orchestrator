@@ -1,0 +1,34 @@
+id = "INTEGRATION-EVENT-WIRING-1"
+title = "Every emitted event has a consumer and every subscription is emitted"
+tag = "stack"
+domain = "integration"
+layer = "universal"
+enforcement = "mechanical"
+default = false
+opt_in_only = true
+layer3_only = false
+verification = "grounded"
+
+[[sources]]
+url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
+title = "Cross-agent rules: the integration gate — wiring completeness (no dangling ends)"
+
+[[sources]]
+url = "docs/decisions/2026-07-05_integration-gate-generic-engine.md"
+title = "Integration gate: the generic reconciliation engine + per-stack extractors"
+
+[decision]
+question = "How does the project verify that events wired across the agent seam have no dangling ends (an emit with no consumer, or a subscription with no emitter)?"
+why = "Event wiring is a cross-agent invariant: the emitter agent and the subscriber agent each ship a clean diff, but only the assembled whole reveals whether an emitted event is actually consumed and whether a subscribed event is actually emitted. A dangling emit is dead signal; a dangling subscription is a consumer waiting on something that never fires. Neither per-agent gate can see the other side of the seam."
+
+[[option]]
+id = "reconcile-event-emit-vs-consume"
+label = "Reconcile emitted events against subscriptions (both directions, deterministic)"
+directive = "On the assembled tree, run the integration gate's event reconciliation for this rule. A per-stack extractor normalizes each repo's source into PRODUCED events (emit / publish / dispatch) and CONSUMED events (subscribe / on / listen). Every produced event must have at least one consumer across the agents, and every consumed event must have at least one emitter. A dangling emit or a dangling subscription fails deterministically and bounces to the responsible agent with the event name and location. Where a stack has no event extractor, the event seam is reported review-tier, never a faked green. Intentional exceptions (e.g. an event published for an external subscriber outside the fleet) are waived with an inline `camerata:allow INTEGRATION-EVENT-WIRING-1 -- <reason>` or a baseline entry."
+why = "The wiring-completeness check runs on the integrated whole — the only place both the emit and the subscribe are visible at once — as a deterministic comparison of neutral event records, not an LLM guessing whether the ends connect."
+
+[[option]]
+id = "no-event-wiring-check"
+label = "No cross-agent event-wiring check"
+directive = "the project does not reconcile emitted events against subscriptions on the assembled tree, so a dangling emit (dead signal) or a dangling subscription (a consumer waiting on an event that is never published) ships undetected across the agent seam"
+why = "Without the integration gate the dangling end surfaces only at runtime, when the expected event never arrives or an emitted event is silently dropped, exactly the wiring gap this tier exists to close."

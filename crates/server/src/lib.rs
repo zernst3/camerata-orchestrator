@@ -1442,23 +1442,53 @@ async fn spawn_brownfield_dev_run(
             })
         })
     };
-    // Integration gate bundle (R3.e): only when the UoW crosses a boundary and has a contract.
+    // Integration gate bundle (R3.e / GAP-6): built when the project has SELECTED at
+    // least one `INTEGRATION-*` rule (deterministic engine), OR the UoW crosses a
+    // boundary with a prose contract (the optional model advisory). This broadens the
+    // old contract-only trigger: the deterministic cross-agent gate runs whenever an
+    // integration rule is on, whether or not a prose contract exists.
     let integration_gate_bundle: Option<crate::dev_implement_run::IntegrationGateBundle> = {
-        if uow_data.investigation.crosses_boundary
-            && !uow_data.investigation.contract.trim().is_empty()
-        {
+        // The project's SELECTED INTEGRATION-* rule ids drive the deterministic engine.
+        let selected_integration_rules: Vec<String> = state
+            .projects
+            .active()
+            .map(|p| {
+                p.ruleset
+                    .selections
+                    .iter()
+                    .filter(|s| s.rule_id.starts_with("INTEGRATION-"))
+                    // A selection is "on" unless it explicitly chose a no-op option.
+                    .map(|s| s.rule_id.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let has_contract = uow_data.investigation.crosses_boundary
+            && !uow_data.investigation.contract.trim().is_empty();
+
+        if selected_integration_rules.is_empty() && !has_contract {
+            None
+        } else {
+            // Pre-parse per-artifact `camerata:allow INTEGRATION-* -- reason` waivers
+            // from the in-scope repo worktrees (intentional-public endpoints etc.).
+            let waivers = collect_integration_waivers(&state).await;
             let gate_model = match &tier_map {
                 Some(map) => map.balanced_primary().to_string(),
                 None => impl_model.clone(),
             };
-            let llm: Arc<dyn crate::llm::Completer> = Arc::new(state.llm());
+            // The model advisory only runs with a prose contract; otherwise llm=None
+            // keeps the gate deterministic-only.
+            let llm: Option<Arc<dyn crate::llm::Completer>> = if has_contract {
+                Some(Arc::new(state.llm()))
+            } else {
+                None
+            };
             Some(crate::dev_implement_run::IntegrationGateBundle {
+                selected_integration_rules,
+                waivers,
                 contract: uow_data.investigation.contract.clone(),
                 model: gate_model,
                 llm,
             })
-        } else {
-            None
         }
     };
     // Multi-repo worktree setup (R3.f / R6): a worktree + story branch per in-scope repo.
@@ -11251,6 +11281,97 @@ pub(crate) fn repo_from_story_id(story_id: &str) -> Option<String> {
 ///
 /// This is a pure helper — no I/O. It mirrors the fallback the primary-repo branch
 /// derivation uses (`uow_branch.unwrap_or_else(|| format!("camerata/{story_id}"))`).
+/// Parse per-artifact `camerata:allow INTEGRATION-* -- reason` waivers out of the
+/// active project's in-scope repo worktrees, for the deterministic integration gate.
+///
+/// Reuses the same inline-waiver model as the per-agent tiers ([`crate::suppression`]):
+/// a `// camerata:allow INTEGRATION-AUTH-SEAM-1 -- intentionally public` on the line
+/// that CALLS the endpoint waives the relational finding for that endpoint. The waiver's
+/// artifact identity is derived by re-extracting the endpoint on the waived line, so a
+/// waiver is scoped to exactly the endpoint it annotates (never a blanket suppression).
+///
+/// Best-effort: unreadable files are skipped. A reason-less waiver is carried through
+/// with `reason = None` so the gate treats it as invalid (does not suppress), mirroring
+/// the per-agent invariant.
+async fn collect_integration_waivers(
+    state: &AppState,
+) -> Vec<camerata_checks::GateWaiver> {
+    let dirs = state.active_repo_dirs();
+    tokio::task::spawn_blocking(move || {
+        let mut out: Vec<camerata_checks::GateWaiver> = Vec::new();
+        for dir in &dirs {
+            for file in walk_source_files(dir) {
+                let Ok(content) = std::fs::read_to_string(&file) else {
+                    continue;
+                };
+                let rel = file
+                    .strip_prefix(dir)
+                    .unwrap_or(&file)
+                    .to_string_lossy()
+                    .to_string();
+                for w in crate::suppression::parse_inline_waivers(&rel, &content) {
+                    if !w.rule_id.starts_with("INTEGRATION-") {
+                        continue;
+                    }
+                    // Scope the waiver to the endpoint on the annotated line, if we can
+                    // recover one; otherwise it is a rule-wide (blanket) waiver.
+                    let artifact = content
+                        .lines()
+                        .nth(w.line.saturating_sub(1))
+                        .and_then(camerata_checks::integration::extractor_endpoint_identity)
+                        .unwrap_or_default();
+                    out.push(camerata_checks::GateWaiver {
+                        rule_id: w.rule_id.clone(),
+                        artifact,
+                        reason: w.reason.clone(),
+                    });
+                }
+            }
+        }
+        out
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Walk a repo dir for source files the integration extractors understand (pruning
+/// vendored/build dirs). Small, dependency-free mirror used only for waiver parsing.
+fn walk_source_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    const PRUNE: &[&str] = &[
+        "node_modules", "target", ".git", ".camerata-venv", "vendor", "dist", "build",
+        "__pycache__", ".next",
+    ];
+    const EXTS: &[&str] = &[
+        "rs", "ts", "tsx", "js", "jsx", "mjs", "cjs", "py", "go", "rb", "java", "cs",
+    ];
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&d) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                let name = entry.file_name();
+                if PRUNE.contains(&name.to_string_lossy().as_ref()) {
+                    continue;
+                }
+                stack.push(path);
+            } else if ft.is_file() {
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    if EXTS.contains(&ext) {
+                        out.push(path);
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 pub(crate) fn derive_scope_branch(mode: &crate::uow::BranchMode, story_id: &str) -> String {
     match mode {
         crate::uow::BranchMode::Existing { branch_name } if !branch_name.trim().is_empty() => {

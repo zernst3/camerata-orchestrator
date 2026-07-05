@@ -1,10 +1,13 @@
 # Cross-agent rules: the integration gate (a third enforcement tier)
 
 Date: 2026-06-15
-Status: Accepted (design); NOT built.
+Status: Accepted; BUILT 2026-07-05 (GAP-6). Generic reconciliation engine +
+pluggable per-stack extractors (endpoint + event) + `INTEGRATION-*` corpus rules +
+review-tier fallback + per-seam/waiver handling + server wiring. Follow-up ADR:
+[`2026-07-05_integration-gate-generic-engine.md`](./2026-07-05_integration-gate-generic-engine.md).
 Deciders: Zach (architect), Claude (architect)
 
-Companion docs: [`ENFORCEMENT.md`](../ENFORCEMENT.md) (the two tiers that exist today),
+Companion docs: [`ENFORCEMENT.md`](../ENFORCEMENT.md) (the three tiers),
 [`RATIONALE.md`](../RATIONALE.md), [`VISION.md`](../VISION.md) (contract handoffs).
 
 ## Context: the per-agent gates have a blind spot
@@ -163,14 +166,48 @@ Rule category: a new `INTEGRATION-*` family (e.g. `INTEGRATION-API-CONTRACT-1`,
 `INTEGRATION-SCHEMA-MATCH-1`), distinct from the per-write (path/content) and per-task
 (fmt/clippy/test) rules, because its scope is the integrated whole.
 
-## Honest current state
+## Honest current state (updated 2026-07-05: BUILT)
 
-Not built. Today there is Layer 1 + Layer 2, both per-agent. The `FleetCoordinator`
-integrates completed-and-gated tasks in dependency order and conceptually "re-runs gates
-at integration," but no cross-agent contract checks exist, and there is no
-`INTEGRATION-*` rule family. This ADR defines the third tier; building it is future
-work (and it pairs with making the deterministic contract-derivation step real per
-stack).
+Built on branch `fix/gap6-integration-gate` (GAP-6). The tier is now a
+STACK-GENERALIZED, deterministic reconciliation engine — NOT an LLM eyeballing a prose
+contract (the first partial implementation, `check_integration_gate_live`, did exactly
+that and has been demoted to an optional advisory).
+
+The design (detail in the follow-up ADR
+[`2026-07-05_integration-gate-generic-engine.md`](./2026-07-05_integration-gate-generic-engine.md)):
+
+- A NEUTRAL vocabulary (`Endpoint`/`Type`/`Event`/`Entity`/`ConfigKey`, plus `Produced`
+  and `Consumed` lists) that the whole engine reasons over. Nothing about a particular
+  stack lives in the vocabulary or the engine.
+- A GENERIC reconciliation engine (`crates/checks/src/integration/engine.rs`) that
+  assembles all repos' produced/consumed lists and reconciles CONSUMED-vs-PRODUCED per
+  selected `INTEGRATION-*` rule. Binary, reproducible verdict; no model. This is the
+  cross-agent sibling of the per-agent `CheckRunner`.
+- PLUGGABLE per-stack EXTRACTORS (`crates/checks/src/integration/extractor.rs`) — the
+  ONLY stack-aware code, selected off the SAME `WorktreeLanguage` detection the Layer-2
+  linters use. Built first: `GenericRouteExtractor` (endpoint seam) and
+  `GenericEventExtractor` (event seam). A shared compiled type across a Rust boundary is
+  the case where the extractor emits matching records and the engine finds zero drift —
+  not a different mechanism.
+- The `INTEGRATION-*` rule family now exists (opt-in): `INTEGRATION-API-CONTRACT-1`,
+  `INTEGRATION-EVENT-WIRING-1`, `INTEGRATION-AUTH-SEAM-1`, in
+  `crates/rules/principles/integration/`.
+- RELATIONAL, PER-SEAM rules with explicit waivers: `INTEGRATION-AUTH-SEAM-1` fires ONLY
+  for affordances the UI actually gates; a public endpoint the UI does not gate is out of
+  scope (no false positive); an intentional-public endpoint is waived per-endpoint via
+  `camerata:allow INTEGRATION-AUTH-SEAM-1 -- <reason>` or a baseline entry. Intra-project
+  mix (some gated, some public) is handled by per-seam firing + explicit waivers.
+- The REVIEW-TIER fallback is real: a stack/seam with no extractor is routed to human QA
+  and honestly labeled, NEVER a faked green.
+- Wired into `run_multi_repo_integration_gate` (`crates/server/src/dev_implement_run.rs`):
+  the deterministic engine runs FIRST on the assembled worktrees, driven by the project's
+  selected `INTEGRATION-*` rules (broadening the old contract-only trigger). A mismatch
+  bounces to the responsible agent(s); a design fork escalates to the architect.
+
+Staged (not built): full typed request/response SCHEMA recovery, migration-vs-entity
+reconciliation, config-key declaration-vs-read, shared-type reconciliation, and
+stack-native (AST) extractors. Each is an additional extractor or artifact kind and does
+not change the engine.
 
 ## Open questions
 
