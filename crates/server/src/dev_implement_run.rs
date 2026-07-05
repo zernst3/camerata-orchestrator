@@ -686,6 +686,38 @@ pub fn implement_prompt(
     )
 }
 
+/// LIFECYCLE-5: append the previous bounce iteration's failure feedback to the TAIL of the
+/// base implement prompt, so the re-run agent gets the NEW information (violated rule ids +
+/// the full toolchain / gate error text) instead of re-reading the identical prompt.
+///
+/// Tail placement is deliberate and cache-friendly: the base prompt (`base_task`) is the
+/// stable, cached prefix; only this delta at the end is new, so the KV-cache prefix stays
+/// warm across iterations. The block mirrors the `directive_grounding` append pattern from
+/// `resume_governed_run` — it addresses the agent directly with the correction to apply.
+///
+/// STACK-AGNOSTIC: `feedback` is whatever the Layer-2 / Layer-3 / integration-gate check
+/// emitted for this stack (clippy / tsc / pytest / go vet / gate deny reasons / contract
+/// mismatch). Nothing here names a specific toolchain — it forwards the check's own output
+/// verbatim. Pure + testable: no I/O, no async.
+///
+/// `iteration` is the count of passes that have failed so far (1 after the first bounce),
+/// used only to label the revise block. `feedback` is the already-assembled failure detail.
+pub fn append_bounce_feedback(base_task: &str, iteration: usize, feedback: &str) -> String {
+    if feedback.trim().is_empty() {
+        return base_task.to_string();
+    }
+    format!(
+        "{base_task}\n\n\
+         ## REVISE — a previous pass (#{iteration}) failed the gate\n\n\
+         Your previous pass did NOT pass the post-task checks. Do NOT re-submit the same work: \
+         READ the failure output below, find the ROOT cause in the code you touched, and fix it. \
+         The exact violated rule ids and the verbatim toolchain / gate output from the failed \
+         checks follow — treat them as the authoritative signal for what to change:\n\n\
+         {feedback}",
+        feedback = feedback.trim(),
+    )
+}
+
 /// True when the dispatch predicate chooses the brownfield implement path: the UoW's
 /// repo worktree must be resolvable (i.e. a local clone exists on disk). Pure + testable.
 ///
@@ -991,7 +1023,12 @@ pub async fn execute_dev_implement_run(
         ),
     );
 
-    let task = implement_prompt(
+    // The STABLE base prompt (LIFECYCLE-5): built once, it is the cache-friendly prefix
+    // that never changes across bounce iterations. On a bounce, the failed iteration's
+    // rule ids + verbatim toolchain / gate output are appended at the TAIL via
+    // `append_bounce_feedback` to form the pass-specific `task`, so the re-run agent gets
+    // the NEW failure information instead of re-reading the identical prompt.
+    let base_task = implement_prompt(
         &story_id,
         &story_title,
         &story_desc,
@@ -1001,6 +1038,9 @@ pub async fn execute_dev_implement_run(
         &escalations_in_scope,
         &model,
     );
+    // The prompt actually handed to the agent this pass. First pass = the base prompt; each
+    // bounce rebuilds it with the prior iteration's failure feedback appended at the tail.
+    let mut task = base_task.clone();
 
     // Bounce-and-revise loop: up to `max_iterations` passes. On each pass, run the
     // agent (layer-1 gate enforced by the gateway), then run layer-2 checks (real
@@ -1175,6 +1215,15 @@ pub async fn execute_dev_implement_run(
                     }
                     // Snapshot the iteration before bouncing.
                     let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
+                    // LIFECYCLE-5: feed the L3 reviewer's reasons into the next pass's prompt tail.
+                    task = append_bounce_feedback(
+                        &base_task,
+                        iteration,
+                        &format!(
+                            "Layer-3 code review bounced. Reviewer findings:\n{}",
+                            l3_bounce_reasons.join("\n")
+                        ),
+                    );
                     continue;
                 }
             }
@@ -1204,6 +1253,12 @@ pub async fn execute_dev_implement_run(
                         ));
                     }
                     let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
+                    // LIFECYCLE-5: feed the integration-gate mismatch reason into the next pass.
+                    task = append_bounce_feedback(
+                        &base_task,
+                        iteration,
+                        &format!("Integration gate (R3.e) bounced — contract mismatch:\n{reason}"),
+                    );
                     continue;
                 }
             }
@@ -1245,6 +1300,15 @@ pub async fn execute_dev_implement_run(
                         }
                         // Snapshot the iteration before bouncing.
                         let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
+                        // LIFECYCLE-5: feed the L3 reviewer's reasons into the next pass's prompt tail.
+                        task = append_bounce_feedback(
+                            &base_task,
+                            iteration,
+                            &format!(
+                                "Layer-3 code review bounced. Reviewer findings:\n{}",
+                                l3_bounce_reasons.join("\n")
+                            ),
+                        );
                         // Bounce: re-run the agent with the L3 reasons.
                         continue;
                     }
@@ -1273,6 +1337,12 @@ pub async fn execute_dev_implement_run(
                             ));
                         }
                         let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
+                        // LIFECYCLE-5: feed the integration-gate mismatch reason into the next pass.
+                        task = append_bounce_feedback(
+                            &base_task,
+                            iteration,
+                            &format!("Integration gate (R3.e) bounced — contract mismatch:\n{reason}"),
+                        );
                         // Bounce: re-run the agent to fix the contract mismatch.
                         continue;
                     }
@@ -1332,6 +1402,15 @@ pub async fn execute_dev_implement_run(
                     },
                 );
                 let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
+                // LIFECYCLE-5: feed the failure back into the NEXT pass's prompt at the tail.
+                // The Layer-2 check emits the violated rule ids (stack-agnostic: whatever the
+                // detected toolchain flagged — Rust clippy/test, tsc, pytest, go vet, manifest
+                // checks); forward them verbatim so the re-run agent knows what to fix.
+                task = append_bounce_feedback(
+                    &base_task,
+                    iteration,
+                    &format!("Layer-2 checks failed. Violated rule id(s): {rule_summary}"),
+                );
             }
             Err(e) => {
                 // A hard check-runner error (e.g. toolchain not found) is surfaced as a
@@ -1972,6 +2051,77 @@ mod tests {
         for tool in ["Bash", "Write", "Edit", "MultiEdit", "NotebookEdit", "Task"] {
             assert!(disallowed.split(' ').any(|t| t == tool));
             assert!(!allowed.split(' ').any(|t| t == tool));
+        }
+    }
+
+    // ── 2c. LIFECYCLE-5: bounce loop feeds errors back into the re-prompt ────────
+
+    /// The second pass's prompt CONTAINS the prior iteration's rule ids + error text at the
+    /// TAIL, and DIFFERS from the first pass's prompt. This is the open-weight linchpin: the
+    /// re-run agent gets new information instead of re-reading the identical prompt.
+    #[test]
+    fn append_bounce_feedback_puts_rule_ids_and_errors_at_the_tail() {
+        let base = implement_prompt(
+            "acme/api#42",
+            "Add login",
+            "Support email/password login.",
+            "camerata/story-42",
+            &[approved_decision("auth", "JWT?", "Use JWT.")],
+            None,
+            &[],
+            "",
+        );
+        // Feedback carries a violated rule id AND verbatim toolchain error text.
+        let feedback = "Layer-2 checks failed. Violated rule id(s): RUST-CLIPPY\n\
+                        error[E0308]: mismatched types\n  --> src/auth.rs:12:5";
+        let second = append_bounce_feedback(&base, 1, feedback);
+
+        // It differs from the first prompt.
+        assert_ne!(second, base, "the bounce prompt must differ from the first pass");
+        // The base prompt is a PREFIX (cache-friendly tail placement): the whole base is
+        // still present, unchanged, at the head of the second prompt.
+        assert!(second.starts_with(&base), "base prompt must remain the cached prefix");
+        // The rule id + verbatim error text are present.
+        assert!(second.contains("RUST-CLIPPY"), "violated rule id must be fed back");
+        assert!(
+            second.contains("error[E0308]: mismatched types"),
+            "verbatim toolchain error text must be fed back"
+        );
+        assert!(second.contains("src/auth.rs:12:5"), "error location must be fed back");
+        // The feedback sits at the TAIL (after the base prompt), not in the middle.
+        let feedback_pos = second.find("error[E0308]").unwrap();
+        assert!(
+            feedback_pos > base.len().saturating_sub(1),
+            "the error feedback must be appended AFTER the base prompt (tail placement)"
+        );
+        // The revise header is present so the agent knows this is a correction pass.
+        assert!(second.contains("REVISE"), "the revise header must be present");
+    }
+
+    /// Empty feedback is a no-op: the prompt is unchanged (defensive — never append an
+    /// empty revise block).
+    #[test]
+    fn append_bounce_feedback_empty_is_noop() {
+        let base = implement_prompt("s/r#1", "T", "D", "b", &[], None, &[], "");
+        assert_eq!(append_bounce_feedback(&base, 1, "   "), base);
+        assert_eq!(append_bounce_feedback(&base, 1, ""), base);
+    }
+
+    /// STACK-AGNOSTIC: whatever the check emitted is forwarded verbatim — the helper never
+    /// hardcodes a toolchain. A tsc error, a pytest failure, and a go vet finding all pass
+    /// through identically.
+    #[test]
+    fn append_bounce_feedback_is_stack_agnostic() {
+        let base = implement_prompt("s/r#1", "T", "D", "b", &[], None, &[], "");
+        for feedback in [
+            "src/app.ts(10,3): error TS2322: Type 'string' is not assignable to type 'number'.",
+            "FAILED tests/test_auth.py::test_login - assert 401 == 200",
+            "./main.go:8:2: undefined: foo",
+            "Integration gate (R3.e) bounced — contract mismatch:\nbackend omits email field",
+        ] {
+            let out = append_bounce_feedback(&base, 1, feedback);
+            assert!(out.contains(feedback), "the check's own output must pass through verbatim: {feedback}");
+            assert!(out.starts_with(&base), "base stays the prefix for {feedback}");
         }
     }
 
