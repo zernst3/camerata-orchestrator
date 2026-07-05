@@ -397,36 +397,24 @@ async fn resolve_conflicts_and_commit(
 
     // 3. The SERVER completes the merge commit (never the agent — Task/commit stay server-side).
     //
-    // GAP-2 chokepoint. A merge commit is the CANONICAL machine-generated action the bypass
-    // exists for: git authors its own `Merge branch ...` message with `--no-edit`, which
-    // cannot satisfy a conventional-commit / story-id convention. We gate it with an
-    // auditable bypass (recorded in the run's evidence trail), never a silent skip. The
-    // representative message is what git will produce; the bypass is honest about it.
-    let merge_msg = format!("Merge {merge_ref} into {target_branch}");
-    match crate::vcs_choke::gated_commit_or_bypass(
+    // GAP-2 chokepoint. Rather than let git author an ungated `Merge branch ...` subject with
+    // `--no-edit` and bypass the gate, Camerata authors a COMPLIANT merge message (conventional
+    // shape + substantive body + story-id reference in the project's format) and completes the
+    // merge with `git commit -m`. The HARD-BLOCK path then guarantees a non-compliant machine
+    // message surfaces as a real error rather than a silent bypass.
+    let numeric_id = crate::vcs_choke::numeric_story_id(story_id);
+    let merge_msg = crate::vcs_choke::compliant_machine_commit_message(
         vcs_config,
-        &merge_msg,
-        Some("machine-generated merge commit (git --no-edit); merge messages cannot satisfy commit-shape conventions"),
-    ) {
-        Ok(Some(record)) => runs.push_event(
-            run_id,
-            GateEvent {
-                seq: next_seq(),
-                layer: "update-branch".to_string(),
-                verdict: "info".to_string(),
-                rule: None,
-                detail: format!("VCS-action gate: {record}"),
-                content_hash: None,
-            },
-        ),
-        Ok(None) => {}
-        Err(e) => {
-            abort_and_fail(format!("VCS-action gate error: {e}")).await;
-            return;
-        }
+        "chore",
+        &format!("merge {merge_ref} into {target_branch} for {story_id}"),
+        &numeric_id,
+    );
+    if let Err(e) = crate::vcs_choke::gated_commit(vcs_config, &merge_msg) {
+        abort_and_fail(format!("VCS-action gate blocked the merge commit: {e}")).await;
+        return;
     }
 
-    match workspace::commit_merge(dir).await {
+    match workspace::commit_merge_with_message(dir, &merge_msg).await {
         Ok(out) => {
             runs.push_event(
                 run_id,

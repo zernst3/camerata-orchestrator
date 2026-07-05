@@ -1283,6 +1283,18 @@ pub async fn commit_merge(dir: &Path) -> anyhow::Result<String> {
     anyhow::bail!("git commit (merge): {}", stderr_of(&out));
 }
 
+/// Complete an in-progress merge with an explicit `message` (instead of git's auto-generated
+/// `Merge branch ...` subject). `git commit -m <message>` in the merging state records the
+/// merge commit with the given message, letting Camerata author a process-rule-compliant merge
+/// message rather than bypassing the gate.
+pub async fn commit_merge_with_message(dir: &Path, message: &str) -> anyhow::Result<String> {
+    let out = git(Some(dir), &["commit", "-m", message]).await?;
+    if out.status.success() {
+        return Ok(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    }
+    anyhow::bail!("git commit (merge): {}", stderr_of(&out));
+}
+
 /// Fetch a single `branch` from origin into the local `origin/<branch>` tracking ref,
 /// using an authenticated transient URL (token never lands in `.git/config`). Used by
 /// the update-branch flow when the merge source is an origin branch, so the local

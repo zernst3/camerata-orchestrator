@@ -224,22 +224,20 @@ pub async fn execute_pr_resolve_run(
     }
 
     // The SERVER commits the agent's fix (commit stays server-side, never the agent).
-    let commit_msg = format!("fix: resolve PR #{pr_number} feedback for {story_id}");
-
-    // GAP-2 chokepoint. Orchestration-internal, machine-generated commit message: gate it
-    // with an auditable bypass so a project's custom rules are honored without silently
-    // skipping the gate. A compliant machine message passes with no bypass record.
-    match crate::vcs_choke::gated_commit_or_bypass(
+    //
+    // GAP-2 chokepoint. Orchestration-internal, but Camerata knows the run's story id, so we
+    // author a message COMPLIANT with the project's active process rules and take the HARD-BLOCK
+    // path. A non-compliant machine message surfaces as a real error rather than a silent bypass.
+    let numeric_id = crate::vcs_choke::numeric_story_id(&story_id);
+    let commit_msg = crate::vcs_choke::compliant_machine_commit_message(
         &vcs_config,
-        &commit_msg,
-        Some("orchestration-internal server commit of the PR-feedback resolution; message is machine-generated"),
-    ) {
-        Ok(Some(record)) => event(&runs, "info", format!("VCS-action gate: {record}")),
-        Ok(None) => {}
-        Err(e) => {
-            fail(&runs, &uow, format!("VCS-action gate error: {e}"));
-            return;
-        }
+        "fix",
+        &format!("resolve PR #{pr_number} feedback for {story_id}"),
+        &numeric_id,
+    );
+    if let Err(e) = crate::vcs_choke::gated_commit(&vcs_config, &commit_msg) {
+        fail(&runs, &uow, format!("VCS-action gate blocked the machine commit: {e}"));
+        return;
     }
 
     match crate::workspace::commit_all(&dir, &commit_msg).await {
