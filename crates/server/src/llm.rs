@@ -446,6 +446,26 @@ fn usage_tokens(usage: &serde_json::Value) -> (Option<u64>, Option<u64>, u64, u6
     (input, output, cache_read, cache_create)
 }
 
+/// Extract the completion text from a `claude -p --output-format json` object, treating an
+/// in-band failure as an error. The CLI can exit 0 yet report a failure via `is_error:true`
+/// (execution error, max-turns abort, etc.) or omit `result` entirely; accepting that as a
+/// successful empty completion masks a backend failure as a low-quality result, so bail.
+fn cli_result_text(v: &serde_json::Value) -> anyhow::Result<&str> {
+    if v["is_error"].as_bool() == Some(true) {
+        anyhow::bail!(
+            "claude CLI returned is_error=true (subtype {}): {}",
+            v["subtype"].as_str().unwrap_or("unknown"),
+            v["result"].as_str().unwrap_or("<no result>")
+        );
+    }
+    v["result"].as_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "claude CLI JSON has no `result` field (subtype {})",
+            v["subtype"].as_str().unwrap_or("unknown")
+        )
+    })
+}
+
 /// List price ($/Mtok input, $/Mtok output) for a model id, from [`MODELS`].
 fn price_for(model_id: &str) -> Option<(f64, f64)> {
     MODELS
@@ -711,9 +731,10 @@ impl Llm {
         }
         let v: serde_json::Value = serde_json::from_slice(&out.stdout)
             .map_err(|e| anyhow::anyhow!("parse claude CLI JSON: {e}"))?;
+        let result_text = cli_result_text(&v)?;
         let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&v["usage"]);
         Ok(LlmResponse {
-            text: v["result"].as_str().unwrap_or_default().to_string(),
+            text: result_text.to_string(),
             model: model.to_string(),
             backend: "cli".to_string(),
             cost_usd: v["total_cost_usd"].as_f64(),
@@ -1965,6 +1986,19 @@ mod tests {
         // Unknown model or missing counts -> None.
         assert!(compute_cost_usd("nope", Some(1), Some(1), 0, 0).is_none());
         assert!(compute_cost_usd("claude-opus-4-8", None, Some(1), 0, 0).is_none());
+    }
+
+    #[test]
+    fn cli_result_text_rejects_error_shaped_payloads() {
+        // Happy path: is_error false, result present.
+        let ok = serde_json::json!({"is_error": false, "result": "hello"});
+        assert_eq!(cli_result_text(&ok).unwrap(), "hello");
+        // is_error:true -> Err even though a result string is present.
+        let errored = serde_json::json!({"is_error": true, "subtype": "error_max_turns", "result": "partial"});
+        assert!(cli_result_text(&errored).is_err(), "is_error=true must fail");
+        // Absent result -> Err.
+        let no_result = serde_json::json!({"is_error": false, "subtype": "success"});
+        assert!(cli_result_text(&no_result).is_err(), "missing result must fail");
     }
 
     #[test]
