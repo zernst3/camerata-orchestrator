@@ -31,7 +31,7 @@
 //! `mcp__camerata__gated_write` — the constant `camerata_agent::GATED_WRITE_TOOL`.
 
 use camerata_core::{Decision, RuleId, ToolCall};
-use camerata_gateway::{evaluate_call, gov1_rule};
+use camerata_gateway::{enforced_gate_rules, evaluate_call, gov1_rule};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{Implementation, ServerCapabilities, ServerInfo},
@@ -516,9 +516,15 @@ pub struct FanOutArgs {
 ///
 /// The file is a JSON array of rule-id strings, e.g. `["GOV-1"]`. This is the
 /// data-driven delivery channel: the orchestrator's live rule selection arrives
-/// as data, not code. A missing/unreadable/unparseable file fails CLOSED onto
-/// the GOV-1 default rather than an empty (allow-everything) subset, so a
-/// delivery glitch can never silently disable governance.
+/// as data, not code.
+///
+/// A file that is SET but unreadable/unparseable/empty is a delivery glitch on a
+/// governed run, so it fails CLOSED onto the FULL enforced floor
+/// (`enforced_gate_rules()`), not onto `[GOV-1]`. `[GOV-1]` alone is only a
+/// synthetic verification fixture, so falling back to it would silently shed the
+/// entire SEC-* floor for the session (fail-OPEN). Only the truly unconfigured
+/// case (env var unset, i.e. the gateway run standalone with no orchestrator
+/// delivery) uses the minimal `[GOV-1]` default.
 fn load_rule_subset() -> Vec<RuleId> {
     let Some(path) = std::env::var_os(RULES_FILE_ENV) else {
         eprintln!("[gateway] {RULES_FILE_ENV} unset; using default subset [GOV-1]");
@@ -541,25 +547,25 @@ fn load_rule_subset() -> Vec<RuleId> {
             }
             Ok(_) => {
                 eprintln!(
-                    "[gateway] {} parsed to an EMPTY subset; failing closed onto [GOV-1]",
+                    "[gateway] {} parsed to an EMPTY subset; failing closed onto the full floor",
                     path.display()
                 );
-                vec![gov1_rule()]
+                enforced_gate_rules()
             }
             Err(e) => {
                 eprintln!(
-                    "[gateway] could not parse {} ({e}); failing closed onto [GOV-1]",
+                    "[gateway] could not parse {} ({e}); failing closed onto the full floor",
                     path.display()
                 );
-                vec![gov1_rule()]
+                enforced_gate_rules()
             }
         },
         Err(e) => {
             eprintln!(
-                "[gateway] could not read {} ({e}); failing closed onto [GOV-1]",
+                "[gateway] could not read {} ({e}); failing closed onto the full floor",
                 path.display()
             );
-            vec![gov1_rule()]
+            enforced_gate_rules()
         }
     }
 }
@@ -999,7 +1005,10 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod gate_sink_tests {
-    use super::{build_gate_record, gate_events_sink_path, GateDecisionRecord};
+    use super::{
+        build_gate_record, enforced_gate_rules, gate_events_sink_path, load_rule_subset, now_ms,
+        GateDecisionRecord,
+    };
 
     #[test]
     fn build_record_classifies_allow() {
@@ -1096,6 +1105,41 @@ mod gate_sink_tests {
             gate_events_sink_path(),
             Some(std::path::PathBuf::from("/tmp/session-1/gate-events.jsonl"))
         );
+        std::env::remove_var(super::RULES_FILE_ENV);
+    }
+
+    #[test]
+    fn rules_file_load_failure_fails_closed_onto_the_full_floor() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let floor = enforced_gate_rules();
+        // Sanity: the full floor is more than the synthetic GOV-1 fixture, and
+        // includes the SEC-* content rules that a fail-OPEN [GOV-1] would shed.
+        assert!(floor.len() > 1);
+        assert!(floor.iter().any(|r| r.0.starts_with("SEC-")));
+
+        let dir = std::env::temp_dir().join(format!(
+            "cam-rules-load-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 1) File set but missing/unreadable -> full floor, NOT [GOV-1].
+        std::env::set_var(super::RULES_FILE_ENV, dir.join("does-not-exist.json"));
+        assert_eq!(load_rule_subset(), floor, "read failure must fail closed");
+
+        // 2) File set but unparseable -> full floor.
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, "{ not json").unwrap();
+        std::env::set_var(super::RULES_FILE_ENV, &bad);
+        assert_eq!(load_rule_subset(), floor, "parse failure must fail closed");
+
+        // 3) File parses to an EMPTY subset -> full floor (never allow-everything).
+        let empty = dir.join("empty.json");
+        std::fs::write(&empty, "[]").unwrap();
+        std::env::set_var(super::RULES_FILE_ENV, &empty);
+        assert_eq!(load_rule_subset(), floor, "empty subset must fail closed");
+
         std::env::remove_var(super::RULES_FILE_ENV);
     }
 }
