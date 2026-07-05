@@ -1686,13 +1686,32 @@ impl Completer for AnthropicNoopCompleter {
 /// Decide whether the `claude` provider should run via the Anthropic Messages API
 /// (`ApiAgentDriver` in [`ApiShape::Anthropic`]) instead of the `ClaudeCliDriver`.
 ///
-/// Returns `Some(key)` when BOTH `CAMERATA_LLM_BACKEND=api` AND `ANTHROPIC_API_KEY` is set
-/// (non-empty) — the same two signals `llm.rs` uses to select the Anthropic API backend.
-/// Returns `None` otherwise (the default `cli` path, or `api` with no key).
-fn anthropic_api_backend_key() -> Option<String> {
+/// Returns `Some(key)` when BOTH the effective backend is `api` AND an Anthropic key is
+/// available (non-empty) — the same two signals `llm.rs` uses to select the Anthropic API
+/// backend. Returns `None` otherwise (the default `cli` path, or `api` with no key).
+///
+/// ROUTES-9: the Anthropic key is read from the CREDENTIAL STORE first (with an env fallback
+/// for back-compat), NOT solely from `ANTHROPIC_API_KEY` env. The `set_credential` handler no
+/// longer mirrors a freshly-saved key into process env (that was a request-thread `set_var`
+/// racing worker-thread `getenv` — POSIX UB). Reading the store here means a freshly-saved
+/// key still takes effect without a restart, with no process-env mutation. The backend signal
+/// is still read from `CAMERATA_LLM_BACKEND` env, which is hydrated ONCE at single-threaded
+/// startup from the persisted setting (see `run`), so it is never written after threads spawn.
+fn anthropic_api_backend_key(creds: &dyn crate::credentials::CredentialStore) -> Option<String> {
     let backend = std::env::var("CAMERATA_LLM_BACKEND").ok();
     if backend.as_deref() != Some("api") {
         return None;
+    }
+    // Store-first, env-fallback: mirrors `credentials::resolve` so a keychain-saved key wins
+    // and existing dotenv/CI setups keep working. A store read error must not silently degrade
+    // to env with no trace, so warn and fall back (matches the resolve() posture).
+    match creds.get(crate::credentials::ANTHROPIC_API_KEY) {
+        Ok(Some(k)) if !k.trim().is_empty() => return Some(k),
+        Ok(_) => {}
+        Err(e) => eprintln!(
+            "[camerata-server] credential-store read of ANTHROPIC_API_KEY failed ({e}); \
+             falling back to env"
+        ),
     }
     std::env::var("ANTHROPIC_API_KEY")
         .ok()
@@ -1709,6 +1728,9 @@ fn anthropic_api_backend_key() -> Option<String> {
 /// worktree jail, same orchestrator gating).
 fn build_claude_driver(
     model_id: &str,
+    // ROUTES-9: credential store, consulted store-first (env fallback) for the Anthropic key
+    // instead of a per-request env `set_var`. See `anthropic_api_backend_key`.
+    creds: &dyn crate::credentials::CredentialStore,
     mcp_config_path: &str,
     rule_subset: Vec<RuleId>,
     worktree: Option<PathBuf>,
@@ -1720,7 +1742,7 @@ fn build_claude_driver(
     // output line; Anthropic API: per loop turn) so a healthy long run stays fresh.
     on_activity: Option<HeartbeatFn>,
 ) -> Arc<dyn AgentDriver> {
-    if let Some(key) = anthropic_api_backend_key() {
+    if let Some(key) = anthropic_api_backend_key(creds) {
         // Anthropic Messages API agent. Same gate surface as every other ApiAgentDriver:
         // gated_write-only, worktree-jailed, delegate/fan_out only when orchestrator=true.
         let mut driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), model_id)
@@ -1837,6 +1859,7 @@ pub fn build_agent_driver(
         // API agent when CAMERATA_LLM_BACKEND=api + ANTHROPIC_API_KEY are set.
         _ => Ok(build_claude_driver(
             model_id,
+            creds,
             mcp_config_path,
             rule_subset,
             worktree,
@@ -2144,7 +2167,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
             // this factory builds, so only the lead can carry delegate/fan_out; its children
             // are built per-model + gated by the embedded ServerChildDriverFactory.
             _ => {
-                if let Some(key) = anthropic_api_backend_key() {
+                if let Some(key) = anthropic_api_backend_key(self.creds.as_ref()) {
                     // Native Anthropic-shape orchestrator. Mirrors the OpenRouter arm: a
                     // ServerChildDriverFactory resolves each delegate/fan_out child to ITS
                     // model's provider (CLI / Anthropic API / OpenRouter), gated.
@@ -3707,12 +3730,19 @@ mod tests {
 
     // ── Routing: build_claude_driver respects backend + key ───────────────────
     //
-    // anthropic_api_backend_key() reads process env. These tests mutate env, so they
-    // run serially under a shared mutex to avoid cross-test interference.
+    // anthropic_api_backend_key() reads the backend from process env and the key
+    // store-first (env fallback). These tests exercise the ENV-fallback path with an
+    // EMPTY credential store, so they mutate env and run serially under a shared mutex.
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// An empty credential store: the helper's key lookup misses and falls back to the
+    /// `ANTHROPIC_API_KEY` env var these routing tests set.
+    fn empty_creds() -> crate::credentials::MemoryCredentialStore {
+        crate::credentials::MemoryCredentialStore::new()
     }
 
     /// RAII guard that snapshots + restores the two env vars routing depends on.
@@ -3745,35 +3775,67 @@ mod tests {
     fn anthropic_backend_key_requires_both_signals() {
         let _g = env_lock();
         let _snap = EnvSnapshot::capture();
+        // Empty store: the key comes from the env fallback these assertions set.
+        let creds = empty_creds();
 
         // Neither set → None.
         std::env::remove_var("CAMERATA_LLM_BACKEND");
         std::env::remove_var("ANTHROPIC_API_KEY");
-        assert!(anthropic_api_backend_key().is_none());
+        assert!(anthropic_api_backend_key(&creds).is_none());
 
         // backend=api but no key → None.
         std::env::set_var("CAMERATA_LLM_BACKEND", "api");
         std::env::remove_var("ANTHROPIC_API_KEY");
-        assert!(anthropic_api_backend_key().is_none());
+        assert!(anthropic_api_backend_key(&creds).is_none());
 
         // key but backend not api (default cli) → None.
         std::env::remove_var("CAMERATA_LLM_BACKEND");
         std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-x");
-        assert!(anthropic_api_backend_key().is_none());
+        assert!(anthropic_api_backend_key(&creds).is_none());
 
         // backend=cli explicitly + key → None.
         std::env::set_var("CAMERATA_LLM_BACKEND", "cli");
         std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-x");
-        assert!(anthropic_api_backend_key().is_none());
+        assert!(anthropic_api_backend_key(&creds).is_none());
 
         // Both signals → Some(key).
         std::env::set_var("CAMERATA_LLM_BACKEND", "api");
         std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-x");
-        assert_eq!(anthropic_api_backend_key().as_deref(), Some("sk-ant-x"));
+        assert_eq!(anthropic_api_backend_key(&creds).as_deref(), Some("sk-ant-x"));
 
         // backend=api + empty key → None.
         std::env::set_var("ANTHROPIC_API_KEY", "   ");
-        assert!(anthropic_api_backend_key().is_none());
+        assert!(anthropic_api_backend_key(&creds).is_none());
+    }
+
+    /// ROUTES-9: the credential STORE is consulted first for the Anthropic key, so a
+    /// store-saved key routes to the Anthropic API path with NO `ANTHROPIC_API_KEY` env set
+    /// (proving the removed per-request `set_var` is no longer needed for no-restart effect).
+    #[test]
+    fn anthropic_backend_key_reads_store_without_env() {
+        use crate::credentials::CredentialStore as _;
+        let _g = env_lock();
+        let _snap = EnvSnapshot::capture();
+
+        // Backend=api (startup-hydrated env), NO ANTHROPIC_API_KEY env at all.
+        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+
+        let creds = empty_creds();
+        // Empty store + no env → None.
+        assert!(anthropic_api_backend_key(&creds).is_none());
+
+        // Save the key to the store only → helper returns it with no env mutation.
+        creds.set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-store").unwrap();
+        assert_eq!(
+            anthropic_api_backend_key(&creds).as_deref(),
+            Some("sk-ant-store"),
+            "a store-saved key must route to the API path with no env set"
+        );
+        assert!(
+            std::env::var("ANTHROPIC_API_KEY").is_err(),
+            "reading the store must not have mutated process env"
+        );
     }
 
     // The driver-selection routing decision is `anthropic_api_backend_key()` (exhaustively
@@ -3788,13 +3850,15 @@ mod tests {
     fn build_claude_driver_builds_on_api_and_cli_paths_without_spawn() {
         let _g = env_lock();
         let _snap = EnvSnapshot::capture();
+        let creds = empty_creds();
 
         // claude + api + key: routing helper fires, driver builds (no claude spawn).
         std::env::set_var("CAMERATA_LLM_BACKEND", "api");
         std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
-        assert!(anthropic_api_backend_key().is_some());
+        assert!(anthropic_api_backend_key(&creds).is_some());
         let _api_driver = build_claude_driver(
             "claude-opus-4-8",
+            &creds,
             "/tmp/fake-mcp.json",
             vec![gov1_rule()],
             Some(PathBuf::from("/tmp/wt")),
@@ -3806,9 +3870,10 @@ mod tests {
         // default cli: routing helper does not fire, CLI driver builds.
         std::env::remove_var("CAMERATA_LLM_BACKEND");
         std::env::remove_var("ANTHROPIC_API_KEY");
-        assert!(anthropic_api_backend_key().is_none());
+        assert!(anthropic_api_backend_key(&creds).is_none());
         let _cli_driver = build_claude_driver(
             "claude-opus-4-8",
+            &creds,
             "/tmp/fake-mcp.json",
             vec![gov1_rule()],
             None,
@@ -3831,7 +3896,7 @@ mod tests {
 
         // Routing decision fires, and build_agent_driver must succeed (Anthropic API path,
         // no OpenRouter credential needed, no claude binary spawn at build time).
-        assert!(anthropic_api_backend_key().is_some());
+        assert!(anthropic_api_backend_key(&creds).is_some());
         let result = build_agent_driver(
             "claude-sonnet-4-6",
             &registry,
@@ -3859,7 +3924,7 @@ mod tests {
         let creds = crate::credentials::MemoryCredentialStore::new();
         let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
 
-        assert!(anthropic_api_backend_key().is_none());
+        assert!(anthropic_api_backend_key(&creds).is_none());
         let result = build_agent_driver(
             "claude-sonnet-4-6",
             &registry,

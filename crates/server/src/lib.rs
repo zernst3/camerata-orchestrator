@@ -7661,11 +7661,19 @@ struct LlmBackendReq {
     backend: String,
 }
 
-/// Set the APP-LEVEL LLM backend (`"cli"` | `"api"`). Persists the choice AND hydrates the
-/// `CAMERATA_LLM_BACKEND` env var so it takes effect for subsequent runs WITHOUT a restart
-/// (the env-driven selection sites re-read it at construction time). Rejects any value other
-/// than `"cli"`/`"api"` with 400. Returns the stored backend plus `api_key_present` so the UI
-/// can immediately warn when `api` is selected with no Anthropic key.
+/// Set the APP-LEVEL LLM backend (`"cli"` | `"api"`). Persists the choice to the settings
+/// store, which is the single source of truth the driver-selection path reads at run-build
+/// time (via [`AppState::settings`]). Rejects any value other than `"cli"`/`"api"` with 400.
+/// Returns the stored backend plus `api_key_present` so the UI can immediately warn when
+/// `api` is selected with no Anthropic key.
+///
+/// ROUTES-9: this handler used to `std::env::set_var("CAMERATA_LLM_BACKEND", ...)` so a
+/// runtime backend switch took effect without a restart. That mutated process-global env
+/// from a request-handler thread while worker threads called `getenv` on the same var —
+/// undefined behaviour on POSIX, and the concurrent writer made the credential env-fallback
+/// test flaky. The env write is gone: the effective backend is now read from the persisted
+/// settings store (see `effective_backend_from`), so a runtime switch still takes effect
+/// without a restart AND without touching process env.
 async fn set_llm_backend(
     State(state): State<AppState>,
     Json(req): Json<LlmBackendReq>,
@@ -7681,9 +7689,6 @@ async fn set_llm_backend(
         );
     }
     state.settings.set_llm_backend(Some(backend.clone()));
-    // Take effect for subsequent runs without a restart: the selection sites read this env
-    // var at construction time. Edition 2021, so `set_var` is safe here.
-    std::env::set_var("CAMERATA_LLM_BACKEND", &backend);
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -7753,13 +7758,14 @@ async fn set_credential(
             })),
         );
     }
-    // Hydrate the Anthropic key into the env var on save so switching to the `api`
-    // backend + entering a key takes effect immediately for subsequent runs, with no
-    // restart. Scoped to the anthropic key only — the github token has its own
-    // `CAMERATA_GITHUB_TOKEN` handling and must not be mirrored into an env var here.
-    if name == crate::credentials::ANTHROPIC_API_KEY && !req.value.trim().is_empty() {
-        std::env::set_var("ANTHROPIC_API_KEY", &req.value);
-    }
+    // ROUTES-9: this handler used to `std::env::set_var("ANTHROPIC_API_KEY", ...)` so a
+    // freshly-saved key took effect for the `api` backend without a restart. That mutated
+    // process-global env from a request-handler thread while worker threads read the same var
+    // via `getenv` — undefined behaviour on POSIX, and the concurrent writer made the
+    // credential env-fallback test flaky. The env write is gone: the driver-selection path
+    // now reads the Anthropic key from the credential store (this same store) with an env
+    // fallback for back-compat, so a freshly-saved key takes effect without a restart AND
+    // without touching process env. See `anthropic_api_backend_key`.
     // Return the masked form so the UI can confirm what was stored.
     let masked = state
         .credential_store
@@ -12665,6 +12671,41 @@ mod tests {
         assert!(json["api_key_present"].is_boolean());
         // Persisted on the settings store.
         assert_eq!(state.settings.llm_backend().as_deref(), Some("api"));
+    }
+
+    /// ROUTES-9: `POST /api/settings/llm-backend` persists to the settings store WITHOUT
+    /// mutating the `CAMERATA_LLM_BACKEND` process-env var. The previous implementation did a
+    /// `std::env::set_var` from the request thread, racing worker-thread `getenv` (POSIX UB)
+    /// and making the credential env-fallback test flaky. The store is now the source of truth.
+    #[tokio::test]
+    async fn post_llm_backend_does_not_mutate_process_env() {
+        // Sentinel value the handler must NOT overwrite.
+        std::env::set_var("CAMERATA_LLM_BACKEND", "sentinel-untouched");
+
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/settings/llm-backend")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"backend":"api"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The setting is persisted to the store...
+        assert_eq!(state.settings.llm_backend().as_deref(), Some("api"));
+        // ...but the process env was left exactly as it was (no per-request set_var).
+        assert_eq!(
+            std::env::var("CAMERATA_LLM_BACKEND").as_deref(),
+            Ok("sentinel-untouched"),
+            "the handler must not mutate CAMERATA_LLM_BACKEND"
+        );
+        std::env::remove_var("CAMERATA_LLM_BACKEND");
     }
 
     /// `POST /api/settings/llm-backend` rejects a bogus backend with 400 and does not
@@ -18260,6 +18301,50 @@ mod tests {
         );
         // The prefix appears.
         assert!(masked.starts_with("ghp_"), "masked starts with first 4 chars");
+    }
+
+    /// ROUTES-9: saving the Anthropic key via `POST /api/credentials/anthropic_api_key`
+    /// stores it in the credential store WITHOUT mutating the `ANTHROPIC_API_KEY` process-env
+    /// var. The old handler mirrored the value into env via `std::env::set_var` from the
+    /// request thread — POSIX UB against worker-thread `getenv`, and the concurrent writer made
+    /// the credential env-fallback test flaky. The driver path now reads the key store-first, so
+    /// no env mutation is needed for a freshly-saved key to take effect.
+    #[tokio::test]
+    async fn set_anthropic_credential_does_not_mutate_process_env() {
+        // Sentinel value the handler must NOT overwrite.
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-sentinel");
+
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/credentials/anthropic_api_key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"value":"sk-ant-freshly-saved"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The key is in the store...
+        assert_eq!(
+            state
+                .credential_store
+                .get(crate::credentials::ANTHROPIC_API_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("sk-ant-freshly-saved"),
+        );
+        // ...but the process env was left exactly as it was (no per-request set_var).
+        assert_eq!(
+            std::env::var("ANTHROPIC_API_KEY").as_deref(),
+            Ok("sk-ant-sentinel"),
+            "the handler must not mutate ANTHROPIC_API_KEY"
+        );
+        std::env::remove_var("ANTHROPIC_API_KEY");
     }
 
     /// `AppState::github_token()` prefers the credential store over the env var.
