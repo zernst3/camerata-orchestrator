@@ -1666,7 +1666,7 @@ downgraded. A finding is marked `suppressed-self-reference` when BOTH conditions
   `CONVENTIONS.md` matches Condition 2, but Condition 1 fails for `app/config.py` so no suppression
   occurs.
 - **Real secrets pasted into governance files still flag.** A developer who pastes a real token
-  (e.g., `ghp_…`) into `CONVENTIONS.md` produces a finding whose snippet is not in any rule
+  (e.g., `ghp_...`) into `CONVENTIONS.md` produces a finding whose snippet is not in any rule
   description. Condition 2 fails, so the finding stays `active`. The file is still scanned;
   only provably-self-referential matches are downranked.
 - **The gateway source (`crates/gateway/src/lib.rs`) is out of scope.** It is application source
@@ -1730,8 +1730,8 @@ pins — preview is indicative, the gate is authoritative.
 
 Mechanism:
 1. **linter → tool.** `tool_for_rule` / `tool_for_linter` derive the rule's tool
-   from its corpus `linter` source: `clippy: …`/`clippy::…` → clippy; `Ruff:
-   …`/bare `RUF…`/`S…` codes → ruff; `semgrep` → semgrep; an eslint-family id →
+   from its corpus `linter` source: `clippy: ...`/`clippy::...` → clippy; `Ruff:
+   ...`/bare `RUF...`/`S...` codes → ruff; `semgrep` → semgrep; an eslint-family id →
    eslint. The `ScanTool` enum has those four variants. Only `Mechanical` rules
    enter this path; Architectural are excluded before it.
 2. **group + run once per tool.** `group_by_tool` groups the selected rules by
@@ -1844,6 +1844,12 @@ of the picked batch mode. The `DeterministicProgress` component (`cockpit.rs`) r
 AI agent-activity drawer (overall done/total bar + per-tool rows) — the primary progress view in
 deterministic-only mode, where the AI drawer is empty. See
 `docs/decisions/2026-06-22_scan_ux_selector_and_det_progress.md`.
+
+**Deep-report export is project-scoped (ROUTES-5).** Each `JobState` carries a `project_id`
+(captured from the active project at creation) and a `completed_at_ms` (stamped in `finish`).
+`GET /api/projects/:id/deep-report` calls `latest_deep_report(project_id)`, which filters to THAT
+project's completed deep jobs and returns the newest by completion time, not an arbitrary job in
+`HashMap` order. See `docs/decisions/2026-07-05_routes-correctness.md`.
 
 ### Onboarding emits stories; the dev layer does the work
 
@@ -2117,7 +2123,7 @@ project a chosen work item onto a UoW. The handlers (in `lib.rs`, using the
   created_at }] }` — fetch the issue's comment thread for the work-item modal. Backed by
   `github_issues::get_issue_comments`. Token-less / malformed-id / fetch-error → empty list
   (graceful at the endpoint layer, never an error).
-- `POST /api/workitems/assignees` `{ work_item_id }` → `{ users: ["login", …] }` — the repo's
+- `POST /api/workitems/assignees` `{ work_item_id }` → `{ users: ["login", ...] }` — the repo's
   assignable users, driving the comment box's `@`-mention autocomplete. Backed by
   `github_issues::get_assignees`. Token-less / error → empty list (the dropdown simply never
   shows). The candidate set is GitHub's repo **assignees** (the practical mention set, not full
@@ -2189,6 +2195,14 @@ UoW API routes include `GET /api/uow`, `GET /api/uow/:story_id`,
 `POST .../status`, `POST .../branch`, `POST .../history`, plus the lifecycle
 transition and sign-off endpoints.
 
+**Read vs. write store access (ROUTES-8).** READ handlers use a NON-creating getter:
+`UowStore::get(id) -> Option<UnitOfWork>` (or `get_or_default(id)`, a transient `story_id`-stamped
+UoW that is not persisted). A GET for an unknown/typo'd id returns a UoW-shaped body with nothing
+written; it never materializes a phantom draft that would then leak into the list view. WRITE
+handlers (author, attach, diagram-set, status/branch, publish, run start) use `get_or_create`,
+which legitimately upserts and persists. `decisions_for` (a read) reads without inserting. See
+`docs/decisions/2026-07-05_routes-correctness.md`.
+
 ### Config vs. data storage separation
 
 Project **config** (transferable) and project **data** (local) are kept in separate stores:
@@ -2206,6 +2220,23 @@ history, sign-off). Transferring them would cause two developers who import the 
 inherit each other's half-finished work. Export stays config-only by design.
 
 See `docs/decisions/2026-06-21_project_config_vs_data_separation.md`.
+
+### HTTP error model (`AppError`, ROUTES-7)
+
+Handlers that can fail return `Result<_, AppError>`. `AppError { status, err }` renders as
+`(status, Json({ "error": err.to_string() }))`. The status is chosen at the failure site:
+
+| Constructor | Status | Use |
+|---|---|---|
+| `AppError(e)` / `?` conversion | 500 Internal | a genuine internal fault (default) |
+| `AppError::not_found(e)` | 404 | a missing resource (run/project/story/routine/escalation/...) |
+| `AppError::bad_request(e)` | 400 | invalid request input (malformed repo, empty body, bad id) |
+| `AppError::with_status(s, e)` | any | e.g. 409 Conflict for an already-resolved escalation |
+
+The BODY shape (`{ "error": "..." }`) is stable across all statuses, so UI code that parses `{error}`
+is unaffected by the status classification. Before ROUTES-7 every failure mapped to 500 regardless
+of cause; the field always existed but the constructors that set 4xx were rarely used. See
+`docs/decisions/2026-07-05_routes-correctness.md`.
 
 ### Investigation run (`POST /api/uow/:story_id/begin-investigation`)
 
@@ -2395,7 +2426,7 @@ gated agent to resolve the markers and `git add` — the agent does NOT commit o
 completes the merge commit. The gated agent is built from the SAME
 `camerata_fleet::governed_role` + `camerata_agent::prepare_session` machinery the investigation
 runner uses, so it carries the identical `--allowedTools` = `gated_write` only and the identical
-denylist (`Task`, `Write`, `Bash`, …); its only mutation path is layer-1, it cannot spawn
+denylist (`Task`, `Write`, `Bash`, ...); its only mutation path is layer-1, it cannot spawn
 sub-agents, and the repo dir jails its writes. None of `crates/agent`, `crates/gateway`, or
 `crates/fleet` internals were modified.
 
@@ -2943,7 +2974,7 @@ descriptive message when no local workspace is configured.
 The single **"Emit rules locally"** button in the **Rules view** (`crates/ui/src/cockpit/rules.rs`)
 calls `POST /api/projects/:id/emit-local`, sending the three cascading toggles (Save emits on a new
 branch → Push to GitHub → Open a PR). The old separate "Emit ruleset to repos (re-emit)" PR button
-is removed. The label switches to "Emitting…" while in flight.
+is removed. The label switches to "Emitting..." while in flight.
 
 The Rules view also exposes **"Reconcile with repos"** (`GET /api/projects/:id/reconcile`,
 `reconcile_project`), which reads each repo's emitted gate config (local working copy first, then
@@ -3035,7 +3066,7 @@ selector** checkboxes live on the Onboard tab's audit UI (§6), not here.
 
 `WorkItemTable` (in `cockpit.rs`) renders GitHub issues grouped by their hierarchy.
 The grouping is generic: for each issue, an `ancestor_path` is computed from the
-GitHub issue tree (parent issue → grandparent → …). Each ancestor depth level gets
+GitHub issue tree (parent issue → grandparent → ...). Each ancestor depth level gets
 its own **Chorale grouping column** in the table. GitHub enforces an 8-level
 ceiling on sub-issue nesting, so at most 8 grouping columns appear.
 

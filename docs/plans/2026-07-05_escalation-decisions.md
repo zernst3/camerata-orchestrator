@@ -9,6 +9,7 @@ options, and a recommendation. Detail for any finding is in `docs/ARCH_AUDIT_202
 **Status: Batch 3 (LIFECYCLE-5/9/12) landed on `fix/lifecycle-loop`.**
 **Status: Batch 3b (LIFECYCLE-7/6) landed on `fix/lifecycle-liveness`.**
 **Status: CheckRunner full-diagnostics landed on `fix/checkrunner-diagnostics` — completes LIFECYCLE-5 for open-weight models: `CheckRunner` returns `CheckOutcome { violated, diagnostics }`; Layer-2 bounce feeds the full toolchain output (16 KiB tail-capped) back at the prompt tail.**
+**Status: Batch 4 ROUTES (ROUTES-9/5/7/8) landed on `fix/routes-correctness`. Server correctness: no per-request `set_var` (backend/key read from stores; fixes a flaky credential test); project-scoped + latest deep-report export; correct HTTP status codes (404/400/409, not all 500; body shape unchanged); read GETs use a non-creating UoW getter (no junk records). ADR: `docs/decisions/2026-07-05_routes-correctness.md`.**
 
 Zach approved every item. Recommendation [Rec] taken for all EXCEPT:
 - **GAP-6: BUILD it now, do NOT defer** (build the remaining 3 integration-gate categories).
