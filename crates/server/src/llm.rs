@@ -454,6 +454,30 @@ fn price_for(model_id: &str) -> Option<(f64, f64)> {
         .map(|m| (m.price_in, m.price_out))
 }
 
+/// Compute the dollar cost from token usage and list price. `input` folds in cache-read and
+/// cache-creation tokens, which are NOT billed at the full input rate: cache reads are ~0.1×
+/// and cache writes ~1.25×. Price the three input components separately so cached reads are
+/// not over-billed ~10×. Returns `None` unless the model is priced and both token counts are
+/// present.
+fn compute_cost_usd(
+    model_id: &str,
+    input: Option<u64>,
+    output: Option<u64>,
+    cache_read: u64,
+    cache_creation: u64,
+) -> Option<f64> {
+    price_for(model_id).and_then(|(pin, pout)| match (input, output) {
+        (Some(i), Some(o)) => {
+            let fresh_input = i.saturating_sub(cache_read).saturating_sub(cache_creation);
+            let input_cost = fresh_input as f64 * pin
+                + cache_read as f64 * pin * 0.1
+                + cache_creation as f64 * pin * 1.25;
+            Some((input_cost + o as f64 * pout) / 1_000_000.0)
+        }
+        _ => None,
+    })
+}
+
 /// Which backend, resolved from env. Pure so it's unit-testable without real calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
@@ -978,14 +1002,8 @@ impl Llm {
             .unwrap_or_default();
         let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&v["usage"]);
         // The API doesn't bill back a dollar figure, so compute it from usage × list price.
-        // When caching is active the billed input already incorporates cache pricing (the API
-        // returns the correctly-billed totals in the usage object) so no adjustment is needed
-        // here — just sum as usual.
         let cost_usd =
-            price_for(model).and_then(|(pin, pout)| match (input_tokens, output_tokens) {
-                (Some(i), Some(o)) => Some((i as f64 * pin + o as f64 * pout) / 1_000_000.0),
-                _ => None,
-            });
+            compute_cost_usd(model, input_tokens, output_tokens, cache_read, cache_creation);
         Ok(LlmResponse {
             text: out,
             model: model.to_string(),
@@ -1318,11 +1336,13 @@ pub fn parse_batch_results_jsonl(jsonl: &str) -> anyhow::Result<Vec<BatchResultR
                 .unwrap_or_default();
             let (input_tokens, output_tokens, cache_read, cache_creation) =
                 usage_tokens(&msg["usage"]);
-            let cost_usd =
-                price_for(&model_id).and_then(|(pin, pout)| match (input_tokens, output_tokens) {
-                    (Some(i), Some(o)) => Some((i as f64 * pin + o as f64 * pout) / 1_000_000.0),
-                    _ => None,
-                });
+            let cost_usd = compute_cost_usd(
+                &model_id,
+                input_tokens,
+                output_tokens,
+                cache_read,
+                cache_creation,
+            );
             rows.push(BatchResultRow {
                 custom_id,
                 response: Some(LlmResponse {
@@ -1922,6 +1942,29 @@ mod tests {
         let usage3 = serde_json::json!({"output_tokens": 5});
         let (inp3, _out3, _cr3, _cc3) = usage_tokens(&usage3);
         assert_eq!(inp3, None, "missing input_tokens stays None");
+    }
+
+    #[test]
+    fn compute_cost_prices_cache_components_separately() {
+        // opus: price_in 15, price_out 75 ($/Mtok). input folds cache fields (base 100,
+        // read 200, creation 30 -> 330); fresh input is 100.
+        let cost = compute_cost_usd("claude-opus-4-8", Some(330), Some(50), 200, 30)
+            .expect("priced model");
+        // 100*15 (fresh) + 200*15*0.1 (read) + 30*15*1.25 (creation) + 50*75 (out) = 6112.5
+        let expected = (100.0 * 15.0 + 200.0 * 15.0 * 0.1 + 30.0 * 15.0 * 1.25 + 50.0 * 75.0)
+            / 1_000_000.0;
+        assert!((cost - expected).abs() < 1e-12, "cost={cost} expected={expected}");
+        // The naive fold-everything-at-full-input rate would over-bill.
+        let naive = (330.0 * 15.0 + 50.0 * 75.0) / 1_000_000.0;
+        assert!(cost < naive, "cached reads must not be billed at full input rate");
+
+        // No cache tokens -> matches the plain input*price formula.
+        let plain = compute_cost_usd("claude-opus-4-8", Some(100), Some(50), 0, 0).unwrap();
+        assert!((plain - (100.0 * 15.0 + 50.0 * 75.0) / 1_000_000.0).abs() < 1e-12);
+
+        // Unknown model or missing counts -> None.
+        assert!(compute_cost_usd("nope", Some(1), Some(1), 0, 0).is_none());
+        assert!(compute_cost_usd("claude-opus-4-8", None, Some(1), 0, 0).is_none());
     }
 
     #[test]
