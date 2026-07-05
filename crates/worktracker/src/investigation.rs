@@ -115,6 +115,18 @@ impl RevisionProvenance {
     }
 }
 
+impl Default for RevisionProvenance {
+    /// A fallback provenance for records whose `provenance` was omitted on the wire.
+    /// Attributes the write to the human architect at the Unix epoch so an absent
+    /// provenance deserializes instead of 422-ing the request.
+    fn default() -> Self {
+        Self {
+            actor: RevisionActor::User,
+            at: DateTime::from_timestamp(0, 0).unwrap_or_else(Utc::now),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DecisionOutcome
 // ---------------------------------------------------------------------------
@@ -277,6 +289,9 @@ pub struct DecisionRecord {
     /// Current approval state. Starts `Pending`.
     pub outcome: DecisionOutcome,
     /// Provenance: who last wrote or approved this record and when.
+    /// Defaults (architect / epoch) when omitted on the wire so a caller that
+    /// cannot stamp provenance does not 422 the whole decision set.
+    #[serde(default)]
     pub provenance: RevisionProvenance,
 }
 

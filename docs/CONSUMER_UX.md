@@ -1,5 +1,12 @@
 # CONSUMER_UX.md
 
+> Status (2026-07-04): SPEC ONLY, not a shipped surface. The consumer-mode
+> prototype this document specifies (the mocked Intake -> Clarify -> Build ->
+> Live desktop flow, formerly `crates/ui/src/screens/`) has been retired. The
+> `camerata-ui` crate is now the engine-spine cockpit (a thin HTTP client of the
+> BFF), not the consumer app-builder. This doc is kept as the design bar for a
+> future consumer surface; it describes an intended experience, not current code.
+
 The design spec for the consumer-mode prototype (the app-builder surface in VISION).
 This is the artifact: a flow a non-technical person walks through, recordable as a
 video, that shows a governed, clarification-first app generator is possible. The differentiator is not the code generation (that is

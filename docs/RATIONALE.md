@@ -57,12 +57,14 @@ That is reproducible by running `cargo run -p camerata -- live-demo`
 
 Two honest scoping notes belong right next to it:
 
-- The gate today enforces five rules (a path-segment guard against `..` traversal
-  and writes into `.git`/`.ssh`, a forbidden-path guard, and three regex content
-  heuristics for secrets / raw-SQL-concat / secrets-in-URLs; no AST analysis yet),
-  with the rest of the corpus catalogued but not yet given executable enforcement
-  arms. The architecture is the point; deepening the rule set behind the seam is
-  incremental, not architectural.
+- The gate today enforces thirteen rules with executable arms (a path-segment guard
+  against `..` traversal and writes into `.git`/`.ssh`, forbidden-path and
+  secret-file-name guards, a guard on writes to the `.camerata/` config directory,
+  and regex content heuristics for hardcoded secrets, vendor tokens, PEM private
+  keys, raw-SQL-concat, secrets-in-URLs, disabled-TLS, unsafe deserialization, and
+  git-state mutation; no AST analysis yet), with the rest of the corpus catalogued
+  but not yet given executable enforcement arms. The architecture is the point;
+  deepening the rule set behind the seam is incremental, not architectural.
 - The end-to-end consumer run ([`PO_MODE.md`](PO_MODE.md), the `po-demo`) takes a
   non-technical intake form through the lead engineer and a governed fleet to a
   passing `cargo build` / `cargo test`, not to a live deployed application.

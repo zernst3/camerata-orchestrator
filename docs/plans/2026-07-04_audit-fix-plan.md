@@ -163,12 +163,24 @@ fixes every AUTO item, skips every ZACH item, and updates the Progress table bel
 
 | Area / PR | Findings | Status | PR / commit |
 |---|---|---|---|
-| UI contract + reactivity | cockpit-F1, UI-1,2,3,4,6,7,8,9,10,11,13,14,16, cockpit-F4,5,6 | not started | — |
-| Workspace panel | workspace-F1..F8 | not started | — |
-| Design double-create | ROUTES-3/UI-12 | not started | — |
-| Server contract + handlers | ROUTES-2,5,6,7,8,9 | not started | — |
-| GitHub token + publish + emit | ROUTES-1/PUBLISH-1, PUBLISH-2,3,4,5,6,7,8, GATE-F6 | not started | — |
-| Lifecycle minor (safe) | LIFECYCLE-11,13 | not started | — |
-| Doc accuracy sweep | GAP-9, GAP-5(doc) | not started | — |
+| UI contract + reactivity | cockpit-F1, UI-1,2,3,4,6,7,8,9,10,11,13,14,16, cockpit-F4,5,6 | done | branch fix/audit-ui-contract (commit 0b81e7c); 543 ui tests green |
+| Workspace panel | workspace-F1..F8 | done | branch fix/audit-workspace (commit ad6ac56); 543 ui tests green. F6 fixed UI-only (restrict drop target to current branch + fix hint); server cherry_pick branch param NOT added (out of scope). |
+| Design double-create | ROUTES-3/UI-12 | done | branch fix/audit-design (commit e62d079); 542 ui tests green |
+| Server contract + handlers | ROUTES-2,5,6,7,8,9 | partial | branch fix/audit-server-contract (commit 0388420); ROUTES-2, ROUTES-6 done (worktracker+ui green). ROUTES-5/7/8/9 deferred-needs-zach: ROUTES-7 (per-handler 4xx status-code judgment across ~40 sites), ROUTES-8 (per-handler read-vs-write classification of ~25 get_or_create sites + new store getter), ROUTES-5 (JobState data-model change), ROUTES-9 (concurrency/env semantics) |
+| GitHub token + publish + emit | ROUTES-1/PUBLISH-1, PUBLISH-2,3,4,5,6,7,8, GATE-F6 | done | branch fix/audit-blitz (blitz); PUBLISH-1/2/3/4/5/6/7/8, ROUTES-1/4, GATE-F6 landed |
+| Lifecycle minor (safe) | LIFECYCLE-11,13 | done | branch fix/audit-blitz (blitz); LIFECYCLE-11, LIFECYCLE-13 landed |
+| Doc accuracy sweep | GAP-9, GAP-5(doc) | done (local commit; push/PR BLOCKED) | branch `fix/audit-docs` @ 0940a07 |
 
 _Routine updates this table as PRs land._
+
+### Blocker (2026-07-04 autofix fire)
+
+`git push` is NOT permitted in the autonomous launchd context (the permission
+prompt cannot be answered with no operator present); `git commit` / `git checkout`
+/ reads ARE permitted. Result: per-area branches can be built and committed locally,
+but they cannot be pushed and no PR can be opened. The `fix/audit-docs` branch is
+committed locally at 0940a07 and is ready to push.
+
+To unblock: grant the routine permission to run `git push` (and `gh pr create`), or
+push `fix/audit-docs` manually. Until then this fire stops after the docs area to
+avoid generating more un-pushable branches. Completion sentinel NOT written.

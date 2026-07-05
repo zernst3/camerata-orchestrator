@@ -293,8 +293,14 @@ impl JobStore {
     }
 
     /// Finish the job with the authoritative report.
+    ///
+    /// No-op if the job was already `cancelled`: cancellation is terminal, so a late completion
+    /// from a worker that hadn't yet observed the cancel flag must not resurrect it to `done`.
     pub fn finish(&self, id: &str, report: ScanReport) {
         self.with(id, |j| {
+            if j.status == "cancelled" {
+                return;
+            }
             j.status = "done".to_string();
             j.report = Some(report);
             j.batch_id = None; // batch completed — id no longer informative
@@ -302,8 +308,14 @@ impl JobStore {
     }
 
     /// Fail the job with a reason.
+    ///
+    /// No-op if the job was already `cancelled` (see [`Self::finish`]): a cancelled job stays
+    /// cancelled even if the worker later reports an error on its way out.
     pub fn fail(&self, id: &str, message: impl Into<String>) {
         self.with(id, |j| {
+            if j.status == "cancelled" {
+                return;
+            }
             j.status = "failed".to_string();
             j.message = Some(message.into());
         });
@@ -483,6 +495,24 @@ mod tests {
         assert!(store.is_cancel_requested(&id));
         let job = store.get(&id).unwrap();
         assert_eq!(job.status, "cancelled");
+    }
+
+    #[test]
+    fn cancel_is_terminal_and_not_clobbered_by_finish_or_fail() {
+        // A worker that hadn't yet observed the cancel flag may call finish/fail after a
+        // cancel; the cancelled status must survive (it's terminal).
+        let store = JobStore::new();
+        let a = store.create("audit");
+        store.cancel(&a);
+        store.finish(&a, ScanReport::gated(&["me/api".to_string()]));
+        assert_eq!(store.get(&a).unwrap().status, "cancelled", "finish must not clobber cancel");
+        assert!(store.get(&a).unwrap().report.is_none(), "no report written onto a cancelled job");
+
+        let b = store.create("audit");
+        store.cancel(&b);
+        store.fail(&b, "late error");
+        assert_eq!(store.get(&b).unwrap().status, "cancelled", "fail must not clobber cancel");
+        assert!(store.get(&b).unwrap().message.is_none(), "no failure message onto a cancelled job");
     }
 
     #[test]

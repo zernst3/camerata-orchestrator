@@ -111,8 +111,10 @@ async fn post_credential(name: &str, value: &str) -> Result<String, String> {
             .to_string();
         Ok(masked)
     } else {
-        let msg = json["error"]
+        // The server reports failures under `message`; fall back to `error` for resilience.
+        let msg = json["message"]
             .as_str()
+            .or_else(|| json["error"].as_str())
             .unwrap_or("unknown error")
             .to_string();
         Err(msg)
@@ -592,7 +594,7 @@ mod tests {
         assert_eq!(result, Ok("sk-s••••".to_string()));
     }
 
-    // POST with a non-success status — returns Err carrying the server's `error` field.
+    // POST with a non-success status — returns Err carrying the server's `message` field.
     #[tokio::test]
     #[serial_test::serial(bff_env)]
     async fn post_credential_returns_error_message_on_failure_status() {
@@ -604,7 +606,7 @@ mod tests {
             .and(path("/api/credentials/github_token"))
             .respond_with(
                 ResponseTemplate::new(400)
-                    .set_body_json(serde_json::json!({ "error": "invalid token format" })),
+                    .set_body_json(serde_json::json!({ "message": "invalid token format" })),
             )
             .expect(1)
             .mount(&server)

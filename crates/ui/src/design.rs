@@ -665,7 +665,6 @@ pub fn DesignCanvasView() -> Element {
                         // is rejected by materialize validation, giving a dead-end button.
                         if let Some(sel_id) = selected_node_id() {
                             {
-                                let rid = root_id().unwrap_or_default();
                                 let sel_type = nodes
                                     .iter()
                                     .find(|n| n.story_id == sel_id)
@@ -678,21 +677,13 @@ pub fn DesignCanvasView() -> Element {
                                             button {
                                                 class: "btn-edit-sm",
                                                 onclick: move |_| {
-                                                    let r = rid.clone();
                                                     let p = sel_id.clone();
                                                     let ct = ct.clone();
                                                     spawn(async move {
+                                                        // `api_design_blank` with a parent already creates AND
+                                                        // parents the child node; a second materialize call here
+                                                        // created a duplicate sibling, so it is intentionally gone.
                                                         if let Some(new_id) = api_design_blank(&ct, Some(&p), None).await {
-                                                            // Materialize it by re-fetching; the blank node is already in the store.
-                                                            let _ = api_design_materialize(
-                                                                &r,
-                                                                &p,
-                                                                vec![serde_json::json!({
-                                                                    "node_type": ct,
-                                                                    "title": "",
-                                                                    "body": "",
-                                                                })],
-                                                            ).await;
                                                             selected_node_id.set(Some(new_id));
                                                             refresh += 1;
                                                         }
@@ -745,6 +736,7 @@ pub fn DesignCanvasView() -> Element {
                             node,
                             root_id: root_id().unwrap_or_default(),
                             on_refresh: move |_| { refresh += 1; },
+                            refresh,
                         }
                     },
                 }
@@ -760,6 +752,9 @@ fn DesignNodeAuthorPanel(
     node: DesignNode,
     root_id: String,
     on_refresh: EventHandler<()>,
+    // Bumped by the parent after every materialize/publish so the read-only publish summary
+    // ("Publishes N nodes across…") re-fetches the tree instead of showing a stale count.
+    #[props(default)] refresh: Signal<u32>,
 ) -> Element {
     let node_id = node.story_id.clone();
     let node_type = node.node_type.clone().unwrap_or_else(|| "Node".to_string());
@@ -770,6 +765,10 @@ fn DesignNodeAuthorPanel(
     let proposed = node.proposed_children.clone();
     let dropped = node.dropped_children.clone();
     let node_publish_repos = node.publish_repos.clone();
+
+    // Optional so the SSR render tests (which construct this panel without an app root)
+    // don't panic on a missing provider; the running app always provides it.
+    let toasts = try_consume_context::<Signal<Vec<crate::toast::Toast>>>();
 
     let mut message = use_signal(String::new);
     let mut sending = use_signal(|| false);
@@ -794,6 +793,7 @@ fn DesignNodeAuthorPanel(
     let tree_root = root_id.clone();
     let tree_res = use_resource(move || {
         let rid = tree_root.clone();
+        let _dep = refresh();
         async move { api_fetch_design_nodes(&rid).await }
     });
     let tree_nodes = tree_res.read().clone().unwrap_or_default();
@@ -871,12 +871,22 @@ fn DesignNodeAuthorPanel(
                             if msg.is_empty() || sending() { return; }
                             let nid = node_id_kd.clone();
                             sending.set(true);
-                            message.set(String::new());
                             spawn(async move {
                                 let _guard = crate::loading::LoadingGuard::new();
-                                api_design_author(&nid, &msg).await;
+                                match api_design_author(&nid, &msg).await {
+                                    Some(_) => {
+                                        message.set(String::new());
+                                        on_refresh.call(());
+                                    }
+                                    None => if let Some(t) = toasts {
+                                        crate::toast::push_toast(
+                                            t,
+                                            crate::toast::ToastKind::Error,
+                                            "Could not send to the design author. Your message was kept.".to_string(),
+                                        );
+                                    },
+                                }
                                 sending.set(false);
-                                on_refresh.call(());
                             });
                         }
                     },
@@ -886,15 +896,25 @@ fn DesignNodeAuthorPanel(
                     disabled: sending(),
                     onclick: move |_| {
                         let msg = message().trim().to_string();
-                        if msg.is_empty() { return; }
+                        if msg.is_empty() || sending() { return; }
                         let nid = node_id_click.clone();
                         sending.set(true);
-                        message.set(String::new());
                         spawn(async move {
                             let _guard = crate::loading::LoadingGuard::new();
-                            api_design_author(&nid, &msg).await;
+                            match api_design_author(&nid, &msg).await {
+                                Some(_) => {
+                                    message.set(String::new());
+                                    on_refresh.call(());
+                                }
+                                None => if let Some(t) = toasts {
+                                    crate::toast::push_toast(
+                                        t,
+                                        crate::toast::ToastKind::Error,
+                                        "Could not send to the design author. Your message was kept.".to_string(),
+                                    );
+                                },
+                            }
                             sending.set(false);
-                            on_refresh.call(());
                         });
                     },
                     if sending() { "Sending…" } else { "Send (Cmd+↵)" }

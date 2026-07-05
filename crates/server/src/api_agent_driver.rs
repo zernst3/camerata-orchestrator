@@ -1116,18 +1116,17 @@ fn execute_gated_write(
     }
 
     // ── Worktree jail ──────────────────────────────────────────────────────
-    if let Some(wt) = &driver.worktree {
-        if let Err(e) = assert_in_worktree(wt, &path) {
-            let msg = format!("DENIED: worktree jail violation — {e}");
-            return (msg.clone(), Some(msg));
-        }
-    }
-
-    // ── Execute the write ──────────────────────────────────────────────────
+    // The jail check RETURNS the resolved absolute write path, so the CHECK and the
+    // write EFFECT are the same path: no `wt.join(trim)` path-doubling (GATE-F3) and no
+    // check-here/write-there divergence (GATE-F4).
     let write_path = if let Some(wt) = &driver.worktree {
-        // Resolve relative to the worktree root.
-        let relative = path.trim_start_matches('/');
-        wt.join(relative)
+        match assert_in_worktree(wt, &path) {
+            Ok(resolved) => resolved,
+            Err(e) => {
+                let msg = format!("DENIED: worktree jail violation — {e}");
+                return (msg.clone(), Some(msg));
+            }
+        }
     } else {
         PathBuf::from(&path)
     };
@@ -1151,27 +1150,81 @@ fn execute_gated_write(
     }
 }
 
-/// Assert that `path` resolves within `worktree`. Returns `Ok(())` when the
-/// canonicalized path is a prefix of the worktree, or a descriptive error when not.
-fn assert_in_worktree(worktree: &Path, path: &str) -> anyhow::Result<()> {
+/// Lexically normalize a path: resolve `.` and `..` WITHOUT touching the filesystem
+/// (so it works for not-yet-created files).
+fn normalize_lexical(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// Resolve symlinks in the EXISTING ancestor prefix of `p`, rejoining the canonical
+/// existing prefix with the remaining not-yet-created tail. Canonicalizing the deepest
+/// existing ancestor resolves every symlink in that prefix; the tail names components
+/// that do not exist yet, so none of them can be a symlink. This is what stops a
+/// repo-committed symlink directory from smuggling a write outside the jail.
+fn canonicalize_existing_prefix(p: &Path) -> PathBuf {
+    let mut ancestor = p.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(canon) = std::fs::canonicalize(&ancestor) {
+            let mut resolved = canon;
+            for seg in tail.iter().rev() {
+                resolved.push(seg);
+            }
+            return resolved;
+        }
+        match ancestor.file_name() {
+            Some(name) => {
+                tail.push(name.to_os_string());
+                if !ancestor.pop() {
+                    return normalize_lexical(p);
+                }
+            }
+            None => return normalize_lexical(p),
+        }
+    }
+}
+
+/// Resolve `path` to the absolute location it must be WRITTEN to inside `worktree`, or
+/// return an error when it escapes the jail. Relative paths resolve against the worktree;
+/// absolute paths are taken as-is. Symlinks in the existing ancestor prefix (of both the
+/// target and the worktree) are resolved BEFORE a component-wise prefix check, so a
+/// symlinked directory component cannot smuggle a write outside the worktree (GATE-F1)
+/// and a legit write under a symlinked worktree prefix is not falsely denied (GATE-F5).
+/// The returned path is the resolved write target, so the caller writes to exactly what
+/// was checked (no path-doubling — GATE-F3).
+fn assert_in_worktree(worktree: &Path, path: &str) -> anyhow::Result<PathBuf> {
     // Reject obvious `..` traversals immediately (defence-in-depth; the gateway rules
     // also catch these via SEC-NO-PATH-ESCAPE-1).
     if path.contains("..") {
+        anyhow::bail!("path `{path}` contains `..` which may escape the worktree");
+    }
+    let t = Path::new(path);
+    let abs = if t.is_absolute() {
+        t.to_path_buf()
+    } else {
+        worktree.join(t)
+    };
+    let target = canonicalize_existing_prefix(&normalize_lexical(&abs));
+    let root = canonicalize_existing_prefix(&normalize_lexical(worktree));
+    if !target.starts_with(&root) {
         anyhow::bail!(
-            "path `{path}` contains `..` which may escape the worktree"
+            "path `{path}` resolves to `{}` which is not under worktree `{}`",
+            target.display(),
+            root.display()
         );
     }
-    // Reject absolute paths that don't start with the worktree (allows absolute paths
-    // that are under the worktree, rejects ones that aren't).
-    if path.starts_with('/') {
-        let wt_str = worktree.display().to_string();
-        if !path.starts_with(&wt_str) {
-            anyhow::bail!(
-                "absolute path `{path}` is not under worktree `{wt_str}`"
-            );
-        }
-    }
-    Ok(())
+    Ok(target)
 }
 
 // ─── read-tool implementations ────────────────────────────────────────────────
@@ -2573,6 +2626,66 @@ mod tests {
         // Absolute path outside the worktree must be blocked.
         assert!(assert_in_worktree(&wt, "/etc/passwd").is_err());
         assert!(assert_in_worktree(&wt, "/tmp/other/file.rs").is_err());
+    }
+
+    // GATE-F3: the jail check RETURNS the resolved write path, and an absolute in-jail
+    // path must resolve to itself, NOT to a doubled `wt/wt/...` path.
+    #[test]
+    fn jail_returns_undoubled_write_path_for_absolute_in_jail_target() {
+        let base = std::env::temp_dir().join(format!(
+            "cam-drv-f3-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let wt = base.join("worktree");
+        std::fs::create_dir_all(&wt).unwrap();
+        let canon_wt = std::fs::canonicalize(&wt).unwrap();
+
+        // Absolute in-jail target -> resolves to itself (no wt.join(trim) doubling).
+        let abs = wt.join("src").join("lib.rs");
+        let resolved = assert_in_worktree(&wt, abs.to_str().unwrap()).unwrap();
+        assert_eq!(resolved, canon_wt.join("src").join("lib.rs"));
+
+        // Relative target -> resolves under the worktree once.
+        let rel = assert_in_worktree(&wt, "Cargo.toml").unwrap();
+        assert_eq!(rel, canon_wt.join("Cargo.toml"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // GATE-F1 (second write path): a symlinked directory component in the worktree must
+    // not let a write escape the jail here either.
+    #[cfg(unix)]
+    #[test]
+    fn jail_denies_write_through_in_worktree_symlink() {
+        let base = std::env::temp_dir().join(format!(
+            "cam-drv-f1-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let wt = base.join("worktree");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = wt.join("escape");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        // Write through the symlink lands outside -> denied.
+        let via = link.join("loot");
+        assert!(
+            assert_in_worktree(&wt, via.to_str().unwrap()).is_err(),
+            "write through an in-worktree symlink to an outside dir must be denied"
+        );
+        // A genuine in-jail write is still allowed.
+        assert!(assert_in_worktree(&wt, wt.join("real.rs").to_str().unwrap()).is_ok());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     // ── tool normalization ─────────────────────────────────────────────────────
