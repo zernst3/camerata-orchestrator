@@ -3336,7 +3336,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             // Placed at the bottom of the deep-tier panel so it's visible after
                             // reviewing the findings. Project id comes from the active project.
                             {
-                                let pid_export = report.repos.first().cloned().unwrap_or_default();
+                                let pid_export = project_id.clone();
                                 rsx! {
                                     DeepReportExportPanel {
                                         project_id: pid_export,

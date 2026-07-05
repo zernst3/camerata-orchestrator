@@ -648,6 +648,7 @@ fn run_mem_action(
     action: MemAction,
     mut busy: Signal<bool>,
     mut refresh: Signal<u32>,
+    toasts: Signal<Vec<crate::toast::Toast>>,
 ) {
     busy.set(true);
     spawn(async move {
@@ -659,6 +660,8 @@ fn run_mem_action(
         busy.set(false);
         if ok {
             refresh += 1;
+        } else {
+            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "That memory action failed.");
         }
     });
 }
@@ -1071,7 +1074,7 @@ fn MemoryEditor(project: ProjectView, refresh: Signal<u32>) -> Element {
                                         button {
                                             class: "mem-btn",
                                             disabled: busy(),
-                                            onclick: move |_| run_mem_action(id_app.clone(), eid_app.clone(), MemAction::Approve, busy, refresh),
+                                            onclick: move |_| run_mem_action(id_app.clone(), eid_app.clone(), MemAction::Approve, busy, refresh, toasts),
                                             "Approve"
                                         }
                                     }
@@ -1079,14 +1082,14 @@ fn MemoryEditor(project: ProjectView, refresh: Signal<u32>) -> Element {
                                         button {
                                             class: "mem-btn",
                                             disabled: busy(),
-                                            onclick: move |_| run_mem_action(id_arc.clone(), eid_arc.clone(), MemAction::Archive, busy, refresh),
+                                            onclick: move |_| run_mem_action(id_arc.clone(), eid_arc.clone(), MemAction::Archive, busy, refresh, toasts),
                                             "Archive"
                                         }
                                     }
                                     button {
                                         class: "mem-btn mem-del",
                                         disabled: busy(),
-                                        onclick: move |_| run_mem_action(id_del.clone(), eid_del.clone(), MemAction::Delete, busy, refresh),
+                                        onclick: move |_| run_mem_action(id_del.clone(), eid_del.clone(), MemAction::Delete, busy, refresh, toasts),
                                         "Delete"
                                     }
                                 }
@@ -1594,14 +1597,29 @@ pub fn CockpitShell() -> Element {
     }
 }
 
-/// Export a project as a JSON file (native save dialog). Returns true on success.
-async fn export_project_json(id: &str, name: &str) -> bool {
+/// Outcome of an export attempt. `Cancelled` (the user dismissed the Save dialog)
+/// is distinct from `Failed` (network / non-2xx / write error) so the caller can
+/// toast only on real failures.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExportOutcome {
+    Saved,
+    Cancelled,
+    Failed,
+}
+
+/// Export a project as a JSON file (native save dialog).
+async fn export_project_json(id: &str, name: &str) -> ExportOutcome {
     let Ok(resp) = reqwest::get(format!("{}/api/projects/{}/export", crate::bff_base(), id)).await
     else {
-        return false;
+        return ExportOutcome::Failed;
     };
+    // A 404/500 still has a body; writing it would produce a corrupt "successful"
+    // export. Reject non-2xx before opening the Save dialog.
+    if !resp.status().is_success() {
+        return ExportOutcome::Failed;
+    }
     let Ok(text) = resp.text().await else {
-        return false;
+        return ExportOutcome::Failed;
     };
     // Slug the project name for the filename: lowercase, spaces → hyphens, strip non-alnum.
     let slug: String = name
@@ -1619,8 +1637,14 @@ async fn export_project_json(id: &str, name: &str) -> bool {
         .save_file()
         .await
     {
-        Some(file) => file.write(text.as_bytes()).await.is_ok(),
-        None => false,
+        Some(file) => {
+            if file.write(text.as_bytes()).await.is_ok() {
+                ExportOutcome::Saved
+            } else {
+                ExportOutcome::Failed
+            }
+        }
+        None => ExportOutcome::Cancelled,
     }
 }
 
@@ -1634,6 +1658,8 @@ enum ImportResult {
     Conflict { name: String, payload: String },
     /// Something went wrong (network, parse, etc.).
     Failed,
+    /// The user dismissed the file picker; no error, nothing to report.
+    Cancelled,
 }
 
 /// Delete a project by id. Returns true on success.
@@ -1655,7 +1681,7 @@ async fn import_project_json() -> ImportResult {
         .pick_file()
         .await
     else {
-        return ImportResult::Failed;
+        return ImportResult::Cancelled;
     };
     let Ok(raw) = String::from_utf8(file.read().await) else {
         return ImportResult::Failed;
@@ -1788,6 +1814,10 @@ fn ProjectsHome() -> Element {
     // "continue or start over" prompt before entering (the project is already active on
     // the server, so the draft endpoints are scoped to it).
     let mut resume_prompt = use_signal(|| false);
+    // Distinguish "still fetching" (outer None) from "resolved, no projects"
+    // (Some(empty)). Without this the home flashes "No projects yet" for ~2.5s
+    // on launch while the resource is pending.
+    let loading = projects.read().is_none();
     let list = projects.read().clone().flatten().unwrap_or_default();
 
     rsx! {
@@ -1893,7 +1923,9 @@ fn ProjectsHome() -> Element {
                 h1 { class: "h1", "Your projects" }
                 p { class: "lede", "A project is the container for everything — its repos, ruleset, baseline, and workspace. Open one to begin, or create a new one." }
 
-                if list.is_empty() {
+                if loading {
+                    p { class: "pg-empty", "Loading projects\u{2026}" }
+                } else if list.is_empty() {
                     p { class: "pg-empty", "No projects yet. Create one below to begin." }
                 } else {
                     div { class: "pg-list",
@@ -1929,7 +1961,11 @@ fn ProjectsHome() -> Element {
                                                 onclick: move |_| {
                                                     let id = id_export.clone();
                                                     let name = name_export.clone();
-                                                    spawn(async move { let _ = export_project_json(&id, &name).await; });
+                                                    spawn(async move {
+                                                        if export_project_json(&id, &name).await == ExportOutcome::Failed {
+                                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Export failed.");
+                                                        }
+                                                    });
                                                 },
                                                 "Export"
                                             }
@@ -1971,6 +2007,8 @@ fn ProjectsHome() -> Element {
                                                             } else {
                                                                 screen.set(CockpitScreen::InProject);
                                                             }
+                                                        } else {
+                                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not open the project.");
                                                         }
                                                     });
                                                 },
@@ -1999,6 +2037,8 @@ fn ProjectsHome() -> Element {
                                         // Newly-created project: set it active so chat grounds on it.
                                         let _ = set_active_project(&p.id).await;
                                         screen.set(CockpitScreen::InProject);
+                                    } else {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not create the project.");
                                     }
                                 });
                             },
@@ -2021,7 +2061,10 @@ fn ProjectsHome() -> Element {
                                     ImportResult::Conflict { name, payload } => {
                                         pending_import_overwrite.set(Some((name, payload)));
                                     }
-                                    ImportResult::Failed => {}
+                                    ImportResult::Failed => {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Import failed.");
+                                    }
+                                    ImportResult::Cancelled => {}
                                 }
                             });
                         },
@@ -2234,6 +2277,9 @@ async fn fetch_gate_probe() -> Option<GateProbeView> {
 fn GateSelfCheck() -> Element {
     let mut running = use_signal(|| false);
     let mut result = use_signal(|| Option::<GateProbeView>::None);
+    // Optional so the isolated render test (which builds this component without an app root)
+    // does not panic on a missing provider; the running app always provides it.
+    let toasts = try_consume_context::<Signal<Vec<crate::toast::Toast>>>();
     rsx! {
         div { class: "gate-selfcheck",
             div { class: "gate-selfcheck-head",
@@ -2245,7 +2291,14 @@ fn GateSelfCheck() -> Element {
                     onclick: move |_| {
                         running.set(true);
                         spawn(async move {
-                            result.set(fetch_gate_probe().await);
+                            // Keep the prior verdict on failure instead of erasing it
+                            // to a blank panel; surface the error via a toast.
+                            match fetch_gate_probe().await {
+                                Some(r) => result.set(Some(r)),
+                                None => if let Some(t) = toasts {
+                                    crate::toast::push_toast(t, crate::toast::ToastKind::Error, "Gate self-check could not run.");
+                                },
+                            }
                             running.set(false);
                         });
                     },
@@ -2430,6 +2483,14 @@ pub fn CockpitApp() -> Element {
     // unmounts (and resets) every time the page leaves the tree.
     let govdev_sel = use_signal(|| uow::GovDevSel::IssueManagement);
     use_context_provider(|| govdev_sel);
+
+    // Shared clarification-refresh signal: the NEEDS-YOU queue and the per-phase clarification
+    // dialogs both bump and both depend on it, so answering a question in one surface refreshes
+    // the other (previously each owned a private counter, leaving "NEEDS YOU (1)" stuck after an
+    // answer given in the phase view). Consumers read it via `try_consume_context` with a private
+    // fallback so isolated render tests still work.
+    let clarify_refresh = uow::ClarifyRefresh(use_signal(|| 0u32));
+    use_context_provider(|| clarify_refresh);
 
     // ── Project readiness gate (2026-07-01 ADR) ───────────────────────────────────
     // On project entry / active-project change, fetch the project's DERIVED readiness. A
@@ -2945,32 +3006,41 @@ async fn fetch_feature_flags() -> FeatureFlagMap {
     result.unwrap_or_default()
 }
 
-/// Minimum release info returned by `GET /api/release`.
+/// App-version info nested under `app` in the `GET /api/updates/check` response.
 /// The server checks the latest GitHub release tag and reports whether the running
-/// binary is behind.
+/// binary is behind. Matches the server's `check_github_release` object shape.
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct AppReleaseView {
     /// Version string of the running binary (e.g. `"0.4.1"`).
-    current: String,
-    /// Latest published release tag (e.g. `"0.4.2"`). `None` when the check
-    /// hasn't run yet or the GitHub API was unreachable.
     #[serde(default)]
-    latest: Option<String>,
-    /// True when `latest > current` (server-side semver compare).
+    current_version: String,
+    /// Latest published release tag (e.g. `"0.4.2"`).
+    #[serde(default)]
+    latest_version: String,
+    /// True when `latest_version > current_version` (server-side compare).
     #[serde(default)]
     update_available: bool,
-    /// HTML / Markdown release notes for `latest` (empty when not available).
+    /// Canonical release page URL for `latest_version` (empty when unavailable).
     #[serde(default)]
-    release_notes: String,
+    release_url: String,
+}
+
+/// Top-level `GET /api/updates/check` envelope. `app` is `null` when the GitHub
+/// release check fails (no token or network error).
+#[derive(serde::Deserialize)]
+struct UpdatesCheckView {
+    #[serde(default)]
+    app: Option<AppReleaseView>,
 }
 
 async fn fetch_app_release() -> Option<AppReleaseView> {
-    reqwest::get(format!("{}/api/release", crate::bff_base()))
+    reqwest::get(format!("{}/api/updates/check", crate::bff_base()))
         .await
         .ok()?
-        .json::<AppReleaseView>()
+        .json::<UpdatesCheckView>()
         .await
-        .ok()
+        .ok()?
+        .app
 }
 
 /// App-update banner. Shown across the top of every cockpit tab when the server
@@ -2986,20 +3056,22 @@ fn AppUpdateBanner() -> Element {
     if !rel.update_available || dismissed() {
         return rsx! {};
     }
-    let latest = rel.latest.clone().unwrap_or_default();
-    let current = rel.current.clone();
+    let latest = rel.latest_version.clone();
+    let current = rel.current_version.clone();
+    let release_url = if rel.release_url.is_empty() {
+        "https://github.com/zernst3/camerata-orchestrator/releases".to_string()
+    } else {
+        rel.release_url.clone()
+    };
     rsx! {
         div { class: "app-update-banner",
             span { class: "app-update-icon", "\u{2B06}" }
             span { class: "app-update-text",
                 "Camerata {latest} is available (you are running {current}). "
-                if !rel.release_notes.is_empty() {
-                    span { class: "app-update-notes", "{rel.release_notes}" }
-                }
             }
             a {
                 class: "app-update-link",
-                href: "https://github.com/zernst3/camerata-orchestrator/releases",
+                href: "{release_url}",
                 target: "_blank",
                 "View release"
             }
@@ -4688,7 +4760,8 @@ mod tests {
         assert!(r.layer2_clean);
     }
 
-    /// `fetch_app_release` GETs /api/release and parses the update info.
+    /// `fetch_app_release` GETs /api/updates/check and parses the nested `app`
+    /// update info, matching the real server envelope shape.
     #[tokio::test]
     #[serial_test::serial(bff_env)]
     async fn fetch_app_release_parses_update_info() {
@@ -4697,12 +4770,16 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/api/release"))
+            .and(path("/api/updates/check"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "current": "0.4.1",
-                "latest": "0.4.2",
-                "update_available": true,
-                "release_notes": "Bug fixes."
+                "ok": true,
+                "app": {
+                    "current_version": "0.4.1",
+                    "latest_version": "0.4.2",
+                    "update_available": true,
+                    "release_url": "https://github.com/zernst3/camerata-orchestrator/releases/tag/v0.4.2"
+                },
+                "rule_drift": []
             })))
             .mount(&server)
             .await;
@@ -4712,9 +4789,39 @@ mod tests {
         std::env::remove_var("CAMERATA_BFF_URL");
 
         let rel = rel.expect("release parses");
-        assert_eq!(rel.current, "0.4.1");
-        assert_eq!(rel.latest.as_deref(), Some("0.4.2"));
+        assert_eq!(rel.current_version, "0.4.1");
+        assert_eq!(rel.latest_version, "0.4.2");
         assert!(rel.update_available);
+        assert_eq!(
+            rel.release_url,
+            "https://github.com/zernst3/camerata-orchestrator/releases/tag/v0.4.2"
+        );
+    }
+
+    /// A failing GitHub check surfaces `app: null`; the fetcher yields `None`
+    /// rather than a bogus update banner.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_app_release_none_when_app_null() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/updates/check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "app": serde_json::Value::Null,
+                "rule_drift": []
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let rel = super::fetch_app_release().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(rel.is_none());
     }
 
     /// `fetch_feature_flags` GETs /api/feature-flags and parses the flag map.

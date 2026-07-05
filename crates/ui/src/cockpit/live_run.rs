@@ -129,6 +129,7 @@ fn submit_uow_review(
     action: &'static str,
     mut submitting: Signal<bool>,
     on_resolved: EventHandler<()>,
+    toasts: Option<Signal<Vec<crate::toast::Toast>>>,
 ) {
     if submitting() {
         return;
@@ -152,6 +153,12 @@ fn submit_uow_review(
         submitting.set(false);
         if ok {
             on_resolved.call(());
+        } else if let Some(t) = toasts {
+            crate::toast::push_toast(
+                t,
+                crate::toast::ToastKind::Error,
+                "Could not submit your review decision. Your text was kept.".to_string(),
+            );
         }
     });
 }
@@ -166,6 +173,8 @@ pub(super) fn UowReviewPanel(
     esc: crate::routines::EscalationView,
     on_resolved: EventHandler<()>,
 ) -> Element {
+    // Optional so isolated render tests (no app root) don't panic on a missing provider.
+    let toasts = try_consume_context::<Signal<Vec<crate::toast::Toast>>>();
     // Local copy so a chat reply updates the displayed thread immediately (the prop is immutable).
     let esc0 = esc.clone();
     let mut esc_view = use_signal(move || esc0);
@@ -259,19 +268,19 @@ pub(super) fn UowReviewPanel(
                 button {
                     class: "btn-run uow-review-approve",
                     disabled: submitting(),
-                    onclick: move |_| submit_uow_review(id_approve.clone(), decision(), "approve", submitting, on_resolved),
+                    onclick: move |_| submit_uow_review(id_approve.clone(), decision(), "approve", submitting, on_resolved, toasts),
                     "Approve & resume"
                 }
                 button {
                     class: "btn-run uow-review-amend",
                     disabled: submitting() || decision().trim().is_empty(),
-                    onclick: move |_| submit_uow_review(id_amend.clone(), decision(), "amend", submitting, on_resolved),
+                    onclick: move |_| submit_uow_review(id_amend.clone(), decision(), "amend", submitting, on_resolved, toasts),
                     "Amend & resume"
                 }
                 button {
                     class: "btn-stop uow-review-reject",
                     disabled: submitting(),
-                    onclick: move |_| submit_uow_review(id_reject.clone(), decision(), "reject", submitting, on_resolved),
+                    onclick: move |_| submit_uow_review(id_reject.clone(), decision(), "reject", submitting, on_resolved, toasts),
                     "Reject & revert"
                 }
             }
@@ -317,6 +326,8 @@ pub(super) async fn answer_clarification(
 /// `allow_free_text`) renders just the "Other" box, so it stays back-compatible.
 #[component]
 pub(super) fn ClarifyQuestion(clar: ClarificationView, on_answered: EventHandler<()>) -> Element {
+    // Optional so isolated render tests (no app root) don't panic on a missing provider.
+    let toasts = try_consume_context::<Signal<Vec<crate::toast::Toast>>>();
     // Selected option labels (one for single-select, many for multi-select).
     let mut selected = use_signal(Vec::<String>::new);
     let mut other = use_signal(String::new);
@@ -417,6 +428,12 @@ pub(super) fn ClarifyQuestion(clar: ClarificationView, on_answered: EventHandler
                                 submitting.set(false);
                                 if ok {
                                     on_answered.call(());
+                                } else if let Some(t) = toasts {
+                                    crate::toast::push_toast(
+                                        t,
+                                        crate::toast::ToastKind::Error,
+                                        "Could not submit your answer. Your response was kept.".to_string(),
+                                    );
                                 }
                             });
                         }
@@ -436,7 +453,9 @@ pub(super) fn ClarifyQuestion(clar: ClarificationView, on_answered: EventHandler
 /// back to any unanswered question. Answering one re-fetches the queue (it drops off).
 #[component]
 pub(super) fn NeedsYouQueue() -> Element {
-    let refresh = use_signal(|| 0u32);
+    // Shared with the per-phase clarification dialogs via context so answering a question in
+    // the phase view drops it off this queue too (and vice versa).
+    let refresh = super::uow::clarify_refresh_signal();
     let open = use_resource(move || {
         let _dep = refresh();
         async move { fetch_all_open_clarifications().await }
