@@ -5,6 +5,8 @@ options, and a recommendation. Detail for any finding is in `docs/ARCH_AUDIT_202
 
 ## APPROVED 2026-07-05 — ALL 21 greenlit
 
+**Status: Batch 2 (LIFECYCLE-1/2/3/4) landed on `fix/lifecycle-provenance`.**
+
 Zach approved every item. Recommendation [Rec] taken for all EXCEPT:
 - **GAP-6: BUILD it now, do NOT defer** (build the remaining 3 integration-gate categories).
 - **LIFECYCLE-7:** also update the stall-auto-cancel DEFAULT shown in the UI.

@@ -881,6 +881,47 @@ The distinction matters: **Failed** (with a reason) signals an unintended stop �
 for an autonomous routine, the reason is the actionable diagnostic. **Cancelled**
 signals an intentional, operator-initiated stop.
 
+**Cancel really stops (LIFECYCLE-1).** Every run spawn (the two `live_fleet` spawns,
+`spawn_brownfield_dev_run` (fresh + resume), `update_branch`, `pr_resolve`, and
+investigation) registers a `tokio` abort handle in `RunStore`. `POST /cancel` sets an
+atomic flag AND aborts the driving task; the aborted future drops the agent driver, whose
+`claude` child is `kill_on_drop(true)`, so a Stop reaches a run blocked inside a live
+subprocess. Each runner also checks `is_cancelled` between major steps and **immediately
+before every git mutation** (before commit, before push, and before the merge / merge
+commit in `update_branch`). On cancel the runner stops BEFORE any git write: no commit, no
+push (a mid-merge cancel aborts the merge so no half-merged tree lingers). Finally,
+`RunStore::set_status` carries a **terminal guard** (it refuses to mutate a run that is
+already `done` or `Cancelled` / `Failed`), so a late executor can no longer resurrect a
+cancelled run and advance it to `AwaitingQa`.
+
+### Provenance stamping: completion-driven and success-gated
+
+When a governed run finishes, a per-run watcher (`stamp_provenance_when_done`, spawned by
+`spawn_provenance_watcher` for BOTH fresh `start_governed_run` and resumed
+`resume_governed_run`, LIFECYCLE-4) freezes the run's gate accounting onto the story's UoW.
+
+- **Completion-driven, not polled (LIFECYCLE-3).** The watcher awaits
+  `RunStore::wait_until_done`, which resolves the instant a terminal setter fires the run's
+  `tokio::sync::Notify` completion signal (the `Notify` retains a permit, so a run that
+  finishes before the watcher awaits is not missed). A live run of any duration is stamped
+  the moment it finishes; the old `MAX_POLLS = 600` (~5 min) poll cliff is gone. A 6 h
+  `safety_timeout` is a backstop against a wedged run, never the normal path.
+- **Advances only on success (LIFECYCLE-2).** The watcher branches on the terminal STATUS:
+
+  | Terminal status | Gate provenance frozen | Stage `Development → AwaitingQa` | QA evidence attached |
+  |---|---|---|---|
+  | `AwaitingQa` (success) | yes | yes | yes |
+  | `Failed { reason }` | yes (honest record of what the gate saw) | no | no |
+  | `Cancelled` | no | no | no |
+
+  Runner failure paths now call `fail_with_reason` (a genuine `Failed` terminal) rather than
+  the old `AwaitingQa + done`, so the sign-off gate can trust that AwaitingQa + attached
+  evidence means the gate actually saw completed work. The enforcement-catch ledger capture
+  runs in every terminal case (it records the gate decisions the run produced, independent of
+  whether the work advanced).
+
+See `docs/decisions/2026-07-05_lifecycle-provenance.md` for the full rationale.
+
 ### Reusability
 
 The detection and bounding machinery is run-level and generic — it does not vary
