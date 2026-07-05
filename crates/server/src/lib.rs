@@ -7790,10 +7790,19 @@ async fn checkout_branch(
     Path(id): Path<String>,
     Json(req): Json<BranchReq>,
 ) -> Result<Json<crate::workspace::RepoCheckout>, AppError> {
-    let _project = state
+    let project = state
         .projects
         .get(&id)
         .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+    // GAP-2 / PROCESS-BRANCH-NAMING-1 chokepoint. HARD-BLOCK a branch name that violates the
+    // project's branch-naming rule. Branch-naming is opt-in (disabled by default), so for
+    // projects that have not enabled it this gate is a no-op and any name passes.
+    if let Err(e) = crate::vcs_choke::gated_branch(&project.process_rule_config, &req.branch) {
+        return Err(AppError(anyhow::anyhow!(
+            "VCS-action gate blocked the branch name `{}`: {e}",
+            req.branch
+        )));
+    }
     let Some(root) = state.settings.workspace_root() else {
         return Err(AppError(anyhow::anyhow!("no workspace folder is set")));
     };
@@ -7972,13 +7981,24 @@ struct GitCheckoutReq {
 /// Switch to (or create) a local branch.
 async fn git_checkout(
     State(state): State<AppState>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
     Json(req): Json<GitCheckoutReq>,
 ) -> Json<serde_json::Value> {
     let dir = match resolve_git_dir(&state, &req.repo) {
         Ok(d) => d,
         Err(e) => return e,
     };
+    // GAP-2 / PROCESS-BRANCH-NAMING-1 chokepoint: only branch CREATION is gated (a plain switch
+    // to an existing branch does not author a name). Opt-in rule, so a no-op by default.
+    if req.create {
+        let vcs_config = process_rule_config_for(&state, &id);
+        if let Err(e) = crate::vcs_choke::gated_branch(&vcs_config, &req.branch) {
+            return Json(serde_json::json!({
+                "ok": false,
+                "message": format!("VCS-action gate blocked the branch name `{}`: {e}", req.branch),
+            }));
+        }
+    }
     let result = if req.create {
         crate::workspace::create_branch_at(&dir, &req.branch).await
     } else {

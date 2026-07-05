@@ -53,24 +53,54 @@ action passes through. It exposes two families of entry points:
   itself rejected (`ChokeError::BypassReasonRequired`). On bypass a record summary is returned for
   the audit trail.
 
-Enforcement points as landed:
+Enforcement points as landed (after the 2026-07-05 Batch 1 refinement):
 
 | Server action | Entry point |
 |---|---|
 | `POST /api/git/commit` (workspace commit_all, human-initiated) | `gated_commit` (HARD-BLOCK) |
-| dev_implement_run final snapshot commit | `gated_commit_or_bypass` (machine; auditable bypass) |
-| pr_resolve update-branch merge commit | `gated_commit_or_bypass` (machine; auditable bypass) |
+| `POST /api/git/create-branch` (`checkout_branch`, human-initiated) | `gated_branch` (HARD-BLOCK) |
+| `POST /api/git/checkout` with `create=true` (`git_checkout`) | `gated_branch` (HARD-BLOCK) |
+| dev_implement_run UoW branch create | `gated_branch` (HARD-BLOCK) |
+| dev_implement_run final implementation commit | **COMPLIANT message + `gated_commit` (HARD-BLOCK)** |
+| pr_resolve_run resolution commit | **COMPLIANT message + `gated_commit` (HARD-BLOCK)** |
+| update_branch_run merge commit (`git commit -m`) | **COMPLIANT message + `gated_commit` (HARD-BLOCK)** |
+| `POST /api/uow/:id/pr/open` (`uow_pr_open`) | **COMPLIANT title/body + `gated_pr` (HARD-BLOCK)** |
+| `POST /api/uow/:id/intake/ship` (multi-repo + single-repo PR-open) | **COMPLIANT title/body + `gated_pr` (HARD-BLOCK)** |
 | `POST /api/pr/open` (human-initiated PR) | `gated_pr` (HARD-BLOCK) |
-| governance PR from onboarding apply | `gated_pr_or_bypass` (machine; auditable bypass) |
+| governance PR from onboarding apply (`onboard_open_pr`, `emit_project_local`) | `gated_pr_or_bypass` (machine; auditable bypass) |
 
 The bypass endpoint at `POST /api/vcs-action-gate/bypass` is unchanged; it remains the explicit
-override path for callers that intentionally need to bypass with an audit record.
+override path for callers that intentionally need to bypass with an audit record. The
+`gated_commit_or_bypass` / `gated_pr_or_bypass` helpers also remain available as an explicit
+fallback — but they are no longer the DEFAULT path for Camerata's own story-scoped commits/PRs.
 
-**Open design point (flagged for Zach):** machine-generated commits currently carry an auditable
-bypass rather than being made format-compliant. This is correct in the short term (the machine
-cannot always produce a conventional-commit subject for a merge commit), but the right long-term
-answer is for the server's commit-authoring paths to produce rule-compliant metadata and take the
-`gated_commit` (hard-block) path. That refactor is deferred to a follow-on story.
+**Resolved (was: open design point):** machine-generated commits are now made
+format-COMPLIANT rather than bypassed. Camerata knows each run's story id, so the server's
+commit-authoring paths (`compliant_machine_commit_message`) and PR-authoring paths
+(`compliant_machine_pr`) generate metadata that satisfies the project's active process rules
+(conventional-commit shape + substantive body + a story-id reference in the project's configured
+`story_id_format`, plus the `AB#<id>` ADO ref when `PROCESS-ADO-LINK-1` is enabled). Those call
+sites now take the HARD-BLOCK `gated_commit` / `gated_pr` path, so a non-compliant machine
+message surfaces as a REAL error (a bug in the generator, or a run missing a usable story id) —
+never a silent bypass. The `numeric_story_id` helper extracts the numeric tail from a canonical
+`owner/repo#<num>` story id; when no numeric id can be extracted, the generated message omits the
+reference and the hard-block fires, which is the intended "missing story id" signal.
+
+Even the `update_branch_run` merge commit — previously called out as the canonical case the
+bypass existed for — is now compliant: instead of `git commit --no-edit` (which takes git's
+ungated `Merge branch ...` subject), the merge is completed with `git commit -m <compliant>` via
+the new `workspace::commit_merge_with_message`.
+
+The two GOVERNANCE PR-opens (onboarding `onboard_open_pr` and per-repo `emit_project_local`)
+intentionally stay on the `gated_pr_or_bypass` path: they emit + push the governance branch
+BEFORE opening the PR, so a hard-block would strand an already-pushed branch, and their title/body
+are not story-scoped (no story id to embed). They record an auditable bypass instead.
+
+**Branch-creation gating (`PROCESS-BRANCH-NAMING-1`) is now wired.** The rule existed but no
+branch-create chokepoint called it. `gated_branch` is now wired at every branch-create site
+(the two human-facing git handlers plus the dev_implement_run UoW-branch create). Branch-naming
+is OPT-IN (disabled by default), so for projects that have not enabled it these gates are no-ops
+and any name passes; when the rule IS active, a non-conforming name HARD-BLOCKS the create.
 
 ### LIFECYCLE-10: thread the sink path per-spawn
 
@@ -100,8 +130,14 @@ In `crates/gateway/src/lib.rs`:
 
 - The commit/PR gate is now a real enforcement gate, not a configured-but-advisory setting.
   Non-compliant commits from human-initiated operations are rejected before git is touched.
-- Machine-generated commits use an auditable bypass; the bypass reason is logged for the evidence
-  trail. The open design point above tracks the path to making those commits format-compliant too.
+- Camerata's OWN story-scoped commits and PRs are now made format-COMPLIANT and take the
+  HARD-BLOCK path, not a silent bypass. A non-compliant machine message is a real, visible error.
+  The only remaining bypasses are the two governance PR-opens (branch already pushed, no story
+  scope) and the explicit `POST /api/vcs-action-gate/bypass` override endpoint.
+- Every PR-open site (UoW PR-open, multi-repo + single-repo Ship, human PR-open) is gated; the
+  governance PR-opens keep their auditable bypass by design.
+- `PROCESS-BRANCH-NAMING-1` is enforced at branch creation. It is opt-in, so it is a no-op for
+  projects that have not enabled it and a HARD-BLOCK for those that have.
 - Concurrent live runs can no longer cross-contaminate each other's gate-event streams. Gate
   provenance is per-run and accurate.
 - Example code is now subject to the same security floor as production code. Placing a TLS bypass
