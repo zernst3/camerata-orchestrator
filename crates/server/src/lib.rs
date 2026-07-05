@@ -1345,11 +1345,23 @@ async fn resume_governed_run(
         return Ok((run_id, mode));
     }
 
+    // Describe why the run PAUSED from the checkpoint's actual pause_reason, rather than
+    // hardcoding the test-tamper guard (checkpoints also pause on rule escalations).
+    let pause_desc = match checkpoint.pause_reason.as_str() {
+        "test-tamper" => {
+            "the test-tamper guard AGENTIC-NO-TEST-TAMPER-1 (it modified or deleted an existing test)"
+                .to_string()
+        }
+        other => match other.strip_prefix("rule-escalation:") {
+            Some(rule_id) => format!("a governance escalation on rule {rule_id}"),
+            None => format!("a human-review escalation ({other})"),
+        },
+    };
     let directive_grounding = format!(
         "## RESUMED AFTER HUMAN REVIEW\n\nThis run PAUSED for human review by \
-         AGENTIC-NO-TEST-TAMPER-1 (it modified or deleted an existing test). A human has now \
-         reviewed it and responded. Continue from the CURRENT worktree state (your prior work is \
-         still here) and apply this decision exactly:\n\n{directive}"
+         {pause_desc}. A human has now reviewed it and responded. Continue from the CURRENT \
+         worktree state (your prior work is still here) and apply this decision \
+         exactly:\n\n{directive}"
     );
     spawn_brownfield_dev_run(
         state,
@@ -11055,15 +11067,34 @@ async fn uow_get_investigation(
 }
 
 /// `POST /api/uow/:story_id/investigation/review` — mark the story's investigation note
-/// reviewed by the architect (ROUTE-B). Returns `{ ok, version }`; `ok=false` when there
-/// is no note to review (or it was already reviewed).
+/// reviewed by the architect (ROUTE-B). Marking is idempotent: reviewing an
+/// already-reviewed note is still `ok:true` (with `already_reviewed:true`, no new
+/// version). Returns 404 when there is no note to review at all.
 async fn uow_mark_investigation_reviewed(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    use crate::uow::ReviewOutcome;
     match state.uow.mark_investigation_reviewed(&story_id) {
-        Some(version) => Json(serde_json::json!({ "ok": true, "version": version })),
-        None => Json(serde_json::json!({ "ok": false })),
+        ReviewOutcome::NewlyReviewed(version) => Json(serde_json::json!({
+            "ok": true,
+            "version": version,
+            "already_reviewed": false,
+        }))
+        .into_response(),
+        ReviewOutcome::AlreadyReviewed => Json(serde_json::json!({
+            "ok": true,
+            "already_reviewed": true,
+        }))
+        .into_response(),
+        ReviewOutcome::NoNote => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "no investigation note to review",
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -14135,7 +14166,8 @@ mod tests {
         let stored = state.uow.investigation_note_for(story).unwrap();
         assert!(stored.reviewed);
 
-        // A second review (already reviewed) → ok=false (no new revision).
+        // A second review is idempotent (already reviewed) → still ok=true, no new
+        // revision, and flagged already_reviewed so the caller can tell it apart.
         let app2 = router(state.clone());
         let resp2 = app2
             .oneshot(
@@ -14147,8 +14179,26 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
         let json2 = body_json(resp2).await;
-        assert_eq!(json2["ok"], false);
+        assert_eq!(json2["ok"], true);
+        assert_eq!(json2["already_reviewed"], true);
+
+        // Reviewing a story that has no investigation note at all → 404, ok=false.
+        let app3 = router(state.clone());
+        let resp3 = app3
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/uow/no-such-story/investigation/review")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp3.status(), StatusCode::NOT_FOUND);
+        let json3 = body_json(resp3).await;
+        assert_eq!(json3["ok"], false);
     }
 
     // ── UoW Increment 1: tiered dev run + model-aware investigation ───────────────
