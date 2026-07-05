@@ -213,6 +213,8 @@ pub(super) fn CustomRulesTable(
                     if n > 0 {
                         crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Deleted {n} custom rule(s)."));
                         refresh += 1;
+                    } else {
+                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not delete the selected custom rule(s).");
                     }
                 });
             },
@@ -919,13 +921,19 @@ pub(super) fn ProjectRulesTable(
     /// Which repo Table 2 wants Table 1 to jump to (set by "Go to repo rule").
     #[props(default)]
     goto_repo: Signal<Option<String>>,
+    /// Repo filter ("" = all repos). Owned by the parent so the parent's remount
+    /// key can include its value: this table mints its RowIds and table handle
+    /// ONCE per mount, so it only re-applies the filter when it remounts. Keeping
+    /// the filter internal made the "Filter by repo" select a dead control.
+    #[props(default)]
+    repo_filter: Signal<String>,
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut detail_rule = use_context::<Signal<Option<ProposedRuleView>>>();
     let mut chosen_ctx = use_context::<Signal<std::collections::HashMap<String, String>>>();
 
-    // Current repo filter ("" = all repos).
-    let mut repo_filter = use_signal(String::new);
+    // Local mutable handle to the parent-owned filter signal (Signal is Copy).
+    let mut repo_filter = repo_filter;
 
     // Consume the goto_repo signal from Table 2: read the value, then clear in a second step.
     use_effect(move || {
@@ -1192,8 +1200,14 @@ pub(super) fn ProjectRulesTable(
                     for row in &rows {
                         if row.bucket == SelectionBucket::Selections {
                             if let Some(s) = p.ruleset.selections.iter_mut().find(|s| s.rule_id == row.selection.rule_id) {
+                                // Only count a real removal: if the repo wasn't on this
+                                // selection, `retain` is a no-op and we must not report
+                                // (or save) a change we didn't make.
+                                let before = s.repos.len();
                                 s.repos.retain(|r| r != &repo_to_remove);
-                                changed = true;
+                                if s.repos.len() != before {
+                                    changed = true;
+                                }
                             }
                         }
                     }
@@ -1234,7 +1248,6 @@ pub(super) fn AllRulesTable(
 ) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut detail_rule = use_context::<Signal<Option<ProposedRuleView>>>();
-    let mut chosen_ctx = use_context::<Signal<std::collections::HashMap<String, String>>>();
 
     // Build a map: rule_id -> Vec<repo> it's currently applied to.
     let applied_repos: std::collections::HashMap<String, Vec<String>> = {
@@ -1407,10 +1420,12 @@ pub(super) fn AllRulesTable(
             row_cell_renderers: corpus_type_renderers,
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(r) = id_map_click.get(&rid) {
+                    // Opening the detail modal is a READ. Writing the default option
+                    // into chosen_ctx here made the save-watcher rewrite the ruleset
+                    // (resetting a non-default choice to default, or adopting an
+                    // unadopted process/cross-repo rule) just from a row click.
+                    // Only an explicit option-button click may mutate chosen_ctx.
                     detail_rule.set(Some(r.clone()));
-                    if let Some(opt) = r.default_option.as_ref() {
-                        chosen_ctx.write().insert(r.id.clone(), opt.clone());
-                    }
                 }
             }),
         }
@@ -2764,6 +2779,11 @@ pub(super) fn RulesView() -> Element {
     // Signal from Table 2 to Table 1: "go to this repo".
     let goto_repo: Signal<Option<String>> = use_signal(|| None);
 
+    // Table 1's repo filter, owned here so its value can be part of the table's
+    // remount key (the table mints its rows once per mount, so it only re-filters
+    // when it remounts). "" = all repos.
+    let repo_filter: Signal<String> = use_signal(String::new);
+
     let proj = active.read().clone().flatten();
     let proj_list = projects.read().clone().flatten().unwrap_or_default();
     let corpus = corpus_res.read().clone().flatten().unwrap_or_default();
@@ -2909,45 +2929,23 @@ pub(super) fn RulesView() -> Element {
                     let pid_sup = p.id.clone();
                     let pid_health = p.id.clone();
                     let pid_drift = p.id.clone();
-                    let p_modal = p_owned.clone();
                     let p_t1 = p_owned.clone();
                     let p_t2 = p_owned.clone();
                     let corpus_t1 = corpus.clone();
                     let corpus_t2 = corpus.clone();
-                    // Corpus keyed by rule id — the immediate on_option_picked handler needs it to
-                    // classify the scope of a not-yet-selected rule (so it can ADOPT project-level
-                    // process/cross-repo rules on the pick, not just update existing selections).
-                    let corpus_by_id_modal: std::collections::HashMap<String, ProposedRuleView> =
-                        corpus.iter().map(|r| (r.id.clone(), r.clone())).collect();
                     rsx! {
                         // The modal host is rendered at this subtree root (outside the chorale
                         // tables) to avoid the ghost-click-eater bug. option_picked persists
                         // the chosen option immediately on every pick.
                         RulesDetailModalHost {
-                            on_option_picked: move |(rule_id, opt_id): (String, String)| {
-                                // Apply the pick to a fresh copy of the project ruleset. This uses
-                                // the SHARED `apply_chosen_option` transform, so picking an option
-                                // on a project-level (process / cross-repo) rule that is NOT yet in
-                                // the ruleset ADOPTS it (adds it to the right bucket, scoped to the
-                                // project repos) rather than silently dropping it. Previously this
-                                // handler only updated selections that ALREADY existed, so a fresh
-                                // process rule never reached the Project Rules (Applied) table.
-                                let mut p2 = p_modal.clone();
-                                let changed = apply_chosen_option(&mut p2, &rule_id, &opt_id, &corpus_by_id_modal);
-                                if changed {
-                                    let body = build_ruleset_json(&p2);
-                                    let pid2 = p2.id.clone();
-                                    let mut refresh = refresh;
-                                    spawn(async move {
-                                        if save_ruleset(&pid2, body).await {
-                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Option saved.");
-                                            refresh += 1;
-                                        } else {
-                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not save the option choice.");
-                                        }
-                                    });
-                                }
-                            }
+                            // Persistence is handled exactly once by the `chosen_ctx` watcher in
+                            // ProjectRulesTable: the option button writes the pick into `chosen_ctx`,
+                            // which the watcher observes and saves (via the SHARED `apply_chosen_option`
+                            // transform, so adopting a not-yet-selected process / cross-repo rule works
+                            // the same way). This handler previously ALSO saved + toasted on the same
+                            // click, producing a duplicate write and a duplicate "Option saved." toast.
+                            // Leave it as a no-op so there is a single save path.
+                            on_option_picked: move |_: (String, String)| {}
                         }
 
                         // Broken-path health check (issue #33): up top so a path that doesn't
@@ -2974,7 +2972,7 @@ pub(super) fn RulesView() -> Element {
                             // modal show a stub for every rule. Keying on `corpus.len()`
                             // remounts the table the moment the corpus resolves, re-minting the
                             // rows with their real corpus join. (Table 2's key already does this.)
-                            let t1_key = format!("pt-{}-{}-{}-{}-{}", refresh(), p_owned.ruleset.selections.len(), p_owned.ruleset.cross_repo.len(), p_owned.ruleset.process.len(), corpus.len());
+                            let t1_key = format!("pt-{}-{}-{}-{}-{}-{}", refresh(), p_owned.ruleset.selections.len(), p_owned.ruleset.cross_repo.len(), p_owned.ruleset.process.len(), corpus.len(), repo_filter());
                             rsx! {
                                 div {
                                     key: "{t1_key}",
@@ -2983,6 +2981,7 @@ pub(super) fn RulesView() -> Element {
                                         corpus: corpus_t1,
                                         refresh,
                                         goto_repo,
+                                        repo_filter,
                                     }
                                 }
                             }
@@ -3206,12 +3205,18 @@ pub(super) fn RulesView() -> Element {
                                         let (name, body, repos) = (cr_name(), cr_body(), cr_repos());
                                         if name.trim().is_empty() || body.trim().is_empty() { return; }
                                         let pid = pid_add.clone();
+                                        // Clear the inputs only after a confirmed save so a
+                                        // failed request doesn't silently discard the typed rule.
                                         spawn(async move {
-                                            if add_custom_rule(&pid, &name, &body, &repos).await { refresh += 1; }
+                                            if add_custom_rule(&pid, &name, &body, &repos).await {
+                                                refresh += 1;
+                                                cr_name.set(String::new());
+                                                cr_body.set(String::new());
+                                                cr_repos.set(Vec::new());
+                                            } else {
+                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not save the custom rule.");
+                                            }
                                         });
-                                        cr_name.set(String::new());
-                                        cr_body.set(String::new());
-                                        cr_repos.set(Vec::new());
                                     },
                                     "Save custom rule"
                                 }

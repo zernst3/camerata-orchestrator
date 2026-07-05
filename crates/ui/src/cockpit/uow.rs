@@ -1799,6 +1799,24 @@ pub(super) fn is_placeholder_note(note: &str) -> bool {
         || note.trim().is_empty()
 }
 
+/// App-scoped clarification-refresh signal, shared via context so the NEEDS-YOU queue and
+/// the per-phase clarification dialogs stay in lock-step: answering a question in either
+/// surface bumps this, and both fetch resources depend on it. Newtype so it is a distinct
+/// context entry from other `Signal<u32>` counters. Consumers read it with a private fallback
+/// (`clarify_refresh_signal`) so isolated render tests don't need a provider.
+#[derive(Clone, Copy)]
+pub(super) struct ClarifyRefresh(pub Signal<u32>);
+
+/// Resolve the shared clarification-refresh signal from context, falling back to a private
+/// per-component signal when no provider is present (isolated SSR render tests). Always
+/// registers exactly one hook so the hook count is stable regardless of the branch taken.
+pub(super) fn clarify_refresh_signal() -> Signal<u32> {
+    let local = use_signal(|| 0u32);
+    try_consume_context::<ClarifyRefresh>()
+        .map(|c| c.0)
+        .unwrap_or(local)
+}
+
 /// Which sub-view of the Governed Development page is selected in the left nav:
 /// the top-level Issue Management panel, or a specific UoW's dev controls.
 #[derive(Clone, PartialEq, Eq)]
@@ -1971,6 +1989,7 @@ pub(super) fn IssueManagementPanel(
 ) -> Element {
     let provider_res = use_resource(fetch_provider);
     let active_proj = use_resource(fetch_active_project);
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
 
     let mut pulling = use_signal(|| false);
     // The work item whose detail is open (by stable id), if any.
@@ -2033,12 +2052,21 @@ pub(super) fn IssueManagementPanel(
                         let proj_id = proj_id.clone();
                         move |_| {
                             let proj_id = proj_id.clone();
+                            let toasts = toasts;
                             pulling.set(true);
                             spawn(async move {
-                                let pulled = pull_work_items().await.unwrap_or_default();
-                                *PULLED_WORK_ITEMS.write() = Some((proj_id, pulled));
-                                detail_id.set(None);
-                                pull_seq += 1;
+                                match pull_work_items().await {
+                                    Some(pulled) => {
+                                        *PULLED_WORK_ITEMS.write() = Some((proj_id, pulled));
+                                        detail_id.set(None);
+                                        pull_seq += 1;
+                                    }
+                                    None => crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Warning,
+                                        "Could not pull work items (check the GitHub token). Keeping the last pull.".to_string(),
+                                    ),
+                                }
                                 pulling.set(false);
                             });
                         }
@@ -2080,9 +2108,10 @@ pub(super) fn IssueManagementPanel(
                         move |_| {
                             let proj_id = proj_id.clone();
                             spawn(async move {
-                                let pulled = pull_work_items().await.unwrap_or_default();
-                                *PULLED_WORK_ITEMS.write() = Some((proj_id, pulled));
-                                pull_seq += 1;
+                                if let Some(pulled) = pull_work_items().await {
+                                    *PULLED_WORK_ITEMS.write() = Some((proj_id, pulled));
+                                    pull_seq += 1;
+                                }
                             });
                         }
                     }),
@@ -2596,7 +2625,10 @@ pub(super) fn StoryAuthoringPanel(
     // it persists to the draft on change (the publish step creates the sub-issue link).
     let mut parent_id = use_signal(String::new);
     let mut parent_seeded = use_signal(|| false);
-    if !parent_seeded() {
+    // Seed only once the authoring resource has actually resolved. Seeding from the
+    // unresolved default would latch `parent_seeded` before the real parent loads,
+    // permanently dropping it (and letting a keystroke overwrite the stored parent).
+    if !parent_seeded() && state_res.read().is_some() {
         if let Some(pid) = full.parent_id.clone() {
             parent_id.set(pid);
         }
@@ -3405,22 +3437,6 @@ pub(super) fn IntakePhaseView(
     let mut commenting = use_signal(|| false);
     let mut mention_open = use_signal(|| false);
 
-    if intake_finished() {
-        return rsx! {
-            div { class: "uow-phase-body uow-phase-finished",
-                div { class: "uow-phase-finished-header",
-                    span { class: "uow-phase-finished-label", "Intake (finished)" }
-                    button {
-                        class: "btn-secondary",
-                        onclick: move |_| intake_finished.set(false),
-                        "Reopen Intake"
-                    }
-                }
-                p { class: "section-hint", "(Intake finished — reopen to edit)" }
-            }
-        };
-    }
-
     // Fetch comments for the story inline display.
     let comments_res = {
         let wid = item.read().id.clone();
@@ -3492,6 +3508,25 @@ pub(super) fn IntakePhaseView(
     // `context_draft`   — the in-progress value while editing.
     let mut editing_context = use_signal(|| false);
     let mut context_draft = use_signal(String::new);
+
+    // Early return kept BELOW all hook registrations above: an early return before those
+    // `use_resource`/`use_signal`/`use_effect` calls would change the hook count between the
+    // finished and active renders and corrupt Dioxus hook state.
+    if intake_finished() {
+        return rsx! {
+            div { class: "uow-phase-body uow-phase-finished",
+                div { class: "uow-phase-finished-header",
+                    span { class: "uow-phase-finished-label", "Intake (finished)" }
+                    button {
+                        class: "btn-secondary",
+                        onclick: move |_| intake_finished.set(false),
+                        "Reopen Intake"
+                    }
+                }
+                p { class: "section-hint", "(Intake finished, reopen to edit)" }
+            }
+        };
+    }
 
     rsx! {
         div { class: "uow-phase-body",
@@ -3899,8 +3934,9 @@ pub(super) fn InvestigationPhaseView(
 ) -> Element {
     let toasts_inv = use_context::<Signal<Vec<crate::toast::Toast>>>();
 
-    // Clarification refresh counter — bumped on each answer.
-    let mut clarify_refresh = use_signal(|| 0u32);
+    // Clarification refresh counter, shared with the NEEDS-YOU queue via context so an answer
+    // given in either surface refreshes both. Bumped on each answer.
+    let mut clarify_refresh = clarify_refresh_signal();
 
     // Fetch open clarifications for this story.
     let open_clars_res = {
@@ -4314,6 +4350,10 @@ pub(super) fn DevelopmentPhaseView(
     // the linters/checkers layer-2 needs. The security gate (layer 1) + the no-code-first
     // decisions gate still apply. The architect turns it back off after the tooling lands.
     let mut bootstrap_skip_layer2 = use_signal(|| false);
+    // Double-click guard for Begin Development (mirrors the Begin-investigation `starting`
+    // flag): disable the button while a start is in flight so a second click can't spawn a
+    // duplicate run.
+    let mut dev_starting = use_signal(|| false);
 
     // Derive stage from the shared uow_for_stage resource (informational; not used to gate
     // Begin Development — §5.1: the button is always available unless the contract block applies).
@@ -4581,7 +4621,9 @@ pub(super) fn DevelopmentPhaseView(
                     div { class: "run-control-row",
                         button {
                             class: "btn-run",
+                            disabled: dev_starting(),
                             onclick: move |_| {
+                                if dev_starting() { return; }
                                 let sid = story_id_dev.clone();
                                 let tm = TierMapView {
                                     strongest: dev_strongest(),
@@ -4591,6 +4633,7 @@ pub(super) fn DevelopmentPhaseView(
                                 };
                                 let skip_l2 = bootstrap_skip_layer2();
                                 let toasts = toasts;
+                                dev_starting.set(true);
                                 spawn(async move {
                                     let _guard = crate::loading::LoadingGuard::new();
                                     match start_dev_run(&sid, &tm, skip_l2).await {
@@ -4608,9 +4651,10 @@ pub(super) fn DevelopmentPhaseView(
                                             "Could not start the governed development run.".to_string(),
                                         ),
                                     }
+                                    dev_starting.set(false);
                                 });
                             },
-                            "\u{25b6} Begin Development"
+                            if dev_starting() { "Starting…" } else { "\u{25b6} Begin Development" }
                         }
                     }
                 }
@@ -4767,10 +4811,19 @@ pub(super) fn DevelopmentPhaseView(
                                     bug_fix_running.set(true);
                                     spawn(async move {
                                         let _guard = crate::loading::LoadingGuard::new();
-                                        // TODO(#105): use a dedicated bug-fix endpoint that threads
-                                        // the bug report into the agent context. Today we reuse
-                                        // start_dev_run on the same branch (the orchestrator sees
-                                        // the bug report in the UoW transcript via the history).
+                                        // Persist the bug report onto the UoW development transcript
+                                        // so the agent actually receives it before the gated re-run
+                                        // on the same branch. Without this the report is dropped.
+                                        if !append_development_chat(&sid, "user", &report).await {
+                                            crate::toast::push_toast(
+                                                toasts,
+                                                crate::toast::ToastKind::Warning,
+                                                "Could not save the bug report; run not started.".to_string(),
+                                            );
+                                            bug_fix_running.set(false);
+                                            return;
+                                        }
+                                        bug_report.set(String::new());
                                         match start_dev_run(&sid, &tm, false).await {
                                             StartRunOutcome::Started(rid) => {
                                                 poll_run_to_done(rid, active_run, uow_refresh, Some(toasts)).await;
