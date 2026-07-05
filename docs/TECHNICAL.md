@@ -789,9 +789,25 @@ issue.
 `on_activity` callback calls `RunStore::touch_activity` so each streamed output line
 also advances the clock.
 
+**Every agent-driving runner wires the heartbeat (LIFECYCLE-7).** `investigation_run`,
+`update_branch_run`, `dev_implement_run`, and `pr_resolve_run` all pass
+`Arc::new(move || runs.touch_activity(&run_id, None))` onto their driver.
+`build_agent_driver` / `build_claude_driver` take an `Option<HeartbeatFn>` and wire it onto
+whichever concrete driver they build. The **CLI driver** beats per streamed output line; the
+**`ApiAgentDriver`** (OpenRouter / Anthropic-API in-process loop) has no line stream, so it
+beats **once per loop turn** via an `on_activity` field fired at the top of each iteration.
+Without this, the two longest paths (dev-implement, pr-resolve) false-reported as stalled the
+moment they went quiet during a long tool call.
+
 Two pure functions derive stall state:
 - `idle_ms(last_activity_ms, now_ms) -> u128`
 - `is_stalled(idle_ms, threshold_ms) -> bool`
+
+**Done and parked runs are never stalled.** `get_run` reports `stalled = false` for any `done`
+run and for a human-PARKED run (`RunStatus::is_parked()` → `AwaitingReview` /
+`AwaitingClarification`) regardless of idle time — those are intentionally idle, not wedged.
+`stall_decision` short-circuits the same cases to `Ok`, so the banner and the auto-cancel sweep
+agree.
 
 For onboarding scan jobs, `JobMeta.last_activity_ms` is updated by
 `det_tool_running` and `det_tool_done`, so scan jobs carry the same liveness
@@ -834,10 +850,22 @@ endpoints and renders stall state from the response fields.
 | `Autonomous` (routine / walk-away) | `Cancel` | The run is auto-stopped into a terminal `Failed { reason }` state. The recorded failure reason IS the operator signal for a walk-away job. |
 
 `stall_decision()` is the pure transition function from stall state + policy to action.
+`start_governed_run` takes the `RunKind`: the interactive HTTP start passes `Watched`; the
+routine/scheduler-driven walk-away path passes `Autonomous`.
+
+**The auto-cancel actor is a background sweep (LIFECYCLE-6).** `crate::stall_sweep`, spawned
+from `serve()` (not `router`, so router-only tests never auto-cancel), periodically snapshots
+every ACTIVE run and applies `stall_decision(run, project.stall_threshold_ms(kind), now)`. On
+`StallDecision::Cancel` it calls `RunStore::fail_with_reason` with an honest reason (idle
+seconds + threshold). `Cancel` is only ever returned for a `Cancel`-policy run, i.e. an
+`Autonomous` run — so the sweep **only auto-cancels autonomous runs**. Watched runs that stall
+stay running (alert-only); done / parked runs are never touched. Cadence is
+`CAMERATA_STALL_SWEEP_SECS` (default 30 s), independent of the threshold itself.
 
 **The key distinction:** for a human-watched run, a stall is unusual but the human
 is present to decide. For an autonomous routine, there is no human watching — auto-
-cancel with a reason is strictly more useful than hanging indefinitely.
+cancel with a reason is strictly more useful than hanging indefinitely. See
+`docs/decisions/2026-07-05_liveness-and-stall.md`.
 
 ### Per-project dual thresholds (`StallThresholds`)
 
@@ -848,12 +876,18 @@ project JSON):
 | Field | Default | Applies to |
 |---|---|---|
 | `watched_secs` | 120 | `RunKind::Watched` (interactive dev runs) |
-| `routine_secs` | 600 | `RunKind::Autonomous` (routines) |
+| `routine_secs` | 1800 (`DEFAULT_ROUTINE_STALL_SECS`) | `RunKind::Autonomous` (routines) |
 
-`project.stall_threshold_ms(autonomous: bool)` selects the right field and
-converts to milliseconds. There is **no env-var fallback** once a project exists —
-the project's stored value is authoritative, mirroring the `StepModels` pattern.
-Per-project isolation: a change to project A's thresholds never touches project B.
+The routine default is deliberately **generous (30 min)**: an autonomous run auto-cancels on
+stall with no human watching, so it earns a long grace period before the sweep reaps it. The
+env override `CAMERATA_RUN_STALL_THRESHOLD_SECS` still applies to the serde defaults (scaled x5
+off the watched base) when set.
+
+`project.stall_threshold_ms(autonomous: bool)` selects the right field and converts to
+milliseconds. `get_run` and the stall sweep both read the **active project's** value, falling
+back to the env/default only when no project is active — so the reported `stalled` flag and the
+auto-cancel decision use the same threshold. Per-project isolation: a change to project A's
+thresholds never touches project B.
 
 **Why two thresholds?** A human-watched run warrants a shorter patience window —
 the operator can act if something is wrong. A walk-away autonomous routine warrants
