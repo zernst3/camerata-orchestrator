@@ -4334,14 +4334,13 @@ pub(super) fn DevelopmentPhaseView(
     // ── Contract boundary guard (R3.g / §4.6 / §5.1) ─────────────────────────────
     // UI-level guard: when the story crosses a contract boundary and no contract exists,
     // show a "needs a contract" block instead of letting the user begin development.
-    // The true backend enforcement is the orchestrator refusing to start — marked TODO(#105).
-    //
-    // TODO(#105): The backend (orchestrator) is the real gatekeeper — it inspects the UoW
-    // state and refuses to begin development if a contract boundary is crossed but no contract
-    // artifact exists. This UI guard is a UX hint ONLY and does not replace that enforcement.
+    // The backend enforcement already exists and is authoritative: the orchestrator
+    // refuses to begin development when `crosses_boundary && contract.is_empty()` (see
+    // `ensure_development_gate` in camerata-server, the R3.g contract precondition).
+    // This UI block is a UX hint only; the server remains the true run-time gatekeeper.
     //
     // Derive `has_contract` + `crosses_contract_boundary` from the persisted UoW
-    // investigation state (#105). The contract is settled in Investigation & Refinement and
+    // investigation state. The contract is settled in Investigation & Refinement and
     // read back here; the orchestrator remains the true run-time enforcer (B2/B3).
     let invest_state: Option<InvestigationStateView> = uow_for_stage
         .read()
@@ -4532,10 +4531,11 @@ pub(super) fn DevelopmentPhaseView(
                          requires a settled contract artifact in Investigation & Refinement before \
                          Development can begin. Switch to the Investigation & Refinement tab to settle it."
                     }
-                    // TODO(#105): the backend enforcer is the orchestrator refusing to start
-                    // the dev run when no contract exists and the boundary is crossed (R3.g).
+                    // The backend enforcer already exists: the orchestrator refuses to start
+                    // the dev run when the boundary is crossed and no contract exists (R3.g,
+                    // `ensure_development_gate`). This block is a UX hint mirroring that gate.
                     p { class: "section-hint",
-                        "UI-level guard only — the orchestrator enforces this at run time. TODO(#105)."
+                        "UI-level guard only; the orchestrator enforces this contract gate at run time."
                     }
                 }
             }

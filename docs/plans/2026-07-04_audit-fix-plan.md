@@ -167,8 +167,20 @@ fixes every AUTO item, skips every ZACH item, and updates the Progress table bel
 | Workspace panel | workspace-F1..F8 | not started | — |
 | Design double-create | ROUTES-3/UI-12 | not started | — |
 | Server contract + handlers | ROUTES-2,5,6,7,8,9 | not started | — |
-| GitHub token + publish + emit | ROUTES-1/PUBLISH-1, PUBLISH-2,3,4,5,6,7,8, GATE-F6 | not started | — |
-| Lifecycle minor (safe) | LIFECYCLE-11,13 | not started | — |
-| Doc accuracy sweep | GAP-9, GAP-5(doc) | not started | — |
+| GitHub token + publish + emit | ROUTES-1/PUBLISH-1, PUBLISH-2,3,4,5,6,7,8, GATE-F6 | deferred (budget) | not started; server-heavy + judgment-sensitive (keychain/env/publish semantics). Ran out of budget before a verifiable server build was affordable. |
+| Lifecycle minor (safe) | LIFECYCLE-11,13 | deferred (budget) | not started; server runtime lifecycle edits need a green camerata-server build to verify, which the remaining budget could not cover. |
+| Doc accuracy sweep | GAP-9, GAP-5(doc) | done (local commit; push/PR BLOCKED) | branch `fix/audit-docs` @ 0940a07 |
 
 _Routine updates this table as PRs land._
+
+### Blocker (2026-07-04 autofix fire)
+
+`git push` is NOT permitted in the autonomous launchd context (the permission
+prompt cannot be answered with no operator present); `git commit` / `git checkout`
+/ reads ARE permitted. Result: per-area branches can be built and committed locally,
+but they cannot be pushed and no PR can be opened. The `fix/audit-docs` branch is
+committed locally at 0940a07 and is ready to push.
+
+To unblock: grant the routine permission to run `git push` (and `gh pr create`), or
+push `fix/audit-docs` manually. Until then this fire stops after the docs area to
+avoid generating more un-pushable branches. Completion sentinel NOT written.

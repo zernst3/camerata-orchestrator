@@ -6,13 +6,14 @@ version = "0.0.0"
 [lints]
 workspace = true
 
-# The consumer-mode prototype: a runnable Dioxus DESKTOP app that walks a
-# non-technical person through Intake -> Clarify -> Build -> Live.
-# Mocked data only (no engine wiring yet); the goal is to nail the look,
-# the motion, and the flow per docs/CONSUMER_UX.md.
+# The cockpit: a runnable Dioxus DESKTOP app that renders the engine spine
+# (Intake, Clarify, Design, Live-run, Workspace, Rules) as a thin HTTP client
+# of the BFF (camerata-server). Engine-spine only. The consumer-mode prototype
+# (the non-technical Intake -> Clarify -> Build -> Live flow, mocked data, the
+# old `src/screens/` tree) has been retired; docs/CONSUMER_UX.md is now a
+# spec-only design reference, not a live surface in this crate.
 #
-# Target: desktop. Chosen over web to avoid the wasm toolchain for an
-# artifact whose whole point is "build it, run it, screen-record it".
+# Target: desktop. Chosen over web to avoid the wasm toolchain.
 # Dioxus 0.7 matches the family version (rust-portfolio, rust-chorale).
 
 [[bin]]
