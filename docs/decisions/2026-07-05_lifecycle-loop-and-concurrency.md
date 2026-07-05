@@ -1,7 +1,10 @@
 # ADR: Run-engine bounce loop, single-flight concurrency, and reject-reverts-commits
 
 **Date:** 2026-07-05
-**Status:** Accepted (Batch 3 shipped on `fix/lifecycle-loop`)
+**Status:** Accepted (Batch 3 shipped on `fix/lifecycle-loop`). LIFECYCLE-5 completed for
+open-weight models on `fix/checkrunner-diagnostics`: the `CheckRunner` trait now returns
+`CheckOutcome { violated, diagnostics }` and the Layer-2 bounce feeds the full toolchain diagnostics
+(16 KiB cap, tail-kept) back at the prompt tail. See section 1.
 
 ## Context
 
@@ -45,13 +48,17 @@ lifecycle defects, stacked on Batch 2's cancel/provenance work (`fix/lifecycle-p
   mismatch (both branches).
 - The append mirrors the `directive_grounding` pattern from `resume_governed_run`: a titled block
   addressing the agent directly with the correction to apply.
-- **Honest limit:** the `CheckRunner` trait returns `Vec<RuleId>` only — the raw compiler stdout is
-  captured inside each runner and dropped before the loop sees it. So the Layer-2 feedback carries the
-  violated **rule ids** (which IS what Layer-2 emits to the loop), while L3 and the integration gate
-  carry their full reason text. Threading the raw toolchain stdout all the way to the loop would
-  change the `CheckRunner` trait signature across ~8 runner impls (a public-API / structural change,
-  ROUTE-1) and is deliberately out of scope for this batch. The seam (`append_bounce_feedback` takes
-  free-form text) is ready for that richer feedback when the trait carries it.
+- **RESOLVED (was an honest limit; landed on `fix/checkrunner-diagnostics`).** The `CheckRunner`
+  trait now returns `CheckOutcome { violated: Vec<RuleId>, diagnostics: String }` instead of a bare
+  `Vec<RuleId>`. `diagnostics` is the raw toolchain stdout/stderr (clippy/tsc/pytest/go vet/manifest
+  output) each runner already captured and used to drop; it is now carried out of the runner. All ~8
+  language/tool runner impls plus the composite (`RustCheckRunner`), polyglot, combined, and manifest
+  runners populate it (empty when the tool has no meaningful stdout or the pass is clean). The Layer-2
+  bounce feedback now appends the **full diagnostics** after the rule ids, at the same cache-friendly
+  tail. To bound prompt size and keep the prefix cache warm, `CheckOutcome` truncates `diagnostics`
+  to **`DIAGNOSTICS_CAP_BYTES` = 16 KiB**, keeping the **tail** (the failing assertion / final error
+  summary is most-relevant-last) and dropping the oldest head, on a UTF-8 char boundary. A literal
+  open-weight model now sees the actual error text to self-correct, not just the rule id.
 
 ### 2. Single-flight guard per story (LIFECYCLE-9)
 
@@ -76,15 +83,17 @@ lifecycle defects, stacked on Batch 2's cancel/provenance work (`fix/lifecycle-p
 
 ## Consequences
 
-- A revise pass now actually revises: the agent sees exactly which rule / check failed and (for L3 /
-  gate) the full reason, at a cache-warm tail.
+- A revise pass now actually revises: the agent sees exactly which rule / check failed AND the full
+  verbatim toolchain diagnostics for Layer-2 (plus, for L3 / gate, the full reason), at a cache-warm
+  tail, bounded by the 16 KiB diagnostics cap.
 - Two runs can never share a worktree, and sign-off can never yank a live run's worktree.
 - Reject means reject: the branch returns to its pre-run commit, with no orphan snapshot commits left
   to be pushed.
 
 ## Honest limits
 
-- Layer-2 feedback is rule ids, not raw compiler stdout (see the LIFECYCLE-5 limit above); richer
-  Layer-2 feedback waits on a `CheckRunner` trait change routed separately.
+- Layer-2 feedback now carries the full toolchain diagnostics (the former rule-ids-only limit is
+  RESOLVED — see section 1). Remaining bound: diagnostics are truncated to 16 KiB (tail kept), so an
+  error spew larger than the cap loses its oldest head lines.
 - The single-flight guard reads the in-memory `RunStore`; if the process restarts mid-run the guard
   state is lost with it (consistent with Batch 2's in-memory completion signal).

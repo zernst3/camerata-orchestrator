@@ -43,7 +43,7 @@
 //! polyglot checks. The manifest never replaces the built-ins.
 
 use async_trait::async_trait;
-use camerata_core::{CheckRunner, Role, RuleId};
+use camerata_core::{CheckOutcome, CheckRunner, Role, RuleId};
 use std::path::Path;
 use tokio::process::Command;
 
@@ -113,13 +113,13 @@ impl ManifestCheckRunner {
 
 #[async_trait]
 impl CheckRunner for ManifestCheckRunner {
-    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<CheckOutcome> {
         let Some(ref manifest) = self.manifest else {
             // No manifest (absent or parse error): zero violations, non-fatal.
-            return Ok(Vec::new());
+            return Ok(CheckOutcome::clean());
         };
 
-        let mut violations: Vec<RuleId> = Vec::new();
+        let mut outcome = CheckOutcome::clean();
 
         for check in manifest.in_loop_checks() {
             // ── tool-version drift detection ───────────────────────────────────
@@ -131,8 +131,8 @@ impl CheckRunner for ManifestCheckRunner {
             // on mismatch: running it on the wrong tool version would produce a
             // result that cannot be compared with CI's pinned-version run.
             if let (Some(tool), Some(pinned_version)) = (&check.tool, &check.version) {
-                let outcome = check_tool_version(tool, pinned_version).await;
-                match outcome {
+                let version_outcome = check_tool_version(tool, pinned_version).await;
+                match version_outcome {
                     VersionCheckOutcome::Matches => {
                         // Local tool is the pinned version — proceed to run the check.
                     }
@@ -140,13 +140,15 @@ impl CheckRunner for ManifestCheckRunner {
                         let install_hint = check.install.as_deref().map(|cmd| {
                             format!(" — install the pinned version with: `{cmd}`")
                         }).unwrap_or_default();
-                        eprintln!(
+                        let msg = format!(
                             "[camerata-checks] VERSION DRIFT: {} ({}) — local {} is {} \
                              but manifest pins {}{}; results may differ from CI. \
                              Skipping check to avoid false-green.",
                             check.id, check.name, tool, reported, pinned_version, install_hint
                         );
-                        violations.push(RuleId(check.id.clone()));
+                        eprintln!("{msg}");
+                        outcome.violated.push(RuleId(check.id.clone()));
+                        outcome.push_diagnostics(&msg);
                         // Do NOT run the check command — its output is not trustworthy.
                         continue;
                     }
@@ -154,12 +156,14 @@ impl CheckRunner for ManifestCheckRunner {
                         let install_hint = check.install.as_deref().map(|cmd| {
                             format!(" — install it with: `{cmd}`")
                         }).unwrap_or_default();
-                        eprintln!(
+                        let msg = format!(
                             "[camerata-checks] VERSION DRIFT: {} ({}) — tool `{}` not found \
                              or could not be queried ({}){} Skipping check.",
                             check.id, check.name, tool, reason, install_hint
                         );
-                        violations.push(RuleId(check.id.clone()));
+                        eprintln!("{msg}");
+                        outcome.violated.push(RuleId(check.id.clone()));
+                        outcome.push_diagnostics(&msg);
                         // Do NOT run the check command — tool is absent/broken.
                         continue;
                     }
@@ -169,16 +173,24 @@ impl CheckRunner for ManifestCheckRunner {
             // ── run the check command ─────────────────────────────────────────
             let result = run_manifest_check(worktree, &check.command).await;
             match result {
-                Ok(true) => {
+                Ok(ref out) if out.success => {
                     // Exit 0 = pass. Nothing to report.
                 }
-                Ok(false) => {
-                    // Non-zero exit = violation. Report under the check's rule id.
+                Ok(out) => {
+                    // Non-zero exit = violation. Report under the check's rule id AND
+                    // forward the command's captured output as diagnostics.
                     eprintln!(
                         "[camerata-checks] manifest check {} ({}) failed (non-zero exit)",
                         check.id, check.name
                     );
-                    violations.push(RuleId(check.id.clone()));
+                    outcome.violated.push(RuleId(check.id.clone()));
+                    let diag = out.combined.trim();
+                    if !diag.is_empty() {
+                        outcome.push_diagnostics(&format!(
+                            "$ {} ({})\n{diag}",
+                            check.command, check.id
+                        ));
+                    }
                 }
                 Err(e) => {
                     // Could not spawn (e.g. `sh` not on PATH, permissions). Log and
@@ -193,24 +205,39 @@ impl CheckRunner for ManifestCheckRunner {
             }
         }
 
-        Ok(violations)
+        Ok(outcome)
     }
 }
 
-/// Run `sh -c <command>` in `worktree`. Returns `Ok(true)` on exit 0, `Ok(false)`
-/// on non-zero exit, or `Err` if the process could not be spawned at all.
+/// Outcome of one manifest check command: exit-success plus the captured
+/// stdout+stderr so a violation can carry the actual tool output into the bounce.
+struct ManifestCheckOutput {
+    /// True when the command exited 0.
+    success: bool,
+    /// Combined stdout + stderr text (for the diagnostics on a violation).
+    combined: String,
+}
+
+/// Run `sh -c <command>` in `worktree`. Returns the exit-success plus the
+/// captured stdout+stderr, or `Err` if the process could not be spawned at all.
 ///
 /// Using `sh -c` gives commands full shell expansion (globs, pipes, `&&` chains)
 /// at the cost of a shell fork — acceptable for per-task gates that already run
-/// cargo builds.
-async fn run_manifest_check(worktree: &Path, command: &str) -> std::io::Result<bool> {
-    let status = Command::new("sh")
+/// cargo builds. We capture output (rather than `.status()`) so a failing check
+/// can feed its verbatim toolchain diagnostics into the Layer-2 bounce.
+async fn run_manifest_check(worktree: &Path, command: &str) -> std::io::Result<ManifestCheckOutput> {
+    let out = Command::new("sh")
         .args(["-c", command])
         .current_dir(worktree)
         .kill_on_drop(true)
-        .status()
+        .output()
         .await?;
-    Ok(status.success())
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    Ok(ManifestCheckOutput {
+        success: out.status.success(),
+        combined: format!("{stdout}\n{stderr}"),
+    })
 }
 
 // ─── tool-version verification ────────────────────────────────────────────────
@@ -429,7 +456,7 @@ mod tests {
         let wt = tmpdir();
         let runner = ManifestCheckRunner::empty();
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("check must not err");
+        let violations = runner.check(&role, &wt).await.expect("check must not err").violated;
         assert!(
             violations.is_empty(),
             "absent manifest must produce zero violations"
@@ -447,7 +474,7 @@ mod tests {
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("check must not err");
+        let violations = runner.check(&role, &wt).await.expect("check must not err").violated;
         assert!(
             violations.is_empty(),
             "exit-0 command must produce zero violations, got {violations:?}"
@@ -465,11 +492,36 @@ mod tests {
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("check must not err");
+        let violations = runner.check(&role, &wt).await.expect("check must not err").violated;
         assert_eq!(
             violations,
             vec![RuleId("ARCH-API-LAYERING-1".to_string())],
             "exit-1 command must map to violation under the check id"
+        );
+    }
+
+    // ── failing check carries its captured toolchain output as diagnostics ─────
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failing_check_carries_command_output_in_diagnostics() {
+        let wt = tmpdir();
+        // Command prints a distinctive diagnostic line then exits non-zero.
+        let manifest = CheckManifest {
+            checks: vec![make_check(
+                "ARCH-API-LAYERING-1",
+                "echo 'db.select outside repositories/' >&2; exit 1",
+                true,
+            )],
+        };
+        let runner = ManifestCheckRunner::with_manifest(manifest);
+        let role = fake_role();
+        let outcome = runner.check(&role, &wt).await.expect("check must not err");
+        assert_eq!(outcome.violated, vec![RuleId("ARCH-API-LAYERING-1".to_string())]);
+        assert!(
+            outcome.diagnostics.contains("db.select outside repositories/"),
+            "diagnostics must carry the failing command's captured output, got: {:?}",
+            outcome.diagnostics
         );
     }
 
@@ -489,7 +541,7 @@ mod tests {
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("check must not err");
+        let violations = runner.check(&role, &wt).await.expect("check must not err").violated;
         assert!(
             violations.is_empty(),
             "ci-only check must be skipped; only in_loop checks run, got {violations:?}"
@@ -511,7 +563,7 @@ mod tests {
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("check must not err");
+        let violations = runner.check(&role, &wt).await.expect("check must not err").violated;
         // A and C-failing both produce violations; A is clean.
         assert_eq!(violations.len(), 2, "expected 2 violations, got {violations:?}");
         assert!(violations.iter().any(|v| v.0 == "RULE-B"));
@@ -650,7 +702,7 @@ mod tests {
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("must not err");
+        let violations = runner.check(&role, &wt).await.expect("must not err").violated;
         assert_eq!(
             violations,
             vec![RuleId("DEP-CRUISER-LAYERING-1".to_string())],
@@ -688,7 +740,7 @@ mod tests {
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("must not err");
+        let violations = runner.check(&role, &wt).await.expect("must not err").violated;
         assert_eq!(
             violations,
             vec![RuleId("ARCH-LAYERING-1".to_string())],
@@ -742,7 +794,7 @@ mod tests {
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
-        let violations = runner.check(&role, &wt).await.expect("must not err");
+        let violations = runner.check(&role, &wt).await.expect("must not err").violated;
         // Exactly one violation: the command failed (not a drift violation).
         // The key property: we GOT here (version matched, command ran).
         assert_eq!(

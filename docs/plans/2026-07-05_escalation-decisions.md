@@ -8,6 +8,7 @@ options, and a recommendation. Detail for any finding is in `docs/ARCH_AUDIT_202
 **Status: Batch 2 (LIFECYCLE-1/2/3/4) landed on `fix/lifecycle-provenance`.**
 **Status: Batch 3 (LIFECYCLE-5/9/12) landed on `fix/lifecycle-loop`.**
 **Status: Batch 3b (LIFECYCLE-7/6) landed on `fix/lifecycle-liveness`.**
+**Status: CheckRunner full-diagnostics landed on `fix/checkrunner-diagnostics` — completes LIFECYCLE-5 for open-weight models: `CheckRunner` returns `CheckOutcome { violated, diagnostics }`; Layer-2 bounce feeds the full toolchain output (16 KiB tail-capped) back at the prompt tail.**
 
 Zach approved every item. Recommendation [Rec] taken for all EXCEPT:
 - **GAP-6: BUILD it now, do NOT defer** (build the remaining 3 integration-gate categories).

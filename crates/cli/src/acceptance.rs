@@ -17,7 +17,8 @@
 
 use camerata_agent::allowed_tools_for_role;
 use camerata_core::{
-    AgentDriver, AgentOutcome, CheckRunner, Decision, GovernanceGateway, Role, RuleId, SessionId,
+    AgentDriver, AgentOutcome, CheckOutcome, CheckRunner, Decision, GovernanceGateway, Role, RuleId,
+    SessionId,
     ToolCall,
 };
 use camerata_gateway::{enforced_gate_rules, GovernedGateway};
@@ -47,8 +48,8 @@ pub struct NoopChecks;
 
 #[async_trait::async_trait]
 impl CheckRunner for NoopChecks {
-    async fn check(&self, _role: &Role, _worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
-        Ok(vec![])
+    async fn check(&self, _role: &Role, _worktree: &Path) -> anyhow::Result<CheckOutcome> {
+        Ok(CheckOutcome::clean())
     }
 }
 

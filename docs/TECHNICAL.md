@@ -308,6 +308,36 @@ Layer-2 is the deterministic gate that runs on the agent's OUTPUT after a task
 finishes, in the coordinator's bounce-and-revise loop. It is **cross-language,
 polyglot, repo-pinned, and fail-closed** — no longer Rust-only-hardcoded.
 
+### The `CheckRunner` return: `CheckOutcome { violated, diagnostics }`
+
+`CheckRunner::check` returns a `CheckOutcome`, not a bare `Vec<RuleId>`:
+
+```rust
+pub struct CheckOutcome {
+    pub violated: Vec<RuleId>,   // the rule-id verdict the loop bounces on
+    pub diagnostics: String,     // captured, truncation-bounded toolchain stdout/stderr
+}
+```
+
+`violated` is unchanged behaviour: the structural verdict. `diagnostics` is the
+raw toolchain output (clippy / tsc / pytest / go vet / manifest command
+stdout+stderr) each runner captures while producing that verdict — the "strict
+stack trace" a literal open-weight model needs in order to self-correct rather
+than guessing from the rule id alone. Every runner populates it (empty on a clean
+pass, or when the tool has no meaningful stdout). The composites (`RustCheckRunner`,
+`PolyglotCheckRunner`, `CombinedCheckRunner`, `ManifestCheckRunner`) concatenate
+their sub-runners' diagnostics in cheapest-first order so the most-relevant output
+lands last.
+
+To bound prompt size and keep the KV-prefix cache warm, `CheckOutcome` caps
+`diagnostics` at **`DIAGNOSTICS_CAP_BYTES` = 16 KiB**, dropping the OLDEST bytes
+(head) and keeping the TAIL — the failing assertion / final error summary — on a
+UTF-8 char boundary. The Layer-2 bounce (`dev_implement_run.rs`) appends this
+diagnostics text AFTER the violated rule ids, at the same cache-friendly prompt
+tail `append_bounce_feedback` uses (see the LIFECYCLE-5 ADR,
+`2026-07-05_lifecycle-loop-and-concurrency.md`). This is stack-agnostic: the loop
+forwards whatever the detected toolchain emitted and hardcodes no tool.
+
 ### The SSOT manifest (`.camerata/checks.toml`)
 
 `.camerata/checks.toml` is the **single source of truth** for custom deterministic
@@ -445,8 +475,10 @@ concrete sub-runners:
   test or compile failure to `RuleId("RUST-TEST")`.
 
 `RustCheckRunner::check` runs them sequentially, cheapest-first (fmt errors make
-clippy noisy; a compile failure makes tests redundant) and deduplicates the
-resulting `Vec<RuleId>`. The subprocess invocation layer
+clippy noisy; a compile failure makes tests redundant), deduplicates the resulting
+`violated` rule ids, and accumulates each sub-runner's captured stdout/stderr into
+the `CheckOutcome.diagnostics` in that same cheapest-first order (test failures
+land last). The subprocess invocation layer
 (`crates/checks/src/subprocess.rs`) and the output-to-`RuleId` mapping layer
 (`crates/checks/src/parse.rs`) are kept separate so the mapping logic is
 unit-testable without spawning real subprocesses.

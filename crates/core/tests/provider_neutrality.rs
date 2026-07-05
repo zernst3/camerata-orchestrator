@@ -38,7 +38,7 @@ use std::sync::Mutex;
 
 use camerata_agent::GenericCliDriver;
 use camerata_core::{
-    AgentDriver, AgentOutcome, FleetCoordinator, FleetStage, Role, RuleId, ToolCall,
+    AgentDriver, AgentOutcome, CheckOutcome, FleetCoordinator, FleetStage, Role, RuleId, ToolCall,
 };
 use camerata_gateway::{evaluate_call, gov1_rule};
 use serde_json::json;
@@ -107,8 +107,9 @@ impl ScriptedChecks {
 
 #[async_trait::async_trait]
 impl camerata_core::CheckRunner for ScriptedChecks {
-    async fn check(&self, _role: &Role, _wt: &Path) -> anyhow::Result<Vec<RuleId>> {
-        Ok(self.queue.lock().unwrap().pop_front().unwrap_or_default())
+    async fn check(&self, _role: &Role, _wt: &Path) -> anyhow::Result<CheckOutcome> {
+        let violated = self.queue.lock().unwrap().pop_front().unwrap_or_default();
+        Ok(CheckOutcome::new(violated, ""))
     }
 }
 

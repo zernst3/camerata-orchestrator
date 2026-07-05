@@ -1274,10 +1274,12 @@ pub async fn execute_dev_implement_run(
         }
 
         let checks = runner_for_worktree(&dir);
-        // CheckRunner::check(role, worktree) → Vec<RuleId> (violated rules).
+        // CheckRunner::check(role, worktree) → CheckOutcome { violated, diagnostics }.
+        // `violated` is the rule-id verdict we bounce on; `diagnostics` is the captured,
+        // truncation-bounded toolchain stdout/stderr fed back into the revise prompt tail.
         let check_result = checks.check(&role, &dir).await;
         match &check_result {
-            Ok(violations) if violations.is_empty() => {
+            Ok(outcome) if outcome.violated.is_empty() => {
                 // Clean L2 pass. Run L3 if enabled before declaring victory.
                 event(&runs, "pass", "Stage 1/1 passed layer-2 checks.".to_string());
                 runs.push_event(
@@ -1357,10 +1359,14 @@ pub async fn execute_dev_implement_run(
                 }
                 break Ok(());
             }
-            Ok(violations) => {
+            Ok(outcome) => {
+                let violations = &outcome.violated;
                 let rule_ids: Vec<String> =
                     violations.iter().map(|RuleId(id)| id.clone()).collect();
                 let rule_summary = rule_ids.join(", ");
+                // The captured toolchain diagnostics (clippy/tsc/pytest/go stdout+stderr),
+                // already truncation-bounded by the CheckOutcome; forwarded verbatim.
+                let diagnostics = outcome.diagnostics.as_str();
                 runs.push_event(
                     &run_id,
                     GateEvent {
@@ -1411,14 +1417,22 @@ pub async fn execute_dev_implement_run(
                 );
                 let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
                 // LIFECYCLE-5: feed the failure back into the NEXT pass's prompt at the tail.
-                // The Layer-2 check emits the violated rule ids (stack-agnostic: whatever the
-                // detected toolchain flagged — Rust clippy/test, tsc, pytest, go vet, manifest
-                // checks); forward them verbatim so the re-run agent knows what to fix.
-                task = append_bounce_feedback(
-                    &base_task,
-                    iteration,
-                    &format!("Layer-2 checks failed. Violated rule id(s): {rule_summary}"),
-                );
+                // The Layer-2 check emits the violated rule ids AND the verbatim toolchain
+                // diagnostics (stack-agnostic: whatever the detected toolchain flagged — Rust
+                // clippy/test, tsc, pytest, go vet, manifest checks). We forward BOTH so a
+                // literal open-weight model gets the actual error text to self-correct, not
+                // just the rule id. The diagnostics go LAST (cache-friendly tail) and are
+                // already truncation-bounded by CheckOutcome so the warm prefix cache holds.
+                let l2_feedback = if diagnostics.trim().is_empty() {
+                    format!("Layer-2 checks failed. Violated rule id(s): {rule_summary}")
+                } else {
+                    format!(
+                        "Layer-2 checks failed. Violated rule id(s): {rule_summary}\n\n\
+                         Verbatim toolchain output from the failed checks (authoritative — \
+                         fix the ROOT cause it describes):\n{diagnostics}"
+                    )
+                };
+                task = append_bounce_feedback(&base_task, iteration, &l2_feedback);
             }
             Err(e) => {
                 // A hard check-runner error (e.g. toolchain not found) is surfaced as a
@@ -2104,6 +2118,83 @@ mod tests {
         );
         // The revise header is present so the agent knows this is a correction pass.
         assert!(second.contains("REVISE"), "the revise header must be present");
+    }
+
+    /// LIFECYCLE-5 (CheckRunner full-diagnostics): the L2 bounce feedback assembled at
+    /// the call site now carries the FULL toolchain diagnostics captured by the runner
+    /// (not just rule ids), and they ride the CACHE-FRIENDLY TAIL of the re-prompt.
+    #[test]
+    fn append_bounce_feedback_carries_full_runner_diagnostics_at_the_tail() {
+        use camerata_core::CheckOutcome;
+
+        let base = implement_prompt("s/r#7", "T", "D", "b", &[], None, &[], "");
+        // Mirror the runner → call-site path: a CheckOutcome with violated rule ids
+        // AND captured toolchain diagnostics (the "strict stack trace").
+        let outcome = CheckOutcome::new(
+            vec![camerata_core::RuleId("RUST-TEST".into())],
+            "$ cargo test\nrunning 1 test\ntest auth::login_rejects_bad_password ... FAILED\n\
+             thread 'auth::login_rejects_bad_password' panicked at 'assertion failed: \
+             `(left == right)`\n  left: `401`,\n right: `200`', src/auth.rs:88:9",
+        );
+        // Same assembly the L2 arm performs: rule ids first, verbatim diagnostics last.
+        let rule_summary = outcome
+            .violated
+            .iter()
+            .map(|r| r.0.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let l2_feedback = format!(
+            "Layer-2 checks failed. Violated rule id(s): {rule_summary}\n\n\
+             Verbatim toolchain output from the failed checks (authoritative — \
+             fix the ROOT cause it describes):\n{}",
+            outcome.diagnostics
+        );
+        let second = append_bounce_feedback(&base, 1, &l2_feedback);
+
+        assert!(second.starts_with(&base), "base prompt must remain the cached prefix");
+        // The FULL diagnostic body (panic message + assertion + file:line), not just the id.
+        assert!(second.contains("RUST-TEST"), "rule id must be present");
+        assert!(
+            second.contains("assertion failed") && second.contains("src/auth.rs:88:9"),
+            "the FULL toolchain diagnostics must be fed back, not just the rule id"
+        );
+        // Diagnostics ride the tail: the panic text lands AFTER the rule-id citation.
+        let ids_pos = second.find("RUST-TEST").unwrap();
+        let diag_pos = second.find("assertion failed").unwrap();
+        assert!(diag_pos > ids_pos, "diagnostics must be appended after the rule ids");
+    }
+
+    /// LIFECYCLE-5 truncation: diagnostics larger than the cap are bounded by
+    /// `CheckOutcome` BEFORE they reach the prompt, so the warm prefix cache holds.
+    /// The oldest head is dropped and the failing tail is preserved.
+    #[test]
+    fn oversized_runner_diagnostics_are_truncated_before_the_reprompt() {
+        use camerata_core::{CheckOutcome, DIAGNOSTICS_CAP_BYTES};
+
+        let base = implement_prompt("s/r#8", "T", "D", "b", &[], None, &[], "");
+        let mut outcome = CheckOutcome::new(vec![camerata_core::RuleId("RUST-CLIPPY".into())], "");
+        outcome.push_diagnostics("HEAD_NOISE_TO_EVICT");
+        outcome.push_diagnostics(&"clippy warning line\n".repeat(DIAGNOSTICS_CAP_BYTES / 10));
+        outcome.push_diagnostics("FINAL_ERROR_SUMMARY_KEEP_ME");
+
+        let second = append_bounce_feedback(&base, 1, &outcome.diagnostics);
+
+        // Bounded: base prompt + a diagnostics block near the cap + the fixed revise
+        // header prose. The point is the diagnostics can't grow unbounded with the raw
+        // toolchain output — it stays within the cap plus a small constant overhead.
+        assert!(
+            second.len() <= base.len() + DIAGNOSTICS_CAP_BYTES + 1024,
+            "the re-prompt diagnostics must be bounded by the cap, got {} extra bytes",
+            second.len() - base.len()
+        );
+        assert!(
+            second.contains("FINAL_ERROR_SUMMARY_KEEP_ME"),
+            "the failing tail must survive truncation"
+        );
+        assert!(
+            !second.contains("HEAD_NOISE_TO_EVICT"),
+            "the oldest head must be evicted past the cap"
+        );
     }
 
     /// Empty feedback is a no-op: the prompt is unchanged (defensive — never append an
