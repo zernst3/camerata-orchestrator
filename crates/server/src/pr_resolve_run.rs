@@ -23,8 +23,9 @@
 //! Nothing is faked.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-use camerata_agent::prepare_session;
+use camerata_agent::{prepare_session, HeartbeatFn};
 use camerata_core::AgentDriver;
 use camerata_fleet::{governed_role, locate_gateway_bin};
 
@@ -227,7 +228,13 @@ pub async fn execute_pr_resolve_run(
             return;
         }
     };
-    let driver = spawn.driver.with_model(&model);
+    // LIFECYCLE-7: wire the run's activity heartbeat so the resolver's streamed output keeps
+    // last_activity_ms fresh throughout its (potentially long) execution and a healthy run is
+    // not reported stalled. Mirrors update_branch_run / investigation_run.
+    let store_hb = runs.clone();
+    let rid_hb = run_id.clone();
+    let on_activity: HeartbeatFn = Arc::new(move || store_hb.touch_activity(&rid_hb, None));
+    let driver = spawn.driver.with_model(&model).with_on_activity(on_activity);
 
     event(
         &runs,

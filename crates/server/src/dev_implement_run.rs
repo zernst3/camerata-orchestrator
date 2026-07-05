@@ -53,7 +53,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use camerata_agent::prepare_session;
+use camerata_agent::{prepare_session, HeartbeatFn};
 use camerata_checks::runner_for_worktree;
 use camerata_core::{AgentDriver, RuleId};
 use camerata_fleet::{governed_role, locate_gateway_bin};
@@ -974,6 +974,13 @@ pub async fn execute_dev_implement_run(
     // TODO(provider-agnostic-followup): agentic-level tier-chain fallback and
     // orchestrator-via-API delegate/fan_out dispatch are not yet implemented.
     let mcp_config_path = spawn.mcp_config.display().to_string();
+    // LIFECYCLE-7: wire the run's activity heartbeat onto the built driver so a healthy long
+    // implement run keeps last_activity_ms fresh and is not reported stalled. The CLI path
+    // fires it per output line; the API path fires it per loop turn (both wired inside
+    // build_agent_driver). Mirrors investigation_run / update_branch_run / pr_resolve_run.
+    let store_hb = runs.clone();
+    let rid_hb = run_id.clone();
+    let on_activity: HeartbeatFn = Arc::new(move || store_hb.touch_activity(&rid_hb, None));
     let driver: Arc<dyn AgentDriver> = match build_agent_driver(
         &model,
         &registry,
@@ -990,6 +997,7 @@ pub async fn execute_dev_implement_run(
         // Opt the implementer into the READ-CLASS raise_escalation tool so it can self-escalate
         // when its work meets a selected rule's escalation condition (the rule-agnostic path).
         true,
+        Some(on_activity),
     ) {
         Ok(d) => d,
         Err(e) => {

@@ -65,6 +65,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
+use camerata_agent::HeartbeatFn;
 use camerata_core::{AgentDriver, AgentOutcome, Decision, Role, RuleId, ToolCall};
 use camerata_gateway::evaluate_call;
 use serde_json::Value;
@@ -186,6 +187,12 @@ pub struct ApiAgentDriver {
     /// `ANTHROPIC_API_KEY` (mirroring `llm.rs::complete_api`) and threaded in at build time.
     /// `None` on the OpenRouter path (the OpenRouter key is read off the completer instead).
     anthropic_api_key: Option<String>,
+    /// LIFECYCLE-7 liveness heartbeat. Fired once per agentic loop iteration so a healthy,
+    /// long-running API-driven run keeps `last_activity_ms` fresh and does NOT read as stalled.
+    /// The CLI path fires its heartbeat per output line via `ClaudeCliDriver::with_on_activity`;
+    /// the API loop has no line stream, so it beats per turn instead. `None` = no heartbeat
+    /// (tests / callers that don't wire one).
+    on_activity: Option<HeartbeatFn>,
 }
 
 impl ApiAgentDriver {
@@ -222,7 +229,16 @@ impl ApiAgentDriver {
             orchestrator_config: None,
             shape: ApiShape::OpenRouter,
             anthropic_api_key: None,
+            on_activity: None,
         }
+    }
+
+    /// Wire the LIFECYCLE-7 liveness heartbeat. Builder form. The callback fires once per
+    /// agentic loop iteration (each provider turn), keeping `last_activity_ms` fresh so a
+    /// healthy long API-driven run is never reported stalled. No-op when never set.
+    pub fn with_on_activity(mut self, cb: HeartbeatFn) -> Self {
+        self.on_activity = Some(cb);
+        self
     }
 
     /// Set the provider wire shape (URL + headers + tool-schema + tool-result + normalizer
@@ -363,6 +379,14 @@ async fn run_loop(
             break;
         }
         iteration += 1;
+
+        // LIFECYCLE-7: beat the liveness heartbeat once per turn. The API loop has no
+        // per-line output stream (unlike the CLI driver), so a multi-turn run that is
+        // healthily grinding through provider calls would otherwise look idle. Firing here
+        // keeps `last_activity_ms` fresh across the whole run.
+        if let Some(cb) = driver.on_activity.as_ref() {
+            cb();
+        }
 
         // ── Call the provider ──────────────────────────────────────────────
         let resp = call_provider(
@@ -1692,6 +1716,9 @@ fn build_claude_driver(
     // Opt this CLI agent into the READ-CLASS `raise_escalation` gateway tool. Only meaningful on
     // the CLI path (the gateway MCP provides the tool); ignored by the Anthropic-API shape.
     escalation: bool,
+    // LIFECYCLE-7 liveness heartbeat. Wired onto whichever concrete driver is built (CLI: per
+    // output line; Anthropic API: per loop turn) so a healthy long run stays fresh.
+    on_activity: Option<HeartbeatFn>,
 ) -> Arc<dyn AgentDriver> {
     if let Some(key) = anthropic_api_backend_key() {
         // Anthropic Messages API agent. Same gate surface as every other ApiAgentDriver:
@@ -1704,6 +1731,9 @@ fn build_claude_driver(
         if let Some(wt) = worktree {
             driver = driver.with_worktree(wt);
         }
+        if let Some(cb) = on_activity {
+            driver = driver.with_on_activity(cb);
+        }
         Arc::new(driver)
     } else {
         let mut cli_driver = camerata_agent::ClaudeCliDriver::new(mcp_config_path)
@@ -1714,6 +1744,9 @@ fn build_claude_driver(
         }
         if let Some(wt) = worktree {
             cli_driver = cli_driver.with_worktree(wt);
+        }
+        if let Some(cb) = on_activity {
+            cli_driver = cli_driver.with_on_activity(cb);
         }
         Arc::new(cli_driver)
     }
@@ -1757,6 +1790,12 @@ pub fn build_agent_driver(
     // for every caller except a governed dev run, which lets the agent self-escalate on rule
     // conditions. Adds no write path; the gate posture is unchanged.
     escalation: bool,
+    // LIFECYCLE-7 liveness heartbeat. Threaded onto the concrete driver (CLI, Anthropic API, or
+    // OpenRouter) so a healthy long run keeps `last_activity_ms` fresh and is not reported
+    // stalled. `None` for callers that don't wire one (tests / non-supervised builds). Runners
+    // pass `Arc::new(move || runs.touch_activity(&run_id, None))`, mirroring
+    // investigation_run / update_branch_run.
+    on_activity: Option<HeartbeatFn>,
 ) -> anyhow::Result<Arc<dyn AgentDriver>> {
     let provider = registry
         .all_entries()
@@ -1789,6 +1828,9 @@ pub fn build_agent_driver(
             if let Some(wt) = worktree {
                 driver = driver.with_worktree(wt);
             }
+            if let Some(cb) = on_activity {
+                driver = driver.with_on_activity(cb);
+            }
             Ok(Arc::new(driver))
         }
         // "claude" or any unrecognised provider: CLI by default, or the Anthropic Messages
@@ -1800,6 +1842,7 @@ pub fn build_agent_driver(
             worktree,
             orchestrator,
             escalation,
+            on_activity,
         )),
     }
 }
@@ -1929,6 +1972,7 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
             self.limiter.clone(),
             self.run_session_id.as_deref(),
             false, // workers do not self-escalate (the governed dev-implement agent does)
+            None,  // child driver: heartbeat is owned by the parent run's supervised path
         )
         .map_err(|e| std::io::Error::other(format!("build child driver for `{model}`: {e}")))?;
 
@@ -2385,6 +2429,52 @@ mod tests {
                 "escape tool `{escape}` must NOT appear in worker schemas"
             );
         }
+    }
+
+    /// LIFECYCLE-7: the API agent loop fires the wired `on_activity` heartbeat at least once
+    /// per run so a healthy long API-driven run keeps `last_activity_ms` fresh (the API path has
+    /// no per-line output stream, unlike the CLI driver). Uses a two-turn completer so the loop
+    /// runs multiple iterations, and asserts the heartbeat fired once per turn.
+    #[tokio::test]
+    async fn api_driver_fires_liveness_heartbeat_per_turn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Two turns: one tool call (gated_write to an allowed path), then final text.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wt = tmp.path().to_path_buf();
+        let completer = Arc::new(OneToolCallCompleter::new(
+            "gated_write",
+            serde_json::json!({ "path": "src/ok.rs", "content": "fn main() {}" }),
+            "done",
+        ));
+        let role = all_rules_role();
+
+        let beats = Arc::new(AtomicUsize::new(0));
+        let beats_cb = beats.clone();
+        let driver = driver_with(completer, &role, Some(wt))
+            .with_on_activity(Arc::new(move || {
+                beats_cb.fetch_add(1, Ordering::SeqCst);
+            }));
+
+        let _ = driver.run(&role, "do the thing").await;
+
+        // The loop ran two turns (tool-call turn + final-text turn); the heartbeat fires once
+        // at the top of each, so it must have fired at least twice.
+        assert!(
+            beats.load(Ordering::SeqCst) >= 2,
+            "heartbeat must fire per loop turn (got {})",
+            beats.load(Ordering::SeqCst)
+        );
+    }
+
+    /// A driver with NO heartbeat wired must run without panicking (the callback is optional).
+    #[tokio::test]
+    async fn api_driver_without_heartbeat_runs_fine() {
+        let completer = Arc::new(StubCompleter("done".to_string()));
+        let role = test_role();
+        let driver = driver_with(completer, &role, None); // no with_on_activity
+        let out = driver.run(&role, "hi").await;
+        assert!(out.is_ok(), "no-heartbeat run must succeed");
     }
 
     #[test]
@@ -2865,6 +2955,7 @@ mod tests {
             limiter,
             None,                 // run_session_id
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         );
         assert!(
             result.is_ok(),
@@ -2917,6 +3008,7 @@ mod tests {
             limiter,
             None, // run_session_id
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         );
         assert!(
             result.is_ok(),
@@ -2946,6 +3038,7 @@ mod tests {
             limiter,
             None, // run_session_id
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         );
         assert!(
             result.is_err(),
@@ -3132,6 +3225,7 @@ mod tests {
             limiter,
             Some("uow-story-id-42"), // run_session_id
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         )
         .expect("build must succeed");
 
@@ -3706,6 +3800,7 @@ mod tests {
             Some(PathBuf::from("/tmp/wt")),
             false,
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         ); // building must not panic / spawn
 
         // default cli: routing helper does not fire, CLI driver builds.
@@ -3719,6 +3814,7 @@ mod tests {
             None,
             false,
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         );
     }
 
@@ -3747,6 +3843,7 @@ mod tests {
             limiter,
             None,
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         );
         assert!(result.is_ok(), "claude+api+key must build: {:?}", result.err().map(|e| e.to_string()));
     }
@@ -3774,6 +3871,7 @@ mod tests {
             limiter,
             None,
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         );
         assert!(result.is_ok(), "claude+cli must build: {:?}", result.err().map(|e| e.to_string()));
     }
