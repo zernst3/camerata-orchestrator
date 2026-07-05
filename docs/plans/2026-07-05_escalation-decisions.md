@@ -1,8 +1,22 @@
 # Escalation decisions — 2026-07-05
 
 Every item the audit blitz escalated (held back because it needs a human call). Each has THE QUESTION,
-options, and a recommendation. Fill in "Answer:" and I implement. Detail for any finding is in
-`docs/ARCH_AUDIT_2026-07-04_fable5-complete.md`.
+options, and a recommendation. Detail for any finding is in `docs/ARCH_AUDIT_2026-07-04_fable5-complete.md`.
+
+## APPROVED 2026-07-05 — ALL 21 greenlit
+
+Zach approved every item. Recommendation [Rec] taken for all EXCEPT:
+- **GAP-6: BUILD it now, do NOT defer** (build the remaining 3 integration-gate categories).
+- **LIFECYCLE-7:** also update the stall-auto-cancel DEFAULT shown in the UI.
+- **GAP-3:** approved, but design the state model + share it BEFORE building (see the design doc).
+
+Governing principle (standing): **never defer hardening/refining/correctness of Camerata; only defer
+net-new features outside MVP spirit.** So GAP-1/3/6/7/8 are all build-now (structural ones design-first).
+
+Implementation order: Batch 1 P0 gate (GAP-2, LIFECYCLE-10, GATE-F7) -> Batch 2 lifecycle provenance
+bundle (LIFECYCLE-1/2/3/4) -> Batch 3 lifecycle loop/concurrency (LIFECYCLE-5/7+6/9/12) -> Batch 4
+ROUTES (5/7/8/9) -> Batch 5 GAP features (4/6/8) -> Batch 6 structural (GAP-3 LlmPort+state, GAP-1
+api-types+MCP, GAP-7 CLI). Prompt phase-2 (cache-layering + rollout 6-9) rides with Batch 3's LIFECYCLE-5.
 
 ## P0 — gate / moat + provenance integrity
 
