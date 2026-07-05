@@ -164,7 +164,7 @@ fixes every AUTO item, skips every ZACH item, and updates the Progress table bel
 | Area / PR | Findings | Status | PR / commit |
 |---|---|---|---|
 | UI contract + reactivity | cockpit-F1, UI-1,2,3,4,6,7,8,9,10,11,13,14,16, cockpit-F4,5,6 | not started | — |
-| Workspace panel | workspace-F1..F8 | not started | — |
+| Workspace panel | workspace-F1..F8 | done | branch fix/audit-workspace (commit ad6ac56); 543 ui tests green. F6 fixed UI-only (restrict drop target to current branch + fix hint); server cherry_pick branch param NOT added (out of scope). |
 | Design double-create | ROUTES-3/UI-12 | not started | — |
 | Server contract + handlers | ROUTES-2,5,6,7,8,9 | not started | — |
 | GitHub token + publish + emit | ROUTES-1/PUBLISH-1, PUBLISH-2,3,4,5,6,7,8, GATE-F6 | not started | — |
