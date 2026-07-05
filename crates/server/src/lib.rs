@@ -6316,17 +6316,40 @@ async fn emit_project(
             serde_json::json!({ "ok": false, "message": "Nothing to emit — this project has no repo-local rules or custom rules yet." }),
         );
     }
+    // Derive the emit repo set as the UNION of the project's repos and the repos its
+    // repo-local rules actually target. Iterating only `project.repos` silently omits a
+    // selection scoped to a repo later removed from the project (PUBLISH-7). Warn on those
+    // out-of-project targets so the drift is visible rather than silent.
+    let project_set: std::collections::BTreeSet<&str> =
+        project.repos.iter().map(String::as_str).collect();
+    let mut repo_set: std::collections::BTreeSet<String> = project.repos.iter().cloned().collect();
+    let mut warnings: Vec<String> = Vec::new();
+    for r in &rules {
+        if r.scope == "cross-repo" || r.scope == "process" {
+            continue;
+        }
+        for repo in &r.repos {
+            if !project_set.contains(repo.as_str()) {
+                warnings.push(format!(
+                    "rule `{}` is scoped to `{repo}`, which is not in the project's repos; emitting anyway",
+                    r.id
+                ));
+            }
+            repo_set.insert(repo.clone());
+        }
+    }
+    let repos: Vec<String> = repo_set.into_iter().collect();
     // Re-emit carries no new baseline (it's a ruleset refresh, not onboarding).
     let no_baselines = std::collections::HashMap::new();
     let results = emit_to_repos(
-        &project.repos,
+        &repos,
         &rules,
         &project.ruleset.custom,
         &no_baselines,
         &token,
     )
     .await;
-    Json(serde_json::json!({ "ok": true, "results": results }))
+    Json(serde_json::json!({ "ok": true, "results": results, "warnings": warnings }))
 }
 
 /// Re-emit a project's ruleset directly into the LOCAL working copies of its repos,
