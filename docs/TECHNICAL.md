@@ -727,11 +727,47 @@ Key design points:
   (`GET /api/v1/models`). Each entry is tagged with capability flags:
   `free`, `tool_use`, `caching`, `vision`, plus `input_price`/`output_price`
   (per-million-token). The registry is fetched once per session and cached.
-- **Prompt caching**: ephemeral `cache_control` blocks are injected on the
-  static system-prompt prefix, making the prefix cache-eligible. OpenRouter
-  response caching is honoured via `X-OpenRouter-Cache` (the driver reads
-  `Cache-Status` and `Cache-Clear` response headers). Both forms of caching are
-  transparent to the caller.
+- **Prompt caching + geological layering**: every agent prompt is assembled in a
+  strict, prefix-cache-optimal order (static at the top, volatile at the bottom) so
+  the cacheable prefix stays byte-identical across calls that differ only in the tail.
+  `camerata_app_core::LayeredPrompt` (`crates/app-core/src/prompt_layers.rs`) is the
+  pure, deterministic assembler with three layers:
+    - **Layer 1 (global immutable, top):** the governance kernel + role framing +
+      project rules/schemas. Identical across every call for a project/model tier.
+    - **Layer 2 (epic/session context, middle):** the grounding block (repo digest +
+      rule context) for the current work area. Changes only every few days.
+    - **Layer 3 (volatile, bottom):** the specific story, the LATEST toolchain/gate
+      error (the LIFECYCLE-5 feedback appended at the very tail), and the turn request.
+  `LayeredPrompt::stable_prefix_len` reports the byte length of Layers 1+2 so a
+  provider adapter can place a cache breakpoint exactly at that boundary. The prefix
+  serializes deterministically (trimmed layers, ordered joins, no timestamps, no
+  nondeterministic map iteration); a unit test proves it is byte-identical across two
+  builds that differ only in Layer-3 input.
+  **Provider-neutral activation:** the prompt builders never mention a vendor. The
+  Anthropic body builder (`api_agent_driver.rs::build_anthropic_request_body`) is the
+  only place that translates the layering into `cache_control` breakpoints: ephemeral
+  blocks on the static system prefix (end of Layer 1) and at the end of the Layer-2
+  grounding block inside the first user message (detected via the grounding terminator
+  marker `=== END PROJECT GROUNDING ===`, so only the volatile Layer-3 tail is billed at
+  full price on each turn). DeepSeek/GLM cache the same stable prefix automatically with
+  no config. The single-shot audit path carries the same seam via
+  `LlmRequest::with_cache_prefix_len`. OpenRouter response caching is honoured via
+  `X-OpenRouter-Cache` (the driver reads `Cache-Status` and `Cache-Clear` response
+  headers). All forms of caching are transparent to the caller.
+  **Verification:** `LlmResponse::cache_hit_ratio` computes the cached fraction of the
+  call's input tokens; the API agent loop logs it per turn, so a prefix that is holding
+  drives the ratio toward 1.0 after the first turn and a churning prefix shows up as a
+  ratio stuck near 0.
+- **Governance kernel (v2)**: the one shared operating protocol every agent prompt
+  embeds (`crates/app-core/src/prompt_kernel.rs`: `GOVERNANCE_KERNEL` /
+  `GOVERNANCE_KERNEL_READONLY`, specialized per model tier by `kernel_for`). v2 adds a
+  mandatory, STACK-NEUTRAL `<Reasoning>` block the writing agent must emit before any
+  code (naming this stack's real correctness risks such as memory/ownership, types,
+  concurrency, null/None; how it manages state; and the exact signatures/interfaces it
+  will change; phrased generically, not Rust-specifically), plus state-machine phase
+  framing on the fast (2-phase) and balanced (3-phase, test-first) tier addenda ("you
+  are in Phase N of M; you may only output X; any other output is rejected") so literal
+  open-weight models stay predictable.
 - **Rate limiting**: per-provider rate-limit headers are parsed and respected;
   on a 429 the driver backs off and retries within the per-request fallback policy.
 - **Request-level fallback**: if the configured primary model returns an error

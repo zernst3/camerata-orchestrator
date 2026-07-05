@@ -33,6 +33,14 @@ These rules are not suggestions. Follow them exactly, in order, on every task.
 2. PLAN, THEN ACT. Before your first write, enumerate the files you will change, the
    behavior that must hold, and the tests that will prove it. If the task names a pattern
    or class of problem, search and enumerate EVERY occurrence.
+2b. EMIT A <Reasoning> BLOCK BEFORE ANY CODE. Before you write or change a single line,
+   output a block delimited by <Reasoning> and </Reasoning> that states, for THIS project's
+   language and stack (whatever it is): the correctness risks specific to that stack (for
+   example memory/ownership, type soundness, concurrency/races, null/None/undefined handling,
+   resource cleanup, whichever apply here); how you will manage state across the change; and
+   the exact function/method/type signatures and interfaces you will add or change. Name the
+   stack's real hazards, not a generic checklist. This block primes your own plan; write it
+   first, then act on it.
 3. TESTS ARE PART OF THE CHANGE. Every new/changed behavior gets a test in the project's
    style that fails if the behavior is removed. Never weaken/delete/skip an existing test
    to fit your change. A change you cannot test must be called out in your final report.
@@ -70,14 +78,23 @@ pub const GOVERNANCE_KERNEL_READONLY: &str = "\
 /// The per-tier addendum for the FAST / LOW tier (Haiku, DeepSeek-Flash). Low tiers must fail
 /// loudly, not creatively. See section 5 "Per-tier addenda".
 pub const KERNEL_ADDENDUM_FAST: &str = "\
-TIER DISCIPLINE (fast): Do exactly what the task says and nothing else. If anything is \
-ambiguous or exceeds what you can verify, return INCOMPLETE: <reason> instead of attempting it.";
+TIER DISCIPLINE (fast). STATE MACHINE: You run as a strict two-phase state machine. \
+Phase 1 of 2 (SCOPE): output ONLY the <Reasoning> block naming the exact files and \
+signatures you will touch; any code in Phase 1 is rejected. Phase 2 of 2 (EXECUTE): output \
+ONLY the writes named in Phase 1; do nothing outside that scope. Do exactly what the task \
+says and nothing else. If anything is ambiguous or exceeds what you can verify in either \
+phase, return INCOMPLETE: <reason> instead of attempting it.";
 
 /// The per-tier addendum for the BALANCED / MID tier (Sonnet, DeepSeek-Pro — surgically precise
 /// but literal). See section 5 "Per-tier addenda".
 pub const KERNEL_ADDENDUM_BALANCED: &str = "\
-TIER DISCIPLINE (balanced): Use the full TDD loop. Write the failing test FIRST, then \
-implement, then confirm the test would fail without the change. Run the rule-5 self-review TWICE.";
+TIER DISCIPLINE (balanced). STATE MACHINE: You run as a strict three-phase state machine; \
+you may only produce the current phase's output, and any other output is rejected. \
+Phase 1 of 3 (TEST): write ONLY the failing test(s) for the new/changed behavior; emit no \
+implementation. Phase 2 of 3 (IMPLEMENT): write ONLY the implementation that makes those \
+tests pass; do not weaken the tests. Phase 3 of 3 (VERIFY): run the rule-5 self-review \
+TWICE and confirm each test would fail without your change. Do not skip a phase or merge \
+phases: the failing test comes first, the implementation second, the double self-review last.";
 
 /// The per-tier addendum for the STRONGEST / ORCHESTRATION tier (Opus, GLM). See section 5.
 pub const KERNEL_ADDENDUM_STRONGEST: &str = "\
@@ -176,6 +193,47 @@ mod tests {
         assert!(GOVERNANCE_KERNEL.contains("VERIFY BEFORE DONE"));
         assert!(GOVERNANCE_KERNEL.contains("IF UNSURE, DO NOT GUESS"));
         assert!(GOVERNANCE_KERNEL.contains("REPORT IN CONTRACT FORM"));
+    }
+
+    #[test]
+    fn full_kernel_mandates_a_stack_neutral_reasoning_block() {
+        // Kernel v2: a mandatory <Reasoning> block before any code.
+        assert!(GOVERNANCE_KERNEL.contains("<Reasoning>"));
+        assert!(GOVERNANCE_KERNEL.contains("</Reasoning>"));
+        assert!(GOVERNANCE_KERNEL.contains("BEFORE ANY CODE"));
+        // It must name stack risks GENERICALLY (concurrency, null/None, ownership) and must NOT
+        // be phrased Rust-specifically: the same kernel drives Python/TS/Go/Java/C#/SQL.
+        assert!(GOVERNANCE_KERNEL.contains("concurrency"));
+        assert!(GOVERNANCE_KERNEL.contains("null/None"));
+        assert!(
+            !GOVERNANCE_KERNEL.to_lowercase().contains("borrow-checker")
+                && !GOVERNANCE_KERNEL.to_lowercase().contains("borrow checker"),
+            "the reasoning block must be stack-neutral, not Rust-specific"
+        );
+        // It must ask for the exact signatures/interfaces being changed.
+        assert!(GOVERNANCE_KERNEL.contains("signatures"));
+    }
+
+    #[test]
+    fn mid_and_low_addenda_use_state_machine_phase_framing() {
+        // Kernel v2: the mid/low tier addenda are explicit state machines with numbered phases
+        // and a "reject any other output" clause, so literal models stay predictable.
+        for text in [KERNEL_ADDENDUM_FAST, KERNEL_ADDENDUM_BALANCED] {
+            assert!(text.contains("STATE MACHINE"), "missing state-machine framing: {text}");
+            assert!(
+                text.contains("Phase 1"),
+                "missing explicit phase numbering: {text}"
+            );
+            assert!(
+                text.to_lowercase().contains("rejected"),
+                "missing the 'any other output is rejected' clause: {text}"
+            );
+        }
+        // The balanced tier's test-first phase must precede its implement phase.
+        let bal = KERNEL_ADDENDUM_BALANCED;
+        let test_phase = bal.find("Phase 1 of 3 (TEST)").expect("test phase");
+        let impl_phase = bal.find("Phase 2 of 3 (IMPLEMENT)").expect("impl phase");
+        assert!(test_phase < impl_phase, "TEST phase must come before IMPLEMENT phase");
     }
 
     #[test]

@@ -401,6 +401,22 @@ async fn run_loop(
         // Cache-bust is one-shot: reset after use so subsequent turns use cached responses.
         bust_cache_this_turn = false;
 
+        // CACHE-HIT LOGGING (prefix-stability verification): log the effective prompt-cache hit
+        // ratio for this call so the geological layering is verifiable in practice. If the stable
+        // Layer-1/Layer-2 prefix is holding, this climbs toward 1.0 after the first turn; a ratio
+        // stuck near 0 across turns signals the prefix is churning. Only logged when the backend
+        // reported input-token usage (the CLI/stub paths report none and are silently skipped).
+        if let Some(ratio) = resp.cache_hit_ratio() {
+            eprintln!(
+                "[camerata-server/api-agent] turn {iteration} cache-hit {:.0}% (read={} creation={} input={}) session={}",
+                ratio * 100.0,
+                resp.cache_read_input_tokens,
+                resp.cache_creation_input_tokens,
+                resp.input_tokens.unwrap_or(0),
+                driver.session_id,
+            );
+        }
+
         // Accumulate cost.
         if let Some(c) = resp.cost_usd {
             total_cost_usd += c;
@@ -703,6 +719,64 @@ async fn call_openrouter_with_tools(
     })
 }
 
+/// The provider-neutral marker that terminates the Layer-2 grounding block in a prompt (emitted
+/// by `grounding::assemble`). The prompt builders stay provider-neutral: they never mention
+/// Anthropic and never place a `cache_control`. This body builder is the ONLY place that knows
+/// how to translate the layering into Anthropic's cache breakpoints, so it detects the end of
+/// Layer 2 by this marker and splits the first user message there.
+const LAYER2_GROUNDING_TERMINATOR: &str = "=== END PROJECT GROUNDING ===";
+
+/// Split a first-user-message string into its cacheable stable prefix (Layer 1 in the system
+/// block already, plus Layer 2 grounding here) and its volatile Layer-3 tail, using the
+/// grounding terminator. Returns `Some((prefix, tail))` only when the marker is present AND
+/// there is real Layer-3 content after it (so we never place a degenerate breakpoint at the very
+/// end). The prefix INCLUDES the terminator line so the whole grounding block is cached.
+///
+/// Provider-neutral by construction: the builders emit the marker via `grounding::assemble`
+/// without knowing this split exists; only the Anthropic body builder consumes it.
+fn split_grounding_prefix(text: &str) -> Option<(&str, &str)> {
+    let idx = text.find(LAYER2_GROUNDING_TERMINATOR)?;
+    // Boundary = just past the terminator marker (end of Layer 2).
+    let boundary = idx + LAYER2_GROUNDING_TERMINATOR.len();
+    let (prefix, tail) = text.split_at(boundary);
+    // Only split when there is non-whitespace Layer-3 content after the boundary; otherwise the
+    // second breakpoint would be redundant with the end of the message.
+    if tail.trim().is_empty() {
+        return None;
+    }
+    Some((prefix, tail))
+}
+
+/// Wrap a first-user-message `Value` (whose content is a plain string) in a two-block content
+/// array with a `cache_control` breakpoint at the end of the Layer-2 grounding prefix, when that
+/// message carries a grounding block. Any other message (tool_result arrays, non-string content,
+/// or a message with no grounding marker) is returned unchanged. Pure: testable without HTTP.
+///
+/// This is the "end of Layer 2" breakpoint from the cache-layering design: the system block
+/// caches Layer 1, and this caches Layer 1+2's continuation in the first user turn, so only the
+/// volatile Layer-3 tail is billed at full price on each turn.
+fn apply_grounding_cache_breakpoint(first_user_msg: &Value) -> Value {
+    let Some(content) = first_user_msg.get("content").and_then(Value::as_str) else {
+        return first_user_msg.clone();
+    };
+    let Some((prefix, tail)) = split_grounding_prefix(content) else {
+        return first_user_msg.clone();
+    };
+    let mut msg = first_user_msg.clone();
+    msg["content"] = serde_json::json!([
+        {
+            "type": "text",
+            "text": prefix,
+            "cache_control": {"type": "ephemeral"}
+        },
+        {
+            "type": "text",
+            "text": tail
+        }
+    ]);
+    msg
+}
+
 /// Build the Anthropic Messages API request body (pure — no HTTP). Returns the body and
 /// whether prompt-caching is active (drives the `anthropic-beta` header in the caller).
 ///
@@ -711,22 +785,53 @@ async fn call_openrouter_with_tools(
 /// tool_result user messages), a top-level `system` text block with a `cache_control`
 /// ephemeral breakpoint (when a system prompt is present), and `tools` in Anthropic format
 /// (`{name, description, input_schema}`) with `tool_choice: {type:"auto"}`.
+///
+/// CACHE LAYERING: two `cache_control` breakpoints are placed, both provider-neutral in the
+/// builders (which never mention Anthropic):
+///   - the top-level `system` block = the end of Layer 1 (kernel + role);
+///   - the end of the Layer-2 grounding block INSIDE the first user message (detected via the
+///     grounding terminator marker), so Layer 2 is cached too and only the volatile Layer-3 tail
+///     is billed at full price on each turn.
 fn build_anthropic_request_body(
     model: &str,
     system: Option<&str>,
     messages: &[Value],
     tool_schemas: &[Value],
 ) -> (Value, bool) {
+    // Place the Layer-2 grounding breakpoint on the FIRST user message when it carries a
+    // grounding block. Every other message is passed through untouched.
+    let mut use_caching = false;
+    let shaped_messages: Vec<Value> = messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            if i == 0 && m.get("role").and_then(Value::as_str) == Some("user") {
+                let shaped = apply_grounding_cache_breakpoint(m);
+                // A shaped (array-content) first message means a grounding breakpoint was placed,
+                // so the beta header must be sent even if there is no system prompt.
+                if shaped
+                    .get("content")
+                    .map(Value::is_array)
+                    .unwrap_or(false)
+                {
+                    use_caching = true;
+                }
+                shaped
+            } else {
+                m.clone()
+            }
+        })
+        .collect();
+
     let mut body = serde_json::json!({
         "model": model,
         "max_tokens": 8192,
-        "messages": messages,
+        "messages": shaped_messages,
     });
 
     // Top-level `system` with a prompt-cache breakpoint on the static prefix. Sending it
     // as a single text block with `cache_control` (rather than a bare string) lets the
     // Anthropic prompt-caching beta cache the system prefix across the multi-turn loop.
-    let mut use_caching = false;
     if let Some(sys) = system {
         body["system"] = serde_json::json!([{
             "type": "text",
@@ -1621,6 +1726,12 @@ fn openai_tool_to_anthropic(tool: &Value) -> Option<Value> {
 ///
 /// `model` pins the kernel's per-tier addendum (`kernel_for(model)`); an empty model falls back
 /// to the base [`camerata_app_core::GOVERNANCE_KERNEL`] with no addendum.
+///
+/// LAYERING: this system prompt IS Layer 1 (global immutable) of the geological prompt layering —
+/// identical across every turn for a given role + model tier. `build_anthropic_request_body`
+/// places a `cache_control` breakpoint on it (the end-of-Layer-1 boundary). Layer 2 (grounding)
+/// and Layer 3 (the volatile task) travel in the user message. See
+/// `camerata_app_core::prompt_layers`.
 fn build_system_prompt(role: &Role, model: &str) -> Option<String> {
     let kernel = if model.trim().is_empty() {
         camerata_app_core::GOVERNANCE_KERNEL.to_string()
@@ -3616,6 +3727,69 @@ mod tests {
         // No tools → no tools/tool_choice keys.
         assert!(body.get("tools").is_none());
         assert!(body.get("tool_choice").is_none());
+    }
+
+    // ── Anthropic shape: Layer-2 grounding cache breakpoint ───────────────────
+
+    #[test]
+    fn split_grounding_prefix_splits_at_the_terminator_when_layer3_follows() {
+        let text = "=== PROJECT GROUNDING ===\nrepo digest\n=== END PROJECT GROUNDING ===\n\n## Story\nvolatile tail";
+        let (prefix, tail) = split_grounding_prefix(text).expect("must split");
+        // Prefix includes the terminator (whole grounding block cached).
+        assert!(prefix.ends_with(LAYER2_GROUNDING_TERMINATOR));
+        assert!(prefix.contains("repo digest"));
+        // Tail is the volatile Layer-3 content only.
+        assert!(tail.contains("## Story"));
+        assert!(!tail.contains("repo digest"));
+    }
+
+    #[test]
+    fn split_grounding_prefix_none_without_marker_or_without_tail() {
+        // No grounding marker at all.
+        assert!(split_grounding_prefix("just a plain task with no grounding").is_none());
+        // Marker present but nothing meaningful after it → no degenerate breakpoint.
+        assert!(split_grounding_prefix("digest\n=== END PROJECT GROUNDING ===\n\n  ").is_none());
+    }
+
+    #[test]
+    fn anthropic_first_user_message_gets_layer2_breakpoint_when_grounded() {
+        let task = "=== PROJECT GROUNDING ===\ndigest here\n=== END PROJECT GROUNDING ===\n\n## Story\ndo the thing";
+        let messages = vec![serde_json::json!({"role": "user", "content": task})];
+        let (body, use_caching) =
+            build_anthropic_request_body("claude-opus-4-8", None, &messages, &[]);
+        // Even without a system prompt, the grounding breakpoint activates caching.
+        assert!(use_caching, "grounded first message → caching active");
+        let content = &body["messages"][0]["content"];
+        assert!(content.is_array(), "first message content must be a two-block array");
+        assert_eq!(content[0]["type"].as_str(), Some("text"));
+        assert_eq!(content[0]["cache_control"]["type"].as_str(), Some("ephemeral"));
+        assert!(content[0]["text"].as_str().unwrap().ends_with(LAYER2_GROUNDING_TERMINATOR));
+        // Second block is the volatile tail with NO cache_control.
+        assert!(content[1]["text"].as_str().unwrap().contains("## Story"));
+        assert!(content[1].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn anthropic_first_user_message_unchanged_without_grounding() {
+        let messages = vec![serde_json::json!({"role": "user", "content": "plain task, no grounding"})];
+        let (body, _use_caching) =
+            build_anthropic_request_body("claude-opus-4-8", Some("sys"), &messages, &[]);
+        // No grounding marker → first message content stays a plain string.
+        assert_eq!(body["messages"][0]["content"].as_str(), Some("plain task, no grounding"));
+    }
+
+    #[test]
+    fn anthropic_only_the_first_user_message_is_reshaped() {
+        // A later user message (e.g. tool_result array) that happens to contain the marker must
+        // not be reshaped — only index 0 is the grounded opening turn.
+        let messages = vec![
+            serde_json::json!({"role": "user", "content": "plain opener no marker"}),
+            serde_json::json!({"role": "user", "content": "later =[END PROJECT GROUNDING]= x\n\ntail"}),
+        ];
+        let (body, _) = build_anthropic_request_body("claude-opus-4-8", None, &messages, &[]);
+        // Index 0 has no marker → stays a string; index 1 is passed through untouched.
+        assert!(body["messages"][0]["content"].is_string());
+        assert!(body["messages"][1]["content"].is_string());
     }
 
     // ── Anthropic shape: tool-result feedback format ──────────────────────────

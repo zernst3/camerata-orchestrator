@@ -652,11 +652,22 @@ pub fn implement_prompt(
         camerata_app_core::kernel_for(model)
     };
 
-    format!(
+    // GEOLOGICAL LAYERING (prefix-cache-optimal, provider-neutral):
+    //   Layer 1 (global immutable, top; maximal cache) = the role header + the governance kernel.
+    //     Identical across every call for this model tier and project.
+    //   Layer 2 (epic/session context, middle; highly cached) = the grounding block (repo digest
+    //     + rule context). Changes only every few days.
+    //   Layer 3 (volatile execution state, bottom; never cached) = the story, the approved
+    //     decisions, the escalation conditions, the required procedure, and (appended later by
+    //     `append_bounce_feedback`) the LATEST toolchain/gate error. Different on almost every call.
+    // The volatile story/error/diff MUST stay at the bottom so it never perturbs the cached
+    // prefix. See camerata_app_core::prompt_layers and the plan's cache-layering section.
+    let layer1_global = format!(
         "You are the BROWNFIELD IMPLEMENTER for story `{story_id}` (branch `{target_branch}`).\n\n\
-         {kernel}\n\n\
-         {grounding_block}\
-         ## Story\n\n\
+         {kernel}"
+    );
+    let layer3_volatile = format!(
+        "## Story\n\n\
          Title: {story_title}\n\
          Description: {story_desc}\n\n\
          ## Architect-approved decisions (the spec)\n\n\
@@ -683,7 +694,13 @@ pub fn implement_prompt(
          Do NOT change unrelated files. Never weaken or skip tests.\n\n\
          ## Final report (exact format)\n\n\
          CHANGES / TESTS / DECISIONS-TRACE / CONCERNS (NONE if empty)."
-    )
+    );
+
+    let mut layered = camerata_app_core::LayeredPrompt::new(layer1_global, layer3_volatile);
+    if !grounding_block.trim().is_empty() {
+        layered = layered.with_grounding(grounding_block);
+    }
+    layered.render()
 }
 
 /// LIFECYCLE-5: append the previous bounce iteration's failure feedback to the TAIL of the
@@ -1888,6 +1905,74 @@ mod tests {
             p.contains("TIER DISCIPLINE (strongest)"),
             "an Opus model must carry the strongest-tier addendum"
         );
+    }
+
+    /// GEOLOGICAL LAYERING: the kernel (Layer 1) leads, the grounding block (Layer 2) sits in
+    /// the middle, and the volatile story + procedure (Layer 3) is at the bottom, so the stable
+    /// Layer-1/Layer-2 prefix never has volatile content leak above it.
+    #[test]
+    fn implement_prompt_orders_layers_kernel_then_grounding_then_story() {
+        let grounding = "=== PROJECT GROUNDING ===\nrepo digest here\n=== END PROJECT GROUNDING ===";
+        let p = implement_prompt(
+            "s/r#9",
+            "MY-STORY-TITLE",
+            "desc",
+            "b",
+            &[approved_decision("opt", "Q", "R")],
+            Some(grounding),
+            &[],
+            "claude-opus-4-8",
+        );
+        let i_kernel = p.find("=== CAMERATA OPERATING PROTOCOL").expect("layer 1");
+        let i_grounding = p.find("=== PROJECT GROUNDING ===").expect("layer 2");
+        let i_story = p.find("MY-STORY-TITLE").expect("layer 3");
+        assert!(
+            i_kernel < i_grounding,
+            "Layer 1 (kernel) must lead Layer 2 (grounding)"
+        );
+        assert!(
+            i_grounding < i_story,
+            "Layer 2 (grounding) must precede Layer 3 (story)"
+        );
+        // The whole grounding block is above the story: no volatile content leaks up.
+        let i_grounding_end = p.find("=== END PROJECT GROUNDING ===").expect("grounding end");
+        assert!(
+            i_grounding_end < i_story,
+            "the story (Layer 3) must sit entirely below the grounding block"
+        );
+    }
+
+    /// The stable Layer-1/Layer-2 prefix is byte-identical across two builds that differ only in
+    /// the Layer-3 story/description input (the prefix-cache-stability invariant).
+    #[test]
+    fn implement_prompt_prefix_is_stable_across_differing_story() {
+        let grounding = "=== PROJECT GROUNDING ===\ndigest\n=== END PROJECT GROUNDING ===";
+        let mk = |title: &str, desc: &str| {
+            implement_prompt(
+                "s/r#1",
+                title,
+                desc,
+                "b",
+                &[approved_decision("opt", "Q", "R")],
+                Some(grounding),
+                &[],
+                "claude-opus-4-8",
+            )
+        };
+        let a = mk("Story A", "description alpha");
+        let b = mk("Story B totally different", "description beta");
+        // Both share the identical stable prefix up to the end of the grounding block.
+        let end = "=== END PROJECT GROUNDING ===";
+        let a_prefix_len = a.find(end).unwrap() + end.len();
+        let b_prefix_len = b.find(end).unwrap() + end.len();
+        assert_eq!(a_prefix_len, b_prefix_len, "prefix boundary must be at the same byte offset");
+        assert_eq!(
+            &a[..a_prefix_len],
+            &b[..b_prefix_len],
+            "the Layer-1/Layer-2 prefix must be byte-identical across differing Layer-3 input"
+        );
+        // The bodies themselves differ (Layer 3 changed).
+        assert_ne!(a, b);
     }
 
     /// Only APPROVED decisions appear in the prompt; Pending decisions are excluded.
