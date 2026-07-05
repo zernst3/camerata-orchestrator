@@ -63,6 +63,10 @@ pub mod model_tier;
 pub mod settings;
 pub mod story_docs_gate;
 pub mod suppression;
+/// GAP-2: the shared commit / PR / branch chokepoint gate. Every server-side VCS action
+/// funnels through `vcs_choke` so a project's configured process rules are actually enforced
+/// (HARD-BLOCK on violation), not merely configurable via the bypass endpoint.
+pub mod vcs_choke;
 pub mod terminal;
 pub mod test_tamper;
 /// Layer-3 CI workflow generator — produces `.github/workflows/camerata-gates.yml`
@@ -5020,6 +5024,24 @@ fn active_project_id(state: &AppState) -> String {
     state.projects.active().map(|p| p.id).unwrap_or_default()
 }
 
+/// Resolve the VCS-action process-rule config for a project id (GAP-2). Falls back to the
+/// active project when `id` does not resolve, and to `ProcessRuleConfig::default()` when
+/// there is no project at all — so the chokepoint gate has a rule set to enforce in every
+/// case (the default enforces the conventional-commit + commit-doc baseline).
+fn process_rule_config_for(
+    state: &AppState,
+    id: &str,
+) -> camerata_checks::vcs_action::ProcessRuleConfig {
+    if let Some(p) = state.projects.get(id) {
+        return p.process_rule_config;
+    }
+    state
+        .projects
+        .active()
+        .map(|p| p.process_rule_config)
+        .unwrap_or_default()
+}
+
 async fn onboard_draft_get(State(state): State<AppState>) -> Json<Option<serde_json::Value>> {
     let pid = active_project_id(&state);
     Json(state.draft.load(&pid))
@@ -5074,6 +5096,21 @@ async fn onboard_open_pr(
     let body = "Adopts the Camerata-selected ruleset for this repo (AGENTS.md / CONVENTIONS.md / \
         CI gate / baseline). Applied locally and pushed by Camerata onboarding; opened as a PR \
         on request.";
+    // GAP-2 chokepoint: gate the governance PR's metadata. This is an orchestration-internal
+    // PR with a machine-generated title/body, so it takes an auditable bypass rather than
+    // HARD-BLOCK — a project whose rules the fixed metadata already satisfies passes cleanly.
+    let vcs_config = process_rule_config_for(&state, &active_project_id(&state));
+    match crate::vcs_choke::gated_pr_or_bypass(
+        &vcs_config,
+        title,
+        body,
+        Some("orchestration-internal onboarding governance PR; title/body are machine-generated"),
+    ) {
+        Ok(_) => {}
+        Err(e) => {
+            return Json(serde_json::json!({ "ok": false, "blocked": true, "message": format!("{e}") }));
+        }
+    }
     let mut results = Vec::new();
     for repo in &repos {
         match crate::workspace::open_branch_pr(repo, crate::arm::ARM_BRANCH, title, body, &token)
@@ -6495,6 +6532,19 @@ async fn emit_project_local(
                 if want_pr {
                     let title = format!("chore(governance): Camerata ruleset for {repo}");
                     let body = "Camerata-managed governance files (AGENTS.md / CONVENTIONS.md / .camerata gate config), regenerated from the project ruleset.";
+                    // GAP-2 chokepoint: gate the governance PR's metadata (auditable bypass —
+                    // machine-generated title/body). A HARD-BLOCK here would strand the
+                    // already-emitted + pushed branch, so we record a bypass rather than block.
+                    let vcs_config =
+                        process_rule_config_for(&state, &active_project_id(&state));
+                    if let Ok(Some(record)) = crate::vcs_choke::gated_pr_or_bypass(
+                        &vcs_config,
+                        &title,
+                        body,
+                        Some("orchestration-internal governance PR; title/body are machine-generated"),
+                    ) {
+                        entry["vcs_gate"] = record.into();
+                    }
                     match crate::workspace::open_branch_pr(
                         repo,
                         crate::arm::ARM_BRANCH,
@@ -7949,11 +7999,21 @@ struct GitCommitReq {
 /// Stage all changes and commit them.
 async fn git_commit(
     State(state): State<AppState>,
-    Path(_id): Path<String>,
+    Path(id): Path<String>,
     Json(req): Json<GitCommitReq>,
 ) -> Json<serde_json::Value> {
     if req.message.trim().is_empty() {
         return Json(serde_json::json!({ "ok": false, "message": "commit message is required" }));
+    }
+    // GAP-2 chokepoint: HARD-BLOCK a commit whose message violates the project's process
+    // rules before staging anything. No commit is created on a violation.
+    let config = process_rule_config_for(&state, &id);
+    if let Err(e) = crate::vcs_choke::gated_commit(&config, &req.message) {
+        return Json(serde_json::json!({
+            "ok": false,
+            "blocked": true,
+            "message": format!("{e}"),
+        }));
     }
     let dir = match resolve_git_dir(&state, &req.repo) {
         Ok(d) => d,
@@ -11393,6 +11453,12 @@ async fn uow_update_branch(
         let grounding = state.project_grounding().await;
         // MULTI-REPO READ scope: ALL the active project's local repo clones (read-only).
         let read_dirs = state.active_repo_dirs();
+        // GAP-2: the active project's VCS-action process rules for the server-side merge-commit gate.
+        let vcs_config = state
+            .projects
+            .active()
+            .map(|p| p.process_rule_config)
+            .unwrap_or_default();
         tokio::spawn(async move {
             crate::update_branch_run::execute_update_branch_run(
                 runs,
@@ -11408,6 +11474,7 @@ async fn uow_update_branch(
                 model,
                 grounding,
                 read_dirs,
+                vcs_config,
             )
             .await;
         });
@@ -11665,6 +11732,12 @@ async fn uow_pr_resolve(
         let grounding = state.project_grounding().await;
         // MULTI-REPO READ scope: ALL the active project's local repo clones (read-only).
         let read_dirs = state.active_repo_dirs();
+        // GAP-2: the active project's VCS-action process rules for the server-side commit gate.
+        let vcs_config = state
+            .projects
+            .active()
+            .map(|p| p.process_rule_config)
+            .unwrap_or_default();
         tokio::spawn(async move {
             crate::pr_resolve_run::execute_pr_resolve_run(
                 runs,
@@ -11681,6 +11754,7 @@ async fn uow_pr_resolve(
                 model,
                 grounding,
                 read_dirs,
+                vcs_config,
             )
             .await;
         });
@@ -12531,6 +12605,36 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         // The store was left untouched (still None).
         assert!(state.settings.llm_backend().is_none());
+    }
+
+    /// GAP-2: the git-commit chokepoint HARD-BLOCKS a commit whose message violates the
+    /// project's process rules BEFORE any git action is taken (no repo dir is even resolved).
+    /// The default project config enforces the conventional-commit + commit-doc baseline.
+    #[tokio::test]
+    async fn git_commit_chokepoint_blocks_a_message_violating_process_rules() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Gate", vec!["me/api".to_string()]).unwrap();
+        let app = router(state);
+
+        // "just some junk" is not a conventional-commit subject and has no doc body/story-id.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/git/commit", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"repo":"me/api","message":"just some junk"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false, "violating commit must be refused: {json}");
+        assert_eq!(json["blocked"], true, "the response must mark it as gate-blocked: {json}");
+        assert!(
+            json["message"].as_str().unwrap_or_default().contains("VCS-action gate"),
+            "the block message must name the VCS-action gate: {json}"
+        );
     }
 
     #[test]

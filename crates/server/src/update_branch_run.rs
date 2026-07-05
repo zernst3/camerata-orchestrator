@@ -149,6 +149,9 @@ pub async fn execute_update_branch_run(
     // READ-ONLY via `--add-dir`. The resolver writes only to `dir` (the repo being merged);
     // sibling repos are readable so it can reconcile cross-repo conflicts.
     read_dirs: Vec<std::path::PathBuf>,
+    // GAP-2: the active project's VCS-action process rules, used to gate the server-side
+    // merge commit at its chokepoint. Defaulted by callers with no active project.
+    vcs_config: camerata_checks::vcs_action::ProcessRuleConfig,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -255,6 +258,7 @@ pub async fn execute_update_branch_run(
                 grounding.as_deref(),
                 &read_dirs,
                 start_seq,
+                &vcs_config,
             )
             .await;
         }
@@ -278,6 +282,8 @@ async fn resolve_conflicts_and_commit(
     // MULTI-REPO READ scope: ALL the active project's local repo clones, added read-only.
     read_dirs: &[std::path::PathBuf],
     start_seq: usize,
+    // GAP-2: the project's VCS-action process rules for the server-side merge-commit gate.
+    vcs_config: &camerata_checks::vcs_action::ProcessRuleConfig,
 ) {
     let seq = AtomicUsize::new(start_seq);
     let next_seq = || seq.fetch_add(1, Ordering::SeqCst) + 1;
@@ -390,6 +396,36 @@ async fn resolve_conflicts_and_commit(
     }
 
     // 3. The SERVER completes the merge commit (never the agent — Task/commit stay server-side).
+    //
+    // GAP-2 chokepoint. A merge commit is the CANONICAL machine-generated action the bypass
+    // exists for: git authors its own `Merge branch ...` message with `--no-edit`, which
+    // cannot satisfy a conventional-commit / story-id convention. We gate it with an
+    // auditable bypass (recorded in the run's evidence trail), never a silent skip. The
+    // representative message is what git will produce; the bypass is honest about it.
+    let merge_msg = format!("Merge {merge_ref} into {target_branch}");
+    match crate::vcs_choke::gated_commit_or_bypass(
+        vcs_config,
+        &merge_msg,
+        Some("machine-generated merge commit (git --no-edit); merge messages cannot satisfy commit-shape conventions"),
+    ) {
+        Ok(Some(record)) => runs.push_event(
+            run_id,
+            GateEvent {
+                seq: next_seq(),
+                layer: "update-branch".to_string(),
+                verdict: "info".to_string(),
+                rule: None,
+                detail: format!("VCS-action gate: {record}"),
+                content_hash: None,
+            },
+        ),
+        Ok(None) => {}
+        Err(e) => {
+            abort_and_fail(format!("VCS-action gate error: {e}")).await;
+            return;
+        }
+    }
+
     match workspace::commit_merge(dir).await {
         Ok(out) => {
             runs.push_event(
@@ -500,6 +536,7 @@ mod tests {
             "claude-opus-4-8".to_string(),
             None,
             Vec::new(),
+            camerata_checks::vcs_action::ProcessRuleConfig::default(),
         )
         .await;
 
@@ -561,6 +598,7 @@ mod tests {
             String::new(),
             None,
             Vec::new(),
+            camerata_checks::vcs_action::ProcessRuleConfig::default(),
         )
         .await;
 

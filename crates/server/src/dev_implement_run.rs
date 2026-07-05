@@ -1493,6 +1493,36 @@ pub async fn execute_dev_implement_run(
     // The SERVER commits the agent's implementation (commit stays server-side, never
     // the agent — mirrors pr_resolve_run exactly).
     let commit_msg = format!("feat: implement story {story_id} on {target_branch}");
+
+    // GAP-2 chokepoint. This is an ORCHESTRATION-INTERNAL commit whose message is
+    // machine-generated, so it may not carry a project's human story-id format. We gate it
+    // with an auditable bypass (never a silent skip): if the project's rules would block the
+    // machine message, the bypass is recorded in the run's evidence trail; a genuine
+    // configuration that the machine message DOES satisfy passes cleanly with no bypass.
+    let vcs_config = project_id
+        .as_deref()
+        .and_then(|pid| projects.get(pid))
+        .map(|p| p.process_rule_config)
+        .unwrap_or_default();
+    match crate::vcs_choke::gated_commit_or_bypass(
+        &vcs_config,
+        &commit_msg,
+        Some("orchestration-internal server commit of the agent's implementation; message is machine-generated"),
+    ) {
+        Ok(Some(record)) => event(
+            &runs,
+            "info",
+            format!("VCS-action gate: {record}"),
+        ),
+        Ok(None) => {}
+        Err(e) => {
+            // Only reachable if the bypass itself is invalid (should not happen — reason is
+            // non-empty). Fail closed rather than commit past a gate error.
+            fail(&runs, &uow, format!("VCS-action gate error: {e}"));
+            return;
+        }
+    }
+
     match crate::workspace::commit_all(&dir, &commit_msg).await {
         Ok(out) => {
             event(

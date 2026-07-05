@@ -108,6 +108,9 @@ pub async fn execute_pr_resolve_run(
     // READ-ONLY via `--add-dir`. The resolver writes only to `dir` (the PR's repo); sibling
     // repos are readable so it can address review comments that reference other repos.
     read_dirs: Vec<std::path::PathBuf>,
+    // GAP-2: the active project's VCS-action process rules, used to gate the server-side
+    // resolution commit at its chokepoint. Defaulted by callers with no active project.
+    vcs_config: camerata_checks::vcs_action::ProcessRuleConfig,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -222,6 +225,23 @@ pub async fn execute_pr_resolve_run(
 
     // The SERVER commits the agent's fix (commit stays server-side, never the agent).
     let commit_msg = format!("fix: resolve PR #{pr_number} feedback for {story_id}");
+
+    // GAP-2 chokepoint. Orchestration-internal, machine-generated commit message: gate it
+    // with an auditable bypass so a project's custom rules are honored without silently
+    // skipping the gate. A compliant machine message passes with no bypass record.
+    match crate::vcs_choke::gated_commit_or_bypass(
+        &vcs_config,
+        &commit_msg,
+        Some("orchestration-internal server commit of the PR-feedback resolution; message is machine-generated"),
+    ) {
+        Ok(Some(record)) => event(&runs, "info", format!("VCS-action gate: {record}")),
+        Ok(None) => {}
+        Err(e) => {
+            fail(&runs, &uow, format!("VCS-action gate error: {e}"));
+            return;
+        }
+    }
+
     match crate::workspace::commit_all(&dir, &commit_msg).await {
         Ok(out) => {
             event(&runs, "allow", format!("Committed the resolution. {out}"));
@@ -336,6 +356,7 @@ mod tests {
             "claude-opus-4-8".to_string(),
             None,
             Vec::new(),
+            camerata_checks::vcs_action::ProcessRuleConfig::default(),
         )
         .await;
 

@@ -459,6 +459,7 @@ pub async fn build_from_plan_with_model_iterations_and_layer2(
 /// while an agent is actively producing output.
 ///
 /// Pass `None` for identical behaviour to the non-activity variant.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_from_plan_with_model_iterations_layer2_and_activity(
     plan: &Plan,
     root: &Path,
