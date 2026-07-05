@@ -264,16 +264,14 @@ impl AppState {
     /// `CAMERATA_GITHUB_TOKEN` environment variable as a back-compat fallback.
     /// Returns `None` when neither is set or non-empty.
     pub fn github_token(&self) -> Option<String> {
-        // 1. Try the credential store (keychain in prod, in-memory in tests).
-        if let Ok(Some(token)) = self.credential_store.get(crate::credentials::GITHUB_TOKEN) {
-            if !token.is_empty() {
-                return Some(token);
-            }
-        }
-        // 2. Fall back to the environment variable for back-compat.
-        std::env::var("CAMERATA_GITHUB_TOKEN")
-            .ok()
-            .filter(|v| !v.is_empty())
+        // Keychain first, then CAMERATA_GITHUB_TOKEN. `resolve` warns (not swallows) on a
+        // keychain read error before falling back to the env var.
+        crate::credentials::resolve(
+            self.credential_store.as_ref(),
+            crate::credentials::GITHUB_TOKEN,
+            "CAMERATA_GITHUB_TOKEN",
+        )
+        .filter(|v| !v.is_empty())
     }
 
     /// Build the shared PROJECT-GROUNDING block for the ACTIVE project: its rule context
@@ -624,13 +622,18 @@ impl AppState {
         // over any pre-existing env value (set_var runs after dotenv load), matching the
         // backend-setting precedence above (keychain/setting > `.env` > default).
         // Edition 2021, so `set_var` is safe (single-threaded startup).
-        if let Ok(Some(key)) = state
+        match state
             .credential_store
             .get(crate::credentials::ANTHROPIC_API_KEY)
         {
-            if !key.trim().is_empty() {
+            Ok(Some(key)) if !key.trim().is_empty() => {
                 std::env::set_var("ANTHROPIC_API_KEY", key);
             }
+            Ok(_) => {}
+            // A read error here silently leaves the API path keyless with no trace.
+            Err(e) => eprintln!(
+                "[camerata-server] keychain read of ANTHROPIC_API_KEY failed during startup hydration: {e}"
+            ),
         }
         state
     }
@@ -1342,11 +1345,23 @@ async fn resume_governed_run(
         return Ok((run_id, mode));
     }
 
+    // Describe why the run PAUSED from the checkpoint's actual pause_reason, rather than
+    // hardcoding the test-tamper guard (checkpoints also pause on rule escalations).
+    let pause_desc = match checkpoint.pause_reason.as_str() {
+        "test-tamper" => {
+            "the test-tamper guard AGENTIC-NO-TEST-TAMPER-1 (it modified or deleted an existing test)"
+                .to_string()
+        }
+        other => match other.strip_prefix("rule-escalation:") {
+            Some(rule_id) => format!("a governance escalation on rule {rule_id}"),
+            None => format!("a human-review escalation ({other})"),
+        },
+    };
     let directive_grounding = format!(
         "## RESUMED AFTER HUMAN REVIEW\n\nThis run PAUSED for human review by \
-         AGENTIC-NO-TEST-TAMPER-1 (it modified or deleted an existing test). A human has now \
-         reviewed it and responded. Continue from the CURRENT worktree state (your prior work is \
-         still here) and apply this decision exactly:\n\n{directive}"
+         {pause_desc}. A human has now reviewed it and responded. Continue from the CURRENT \
+         worktree state (your prior work is still here) and apply this decision \
+         exactly:\n\n{directive}"
     );
     spawn_brownfield_dev_run(
         state,
@@ -2158,8 +2173,7 @@ async fn sign_off_run(
         let markdown = crate::evidence::render_pr_markdown(&evidence_for_pr);
 
         if let Some((owner, repo_name)) = pr_repo.split_once('/') {
-            let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-                .unwrap_or_default();
+            let token = state.github_token().unwrap_or_default();
             let comment_url = crate::arm::post_pr_comment(
                 owner,
                 repo_name,
@@ -3355,10 +3369,7 @@ async fn reconcile_project(
     };
     // Local-first: read each repo's working copy (where emit writes by default); the token only
     // enables the GitHub governance-branch fallback for repos that aren't cloned locally.
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_default();
+    let token = state.github_token().unwrap_or_default();
     let workspace_root = state.settings.workspace_root();
     let sources: Vec<(String, Option<std::path::PathBuf>)> = project
         .repos
@@ -4340,7 +4351,13 @@ async fn gate_probe() -> Json<serde_json::Value> {
             let checks: Vec<serde_json::Value> = r
                 .layer1
                 .iter()
-                .map(|c| serde_json::json!({ "label": c.label, "denied": c.denied, "detail": c.detail }))
+                .map(|c| serde_json::json!({
+                    "rule": c.rule,
+                    "label": c.label,
+                    "denied": c.denied,
+                    "isolated_denied": c.isolated_denied,
+                    "detail": c.detail,
+                }))
                 .collect();
             Json(serde_json::json!({
                 "ok": true,
@@ -4348,6 +4365,7 @@ async fn gate_probe() -> Json<serde_json::Value> {
                 "story": r.story,
                 "layer1": checks,
                 "layer1_denied": r.layer1_denied_count(),
+                "layer1_isolated": r.layer1_isolated_count(),
                 "layer1_total": r.layer1_total(),
                 "layer1_clean_allowed": r.layer1_clean_allowed,
                 "layer2_bounced": r.layer2_bounced,
@@ -4398,7 +4416,10 @@ struct TicketReq {
 
 /// Accept selected findings as tech debt: open a GitHub issue with them. Gated on
 /// the token (needs Issues write). Returns `{ ok, url, message }`.
-async fn onboard_ticket(Json(req): Json<TicketReq>) -> Json<serde_json::Value> {
+async fn onboard_ticket(
+    State(state): State<AppState>,
+    Json(req): Json<TicketReq>,
+) -> Json<serde_json::Value> {
     let Some((owner, repo)) = req.repo.split_once('/') else {
         return Json(
             serde_json::json!({ "ok": false, "message": "Target repo must be `owner/repo`." }),
@@ -4407,9 +4428,7 @@ async fn onboard_ticket(Json(req): Json<TicketReq>) -> Json<serde_json::Value> {
     if req.findings.is_empty() {
         return Json(serde_json::json!({ "ok": false, "message": "No findings selected." }));
     }
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = state.github_token();
     let Some(token) = token else {
         return Json(
             serde_json::json!({ "ok": false, "message": "Connect GitHub to file a ticket." }),
@@ -4600,9 +4619,7 @@ async fn onboard_arm(
     if req.rules.is_empty() {
         return Json(serde_json::json!({ "ok": false, "message": "No rules selected to arm." }));
     }
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = state.github_token();
     let Some(token) = token else {
         return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to arm." }));
     };
@@ -4664,9 +4681,7 @@ async fn onboard_apply(
             );
         }
     }
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = state.github_token();
     let Some(token) = token else {
         return Json(
             serde_json::json!({ "ok": false, "message": "Connect GitHub to apply (the branch is pushed to origin)." }),
@@ -5036,12 +5051,10 @@ struct OpenPrReq {
 /// Open the governance PR from the already-applied + pushed branch (the explicit, separate
 /// step after `onboard_apply`). One PR per repo into its default branch.
 async fn onboard_open_pr(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<OpenPrReq>,
 ) -> Json<serde_json::Value> {
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = state.github_token();
     let Some(token) = token else {
         return Json(
             serde_json::json!({ "ok": false, "message": "Connect GitHub to open the PR." }),
@@ -5127,7 +5140,7 @@ async fn fetch_baseline(owner: &str, repo: &str, token: &str) -> crate::suppress
 /// ticket tie-back), and open a governed PR. NOT a one-time dismissal — it persists,
 /// shows in the diff, and rolls up into the audit registry.
 async fn onboard_ignore(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<IgnoreReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     if req.reason.trim().is_empty() {
@@ -5135,7 +5148,7 @@ async fn onboard_ignore(
             "a reason is required to ignore a finding"
         )));
     }
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    let token = state.github_token().unwrap_or_default();
     if token.trim().is_empty() {
         return Err(AppError(anyhow::anyhow!(
             "connect GitHub to record an ignore"
@@ -5830,7 +5843,10 @@ fn ci_story_body_vcs_metadata(repo: &str, rules: &[CiStoryRule]) -> String {
 /// The UI files each story separately so the tracks land as distinct GitHub issues.
 /// Each story carries the HOW-TO so a developer or AI agent can implement the check
 /// correctly without additional hand-holding.
-async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value> {
+async fn onboard_ci_rules(
+    State(state): State<AppState>,
+    Json(req): Json<CiRulesReq>,
+) -> Json<serde_json::Value> {
     let Some((owner, repo)) = req.repo.split_once('/') else {
         return Json(serde_json::json!({ "ok": false, "message": "repo must be owner/repo" }));
     };
@@ -5846,9 +5862,7 @@ async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value
             "message": format!("no {} rules to wire", req.tier)
         }));
     }
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = state.github_token();
     let Some(token) = token else {
         return Json(
             serde_json::json!({ "ok": false, "message": "Connect GitHub to create the story issue." }),
@@ -6094,31 +6108,43 @@ fn save_armed_to_project(
     custom: &[crate::project::CustomRule],
 ) {
     use crate::project::RuleSelection;
-    let mut selections = Vec::new();
-    let mut cross = Vec::new();
-    let mut process = Vec::new();
+    // First pass: gather the REAL repos this arm touches, skipping the UI-internal
+    // single-repo sentinel (a NUL-prefixed map key that is never a real `owner/repo`).
+    // This set seeds the project's repo list and, below, resolves any leaked sentinel in a
+    // selection's repos — persisting the sentinel would break clone/emit forever
+    // (PUBLISH-2).
     let mut all_repos = std::collections::BTreeSet::new();
     for r in rules {
-        let s = RuleSelection {
-            rule_id: r.id.clone(),
-            chosen_option: r.option.clone(),
-            repos: r.repos.clone(),
-            ..Default::default()
-        };
         for repo in &r.repos {
-            all_repos.insert(repo.clone());
-        }
-        match r.scope.as_str() {
-            "cross-repo" => cross.push(s),
-            "process" => process.push(s),
-            _ => selections.push(s),
+            if !repo.contains('\0') {
+                all_repos.insert(repo.clone());
+            }
         }
     }
     // Repo-scoped custom rules pull their repo into the project too (covers a custom-only apply).
     for c in custom {
         let d = c.domain.trim();
-        if !d.is_empty() && d != "*" {
+        if !d.is_empty() && d != "*" && !d.contains('\0') {
             all_repos.insert(d.to_string());
+        }
+    }
+    let all_repos_vec: Vec<String> = all_repos.iter().cloned().collect();
+    let mut selections = Vec::new();
+    let mut cross = Vec::new();
+    let mut process = Vec::new();
+    for r in rules {
+        let s = RuleSelection {
+            rule_id: r.id.clone(),
+            chosen_option: r.option.clone(),
+            // Normalize before persisting so a leaked sentinel expands to the real repos
+            // instead of being written into the ruleset.
+            repos: normalize_repos(&r.repos, &all_repos_vec),
+            ..Default::default()
+        };
+        match r.scope.as_str() {
+            "cross-repo" => cross.push(s),
+            "process" => process.push(s),
+            _ => selections.push(s),
         }
     }
     let pid = match state.projects.active() {
@@ -6299,9 +6325,7 @@ async fn emit_project(
     let Some(project) = state.projects.get(&id) else {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = state.github_token();
     let Some(token) = token else {
         return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to emit." }));
     };
@@ -6311,17 +6335,40 @@ async fn emit_project(
             serde_json::json!({ "ok": false, "message": "Nothing to emit — this project has no repo-local rules or custom rules yet." }),
         );
     }
+    // Derive the emit repo set as the UNION of the project's repos and the repos its
+    // repo-local rules actually target. Iterating only `project.repos` silently omits a
+    // selection scoped to a repo later removed from the project (PUBLISH-7). Warn on those
+    // out-of-project targets so the drift is visible rather than silent.
+    let project_set: std::collections::BTreeSet<&str> =
+        project.repos.iter().map(String::as_str).collect();
+    let mut repo_set: std::collections::BTreeSet<String> = project.repos.iter().cloned().collect();
+    let mut warnings: Vec<String> = Vec::new();
+    for r in &rules {
+        if r.scope == "cross-repo" || r.scope == "process" {
+            continue;
+        }
+        for repo in &r.repos {
+            if !project_set.contains(repo.as_str()) {
+                warnings.push(format!(
+                    "rule `{}` is scoped to `{repo}`, which is not in the project's repos; emitting anyway",
+                    r.id
+                ));
+            }
+            repo_set.insert(repo.clone());
+        }
+    }
+    let repos: Vec<String> = repo_set.into_iter().collect();
     // Re-emit carries no new baseline (it's a ruleset refresh, not onboarding).
     let no_baselines = std::collections::HashMap::new();
     let results = emit_to_repos(
-        &project.repos,
+        &repos,
         &rules,
         &project.ruleset.custom,
         &no_baselines,
         &token,
     )
     .await;
-    Json(serde_json::json!({ "ok": true, "results": results }))
+    Json(serde_json::json!({ "ok": true, "results": results, "warnings": warnings }))
 }
 
 /// Re-emit a project's ruleset directly into the LOCAL working copies of its repos,
@@ -6351,10 +6398,7 @@ async fn emit_project_local(
     let Some(project) = state.projects.get(&id) else {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_default();
+    let token = state.github_token().unwrap_or_default();
     if want_push && token.is_empty() {
         return Json(serde_json::json!({ "ok": false, "message": "A GitHub token is required to push or open a PR (set CAMERATA_GITHUB_TOKEN). Emit locally without push, or connect GitHub." }));
     }
@@ -6574,6 +6618,7 @@ struct GithubIssuesQuery {
 /// errors out or panics, so the UI degrades to a "Connect GitHub" hint. The token
 /// is never echoed back. Pull requests are filtered out by the parser.
 async fn github_issues_list(
+    State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<GithubIssuesQuery>,
 ) -> Json<serde_json::Value> {
     let repo = q.repo.trim();
@@ -6584,9 +6629,7 @@ async fn github_issues_list(
             "message": "Provide a repo as `owner/name`.",
         }));
     }
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = state.github_token();
     let Some(token) = token else {
         return Json(serde_json::json!({
             "ok": false,
@@ -7046,7 +7089,7 @@ async fn answer_escalation(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<crate::escalation::AnswerEscalationReq>,
-) -> Result<Json<crate::escalation::Escalation>, AppError> {
+) -> Result<Json<serde_json::Value>, AppError> {
     let esc = state
         .escalations
         .get(&id)
@@ -7081,6 +7124,9 @@ async fn answer_escalation(
     // Act on the resolution by subject. A ROUTINE review returns the routine to Idle so the
     // scheduler can run its next slot. A UoW (Governed Development) review RESUMES the paused run
     // from its checkpoint (Approve/Amend) — or, on Reject, reverts the worktree and stops cleanly.
+    // On a successful Approve/Amend resume we capture the NEW run id (surfaced to the client) and
+    // mark the paused run terminal; a resume that cannot start is a 409, not a silent success.
+    let mut resume_run_id: Option<String> = None;
     match resolved.subject_kind {
         crate::escalation::SubjectKind::Routine => {
             let _ = state
@@ -7119,13 +7165,35 @@ async fn answer_escalation(
                     }
                     _ => {
                         // Approve / Amend: re-spawn from the checkpoint with the directive.
-                        let _ = resume_governed_run(&state, &ckpt, &directive).await;
+                        // A failed resume must NOT read as a successful resolution — surface it
+                        // as a 409 (the escalation is already resolved in the store, but the
+                        // client learns the run did not restart).
+                        match resume_governed_run(&state, &ckpt, &directive).await {
+                            Ok((new_run_id, _mode)) => {
+                                // The paused run is superseded by the resume run; close it out.
+                                state.runs.mark_done(&ckpt.run_id);
+                                resume_run_id = Some(new_run_id);
+                            }
+                            Err(reason) => {
+                                return Err(AppError::with_status(
+                                    StatusCode::CONFLICT,
+                                    anyhow::anyhow!("could not resume run from checkpoint: {reason}"),
+                                ));
+                            }
+                        }
                     }
                 }
             }
         }
     }
-    Ok(Json(resolved))
+    // Return the resolved escalation, annotated with the resumed run id (if any) so the client
+    // can follow the new run. Serialise to a Value so we can add the field without changing the
+    // persisted Escalation schema.
+    let mut body = serde_json::to_value(&resolved).map_err(|e| AppError(e.into()))?;
+    if let (Some(rid), Some(obj)) = (resume_run_id, body.as_object_mut()) {
+        obj.insert("resume_run_id".to_string(), serde_json::json!(rid));
+    }
+    Ok(Json(body))
 }
 
 /// Edit an existing routine (name / schedule / intent / prompt / scope).
@@ -7624,7 +7692,7 @@ async fn checkout_project(
             "no workspace folder is set — pick one first"
         )));
     };
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    let token = state.github_token().unwrap_or_default();
     if token.trim().is_empty() {
         return Err(AppError(anyhow::anyhow!(
             "no GitHub token — set CAMERATA_GITHUB_TOKEN to clone"
@@ -7715,7 +7783,7 @@ async fn ship_repo(
     let Some(root) = state.settings.workspace_root() else {
         return Err(AppError(anyhow::anyhow!("no workspace folder is set")));
     };
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    let token = state.github_token().unwrap_or_default();
     if token.trim().is_empty() {
         return Err(AppError(anyhow::anyhow!(
             "no GitHub token — set CAMERATA_GITHUB_TOKEN to push"
@@ -7909,7 +7977,7 @@ async fn git_push(
     Path(_id): Path<String>,
     Json(req): Json<GitPushReq>,
 ) -> Json<serde_json::Value> {
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    let token = state.github_token().unwrap_or_default();
     if token.trim().is_empty() {
         return Json(
             serde_json::json!({ "ok": false, "message": "no GitHub token — set CAMERATA_GITHUB_TOKEN to push" }),
@@ -7937,7 +8005,7 @@ async fn git_pull(
     Path(_id): Path<String>,
     Json(req): Json<GitPullReq>,
 ) -> Json<serde_json::Value> {
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    let token = state.github_token().unwrap_or_default();
     if token.trim().is_empty() {
         return Json(
             serde_json::json!({ "ok": false, "message": "no GitHub token — set CAMERATA_GITHUB_TOKEN to pull" }),
@@ -7996,24 +8064,6 @@ async fn uow_get(
 }
 
 // ── Provider-agnostic WorkItem + UoW layer (governed-dev surface) ──────────────
-
-/// Read the GitHub token: credential store first, then `CAMERATA_GITHUB_TOKEN` env
-/// var as a back-compat fallback.  Returns `None` when neither is set or non-empty.
-///
-/// This is the canonical resolution path used by all handlers.  The plain
-/// `github_token_env()` helper below covers the few call sites that run before the
-/// AppState is available (e.g. the connections probe, which runs out of band).
-fn github_token() -> Option<String> {
-    github_token_env()
-}
-
-/// Read `CAMERATA_GITHUB_TOKEN` from the environment only (no credential store).
-/// Used by the connections probe and other paths that have no AppState at hand.
-fn github_token_env() -> Option<String> {
-    std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty())
-}
 
 /// `POST /api/workitems/pull` — pull ALL open issues across ALL the ACTIVE project's
 /// repos via the GitHub adapter, normalized to [`WorkItem`] (each carrying its repo).
@@ -8237,7 +8287,7 @@ async fn workitems_set_parent(
         Err(e) => {
             return Json(serde_json::json!({
                 "ok": false,
-                "message": e.0.to_string(),
+                "message": e.err.to_string(),
             }));
         }
     };
@@ -9722,9 +9772,12 @@ async fn design_publish(
         }
 
         // Create the issue. Embed any node attachments then the diagram in the body.
+        // Fail-soft: a per-node create error must NOT abort the whole tree (that would
+        // discard already-created issues and duplicate them on retry). Warn and continue,
+        // always returning `{nodes, warnings}` so the caller can retry the remainder.
         let node_issue_body = embed_attachments(&authoring.draft_body, &node.attachments);
         let node_issue_body = embed_diagram(&node_issue_body, node.diagram.as_deref());
-        let (html_url, child_db_id) = crate::github_issues::create_issue_returning_id(
+        let (html_url, child_db_id) = match crate::github_issues::create_issue_returning_id(
             &coord.owner,
             &coord.repo,
             &token,
@@ -9732,17 +9785,28 @@ async fn design_publish(
             &node_issue_body,
         )
         .await
-        .map_err(AppError)?;
+        {
+            Ok(v) => v,
+            Err(e) => {
+                warnings.push(format!(
+                    "node `{}` failed to create in `{}`: {e}",
+                    node.story_id, action.repo
+                ));
+                continue;
+            }
+        };
 
-        let number: u64 = html_url
+        let Some(number) = html_url
             .rsplit('/')
             .next()
-            .and_then(|s| s.trim().parse().ok())
-            .ok_or_else(|| {
-                AppError(anyhow::anyhow!(
-                    "could not parse issue number from `{html_url}`"
-                ))
-            })?;
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        else {
+            warnings.push(format!(
+                "node `{}` created in `{}` but its issue number could not be parsed from `{html_url}`",
+                node.story_id, action.repo
+            ));
+            continue;
+        };
 
         // Apply the type label (fail-soft: label failure does not abort publish).
         if let Some(ref node_type) = node.node_type {
@@ -9767,28 +9831,37 @@ async fn design_publish(
         // `link_sub_issue` needs the parent's issue NUMBER and the child's DATABASE id.
         if action.link_to_parent {
             if let Some(parent_draft_id) = node.draft_parent_id.as_deref() {
-                if let Some(&parent_number) =
-                    published.get(&(action.repo.clone(), parent_draft_id.to_string()))
-                {
-                    if let Err(e) = crate::github_issues::link_sub_issue(
-                        &coord.owner,
-                        &coord.repo,
-                        parent_number,
-                        child_db_id,
-                        &token,
-                    )
-                    .await
-                    {
-                        warnings.push(format!(
-                            "{}#{number}: sub-issue link to #{parent_number} failed: {e}",
-                            action.repo
-                        ));
+                match published.get(&(action.repo.clone(), parent_draft_id.to_string())) {
+                    Some(&parent_number) => {
+                        if let Err(e) = crate::github_issues::link_sub_issue(
+                            &coord.owner,
+                            &coord.repo,
+                            parent_number,
+                            child_db_id,
+                            &token,
+                        )
+                        .await
+                        {
+                            warnings.push(format!(
+                                "{}#{number}: sub-issue link to #{parent_number} failed: {e}",
+                                action.repo
+                            ));
+                        }
                     }
+                    // The plan asked to link but the parent was never published in THIS
+                    // repo, so there is no parent issue number to link to. Surface it
+                    // instead of silently dropping the promised link.
+                    None => warnings.push(format!(
+                        "{}#{number}: sub-issue link skipped — parent node `{parent_draft_id}` was not published in `{}`",
+                        action.repo, action.repo
+                    )),
                 }
             }
         }
 
-        // Upsert the story onto the canonical spine (per repo it was created in).
+        // Upsert the story onto the canonical spine (per repo it was created in). The issue
+        // already exists on GitHub, so a local upsert failure is fail-soft: warn but still
+        // record the node so the response reflects reality (and children can still link).
         let story = crate::github_issues::issue_to_story(
             &action.repo,
             number,
@@ -9796,9 +9869,13 @@ async fn design_publish(
             &node_issue_body,
         );
         let work_item_story_id = story.id.clone();
-        state.stories.upsert(story).await.map_err(AppError)?;
-        // Link the work item onto the UoW once (first successful action for this node).
-        if linked.insert(node.story_id.clone()) {
+        if let Err(e) = state.stories.upsert(story).await {
+            warnings.push(format!(
+                "{}#{number}: created but could not upsert onto the spine: {e}",
+                action.repo
+            ));
+        } else if linked.insert(node.story_id.clone()) {
+            // Link the work item onto the UoW once (first successful action for this node).
             state.uow.link_work_item(&node.story_id, &work_item_story_id);
         }
 
@@ -10990,15 +11067,34 @@ async fn uow_get_investigation(
 }
 
 /// `POST /api/uow/:story_id/investigation/review` — mark the story's investigation note
-/// reviewed by the architect (ROUTE-B). Returns `{ ok, version }`; `ok=false` when there
-/// is no note to review (or it was already reviewed).
+/// reviewed by the architect (ROUTE-B). Marking is idempotent: reviewing an
+/// already-reviewed note is still `ok:true` (with `already_reviewed:true`, no new
+/// version). Returns 404 when there is no note to review at all.
 async fn uow_mark_investigation_reviewed(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
-) -> Json<serde_json::Value> {
+) -> Response {
+    use crate::uow::ReviewOutcome;
     match state.uow.mark_investigation_reviewed(&story_id) {
-        Some(version) => Json(serde_json::json!({ "ok": true, "version": version })),
-        None => Json(serde_json::json!({ "ok": false })),
+        ReviewOutcome::NewlyReviewed(version) => Json(serde_json::json!({
+            "ok": true,
+            "version": version,
+            "already_reviewed": false,
+        }))
+        .into_response(),
+        ReviewOutcome::AlreadyReviewed => Json(serde_json::json!({
+            "ok": true,
+            "already_reviewed": true,
+        }))
+        .into_response(),
+        ReviewOutcome::NoNote => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": "no investigation note to review",
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -12235,12 +12331,33 @@ fn render_deep_report_markdown(deep: &crate::ai_audit::DeepReport, soc2_enabled:
 // ── error type ──────────────────────────────────────────────────────────────
 
 /// Maps any backend error to a 500 with a JSON body, so handlers can use `?`.
-struct AppError(anyhow::Error);
+struct AppError {
+    status: StatusCode,
+    err: anyhow::Error,
+}
+
+/// Construct a 500 `AppError` (the default). The `AppError(e)` call form is preserved via a
+/// same-named free function (types and values live in separate namespaces), so every existing
+/// call site keeps compiling; use [`AppError::with_status`] for a non-500 code.
+#[allow(non_snake_case)]
+fn AppError(err: anyhow::Error) -> AppError {
+    AppError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        err,
+    }
+}
+
+impl AppError {
+    /// An `AppError` that renders with a specific HTTP status (e.g. 409 Conflict).
+    fn with_status(status: StatusCode, err: anyhow::Error) -> Self {
+        AppError { status, err }
+    }
+}
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let body = Json(serde_json::json!({ "error": self.0.to_string() }));
-        (StatusCode::INTERNAL_SERVER_ERROR, body).into_response()
+        let body = Json(serde_json::json!({ "error": self.err.to_string() }));
+        (self.status, body).into_response()
     }
 }
 
@@ -12511,6 +12628,49 @@ mod tests {
             p.repos.contains(&"me/web".to_string()),
             "repos absorbed into the project"
         );
+    }
+
+    #[test]
+    fn save_armed_never_persists_the_single_repo_sentinel() {
+        let sentinel = "\u{0}__single_repo__".to_string();
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // One rule carries the leaked UI sentinel alongside a real repo; another is
+        // sentinel-only. Neither must write a NUL into the persisted project.
+        save_armed_to_project(
+            &state,
+            &[
+                arm_rule("REPO-1", "repo-local", &[&sentinel, "me/api"]),
+                arm_rule("XREPO-1", "cross-repo", &[&sentinel]),
+            ],
+            &[],
+        );
+        let p = state.projects.active().expect("a project was created");
+        assert!(
+            p.repos.iter().all(|r| !r.contains('\0')),
+            "no sentinel in project.repos: {:?}",
+            p.repos
+        );
+        for sel in p
+            .ruleset
+            .selections
+            .iter()
+            .chain(p.ruleset.cross_repo.iter())
+        {
+            assert!(
+                sel.repos.iter().all(|r| !r.contains('\0')),
+                "no sentinel in selection {}: {:?}",
+                sel.rule_id,
+                sel.repos
+            );
+        }
+        // The sentinel on REPO-1 expanded to the real repo discovered in the same arm.
+        let repo1 = p
+            .ruleset
+            .selections
+            .iter()
+            .find(|s| s.rule_id == "REPO-1")
+            .unwrap();
+        assert!(repo1.repos.contains(&"me/api".to_string()));
     }
 
     #[test]
@@ -13165,7 +13325,12 @@ mod tests {
         .await
         .unwrap_or_else(|_| panic!("answer_escalation should succeed"))
         .0;
-        assert_eq!(resolved.status, crate::escalation::EscalationStatus::Resolved);
+        assert_eq!(resolved["status"], "resolved");
+        // A successful resume surfaces the NEW run id so the client can follow it.
+        assert!(
+            resolved["resume_run_id"].as_str().is_some_and(|s| !s.is_empty()),
+            "approve returns the resumed run id: {resolved}"
+        );
         // Approve RESUMES: the checkpoint is consumed (enforcing once-only resume) and no longer
         // shows in NEEDS YOU.
         assert!(
@@ -13201,7 +13366,12 @@ mod tests {
         .await
         .unwrap_or_else(|_| panic!("answer_escalation should succeed"))
         .0;
-        assert_eq!(resolved.status, crate::escalation::EscalationStatus::Resolved);
+        assert_eq!(resolved["status"], "resolved");
+        // Reject does NOT resume, so no run id is surfaced.
+        assert!(
+            resolved["resume_run_id"].is_null(),
+            "reject surfaces no resumed run id: {resolved}"
+        );
         // Reject consumes the checkpoint (stop cleanly; no resume).
         assert!(
             state.checkpoints.get(&ckpt_id).unwrap().resumed.is_some(),
@@ -13996,7 +14166,8 @@ mod tests {
         let stored = state.uow.investigation_note_for(story).unwrap();
         assert!(stored.reviewed);
 
-        // A second review (already reviewed) → ok=false (no new revision).
+        // A second review is idempotent (already reviewed) → still ok=true, no new
+        // revision, and flagged already_reviewed so the caller can tell it apart.
         let app2 = router(state.clone());
         let resp2 = app2
             .oneshot(
@@ -14008,8 +14179,26 @@ mod tests {
             )
             .await
             .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
         let json2 = body_json(resp2).await;
-        assert_eq!(json2["ok"], false);
+        assert_eq!(json2["ok"], true);
+        assert_eq!(json2["already_reviewed"], true);
+
+        // Reviewing a story that has no investigation note at all → 404, ok=false.
+        let app3 = router(state.clone());
+        let resp3 = app3
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/uow/no-such-story/investigation/review")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp3.status(), StatusCode::NOT_FOUND);
+        let json3 = body_json(resp3).await;
+        assert_eq!(json3["ok"], false);
     }
 
     // ── UoW Increment 1: tiered dev run + model-aware investigation ───────────────
@@ -14677,7 +14866,7 @@ mod tests {
             "github:zernst3/camerata-orchestrator#42",
         ) {
             Ok(v) => v,
-            Err(e) => panic!("valid id should parse: {}", e.0),
+            Err(e) => panic!("valid id should parse: {}", e.err),
         };
         assert_eq!(repo, "zernst3/camerata-orchestrator");
         assert_eq!(number, 42);

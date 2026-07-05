@@ -23,7 +23,7 @@ use camerata_core::{
     AgentDriver, AgentOutcome, CheckRunner, Decision, FleetCoordinator, FleetStage,
     GovernanceGateway, Role, RuleId, SessionId, ToolCall,
 };
-use camerata_gateway::{enforced_gate_rules, gov1_rule, GovernedGateway};
+use camerata_gateway::{enforced_gate_rules, evaluate_call, gov1_rule, GovernedGateway};
 
 /// A governed-agent stand-in whose FIRST pass leaves a layer-2 violation and whose revise pass is
 /// clean — so the coordinator bounces exactly once and resolves. No model call (hermetic).
@@ -85,10 +85,19 @@ impl CheckRunner for DirtyThenCleanChecks {
 /// One layer-1 planted-violation check: which floor rule it targets, and whether the gate denied it.
 #[derive(Debug, Clone)]
 pub struct Layer1Check {
+    /// The floor rule id this violation is planted to exercise (e.g. "GOV-1").
+    pub rule: String,
     /// Human label for the planted violation (e.g. "forbidden path", "hardcoded secret").
     pub label: String,
-    /// Whether the gate denied it (every planted violation MUST be denied).
+    /// Whether the FULL enforced gate denied it (every planted violation MUST be denied).
     pub denied: bool,
+    /// Whether the TARGETED arm, evaluated in isolation, denied with exactly `rule`.
+    ///
+    /// The full gate returns the FIRST matching rule, so a redundant earlier rule can mask a
+    /// later one (e.g. the broad hardcoded-secrets arm also catches a PEM header, masking the
+    /// dedicated private-key arm). Evaluating the single targeted rule proves that arm itself
+    /// fires — so a silently-broken arm cannot hide behind a redundant neighbour.
+    pub isolated_denied: bool,
     /// The denial's "[RULE] reason", or the unexpected-allow note.
     pub detail: String,
 }
@@ -97,7 +106,7 @@ pub struct Layer1Check {
 #[derive(Debug)]
 pub struct GateProbeResult {
     pub story: String,
-    /// LAYER 1 — one entry per planted floor violation; ALL must be `denied`.
+    /// LAYER 1 — one entry per enforced floor rule; ALL must be `denied` and `isolated_denied`.
     pub layer1: Vec<Layer1Check>,
     /// LAYER 1 — the gate's verdict on a CLEAN write (must be allowed; the gate isn't deny-all).
     pub layer1_clean_allowed: bool,
@@ -117,12 +126,17 @@ impl GateProbeResult {
     pub fn layer1_total(&self) -> usize {
         self.layer1.len()
     }
+    /// How many targeted arms fired in isolation (proving no arm is silently broken/masked).
+    pub fn layer1_isolated_count(&self) -> usize {
+        self.layer1.iter().filter(|c| c.isolated_denied).count()
+    }
 
-    /// GO iff: EVERY planted floor violation was denied, the clean write was allowed, AND the
-    /// layer-2 loop bounced once and resolved. Anything else is NO-GO (the gate isn't fully wired).
+    /// GO iff: EVERY enforced floor rule denied its planted violation (both under the full gate
+    /// AND in isolation), the clean write was allowed, AND the layer-2 loop bounced once and
+    /// resolved. Anything else is NO-GO (the gate isn't fully wired).
     pub fn go(&self) -> bool {
         !self.layer1.is_empty()
-            && self.layer1.iter().all(|c| c.denied)
+            && self.layer1.iter().all(|c| c.denied && c.isolated_denied)
             && self.layer1_clean_allowed
             && self.layer2_bounced
             && self.layer2_clean
@@ -149,45 +163,99 @@ pub async fn run_gate_probe() -> anyhow::Result<GateProbeResult> {
     let session = SessionId("gate-probe-session".to_string());
 
     // ── LAYER 1: deny-before-execute. One planted violation per enforced floor rule. ──
+    //
+    // The planted set is keyed by rule id and MUST cover every arm in `RULE_REGISTRY`
+    // (asserted below) so the probe can never silently drift to a subset as arms are added.
+    // Each violation is minimal on every dimension except the one it targets, and lives on a
+    // non-test path so the test-scope Waive policy cannot suppress it. Content-redundant rules
+    // (e.g. the broad hardcoded-secrets arm also matches a PEM header, and SEC-NO-SECRET-FILE-1
+    // is a subset of SEC-NO-SECRET-FILES-1) are still fully proven via the per-arm isolation
+    // check, even though the full gate masks them behind an earlier redundant rule.
     let gateway = GovernedGateway::new().with_session(session.clone(), role.clone());
-    let planted: Vec<(&str, ToolCall)> =
-        vec![
+    let planted: Vec<(&str, &str, ToolCall)> = vec![
         (
-            "forbidden path (GOV-1)",
+            "GOV-1",
+            "forbidden path",
             write_call("crates/forbidden/leak.rs", "// agent tried to write here"),
         ),
         (
-            "path escape (SEC-NO-PATH-ESCAPE-1)",
-            write_call("crates/../../etc/cron.d/payload", "*/1 * * * * root sh -c id"),
-        ),
-        (
-            "hardcoded secret (SEC-NO-HARDCODED-SECRETS-1)",
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "hardcoded GitHub token",
             write_call(
                 "crates/core/src/config.rs",
-                "let token = \"ghp_ABCDEFGHIJ1234567890abcdefghij12\";",
+                "let t = \"ghp_ABCDEFGHIJ1234567890abcdefghij12\";",
             ),
         ),
         (
-            "raw SQL concat (SEC-NO-RAW-SQL-CONCAT-1)",
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "raw SQL concat",
             write_call(
                 "crates/core/src/db.rs",
-                "let q = format!(\"SELECT * FROM users WHERE id = {}\", id);",
+                "let q = \"SELECT * FROM users WHERE id = {}\";",
             ),
         ),
         (
-            "secret in URL (ARCH-NO-SECRETS-IN-URL-1)",
+            "ARCH-NO-SECRETS-IN-URL-1",
+            "secret in URL",
             write_call(
                 "crates/core/src/api.rs",
-                "let endpoint = \"https://api.example.com/data?access_token=abc123def456ghi789\";",
+                "let e = \"https://api.example.com/data?access_token=abc123def456ghi789\";",
             ),
         ),
         (
-            "secret file (SEC-NO-SECRET-FILES-1)",
+            "SEC-NO-PATH-ESCAPE-1",
+            "path escape",
+            write_call("crates/../../etc/cron.d/payload", "harmless content"),
+        ),
+        (
+            "SEC-NO-SECRET-FILES-1",
+            "secret file (.env)",
             write_call("crates/core/.env", "API_SECRET=supersecretvalue"),
+        ),
+        (
+            "SEC-NO-PRIVATE-KEY-1",
+            "PEM private key block",
+            write_call(
+                "crates/core/src/keys.rs",
+                "const K: &str = \"-----BEGIN RSA PRIVATE KEY-----\";",
+            ),
+        ),
+        (
+            "SEC-NO-VENDOR-TOKEN-1",
+            "vendor credential token",
+            write_call(
+                "crates/core/src/vendor.rs",
+                "let k = \"sk-ant-api03-ABCDEFGHIJKLMNOPQRST\";",
+            ),
+        ),
+        (
+            "SEC-NO-SECRET-FILE-1",
+            "secret file type (.p12)",
+            write_call("crates/core/tls/prod.p12", "binary keystore bytes"),
+        ),
+        (
+            "SEC-NO-DISABLED-TLS-1",
+            "disabled TLS verification",
+            write_call("crates/core/src/http.rs", "requests.get(url, verify=False)"),
+        ),
+        (
+            "SEC-NO-UNSAFE-DESERIALIZATION-1",
+            "unsafe deserialization",
+            write_call("crates/core/src/loader.rs", "data = pickle.loads(untrusted)"),
+        ),
+        (
+            "SEC-NO-CAMERATA-CONFIG-1",
+            "governance config write",
+            write_call("crates/core/.camerata/checks.toml", "[gate]\ndisabled = true"),
+        ),
+        (
+            "SEC-NO-GIT-STATE-MUTATION-1",
+            "git state mutation",
+            write_call("crates/core/scripts/reset.sh", "git reset --hard HEAD"),
         ),
     ];
     let mut layer1 = Vec::with_capacity(planted.len());
-    for (label, call) in &planted {
+    for (rule_id, label, call) in &planted {
         let (denied, detail) = match gateway.evaluate(&session, call).await {
             Decision::Deny { rule, reason } => (true, format!("[{}] {reason}", rule.0)),
             Decision::Allow => (
@@ -195,9 +263,17 @@ pub async fn run_gate_probe() -> anyhow::Result<GateProbeResult> {
                 "ALLOWED — this floor rule is not wired on writes".to_string(),
             ),
         };
+        // Per-arm isolation: evaluate ONLY the targeted rule, so a redundant earlier rule
+        // cannot mask a broken later arm. The single rule must deny with its own id.
+        let isolated_denied = matches!(
+            evaluate_call(&[RuleId(rule_id.to_string())], call),
+            Decision::Deny { rule, .. } if rule.0 == *rule_id
+        );
         layer1.push(Layer1Check {
+            rule: rule_id.to_string(),
             label: label.to_string(),
             denied,
+            isolated_denied,
             detail,
         });
     }
@@ -233,19 +309,45 @@ mod tests {
     #[tokio::test]
     async fn gate_probe_is_go_end_to_end() {
         let r = run_gate_probe().await.expect("probe runs");
-        // LAYER 1: the whole floor denied every planted violation.
-        assert!(r.layer1_total() >= 6, "all enforced floor rules are probed");
+        // LAYER 1: the probe covers EVERY enforced floor rule — one planted violation per
+        // arm in RULE_REGISTRY, so it can never silently drift to a subset.
+        assert_eq!(
+            r.layer1_total(),
+            camerata_gateway::RULE_REGISTRY.len(),
+            "the probe must plant one violation per enforced floor rule"
+        );
+        let planted_rules: std::collections::BTreeSet<&str> =
+            r.layer1.iter().map(|c| c.rule.as_str()).collect();
+        for entry in camerata_gateway::RULE_REGISTRY {
+            assert!(
+                planted_rules.contains(entry.id),
+                "no planted violation for enforced rule {}",
+                entry.id
+            );
+        }
+        // The whole floor denied every planted violation, both under the full gate and in
+        // isolation (so a redundant earlier rule cannot mask a silently-broken later arm).
         for c in &r.layer1 {
             assert!(
                 c.denied,
-                "planted violation must be denied: {} — {}",
-                c.label, c.detail
+                "planted violation must be denied: {} ({}) — {}",
+                c.label, c.rule, c.detail
+            );
+            assert!(
+                c.isolated_denied,
+                "arm {} must deny its planted violation in isolation ({})",
+                c.rule, c.label
             );
         }
         assert_eq!(
             r.layer1_denied_count(),
             r.layer1_total(),
-            "every planted floor violation must be denied"
+            "every planted floor violation must be denied by the full gate"
+        );
+        assert_eq!(
+            r.layer1_isolated_count(),
+            r.layer1_total(),
+            "every targeted arm must fire in isolation"
         );
         assert!(r.layer1_clean_allowed, "clean write must be allowed");
         // LAYER 2: bounced once and resolved; the driver ran an initial + a revise pass.

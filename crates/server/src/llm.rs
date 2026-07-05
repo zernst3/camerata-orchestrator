@@ -446,12 +446,56 @@ fn usage_tokens(usage: &serde_json::Value) -> (Option<u64>, Option<u64>, u64, u6
     (input, output, cache_read, cache_create)
 }
 
+/// Extract the completion text from a `claude -p --output-format json` object, treating an
+/// in-band failure as an error. The CLI can exit 0 yet report a failure via `is_error:true`
+/// (execution error, max-turns abort, etc.) or omit `result` entirely; accepting that as a
+/// successful empty completion masks a backend failure as a low-quality result, so bail.
+fn cli_result_text(v: &serde_json::Value) -> anyhow::Result<&str> {
+    if v["is_error"].as_bool() == Some(true) {
+        anyhow::bail!(
+            "claude CLI returned is_error=true (subtype {}): {}",
+            v["subtype"].as_str().unwrap_or("unknown"),
+            v["result"].as_str().unwrap_or("<no result>")
+        );
+    }
+    v["result"].as_str().ok_or_else(|| {
+        anyhow::anyhow!(
+            "claude CLI JSON has no `result` field (subtype {})",
+            v["subtype"].as_str().unwrap_or("unknown")
+        )
+    })
+}
+
 /// List price ($/Mtok input, $/Mtok output) for a model id, from [`MODELS`].
 fn price_for(model_id: &str) -> Option<(f64, f64)> {
     MODELS
         .iter()
         .find(|m| m.id == model_id)
         .map(|m| (m.price_in, m.price_out))
+}
+
+/// Compute the dollar cost from token usage and list price. `input` folds in cache-read and
+/// cache-creation tokens, which are NOT billed at the full input rate: cache reads are ~0.1×
+/// and cache writes ~1.25×. Price the three input components separately so cached reads are
+/// not over-billed ~10×. Returns `None` unless the model is priced and both token counts are
+/// present.
+fn compute_cost_usd(
+    model_id: &str,
+    input: Option<u64>,
+    output: Option<u64>,
+    cache_read: u64,
+    cache_creation: u64,
+) -> Option<f64> {
+    price_for(model_id).and_then(|(pin, pout)| match (input, output) {
+        (Some(i), Some(o)) => {
+            let fresh_input = i.saturating_sub(cache_read).saturating_sub(cache_creation);
+            let input_cost = fresh_input as f64 * pin
+                + cache_read as f64 * pin * 0.1
+                + cache_creation as f64 * pin * 1.25;
+            Some((input_cost + o as f64 * pout) / 1_000_000.0)
+        }
+        _ => None,
+    })
 }
 
 /// Which backend, resolved from env. Pure so it's unit-testable without real calls.
@@ -687,9 +731,10 @@ impl Llm {
         }
         let v: serde_json::Value = serde_json::from_slice(&out.stdout)
             .map_err(|e| anyhow::anyhow!("parse claude CLI JSON: {e}"))?;
+        let result_text = cli_result_text(&v)?;
         let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&v["usage"]);
         Ok(LlmResponse {
-            text: v["result"].as_str().unwrap_or_default().to_string(),
+            text: result_text.to_string(),
             model: model.to_string(),
             backend: "cli".to_string(),
             cost_usd: v["total_cost_usd"].as_f64(),
@@ -978,14 +1023,8 @@ impl Llm {
             .unwrap_or_default();
         let (input_tokens, output_tokens, cache_read, cache_creation) = usage_tokens(&v["usage"]);
         // The API doesn't bill back a dollar figure, so compute it from usage × list price.
-        // When caching is active the billed input already incorporates cache pricing (the API
-        // returns the correctly-billed totals in the usage object) so no adjustment is needed
-        // here — just sum as usual.
         let cost_usd =
-            price_for(model).and_then(|(pin, pout)| match (input_tokens, output_tokens) {
-                (Some(i), Some(o)) => Some((i as f64 * pin + o as f64 * pout) / 1_000_000.0),
-                _ => None,
-            });
+            compute_cost_usd(model, input_tokens, output_tokens, cache_read, cache_creation);
         Ok(LlmResponse {
             text: out,
             model: model.to_string(),
@@ -1318,11 +1357,13 @@ pub fn parse_batch_results_jsonl(jsonl: &str) -> anyhow::Result<Vec<BatchResultR
                 .unwrap_or_default();
             let (input_tokens, output_tokens, cache_read, cache_creation) =
                 usage_tokens(&msg["usage"]);
-            let cost_usd =
-                price_for(&model_id).and_then(|(pin, pout)| match (input_tokens, output_tokens) {
-                    (Some(i), Some(o)) => Some((i as f64 * pin + o as f64 * pout) / 1_000_000.0),
-                    _ => None,
-                });
+            let cost_usd = compute_cost_usd(
+                &model_id,
+                input_tokens,
+                output_tokens,
+                cache_read,
+                cache_creation,
+            );
             rows.push(BatchResultRow {
                 custom_id,
                 response: Some(LlmResponse {
@@ -1922,6 +1963,42 @@ mod tests {
         let usage3 = serde_json::json!({"output_tokens": 5});
         let (inp3, _out3, _cr3, _cc3) = usage_tokens(&usage3);
         assert_eq!(inp3, None, "missing input_tokens stays None");
+    }
+
+    #[test]
+    fn compute_cost_prices_cache_components_separately() {
+        // opus: price_in 15, price_out 75 ($/Mtok). input folds cache fields (base 100,
+        // read 200, creation 30 -> 330); fresh input is 100.
+        let cost = compute_cost_usd("claude-opus-4-8", Some(330), Some(50), 200, 30)
+            .expect("priced model");
+        // 100*15 (fresh) + 200*15*0.1 (read) + 30*15*1.25 (creation) + 50*75 (out) = 6112.5
+        let expected = (100.0 * 15.0 + 200.0 * 15.0 * 0.1 + 30.0 * 15.0 * 1.25 + 50.0 * 75.0)
+            / 1_000_000.0;
+        assert!((cost - expected).abs() < 1e-12, "cost={cost} expected={expected}");
+        // The naive fold-everything-at-full-input rate would over-bill.
+        let naive = (330.0 * 15.0 + 50.0 * 75.0) / 1_000_000.0;
+        assert!(cost < naive, "cached reads must not be billed at full input rate");
+
+        // No cache tokens -> matches the plain input*price formula.
+        let plain = compute_cost_usd("claude-opus-4-8", Some(100), Some(50), 0, 0).unwrap();
+        assert!((plain - (100.0 * 15.0 + 50.0 * 75.0) / 1_000_000.0).abs() < 1e-12);
+
+        // Unknown model or missing counts -> None.
+        assert!(compute_cost_usd("nope", Some(1), Some(1), 0, 0).is_none());
+        assert!(compute_cost_usd("claude-opus-4-8", None, Some(1), 0, 0).is_none());
+    }
+
+    #[test]
+    fn cli_result_text_rejects_error_shaped_payloads() {
+        // Happy path: is_error false, result present.
+        let ok = serde_json::json!({"is_error": false, "result": "hello"});
+        assert_eq!(cli_result_text(&ok).unwrap(), "hello");
+        // is_error:true -> Err even though a result string is present.
+        let errored = serde_json::json!({"is_error": true, "subtype": "error_max_turns", "result": "partial"});
+        assert!(cli_result_text(&errored).is_err(), "is_error=true must fail");
+        // Absent result -> Err.
+        let no_result = serde_json::json!({"is_error": false, "subtype": "success"});
+        assert!(cli_result_text(&no_result).is_err(), "missing result must fail");
     }
 
     #[test]

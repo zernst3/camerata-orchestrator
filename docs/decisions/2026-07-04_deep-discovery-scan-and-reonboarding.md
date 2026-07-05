@@ -159,19 +159,32 @@ destroy trust, so this component gets the strongest model and its own eval set.
   should say so rather than invent gaps).
 - v1 is snapshot-only; the re-scan DIFF is deferred.
 
-### 7. Scheduled "Bug and Gap Discovery Scan" routine template (added 2026-07-05)
+### 7. Scheduled onboarding-scan routine template (all tiers selectable) + per-iteration slice (added 2026-07-05)
 
-A new routine TEMPLATE (Camerata's scheduled-routine feature): a recurring **Bug and Gap Discovery Scan**
-that runs the tier-3 discovery scan against the project's repos on a schedule. It is re-onboarding (§5)
-on a cadence, feeding the same consolidator + triage pipeline.
+A routine TEMPLATE (Camerata's scheduled-routine feature) that re-runs the ENTIRE onboarding scan flow on
+a cadence, exposing the SAME selectable options as interactive onboarding, plus a new per-iteration SLICE
+scope. It is re-onboarding (§5) on a schedule, feeding the same consolidator (§6) + triage pipeline. It is
+a template: sensible defaults the user overrides however they like.
 
-- **Scan scope: FULL every run.** Each fire deep-scans ALL of the repos' code, not an incremental slice
-  and not skipping previously-scanned code. By design: already-scanned code can behave differently once
-  it is referenced by NEW code, so a true DEEP scan re-examines everything each time. (The re-scan DIFF in
-  §5 is still valid and complementary: it compares two FULL-scan snapshots to show new/fixed/regressed.)
-- **Guardrailed against snowballing:** bounded agent count (= number of subsystems, no recursion), a
-  per-run cost cap + estimate, and a minimum cadence, so a scheduled full-repo deep scan cannot run away.
-- Output: consolidator → category-grouped findings (§6) → triage (never auto-fix).
+- **Runs the full onboarding flow each iteration**, with the identical onboarding selector: which TIERS
+  run (mechanical / rule-based audit / Bug-and-Gap discovery, any subset), the DISPOSITION (triage-first),
+  and the MODEL tier. Default template = all three tiers, triage-first, strongest model for discovery.
+- **NEW: per-iteration SLICE scope.** Instead of the whole codebase, a run can scan a configurable SLICE:
+  a path / glob / subsystem / language-layer selector (e.g. "API controllers only", "crates/server",
+  "src/auth/**"). The slice can be **fixed** (same slice every run, e.g. security-triage the API layer
+  nightly) or **rotating** (advance through slices across iterations to cover the whole codebase over time
+  at lower per-run cost). Full-codebase-every-run stays the default/recommended; the slice is the
+  cost/cadence lever.
+- **Fully customizable combinations**, e.g.: "full onboarding every iteration", "security triage only",
+  "discovery scan of the API-controllers slice per iteration", or any tier x disposition x model x slice.
+- **Guardrailed against snowballing:** bounded agent count (= subsystems in scope, no recursion), a per-run
+  cost cap + estimate, and a cadence floor, so even a full-repo run cannot run away.
+- Output each run: consolidator → category-grouped findings (§6) → triage (never auto-fix).
+
+Reconciling with the "full deep scan every run" principle (§decision 3): that is the DEFAULT and the rule
+for a given run's SCOPE (within a run, do not auto-skip already-scanned code, since new references change
+its behavior). The slice option is a DELIBERATE user choice to narrow the per-iteration scope for
+cost/cadence; within the chosen slice, the scan is still full and deep.
 
 ## Resolved decisions (2026-07-05)
 

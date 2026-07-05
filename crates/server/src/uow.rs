@@ -296,6 +296,19 @@ impl UnitOfWork {
 /// other conventions the hook is a no-op. Hook failures are non-fatal: the sign-off
 /// is already persisted when the hook runs, so a doc-write error only logs and never
 /// rolls back the sign-off.
+/// Outcome of [`UowStore::mark_investigation_reviewed`], distinguishing the idempotent
+/// already-reviewed success from the error case where no note exists to review.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewOutcome {
+    /// The note was newly marked reviewed, persisted as revision `version`.
+    NewlyReviewed(i64),
+    /// The note was already reviewed; nothing was persisted, but this is a success.
+    AlreadyReviewed,
+    /// No investigation note exists for the story (or no artifact store is attached),
+    /// so there is nothing to review.
+    NoNote,
+}
+
 #[derive(Clone, Default)]
 pub struct UowStore {
     path: Option<Arc<PathBuf>>,
@@ -1419,23 +1432,30 @@ impl UowStore {
 
     /// Mark a story's current investigation note as REVIEWED by the architect, persisting
     /// the reviewed copy as a new revision (provenance → User) and appending a history
-    /// entry. Returns the new revision version, or `None` when there is no note to review
-    /// (or no artifact store attached). This is the ROUTE-B check the development gate
-    /// relies on alongside the decision gate.
-    pub fn mark_investigation_reviewed(&self, story_id: &str) -> Option<i64> {
-        let note = self.investigation_note_for(story_id)?;
+    /// entry. This is the ROUTE-B check the development gate relies on alongside the
+    /// decision gate.
+    ///
+    /// Returns a [`ReviewOutcome`] so callers can distinguish the idempotent
+    /// already-reviewed case (still a success) from the error case where no note exists
+    /// to review at all.
+    pub fn mark_investigation_reviewed(&self, story_id: &str) -> ReviewOutcome {
+        let Some(note) = self.investigation_note_for(story_id) else {
+            return ReviewOutcome::NoNote;
+        };
         if note.reviewed {
-            // Already reviewed: nothing to persist, but report success-ish (no new rev).
-            return None;
+            // Idempotent: already reviewed, so no new revision, but this is a success.
+            return ReviewOutcome::AlreadyReviewed;
         }
         let reviewed = note.mark_reviewed(chrono::Utc::now());
-        let version = self.set_investigation_note(&reviewed)?;
+        let Some(version) = self.set_investigation_note(&reviewed) else {
+            return ReviewOutcome::NoNote;
+        };
         self.append_history(
             story_id,
             "note",
             "Investigation note marked reviewed by the architect.",
         );
-        Some(version)
+        ReviewOutcome::NewlyReviewed(version)
     }
 
     /// Read a story's current investigation note from the central [`ArtifactStore`],

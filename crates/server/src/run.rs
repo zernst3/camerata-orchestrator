@@ -101,6 +101,18 @@ impl RunStore {
         }
     }
 
+    /// Mark a run terminal (`done = true`) WITHOUT altering its status — e.g. a paused run
+    /// (`AwaitingReview`) whose review has been resolved and is now superseded by a fresh resume
+    /// run. Preserving the last status keeps the history honest (it really did stop at review),
+    /// while `done = true` stops it lingering as an open run forever.
+    pub fn mark_done(&self, id: &str) {
+        if let Ok(mut guard) = self.runs.lock() {
+            if let Some(run) = guard.get_mut(id) {
+                run.done = true;
+            }
+        }
+    }
+
     pub(crate) fn push_event(&self, id: &str, event: GateEvent) {
         if let Ok(mut guard) = self.runs.lock() {
             if let Some(run) = guard.get_mut(id) {

@@ -31,7 +31,7 @@
 //! `mcp__camerata__gated_write` — the constant `camerata_agent::GATED_WRITE_TOOL`.
 
 use camerata_core::{Decision, RuleId, ToolCall};
-use camerata_gateway::{evaluate_call, gov1_rule};
+use camerata_gateway::{enforced_gate_rules, evaluate_call, gov1_rule};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{Implementation, ServerCapabilities, ServerInfo},
@@ -407,8 +407,7 @@ fn append_gate_record(record: &GateDecisionRecord) {
 pub const WORKTREE_ROOT_ENV: &str = "CAMERATA_WORKTREE_ROOT";
 
 /// Lexically normalize a path: resolve `.` and `..` WITHOUT touching the filesystem
-/// (so it works for not-yet-created files). Symlink resolution is intentionally not
-/// done; the agent cannot create symlinks because `Bash` is denied at the cage.
+/// (so it works for not-yet-created files).
 fn normalize_lexical(p: &std::path::Path) -> std::path::PathBuf {
     use std::path::Component;
     let mut out = std::path::PathBuf::new();
@@ -424,18 +423,72 @@ fn normalize_lexical(p: &std::path::Path) -> std::path::PathBuf {
     out
 }
 
-/// Whether `target` resolves to a path inside `root`. Relative targets resolve against
-/// `root` (the agent's cwd is the worktree); absolute targets are taken as-is. Both are
-/// lexically normalized, then a component-wise prefix check jails the result. An
-/// absolute path outside the worktree, or a `..` climb above it, returns false.
-fn within_jail(root: &std::path::Path, target: &str) -> bool {
+/// Resolve symlinks in the EXISTING ancestor prefix of `p`, returning the canonical
+/// existing prefix rejoined with the remaining not-yet-created tail. Walk up from `p`
+/// to the deepest ancestor that exists on disk, `canonicalize` it (which resolves every
+/// symlink in that prefix), then re-append the stripped tail verbatim. The tail names a
+/// path that does not exist yet, so none of its components can themselves be symlinks.
+///
+/// This is what stops a repo-committed symlink directory (e.g. `worktree/link -> /etc`)
+/// from smuggling a gated write outside the jail: a purely lexical `starts_with` check
+/// would see `worktree/link/passwd` as in-jail, but canonicalizing the existing
+/// `worktree/link` prefix exposes the real `/private/etc/passwd` destination.
+fn canonicalize_existing_prefix(p: &std::path::Path) -> std::path::PathBuf {
+    let mut ancestor = p.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if let Ok(canon) = std::fs::canonicalize(&ancestor) {
+            let mut resolved = canon;
+            for seg in tail.iter().rev() {
+                resolved.push(seg);
+            }
+            return resolved;
+        }
+        match ancestor.file_name() {
+            Some(name) => {
+                tail.push(name.to_os_string());
+                if !ancestor.pop() {
+                    return normalize_lexical(p);
+                }
+            }
+            // No file_name (root `/` or a prefix) that still fails to canonicalize:
+            // fall back to the lexical form rather than looping forever.
+            None => return normalize_lexical(p),
+        }
+    }
+}
+
+/// Resolve `target` to the absolute path it must be WRITTEN to inside `root`, or `None`
+/// when it escapes the jail. Relative targets resolve against `root` (the jail root, NOT
+/// the process cwd — so the returned path is what the caller must actually write to,
+/// keeping check and effect the same path: GATE-F4). Absolute targets are taken as-is.
+/// Both the target and the root have symlinks in their existing prefix resolved
+/// ([`canonicalize_existing_prefix`]) BEFORE the component-wise prefix check, so a
+/// symlinked directory component cannot smuggle a write outside the jail (GATE-F1), and a
+/// legitimate absolute write under a symlinked root prefix (e.g. macOS `/tmp` ->
+/// `/private/tmp`) is not falsely denied (GATE-F5). An absolute path outside the
+/// worktree, or a `..` climb above it, returns `None`.
+fn resolve_in_jail(root: &std::path::Path, target: &str) -> Option<std::path::PathBuf> {
     let t = std::path::Path::new(target);
     let abs = if t.is_absolute() {
         t.to_path_buf()
     } else {
         root.join(t)
     };
-    normalize_lexical(&abs).starts_with(normalize_lexical(root))
+    let target_resolved = canonicalize_existing_prefix(&normalize_lexical(&abs));
+    let root_resolved = canonicalize_existing_prefix(&normalize_lexical(root));
+    target_resolved
+        .starts_with(&root_resolved)
+        .then_some(target_resolved)
+}
+
+/// Whether `target` resolves to a path inside `root`. Thin boolean wrapper over
+/// [`resolve_in_jail`]; use `resolve_in_jail` directly when you also need the resolved
+/// write path (so the CHECK and the WRITE hit the same location). Retained for the jail
+/// unit tests and as a boolean-only convenience.
+#[allow(dead_code)]
+fn within_jail(root: &std::path::Path, target: &str) -> bool {
+    resolve_in_jail(root, target).is_some()
 }
 
 /// Load the worktree jail root from the environment, canonicalized. `None` means no
@@ -516,9 +569,15 @@ pub struct FanOutArgs {
 ///
 /// The file is a JSON array of rule-id strings, e.g. `["GOV-1"]`. This is the
 /// data-driven delivery channel: the orchestrator's live rule selection arrives
-/// as data, not code. A missing/unreadable/unparseable file fails CLOSED onto
-/// the GOV-1 default rather than an empty (allow-everything) subset, so a
-/// delivery glitch can never silently disable governance.
+/// as data, not code.
+///
+/// A file that is SET but unreadable/unparseable/empty is a delivery glitch on a
+/// governed run, so it fails CLOSED onto the FULL enforced floor
+/// (`enforced_gate_rules()`), not onto `[GOV-1]`. `[GOV-1]` alone is only a
+/// synthetic verification fixture, so falling back to it would silently shed the
+/// entire SEC-* floor for the session (fail-OPEN). Only the truly unconfigured
+/// case (env var unset, i.e. the gateway run standalone with no orchestrator
+/// delivery) uses the minimal `[GOV-1]` default.
 fn load_rule_subset() -> Vec<RuleId> {
     let Some(path) = std::env::var_os(RULES_FILE_ENV) else {
         eprintln!("[gateway] {RULES_FILE_ENV} unset; using default subset [GOV-1]");
@@ -541,25 +600,25 @@ fn load_rule_subset() -> Vec<RuleId> {
             }
             Ok(_) => {
                 eprintln!(
-                    "[gateway] {} parsed to an EMPTY subset; failing closed onto [GOV-1]",
+                    "[gateway] {} parsed to an EMPTY subset; failing closed onto the full floor",
                     path.display()
                 );
-                vec![gov1_rule()]
+                enforced_gate_rules()
             }
             Err(e) => {
                 eprintln!(
-                    "[gateway] could not parse {} ({e}); failing closed onto [GOV-1]",
+                    "[gateway] could not parse {} ({e}); failing closed onto the full floor",
                     path.display()
                 );
-                vec![gov1_rule()]
+                enforced_gate_rules()
             }
         },
         Err(e) => {
             eprintln!(
-                "[gateway] could not read {} ({e}); failing closed onto [GOV-1]",
+                "[gateway] could not read {} ({e}); failing closed onto the full floor",
                 path.display()
             );
-            vec![gov1_rule()]
+            enforced_gate_rules()
         }
     }
 }
@@ -642,20 +701,28 @@ impl Gateway {
         // can write anywhere on the filesystem, so refuse any target outside the
         // worktree before evaluating content rules. This is what keeps the agent from
         // writing its own rules.json / system files via an absolute path.
-        let decision = if self
-            .jail_root
-            .as_ref()
-            .is_some_and(|root| !within_jail(root, &path))
-        {
-            format!("DENIED [JAIL: outside the worktree] path={path}")
-        } else {
-            match self.evaluate(&path, &content) {
+        //
+        // When jailed, WRITE to the jail-resolved path, not the raw `path`: a relative
+        // target resolves against the jail root here, but `std::fs::write` on the raw
+        // relative path would resolve against the process cwd, so a cwd != jail-root
+        // would check one file and write another (GATE-F4). `write_target` is the exact
+        // path the jail check validated.
+        let jail_check = match &self.jail_root {
+            Some(root) => match resolve_in_jail(root, &path) {
+                Some(resolved) => Ok(resolved),
+                None => Err(()),
+            },
+            None => Ok(std::path::PathBuf::from(&path)),
+        };
+        let decision = match jail_check {
+            Err(()) => format!("DENIED [JAIL: outside the worktree] path={path}"),
+            Ok(write_target) => match self.evaluate(&path, &content) {
                 Err(rule) => format!("DENIED [{rule}] path={path}"),
-                Ok(()) => match std::fs::write(&path, content.as_bytes()) {
+                Ok(()) => match std::fs::write(&write_target, content.as_bytes()) {
                     Ok(()) => format!("ALLOWED: wrote {} bytes to {path}", content.len()),
                     Err(e) => format!("ALLOWED but IO error on {path}: {e}"),
                 },
-            }
+            },
         };
 
         let micros = t0.elapsed().as_micros();
@@ -999,7 +1066,10 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod gate_sink_tests {
-    use super::{build_gate_record, gate_events_sink_path, GateDecisionRecord};
+    use super::{
+        build_gate_record, enforced_gate_rules, gate_events_sink_path, load_rule_subset, now_ms,
+        GateDecisionRecord,
+    };
 
     #[test]
     fn build_record_classifies_allow() {
@@ -1098,6 +1168,41 @@ mod gate_sink_tests {
         );
         std::env::remove_var(super::RULES_FILE_ENV);
     }
+
+    #[test]
+    fn rules_file_load_failure_fails_closed_onto_the_full_floor() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let floor = enforced_gate_rules();
+        // Sanity: the full floor is more than the synthetic GOV-1 fixture, and
+        // includes the SEC-* content rules that a fail-OPEN [GOV-1] would shed.
+        assert!(floor.len() > 1);
+        assert!(floor.iter().any(|r| r.0.starts_with("SEC-")));
+
+        let dir = std::env::temp_dir().join(format!(
+            "cam-rules-load-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // 1) File set but missing/unreadable -> full floor, NOT [GOV-1].
+        std::env::set_var(super::RULES_FILE_ENV, dir.join("does-not-exist.json"));
+        assert_eq!(load_rule_subset(), floor, "read failure must fail closed");
+
+        // 2) File set but unparseable -> full floor.
+        let bad = dir.join("bad.json");
+        std::fs::write(&bad, "{ not json").unwrap();
+        std::env::set_var(super::RULES_FILE_ENV, &bad);
+        assert_eq!(load_rule_subset(), floor, "parse failure must fail closed");
+
+        // 3) File parses to an EMPTY subset -> full floor (never allow-everything).
+        let empty = dir.join("empty.json");
+        std::fs::write(&empty, "[]").unwrap();
+        std::env::set_var(super::RULES_FILE_ENV, &empty);
+        assert_eq!(load_rule_subset(), floor, "empty subset must fail closed");
+
+        std::env::remove_var(super::RULES_FILE_ENV);
+    }
 }
 
 #[cfg(test)]
@@ -1190,8 +1295,29 @@ mod clarify_tool_tests {
 
 #[cfg(test)]
 mod jail_tests {
-    use super::within_jail;
+    use super::{resolve_in_jail, within_jail};
     use std::path::Path;
+
+    // GATE-F4: a relative target must resolve against the JAIL ROOT (what the write then
+    // uses), never the process cwd, so check and effect hit the same file.
+    #[test]
+    fn resolve_in_jail_resolves_relative_targets_against_the_root() {
+        let root = std::env::temp_dir().join(format!(
+            "cam-jail-f4-{}-{}",
+            std::process::id(),
+            super::now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let canon = std::fs::canonicalize(&root).unwrap();
+
+        let resolved = resolve_in_jail(&root, "sub/file.rs").expect("relative in-jail target");
+        assert_eq!(resolved, canon.join("sub").join("file.rs"));
+
+        // Out-of-jail absolute target -> None.
+        assert!(resolve_in_jail(&root, "/etc/passwd").is_none());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn relative_paths_resolve_under_the_worktree() {
@@ -1227,6 +1353,76 @@ mod jail_tests {
     fn absolute_paths_inside_the_worktree_are_allowed() {
         let root = Path::new("/work/crate");
         assert!(within_jail(root, "/work/crate/src/lib.rs"));
+    }
+
+    // GATE-F1: a repo-committed symlink directory must NOT let a gated write escape the
+    // jail. A purely lexical check would pass `worktree/escape/loot`; resolving the
+    // existing symlinked prefix exposes the real out-of-jail destination.
+    #[test]
+    fn symlinked_directory_component_cannot_escape_the_jail() {
+        let base = std::env::temp_dir().join(format!(
+            "cam-jail-f1-{}-{}",
+            std::process::id(),
+            super::now_ms()
+        ));
+        let worktree = base.join("worktree");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        // A symlink INSIDE the worktree pointing at a sibling outside it.
+        let link = worktree.join("escape");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        #[cfg(not(unix))]
+        {
+            let _ = &link;
+            return; // symlink semantics differ on non-unix; skip.
+        }
+
+        // Writing THROUGH the symlink lands outside the worktree -> must be denied,
+        // whether the final file exists yet or not.
+        let via_link_existing = link.join("loot");
+        std::fs::write(&via_link_existing, b"x").unwrap();
+        assert!(
+            !within_jail(&worktree, via_link_existing.to_str().unwrap()),
+            "write through an in-jail symlink to an outside dir must be denied (existing target)"
+        );
+        let via_link_new = link.join("new-file");
+        assert!(
+            !within_jail(&worktree, via_link_new.to_str().unwrap()),
+            "write through an in-jail symlink to an outside dir must be denied (new target)"
+        );
+
+        // A real in-jail write is still allowed.
+        assert!(within_jail(&worktree, worktree.join("src.rs").to_str().unwrap()));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // GATE-F5: a legitimate absolute write under a SYMLINKED root prefix (the real macOS
+    // case: /tmp -> /private/tmp) must NOT be falsely denied, now that the target's
+    // existing prefix is canonicalized on the same footing as the root.
+    #[test]
+    fn absolute_write_under_a_symlinked_root_prefix_is_allowed() {
+        // temp_dir() on macOS is under /var -> /private/var (a symlinked prefix).
+        let root = std::env::temp_dir().join(format!(
+            "cam-jail-f5-{}-{}",
+            std::process::id(),
+            super::now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let target = root.join("sub").join("file.rs");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+
+        // The caller passes the UN-canonicalized root (as the env var might hold it),
+        // and an absolute in-jail target: it must resolve as in-jail.
+        assert!(
+            within_jail(&root, target.to_str().unwrap()),
+            "legit absolute write under a symlinked root prefix must be allowed"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
