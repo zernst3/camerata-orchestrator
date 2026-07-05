@@ -2004,6 +2004,8 @@ mod tests {
         assert!(!is_test_or_fixture_path("migrations/001_init.sql"), "migrations are production");
         assert!(!is_test_or_fixture_path("lib/utils.py"), "plain Python lib");
         assert!(!is_test_or_fixture_path("app.rs"), "bare filename with no test indicators");
+        // GATE-F7: examples are shipped/executed code — NOT test scope.
+        assert!(!is_test_or_fixture_path("examples/demo.rs"), "examples/ is production (GATE-F7)");
     }
 
     #[test]
@@ -2015,7 +2017,8 @@ mod tests {
         assert!(is_test_or_fixture_path("fixtures/keys.env"), "fixtures/ segment");
         assert!(is_test_or_fixture_path("crates/x/src/fixtures/keys.py"), "nested fixtures/");
         assert!(is_test_or_fixture_path("__tests__/auth.test.ts"), "__tests__/ segment");
-        assert!(is_test_or_fixture_path("examples/demo.rs"), "examples/ segment");
+        // GATE-F7: `examples/` is NO LONGER test scope — example code is shipped/executed,
+        // so the brownfield audit classifies it as production (asserted in the false-cases test).
         assert!(is_test_or_fixture_path("benches/bench.rs"), "benches/ segment");
 
         // Filename-pattern matches.

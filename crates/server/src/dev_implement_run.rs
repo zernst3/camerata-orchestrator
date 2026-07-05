@@ -898,7 +898,7 @@ pub async fn execute_dev_implement_run(
         .filter(|d| d.as_path() != dir.as_path())
         .cloned()
         .collect();
-    let spawn = match prepare_session(&gateway_bin, &role, Some(dir.as_path()), &sibling_read_dirs)
+    let spawn = match prepare_session(&gateway_bin, &role, Some(dir.as_path()), &sibling_read_dirs, None)
     {
         Ok(s) => s,
         Err(e) => {
@@ -1888,6 +1888,7 @@ mod tests {
             &role,
             Some(&wt),
             std::slice::from_ref(&sibling),
+            None,
         )
         .expect("session prepares");
         let args = spawn.driver.build_args(&role, "implement");

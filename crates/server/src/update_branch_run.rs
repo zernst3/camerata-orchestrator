@@ -342,7 +342,7 @@ async fn resolve_conflicts_and_commit(
         .filter(|d| d.as_path() != dir)
         .cloned()
         .collect();
-    let spawn = match prepare_session(&gateway_bin, &role, Some(dir), &sibling_read_dirs) {
+    let spawn = match prepare_session(&gateway_bin, &role, Some(dir), &sibling_read_dirs, None) {
         Ok(s) => s,
         Err(e) => {
             abort_and_fail(format!("could not prepare the resolver session: {e}")).await;

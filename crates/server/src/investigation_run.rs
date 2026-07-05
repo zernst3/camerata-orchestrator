@@ -498,7 +498,7 @@ async fn run_one_investigation_pass(
     // repo clones are added as read-only `--add-dir` so the investigation agent can read
     // across every repo. The write jail is NOT widened (still `repo_dir`); the primary is
     // deduped against the cwd inside the driver.
-    let spawn = match prepare_session(&gateway_bin, &role, repo_dir.as_deref(), &read_dirs) {
+    let spawn = match prepare_session(&gateway_bin, &role, repo_dir.as_deref(), &read_dirs, None) {
         Ok(s) => s,
         Err(e) => {
             runs.push_event(
@@ -751,7 +751,7 @@ mod tests {
             allowed_paths: vec!["crates/".to_string()],
         };
         // prepare_session now creates its own RAII TempDir internally (ARCH-RESOURCE-LIFECYCLE-1).
-        let spawn = prepare_session(Path::new("/bin/camerata-gateway"), &role, None, &[])
+        let spawn = prepare_session(Path::new("/bin/camerata-gateway"), &role, None, &[], None)
             .expect("session prepares");
         let driver = spawn.driver.with_clarification(true);
         let args = driver.build_args(&role, "analyze");

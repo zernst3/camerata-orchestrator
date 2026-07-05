@@ -195,7 +195,7 @@ pub async fn execute_pr_resolve_run(
         .filter(|d| d.as_path() != dir.as_path())
         .cloned()
         .collect();
-    let spawn = match prepare_session(&gateway_bin, &role, Some(dir.as_path()), &sibling_read_dirs)
+    let spawn = match prepare_session(&gateway_bin, &role, Some(dir.as_path()), &sibling_read_dirs, None)
     {
         Ok(s) => s,
         Err(e) => {

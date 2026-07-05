@@ -825,6 +825,7 @@ fn lead_session(tier_map: &TierMap) -> OrchestratorSession {
         std::path::Path::new("/work/crate"),
         tier_map,
         false,
+        None,
     )
     .expect("prepare orchestrator session")
 }
