@@ -4255,14 +4255,16 @@ async fn onboard_audit_start(
     // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
     let (sources, notes) = resolve_local_sources(&state, &repos);
 
-    let job_id = state.jobs.create("audit");
+    // Capture the active project up front: the job is stamped with it (ROUTES-5, so a
+    // project's deep-report export finds ITS OWN latest deep report) AND it seeds the
+    // incremental-scan manifest lookup below.
+    let project_id = state.projects.active().map(|p| p.id);
+    let job_id = state.jobs.create("audit", project_id.clone());
     state.transcripts.clear(SCAN_AUDIT_KEY);
 
     let jobs = state.jobs.clone();
     let transcripts = state.transcripts.clone();
     let jid = job_id.clone();
-    // Incremental scan: capture the prior manifest + the cache store for the spawned task.
-    let project_id = state.projects.active().map(|p| p.id);
     let prior = if req.incremental {
         project_id
             .as_deref()
@@ -12422,16 +12424,16 @@ async fn export_deep_report(
             .into_response();
     }
 
-    // Find the most recent deep report from the job store (any completed job
-    // with a deep field). Jobs are stored with their ScanReport; we look for the
-    // most recently completed one that has a deep section.
-    let deep_report = state.jobs.latest_deep_report();
+    // ROUTES-5: find THIS project's most recent completed deep report (filtered by
+    // project_id, newest by completion time). Previously this returned an arbitrary job's
+    // deep report regardless of which project it belonged to.
+    let deep_report = state.jobs.latest_deep_report(&id);
     let Some(deep) = deep_report else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "ok": false,
-                "message": "No deep-tier report available. Run an audit with `deep=true` first."
+                "message": "No deep-tier report available for this project. Run an audit with `deep=true` first."
             })),
         )
             .into_response();
