@@ -8213,12 +8213,14 @@ async fn uow_list(State(state): State<AppState>) -> Json<Vec<crate::uow::UnitOfW
     Json(state.uow.list_for_project(&p.id, &p.repos))
 }
 
-/// The UoW for a story. Creates a default one if the story has no UoW yet.
+/// The UoW for a story. ROUTES-8: a READ must not create — an unknown/typo'd id returns a
+/// transient default UoW (story_id set) that is NOT persisted, instead of materializing a junk
+/// record that then leaked into every list view. WRITE handlers still `get_or_create`.
 async fn uow_get(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
 ) -> Json<crate::uow::UnitOfWork> {
-    Json(state.uow.get_or_create(&story_id))
+    Json(state.uow.get_or_default(&story_id))
 }
 
 // ── Provider-agnostic WorkItem + UoW layer (governed-dev surface) ──────────────
@@ -9052,7 +9054,8 @@ async fn uow_list_attachments(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
 ) -> Json<serde_json::Value> {
-    let uow = state.uow.get_or_create(&story_id);
+    // ROUTES-8: READ — must not create. An unknown id yields an empty attachment list.
+    let uow = state.uow.get_or_default(&story_id);
     let list: Vec<serde_json::Value> = uow
         .attachments
         .iter()
@@ -9101,7 +9104,9 @@ async fn uow_get_attachment(
     State(state): State<AppState>,
     Path((story_id, name)): Path<(String, String)>,
 ) -> Json<serde_json::Value> {
-    let uow = state.uow.get_or_create(&story_id);
+    // ROUTES-8: READ — must not create. An unknown UoW id has no attachments, so the
+    // not-found branch fires (no junk UoW persisted).
+    let uow = state.uow.get_or_default(&story_id);
     match uow.attachments.iter().find(|a| a.name == name) {
         Some(a) => Json(serde_json::json!({
             "attachment": { "name": a.name, "mime": a.mime, "content": a.content }
@@ -9167,7 +9172,8 @@ async fn uow_get_diagram(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
 ) -> Json<serde_json::Value> {
-    let uow = state.uow.get_or_create(&story_id);
+    // ROUTES-8: READ — must not create. An unknown id yields `{ "diagram": null }`.
+    let uow = state.uow.get_or_default(&story_id);
     Json(serde_json::json!({ "diagram": uow.diagram }))
 }
 
@@ -9387,11 +9393,13 @@ async fn uow_generate_mockup(
     }
 
     // Resolve the PARENT (epic/story) so the mockup is grounded in its context, not just
-    // this node's title/body.
+    // this node's title/body. ROUTES-8: this is a READ for grounding — use the non-creating
+    // getter so a stale `draft_parent_id` does not persist a junk parent UoW. Absent parent =
+    // no extra grounding (the node's own context still drives the mockup).
     let parent = uow
         .draft_parent_id
         .as_ref()
-        .map(|pid| state.uow.get_or_create(pid));
+        .and_then(|pid| state.uow.get(pid));
 
     let prompt = build_mockup_prompt(
         &authoring,
@@ -11687,7 +11695,9 @@ async fn uow_pr_get(
     let Some(repo) = repo_from_story_id(&story_id) else {
         return Json(empty("Could not derive owner/repo from the story id."));
     };
-    let uow = state.uow.get_or_create(&story_id);
+    // ROUTES-8: READ — must not create. An unknown id resolves to a default UoW (no PR ref),
+    // so the "No PR" path fires without persisting a junk UoW.
+    let uow = state.uow.get_or_default(&story_id);
     let Some(info) = crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
     else {
         return Json(empty("No PR for this UoW yet."));
@@ -18630,6 +18640,51 @@ mod tests {
             0,
             "attachment removed"
         );
+    }
+
+    /// ROUTES-8: a `GET /api/uow/:id` with an UNKNOWN id returns a (transient) UoW body but
+    /// does NOT persist a junk record — the UoW list stays empty afterwards. Previously the
+    /// read `get_or_create`d the id, leaking an empty UoW into every list view.
+    #[tokio::test]
+    async fn uow_get_read_does_not_persist_unknown_id() {
+        // An active project so /api/uow (list) is not short-circuited to empty.
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let pid = state
+            .projects
+            .create("Proj", vec!["me/api".to_string()])
+            .unwrap()
+            .id;
+        state.projects.set_active(&pid);
+        let app = router(state.clone());
+
+        // GET a UoW for an id that was never created. A single-segment (slash-free) draft
+        // id keeps the `:story_id` route matching clean while still being an unknown id.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/uow/draft-does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["story_id"], "draft-does-not-exist", "returns a UoW-shaped body");
+
+        // The store must not have materialized it — neither the direct getter nor the raw
+        // list sees any record after a read of an unknown id.
+        assert!(
+            state.uow.get("draft-does-not-exist").is_none(),
+            "a GET must not persist a UoW for an unknown id"
+        );
+        assert!(
+            state.uow.list().is_empty(),
+            "the junk UoW must not leak into the store"
+        );
+        let _ = pid; // project made active only so the list endpoint isn't short-circuited
     }
 
     // ── Diagram embed / strip tests ───────────────────────────────────────────
