@@ -577,6 +577,7 @@ pub fn implement_prompt(
     decisions: &[DecisionRecord],
     grounding: Option<&str>,
     escalations: &[EscalationInScope],
+    model: &str,
 ) -> String {
     // GROUNDING (the invariant): the implementer can read the repo clone, but still hand
     // it the project's rule context + repo digest up front and tell it to consult the real
@@ -644,25 +645,44 @@ pub fn implement_prompt(
         )
     };
 
+    // The shared governance protocol, specialized for the implementing agent's model tier.
+    let kernel = if model.trim().is_empty() {
+        camerata_app_core::GOVERNANCE_KERNEL.to_string()
+    } else {
+        camerata_app_core::kernel_for(model)
+    };
+
     format!(
         "You are the BROWNFIELD IMPLEMENTER for story `{story_id}` (branch `{target_branch}`).\n\n\
+         {kernel}\n\n\
          {grounding_block}\
          ## Story\n\n\
          Title: {story_title}\n\
          Description: {story_desc}\n\n\
          ## Architect-approved decisions (the spec)\n\n\
          {decisions_text}\n\n\
+         The approved decisions are binding. If the actual code contradicts a decision, do NOT \
+         silently pick one: implement the decision if possible and state the contradiction in your \
+         final report. Never substitute your own preference for an approved decision.\n\n\
          {escalation_block}\
-         ## Your job\n\n\
-         Read the existing codebase, then make the minimal correct changes that satisfy \
-         the story and every approved decision above.\n\n\
-         Rules:\n\
-         1. Keep the project building and the existing tests passing.\n\
-         2. Add tests for any new behaviour you introduce.\n\
-         3. Do NOT change unrelated files.\n\
-         4. Do NOT run `git commit` — the server commits your changes after you finish.\n\
-         5. Do NOT push.\n\
-         6. When the changes are complete and the project builds, you are done."
+         ## Required procedure (IN ORDER)\n\n\
+         1. READ FIRST. Read every file you intend to change and its callers. If a file is not \
+         where you expect, Grep/Glob for it; never assume its contents.\n\
+         2. PLAN the minimal change satisfying the story AND every decision. If the story names a \
+         pattern/class of defect, Grep and enumerate EVERY occurrence; cover all of them.\n\
+         3. TESTS WITH THE CHANGE. Each new/changed behavior gets a test in the project's style \
+         that fails if the behavior is removed. A change with no test must be justified.\n\
+         4. IMPLEMENT via gated_write only, full file contents. Handle error/empty cases on every \
+         path; validate input at boundaries; no new unwrap/panic on fallible paths unless the \
+         file already does; match existing conventions exactly.\n\
+         5. SELF-REVIEW BEFORE DONE. Re-read every changed file end to end: each criterion+decision \
+         maps to a change; no syntax errors / missing imports / dangling refs; no unrelated file \
+         touched; every grounding rule still holds. Fix, then re-read again.\n\n\
+         ## Hard prohibitions\n\n\
+         Do NOT run `git commit` (the server commits your changes after you finish). Do NOT push. \
+         Do NOT change unrelated files. Never weaken or skip tests.\n\n\
+         ## Final report (exact format)\n\n\
+         CHANGES / TESTS / DECISIONS-TRACE / CONCERNS (NONE if empty)."
     )
 }
 
@@ -953,6 +973,7 @@ pub async fn execute_dev_implement_run(
         &decisions,
         grounding.as_deref(),
         &escalations_in_scope,
+        &model,
     );
 
     // Bounce-and-revise loop: up to `max_iterations` passes. On each pass, run the
@@ -1636,6 +1657,7 @@ mod tests {
             &decisions,
             None,
             &[],
+            "",
         );
 
         // Story identity.
@@ -1673,6 +1695,58 @@ mod tests {
         assert!(p.contains("Do NOT push"), "prompt must forbid agent push");
     }
 
+    /// The hardened implement prompt embeds the shared governance kernel, the ordered
+    /// procedure with the mandatory SELF-REVIEW step, and the exact final-report contract.
+    #[test]
+    fn implement_prompt_embeds_kernel_selfreview_and_report_contract() {
+        let p = implement_prompt(
+            "acme/api#7",
+            "T",
+            "D",
+            "b",
+            &[approved_decision("opt-a", "Q", "R")],
+            None,
+            &[],
+            "claude-opus-4-8",
+        );
+
+        // Governance kernel markers + a load-bearing clause.
+        assert!(
+            p.contains("=== CAMERATA OPERATING PROTOCOL"),
+            "prompt must embed the governance kernel"
+        );
+        assert!(p.contains("=== END OPERATING PROTOCOL ==="));
+        assert!(p.contains("GROUND EVERY FACT"), "kernel clause must be present");
+
+        // The ordered procedure's mandatory self-review step.
+        assert!(
+            p.contains("SELF-REVIEW BEFORE DONE"),
+            "prompt must mandate the pre-done self-review pass"
+        );
+        assert!(
+            p.contains("Required procedure (IN ORDER)"),
+            "prompt must present the ordered procedure"
+        );
+
+        // The exact final-report contract.
+        assert!(
+            p.contains("CHANGES / TESTS / DECISIONS-TRACE / CONCERNS"),
+            "prompt must carry the exact final-report contract"
+        );
+
+        // Decisions-binding clause.
+        assert!(
+            p.contains("approved decisions are binding"),
+            "prompt must state that approved decisions are binding"
+        );
+
+        // An Opus model carries the strongest-tier addendum.
+        assert!(
+            p.contains("TIER DISCIPLINE (strongest)"),
+            "an Opus model must carry the strongest-tier addendum"
+        );
+    }
+
     /// Only APPROVED decisions appear in the prompt; Pending decisions are excluded.
     #[test]
     fn implement_prompt_only_includes_approved_decisions() {
@@ -1688,6 +1762,7 @@ mod tests {
             &decisions,
             None,
             &[],
+            "",
         );
         assert!(
             p.contains("approved-one"),
@@ -1702,7 +1777,7 @@ mod tests {
     /// When there are no decisions at all, a clear note replaces the list.
     #[test]
     fn implement_prompt_handles_empty_decisions() {
-        let p = implement_prompt("s/r#1", "T", "D", "b", &[], None, &[]);
+        let p = implement_prompt("s/r#1", "T", "D", "b", &[], None, &[], "");
         assert!(p.contains("no approved decisions"));
     }
 
@@ -1720,7 +1795,7 @@ mod tests {
                 severity: camerata_rules::EscalationSeverity::SoftFlag,
             },
         ];
-        let p = implement_prompt("s/r#1", "T", "D", "b", &[], None, &escalations);
+        let p = implement_prompt("s/r#1", "T", "D", "b", &[], None, &escalations, "");
         // The agent is told about the tool + each rule's condition + severity.
         assert!(p.contains("## ESCALATION CONDITIONS"));
         assert!(p.contains("raise_escalation"));
@@ -1733,7 +1808,7 @@ mod tests {
 
     #[test]
     fn implement_prompt_omits_escalation_section_when_none_in_scope() {
-        let p = implement_prompt("s/r#1", "T", "D", "b", &[], None, &[]);
+        let p = implement_prompt("s/r#1", "T", "D", "b", &[], None, &[], "");
         assert!(!p.contains("## ESCALATION CONDITIONS"));
         assert!(!p.contains("raise_escalation"));
     }
@@ -1961,6 +2036,7 @@ mod tests {
             &[approved_decision("opt-a", "Q", "R")],
             None,
             &[],
+            "",
         );
         assert!(
             p.contains("camerata/story-7"),

@@ -137,6 +137,7 @@ pub fn investigation_prompt(
     format!(
         "You are the INVESTIGATION agent for story `{story_id}`. Your job is to ANALYZE, \
          not to build. Do NOT write or scaffold any code.\n\n\
+         {kernel}\n\n\
          {grounding_block}\
          Story title: {title}\n\
          Story description: {desc}\n\n\
@@ -147,12 +148,16 @@ pub fn investigation_prompt(
             any code is written (for each: the question, the options, and your recommended \
             option with reasoning).\n\
          4. States explicitly what is OUT of scope.\n\n\
+         GROUND EVERY CLAIM: every factual statement about the repo must come from a file you \
+         actually read this session; cite the file path for each such claim. If you did not \
+         verify something, say so rather than assert it.\n\n\
          If a SINGLE product/design decision genuinely BLOCKS your analysis and you cannot \
          make it yourself, call the `ask_clarification` tool with a structured question \
-         (options each with a benefit/drawback) instead of guessing, then STOP — you will \
-         be resumed with the human's answer.\n\n\
+         (options each with a benefit/drawback) instead of guessing, then STOP (you will \
+         be resumed with the human's answer).\n\n\
          Output ONLY the investigation note. The architect reviews it and records the \
-         decisions; no code is written until those decisions are approved."
+         decisions; no code is written until those decisions are approved.",
+        kernel = camerata_app_core::GOVERNANCE_KERNEL_READONLY,
     )
 }
 
@@ -652,6 +657,25 @@ mod tests {
         assert!(p.contains("DECISIONS"));
         // It must point the agent at ask_clarification for blocking decisions.
         assert!(p.contains("ask_clarification"));
+    }
+
+    /// The investigation prompt embeds the read-only governance kernel and the
+    /// cite-the-files-you-read grounding mandate.
+    #[test]
+    fn investigation_prompt_embeds_readonly_kernel_and_grounding_mandate() {
+        let p = investigation_prompt("CAM-7", "Add export", "Members CSV export.", None);
+        assert!(
+            p.contains("=== CAMERATA OPERATING PROTOCOL (analysis) ==="),
+            "investigation prompt must embed the read-only governance kernel"
+        );
+        assert!(
+            p.contains("GROUND EVERY CLAIM"),
+            "investigation prompt must mandate grounding every claim in a file it read"
+        );
+        assert!(
+            p.contains("cite the file path"),
+            "investigation prompt must require citing the file for each repo claim"
+        );
     }
 
     #[test]

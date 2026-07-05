@@ -331,7 +331,7 @@ async fn run_loop(
     task: &str,
 ) -> anyhow::Result<AgentOutcome> {
     // Build the initial messages array: system (if any) + first user turn.
-    let system_prompt = build_system_prompt(role);
+    let system_prompt = build_system_prompt(role, &driver.model);
     // Tool schemas are produced in the wire shape this driver speaks: OpenAI-shaped
     // (`function`) for OpenRouter, Anthropic-shaped (`input_schema`) for Anthropic. The
     // allowlist (which tools exist) is identical; only the JSON envelope differs.
@@ -1536,28 +1536,43 @@ fn openai_tool_to_anthropic(tool: &Value) -> Option<Value> {
 
 // ─── system prompt ────────────────────────────────────────────────────────────
 
-/// Build the system prompt for the agent, incorporating the role name and key constraints.
-fn build_system_prompt(role: &Role) -> Option<String> {
+/// Build the system prompt for the agent, embedding the shared governance kernel + the role's
+/// tool constraints. This is THE system prompt for every OpenRouter/API in-process loop — the
+/// path open-weight models arrive through — so it is the single highest-impact insertion point
+/// for the operating protocol. See the hardened rewrite 3.5 in
+/// `docs/plans/2026-07-05_prompt-hardening-and-governance-kernel.md`.
+///
+/// `model` pins the kernel's per-tier addendum (`kernel_for(model)`); an empty model falls back
+/// to the base [`camerata_app_core::GOVERNANCE_KERNEL`] with no addendum.
+fn build_system_prompt(role: &Role, model: &str) -> Option<String> {
+    let kernel = if model.trim().is_empty() {
+        camerata_app_core::GOVERNANCE_KERNEL.to_string()
+    } else {
+        camerata_app_core::kernel_for(model)
+    };
+    let paths = if role.allowed_paths.is_empty() {
+        "<unrestricted>".to_string()
+    } else {
+        role.allowed_paths.join(", ")
+    };
     Some(format!(
-        "You are a governed software engineering agent running in the `{}` role under \
-         the Camerata governance framework.\n\n\
-         CONSTRAINTS (non-negotiable):\n\
-         - You may ONLY write files via the `gated_write` tool. Every write is evaluated \
-           by the Layer-1 governance gate; denied writes will not be executed.\n\
-         - You may read files via `Read`, `Glob`, `Grep`, and `LS`.\n\
-         - You may NOT run shell commands, use `Bash`, `Task`, `Edit`, `Write`, \
-           `MultiEdit`, or any other tool not listed above.\n\
-         - When your task is complete, respond with a final text message summarizing what \
-           you did (no tool call).\n\n\
-         Your role: `{}`\n\
-         Allowed paths: {}",
-        role.name,
-        role.name,
-        if role.allowed_paths.is_empty() {
-            "<unrestricted>".to_string()
-        } else {
-            role.allowed_paths.join(", ")
-        }
+        "You are a governed software engineering agent in the `{role}` role under Camerata.\n\n\
+         {kernel}\n\n\
+         CONSTRAINTS: write files ONLY via gated_write (denied writes are information, not an \
+         obstacle to route around); Read/Glob/Grep/LS to read (read before you write; never guess \
+         contents/locations); NO Bash/Task/Edit/Write/MultiEdit or unlisted tools.\n\
+         WORKING DISCIPLINE (in order): (1) read relevant code; (2) plan the minimal complete \
+         change; (3) write tests with any behavior change; (4) implement defensively (explicit \
+         error/empty handling, boundary validation, follow file conventions); (5) before finishing, \
+         re-read every file you wrote and fix any incompleteness/syntax/import/rule issue. Not done \
+         until this self-review finds nothing.\n\
+         IF UNSURE: do not guess/invent. Prefer: read more; take the most conservative compliant \
+         action; or state precisely what is unknown. Never fabricate file contents, APIs, or facts.\n\
+         COMPLETION: final text message with CHANGES / TESTS / CONCERNS.\n\
+         Role: `{role}`   Allowed paths: {paths}",
+        role = role.name,
+        kernel = kernel,
+        paths = paths,
     ))
 }
 
@@ -2111,6 +2126,60 @@ mod tests {
             rule_subset: enforced_gate_rules(),
             allowed_paths: vec!["src/".to_string()],
         }
+    }
+
+    // ── build_system_prompt: the open-weight chokepoint ─────────────────────────
+
+    /// The system prompt for every API-driven agent embeds the shared governance kernel
+    /// (markers + all seven clauses), the working-discipline block, and the if-unsure clause.
+    /// This is the single highest-impact insertion point for the operating protocol.
+    #[test]
+    fn build_system_prompt_embeds_kernel_and_working_discipline() {
+        let role = test_role();
+        let p = build_system_prompt(&role, "claude-opus-4-8").expect("prompt is Some");
+
+        // Kernel markers + a couple of load-bearing clauses.
+        assert!(
+            p.contains("=== CAMERATA OPERATING PROTOCOL"),
+            "system prompt must embed the governance kernel opening marker"
+        );
+        assert!(
+            p.contains("=== END OPERATING PROTOCOL ==="),
+            "system prompt must embed the governance kernel closing marker"
+        );
+        assert!(p.contains("GROUND EVERY FACT"), "kernel clause 1 must be present");
+        assert!(p.contains("VERIFY BEFORE DONE"), "kernel clause 5 must be present");
+
+        // Working discipline + if-unsure blocks.
+        assert!(
+            p.contains("WORKING DISCIPLINE (in order)"),
+            "system prompt must include the working-discipline block"
+        );
+        assert!(
+            p.contains("IF UNSURE:"),
+            "system prompt must include the if-unsure clause"
+        );
+
+        // Role + paths interpolation is preserved.
+        assert!(p.contains("TestWorker"), "role name must be interpolated");
+        assert!(p.contains("src/"), "allowed paths must be interpolated");
+
+        // Opus resolves to the strongest tier addendum.
+        assert!(
+            p.contains("TIER DISCIPLINE (strongest)"),
+            "an Opus model must carry the strongest-tier addendum"
+        );
+    }
+
+    /// An empty model falls back to the base kernel (no addendum) and still carries the
+    /// full protocol + constraints.
+    #[test]
+    fn build_system_prompt_empty_model_uses_base_kernel() {
+        let role = test_role();
+        let p = build_system_prompt(&role, "").expect("prompt is Some");
+        assert!(p.contains("=== CAMERATA OPERATING PROTOCOL"));
+        assert!(!p.contains("TIER DISCIPLINE"), "no per-tier addendum for an empty model");
+        assert!(p.contains("gated_write"), "constraints block must be preserved");
     }
 
     /// A stub `Completer` that always returns a fixed final text (no tool calls).

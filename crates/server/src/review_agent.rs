@@ -71,7 +71,9 @@ You are an expert code reviewer performing a Layer-3 agentic review. Your job is
 2. Fulfills the story's intent (requirements, contract, integrations, acceptance criteria).
 3. Addresses the story's FULL SCOPE (completeness). If the story describes a cross-cutting change — a pattern, invariant, or class of defect that should apply EVERYWHERE it occurs (signals like \"every\", \"all\", \"across the app\", \"anywhere that\", or a fix for a mistake likely repeated elsewhere) — check that the diff addresses the WHOLE class, not just a single instance. A spot-fix for what the story frames as a pervasive pattern is INCOMPLETE: bounce it and say to sweep the codebase for the remaining instances. If the story is genuinely local and bounded, do NOT manufacture a completeness concern.
 
-You see ONLY: the story, the rules, and the diff. You do NOT have access to any other agent's reasoning, implementation notes, or context — this isolation is intentional. You also cannot see the rest of the codebase, so judge completeness by whether the diff's breadth plausibly matches the story's implied scope; when a cross-cutting story is addressed by a narrow diff, bounce and ask to confirm the sweep covered every instance.
+You see ONLY: the story, the rules, and the diff. You do NOT have access to any other agent's reasoning, implementation notes, or context (this isolation is intentional). You also cannot see the rest of the codebase, so judge completeness by whether the diff's breadth plausibly matches the story's implied scope; when a cross-cutting story is addressed by a narrow diff, bounce and ask to confirm the sweep covered every instance.
+
+PROCEDURE (in order, before you decide): (1) check the diff rule-by-rule against the SSOT; (2) check it criterion-by-criterion against the story's requirements and acceptance criteria; only then form the verdict. For each BOUNCE reason, quote the violated rule id or the specific criterion it fails. If you cannot verify a rule or criterion from the diff alone, that is a BOUNCE reason (\"cannot verify <what>\"), never a silent PASS.
 
 Return your verdict in this exact format:
 PASS
@@ -99,7 +101,7 @@ pub async fn run_l3_review(
 ) -> anyhow::Result<ReviewVerdict> {
     let user_prompt = build_l3_prompt(input);
     let req = LlmRequest::new(user_prompt)
-        .with_system(L3_SYSTEM_PROMPT)
+        .with_system(l3_system_prompt())
         .with_model(input.model);
     let resp = llm.complete(req).await?;
     Ok(parse_l3_verdict(&resp.text))
@@ -149,6 +151,8 @@ pub struct IntegrationGateReviewInput<'a> {
 const INTEGRATION_SYSTEM_PROMPT: &str = "\
 You are a cross-repo integration verifier. Your job is to check that the assembled per-repo outputs are consistent with the agreed cross-repo contract below.
 
+PROCEDURE (in order): enumerate the contract clause-by-clause and, for each clause, check every repo's output against it before concluding. A repo that produced an empty or missing output is checked against the contract too (a clause requiring its participation is a MISMATCH, not a pass). If a clause cannot be verified from the outputs provided, report it as a MISMATCH reason (\"insufficient evidence for <clause>\"), never a silent PASS.
+
 Return your verdict in this exact format:
 PASS
 (if every repo's output is consistent with the contract)
@@ -163,6 +167,27 @@ MISMATCH
 
 Be specific: name the repo and the contract clause that is violated. Do not include explanation outside the verdict format.";
 
+/// The L3 reviewer's system prompt with the shared read-only governance protocol prepended.
+/// Reviewers are analysis agents, so they get [`camerata_app_core::GOVERNANCE_KERNEL_READONLY`]
+/// (ground-every-claim, enumerate-then-judge, if-unsure-say-so, exact-output-only) ahead of the
+/// review-specific instructions. See rewrite 3.3 in
+/// `docs/plans/2026-07-05_prompt-hardening-and-governance-kernel.md`.
+fn l3_system_prompt() -> String {
+    format!(
+        "{}\n\n{}",
+        camerata_app_core::GOVERNANCE_KERNEL_READONLY, L3_SYSTEM_PROMPT
+    )
+}
+
+/// The integration-gate reviewer's system prompt with the shared read-only governance protocol
+/// prepended. See rewrite 3.4 in the prompt-hardening plan.
+fn integration_system_prompt() -> String {
+    format!(
+        "{}\n\n{}",
+        camerata_app_core::GOVERNANCE_KERNEL_READONLY, INTEGRATION_SYSTEM_PROMPT
+    )
+}
+
 /// Run the integration-gate agentic reviewer.
 ///
 /// Calls the LLM to verify that the assembled per-repo outputs are consistent with the
@@ -174,7 +199,7 @@ pub async fn run_integration_gate_review(
 ) -> anyhow::Result<ReviewVerdict> {
     let user_prompt = build_integration_prompt(input);
     let req = LlmRequest::new(user_prompt)
-        .with_system(INTEGRATION_SYSTEM_PROMPT)
+        .with_system(integration_system_prompt())
         .with_model(input.model);
     let resp = llm.complete(req).await?;
     Ok(parse_integration_verdict(&resp.text))
@@ -365,6 +390,44 @@ mod tests {
         assert!(
             p.to_ascii_lowercase().contains("cross-cutting"),
             "L3 prompt must scope the completeness check to cross-cutting stories (not local ones)"
+        );
+    }
+
+    /// The assembled L3 system prompt embeds the read-only governance kernel and the
+    /// hardened stepwise + if-unsure mandates.
+    #[test]
+    fn l3_system_prompt_embeds_readonly_kernel_and_stepwise_mandates() {
+        let p = l3_system_prompt();
+        assert!(
+            p.contains("=== CAMERATA OPERATING PROTOCOL (analysis) ==="),
+            "L3 system prompt must embed the read-only governance kernel"
+        );
+        assert!(
+            p.contains("rule-by-rule"),
+            "L3 prompt must mandate rule-by-rule enumeration before the verdict"
+        );
+        assert!(
+            p.to_ascii_lowercase().contains("cannot verify"),
+            "L3 prompt must turn an unverifiable point into a bounce, not a silent pass"
+        );
+    }
+
+    /// The assembled integration system prompt embeds the read-only kernel and the
+    /// clause-by-clause + insufficient-evidence mandates.
+    #[test]
+    fn integration_system_prompt_embeds_readonly_kernel_and_clause_mandates() {
+        let p = integration_system_prompt();
+        assert!(
+            p.contains("=== CAMERATA OPERATING PROTOCOL (analysis) ==="),
+            "integration system prompt must embed the read-only governance kernel"
+        );
+        assert!(
+            p.contains("clause-by-clause"),
+            "integration prompt must mandate clause-by-clause enumeration"
+        );
+        assert!(
+            p.to_ascii_lowercase().contains("insufficient evidence"),
+            "integration prompt must report unverifiable clauses as a mismatch"
         );
     }
 

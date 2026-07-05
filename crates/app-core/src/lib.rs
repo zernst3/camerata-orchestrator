@@ -14,8 +14,15 @@ pub mod checkpoint;
 pub mod escalation;
 pub mod lifecycle;
 pub mod project;
+pub mod prompt_kernel;
 pub mod readiness;
 pub mod routine;
 pub mod run;
 pub mod schedule;
 pub mod uow;
+
+// The shared governance prompt kernel, re-exported at the crate root so prompt builders can
+// reach it as `camerata_app_core::{GOVERNANCE_KERNEL, GOVERNANCE_KERNEL_READONLY, kernel_for}`.
+pub use prompt_kernel::{
+    kernel_for, tier_of, KernelTier, GOVERNANCE_KERNEL, GOVERNANCE_KERNEL_READONLY,
+};
