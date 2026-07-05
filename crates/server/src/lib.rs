@@ -6089,31 +6089,43 @@ fn save_armed_to_project(
     custom: &[crate::project::CustomRule],
 ) {
     use crate::project::RuleSelection;
-    let mut selections = Vec::new();
-    let mut cross = Vec::new();
-    let mut process = Vec::new();
+    // First pass: gather the REAL repos this arm touches, skipping the UI-internal
+    // single-repo sentinel (a NUL-prefixed map key that is never a real `owner/repo`).
+    // This set seeds the project's repo list and, below, resolves any leaked sentinel in a
+    // selection's repos — persisting the sentinel would break clone/emit forever
+    // (PUBLISH-2).
     let mut all_repos = std::collections::BTreeSet::new();
     for r in rules {
-        let s = RuleSelection {
-            rule_id: r.id.clone(),
-            chosen_option: r.option.clone(),
-            repos: r.repos.clone(),
-            ..Default::default()
-        };
         for repo in &r.repos {
-            all_repos.insert(repo.clone());
-        }
-        match r.scope.as_str() {
-            "cross-repo" => cross.push(s),
-            "process" => process.push(s),
-            _ => selections.push(s),
+            if !repo.contains('\0') {
+                all_repos.insert(repo.clone());
+            }
         }
     }
     // Repo-scoped custom rules pull their repo into the project too (covers a custom-only apply).
     for c in custom {
         let d = c.domain.trim();
-        if !d.is_empty() && d != "*" {
+        if !d.is_empty() && d != "*" && !d.contains('\0') {
             all_repos.insert(d.to_string());
+        }
+    }
+    let all_repos_vec: Vec<String> = all_repos.iter().cloned().collect();
+    let mut selections = Vec::new();
+    let mut cross = Vec::new();
+    let mut process = Vec::new();
+    for r in rules {
+        let s = RuleSelection {
+            rule_id: r.id.clone(),
+            chosen_option: r.option.clone(),
+            // Normalize before persisting so a leaked sentinel expands to the real repos
+            // instead of being written into the ruleset.
+            repos: normalize_repos(&r.repos, &all_repos_vec),
+            ..Default::default()
+        };
+        match r.scope.as_str() {
+            "cross-repo" => cross.push(s),
+            "process" => process.push(s),
+            _ => selections.push(s),
         }
     }
     let pid = match state.projects.active() {
@@ -12482,6 +12494,49 @@ mod tests {
             p.repos.contains(&"me/web".to_string()),
             "repos absorbed into the project"
         );
+    }
+
+    #[test]
+    fn save_armed_never_persists_the_single_repo_sentinel() {
+        let sentinel = "\u{0}__single_repo__".to_string();
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        // One rule carries the leaked UI sentinel alongside a real repo; another is
+        // sentinel-only. Neither must write a NUL into the persisted project.
+        save_armed_to_project(
+            &state,
+            &[
+                arm_rule("REPO-1", "repo-local", &[&sentinel, "me/api"]),
+                arm_rule("XREPO-1", "cross-repo", &[&sentinel]),
+            ],
+            &[],
+        );
+        let p = state.projects.active().expect("a project was created");
+        assert!(
+            p.repos.iter().all(|r| !r.contains('\0')),
+            "no sentinel in project.repos: {:?}",
+            p.repos
+        );
+        for sel in p
+            .ruleset
+            .selections
+            .iter()
+            .chain(p.ruleset.cross_repo.iter())
+        {
+            assert!(
+                sel.repos.iter().all(|r| !r.contains('\0')),
+                "no sentinel in selection {}: {:?}",
+                sel.rule_id,
+                sel.repos
+            );
+        }
+        // The sentinel on REPO-1 expanded to the real repo discovered in the same arm.
+        let repo1 = p
+            .ruleset
+            .selections
+            .iter()
+            .find(|s| s.rule_id == "REPO-1")
+            .unwrap();
+        assert!(repo1.repos.contains(&"me/api".to_string()));
     }
 
     #[test]
