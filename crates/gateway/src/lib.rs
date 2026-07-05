@@ -208,9 +208,65 @@ pub enum TestScopePolicy {
 /// enforced in test scope so they cannot be evaded by placing content in a test file).
 pub fn test_scope_policy(rule_id: &str) -> TestScopePolicy {
     match rule_id {
-        "SEC-NO-RAW-SQL-CONCAT-1" | "SEC-NO-DISABLED-TLS-1" | "SEC-NO-UNSAFE-DESERIALIZATION-1" => TestScopePolicy::Waive,
+        // GATE-F7: only SQL-concat remains path-waivable in genuine test files.
+        // Raw SQL string-building in a test fixture (seeding a table, asserting a
+        // query builder) is a common, low-risk pattern that would otherwise force
+        // a suppression on every test. It is NOT a data-exfil / RCE primitive.
+        "SEC-NO-RAW-SQL-CONCAT-1" => TestScopePolicy::Waive,
+        // SEC-NO-DISABLED-TLS-1 and SEC-NO-UNSAFE-DESERIALIZATION-1 are NO LONGER
+        // path-waivable (GATE-F7). Disabling TLS or calling pickle/yaml.load is a
+        // real vulnerability even in a test — a test that skips cert verification
+        // hides a MITM, a test that unpickles untrusted bytes is an RCE. They now
+        // require an EXPLICIT `camerata:allow <rule>` inline suppression (handled
+        // in each arm), so the waiver is auditable rather than filename-implicit.
         _ => TestScopePolicy::Downgrade,
     }
+}
+
+/// The inline suppression marker: `// camerata:allow <RULE-ID> -- <reason>`.
+///
+/// Kept in sync with `camerata-server`'s `suppression::MARKER`. The server crate
+/// owns the authoritative brownfield-audit suppression pipeline, but the gateway
+/// enforces at WRITE TIME and cannot depend on the server (the dependency runs the
+/// other way). So the write-time gate re-implements the same narrow check: a
+/// `camerata:allow <rule>` marker WITH a non-empty reason, on the offending line or
+/// the line directly above it (the linter convention). A bare, reason-less marker
+/// does NOT suppress — mirroring the server's require-reason invariant.
+const GATEWAY_ALLOW_MARKER: &str = "camerata:allow";
+
+/// True when `content` carries an inline `camerata:allow <rule_id>` suppression,
+/// WITH a non-empty reason, that applies to a finding on `finding_line` (1-based).
+///
+/// A waiver applies when its marker sits on the finding's own line (trailing
+/// comment) or the line directly above it. A reason-less marker is ignored (it is
+/// itself an un-auditable hole, so it must not silence the gate).
+fn has_allow_suppression(content: &str, rule_id: &str, finding_line: usize) -> bool {
+    for (i, line) in content.lines().enumerate() {
+        let marker_line = i + 1;
+        // Marker must be on the finding line or the line directly above it.
+        if marker_line != finding_line && marker_line + 1 != finding_line {
+            continue;
+        }
+        let Some(idx) = line.find(GATEWAY_ALLOW_MARKER) else {
+            continue;
+        };
+        let rest = line[idx + GATEWAY_ALLOW_MARKER.len()..].trim();
+        let mut parts = rest.splitn(2, char::is_whitespace);
+        let marker_rule = parts.next().unwrap_or("").trim();
+        if marker_rule != rule_id {
+            continue;
+        }
+        // A reason (`-- <text>`) is required; a bare marker does not suppress.
+        let after = parts.next().unwrap_or("").trim();
+        let has_reason = after
+            .strip_prefix("--")
+            .map(|r| !r.trim().is_empty())
+            .unwrap_or(false);
+        if has_reason {
+            return true;
+        }
+    }
+    false
 }
 
 // ─── public rule registry ─────────────────────────────────────────────────────
@@ -309,7 +365,7 @@ pub static RULE_REGISTRY: &[RuleEntry] = &[
         description: "Deny content that disables TLS/certificate verification in production \
                       code (verify=False, rejectUnauthorized:false, InsecureSkipVerify:true, \
                       NODE_TLS_REJECT_UNAUTHORIZED=0, CURLOPT_SSL_VERIFYPEER false/0). \
-                      Waive policy in test scope.",
+                      Requires an explicit camerata:allow suppression even in test code.",
         arm: arm_sec_no_disabled_tls_1,
     },
     RuleEntry {
@@ -487,7 +543,8 @@ fn is_write_tool(tool: &str) -> bool {
 ///
 /// Matching rules (all comparisons are case-insensitive):
 /// - Any **path segment** (directory component) equals one of:
-///   `tests`, `test`, `testdata`, `fixtures`, `__tests__`, `examples`, `benches`
+///   `tests`, `test`, `testdata`, `fixtures`, `__tests__`, `benches`
+///   (`examples` is intentionally excluded — see GATE-F7 note in the body).
 /// - The **filename** (last segment) matches one of:
 ///   `*_test.<ext>`, `*.test.<ext>`, `*.spec.<ext>`, `test_*.py`, `conftest.py`
 ///
@@ -512,7 +569,13 @@ pub fn is_test_or_fixture_path(path: &str) -> bool {
     };
     for seg in dir_segments {
         match seg.as_str() {
-            "tests" | "test" | "testdata" | "fixtures" | "__tests__" | "examples" | "benches" => {
+            // NB: `examples` is deliberately ABSENT (GATE-F7). Example code is
+            // shipped and executed like production code — a `verify=False` or a
+            // `pickle.load` under `examples/` is a real vulnerability, not a
+            // test artefact. Treating an examples path as test scope let an
+            // agent disable floor rules by filename. Examples now get full
+            // production enforcement.
+            "tests" | "test" | "testdata" | "fixtures" | "__tests__" | "benches" => {
                 return true;
             }
             _ => {}
@@ -1249,16 +1312,15 @@ fn sec_disabled_tls_regex() -> &'static Regex {
     })
 }
 
-fn arm_sec_no_disabled_tls_1(path: &str, content: &str) -> Result<(), String> {
+fn arm_sec_no_disabled_tls_1(_path: &str, content: &str) -> Result<(), String> {
     if let Some(m) = sec_disabled_tls_regex().find(content) {
         let match_line = content[..m.start()].bytes().filter(|&b| b == b'\n').count() + 1;
-        let in_test = is_test_or_fixture_path(path)
-            || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
-        if in_test {
-            match test_scope_policy("SEC-NO-DISABLED-TLS-1") {
-                TestScopePolicy::Waive => return Ok(()),
-                TestScopePolicy::Downgrade => {}
-            }
+        // GATE-F7: this rule is no longer path-waivable. Test scope only DOWNGRADES
+        // in the brownfield audit; at write time the sole escape hatch is an explicit,
+        // reasoned `camerata:allow SEC-NO-DISABLED-TLS-1` marker on/above the offending
+        // line. A filename alone (test/fixture/examples) no longer silences it.
+        if has_allow_suppression(content, "SEC-NO-DISABLED-TLS-1", match_line) {
+            return Ok(());
         }
         Err(
             "SEC-NO-DISABLED-TLS-1: content disables TLS/certificate verification; \
@@ -1389,7 +1451,7 @@ fn yaml_load_is_safe(line: &str) -> bool {
 
 /// SEC-NO-UNSAFE-DESERIALIZATION-1: deny content that calls an unsafe deserialization
 /// function on untrusted input. See [`sec_unsafe_deser_regex`] for the full match-set.
-fn arm_sec_no_unsafe_deserialization_1(path: &str, content: &str) -> Result<(), String> {
+fn arm_sec_no_unsafe_deserialization_1(_path: &str, content: &str) -> Result<(), String> {
     let re = sec_unsafe_deser_regex();
     for m in re.find_iter(content) {
         let match_line = byte_offset_to_line(content, m.start());
@@ -1400,13 +1462,12 @@ fn arm_sec_no_unsafe_deserialization_1(path: &str, content: &str) -> Result<(), 
             continue;
         }
 
-        let in_test = is_test_or_fixture_path(path)
-            || is_in_test_scope(match_line, &test_scope_line_ranges(path, content));
-        if in_test {
-            match test_scope_policy("SEC-NO-UNSAFE-DESERIALIZATION-1") {
-                TestScopePolicy::Waive => continue,
-                TestScopePolicy::Downgrade => {}
-            }
+        // GATE-F7: no longer path-waivable. The sole write-time escape hatch is an
+        // explicit, reasoned `camerata:allow SEC-NO-UNSAFE-DESERIALIZATION-1` marker
+        // on/above the offending line. A test/fixture/examples filename no longer
+        // silences an unsafe deserialization sink.
+        if has_allow_suppression(content, "SEC-NO-UNSAFE-DESERIALIZATION-1", match_line) {
+            continue;
         }
 
         let matched = m.as_str();
@@ -2353,8 +2414,19 @@ mod tests {
 
     #[test]
     fn test_scope_policy_waive_rules() {
+        // GATE-F7: only SQL-concat is still path-waivable in test scope.
         assert!(matches!(test_scope_policy("SEC-NO-RAW-SQL-CONCAT-1"), TestScopePolicy::Waive));
-        assert!(matches!(test_scope_policy("SEC-NO-DISABLED-TLS-1"), TestScopePolicy::Waive));
+    }
+
+    #[test]
+    fn test_scope_policy_tls_and_deser_no_longer_waived() {
+        // GATE-F7: disabled-TLS and unsafe-deserialization are downgraded (not waived)
+        // by test scope; they require an explicit camerata:allow at write time.
+        assert!(matches!(test_scope_policy("SEC-NO-DISABLED-TLS-1"), TestScopePolicy::Downgrade));
+        assert!(matches!(
+            test_scope_policy("SEC-NO-UNSAFE-DESERIALIZATION-1"),
+            TestScopePolicy::Downgrade
+        ));
     }
 
     #[test]
@@ -2582,11 +2654,49 @@ mod tests {
     }
 
     #[test]
-    fn disabled_tls_in_test_scope_is_waived() {
-        // Waive policy: test code legitimately disables TLS
+    fn disabled_tls_in_test_scope_is_no_longer_path_waived() {
+        // GATE-F7: a filename/#[cfg(test)] scope alone no longer waives disabled TLS.
+        // A test that skips cert verification still hides a MITM, so the gate denies
+        // it unless an explicit camerata:allow is present.
         let content = "\n#[cfg(test)]\nmod tests {\n    fn test_http() {\n        let cfg = TlsConfig { InsecureSkipVerify: true };\n    }\n}\n";
-        let result = arm_sec_no_disabled_tls_1("src/lib.rs", content);
-        assert!(result.is_ok(), "TLS disable in test scope should be ALLOWED (Waive policy)");
+        assert!(
+            arm_sec_no_disabled_tls_1("src/lib.rs", content).is_err(),
+            "TLS disable in test scope must now be DENIED without an explicit suppression"
+        );
+    }
+
+    #[test]
+    fn disabled_tls_in_examples_dir_is_denied() {
+        // GATE-F7: examples are shipped/executed code — no waive.
+        let content = "let cfg = TlsConfig { InsecureSkipVerify: true };";
+        assert!(
+            arm_sec_no_disabled_tls_1("examples/http_client.rs", content).is_err(),
+            "disabled TLS under examples/ must be DENIED"
+        );
+    }
+
+    #[test]
+    fn disabled_tls_in_test_file_allowed_with_camerata_allow() {
+        // GATE-F7: the only escape hatch is an explicit, reasoned camerata:allow on
+        // the offending line (or the line directly above it).
+        let content =
+            "let c = TlsConfig { InsecureSkipVerify: true }; // camerata:allow SEC-NO-DISABLED-TLS-1 -- local test proxy uses a self-signed CA";
+        assert!(
+            arm_sec_no_disabled_tls_1("src/client_test.rs", content).is_ok(),
+            "an explicit reasoned camerata:allow must permit disabled TLS in test code"
+        );
+    }
+
+    #[test]
+    fn disabled_tls_reasonless_camerata_allow_does_not_suppress() {
+        // GATE-F7: a bare, reason-less marker is an un-auditable hole — it must NOT
+        // silence the gate (mirrors the server's require-reason invariant).
+        let content =
+            "let c = TlsConfig { InsecureSkipVerify: true }; // camerata:allow SEC-NO-DISABLED-TLS-1";
+        assert!(
+            arm_sec_no_disabled_tls_1("src/client_test.rs", content).is_err(),
+            "a reason-less camerata:allow must NOT suppress the gate"
+        );
     }
 
     #[test]
@@ -2699,21 +2809,51 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_deser_waived_in_cfg_test_scope() {
-        // Waive policy: unsafe deser inside #[cfg(test)] is allowed (test infrastructure).
+    fn unsafe_deser_in_cfg_test_scope_no_longer_waived() {
+        // GATE-F7: a #[cfg(test)] scope no longer waives unsafe deserialization.
         let content = "\n#[cfg(test)]\nmod tests {\n    fn setup() {\n        let v = yaml.load(f);\n    }\n}\n";
         assert!(
-            arm_sec_no_unsafe_deserialization_1("src/lib.rs", content).is_ok(),
-            "unsafe deser in #[cfg(test)] must be waived"
+            arm_sec_no_unsafe_deserialization_1("src/lib.rs", content).is_err(),
+            "unsafe deser in #[cfg(test)] must now be DENIED without an explicit suppression"
         );
     }
 
     #[test]
-    fn unsafe_deser_waived_in_test_path() {
-        // A file under tests/ is a test path → waive.
+    fn unsafe_deser_in_test_path_no_longer_waived() {
+        // GATE-F7: a file under tests/ no longer path-waives an unsafe deser sink.
         assert!(
-            arm_sec_no_unsafe_deserialization_1("tests/fixtures/payload.py", "pickle.loads(d)").is_ok(),
-            "pickle.loads in tests/ path must be waived"
+            arm_sec_no_unsafe_deserialization_1("tests/fixtures/payload.py", "pickle.loads(d)").is_err(),
+            "pickle.loads in a test path must now be DENIED without an explicit suppression"
+        );
+    }
+
+    #[test]
+    fn unsafe_deser_in_examples_dir_is_denied() {
+        // GATE-F7: examples are shipped/executed code — no waive.
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("examples/load_cfg.py", "cfg = yaml.load(f)").is_err(),
+            "unsafe deser under examples/ must be DENIED"
+        );
+    }
+
+    #[test]
+    fn unsafe_deser_in_test_file_allowed_with_camerata_allow() {
+        // GATE-F7: the only escape hatch is an explicit, reasoned camerata:allow.
+        let content =
+            "obj = pickle.loads(buf)  # camerata:allow SEC-NO-UNSAFE-DESERIALIZATION-1 -- fixture bytes are produced by this same test";
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("tests/fixtures/payload_test.py", content).is_ok(),
+            "an explicit reasoned camerata:allow must permit unsafe deser in test code"
+        );
+    }
+
+    #[test]
+    fn unsafe_deser_reasonless_camerata_allow_does_not_suppress() {
+        // GATE-F7: a bare, reason-less marker must NOT suppress.
+        let content = "obj = pickle.loads(buf)  # camerata:allow SEC-NO-UNSAFE-DESERIALIZATION-1";
+        assert!(
+            arm_sec_no_unsafe_deserialization_1("tests/fixtures/payload_test.py", content).is_err(),
+            "a reason-less camerata:allow must NOT suppress the gate"
         );
     }
 
@@ -2744,6 +2884,27 @@ mod tests {
         let content = "\n#[cfg(test)]\nmod tests {\n    fn setup() {\n        let q = format!(\"INSERT INTO test_table VALUES ('{}')\", val);\n    }\n}\n";
         let result = arm_sec_no_raw_sql_concat_1("src/repo.rs", content);
         assert!(result.is_ok(), "SQL concat in test scope should be ALLOWED (Waive policy)");
+    }
+
+    #[test]
+    fn sql_concat_still_waived_in_genuine_test_file() {
+        // GATE-F7: SQL-concat remains path-waivable for genuine test files.
+        let content = "let q = format!(\"SELECT * FROM t WHERE id = {}\", id);";
+        assert!(
+            arm_sec_no_raw_sql_concat_1("src/repo_test.rs", content).is_ok(),
+            "SQL concat in a *_test.rs file must still be waived by path"
+        );
+    }
+
+    #[test]
+    fn examples_path_is_not_test_scope() {
+        // GATE-F7: examples are shipped/executed code, not test scope.
+        assert!(
+            !is_test_or_fixture_path("examples/http_client.rs"),
+            "examples/ must NOT be treated as test scope"
+        );
+        // A test dir is still test scope.
+        assert!(is_test_or_fixture_path("tests/fixtures/data.rs"));
     }
 }
 
