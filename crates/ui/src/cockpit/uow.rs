@@ -6187,7 +6187,13 @@ pub(super) fn DecisionsReviewPanel(story_id: String, uow_refresh: Signal<u32>) -
                                     rationale: new_rationale().trim().to_string(),
                                     alternatives_considered: Vec::new(),
                                     outcome: DecisionOutcomeView::Approved,
-                                    provenance: RevisionProvenanceView::default(),
+                                    // Stamp a real provenance: an empty {actor:"",at:""} fails to
+                                    // deserialize server-side (actor enum + DateTime), which 422'd
+                                    // the only manual path to satisfy the dev gate.
+                                    provenance: RevisionProvenanceView {
+                                        actor: "user".to_string(),
+                                        at: chrono::Utc::now().to_rfc3339(),
+                                    },
                                 };
                                 let mut updated = existing.clone();
                                 updated.push(rec);
