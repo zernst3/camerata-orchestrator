@@ -9705,9 +9705,12 @@ async fn design_publish(
         }
 
         // Create the issue. Embed any node attachments then the diagram in the body.
+        // Fail-soft: a per-node create error must NOT abort the whole tree (that would
+        // discard already-created issues and duplicate them on retry). Warn and continue,
+        // always returning `{nodes, warnings}` so the caller can retry the remainder.
         let node_issue_body = embed_attachments(&authoring.draft_body, &node.attachments);
         let node_issue_body = embed_diagram(&node_issue_body, node.diagram.as_deref());
-        let (html_url, child_db_id) = crate::github_issues::create_issue_returning_id(
+        let (html_url, child_db_id) = match crate::github_issues::create_issue_returning_id(
             &coord.owner,
             &coord.repo,
             &token,
@@ -9715,17 +9718,28 @@ async fn design_publish(
             &node_issue_body,
         )
         .await
-        .map_err(AppError)?;
+        {
+            Ok(v) => v,
+            Err(e) => {
+                warnings.push(format!(
+                    "node `{}` failed to create in `{}`: {e}",
+                    node.story_id, action.repo
+                ));
+                continue;
+            }
+        };
 
-        let number: u64 = html_url
+        let Some(number) = html_url
             .rsplit('/')
             .next()
-            .and_then(|s| s.trim().parse().ok())
-            .ok_or_else(|| {
-                AppError(anyhow::anyhow!(
-                    "could not parse issue number from `{html_url}`"
-                ))
-            })?;
+            .and_then(|s| s.trim().parse::<u64>().ok())
+        else {
+            warnings.push(format!(
+                "node `{}` created in `{}` but its issue number could not be parsed from `{html_url}`",
+                node.story_id, action.repo
+            ));
+            continue;
+        };
 
         // Apply the type label (fail-soft: label failure does not abort publish).
         if let Some(ref node_type) = node.node_type {
@@ -9750,28 +9764,37 @@ async fn design_publish(
         // `link_sub_issue` needs the parent's issue NUMBER and the child's DATABASE id.
         if action.link_to_parent {
             if let Some(parent_draft_id) = node.draft_parent_id.as_deref() {
-                if let Some(&parent_number) =
-                    published.get(&(action.repo.clone(), parent_draft_id.to_string()))
-                {
-                    if let Err(e) = crate::github_issues::link_sub_issue(
-                        &coord.owner,
-                        &coord.repo,
-                        parent_number,
-                        child_db_id,
-                        &token,
-                    )
-                    .await
-                    {
-                        warnings.push(format!(
-                            "{}#{number}: sub-issue link to #{parent_number} failed: {e}",
-                            action.repo
-                        ));
+                match published.get(&(action.repo.clone(), parent_draft_id.to_string())) {
+                    Some(&parent_number) => {
+                        if let Err(e) = crate::github_issues::link_sub_issue(
+                            &coord.owner,
+                            &coord.repo,
+                            parent_number,
+                            child_db_id,
+                            &token,
+                        )
+                        .await
+                        {
+                            warnings.push(format!(
+                                "{}#{number}: sub-issue link to #{parent_number} failed: {e}",
+                                action.repo
+                            ));
+                        }
                     }
+                    // The plan asked to link but the parent was never published in THIS
+                    // repo, so there is no parent issue number to link to. Surface it
+                    // instead of silently dropping the promised link.
+                    None => warnings.push(format!(
+                        "{}#{number}: sub-issue link skipped — parent node `{parent_draft_id}` was not published in `{}`",
+                        action.repo, action.repo
+                    )),
                 }
             }
         }
 
-        // Upsert the story onto the canonical spine (per repo it was created in).
+        // Upsert the story onto the canonical spine (per repo it was created in). The issue
+        // already exists on GitHub, so a local upsert failure is fail-soft: warn but still
+        // record the node so the response reflects reality (and children can still link).
         let story = crate::github_issues::issue_to_story(
             &action.repo,
             number,
@@ -9779,9 +9802,13 @@ async fn design_publish(
             &node_issue_body,
         );
         let work_item_story_id = story.id.clone();
-        state.stories.upsert(story).await.map_err(AppError)?;
-        // Link the work item onto the UoW once (first successful action for this node).
-        if linked.insert(node.story_id.clone()) {
+        if let Err(e) = state.stories.upsert(story).await {
+            warnings.push(format!(
+                "{}#{number}: created but could not upsert onto the spine: {e}",
+                action.repo
+            ));
+        } else if linked.insert(node.story_id.clone()) {
+            // Link the work item onto the UoW once (first successful action for this node).
             state.uow.link_work_item(&node.story_id, &work_item_story_id);
         }
 
