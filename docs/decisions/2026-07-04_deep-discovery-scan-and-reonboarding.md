@@ -41,10 +41,8 @@ of two things:
   system should do vs what the code actually does (missing capability, half-built stub, a promised
   surface with no implementation).
 
-**Working name: "Deep Discovery Scan"** (also fine: "Bug & Gap Scan", "Correctness Audit"). NAMING IS AN
-OPEN DECISION for Zach. Constraint: do NOT reuse "deep" if it collides confusingly with the existing
-"deep-tier" that produces the advisory SOC-2 deep-report markdown export (a separate feature). Candidate
-final names to pick from: "Discovery Scan", "Bug & Gap Audit", "Deep Correctness Scan".
+**Name (decided 2026-07-05): "Bug and Gap Discovery Scan".** (Chosen over "Deep Discovery Scan" to avoid
+colliding with the existing "deep-tier" SOC-2 deep-report export.)
 
 ### 2. Engine: bounded, read-only, subsystem-partitioned reasoning agents
 
@@ -90,6 +88,58 @@ the current code. Called "re-onboarding" for simplicity even though it is really
 - **Future enhancement:** diff a re-scan against the prior snapshot ("what's new / fixed / regressed
   since last scan") — high value, but v1 can ship snapshot-only.
 
+### 6. Findings presentation: category-first consolidation (added 2026-07-05)
+
+Three scan tiers (mechanical, rule-based, deep discovery) will produce HUNDREDS of rows. Today the grid
+groups by domain/rule inside collapsible drop-downs; with three tiers that is still an unnavigable wall.
+Add ONE abstraction higher: a **finding CATEGORY** as the top-level grouping.
+
+**The taxonomy (fixed + closed, so categorization is repeatable):**
+- **Security** — vulnerabilities, secrets, auth/authz, injection, path escape, TLS, unsafe deserialization.
+- **Architecture** — layering/boundary violations, coupling, DI, contract drift, module structure.
+- **Correctness (Bugs)** — logic errors, races, silent failures, contract mismatches, state-machine
+  violations, dead affordances.
+- **Functionality Gaps** — missing or half-built capabilities vs the repo's stated intent.
+- **Performance** — N+1, hot-path allocations, missing indexes, needless work.
+- **Compliance** — SOC-2 / audit gaps, licensing, evidence.
+- **Maintainability / Debt** — dead code, duplication, stale TODOs, complexity (optional; may fold into
+  Architecture).
+- **Other** — catch-all; should stay near-empty (a large Other means the taxonomy needs a new category).
+
+**The critical rule: category is INTRINSIC, decoupled from source tier.** A finding is grouped by WHAT it
+is, not by which scan found it. A security flaw surfaced by the tier-3 deep scan is a **Security** row,
+sitting with the other Security findings, even though the dedicated security scan missed it. Each finding
+therefore carries two orthogonal fields:
+- `category` — the intrinsic type; the TOP-LEVEL grouping key (assigned by the consolidator).
+- `source` — which tier/lens produced it (mechanical / rule-audit / deep-discovery + lens); a visible
+  badge + a filter, NEVER the grouping key.
+
+**The grid:** Category (new level 0: collapsible, shows count + max severity + a source-mix badge) → the
+EXISTING breakdown (domain / repo / rule drop-downs, unchanged) underneath → individual findings.
+Provenance stays visible via the per-row Source badge, and Source becomes a FILTER, so you can still slice
+by tier when you want without it dictating the grouping.
+
+**The consolidator (the make-or-break component: it must categorize + dedup correctly).** A governed step
+that runs AFTER all tiers emit raw findings:
+1. NORMALIZE every finding to one shape (category, source, severity, confidence, repo, file:line, title,
+   detail, rule_id?).
+2. CATEGORIZE into the fixed taxonomy by intrinsic nature. Deterministic where the source implies it (a
+   mechanical secret-scan hit is Security by construction); LLM judgment only for ambiguous ones, against
+   WRITTEN category definitions so it is repeatable.
+3. DEDUP across tiers: the same issue found by two tiers is ONE row listing both sources. Merge ONLY
+   same-issue-same-spot (same file + overlapping line + same semantic defect). NEVER merge across
+   different lines or on a "same issue?" guess: a wrong merge HIDES a real finding (the worst failure);
+   when unsure, keep separate and flag `[needs review]`.
+4. CROSS-CONFIRM: a finding independently surfaced by 2+ tiers/lenses gets a confidence boost + a
+   "confirmed" badge (high-trust, like the audit's cross-agent confirmations).
+5. RANK within each category by severity x confidence.
+
+**Consolidator reliability:** it is itself a governed agent — the read-only governance kernel, the fixed
+taxonomy with definitions, and a STRICT output contract (one object per finding: category, source(s),
+severity, confidence, file:line, dedup-group-id, cross_confirmed_by). Dedup uses normalized file+line + a
+conservative similarity threshold biased toward keeping separate. Mis-categorization or wrong merges
+destroy trust, so this component gets the strongest model and its own eval set.
+
 ## Consequences
 
 - Onboarding gains a third, opt-in tier that is reasoning-heavy and cost-gated; the two existing tiers
@@ -109,9 +159,29 @@ the current code. Called "re-onboarding" for simplicity even though it is really
   should say so rather than invent gaps).
 - v1 is snapshot-only; the re-scan DIFF is deferred.
 
-## Open decisions for Zach
+### 7. Scheduled "Bug and Gap Discovery Scan" routine template (added 2026-07-05)
 
-1. Final NAME of the mode (see §1).
-2. Whether discovered bugs auto-file as GitHub issues by default, or land in triage for review first.
-3. Snapshot-only v1 vs. shipping the re-scan diff in v1.
-4. Subsystem partitioning heuristic (per-crate vs per-top-level-dir vs language-aware) and the agent-count cap.
+A new routine TEMPLATE (Camerata's scheduled-routine feature): a recurring **Bug and Gap Discovery Scan**
+that runs the tier-3 discovery scan against the project's repos on a schedule. It is re-onboarding (§5)
+on a cadence, feeding the same consolidator + triage pipeline.
+
+- **Scan scope: FULL every run.** Each fire deep-scans ALL of the repos' code, not an incremental slice
+  and not skipping previously-scanned code. By design: already-scanned code can behave differently once
+  it is referenced by NEW code, so a true DEEP scan re-examines everything each time. (The re-scan DIFF in
+  §5 is still valid and complementary: it compares two FULL-scan snapshots to show new/fixed/regressed.)
+- **Guardrailed against snowballing:** bounded agent count (= number of subsystems, no recursion), a
+  per-run cost cap + estimate, and a minimum cadence, so a scheduled full-repo deep scan cannot run away.
+- Output: consolidator → category-grouped findings (§6) → triage (never auto-fix).
+
+## Resolved decisions (2026-07-05)
+
+1. **Name:** "Bug and Gap Discovery Scan" (see §1).
+2. **Disposition:** triage-first (findings land in the triage tables; the user promotes real ones to
+   issues). No auto-filing.
+3. **Scan scope:** FULL deep scan of all repos every run, never incremental/skip-already-scanned (see §7).
+   The snapshot DIFF stays a v2 feature layered on top of full-scan snapshots.
+4. **Guardrails:** bounded + capped (agent count = subsystems, no recursion; cost cap; cadence floor) to
+   prevent snowballing (see §2, §7).
+5. **Category taxonomy:** confirmed as the top-level grouping (the §6 set). Maintainability/Debt stays its
+   own category; the user can manually re-bucket a finding (like triage), with the consolidator's call as
+   the default.

@@ -200,3 +200,32 @@ ingestion: (a) it keeps the cache prefix stable (grounding.rs relies on a stable
 attention dilution across a large monolith, (c) it keeps the kernel + relevant subsystem + cross-repo
 contracts in the high-signal part of the window. Use the 1M window to hold the full RELEVANT subsystem
 and its contracts during a task, not the entire codebase indiscriminately.
+
+## Addendum (2026-07-05): state machines, a forced reasoning block, and the STACK-AGNOSTIC loop
+
+Three refinements from follow-up feedback on how open-weight (literal) models actually reach Claude-like
+consistency. These are phase-2 enhancements to the kernel + a correction.
+
+1. **Prompts as state machines, not instructions.** Literal models take the shortest path under ambiguity
+   (skip tests, ignore edge cases). Hard phase boundaries make them MORE predictable, not less. Strengthen
+   the mid/low tier addenda toward explicit phases: "You are in Phase N of M; you may only output X; any
+   other output is rejected." (e.g. a test-only phase before an implementation phase). This is a per-tier
+   addendum, not a change to the shared kernel body.
+
+2. **A forced, STACK-NEUTRAL reasoning block before any code.** Add to the writing kernel a mandatory
+   `<Reasoning>` block the model must emit before writing: it names the risks SPECIFIC TO THIS
+   LANGUAGE/STACK (ownership/memory, types, concurrency, null/None, whatever applies), how it will handle
+   state, and the exact signatures/interfaces it will add or change. Do NOT phrase this Rust-specifically
+   (no "borrow-checker"): the same kernel drives Python, TS, Go, Java, C#, Ruby, SQL. Forcing the model to
+   externalize its plan primes its own context and lifts output quality on the next sequence.
+
+3. **CORRECTION: the execution loop is STACK-AGNOSTIC.** The gap-bridger is NOT "cargo check" (Rust only).
+   It is: after the agent writes, the ORCHESTRATOR runs THE PROJECT'S OWN toolchain for that stack (cargo
+   for Rust, tsc/eslint/jest for TS, pytest/mypy/ruff for Python, go vet/test for Go, etc.), captures the
+   errors, and re-prompts the agent with those exact errors. Camerata's Layer-2 already has per-stack check
+   runners, so the mechanism is stack-agnostic by construction. Prompts must reference the concept
+   GENERICALLY ("the project's build/type/test/lint output", "the toolchain's errors"), never a specific
+   tool. The audit's **LIFECYCLE-5** (the bounce loop re-runs the identical prompt and DROPS the failure
+   reasons) is exactly the missing half of this loop: feeding the stack-appropriate error output back into
+   the next attempt is the single highest-leverage fix for open-weight consistency, and it is elevated from
+   "medium bug" to a strategic priority for the model-agnostic goal.
