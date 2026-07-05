@@ -13,6 +13,11 @@ Zach approved every item. Recommendation [Rec] taken for all EXCEPT:
 Governing principle (standing): **never defer hardening/refining/correctness of Camerata; only defer
 net-new features outside MVP spirit.** So GAP-1/3/6/7/8 are all build-now (structural ones design-first).
 
+GAP-8 landed on fix/gap8-routine-scope — `Routine.scope` is now a structured, enforced `RoutineScope`
+(rule subset + tool allowlist + write jail) that resolves onto the same gateway registration dev runs
+use (`resolve_scope_registration`); serde back-compat for legacy string scopes; live execution still
+latent (seam tested). ADR: docs/decisions/2026-07-05_routine-structured-scope.md.
+
 Implementation order: Batch 1 P0 gate (GAP-2, LIFECYCLE-10, GATE-F7) -> Batch 2 lifecycle provenance
 bundle (LIFECYCLE-1/2/3/4) -> Batch 3 lifecycle loop/concurrency (LIFECYCLE-5/7+6/9/12) -> Batch 4
 ROUTES (5/7/8/9) -> Batch 5 GAP features (4/6/8) -> Batch 6 structural (GAP-3 LlmPort+state, GAP-1

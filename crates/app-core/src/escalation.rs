@@ -399,7 +399,7 @@ pub fn blocked_run_escalation_req(routine: &Routine, denies: usize) -> RaiseEsca
     } else {
         format!(" (rule(s): {})", denied_rules.join(", "))
     };
-    let mut raw_context = format!("scope: {}", routine.scope);
+    let mut raw_context = format!("scope: {}", routine.scope.label());
     if !denied_rules.is_empty() {
         raw_context.push_str(&format!("\ndenied rules: {}", denied_rules.join(", ")));
     }
