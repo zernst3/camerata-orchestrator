@@ -4339,7 +4339,13 @@ async fn gate_probe() -> Json<serde_json::Value> {
             let checks: Vec<serde_json::Value> = r
                 .layer1
                 .iter()
-                .map(|c| serde_json::json!({ "label": c.label, "denied": c.denied, "detail": c.detail }))
+                .map(|c| serde_json::json!({
+                    "rule": c.rule,
+                    "label": c.label,
+                    "denied": c.denied,
+                    "isolated_denied": c.isolated_denied,
+                    "detail": c.detail,
+                }))
                 .collect();
             Json(serde_json::json!({
                 "ok": true,
@@ -4347,6 +4353,7 @@ async fn gate_probe() -> Json<serde_json::Value> {
                 "story": r.story,
                 "layer1": checks,
                 "layer1_denied": r.layer1_denied_count(),
+                "layer1_isolated": r.layer1_isolated_count(),
                 "layer1_total": r.layer1_total(),
                 "layer1_clean_allowed": r.layer1_clean_allowed,
                 "layer2_bounced": r.layer2_bounced,
