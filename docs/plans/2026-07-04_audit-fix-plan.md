@@ -165,7 +165,7 @@ fixes every AUTO item, skips every ZACH item, and updates the Progress table bel
 |---|---|---|---|
 | UI contract + reactivity | cockpit-F1, UI-1,2,3,4,6,7,8,9,10,11,13,14,16, cockpit-F4,5,6 | not started | — |
 | Workspace panel | workspace-F1..F8 | not started | — |
-| Design double-create | ROUTES-3/UI-12 | not started | — |
+| Design double-create | ROUTES-3/UI-12 | done | branch fix/audit-design (commit e62d079); 542 ui tests green |
 | Server contract + handlers | ROUTES-2,5,6,7,8,9 | not started | — |
 | GitHub token + publish + emit | ROUTES-1/PUBLISH-1, PUBLISH-2,3,4,5,6,7,8, GATE-F6 | not started | — |
 | Lifecycle minor (safe) | LIFECYCLE-11,13 | not started | — |
