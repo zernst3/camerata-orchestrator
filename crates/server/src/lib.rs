@@ -264,16 +264,14 @@ impl AppState {
     /// `CAMERATA_GITHUB_TOKEN` environment variable as a back-compat fallback.
     /// Returns `None` when neither is set or non-empty.
     pub fn github_token(&self) -> Option<String> {
-        // 1. Try the credential store (keychain in prod, in-memory in tests).
-        if let Ok(Some(token)) = self.credential_store.get(crate::credentials::GITHUB_TOKEN) {
-            if !token.is_empty() {
-                return Some(token);
-            }
-        }
-        // 2. Fall back to the environment variable for back-compat.
-        std::env::var("CAMERATA_GITHUB_TOKEN")
-            .ok()
-            .filter(|v| !v.is_empty())
+        // Keychain first, then CAMERATA_GITHUB_TOKEN. `resolve` warns (not swallows) on a
+        // keychain read error before falling back to the env var.
+        crate::credentials::resolve(
+            self.credential_store.as_ref(),
+            crate::credentials::GITHUB_TOKEN,
+            "CAMERATA_GITHUB_TOKEN",
+        )
+        .filter(|v| !v.is_empty())
     }
 
     /// Build the shared PROJECT-GROUNDING block for the ACTIVE project: its rule context
@@ -624,13 +622,18 @@ impl AppState {
         // over any pre-existing env value (set_var runs after dotenv load), matching the
         // backend-setting precedence above (keychain/setting > `.env` > default).
         // Edition 2021, so `set_var` is safe (single-threaded startup).
-        if let Ok(Some(key)) = state
+        match state
             .credential_store
             .get(crate::credentials::ANTHROPIC_API_KEY)
         {
-            if !key.trim().is_empty() {
+            Ok(Some(key)) if !key.trim().is_empty() => {
                 std::env::set_var("ANTHROPIC_API_KEY", key);
             }
+            Ok(_) => {}
+            // A read error here silently leaves the API path keyless with no trace.
+            Err(e) => eprintln!(
+                "[camerata-server] keychain read of ANTHROPIC_API_KEY failed during startup hydration: {e}"
+            ),
         }
         state
     }
@@ -2158,8 +2161,7 @@ async fn sign_off_run(
         let markdown = crate::evidence::render_pr_markdown(&evidence_for_pr);
 
         if let Some((owner, repo_name)) = pr_repo.split_once('/') {
-            let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-                .unwrap_or_default();
+            let token = state.github_token().unwrap_or_default();
             let comment_url = crate::arm::post_pr_comment(
                 owner,
                 repo_name,
@@ -3355,10 +3357,7 @@ async fn reconcile_project(
     };
     // Local-first: read each repo's working copy (where emit writes by default); the token only
     // enables the GitHub governance-branch fallback for repos that aren't cloned locally.
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_default();
+    let token = state.github_token().unwrap_or_default();
     let workspace_root = state.settings.workspace_root();
     let sources: Vec<(String, Option<std::path::PathBuf>)> = project
         .repos
@@ -4398,7 +4397,10 @@ struct TicketReq {
 
 /// Accept selected findings as tech debt: open a GitHub issue with them. Gated on
 /// the token (needs Issues write). Returns `{ ok, url, message }`.
-async fn onboard_ticket(Json(req): Json<TicketReq>) -> Json<serde_json::Value> {
+async fn onboard_ticket(
+    State(state): State<AppState>,
+    Json(req): Json<TicketReq>,
+) -> Json<serde_json::Value> {
     let Some((owner, repo)) = req.repo.split_once('/') else {
         return Json(
             serde_json::json!({ "ok": false, "message": "Target repo must be `owner/repo`." }),
@@ -4407,9 +4409,7 @@ async fn onboard_ticket(Json(req): Json<TicketReq>) -> Json<serde_json::Value> {
     if req.findings.is_empty() {
         return Json(serde_json::json!({ "ok": false, "message": "No findings selected." }));
     }
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = state.github_token();
     let Some(token) = token else {
         return Json(
             serde_json::json!({ "ok": false, "message": "Connect GitHub to file a ticket." }),
@@ -4600,9 +4600,7 @@ async fn onboard_arm(
     if req.rules.is_empty() {
         return Json(serde_json::json!({ "ok": false, "message": "No rules selected to arm." }));
     }
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = state.github_token();
     let Some(token) = token else {
         return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to arm." }));
     };
@@ -4664,9 +4662,7 @@ async fn onboard_apply(
             );
         }
     }
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = state.github_token();
     let Some(token) = token else {
         return Json(
             serde_json::json!({ "ok": false, "message": "Connect GitHub to apply (the branch is pushed to origin)." }),
@@ -5036,12 +5032,10 @@ struct OpenPrReq {
 /// Open the governance PR from the already-applied + pushed branch (the explicit, separate
 /// step after `onboard_apply`). One PR per repo into its default branch.
 async fn onboard_open_pr(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<OpenPrReq>,
 ) -> Json<serde_json::Value> {
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = state.github_token();
     let Some(token) = token else {
         return Json(
             serde_json::json!({ "ok": false, "message": "Connect GitHub to open the PR." }),
@@ -5127,7 +5121,7 @@ async fn fetch_baseline(owner: &str, repo: &str, token: &str) -> crate::suppress
 /// ticket tie-back), and open a governed PR. NOT a one-time dismissal — it persists,
 /// shows in the diff, and rolls up into the audit registry.
 async fn onboard_ignore(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<IgnoreReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     if req.reason.trim().is_empty() {
@@ -5135,7 +5129,7 @@ async fn onboard_ignore(
             "a reason is required to ignore a finding"
         )));
     }
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    let token = state.github_token().unwrap_or_default();
     if token.trim().is_empty() {
         return Err(AppError(anyhow::anyhow!(
             "connect GitHub to record an ignore"
@@ -5830,7 +5824,10 @@ fn ci_story_body_vcs_metadata(repo: &str, rules: &[CiStoryRule]) -> String {
 /// The UI files each story separately so the tracks land as distinct GitHub issues.
 /// Each story carries the HOW-TO so a developer or AI agent can implement the check
 /// correctly without additional hand-holding.
-async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value> {
+async fn onboard_ci_rules(
+    State(state): State<AppState>,
+    Json(req): Json<CiRulesReq>,
+) -> Json<serde_json::Value> {
     let Some((owner, repo)) = req.repo.split_once('/') else {
         return Json(serde_json::json!({ "ok": false, "message": "repo must be owner/repo" }));
     };
@@ -5846,9 +5843,7 @@ async fn onboard_ci_rules(Json(req): Json<CiRulesReq>) -> Json<serde_json::Value
             "message": format!("no {} rules to wire", req.tier)
         }));
     }
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = state.github_token();
     let Some(token) = token else {
         return Json(
             serde_json::json!({ "ok": false, "message": "Connect GitHub to create the story issue." }),
@@ -6299,9 +6294,7 @@ async fn emit_project(
     let Some(project) = state.projects.get(&id) else {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = state.github_token();
     let Some(token) = token else {
         return Json(serde_json::json!({ "ok": false, "message": "Connect GitHub to emit." }));
     };
@@ -6351,10 +6344,7 @@ async fn emit_project_local(
     let Some(project) = state.projects.get(&id) else {
         return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
     };
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_default();
+    let token = state.github_token().unwrap_or_default();
     if want_push && token.is_empty() {
         return Json(serde_json::json!({ "ok": false, "message": "A GitHub token is required to push or open a PR (set CAMERATA_GITHUB_TOKEN). Emit locally without push, or connect GitHub." }));
     }
@@ -6574,6 +6564,7 @@ struct GithubIssuesQuery {
 /// errors out or panics, so the UI degrades to a "Connect GitHub" hint. The token
 /// is never echoed back. Pull requests are filtered out by the parser.
 async fn github_issues_list(
+    State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<GithubIssuesQuery>,
 ) -> Json<serde_json::Value> {
     let repo = q.repo.trim();
@@ -6584,9 +6575,7 @@ async fn github_issues_list(
             "message": "Provide a repo as `owner/name`.",
         }));
     }
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty());
+    let token = state.github_token();
     let Some(token) = token else {
         return Json(serde_json::json!({
             "ok": false,
@@ -7624,7 +7613,7 @@ async fn checkout_project(
             "no workspace folder is set — pick one first"
         )));
     };
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    let token = state.github_token().unwrap_or_default();
     if token.trim().is_empty() {
         return Err(AppError(anyhow::anyhow!(
             "no GitHub token — set CAMERATA_GITHUB_TOKEN to clone"
@@ -7715,7 +7704,7 @@ async fn ship_repo(
     let Some(root) = state.settings.workspace_root() else {
         return Err(AppError(anyhow::anyhow!("no workspace folder is set")));
     };
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    let token = state.github_token().unwrap_or_default();
     if token.trim().is_empty() {
         return Err(AppError(anyhow::anyhow!(
             "no GitHub token — set CAMERATA_GITHUB_TOKEN to push"
@@ -7909,7 +7898,7 @@ async fn git_push(
     Path(_id): Path<String>,
     Json(req): Json<GitPushReq>,
 ) -> Json<serde_json::Value> {
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    let token = state.github_token().unwrap_or_default();
     if token.trim().is_empty() {
         return Json(
             serde_json::json!({ "ok": false, "message": "no GitHub token — set CAMERATA_GITHUB_TOKEN to push" }),
@@ -7937,7 +7926,7 @@ async fn git_pull(
     Path(_id): Path<String>,
     Json(req): Json<GitPullReq>,
 ) -> Json<serde_json::Value> {
-    let token = std::env::var("CAMERATA_GITHUB_TOKEN").unwrap_or_default();
+    let token = state.github_token().unwrap_or_default();
     if token.trim().is_empty() {
         return Json(
             serde_json::json!({ "ok": false, "message": "no GitHub token — set CAMERATA_GITHUB_TOKEN to pull" }),
@@ -7996,24 +7985,6 @@ async fn uow_get(
 }
 
 // ── Provider-agnostic WorkItem + UoW layer (governed-dev surface) ──────────────
-
-/// Read the GitHub token: credential store first, then `CAMERATA_GITHUB_TOKEN` env
-/// var as a back-compat fallback.  Returns `None` when neither is set or non-empty.
-///
-/// This is the canonical resolution path used by all handlers.  The plain
-/// `github_token_env()` helper below covers the few call sites that run before the
-/// AppState is available (e.g. the connections probe, which runs out of band).
-fn github_token() -> Option<String> {
-    github_token_env()
-}
-
-/// Read `CAMERATA_GITHUB_TOKEN` from the environment only (no credential store).
-/// Used by the connections probe and other paths that have no AppState at hand.
-fn github_token_env() -> Option<String> {
-    std::env::var("CAMERATA_GITHUB_TOKEN")
-        .ok()
-        .filter(|v| !v.is_empty())
-}
 
 /// `POST /api/workitems/pull` — pull ALL open issues across ALL the ACTIVE project's
 /// repos via the GitHub adapter, normalized to [`WorkItem`] (each carrying its repo).

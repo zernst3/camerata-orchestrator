@@ -208,8 +208,14 @@ pub fn resolve(
     env_var: &str,
 ) -> Option<String> {
     // Keychain wins.
-    if let Ok(Some(v)) = store.get(cred_name) {
-        return Some(v);
+    match store.get(cred_name) {
+        Ok(Some(v)) => return Some(v),
+        Ok(None) => {}
+        // A read error (locked keychain, backend failure) must not silently degrade to the
+        // env fallback with no trace — that is undiagnosable. Warn, then fall back.
+        Err(e) => eprintln!(
+            "[camerata-server] keychain read of `{cred_name}` failed ({e}); falling back to {env_var}"
+        ),
     }
     // Fall back to env var (back-compat: existing CI/dotenv setups keep working).
     std::env::var(env_var).ok().filter(|v| !v.is_empty())
