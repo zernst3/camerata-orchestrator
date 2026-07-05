@@ -329,7 +329,8 @@ impl Default for StepModelsView {
 }
 
 /// UI mirror of `camerata_server::project::StallThresholds`. Two u64 slots.
-/// Serde defaults match the server's defaults (120s watched, 600s routine).
+/// Serde defaults match the server's defaults (120s watched, 1800s routine — the generous
+/// autonomous auto-cancel default, LIFECYCLE-6).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 struct StallThresholdsView {
     #[serde(default = "default_watched_secs")]
@@ -340,7 +341,10 @@ struct StallThresholdsView {
 
 fn default_watched_secs() -> u64 { 120 }
 
-fn default_routine_secs() -> u64 { 600 }
+/// The generous routine (autonomous) default, mirroring the server's
+/// `camerata_app_core::project::DEFAULT_ROUTINE_STALL_SECS`. Autonomous runs auto-cancel on
+/// stall with no architect watching, so the default grace period is deliberately long (30 min).
+fn default_routine_secs() -> u64 { 1_800 }
 
 impl Default for StallThresholdsView {
     fn default() -> Self {
@@ -4089,10 +4093,15 @@ mod tests {
         let s: StallThresholdsView = serde_json::from_str(r#"{"watched_secs":60,"routine_secs":300}"#).unwrap();
         assert_eq!(s.watched_secs, 60);
         assert_eq!(s.routine_secs, 300);
-        // Back-compat: no fields → defaults.
+        // Back-compat: no fields → defaults. LIFECYCLE-6: the routine (autonomous) default is
+        // the generous 30-min auto-cancel grace period, matching the server default.
         let d: StallThresholdsView = serde_json::from_str("{}").unwrap();
         assert_eq!(d.watched_secs, 120);
-        assert_eq!(d.routine_secs, 600);
+        assert_eq!(d.routine_secs, 1_800);
+        // The Default impl agrees with the serde defaults.
+        let def = StallThresholdsView::default();
+        assert_eq!(def.watched_secs, 120);
+        assert_eq!(def.routine_secs, 1_800);
     }
 
     /// `JobStatusEnvelope` parses the wrapped job shape.
