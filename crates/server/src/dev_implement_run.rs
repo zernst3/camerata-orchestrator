@@ -840,6 +840,23 @@ pub async fn execute_dev_implement_run(
         return;
     }
 
+    // GAP-2 / PROCESS-BRANCH-NAMING-1 chokepoint: HARD-BLOCK a UoW branch name that violates
+    // the project's branch-naming rule before creating it. Opt-in rule (disabled by default),
+    // so a no-op for projects that have not enabled branch-naming.
+    let branch_gate_config = project_id
+        .as_deref()
+        .and_then(|pid| projects.get(pid))
+        .map(|p| p.process_rule_config)
+        .unwrap_or_default();
+    if let Err(e) = crate::vcs_choke::gated_branch(&branch_gate_config, &target_branch) {
+        fail(
+            &runs,
+            &uow,
+            format!("VCS-action gate blocked the UoW branch name `{target_branch}`: {e}"),
+        );
+        return;
+    }
+
     // Ensure the UoW branch is checked out in this worktree before the agent edits.
     // `create_branch_at` creates the branch if absent, then switches to it — exactly
     // the pattern update_branch_run uses via `switch_branch` (after the clone already
@@ -898,7 +915,7 @@ pub async fn execute_dev_implement_run(
         .filter(|d| d.as_path() != dir.as_path())
         .cloned()
         .collect();
-    let spawn = match prepare_session(&gateway_bin, &role, Some(dir.as_path()), &sibling_read_dirs)
+    let spawn = match prepare_session(&gateway_bin, &role, Some(dir.as_path()), &sibling_read_dirs, None)
     {
         Ok(s) => s,
         Err(e) => {
@@ -1492,7 +1509,32 @@ pub async fn execute_dev_implement_run(
 
     // The SERVER commits the agent's implementation (commit stays server-side, never
     // the agent — mirrors pr_resolve_run exactly).
-    let commit_msg = format!("feat: implement story {story_id} on {target_branch}");
+    //
+    // GAP-2 chokepoint. This is an ORCHESTRATION-INTERNAL commit, but Camerata knows the run's
+    // story id, so we author a message that is COMPLIANT with the project's active process rules
+    // (conventional-commit shape + substantive body + story-id reference in the required format)
+    // and take the HARD-BLOCK path. A non-compliant machine message is then a real bug that
+    // surfaces here, not a silent bypass. The `_or_bypass` fallback remains available for cases
+    // that genuinely cannot satisfy a rule.
+    let vcs_config = project_id
+        .as_deref()
+        .and_then(|pid| projects.get(pid))
+        .map(|p| p.process_rule_config)
+        .unwrap_or_default();
+    let numeric_id = crate::vcs_choke::numeric_story_id(&story_id);
+    let commit_msg = crate::vcs_choke::compliant_machine_commit_message(
+        &vcs_config,
+        "feat",
+        &format!("implement story {story_id} on {target_branch}"),
+        &numeric_id,
+    );
+    if let Err(e) = crate::vcs_choke::gated_commit(&vcs_config, &commit_msg) {
+        // The machine message failed the project's gate. Fail closed — this is a bug in the
+        // message generator or a run missing a usable story id, not a reason to commit past it.
+        fail(&runs, &uow, format!("VCS-action gate blocked the machine commit: {e}"));
+        return;
+    }
+
     match crate::workspace::commit_all(&dir, &commit_msg).await {
         Ok(out) => {
             event(
@@ -1888,6 +1930,7 @@ mod tests {
             &role,
             Some(&wt),
             std::slice::from_ref(&sibling),
+            None,
         )
         .expect("session prepares");
         let args = spawn.driver.build_args(&role, "implement");

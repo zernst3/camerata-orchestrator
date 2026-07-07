@@ -108,6 +108,9 @@ pub async fn execute_pr_resolve_run(
     // READ-ONLY via `--add-dir`. The resolver writes only to `dir` (the PR's repo); sibling
     // repos are readable so it can address review comments that reference other repos.
     read_dirs: Vec<std::path::PathBuf>,
+    // GAP-2: the active project's VCS-action process rules, used to gate the server-side
+    // resolution commit at its chokepoint. Defaulted by callers with no active project.
+    vcs_config: camerata_checks::vcs_action::ProcessRuleConfig,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -195,7 +198,7 @@ pub async fn execute_pr_resolve_run(
         .filter(|d| d.as_path() != dir.as_path())
         .cloned()
         .collect();
-    let spawn = match prepare_session(&gateway_bin, &role, Some(dir.as_path()), &sibling_read_dirs)
+    let spawn = match prepare_session(&gateway_bin, &role, Some(dir.as_path()), &sibling_read_dirs, None)
     {
         Ok(s) => s,
         Err(e) => {
@@ -221,7 +224,22 @@ pub async fn execute_pr_resolve_run(
     }
 
     // The SERVER commits the agent's fix (commit stays server-side, never the agent).
-    let commit_msg = format!("fix: resolve PR #{pr_number} feedback for {story_id}");
+    //
+    // GAP-2 chokepoint. Orchestration-internal, but Camerata knows the run's story id, so we
+    // author a message COMPLIANT with the project's active process rules and take the HARD-BLOCK
+    // path. A non-compliant machine message surfaces as a real error rather than a silent bypass.
+    let numeric_id = crate::vcs_choke::numeric_story_id(&story_id);
+    let commit_msg = crate::vcs_choke::compliant_machine_commit_message(
+        &vcs_config,
+        "fix",
+        &format!("resolve PR #{pr_number} feedback for {story_id}"),
+        &numeric_id,
+    );
+    if let Err(e) = crate::vcs_choke::gated_commit(&vcs_config, &commit_msg) {
+        fail(&runs, &uow, format!("VCS-action gate blocked the machine commit: {e}"));
+        return;
+    }
+
     match crate::workspace::commit_all(&dir, &commit_msg).await {
         Ok(out) => {
             event(&runs, "allow", format!("Committed the resolution. {out}"));
@@ -336,6 +354,7 @@ mod tests {
             "claude-opus-4-8".to_string(),
             None,
             Vec::new(),
+            camerata_checks::vcs_action::ProcessRuleConfig::default(),
         )
         .await;
 

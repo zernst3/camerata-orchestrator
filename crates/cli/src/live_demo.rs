@@ -126,7 +126,7 @@ async fn run_one(
 ) -> anyhow::Result<LiveRun> {
     // prepare_session creates its own TempDir (ARCH-RESOURCE-LIFECYCLE-1); no manual
     // session_dir needed.
-    let spawn = prepare_session(gateway_bin, role, None, &[])?;
+    let spawn = prepare_session(gateway_bin, role, None, &[], None)?;
 
     eprintln!(
         "[live-demo] session={} rules_file={} mcp_config={}",

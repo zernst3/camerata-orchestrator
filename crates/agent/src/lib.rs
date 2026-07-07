@@ -24,7 +24,7 @@ use thiserror::Error;
 pub mod session;
 pub use session::{
     prepare_session, render_mcp_config, render_rules_file, SessionError, SessionSpawn,
-    MCP_SERVER_KEY, RULES_FILE_ENV, WORKTREE_ROOT_ENV,
+    GATE_EVENTS_FILE_ENV, MCP_SERVER_KEY, RULES_FILE_ENV, WORKTREE_ROOT_ENV,
 };
 
 pub mod generic;

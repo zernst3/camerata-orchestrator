@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use camerata_agent::{render_rules_file, HeartbeatFn, MCP_SERVER_KEY, RULES_FILE_ENV, WORKTREE_ROOT_ENV};
+use camerata_agent::{render_rules_file, HeartbeatFn, GATE_EVENTS_FILE_ENV, MCP_SERVER_KEY, RULES_FILE_ENV, WORKTREE_ROOT_ENV};
 use camerata_core::{AgentDriver, Role};
 
 use crate::tier::{CapabilityBand, TierMap};
@@ -138,6 +138,7 @@ pub fn render_orchestrator_mcp_config(
     worktree: &Path,
     tier_map: &TierMap,
     vision_enabled: bool,
+    gate_events_file: Option<&Path>,
 ) -> Result<String, serde_json::Error> {
     let mut env: BTreeMap<String, String> = BTreeMap::new();
     env.insert(RULES_FILE_ENV.to_string(), rules_file.display().to_string());
@@ -145,6 +146,11 @@ pub fn render_orchestrator_mcp_config(
         WORKTREE_ROOT_ENV.to_string(),
         worktree.display().to_string(),
     );
+    // LIFECYCLE-10: the lead's gateway subprocess writes to the run's OWN sink, threaded
+    // per-spawn via this config's env (never the shared parent process env).
+    if let Some(sink) = gate_events_file {
+        env.insert(GATE_EVENTS_FILE_ENV.to_string(), sink.display().to_string());
+    }
     env.insert(DELEGATE_ENABLED_ENV.to_string(), "1".to_string());
     env.insert(
         DELEGATE_MODELS_ENV.to_string(),
@@ -190,6 +196,7 @@ pub fn prepare_orchestrator_session(
     worktree: &Path,
     tier_map: &TierMap,
     vision_enabled: bool,
+    gate_events_file: Option<&Path>,
 ) -> anyhow::Result<OrchestratorSession> {
     let dir = tempfile::TempDir::new()?;
     let session_dir = dir.path();
@@ -198,8 +205,14 @@ pub fn prepare_orchestrator_session(
     std::fs::write(&rules_file, render_rules_file(role)?)?;
 
     let mcp_config = session_dir.join("gateway.json");
-    let cfg =
-        render_orchestrator_mcp_config(gateway_bin, &rules_file, worktree, tier_map, vision_enabled)?;
+    let cfg = render_orchestrator_mcp_config(
+        gateway_bin,
+        &rules_file,
+        worktree,
+        tier_map,
+        vision_enabled,
+        gate_events_file,
+    )?;
     std::fs::write(&mcp_config, cfg)?;
 
     Ok(OrchestratorSession {
@@ -345,6 +358,7 @@ mod tests {
             Path::new("/work/crate"),
             &TierMap::default(),
             false,
+            None,
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
@@ -354,6 +368,25 @@ mod tests {
         assert_eq!(env[GATEWAY_BIN_ENV], "/bin/camerata-gateway");
         assert_eq!(env[RULES_FILE_ENV], "/tmp/s/rules.json");
         assert_eq!(env[WORKTREE_ROOT_ENV], "/work/crate");
+        // No sink passed -> the gate-events env is absent.
+        assert!(env.get(GATE_EVENTS_FILE_ENV).is_none());
+    }
+
+    #[test]
+    fn orchestrator_mcp_config_sets_gate_events_sink_when_given() {
+        // LIFECYCLE-10: the lead's gateway subprocess sink is threaded per-spawn.
+        let cfg = render_orchestrator_mcp_config(
+            Path::new("/bin/camerata-gateway"),
+            Path::new("/tmp/s/rules.json"),
+            Path::new("/work/crate"),
+            &TierMap::default(),
+            false,
+            Some(Path::new("/runs/run-xyz/gate-events.jsonl")),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
+        let env = &v["mcpServers"][MCP_SERVER_KEY]["env"];
+        assert_eq!(env[GATE_EVENTS_FILE_ENV], "/runs/run-xyz/gate-events.jsonl");
         // The models env is a JSON object string with all three tiers.
         let models: serde_json::Value =
             serde_json::from_str(env[DELEGATE_MODELS_ENV].as_str().unwrap()).unwrap();
@@ -372,6 +405,7 @@ mod tests {
             Path::new("/work/crate"),
             &m,
             true,
+            None,
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
@@ -390,6 +424,7 @@ mod tests {
             Path::new("/work/crate"),
             &TierMap::default(),
             false,
+            None,
         )
         .unwrap();
         assert!(s.rules_file.exists());

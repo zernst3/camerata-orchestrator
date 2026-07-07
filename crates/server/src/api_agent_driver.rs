@@ -1845,6 +1845,10 @@ pub struct ServerChildDriverFactory {
     rule_subset: Vec<RuleId>,
     /// Stable per-run session id (OpenRouter sticky routing / KV-cache warmth). Optional.
     run_session_id: Option<String>,
+    /// LIFECYCLE-10: the run's OWN gate-events sink, threaded per-spawn into each delegate
+    /// child's gateway mcp-config env (never the shared parent process env). `None` = no
+    /// live gate-events capture for children.
+    gate_events_file: Option<PathBuf>,
 }
 
 impl ServerChildDriverFactory {
@@ -1856,6 +1860,7 @@ impl ServerChildDriverFactory {
         gateway_bin: PathBuf,
         rule_subset: Vec<RuleId>,
         run_session_id: Option<String>,
+        gate_events_file: Option<PathBuf>,
     ) -> Self {
         Self {
             registry,
@@ -1864,6 +1869,7 @@ impl ServerChildDriverFactory {
             gateway_bin,
             rule_subset,
             run_session_id,
+            gate_events_file,
         }
     }
 }
@@ -1912,6 +1918,7 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
             &child_role,
             Some(worktree),
             read_dirs,
+            self.gate_events_file.as_deref(),
         )
         .map_err(|e| std::io::Error::other(format!("prepare child session: {e}")))?;
         let mcp_config_path = spawn.mcp_config.display().to_string();
@@ -1976,6 +1983,9 @@ pub struct ServerOrchestratorDriverFactory {
     gateway_bin: PathBuf,
     /// Stable per-run session id (OpenRouter sticky routing / KV-cache warmth). Optional.
     run_session_id: Option<String>,
+    /// LIFECYCLE-10: the run's OWN gate-events sink, threaded per-spawn into the lead's and
+    /// its delegate children's gateway mcp-config env (never the shared parent process env).
+    gate_events_file: Option<PathBuf>,
 }
 
 impl ServerOrchestratorDriverFactory {
@@ -1986,6 +1996,7 @@ impl ServerOrchestratorDriverFactory {
         limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
         gateway_bin: PathBuf,
         run_session_id: Option<String>,
+        gate_events_file: Option<PathBuf>,
     ) -> Self {
         Self {
             registry,
@@ -1993,6 +2004,7 @@ impl ServerOrchestratorDriverFactory {
             limiter,
             gateway_bin,
             run_session_id,
+            gate_events_file,
         }
     }
 
@@ -2075,6 +2087,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                     self.gateway_bin.clone(),
                     rule_subset.clone(),
                     self.run_session_id.clone(),
+                    self.gate_events_file.clone(),
                 );
 
                 let orch_config = camerata_gateway::delegate::OrchestratorConfig {
@@ -2113,6 +2126,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                         self.gateway_bin.clone(),
                         rule_subset.clone(),
                         self.run_session_id.clone(),
+                        self.gate_events_file.clone(),
                     );
 
                     let orch_config = camerata_gateway::delegate::OrchestratorConfig {
@@ -3178,6 +3192,7 @@ mod tests {
             Arc::new(crate::rate_limit::ProviderRateLimiter::new()),
             PathBuf::from("/tmp/fake-camerata-gateway"), // path only; binary need not exist
             vec![gov1_rule()],
+            None,
             None,
         )
     }

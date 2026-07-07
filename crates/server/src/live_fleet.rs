@@ -23,13 +23,11 @@ use camerata_intake::{Plan, PlanTask, TaskKind};
 
 use crate::run::{GateEvent, RunStatus, RunStore};
 
-/// Env the live executor sets so EVERY gateway subprocess in the fleet (the per-stage
-/// agents and any delegate children, which inherit the server's process env) appends its
-/// structured gate-decision records to ONE shared JSONL sink. The server tails that file
-/// and folds each record into the run's event stream. Must match the gateway's
-/// `GATE_EVENTS_FILE_ENV`. Observability only — it routes where decisions are RECORDED,
-/// never what is decided.
-const GATE_EVENTS_FILE_ENV: &str = "CAMERATA_GATE_EVENTS_FILE";
+// The per-run gate-events sink is threaded PER-SPAWN into each gateway subprocess'
+// mcp-config env (LIFECYCLE-10), via `camerata_agent::GATE_EVENTS_FILE_ENV` down the
+// `build_from_plan_*` call. The live executor no longer sets a process-global env var for
+// it, so concurrent runs can never read each other's sink. The tailer here reads the sink
+// PATH directly (see `start_gate_observability`), never the env var.
 
 /// A structured gate-decision record as the gateway writes it to the JSONL sink. This
 /// MIRRORS the gateway's `GateDecisionRecord` (the gateway is a binary crate, so its
@@ -147,15 +145,23 @@ async fn tail_gate_events(
 /// gate-events sink path the gateways append to, a `done` flag, and the tailer task.
 struct LiveObservability {
     seq: Arc<AtomicUsize>,
+    /// The per-run gate-events sink path. LIFECYCLE-10: the caller threads THIS into
+    /// each fleet spawn's mcp-config env, so every gateway subprocess of THIS run writes
+    /// here — never via a shared process-global env that a concurrent run could clobber.
+    sink_path: std::path::PathBuf,
     done: Arc<std::sync::atomic::AtomicBool>,
     tailer: tokio::task::JoinHandle<()>,
 }
 
-/// Point every gateway subprocess at one shared gate-decision JSONL sink (via the
-/// process env so the `claude` CLI + the gateway it launches inherit it), then spawn the
-/// tailer that folds those records into the run's events. The sink lives under the run's
-/// temp root so concurrent runs in the same process don't interleave. Returns the shared
-/// seq counter for the build-event callback to continue from.
+/// Create this run's OWN gate-decision JSONL sink and spawn the tailer that folds those
+/// records into the run's events. The sink path is RETURNED (in [`LiveObservability`]) so
+/// the caller can thread it PER-SPAWN into each gateway subprocess' mcp-config env.
+///
+/// LIFECYCLE-10: this NO LONGER mutates the parent process env. Previously the sink path
+/// was published via `std::env::set_var(GATE_EVENTS_FILE_ENV, ...)`, a process-global that
+/// two concurrent runs would clobber for each other — cross-contaminating gate provenance.
+/// Now the path is passed down the fleet call and lands only in each spawned gateway's own
+/// per-session env, so every run reads exactly its own sink.
 ///
 /// Observability only: this routes WHERE decisions are recorded and surfaces them; it
 /// changes nothing about what the gate decides.
@@ -164,21 +170,17 @@ fn start_gate_observability(store: &RunStore, run_id: &str, root: &std::path::Pa
     let sink_path = root.join("gate-events.jsonl");
     // Fresh sink per run.
     let _ = std::fs::remove_file(&sink_path);
-    // SAFETY/scope: process-wide env. The fleet runs are serialized per process in
-    // practice (one operator), and the sink path is unique per run root, so the last
-    // writer wins harmlessly; the tailer reads the path it was given regardless.
-    std::env::set_var(GATE_EVENTS_FILE_ENV, &sink_path);
 
     let seq = Arc::new(AtomicUsize::new(0));
     let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let tailer = tokio::spawn(tail_gate_events(
         store.clone(),
         run_id.to_string(),
-        sink_path,
+        sink_path.clone(),
         seq.clone(),
         done.clone(),
     ));
-    LiveObservability { seq, done, tailer }
+    LiveObservability { seq, sink_path, done, tailer }
 }
 
 /// Signal the tailer to stop and wait for its final drain pass. Best-effort.
@@ -261,6 +263,8 @@ pub async fn execute_live_run(
     // build-event callback so the two interleave with coherent ordering.
     let obs = start_gate_observability(&store, &run_id, root);
     let seq = obs.seq.clone();
+    // LIFECYCLE-10: thread THIS run's sink into every gateway subprocess per-spawn.
+    let sink_path = obs.sink_path.clone();
 
     let store_cb = store.clone();
     let rid_cb = run_id.clone();
@@ -281,6 +285,7 @@ pub async fn execute_live_run(
         skip_layer2,
         &move |event| record_build_event(&store_cb, &rid_cb, &*seq, event),
         Some(on_activity),
+        Some(sink_path.as_path()),
     )
     .await;
 
@@ -394,6 +399,8 @@ pub async fn execute_live_run_tiered(
 
     let obs = start_gate_observability(&store, &run_id, root);
     let seq = obs.seq.clone();
+    // LIFECYCLE-10: thread THIS run's sink into every gateway subprocess per-spawn.
+    let sink_path = obs.sink_path.clone();
 
     let store_cb = store.clone();
     let rid_cb = run_id.clone();
@@ -416,6 +423,8 @@ pub async fn execute_live_run_tiered(
                 limiter,
                 gateway_bin.clone(),
                 Some(run_id.clone()),
+                // LIFECYCLE-10: the lead + its delegate children write to THIS run's sink.
+                Some(sink_path.clone()),
             ),
         ));
 
@@ -430,6 +439,7 @@ pub async fn execute_live_run_tiered(
         Some(on_activity),
         vision_enabled,
         orch_factory,
+        Some(sink_path.as_path()),
     )
     .await;
 

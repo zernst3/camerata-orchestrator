@@ -447,6 +447,7 @@ pub async fn build_from_plan_with_model_iterations_and_layer2(
         skip_layer2,
         on_event,
         None,
+        None,
     )
     .await
 }
@@ -458,6 +459,7 @@ pub async fn build_from_plan_with_model_iterations_and_layer2(
 /// while an agent is actively producing output.
 ///
 /// Pass `None` for identical behaviour to the non-activity variant.
+#[allow(clippy::too_many_arguments)]
 pub async fn build_from_plan_with_model_iterations_layer2_and_activity(
     plan: &Plan,
     root: &Path,
@@ -467,6 +469,7 @@ pub async fn build_from_plan_with_model_iterations_layer2_and_activity(
     skip_layer2: bool,
     on_event: &(dyn Fn(BuildEvent) + Send + Sync),
     on_activity: Option<HeartbeatFn>,
+    gate_events_file: Option<&Path>,
 ) -> anyhow::Result<BuildOutcome> {
     let crate_name = "camerata_app";
 
@@ -497,7 +500,9 @@ pub async fn build_from_plan_with_model_iterations_layer2_and_activity(
         // greenfield fleet builds scaffold into this throwaway worktree and have no other
         // project-repo clones to read across (the multi-repo read scope is for in-project
         // brownfield agents, threaded from the server's AppState::active_repo_dirs()).
-        let spawn = prepare_session(gateway_bin, role, Some(&worktree), &[])?;
+        // LIFECYCLE-10: thread the run's OWN gate-events sink into this session's
+        // gateway subprocess env, per-spawn (never the shared parent process env).
+        let spawn = prepare_session(gateway_bin, role, Some(&worktree), &[], gate_events_file)?;
         spawns.push(spawn);
     }
     let drivers: Vec<_> = spawns
@@ -702,6 +707,9 @@ pub async fn build_from_plan_with_tier_map_and_layer2(
         // Back-compat wrapper: no orchestrator-driver factory => the lead runs on the
         // exact current `ClaudeCliDriver` orchestrator path.
         None,
+        // Back-compat wrapper: no live gate-events sink (the live server path calls the
+        // deepest function directly and passes the run's own sink).
+        None,
     )
     .await
 }
@@ -731,6 +739,7 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
     on_activity: Option<HeartbeatFn>,
     vision_enabled: bool,
     orch_factory: Option<orchestrator::SharedOrchestratorDriverFactory>,
+    gate_events_file: Option<&Path>,
 ) -> anyhow::Result<BuildOutcome> {
     let crate_name = "camerata_app";
 
@@ -776,6 +785,7 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
                 &worktree,
                 tier_map,
                 vision_enabled,
+                gate_events_file,
             )?;
             mcp_config_paths.push(orch.mcp_config.display().to_string());
             is_orchestrator.push(true);
@@ -783,7 +793,8 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
         } else {
             // No extra read dirs: greenfield fleet builds scaffold into this throwaway
             // worktree (multi-repo read scope is for in-project brownfield agents).
-            let spawn = prepare_session(gateway_bin, role, Some(&worktree), &[])?;
+            // LIFECYCLE-10: thread the run's OWN gate-events sink per-spawn.
+            let spawn = prepare_session(gateway_bin, role, Some(&worktree), &[], gate_events_file)?;
             mcp_config_paths.push(spawn.mcp_config.display().to_string());
             is_orchestrator.push(false);
             tiered_spawns.push(spawn);
@@ -1474,6 +1485,7 @@ mod tests {
             std::path::Path::new("/work/crate"),
             &crate::tier::TierMap::default(),
             false,
+            None,
         )
         .unwrap();
         let cb: HeartbeatFn = Arc::new(|| {});
@@ -1509,6 +1521,7 @@ mod tests {
             std::path::Path::new("/work/crate"),
             &crate::tier::TierMap::default(),
             false,
+            None,
         )
         .unwrap();
         assert_eq!(session.role_rule_subset, role.rule_subset);
@@ -1529,12 +1542,12 @@ mod tests {
             // None => CLI orchestrator (back-compat).
             let _none: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
                 Box::pin(build_from_plan_with_tier_map_layer2_and_activity(
-                    plan, root, bin, &tier_map, 1, false, &|_| {}, None, false, None,
+                    plan, root, bin, &tier_map, 1, false, &|_| {}, None, false, None, None,
                 ));
             // Some => lead via the factory.
             let _some: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> =
                 Box::pin(build_from_plan_with_tier_map_layer2_and_activity(
-                    plan, root, bin, &tier_map, 1, false, &|_| {}, None, false, Some(factory),
+                    plan, root, bin, &tier_map, 1, false, &|_| {}, None, false, Some(factory), None,
                 ));
         }
         let _ = _check

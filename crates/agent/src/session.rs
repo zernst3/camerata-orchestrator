@@ -33,6 +33,16 @@ pub const RULES_FILE_ENV: &str = "CAMERATA_RULES_FILE";
 /// independent of any rule).
 pub const WORKTREE_ROOT_ENV: &str = "CAMERATA_WORKTREE_ROOT";
 
+/// The env var name the gateway writes its structured gate-decision JSONL sink to.
+/// Kept in sync with the gateway binary's `GATE_EVENTS_FILE_ENV`.
+///
+/// LIFECYCLE-10: this is threaded PER-SPAWN through the MCP config's `env` block
+/// (not the parent process env). Each governed run points its own gateway
+/// subprocesses at its own sink, so two concurrent runs never read each other's
+/// gate provenance. Observability only — it routes WHERE decisions are recorded,
+/// never what is decided.
+pub const GATE_EVENTS_FILE_ENV: &str = "CAMERATA_GATE_EVENTS_FILE";
+
 /// The mcp-config server KEY. Claude Code namespaces the tool as
 /// `mcp__<key>__<tool>`; this key plus the gateway's `gated_write` tool yield
 /// exactly [`GATED_WRITE_TOOL`] (`mcp__camerata__gated_write`).
@@ -82,11 +92,17 @@ pub fn render_mcp_config(
     gateway_bin: &Path,
     rules_file: &Path,
     worktree: Option<&Path>,
+    gate_events_file: Option<&Path>,
 ) -> Result<String, SessionError> {
     let mut env = std::collections::BTreeMap::new();
     env.insert(RULES_FILE_ENV.to_string(), rules_file.display().to_string());
     if let Some(wt) = worktree {
         env.insert(WORKTREE_ROOT_ENV.to_string(), wt.display().to_string());
+    }
+    // LIFECYCLE-10: point this gateway subprocess at the run's OWN gate-events sink,
+    // per-spawn, via its explicit MCP-config env — never the shared parent process env.
+    if let Some(sink) = gate_events_file {
+        env.insert(GATE_EVENTS_FILE_ENV.to_string(), sink.display().to_string());
     }
 
     let mut servers = std::collections::BTreeMap::new();
@@ -167,11 +183,18 @@ pub struct SessionSpawn {
 /// Reads are ungated; writes stay gated + jailed. Pass `Some(repo_dir)` + the project's
 /// repo clones for any in-project agent so it can consult the real code across all repos;
 /// the write gate is unaffected.
+///
+/// `gate_events_file`, when `Some`, points THIS session's gateway subprocess at the run's
+/// own structured gate-decision JSONL sink, threaded per-spawn via the mcp-config `env`
+/// (LIFECYCLE-10). It is observability only (WHERE decisions are recorded), and being
+/// per-spawn it never lets concurrent runs read each other's provenance. Pass `None` when
+/// no live gate-events capture is wanted (the gateway then falls back to its own default).
 pub fn prepare_session(
     gateway_bin: &Path,
     role: &Role,
     worktree: Option<&Path>,
     read_dirs: &[PathBuf],
+    gate_events_file: Option<&Path>,
 ) -> Result<SessionSpawn, SessionError> {
     // Create a RAII temp dir.  Dropped (and thus removed from disk) when the
     // returned SessionSpawn goes out of scope.
@@ -191,7 +214,7 @@ pub fn prepare_session(
     })?;
 
     let mcp_config = session_dir.join("gateway.json");
-    let config_json = render_mcp_config(gateway_bin, &rules_file, worktree)?;
+    let config_json = render_mcp_config(gateway_bin, &rules_file, worktree, gate_events_file)?;
     std::fs::write(&mcp_config, config_json).map_err(|source| SessionError::Write {
         what: "mcp-config",
         path: mcp_config.clone(),
@@ -273,6 +296,7 @@ mod tests {
             Path::new("/bin/camerata-gateway"),
             Path::new("/tmp/s/rules.json"),
             None,
+            None,
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
@@ -281,6 +305,26 @@ mod tests {
         assert_eq!(server["env"][RULES_FILE_ENV], "/tmp/s/rules.json");
         // No worktree passed -> the jail env is absent.
         assert!(server["env"].get(WORKTREE_ROOT_ENV).is_none());
+        // No sink passed -> the gate-events env is absent.
+        assert!(server["env"].get(GATE_EVENTS_FILE_ENV).is_none());
+    }
+
+    #[test]
+    fn mcp_config_sets_the_gate_events_sink_env_when_given() {
+        // LIFECYCLE-10: the per-run sink path is threaded into the gateway subprocess'
+        // OWN mcp-config env, per-spawn — not the parent process env.
+        let cfg = render_mcp_config(
+            Path::new("/bin/camerata-gateway"),
+            Path::new("/tmp/s/rules.json"),
+            Some(Path::new("/work/crate")),
+            Some(Path::new("/runs/run-abc/gate-events.jsonl")),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
+        assert_eq!(
+            v["mcpServers"][MCP_SERVER_KEY]["env"][GATE_EVENTS_FILE_ENV],
+            "/runs/run-abc/gate-events.jsonl"
+        );
     }
 
     #[test]
@@ -289,6 +333,7 @@ mod tests {
             Path::new("/bin/camerata-gateway"),
             Path::new("/tmp/s/rules.json"),
             Some(Path::new("/work/crate")),
+            None,
         )
         .unwrap();
         let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
@@ -312,7 +357,7 @@ mod tests {
     fn prepare_session_writes_both_files_and_wires_driver() {
         // prepare_session now creates its own TempDir; no caller-supplied path needed.
         let spawn =
-            prepare_session(Path::new("/bin/camerata-gateway"), &role(), None, &[]).unwrap();
+            prepare_session(Path::new("/bin/camerata-gateway"), &role(), None, &[], None).unwrap();
         assert!(spawn.rules_file.exists());
         assert!(spawn.mcp_config.exists());
         assert_eq!(
@@ -336,7 +381,7 @@ mod tests {
         // gateway write-jail env is set too, but it is independent — the driver-side
         // `--add-dir` is what grants the read window.
         let wt = std::env::temp_dir().join("cam-prepare-wt-readscope");
-        let spawn = prepare_session(Path::new("/bin/camerata-gateway"), &role(), Some(&wt), &[])
+        let spawn = prepare_session(Path::new("/bin/camerata-gateway"), &role(), Some(&wt), &[], None)
             .unwrap();
         let args = spawn.driver.build_args(&role(), "task");
         let idx = args
@@ -370,6 +415,7 @@ mod tests {
             &role(),
             Some(&wt),
             &[backend.clone(), shared.clone()],
+            None,
         )
         .unwrap();
 
@@ -405,5 +451,37 @@ mod tests {
         assert!(!allowed.split(' ').any(|t| t == "Write"));
         assert!(!allowed.split(' ').any(|t| t == "Edit"));
         assert!(!allowed.split(' ').any(|t| t == "Bash"));
+    }
+
+    #[test]
+    fn prepare_session_writes_per_run_gate_events_sink_and_two_runs_get_distinct_sinks() {
+        // LIFECYCLE-10: each run passes its OWN sink path into prepare_session, which
+        // lands it in that gateway subprocess' mcp-config env — no process-global state.
+        // Two concurrent runs therefore write to DISTINCT sinks, so their gate provenance
+        // cannot cross-contaminate.
+        let sink_a = std::env::temp_dir().join("cam-run-a").join("gate-events.jsonl");
+        let sink_b = std::env::temp_dir().join("cam-run-b").join("gate-events.jsonl");
+
+        let spawn_a =
+            prepare_session(Path::new("/bin/camerata-gateway"), &role(), None, &[], Some(&sink_a))
+                .unwrap();
+        let spawn_b =
+            prepare_session(Path::new("/bin/camerata-gateway"), &role(), None, &[], Some(&sink_b))
+                .unwrap();
+
+        let read_sink = |spawn: &SessionSpawn| -> String {
+            let cfg: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&spawn.mcp_config).unwrap()).unwrap();
+            cfg["mcpServers"][MCP_SERVER_KEY]["env"][GATE_EVENTS_FILE_ENV]
+                .as_str()
+                .expect("gate-events sink env set")
+                .to_string()
+        };
+
+        let a = read_sink(&spawn_a);
+        let b = read_sink(&spawn_b);
+        assert_eq!(a, sink_a.display().to_string());
+        assert_eq!(b, sink_b.display().to_string());
+        assert_ne!(a, b, "two runs must get DISTINCT sinks (no cross-contamination)");
     }
 }

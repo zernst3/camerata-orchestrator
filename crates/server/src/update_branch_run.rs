@@ -149,6 +149,9 @@ pub async fn execute_update_branch_run(
     // READ-ONLY via `--add-dir`. The resolver writes only to `dir` (the repo being merged);
     // sibling repos are readable so it can reconcile cross-repo conflicts.
     read_dirs: Vec<std::path::PathBuf>,
+    // GAP-2: the active project's VCS-action process rules, used to gate the server-side
+    // merge commit at its chokepoint. Defaulted by callers with no active project.
+    vcs_config: camerata_checks::vcs_action::ProcessRuleConfig,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -255,6 +258,7 @@ pub async fn execute_update_branch_run(
                 grounding.as_deref(),
                 &read_dirs,
                 start_seq,
+                &vcs_config,
             )
             .await;
         }
@@ -278,6 +282,8 @@ async fn resolve_conflicts_and_commit(
     // MULTI-REPO READ scope: ALL the active project's local repo clones, added read-only.
     read_dirs: &[std::path::PathBuf],
     start_seq: usize,
+    // GAP-2: the project's VCS-action process rules for the server-side merge-commit gate.
+    vcs_config: &camerata_checks::vcs_action::ProcessRuleConfig,
 ) {
     let seq = AtomicUsize::new(start_seq);
     let next_seq = || seq.fetch_add(1, Ordering::SeqCst) + 1;
@@ -342,7 +348,7 @@ async fn resolve_conflicts_and_commit(
         .filter(|d| d.as_path() != dir)
         .cloned()
         .collect();
-    let spawn = match prepare_session(&gateway_bin, &role, Some(dir), &sibling_read_dirs) {
+    let spawn = match prepare_session(&gateway_bin, &role, Some(dir), &sibling_read_dirs, None) {
         Ok(s) => s,
         Err(e) => {
             abort_and_fail(format!("could not prepare the resolver session: {e}")).await;
@@ -390,7 +396,25 @@ async fn resolve_conflicts_and_commit(
     }
 
     // 3. The SERVER completes the merge commit (never the agent — Task/commit stay server-side).
-    match workspace::commit_merge(dir).await {
+    //
+    // GAP-2 chokepoint. Rather than let git author an ungated `Merge branch ...` subject with
+    // `--no-edit` and bypass the gate, Camerata authors a COMPLIANT merge message (conventional
+    // shape + substantive body + story-id reference in the project's format) and completes the
+    // merge with `git commit -m`. The HARD-BLOCK path then guarantees a non-compliant machine
+    // message surfaces as a real error rather than a silent bypass.
+    let numeric_id = crate::vcs_choke::numeric_story_id(story_id);
+    let merge_msg = crate::vcs_choke::compliant_machine_commit_message(
+        vcs_config,
+        "chore",
+        &format!("merge {merge_ref} into {target_branch} for {story_id}"),
+        &numeric_id,
+    );
+    if let Err(e) = crate::vcs_choke::gated_commit(vcs_config, &merge_msg) {
+        abort_and_fail(format!("VCS-action gate blocked the merge commit: {e}")).await;
+        return;
+    }
+
+    match workspace::commit_merge_with_message(dir, &merge_msg).await {
         Ok(out) => {
             runs.push_event(
                 run_id,
@@ -500,6 +524,7 @@ mod tests {
             "claude-opus-4-8".to_string(),
             None,
             Vec::new(),
+            camerata_checks::vcs_action::ProcessRuleConfig::default(),
         )
         .await;
 
@@ -561,6 +586,7 @@ mod tests {
             String::new(),
             None,
             Vec::new(),
+            camerata_checks::vcs_action::ProcessRuleConfig::default(),
         )
         .await;
 
