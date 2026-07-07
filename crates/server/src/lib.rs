@@ -15966,8 +15966,17 @@ mod tests {
     /// touching the network. The well-formed-token path is exercised in integration.
     #[tokio::test]
     async fn workitems_comment_validates_input() {
-        std::env::set_var("CAMERATA_GITHUB_TOKEN", "ghp_test");
-        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        // Seed the token on this AppState's own credential store (store-first in
+        // `github_token()`) rather than the process-global `CAMERATA_GITHUB_TOKEN` env var,
+        // so this test does not race other tests that mutate that env var under
+        // `cargo test --workspace` (a shared-process-env flake). Per-instance store =
+        // deterministic regardless of what any concurrent test does to the env.
+        let creds = crate::credentials::MemoryCredentialStore::new();
+        crate::credentials::CredentialStore::set(&creds, crate::credentials::GITHUB_TOKEN, "ghp_test")
+            .unwrap();
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.credential_store = std::sync::Arc::new(creds);
+        let app = router(state);
 
         // ROUTES-7: an empty body is invalid REQUEST INPUT → 400 Bad Request (was 500).
         let body = serde_json::json!({ "work_item_id": "github:o/r#20", "body": "  " }).to_string();
