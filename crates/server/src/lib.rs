@@ -192,6 +192,12 @@ pub struct AppState {
     /// Passed into [`crate::llm::build_completer`] whenever an OpenRouter model is
     /// selected.
     pub rate_limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
+    /// Cached authenticated GitHub login for the configured token (the "who am I" behind
+    /// the UI's "Assign to me"). `None` = not yet resolved (or resolvable). Fetched ONCE
+    /// via `GET /user` on first `/api/me` and memoized here, so it is never re-fetched per
+    /// request. Only a successful login is cached; a token-less / failed lookup leaves it
+    /// `None` so a later request (after a token is set) can still resolve it.
+    github_login_cache: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl AppState {
@@ -230,6 +236,8 @@ impl AppState {
             model_registry: crate::model_registry::ModelRegistry::new(),
             // Default limiter: 20 RPM for "openrouter", unlimited for all others.
             rate_limiter: Arc::new(crate::rate_limit::ProviderRateLimiter::new()),
+            // The authenticated login is resolved lazily on the first `/api/me`.
+            github_login_cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -278,6 +286,26 @@ impl AppState {
             "CAMERATA_GITHUB_TOKEN",
         )
         .filter(|v| !v.is_empty())
+    }
+
+    /// Resolve the AUTHENTICATED GitHub login for the configured token, memoized so the
+    /// `GET /user` call happens at most once per process (not per request). Returns `None`
+    /// gracefully when there is no token or the lookup fails; only a successful login is
+    /// cached, so a later call (after a token is configured) can still resolve it.
+    pub async fn github_login(&self) -> Option<String> {
+        // Fast path: already resolved.
+        if let Some(login) = self.github_login_cache.lock().unwrap().clone() {
+            return Some(login);
+        }
+        // Not cached, so resolve via the token. No token, no identity.
+        let token = self.github_token()?;
+        match crate::github_issues::get_authenticated_login(&token).await {
+            Ok(login) if !login.is_empty() => {
+                *self.github_login_cache.lock().unwrap() = Some(login.clone());
+                Some(login)
+            }
+            _ => None,
+        }
     }
 
     /// Build the shared PROJECT-GROUNDING block for the ACTIVE project: its rule context
@@ -837,7 +865,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/workitems/comment", post(workitems_comment))
         .route("/api/workitems/comments", post(workitems_comments))
         .route("/api/workitems/assignees", post(workitems_assignees))
+        .route("/api/workitems/assign", post(workitems_assign))
+        .route("/api/workitems/updated-check", post(workitems_updated_check))
         .route("/api/workitems/set-parent", post(workitems_set_parent))
+        .route("/api/me", get(me))
         .route("/api/uows", get(uows_list))
         .route("/api/uow/from-workitem", post(uow_from_workitem))
         // ── AI story authoring from a blank UoW (2026-06-22) ──────────────────
@@ -8398,6 +8429,10 @@ async fn workitems_pull(State(state): State<AppState>) -> Json<serde_json::Value
                         url: issue.url,
                         labels: Vec::new(),
                         parent_number: issue.parent_number,
+                        // The bulk list path (IssueSummary) does not carry assignees or the
+                        // updated-at timestamp; they populate on a single-issue Pull latest.
+                        assignees: Vec::new(),
+                        updated_at: String::new(),
                     });
                 }
             }
@@ -8509,6 +8544,133 @@ async fn workitems_assignees(
         Ok(users) => Json(serde_json::json!({ "users": users })),
         Err(_) => Json(serde_json::json!({ "users": [] })),
     }
+}
+
+/// `GET /api/me` returns `{ login }`, the authenticated GitHub user for the configured token.
+/// `login` is `null` when there is no token or the lookup fails (the UI hides/disables
+/// "Assign to me" in that case). The login is resolved once and cached in `AppState`.
+async fn me(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let login = state.github_login().await;
+    Json(serde_json::json!({ "login": login }))
+}
+
+/// `POST /api/workitems/assign` body `{ work_item_id, assignee }`: add `assignee` (a
+/// login; the UI passes the current user's login for "assign to me") to the work item's
+/// source issue via GitHub, returning `{ ok, assignees }` (the UPDATED assignee logins).
+/// Needs the token.
+#[derive(serde::Deserialize)]
+struct WorkItemAssignReq {
+    work_item_id: String,
+    assignee: String,
+}
+
+async fn workitems_assign(
+    State(state): State<AppState>,
+    Json(req): Json<WorkItemAssignReq>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let token = state
+        .github_token()
+        .ok_or_else(|| AppError(anyhow::anyhow!("no GitHub token — set CAMERATA_GITHUB_TOKEN")))?;
+    if req.assignee.trim().is_empty() {
+        return Err(AppError(anyhow::anyhow!("assignee must not be empty")));
+    }
+    let (repo, number) = parse_github_work_item_id(&req.work_item_id)?;
+    let assignees =
+        crate::github_issues::add_assignee_to_issue(&repo, number, req.assignee.trim(), &token)
+            .await
+            .map_err(AppError)?;
+    Ok(Json(serde_json::json!({ "ok": true, "assignees": assignees })))
+}
+
+/// `POST /api/workitems/updated-check` body `{ items: [{ work_item_id, repo, number }] }`
+/// A cheap background "has anything changed?" probe. Returns
+/// `{ updates: [{ work_item_id, updated_at, state }] }`.
+///
+/// Efficiency: the requested items are grouped by repo and answered with ONE list call
+/// per repo (`state=all&sort=updated&direction=desc&per_page=100`), NOT N single-issue
+/// GETs, to mind GitHub's rate limits. An item whose number is not in its repo's
+/// most-recent 100 is simply omitted (the poller keeps its prior last-seen). `repo` /
+/// `number` are read from the body when present, else parsed from the `work_item_id`.
+///
+/// Degrades gracefully: with no token (or on any per-repo fetch failure) the affected
+/// items are omitted; the endpoint never errors, so a failed poll is silent.
+#[derive(serde::Deserialize)]
+struct UpdatedCheckItem {
+    work_item_id: String,
+    #[serde(default)]
+    repo: Option<String>,
+    #[serde(default)]
+    number: Option<u64>,
+}
+
+#[derive(serde::Deserialize)]
+struct UpdatedCheckReq {
+    #[serde(default)]
+    items: Vec<UpdatedCheckItem>,
+}
+
+async fn workitems_updated_check(
+    State(state): State<AppState>,
+    Json(req): Json<UpdatedCheckReq>,
+) -> Json<serde_json::Value> {
+    let Some(token) = state.github_token() else {
+        return Json(serde_json::json!({ "updates": [] }));
+    };
+
+    // Resolve each requested item to (work_item_id, repo, number). Prefer the body's
+    // repo/number; fall back to parsing the work_item_id. Skip anything unresolvable.
+    struct Resolved {
+        work_item_id: String,
+        repo: String,
+        number: u64,
+    }
+    let mut resolved: Vec<Resolved> = Vec::new();
+    for it in &req.items {
+        let (repo, number) = match (it.repo.clone(), it.number) {
+            (Some(r), Some(n)) if camerata_worktracker::RepoCoord::parse(&r).is_some() => (r, n),
+            _ => match parse_github_work_item_id(&it.work_item_id) {
+                Ok(pair) => pair,
+                Err(_) => continue,
+            },
+        };
+        resolved.push(Resolved {
+            work_item_id: it.work_item_id.clone(),
+            repo,
+            number,
+        });
+    }
+
+    // Group the requested numbers by repo so each repo is fetched exactly once.
+    let mut by_repo: std::collections::HashMap<String, Vec<(String, u64)>> =
+        std::collections::HashMap::new();
+    for r in resolved {
+        by_repo
+            .entry(r.repo)
+            .or_default()
+            .push((r.work_item_id, r.number));
+    }
+
+    let mut updates: Vec<serde_json::Value> = Vec::new();
+    for (repo, wanted) in by_repo {
+        // ONE list call per repo. On failure, skip the whole repo (silent per contract).
+        let rows = match crate::github_issues::list_issue_update_rows(&repo, None, &token).await {
+            Ok(rows) => rows,
+            Err(_) => continue,
+        };
+        let by_number: std::collections::HashMap<u64, &crate::github_issues::IssueUpdateRow> =
+            rows.iter().map(|r| (r.number, r)).collect();
+        for (work_item_id, number) in wanted {
+            if let Some(row) = by_number.get(&number) {
+                updates.push(serde_json::json!({
+                    "work_item_id": work_item_id,
+                    "updated_at": row.updated_at,
+                    "state": row.state,
+                }));
+            }
+        }
+    }
+
+    Json(serde_json::json!({ "updates": updates }))
 }
 
 /// `POST /api/workitems/set-parent` body `{ work_item_id, parent_number }` — make an
@@ -15874,6 +16036,81 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["users"].as_array().unwrap().len(), 0);
+    }
+
+    /// GET /api/me returns `{ login: null }` with no token (the UI hides "Assign to me").
+    #[tokio::test]
+    async fn me_no_token_returns_null_login() {
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/me")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json.get("login").is_some(), "the `login` key is always present");
+        assert!(json["login"].is_null(), "no token → login is null");
+    }
+
+    /// POST /api/workitems/assign errors without a token (there is nothing to assign
+    /// against), and rejects an empty assignee.
+    #[tokio::test]
+    async fn workitems_assign_requires_token_and_nonempty_assignee() {
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        // No token → error status (not a silent success).
+        let body = serde_json::json!({ "work_item_id": "github:o/r#20", "assignee": "octocat" })
+            .to_string();
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/workitems/assign")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::OK,
+            "assign without a token must not report success"
+        );
+    }
+
+    /// POST /api/workitems/updated-check degrades gracefully with no token: it returns an
+    /// empty updates list (never an error) so a background poll is silent.
+    #[tokio::test]
+    async fn workitems_updated_check_no_token_returns_empty() {
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let body = serde_json::json!({
+            "items": [{ "work_item_id": "github:o/r#20", "repo": "o/r", "number": 20 }]
+        })
+        .to_string();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/workitems/updated-check")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["updates"].as_array().unwrap().len(), 0);
     }
 
     /// POST /api/uow/from-workitem creates a UoW on first call and DEDUPES on the
