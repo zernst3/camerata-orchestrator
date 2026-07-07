@@ -686,10 +686,15 @@ connected, a real gated investigation agent runs.
 
 The Investigation phase hosts the investigation agent's output and the prose interface contract.
 
-**Investigation chat and decisions.** The investigation/refinement agent chat transcript is shown
-here. Decisions the agent surfaced are listed and can be approved or rejected. When all decision
-records are approved, **Approve decisions** advances the UoW to **Decisions Approved** — the gate
-state the server requires before development can start.
+**Investigation chat and decisions.** The investigation/refinement agent chat is a **live,
+project-grounded AI conversation** (not a stub). Each message you send is answered by a real model
+call grounded in this story: the investigation note (the agent's written findings) and the approved
+decisions. Use it to interrogate the refinement, ask why a decision was made, or clarify scope. The
+whole transcript persists to the UoW so it survives a reload. If a message fails (the backend or
+model is unreachable), an error toast surfaces the reason and your draft is kept so you can retry.
+Decisions the agent surfaced are listed and can be approved or rejected. When all decision records
+are approved, **Approve decisions** advances the UoW to **Decisions Approved** — the gate state the
+server requires before development can start.
 
 **Settling the prose contract (cross-repo work).** If the story's work **crosses a contract
 boundary** (e.g. two repos need to agree on an API shape), mark **"this work crosses a contract
@@ -733,6 +738,14 @@ LLM check path is implemented but the wiring into the dev run orchestration path
 (#105-followup)** — the contract precondition and the synchronous gate seam are live.
 
 Without `CAMERATA_LIVE_BUILD=1` the run is token-free/scripted and gate enforcement is still real.
+
+**Chat back (development scope).** When a development run pauses for a clarification, a **live,
+project-grounded** dev-agent chat is available alongside the clarification questions. Like the
+investigation chat, each message is a real model call (grounded in this story and the approved
+decisions the run is bound to build under), not a stub. Use it to add context or ask about the
+work in flight; the transcript persists to the UoW. Failures surface as an error toast and your
+draft is kept for retry. (This is distinct from the **Bug-fix loop** below, which starts a fresh
+gated re-run on the same branch.)
 
 **Bootstrap run — skip layer-2 checks (the chicken-and-egg escape hatch).** The development-run
 control carries a **default-OFF** "bootstrap run — skip layer-2 checks" toggle. Layer 2 is
