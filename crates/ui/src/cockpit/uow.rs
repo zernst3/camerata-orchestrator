@@ -1429,13 +1429,18 @@ pub(super) struct MeResult {
     pub login: Option<String>,
 }
 
-/// The `POST /api/workitems/assign` envelope: the item's UPDATED assignee logins.
+/// The `POST /api/workitems/assign` envelope: the item's UPDATED assignee logins, and the
+/// issue's `updated_at` from the same response. On a successful assign the caller
+/// re-baselines the change-poll last-seen value to `updated_at` (when non-empty) so
+/// assigning does not itself flag the item CHANGED on the next background poll.
 #[derive(Clone, PartialEq, serde::Deserialize, Default)]
 pub(super) struct AssignResult {
     #[serde(default)]
     pub ok: bool,
     #[serde(default)]
     pub assignees: Vec<String>,
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 /// One row from `POST /api/workitems/updated-check`: the work item's id, its freshly
@@ -1615,6 +1620,42 @@ mod assignee_and_update_tests {
             Some("2026-07-05T12:00:00Z"),
             "an empty timestamp must not clobber the baseline"
         );
+    }
+
+    /// Assigning a work item (including "Assign to me") must NOT itself cause the next
+    /// background poll to flag the item CHANGED, because the assign response's
+    /// `updated_at` re-baselines last-seen (same mechanism as a manual "Pull latest").
+    /// A LATER real update (a strictly newer `updated_at`) must still flag. This is the
+    /// full sequence: baseline established -> self-assign re-baselines -> same-timestamp
+    /// poll does not flag -> newer-timestamp poll does flag.
+    #[test]
+    fn self_assign_rebaselines_so_the_next_poll_does_not_self_flag() {
+        let mut last_seen = HashMap::new();
+        let mut changed = HashSet::new();
+        let wid = "github:o/r#20";
+
+        // 1. Baseline established (e.g. on UoW open / initial pull).
+        fold_poll_update(&mut last_seen, &mut changed, wid, "2026-07-05T12:00:00Z");
+        assert_eq!(last_seen.get(wid).map(String::as_str), Some("2026-07-05T12:00:00Z"));
+        assert!(!changed.contains(wid));
+
+        // 2. Self-assign ("Assign to me") succeeds; GitHub's assign response carries a
+        // fresh `updated_at` (the assignment itself bumped the issue). The UI calls
+        // clear_changed_and_bump with that timestamp to re-baseline.
+        let assign_updated_at = "2026-07-05T12:05:00Z";
+        clear_changed_and_bump(&mut last_seen, &mut changed, wid, assign_updated_at);
+        assert_eq!(last_seen.get(wid).map(String::as_str), Some(assign_updated_at));
+        assert!(!changed.contains(wid), "a successful assign must not leave a stale flag");
+
+        // 3. The next background poll observes the SAME `updated_at` the assign already
+        // re-baselined to (this is the case the assign itself produced) -> must NOT flag.
+        fold_poll_update(&mut last_seen, &mut changed, wid, assign_updated_at);
+        assert!(!changed.contains(wid), "the poll must not self-flag the assign's own update");
+
+        // 4. The story is updated again afterward by something else (a strictly newer
+        // `updated_at`) -> the poll must still flag it CHANGED.
+        fold_poll_update(&mut last_seen, &mut changed, wid, "2026-07-05T13:00:00Z");
+        assert!(changed.contains(wid), "a later real update must still flag changed");
     }
 }
 
@@ -1895,9 +1936,11 @@ pub(super) async fn fetch_me_login() -> Option<String> {
 }
 
 /// Assign `assignee` (a login) to a work item's source issue (`POST /api/workitems/assign`).
-/// Returns the item's UPDATED assignee logins on success, `None` on any failure (the caller
-/// toasts). The UI passes the current user's login for "assign to me".
-pub(super) async fn assign_work_item(work_item_id: &str, assignee: &str) -> Option<Vec<String>> {
+/// Returns the full [`AssignResult`] (updated assignee logins + `updated_at`) on success,
+/// `None` on any failure (the caller toasts). The UI passes the current user's login for
+/// "assign to me", and uses `updated_at` to re-baseline the change-poll last-seen value so
+/// the assign itself does not flag the item CHANGED on the next poll.
+pub(super) async fn assign_work_item(work_item_id: &str, assignee: &str) -> Option<AssignResult> {
     let res = reqwest::Client::new()
         .post(format!("{}/api/workitems/assign", crate::bff_base()))
         .json(&serde_json::json!({ "work_item_id": work_item_id, "assignee": assignee }))
@@ -1906,7 +1949,7 @@ pub(super) async fn assign_work_item(work_item_id: &str, assignee: &str) -> Opti
         .ok()?;
     let parsed = res.json::<AssignResult>().await.ok()?;
     if parsed.ok {
-        Some(parsed.assignees)
+        Some(parsed)
     } else {
         None
     }
@@ -3716,7 +3759,10 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                 }
                 // ── Assign to me ──────────────────────────────────────────────────
                 // Shown only when we resolved an authenticated login (a token is set). On
-                // success the displayed assignees update; on failure we toast.
+                // success the displayed assignees update, AND the change-poll last-seen
+                // baseline is re-bumped to the assign response's `updated_at` -- so this
+                // assign does not itself flag the item CHANGED on the next poll (a later
+                // real update still will). On failure we toast.
                 if let Some(login) = me_login.clone() {
                     {
                         let already = it.assignees.iter().any(|a| a == &login);
@@ -3732,8 +3778,13 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                                     assigning.set(true);
                                     spawn(async move {
                                         match assign_work_item(&wid, &login).await {
-                                            Some(updated_assignees) => {
-                                                item.with_mut(|w| w.assignees = updated_assignees);
+                                            Some(result) => {
+                                                item.with_mut(|w| w.assignees = result.assignees);
+                                                if !result.updated_at.is_empty() {
+                                                    let mut last_seen = UOW_LAST_SEEN.write();
+                                                    let mut changed = UOW_CHANGED.write();
+                                                    clear_changed_and_bump(&mut last_seen, &mut changed, &wid, &result.updated_at);
+                                                }
                                             }
                                             None => crate::toast::push_toast(
                                                 toasts,
@@ -8211,7 +8262,8 @@ mod bff_tests {
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
-                "assignees": ["octocat"]
+                "assignees": ["octocat"],
+                "updated_at": "2026-07-06T08:00:00Z"
             })))
             .expect(1)
             .mount(&server)
@@ -8221,7 +8273,9 @@ mod bff_tests {
         let out = super::assign_work_item("github:o/r#20", "octocat").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(out, Some(vec!["octocat".to_string()]));
+        let result = out.expect("assign result");
+        assert_eq!(result.assignees, vec!["octocat".to_string()]);
+        assert_eq!(result.updated_at, "2026-07-06T08:00:00Z");
     }
 
     #[tokio::test]

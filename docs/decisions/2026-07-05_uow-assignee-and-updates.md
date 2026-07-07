@@ -48,12 +48,17 @@ assignee list and set the update baseline.
   is no token or the lookup fails. Only a **successful** login is cached, so setting a token
   later still resolves. This is the identity behind "assign to me".
 
-- **`POST /api/workitems/assign` with `{ work_item_id, assignee }` returns `{ ok, assignees }`.**
-  Adds `assignee` (a login; the UI passes the current user's login for "assign to me") to the
-  source issue via `POST /repos/:owner/:repo/issues/:number/assignees` with
-  `{assignees:[login]}`, and returns the issue's **updated** assignee logins. Needs the token
-  (it errors without one, since there is nothing to assign against). GitHub treats assignment
-  as additive and idempotent.
+- **`POST /api/workitems/assign` with `{ work_item_id, assignee }` returns
+  `{ ok, assignees, updated_at }`.** Adds `assignee` (a login; the UI passes the current
+  user's login for "assign to me") to the source issue via
+  `POST /repos/:owner/:repo/issues/:number/assignees` with `{assignees:[login]}`. GitHub's
+  assign response is the full updated issue object, so we return both the issue's
+  **updated** assignee logins and its `updated_at` from that same response
+  (`parse_issue_assign_outcome`). Needs the token (it errors without one, since there is
+  nothing to assign against). GitHub treats assignment as additive and idempotent.
+  `updated_at` is empty when GitHub's response happens to lack the field; the UI treats
+  that as "no re-baseline available", which is safe (see "Assign re-baselines last-seen"
+  below).
 
 - **`POST /api/workitems/updated-check` with `{ items: [{ work_item_id, repo, number }] }`
   returns `{ updates: [{ work_item_id, updated_at, state }] }`.** The cheap "has anything
@@ -114,6 +119,31 @@ called from three places:
   component is keyed by UoW id, so switching UoWs remounts and re-baselines.)
 - **Pull latest.** The existing button now also clears the flag and bumps the baseline.
 - **The header's Updated affordance.** Same as Pull latest (re-fetch, clear, bump).
+- **A successful assign** ("Assign to me" or any assign). See below.
+
+### The poll is flag-only; assigning re-baselines last-seen (standing rule)
+
+Two invariants hold for the whole feature, and this rule adds a third case that satisfies
+them without weakening either:
+
+1. **The poll never auto-updates displayed content.** It only ever flips the `UOW_CHANGED`
+   flag on or off; it never mutates the `WorkItem` the UI shows. Seeing the story's fields
+   change on screen always requires an explicit fetch (open, Pull latest, the Updated
+   affordance, or a successful assign) — never a silent overwrite from the background tick.
+2. **"Pull latest" stays the user's explicit choice to refresh displayed content.** Nothing
+   in this change makes the poll implicitly pull; it only decides whether to show the
+   change icon.
+3. **Assigning a work item (including "Assign to me") re-baselines `UOW_LAST_SEEN` to the
+   assign response's `updated_at`.** GitHub's assign response is the full updated issue, so
+   assigning is itself an "update" from the poll's point of view — without this rebaseline,
+   assigning yourself would make the very next poll tick flag the item CHANGED, which reads
+   as a false "someone else touched this" notification when it was actually you, a second
+   ago, through Camerata. `workitems_assign` forwards `updated_at`; on a successful assign
+   the UI calls the existing `clear_changed_and_bump(work_item_id, updated_at)` (only when
+   `updated_at` is non-empty) exactly as Pull latest does. A LATER real update — a strictly
+   newer `updated_at` from someone/something else — still flags normally, because
+   `fold_poll_update` only suppresses a change at or below the baseline it was just bumped
+   to.
 
 ## Alternatives considered
 
@@ -130,10 +160,17 @@ called from three places:
 
 - Server (pure): `parse_issue_detail` now asserts assignees and `updated_at` (and their empty
   defaults); `parse_authenticated_login`, `parse_issue_assignees`, `assign_payload`,
-  `parse_issue_update_rows`. Router: `/api/me` null-login, `/api/workitems/assign` token and
-  empty-assignee guard, `/api/workitems/updated-check` token-less empty.
+  `parse_issue_update_rows`. `parse_issue_assign_outcome_reads_assignees_and_updated_at` /
+  `parse_issue_assign_outcome_updated_at_empty_when_absent` cover the assign response's
+  `updated_at` parse (including the empty-when-absent fallback). Router: `/api/me`
+  null-login, `/api/workitems/assign` token and empty-assignee guard,
+  `/api/workitems/updated-check` token-less empty.
 - UI (pure): `assignee_label`; `fold_poll_update` (first-sight baseline, newer flags,
   equal/older/empty do not flag, a poll does not advance the baseline); `clear_changed_and_bump`
-  (clears and advances, empty timestamp still clears without clobbering). Network helpers via
-  wiremock: `assign_work_item` request shape plus `ok:false` maps to None, `fetch_me_login`
-  present and null, `check_work_items_updated` row parse.
+  (clears and advances, empty timestamp still clears without clobbering).
+  `self_assign_rebaselines_so_the_next_poll_does_not_self_flag` is the sequence test for the
+  standing rule above: baseline established -> self-assign re-baselines via
+  `clear_changed_and_bump` -> a `fold_poll_update` at that same timestamp does not flag -> a
+  `fold_poll_update` at a strictly newer timestamp does flag. Network helpers via wiremock:
+  `assign_work_item` request shape (now asserting the parsed `updated_at` too) plus `ok:false`
+  maps to `None`, `fetch_me_login` present and null, `check_work_items_updated` row parse.

@@ -8556,8 +8556,9 @@ async fn me(State(state): State<AppState>) -> Json<serde_json::Value> {
 
 /// `POST /api/workitems/assign` body `{ work_item_id, assignee }`: add `assignee` (a
 /// login; the UI passes the current user's login for "assign to me") to the work item's
-/// source issue via GitHub, returning `{ ok, assignees }` (the UPDATED assignee logins).
-/// Needs the token.
+/// source issue via GitHub, returning `{ ok, assignees, updated_at }` (the UPDATED
+/// assignee logins, and the issue's `updated_at` from the same response so the UI can
+/// re-baseline its change-poll last-seen value at assign time). Needs the token.
 #[derive(serde::Deserialize)]
 struct WorkItemAssignReq {
     work_item_id: String,
@@ -8575,11 +8576,15 @@ async fn workitems_assign(
         return Err(AppError(anyhow::anyhow!("assignee must not be empty")));
     }
     let (repo, number) = parse_github_work_item_id(&req.work_item_id)?;
-    let assignees =
+    let outcome =
         crate::github_issues::add_assignee_to_issue(&repo, number, req.assignee.trim(), &token)
             .await
             .map_err(AppError)?;
-    Ok(Json(serde_json::json!({ "ok": true, "assignees": assignees })))
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "assignees": outcome.assignees,
+        "updated_at": outcome.updated_at,
+    })))
 }
 
 /// `POST /api/workitems/updated-check` body `{ items: [{ work_item_id, repo, number }] }`

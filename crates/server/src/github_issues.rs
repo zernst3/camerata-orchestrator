@@ -565,16 +565,52 @@ pub fn parse_issue_assignees(json: &str) -> anyhow::Result<Vec<String>> {
     Ok(raw.assignees.into_iter().filter_map(|u| u.login).collect())
 }
 
+/// The result of adding an assignee to an issue: the issue's UPDATED assignee logins,
+/// and its `updated_at` timestamp read from the SAME response. The `/api/workitems/assign`
+/// route forwards `updated_at` to the UI, which re-baselines its change-poll last-seen
+/// value to it on a successful assign -- so assigning (including "Assign to me") does not
+/// itself cause the next background poll to flag the item CHANGED, unless the story is
+/// updated again afterward with a strictly newer timestamp. `updated_at` is empty when the
+/// field is absent from GitHub's response; the UI treats that as "no re-baseline", which is
+/// safe (the poll is just compared against whatever baseline already existed).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AssignOutcome {
+    /// The issue's current assignee logins after the mutation.
+    pub assignees: Vec<String>,
+    /// The issue's `updated_at` ISO-8601 timestamp from the assign response. Empty when
+    /// GitHub's response lacked the field.
+    pub updated_at: String,
+}
+
+/// Parse the assignee-mutation response (GitHub returns the full issue object) into its
+/// current assignee logins AND its `updated_at` timestamp. Pure (no I/O).
+pub fn parse_issue_assign_outcome(json: &str) -> anyhow::Result<AssignOutcome> {
+    #[derive(Deserialize)]
+    struct RawAssignOutcome {
+        #[serde(default)]
+        assignees: Vec<RawUser>,
+        #[serde(default)]
+        updated_at: Option<String>,
+    }
+    let raw: RawAssignOutcome = serde_json::from_str(json)
+        .map_err(|e| anyhow::anyhow!("parse_issue_assign_outcome: {e}"))?;
+    Ok(AssignOutcome {
+        assignees: raw.assignees.into_iter().filter_map(|u| u.login).collect(),
+        updated_at: raw.updated_at.unwrap_or_default(),
+    })
+}
+
 /// Add `assignee` (a login) to an issue via
 /// `POST /repos/:owner/:repo/issues/:number/assignees` with body `{"assignees":[login]}`,
-/// returning the issue's UPDATED assignee logins. `repo` must be `owner/name`. GitHub
-/// treats assignment as additive (idempotent for an already-assigned user).
+/// returning the issue's UPDATED assignee logins and `updated_at` (see [`AssignOutcome`]).
+/// `repo` must be `owner/name`. GitHub treats assignment as additive (idempotent for an
+/// already-assigned user).
 pub async fn add_assignee_to_issue(
     repo: &str,
     number: u64,
     assignee: &str,
     token: &str,
-) -> anyhow::Result<Vec<String>> {
+) -> anyhow::Result<AssignOutcome> {
     let coord = RepoCoord::parse(repo)
         .ok_or_else(|| anyhow::anyhow!("repo must be `owner/name`, got `{repo}`"))?;
     let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
@@ -591,7 +627,7 @@ pub async fn add_assignee_to_issue(
             resp.status
         );
     }
-    parse_issue_assignees(&resp.body)
+    parse_issue_assign_outcome(&resp.body)
 }
 
 /// One lightweight issue-update row for the update-polling path: the issue number, its
@@ -1123,6 +1159,33 @@ mod tests {
     fn parse_issue_assignees_empty_when_none() {
         let json = r#"{ "number": 1, "title": "x", "assignees": [] }"#;
         assert!(parse_issue_assignees(json).expect("parse").is_empty());
+    }
+
+    #[test]
+    fn parse_issue_assign_outcome_reads_assignees_and_updated_at() {
+        // A representative GitHub assign response: the full issue object, including
+        // `updated_at`. The assign route forwards this so the UI can re-baseline its
+        // change-poll last-seen value at assign time.
+        let json = r#"{
+            "number": 42,
+            "title": "x",
+            "assignees": [{"login":"octocat"},{"login":"hubot"},{"id":3}],
+            "updated_at": "2026-07-06T08:00:00Z"
+        }"#;
+        let outcome = parse_issue_assign_outcome(json).expect("parse");
+        assert_eq!(outcome.assignees, vec!["octocat", "hubot"]);
+        assert_eq!(outcome.updated_at, "2026-07-06T08:00:00Z");
+    }
+
+    #[test]
+    fn parse_issue_assign_outcome_updated_at_empty_when_absent() {
+        // If GitHub's response somehow lacks `updated_at`, the outcome carries an empty
+        // string rather than erroring -- the caller treats that as "no re-baseline",
+        // which is safe.
+        let json = r#"{ "number": 1, "title": "x", "assignees": [] }"#;
+        let outcome = parse_issue_assign_outcome(json).expect("parse");
+        assert!(outcome.assignees.is_empty());
+        assert_eq!(outcome.updated_at, "");
     }
 
     #[test]
