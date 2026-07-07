@@ -6,6 +6,12 @@ options, and a recommendation. Detail for any finding is in `docs/ARCH_AUDIT_202
 ## APPROVED 2026-07-05 — ALL 21 greenlit
 
 Batch 1 (GAP-2, LIFECYCLE-10, GATE-F7) landed on fix/gate-hardening.
+**Status: Batch 2 (LIFECYCLE-1/2/3/4) landed on `fix/lifecycle-provenance`.**
+**Status: Batch 3 (LIFECYCLE-5/9/12) landed on `fix/lifecycle-loop`.**
+**Status: Batch 3b (LIFECYCLE-7/6) landed on `fix/lifecycle-liveness`.**
+**Status: CheckRunner full-diagnostics landed on `fix/checkrunner-diagnostics` — completes LIFECYCLE-5 for open-weight models: `CheckRunner` returns `CheckOutcome { violated, diagnostics }`; Layer-2 bounce feeds the full toolchain output (16 KiB tail-capped) back at the prompt tail.**
+**Status: Batch 4 ROUTES (ROUTES-9/5/7/8) landed on `fix/routes-correctness`. Server correctness: no per-request `set_var` (backend/key read from stores; fixes a flaky credential test); project-scoped + latest deep-report export; correct HTTP status codes (404/400/409, not all 500; body shape unchanged); read GETs use a non-creating UoW getter (no junk records). ADR: `docs/decisions/2026-07-05_routes-correctness.md`.**
+**Status: Prompt cache-layering + kernel v2 landed on `fix/prompt-cache-layering`. Formalized the 3-layer geological assembly (`camerata_app_core::LayeredPrompt`): Layer 1 (kernel + role) top, Layer 2 (grounding) middle, Layer 3 (story + LIFECYCLE-5 error tail) bottom; a byte-stable static prefix with a unit test proving it is identical across differing Layer-3 input; a provider-neutral cache-activation abstraction (Anthropic `cache_control` breakpoints at the Layer 1/2 and end-of-Layer-2 boundaries via the grounding terminator marker; DeepSeek/GLM automatic); per-call cache-hit-ratio logging (`LlmResponse::cache_hit_ratio`); and kernel v2 (a mandatory stack-neutral `<Reasoning>` block + state-machine phase framing for the fast/balanced tier addenda). Rollout 6-9 (the remaining prompt rewrites + emitted AGENTS.md/CONVENTIONS.md preamble + audit lenses) is a noted follow-up.**
 
 Zach approved every item. Recommendation [Rec] taken for all EXCEPT:
 - **GAP-6: BUILD it now, do NOT defer** (build the remaining 3 integration-gate categories).
@@ -14,6 +20,23 @@ Zach approved every item. Recommendation [Rec] taken for all EXCEPT:
 
 Governing principle (standing): **never defer hardening/refining/correctness of Camerata; only defer
 net-new features outside MVP spirit.** So GAP-1/3/6/7/8 are all build-now (structural ones design-first).
+
+GAP-4 (phase chat wired) landed on fix/gap4-chat: the Investigation and Development phase chats are
+now live, project-grounded LLM conversations (reuse `POST /api/chat`), not stubs. See
+`docs/decisions/2026-07-05_govdev-phase-chat.md`.
+
+GAP-8 landed on fix/gap8-routine-scope: `Routine.scope` is now a structured, enforced `RoutineScope`
+(rule subset + tool allowlist + write jail) that resolves onto the same gateway registration dev runs
+use (`resolve_scope_registration`); serde back-compat for legacy string scopes; live execution still
+latent (seam tested). ADR: docs/decisions/2026-07-05_routine-structured-scope.md.
+
+**GAP-6 landed on `fix/gap6-integration-gate`** (2026-07-05): the cross-agent integration gate is now a
+stack-generalized deterministic reconciliation engine (`crates/checks/src/integration/`) with pluggable
+per-stack extractors (endpoint + event built; schema/migration/config staged), the `INTEGRATION-*`
+corpus rules (`crates/rules/principles/integration/`), per-seam relational firing + `camerata:allow`
+waivers, and a review-tier fallback (no extractor -> human QA, never a faked green), wired into
+`run_multi_repo_integration_gate`. The old LLM-eyeballs-the-prose-contract path is demoted to an
+optional advisory. ADR: `docs/decisions/2026-07-05_integration-gate-generic-engine.md`.
 
 Implementation order: Batch 1 P0 gate (GAP-2, LIFECYCLE-10, GATE-F7) -> Batch 2 lifecycle provenance
 bundle (LIFECYCLE-1/2/3/4) -> Batch 3 lifecycle loop/concurrency (LIFECYCLE-5/7+6/9/12) -> Batch 4

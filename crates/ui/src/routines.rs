@@ -12,6 +12,48 @@ use crate::md::md_to_html;
 // framework-agnostic core (RUST-HEADLESS-CORE-1); this crate is the Dioxus adapter that calls them.
 use camerata_ui_core::schedule::{build_schedule, parse_schedule, WEEKDAYS};
 
+/// Deserialize a routine `scope` into a DISPLAY STRING, accepting BOTH shapes the
+/// BFF may send (GAP-8): a legacy plain string, or the structured `RoutineScope`
+/// object (`{rule_subset, write, write_jail, note}`). For the structured form we
+/// reduce to a readable label: the human `note` if present, else a label derived
+/// from the `write` policy. The dashboard only needs a display string + a value
+/// that round-trips through the create form's scope <select> (whose option values
+/// are `read-only` / `write (gated)` / `write + open PR`), and the policy-derived
+/// labels match those exactly.
+fn deserialize_scope_display<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(serde::Deserialize)]
+    struct StructuredScope {
+        #[serde(default)]
+        write: String,
+        #[serde(default)]
+        note: String,
+    }
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum ScopeWire {
+        Legacy(String),
+        Structured(StructuredScope),
+    }
+    use serde::Deserialize as _;
+    Ok(match ScopeWire::deserialize(deserializer)? {
+        ScopeWire::Legacy(s) => s,
+        ScopeWire::Structured(s) => {
+            if !s.note.trim().is_empty() {
+                s.note
+            } else {
+                match s.write.as_str() {
+                    "write_gated" => "write (gated)".to_string(),
+                    "write_open_pr" => "write + open PR".to_string(),
+                    _ => "read-only".to_string(),
+                }
+            }
+        }
+    })
+}
+
 /// A routine as the BFF reports it (`/api/routines`).
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct RoutineView {
@@ -23,6 +65,10 @@ struct RoutineView {
     intent: String,
     /// The AI-authored operational prompt (shown on demand).
     prompt: String,
+    /// The routine's permission scope, reduced to a display string. GAP-8: the
+    /// BFF now sends a STRUCTURED scope object; the tolerant deserializer accepts
+    /// both that and a legacy plain string.
+    #[serde(deserialize_with = "deserialize_scope_display")]
     scope: String,
     enabled: bool,
     last_run: Option<RoutineRunSummaryView>,
@@ -227,7 +273,9 @@ struct RoutineTemplate {
     description: String,
     #[serde(default)]
     schedule: String,
-    #[serde(default)]
+    /// The template's default scope, reduced to a display string. GAP-8: accepts
+    /// both the structured scope object and a legacy plain string.
+    #[serde(default, deserialize_with = "deserialize_scope_display")]
     scope: String,
     prompt: String,
     #[serde(default)]
@@ -1385,6 +1433,44 @@ mod tests {
 
     // Schedule build/parse tests moved to camerata-ui-core::schedule (they are pure and now live
     // with the code, testable with no VirtualDom). This module keeps the adapter-side tests below.
+
+    // ── GAP-8: tolerant scope deserialization (structured OR legacy string) ────
+
+    #[test]
+    fn routine_view_parses_a_legacy_string_scope() {
+        let json = r#"{"id":"rt-1","name":"N","schedule":"manual","prompt":"p",
+            "scope":"write (gated)","enabled":true,"last_run":null}"#;
+        let rv: RoutineView = serde_json::from_str(json).unwrap();
+        assert_eq!(rv.scope, "write (gated)");
+    }
+
+    #[test]
+    fn routine_view_parses_a_structured_scope_with_a_note() {
+        // The structured object reduces to its human note for display + prefill.
+        let json = r#"{"id":"rt-2","name":"N","schedule":"manual","prompt":"p",
+            "scope":{"rule_subset":"all","write":"write_gated","write_jail":"worktree",
+                     "note":"SEC-* behind the gate"},
+            "enabled":true,"last_run":null}"#;
+        let rv: RoutineView = serde_json::from_str(json).unwrap();
+        assert_eq!(rv.scope, "SEC-* behind the gate");
+    }
+
+    #[test]
+    fn routine_view_structured_scope_without_note_uses_policy_label() {
+        // No note -> a label derived from the write policy that matches the
+        // create-form <select> option values exactly.
+        let json = r#"{"id":"rt-3","name":"N","schedule":"manual","prompt":"p",
+            "scope":{"write":"write_open_pr","note":""},
+            "enabled":true,"last_run":null}"#;
+        let rv: RoutineView = serde_json::from_str(json).unwrap();
+        assert_eq!(rv.scope, "write + open PR");
+
+        let ro = r#"{"id":"rt-4","name":"N","schedule":"manual","prompt":"p",
+            "scope":{"write":"read_only","note":""},
+            "enabled":true,"last_run":null}"#;
+        let rv: RoutineView = serde_json::from_str(ro).unwrap();
+        assert_eq!(rv.scope, "read-only");
+    }
 
     #[test]
     fn status_badge_maps_known_states() {

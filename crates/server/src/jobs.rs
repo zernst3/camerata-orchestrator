@@ -96,6 +96,17 @@ pub struct JobState {
     /// msgbatch_01AbCd"). `None` for parallel/sequential mode jobs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub batch_id: Option<String>,
+    /// ROUTES-5: the project this job scanned, captured at creation from the active
+    /// project. `latest_deep_report(project_id)` filters on this so a project's
+    /// deep-report export returns ITS OWN latest deep report, not an arbitrary one.
+    /// `None` for jobs created with no active project (e.g. an ad-hoc repo scan).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    /// ROUTES-5: epoch-ms at which the job completed (`finish`). Used to pick the LATEST
+    /// deep report within a project deterministically instead of relying on HashMap
+    /// iteration order. `None` while the job is still running / failed / cancelled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<u128>,
 }
 
 /// In-memory job store, shared into handlers + the background worker.
@@ -117,13 +128,18 @@ impl JobStore {
     }
 
     /// Create a fresh `running` job and return its id.
-    pub fn create(&self, _label: &str) -> String {
+    ///
+    /// `project_id` is the active project this scan belongs to (or `None` for an ad-hoc
+    /// scan with no active project). It is recorded on the job so `latest_deep_report`
+    /// can return a project's OWN latest deep report (ROUTES-5).
+    pub fn create(&self, _label: &str, project_id: Option<String>) -> String {
         let id = format!("job-{}", self.counter.fetch_add(1, Ordering::Relaxed) + 1);
         if let Ok(mut g) = self.inner.lock() {
             g.insert(
                 id.clone(),
                 JobState {
                     status: "running".to_string(),
+                    project_id,
                     ..Default::default()
                 },
             );
@@ -297,6 +313,7 @@ impl JobStore {
     /// No-op if the job was already `cancelled`: cancellation is terminal, so a late completion
     /// from a worker that hadn't yet observed the cancel flag must not resurrect it to `done`.
     pub fn finish(&self, id: &str, report: ScanReport) {
+        let now_ms = now_epoch_ms();
         self.with(id, |j| {
             if j.status == "cancelled" {
                 return;
@@ -304,6 +321,9 @@ impl JobStore {
             j.status = "done".to_string();
             j.report = Some(report);
             j.batch_id = None; // batch completed — id no longer informative
+            // ROUTES-5: stamp completion time so latest_deep_report can pick the newest
+            // deep report within a project deterministically (not by HashMap order).
+            j.completed_at_ms = Some(now_ms);
         });
     }
 
@@ -327,18 +347,48 @@ impl JobStore {
         self.inner.lock().ok().and_then(|g| g.get(id).cloned())
     }
 
-    /// Return the deep-tier report from the most recently COMPLETED job that
-    /// had a non-None `report.deep` field. Used by the deep-report export
-    /// endpoint to find the last successful deep audit without needing the job
-    /// id. Returns `None` when no completed job has a deep report yet.
+    /// ROUTES-5: return the deep-tier report from `project_id`'s most recently COMPLETED
+    /// deep-audit job.
+    ///
+    /// Filters to jobs whose `project_id` matches AND that carry a non-None `report.deep`,
+    /// then picks the one with the greatest `completed_at_ms` (newest wins WITHIN the
+    /// project). Previously this iterated all jobs in HashMap order and returned the FIRST
+    /// deep report found — an arbitrary job that could belong to a DIFFERENT project. Used by
+    /// the `GET /api/projects/:id/deep-report` export to find that project's last successful
+    /// deep audit without needing the job id. Returns `None` when the project has no completed
+    /// deep report yet.
     #[must_use]
-    pub fn latest_deep_report(&self) -> Option<crate::ai_audit::DeepReport> {
+    pub fn latest_deep_report(&self, project_id: &str) -> Option<crate::ai_audit::DeepReport> {
         let guard = self.inner.lock().ok()?;
         guard
             .values()
-            .filter_map(|j| j.report.as_ref()?.deep.clone())
-            .next()
+            .filter(|j| j.project_id.as_deref() == Some(project_id))
+            .filter_map(|j| {
+                let deep = j.report.as_ref()?.deep.clone()?;
+                // Order by completion time; a completed deep job always has completed_at_ms,
+                // but default to 0 defensively so a stamped job never loses to an unstamped one.
+                Some((j.completed_at_ms.unwrap_or(0), deep))
+            })
+            .max_by_key(|(ts, _)| *ts)
+            .map(|(_, deep)| deep)
     }
+
+    /// Test-only: force a job's completion timestamp so `latest_deep_report`'s "newest
+    /// wins within a project" ordering can be exercised deterministically (two jobs finished
+    /// in the same wall-clock millisecond would otherwise tie).
+    #[cfg(test)]
+    fn set_completed_at_ms(&self, id: &str, ms: u128) {
+        self.with(id, |j| j.completed_at_ms = Some(ms));
+    }
+}
+
+/// Current wall-clock epoch time in milliseconds. Saturates to 0 if the clock is before the
+/// epoch (never in practice). Kept module-local so `finish` can stamp completion time.
+fn now_epoch_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -366,7 +416,7 @@ mod tests {
     #[test]
     fn lifecycle_create_progress_findings_finish() {
         let store = JobStore::new();
-        let id = store.create("audit");
+        let id = store.create("audit", None);
         assert_eq!(store.get(&id).unwrap().status, "running");
 
         store.add_total(&id, 4);
@@ -390,8 +440,8 @@ mod tests {
     #[test]
     fn unique_ids_and_fail_path() {
         let store = JobStore::new();
-        let a = store.create("audit");
-        let b = store.create("audit");
+        let a = store.create("audit", None);
+        let b = store.create("audit", None);
         assert_ne!(a, b);
         store.fail(&a, "no token");
         assert_eq!(store.get(&a).unwrap().status, "failed");
@@ -404,7 +454,7 @@ mod tests {
     #[test]
     fn deterministic_progress_lifecycle() {
         let store = JobStore::new();
-        let id = store.create("audit");
+        let id = store.create("audit", None);
 
         // Nothing yet.
         let p = store.det_progress(&id).unwrap();
@@ -446,7 +496,7 @@ mod tests {
     #[test]
     fn deterministic_progress_serializes() {
         let store = JobStore::new();
-        let id = store.create("audit");
+        let id = store.create("audit", None);
         store.det_tool_done(&id, "floor", 2);
         let js = store.get(&id).unwrap();
         let json = serde_json::to_string(&js).unwrap();
@@ -465,7 +515,7 @@ mod tests {
     #[test]
     fn batch_id_lifecycle() {
         let store = JobStore::new();
-        let id = store.create("audit");
+        let id = store.create("audit", None);
 
         // Initially absent.
         assert!(store.get(&id).unwrap().batch_id.is_none());
@@ -489,7 +539,7 @@ mod tests {
     #[test]
     fn job_cancel_marks_done_and_sets_flag() {
         let store = JobStore::new();
-        let id = store.create("audit");
+        let id = store.create("audit", None);
         assert!(!store.is_cancel_requested(&id));
         store.cancel(&id);
         assert!(store.is_cancel_requested(&id));
@@ -502,13 +552,13 @@ mod tests {
         // A worker that hadn't yet observed the cancel flag may call finish/fail after a
         // cancel; the cancelled status must survive (it's terminal).
         let store = JobStore::new();
-        let a = store.create("audit");
+        let a = store.create("audit", None);
         store.cancel(&a);
         store.finish(&a, ScanReport::gated(&["me/api".to_string()]));
         assert_eq!(store.get(&a).unwrap().status, "cancelled", "finish must not clobber cancel");
         assert!(store.get(&a).unwrap().report.is_none(), "no report written onto a cancelled job");
 
-        let b = store.create("audit");
+        let b = store.create("audit", None);
         store.cancel(&b);
         store.fail(&b, "late error");
         assert_eq!(store.get(&b).unwrap().status, "cancelled", "fail must not clobber cancel");
@@ -524,7 +574,7 @@ mod tests {
     #[test]
     fn det_tool_running_touches_activity() {
         let store = JobStore::new();
-        let id = store.create("audit");
+        let id = store.create("audit", None);
         // Record activity time just before
         let before_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -548,7 +598,7 @@ mod tests {
     #[test]
     fn declare_tools_predeclares_full_pipeline() {
         let store = JobStore::new();
-        let id = store.create("audit");
+        let id = store.create("audit", None);
 
         // Declare the full pipeline: floor + two preview linters + dep-audit (4 tools).
         store.declare_tools(&id, &["floor", "clippy", "semgrep", "dep-audit"]);
@@ -585,7 +635,7 @@ mod tests {
     #[test]
     fn declare_tools_idempotent_on_known_tools() {
         let store = JobStore::new();
-        let id = store.create("audit");
+        let id = store.create("audit", None);
 
         store.declare_tools(&id, &["floor", "dep-audit"]);
         store.det_tool_done(&id, "floor", 1);
@@ -599,6 +649,94 @@ mod tests {
             p.tools.iter().find(|t| t.tool == "floor").unwrap().status,
             det_status::DONE,
             "floor status must not be reset by re-declare"
+        );
+    }
+
+    // ── ROUTES-5: latest_deep_report is project-scoped + newest-wins ──────────
+
+    /// Build a `ScanReport` carrying a deep report tagged with `marker` in its disclaimer,
+    /// so a test can identify WHICH deep report came back.
+    fn report_with_deep(marker: &str) -> ScanReport {
+        let mut r = ScanReport::gated(&["me/api".to_string()]);
+        r.deep = Some(crate::ai_audit::DeepReport {
+            lenses: Vec::new(),
+            advisory: true,
+            disclaimer: marker.to_string(),
+        });
+        r
+    }
+
+    /// Two projects each with their own completed deep job: each project's export must get
+    /// ITS OWN deep report, never the other project's (the old code returned an arbitrary
+    /// job's deep report by HashMap order).
+    #[test]
+    fn latest_deep_report_is_scoped_to_the_requested_project() {
+        let store = JobStore::new();
+
+        let a = store.create("audit", Some("proj-a".to_string()));
+        store.finish(&a, report_with_deep("deep-A"));
+
+        let b = store.create("audit", Some("proj-b".to_string()));
+        store.finish(&b, report_with_deep("deep-B"));
+
+        assert_eq!(
+            store.latest_deep_report("proj-a").unwrap().disclaimer,
+            "deep-A",
+            "proj-a must get proj-a's deep report"
+        );
+        assert_eq!(
+            store.latest_deep_report("proj-b").unwrap().disclaimer,
+            "deep-B",
+            "proj-b must get proj-b's deep report"
+        );
+        // A project with no deep job gets nothing.
+        assert!(store.latest_deep_report("proj-c").is_none());
+    }
+
+    /// Within a single project, the NEWEST completed deep report wins (by completion
+    /// timestamp), regardless of insertion / HashMap iteration order.
+    #[test]
+    fn latest_deep_report_newest_wins_within_a_project() {
+        let store = JobStore::new();
+
+        // Older job finishes first (lower timestamp)...
+        let older = store.create("audit", Some("proj-a".to_string()));
+        store.finish(&older, report_with_deep("deep-old"));
+        store.set_completed_at_ms(&older, 1_000);
+
+        // ...newer job finishes later (higher timestamp).
+        let newer = store.create("audit", Some("proj-a".to_string()));
+        store.finish(&newer, report_with_deep("deep-new"));
+        store.set_completed_at_ms(&newer, 2_000);
+
+        assert_eq!(
+            store.latest_deep_report("proj-a").unwrap().disclaimer,
+            "deep-new",
+            "the newest deep report within the project must win"
+        );
+    }
+
+    /// A running (not-yet-finished) deep job for a project is NOT returned — only completed
+    /// jobs carry a materialised deep report.
+    #[test]
+    fn latest_deep_report_ignores_jobs_without_a_deep_report() {
+        let store = JobStore::new();
+
+        // A finished job WITHOUT a deep field (standard scan) contributes nothing.
+        let plain = store.create("audit", Some("proj-a".to_string()));
+        store.finish(&plain, ScanReport::gated(&["me/api".to_string()]));
+
+        assert!(
+            store.latest_deep_report("proj-a").is_none(),
+            "a completed job with no deep field yields no deep report"
+        );
+
+        // Add a real deep job → now it's found.
+        let deep = store.create("audit", Some("proj-a".to_string()));
+        store.finish(&deep, report_with_deep("deep-A"));
+        assert_eq!(
+            store.latest_deep_report("proj-a").unwrap().disclaimer,
+            "deep-A"
         );
     }
 }

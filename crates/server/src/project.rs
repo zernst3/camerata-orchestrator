@@ -841,16 +841,24 @@ mod tests {
     fn new_project_seeds_stall_thresholds_to_defaults() {
         let store = ProjectStore::new();
         let p = store.create("T", vec![]).unwrap();
-        assert_eq!(p.stall_thresholds.watched_secs, 120);
-        assert_eq!(p.stall_thresholds.routine_secs, 600);
+        // Assert against the default fns so this is env-override tolerant. LIFECYCLE-6: the
+        // routine (autonomous) default is the generous 30-min floor.
+        assert_eq!(p.stall_thresholds.watched_secs, default_watched_secs());
+        assert_eq!(p.stall_thresholds.routine_secs, default_routine_secs());
     }
 
     #[test]
     fn stall_threshold_ms_returns_correct_value_by_kind() {
         let store = ProjectStore::new();
         let p = store.create("T2", vec![]).unwrap();
-        assert_eq!(p.stall_threshold_ms(false), 120_000);
-        assert_eq!(p.stall_threshold_ms(true), 600_000);
+        assert_eq!(
+            p.stall_threshold_ms(false),
+            u128::from(default_watched_secs()) * 1_000
+        );
+        assert_eq!(
+            p.stall_threshold_ms(true),
+            u128::from(default_routine_secs()) * 1_000
+        );
     }
 
     #[test]

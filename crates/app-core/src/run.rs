@@ -34,6 +34,15 @@ impl Default for RunKind {
     }
 }
 
+impl RunKind {
+    /// Whether this run is autonomous (walk-away / routine-driven). Autonomous runs use the
+    /// longer routine stall threshold and are the ONLY runs the background sweep auto-cancels
+    /// on stall (watched/interactive runs are alert-only). See LIFECYCLE-6.
+    pub fn is_autonomous(&self) -> bool {
+        matches!(self, RunKind::Autonomous)
+    }
+}
+
 /// What the server does when a run stalls (exceeds its idle threshold).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -113,6 +122,17 @@ impl RunStatus {
             RunStatus::Failed { .. } => "failed",
             RunStatus::Cancelled => "cancelled",
         }
+    }
+
+    /// Whether the run is PARKED on a human: waiting on a clarifying answer
+    /// (`AwaitingClarification`) or a review decision (`AwaitingReview`). A parked run is
+    /// intentionally idle, not wedged, so it must never be reported as stalled nor
+    /// auto-cancelled by the stall sweep (LIFECYCLE-7 / LIFECYCLE-6).
+    pub fn is_parked(&self) -> bool {
+        matches!(
+            self,
+            RunStatus::AwaitingClarification | RunStatus::AwaitingReview
+        )
     }
 }
 
@@ -385,7 +405,15 @@ pub enum StallDecision {
 }
 
 /// Determine what action to take given a run's current idle time and stall policy. Pure.
+///
+/// A `done` run (terminal) or a PARKED run (`AwaitingReview` / `AwaitingClarification`,
+/// waiting on a human) is intentionally idle, not wedged: it returns [`StallDecision::Ok`]
+/// regardless of idle time so neither the stall banner nor the auto-cancel sweep acts on it
+/// (LIFECYCLE-7 / LIFECYCLE-6).
 pub fn stall_decision(run: &Run, threshold_ms: u128, now_ms: u128) -> StallDecision {
+    if run.done || run.status.is_parked() {
+        return StallDecision::Ok;
+    }
     // Delegate idle computation to the tracker (u64 arithmetic, safe for wall-clock ms).
     let idle = u128::from(run.tracker.idle_ms(now_ms.try_into().unwrap_or(u64::MAX)));
     if idle < threshold_ms {
@@ -618,5 +646,69 @@ mod tests {
             stall_decision(&autonomous, threshold, 201_000),
             StallDecision::Cancel
         );
+    }
+
+    /// LIFECYCLE-6/7: a `done` run or a PARKED run (AwaitingReview / AwaitingClarification)
+    /// is intentionally idle, so `stall_decision` returns `Ok` even for an Autonomous run
+    /// far past its threshold. The sweep must never auto-cancel a finished or human-parked run.
+    #[test]
+    fn stall_decision_never_acts_on_done_or_parked_runs() {
+        let mk = |status: RunStatus, done: bool| Run {
+            id: "run-1".to_string(),
+            story_id: "CAM-1".to_string(),
+            status,
+            events: Vec::new(),
+            done,
+            mode: "live".to_string(),
+            // Ticked long ago so idle is huge relative to the threshold.
+            tracker: LivenessTracker::with_initial_ms(1_000),
+            last_progress_label: "working".to_string(),
+            // Autonomous + Cancel policy: the ONLY case that could auto-cancel — proving the
+            // done/parked short-circuit is what stops it.
+            kind: RunKind::Autonomous,
+            stall_policy: StallPolicy::Cancel,
+            failure_reason: None,
+        };
+        let threshold = 120_000u128;
+        let now = 900_000u128; // idle ~899s, far past threshold
+
+        // Done (terminal): Ok.
+        assert_eq!(
+            stall_decision(&mk(RunStatus::AwaitingQa, true), threshold, now),
+            StallDecision::Ok
+        );
+        // Parked on review: Ok.
+        assert_eq!(
+            stall_decision(&mk(RunStatus::AwaitingReview, false), threshold, now),
+            StallDecision::Ok
+        );
+        // Parked on clarification: Ok.
+        assert_eq!(
+            stall_decision(&mk(RunStatus::AwaitingClarification, false), threshold, now),
+            StallDecision::Ok
+        );
+        // Sanity: the SAME autonomous run, live (Executing, not done), IS cancelled.
+        assert_eq!(
+            stall_decision(&mk(RunStatus::Executing, false), threshold, now),
+            StallDecision::Cancel
+        );
+    }
+
+    /// `RunKind::is_autonomous` distinguishes the walk-away kind from the watched kind.
+    #[test]
+    fn run_kind_is_autonomous_predicate() {
+        assert!(RunKind::Autonomous.is_autonomous());
+        assert!(!RunKind::Watched.is_autonomous());
+    }
+
+    /// `RunStatus::is_parked` is true ONLY for the two human-waiting states.
+    #[test]
+    fn run_status_is_parked_predicate() {
+        assert!(RunStatus::AwaitingReview.is_parked());
+        assert!(RunStatus::AwaitingClarification.is_parked());
+        assert!(!RunStatus::Executing.is_parked());
+        assert!(!RunStatus::AwaitingQa.is_parked());
+        assert!(!RunStatus::Cancelled.is_parked());
+        assert!(!RunStatus::Planned.is_parked());
     }
 }

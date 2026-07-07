@@ -49,6 +49,16 @@ pub use manifest::{CheckManifest, ManifestCheck};
 pub mod manifest_runner;
 pub use manifest_runner::ManifestCheckRunner;
 
+/// The cross-agent INTEGRATION GATE (GAP-6 / R3.e): the third enforcement tier.
+/// A stack-generalized reconciliation engine over the ASSEMBLED tree (all role
+/// agents' outputs combined), with pluggable per-stack extractors that normalize
+/// each repo's source into neutral produced/consumed lists. Deterministic
+/// verdicts; a seam with no extractor is review-tier, never a faked green.
+/// See `docs/decisions/2026-07-05_integration-gate-generic-engine.md` and
+/// `docs/decisions/2026-06-15_cross_agent_integration_gate.md`.
+pub mod integration;
+pub use integration::{run_gate, GateRepo, GateVerdict, GateWaiver, ReviewItem};
+
 pub mod parse;
 pub mod subprocess;
 
@@ -69,7 +79,7 @@ pub mod verification_gate;
 use anyhow::Context as _;
 use async_trait::async_trait;
 use camerata_liveness::HeartbeatFn;
-use camerata_core::{CheckRunner, Role, RuleId};
+use camerata_core::{CheckOutcome, CheckRunner, Role, RuleId};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -102,6 +112,22 @@ pub fn clippy_rule() -> RuleId {
 
 pub fn test_rule() -> RuleId {
     RuleId("RUST-TEST".to_string())
+}
+
+/// Build the diagnostics text for one check step's captured toolchain output.
+///
+/// Returns empty when there are NO violations (a clean pass carries no error
+/// text, keeping the eventual bounce prompt lean) or when the tool emitted no
+/// output. Otherwise labels the block with `label` (e.g. `cargo clippy`) so a
+/// multi-step runner's concatenated diagnostics stay attributable to their tool.
+/// The final truncation to the byte cap is applied by
+/// [`camerata_core::CheckOutcome`] when the pieces are assembled.
+pub(crate) fn diagnostics_for(label: &str, combined: &str, violated: &[RuleId]) -> String {
+    let trimmed = combined.trim();
+    if violated.is_empty() || trimmed.is_empty() {
+        return String::new();
+    }
+    format!("$ {label}\n{trimmed}")
 }
 
 // ─── Shared Cargo target-dir derivation (disk-safety, 2026-06-22) ────────────
@@ -210,7 +236,7 @@ impl Default for FmtCheckRunner {
 
 #[async_trait]
 impl CheckRunner for FmtCheckRunner {
-    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<CheckOutcome> {
         // Disk-headroom preflight: refuse to start a build if disk is low.
         check_build_disk_headroom(worktree)?;
         let target_dir = derive_shared_target_dir(worktree);
@@ -218,7 +244,11 @@ impl CheckRunner for FmtCheckRunner {
             .await
             .context("running cargo fmt --check")?;
 
-        Ok(parse::map_fmt_output(&output))
+        let violated = parse::map_fmt_output(&output);
+        // Only carry the captured stdout/stderr when there IS a violation — a
+        // clean pass needs no diagnostics and keeps the bounce prompt lean.
+        let diagnostics = diagnostics_for("cargo fmt --check", &output.combined, &violated);
+        Ok(CheckOutcome::new(violated, diagnostics))
     }
 }
 
@@ -253,7 +283,7 @@ impl Default for ClippyCheckRunner {
 
 #[async_trait]
 impl CheckRunner for ClippyCheckRunner {
-    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<CheckOutcome> {
         // Disk-headroom preflight: refuse to start a build if disk is low.
         check_build_disk_headroom(worktree)?;
         let target_dir = derive_shared_target_dir(worktree);
@@ -261,7 +291,9 @@ impl CheckRunner for ClippyCheckRunner {
             .await
             .context("running cargo clippy")?;
 
-        Ok(parse::map_clippy_output(&output))
+        let violated = parse::map_clippy_output(&output);
+        let diagnostics = diagnostics_for("cargo clippy", &output.combined, &violated);
+        Ok(CheckOutcome::new(violated, diagnostics))
     }
 }
 
@@ -296,7 +328,7 @@ impl Default for TestCheckRunner {
 
 #[async_trait]
 impl CheckRunner for TestCheckRunner {
-    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<CheckOutcome> {
         // Disk-headroom preflight: refuse to start a build if disk is low.
         check_build_disk_headroom(worktree)?;
         let target_dir = derive_shared_target_dir(worktree);
@@ -304,7 +336,9 @@ impl CheckRunner for TestCheckRunner {
             .await
             .context("running cargo test")?;
 
-        Ok(parse::map_test_output(&output))
+        let violated = parse::map_test_output(&output);
+        let diagnostics = diagnostics_for("cargo test", &output.combined, &violated);
+        Ok(CheckOutcome::new(violated, diagnostics))
     }
 }
 
@@ -352,18 +386,31 @@ impl Default for RustCheckRunner {
 
 #[async_trait]
 impl CheckRunner for RustCheckRunner {
-    async fn check(&self, role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+    async fn check(&self, role: &Role, worktree: &Path) -> anyhow::Result<CheckOutcome> {
         // Run sequentially, cheapest-first: fmt errors often make clippy noisy,
         // and a clippy/compile failure makes the test run redundant. Ordering the
         // gate this way surfaces the cheapest fix first in the bounce-back.
-        let mut violations = self.fmt.check(role, worktree).await?;
-        let mut clippy_violations = self.clippy.check(role, worktree).await?;
-        violations.append(&mut clippy_violations);
-        let mut test_violations = self.test.check(role, worktree).await?;
-        violations.append(&mut test_violations);
+        //
+        // Diagnostics accumulate in the SAME cheapest-first order, so the most
+        // expensive / most-relevant output (test failures) lands LAST — the tail
+        // the bounce prompt keeps if truncation kicks in.
+        let mut outcome = CheckOutcome::clean();
+
+        let fmt = self.fmt.check(role, worktree).await?;
+        outcome.violated.extend(fmt.violated);
+        outcome.push_diagnostics(&fmt.diagnostics);
+
+        let clippy = self.clippy.check(role, worktree).await?;
+        outcome.violated.extend(clippy.violated);
+        outcome.push_diagnostics(&clippy.diagnostics);
+
+        let test = self.test.check(role, worktree).await?;
+        outcome.violated.extend(test.violated);
+        outcome.push_diagnostics(&test.diagnostics);
+
         // Deduplicate so the bounce-back message is clean.
-        violations.dedup_by(|a, b| a.0 == b.0);
-        Ok(violations)
+        outcome.violated.dedup_by(|a, b| a.0 == b.0);
+        Ok(outcome)
     }
 }
 

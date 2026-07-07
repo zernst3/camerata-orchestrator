@@ -61,8 +61,9 @@ use std::path::{Path, PathBuf};
 use anyhow::Context as _;
 use async_trait::async_trait;
 use camerata_liveness::HeartbeatFn;
-use camerata_core::{CheckRunner, Role, RuleId};
+use camerata_core::{CheckOutcome, CheckRunner, Role, RuleId};
 
+use crate::diagnostics_for;
 use crate::subprocess::{run_command, CommandOutput};
 
 /// Directory names pruned while walking a worktree for manifests. These are
@@ -307,7 +308,7 @@ impl JsCheckRunner {
 
 #[async_trait]
 impl CheckRunner for JsCheckRunner {
-    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<CheckOutcome> {
         let scripts = Self::declared_scripts(worktree)?;
         let has_lint = scripts.iter().any(|s| s == "lint");
         let has_test = scripts.iter().any(|s| s == "test");
@@ -324,24 +325,28 @@ impl CheckRunner for JsCheckRunner {
         // Install deps into node_modules if absent; fail closed if install fails.
         self.ensure_deps_installed(worktree).await?;
 
-        let mut violations = Vec::new();
+        let mut outcome = CheckOutcome::clean();
 
         if has_lint {
             let out = run_command(worktree, "npm", &["run", "lint"], self.on_progress.as_ref())
                 .await
                 .context("running `npm run lint`")?;
-            violations.extend(map_command_to_rule(&out, js_checks_rule()));
+            let hits = map_command_to_rule(&out, js_checks_rule());
+            outcome.push_diagnostics(&diagnostics_for("npm run lint", &out.combined, &hits));
+            outcome.violated.extend(hits);
         }
 
         if has_test {
             let out = run_command(worktree, "npm", &["run", "test"], self.on_progress.as_ref())
                 .await
                 .context("running `npm run test`")?;
-            violations.extend(map_command_to_rule(&out, js_checks_rule()));
+            let hits = map_command_to_rule(&out, js_checks_rule());
+            outcome.push_diagnostics(&diagnostics_for("npm run test", &out.combined, &hits));
+            outcome.violated.extend(hits);
         }
 
-        violations.dedup_by(|a, b| a.0 == b.0);
-        Ok(violations)
+        outcome.violated.dedup_by(|a, b| a.0 == b.0);
+        Ok(outcome)
     }
 }
 
@@ -525,7 +530,7 @@ pub enum PythonManifest {
 
 #[async_trait]
 impl CheckRunner for PythonCheckRunner {
-    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<CheckOutcome> {
         // Step 1: fail closed if no manifest.
         let manifest = Self::detect_manifest(worktree)?;
 
@@ -540,20 +545,24 @@ impl CheckRunner for PythonCheckRunner {
         let ruff = venv_bin.join("ruff").to_string_lossy().into_owned();
         let pytest = venv_bin.join("pytest").to_string_lossy().into_owned();
 
-        let mut violations = Vec::new();
+        let mut outcome = CheckOutcome::clean();
 
         let lint = run_command(worktree, &ruff, &["check", "."], self.on_progress.as_ref())
             .await
             .with_context(|| format!("running `{ruff} check .`"))?;
-        violations.extend(map_command_to_rule(&lint, python_checks_rule()));
+        let lint_hits = map_command_to_rule(&lint, python_checks_rule());
+        outcome.push_diagnostics(&diagnostics_for("ruff check .", &lint.combined, &lint_hits));
+        outcome.violated.extend(lint_hits);
 
         let test = run_command(worktree, &pytest, &["-q"], self.on_progress.as_ref())
             .await
             .with_context(|| format!("running `{pytest} -q`"))?;
-        violations.extend(map_command_to_rule(&test, python_checks_rule()));
+        let test_hits = map_command_to_rule(&test, python_checks_rule());
+        outcome.push_diagnostics(&diagnostics_for("pytest -q", &test.combined, &test_hits));
+        outcome.violated.extend(test_hits);
 
-        violations.dedup_by(|a, b| a.0 == b.0);
-        Ok(violations)
+        outcome.violated.dedup_by(|a, b| a.0 == b.0);
+        Ok(outcome)
     }
 }
 
@@ -605,8 +614,8 @@ impl Default for GoCheckRunner {
 
 #[async_trait]
 impl CheckRunner for GoCheckRunner {
-    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
-        let mut violations = Vec::new();
+    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<CheckOutcome> {
+        let mut outcome = CheckOutcome::clean();
 
         // gofmt -l lists unformatted files on stdout and exits 0; treat any
         // non-whitespace output as a violation.
@@ -614,21 +623,31 @@ impl CheckRunner for GoCheckRunner {
             .await
             .context("running `gofmt -l .` (is gofmt installed?)")?;
         if !fmt.combined.trim().is_empty() {
-            violations.push(go_checks_rule());
+            let hits = vec![go_checks_rule()];
+            outcome.push_diagnostics(&diagnostics_for(
+                "gofmt -l . (unformatted files)",
+                &fmt.combined,
+                &hits,
+            ));
+            outcome.violated.extend(hits);
         }
 
         let vet = run_command(worktree, "go", &["vet", "./..."], self.on_progress.as_ref())
             .await
             .context("running `go vet ./...` (is go installed?)")?;
-        violations.extend(map_command_to_rule(&vet, go_checks_rule()));
+        let vet_hits = map_command_to_rule(&vet, go_checks_rule());
+        outcome.push_diagnostics(&diagnostics_for("go vet ./...", &vet.combined, &vet_hits));
+        outcome.violated.extend(vet_hits);
 
         let test = run_command(worktree, "go", &["test", "./..."], self.on_progress.as_ref())
             .await
             .context("running `go test ./...`")?;
-        violations.extend(map_command_to_rule(&test, go_checks_rule()));
+        let test_hits = map_command_to_rule(&test, go_checks_rule());
+        outcome.push_diagnostics(&diagnostics_for("go test ./...", &test.combined, &test_hits));
+        outcome.violated.extend(test_hits);
 
-        violations.dedup_by(|a, b| a.0 == b.0);
-        Ok(violations)
+        outcome.violated.dedup_by(|a, b| a.0 == b.0);
+        Ok(outcome)
     }
 }
 
@@ -751,7 +770,7 @@ impl Default for RubyCheckRunner {
 
 #[async_trait]
 impl CheckRunner for RubyCheckRunner {
-    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<CheckOutcome> {
         let has_rubocop = Self::has_rubocop(worktree);
         let test_args = Self::test_args(worktree);
 
@@ -768,24 +787,36 @@ impl CheckRunner for RubyCheckRunner {
         self.ensure_gems_installed(worktree).await?;
 
         let bundle = self.bundle_program();
-        let mut violations = Vec::new();
+        let mut outcome = CheckOutcome::clean();
 
         if has_rubocop {
             let lint = run_command(worktree, &bundle, &["exec", "rubocop"], self.on_progress.as_ref())
                 .await
                 .with_context(|| format!("running `{bundle} exec rubocop`"))?;
-            violations.extend(map_command_to_rule(&lint, ruby_checks_rule()));
+            let hits = map_command_to_rule(&lint, ruby_checks_rule());
+            outcome.push_diagnostics(&diagnostics_for(
+                &format!("{bundle} exec rubocop"),
+                &lint.combined,
+                &hits,
+            ));
+            outcome.violated.extend(hits);
         }
 
         if let Some(args) = test_args {
             let test = run_command(worktree, &bundle, &args, self.on_progress.as_ref())
                 .await
                 .with_context(|| format!("running `{bundle} {}`", args.join(" ")))?;
-            violations.extend(map_command_to_rule(&test, ruby_checks_rule()));
+            let hits = map_command_to_rule(&test, ruby_checks_rule());
+            outcome.push_diagnostics(&diagnostics_for(
+                &format!("{bundle} {}", args.join(" ")),
+                &test.combined,
+                &hits,
+            ));
+            outcome.violated.extend(hits);
         }
 
-        violations.dedup_by(|a, b| a.0 == b.0);
-        Ok(violations)
+        outcome.violated.dedup_by(|a, b| a.0 == b.0);
+        Ok(outcome)
     }
 }
 
@@ -912,7 +943,7 @@ impl Default for JavaCheckRunner {
 
 #[async_trait]
 impl CheckRunner for JavaCheckRunner {
-    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<CheckOutcome> {
         let tool = JavaBuildTool::detect(worktree).ok_or_else(|| {
             anyhow::anyhow!(
                 "JavaCheckRunner could not verify {}: no pom.xml / build.gradle / build.gradle.kts found (fail-closed: not reporting clean)",
@@ -936,9 +967,14 @@ impl CheckRunner for JavaCheckRunner {
                 )
             })?;
 
-        let mut violations = map_command_to_rule(&out, java_checks_rule());
-        violations.dedup_by(|a, b| a.0 == b.0);
-        Ok(violations)
+        let mut violated = map_command_to_rule(&out, java_checks_rule());
+        violated.dedup_by(|a, b| a.0 == b.0);
+        let diagnostics = diagnostics_for(
+            &format!("{program} {}", args.join(" ")),
+            &out.combined,
+            &violated,
+        );
+        Ok(CheckOutcome::new(violated, diagnostics))
     }
 }
 
@@ -1039,7 +1075,7 @@ impl Default for CSharpCheckRunner {
 
 #[async_trait]
 impl CheckRunner for CSharpCheckRunner {
-    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+    async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<CheckOutcome> {
         if !Self::has_project(worktree) {
             anyhow::bail!(
                 "CSharpCheckRunner could not verify {}: no *.csproj or *.sln found (fail-closed: not reporting clean)",
@@ -1048,27 +1084,45 @@ impl CheckRunner for CSharpCheckRunner {
         }
 
         let dotnet = self.dotnet_program();
-        let mut violations = Vec::new();
+        let mut outcome = CheckOutcome::clean();
 
         let fmt = run_command(worktree, &dotnet, &["format", "--verify-no-changes"], self.on_progress.as_ref())
             .await
             .with_context(|| {
                 format!("running `{dotnet} format --verify-no-changes` (is dotnet installed?)")
             })?;
-        violations.extend(map_command_to_rule(&fmt, csharp_checks_rule()));
+        let fmt_hits = map_command_to_rule(&fmt, csharp_checks_rule());
+        outcome.push_diagnostics(&diagnostics_for(
+            &format!("{dotnet} format --verify-no-changes"),
+            &fmt.combined,
+            &fmt_hits,
+        ));
+        outcome.violated.extend(fmt_hits);
 
         let build = run_command(worktree, &dotnet, &["build"], self.on_progress.as_ref())
             .await
             .with_context(|| format!("running `{dotnet} build`"))?;
-        violations.extend(map_command_to_rule(&build, csharp_checks_rule()));
+        let build_hits = map_command_to_rule(&build, csharp_checks_rule());
+        outcome.push_diagnostics(&diagnostics_for(
+            &format!("{dotnet} build"),
+            &build.combined,
+            &build_hits,
+        ));
+        outcome.violated.extend(build_hits);
 
         let test = run_command(worktree, &dotnet, &["test"], self.on_progress.as_ref())
             .await
             .with_context(|| format!("running `{dotnet} test`"))?;
-        violations.extend(map_command_to_rule(&test, csharp_checks_rule()));
+        let test_hits = map_command_to_rule(&test, csharp_checks_rule());
+        outcome.push_diagnostics(&diagnostics_for(
+            &format!("{dotnet} test"),
+            &test.combined,
+            &test_hits,
+        ));
+        outcome.violated.extend(test_hits);
 
-        violations.dedup_by(|a, b| a.0 == b.0);
-        Ok(violations)
+        outcome.violated.dedup_by(|a, b| a.0 == b.0);
+        Ok(outcome)
     }
 }
 
@@ -1103,8 +1157,8 @@ pub struct NoopChecks;
 
 #[async_trait]
 impl CheckRunner for NoopChecks {
-    async fn check(&self, _role: &Role, _worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
-        Ok(vec![])
+    async fn check(&self, _role: &Role, _worktree: &Path) -> anyhow::Result<CheckOutcome> {
+        Ok(CheckOutcome::clean())
     }
 }
 
@@ -1374,8 +1428,8 @@ impl PolyglotCheckRunner {
 
 #[async_trait]
 impl CheckRunner for PolyglotCheckRunner {
-    async fn check(&self, role: &Role, _worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
-        let mut violations: Vec<RuleId> = Vec::new();
+    async fn check(&self, role: &Role, _worktree: &Path) -> anyhow::Result<CheckOutcome> {
+        let mut outcome = CheckOutcome::clean();
         // Aggregate could-not-run failures across ALL sub-runners; we run every
         // one before deciding the verdict (fail-closed, but never abort-early).
         let mut failures: Vec<String> = Vec::new();
@@ -1383,7 +1437,18 @@ impl CheckRunner for PolyglotCheckRunner {
         for (lang, dir, runner) in &self.sub {
             // Each sub-runner checks ITS subtree, not the worktree root.
             match runner.check(role, dir).await {
-                Ok(rules) => violations.extend(rules),
+                Ok(sub) => {
+                    // Prefix each project's diagnostics with its language so a
+                    // polyglot bounce stays attributable in the merged tail.
+                    if !sub.diagnostics.is_empty() {
+                        outcome.push_diagnostics(&format!(
+                            "=== {lang:?} @ {} ===\n{}",
+                            dir.display(),
+                            sub.diagnostics
+                        ));
+                    }
+                    outcome.violated.extend(sub.violated);
+                }
                 Err(e) => failures.push(format!("{lang:?} @ {}: {e}", dir.display())),
             }
         }
@@ -1398,8 +1463,8 @@ impl CheckRunner for PolyglotCheckRunner {
             );
         }
 
-        violations.dedup_by(|a, b| a.0 == b.0);
-        Ok(violations)
+        outcome.violated.dedup_by(|a, b| a.0 == b.0);
+        Ok(outcome)
     }
 }
 
@@ -1425,17 +1490,19 @@ pub struct CombinedCheckRunner {
 
 #[async_trait::async_trait]
 impl CheckRunner for CombinedCheckRunner {
-    async fn check(&self, role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+    async fn check(&self, role: &Role, worktree: &Path) -> anyhow::Result<CheckOutcome> {
         // Run language-tier first. On Err, propagate immediately (fail-closed).
-        let mut violations = self.language.check(role, worktree).await?;
+        let mut outcome = self.language.check(role, worktree).await?;
 
-        // Run manifest-tier. On Err, propagate (fail-closed).
-        let mut manifest_violations = self.manifest.check(role, worktree).await?;
-        violations.append(&mut manifest_violations);
+        // Run manifest-tier. On Err, propagate (fail-closed). Manifest diagnostics
+        // land AFTER the language diagnostics (additive tail).
+        let manifest = self.manifest.check(role, worktree).await?;
+        outcome.push_diagnostics(&manifest.diagnostics);
+        outcome.violated.extend(manifest.violated);
 
         // Deduplicate so the bounce-back message is clean.
-        violations.dedup_by(|a, b| a.0 == b.0);
-        Ok(violations)
+        outcome.violated.dedup_by(|a, b| a.0 == b.0);
+        Ok(outcome)
     }
 }
 
@@ -2096,7 +2163,7 @@ mod tests {
             bundle_bin_override: Some(bin_dir.join("fake-bundle").to_string_lossy().into_owned()),
         };
 
-        let violations = runner.check(&role(), &dir).await.unwrap();
+        let violations = runner.check(&role(), &dir).await.unwrap().violated;
         assert!(violations.is_empty(), "clean bundle run -> no violations: {violations:?}");
     }
 
@@ -2147,7 +2214,7 @@ mod tests {
             bundle_bin_override: Some(script_path.to_string_lossy().into_owned()),
         };
 
-        let violations = runner.check(&role(), &dir).await.unwrap();
+        let violations = runner.check(&role(), &dir).await.unwrap().violated;
         assert!(
             violations.contains(&ruby_checks_rule()),
             "failing rubocop should bounce: {violations:?}"
@@ -2209,7 +2276,7 @@ mod tests {
             on_progress: None,
             program_override: Some(bin_dir.join("fake-mvn").to_string_lossy().into_owned()),
         };
-        let violations = runner.check(&role(), &dir).await.unwrap();
+        let violations = runner.check(&role(), &dir).await.unwrap().violated;
         assert!(violations.is_empty(), "clean build -> no violations: {violations:?}");
     }
 
@@ -2226,7 +2293,7 @@ mod tests {
                 bin_dir.join("fake-gradle-fail").to_string_lossy().into_owned(),
             ),
         };
-        let violations = runner.check(&role(), &dir).await.unwrap();
+        let violations = runner.check(&role(), &dir).await.unwrap().violated;
         assert!(
             violations.contains(&java_checks_rule()),
             "failing build should bounce: {violations:?}"
@@ -2260,7 +2327,7 @@ mod tests {
             on_progress: None,
             dotnet_bin_override: Some(bin_dir.join("fake-dotnet").to_string_lossy().into_owned()),
         };
-        let violations = runner.check(&role(), &dir).await.unwrap();
+        let violations = runner.check(&role(), &dir).await.unwrap().violated;
         assert!(violations.is_empty(), "clean dotnet run -> no violations: {violations:?}");
     }
 
@@ -2278,7 +2345,7 @@ mod tests {
                 bin_dir.join("fake-dotnet-fail").to_string_lossy().into_owned(),
             ),
         };
-        let violations = runner.check(&role(), &dir).await.unwrap();
+        let violations = runner.check(&role(), &dir).await.unwrap().violated;
         assert!(
             violations.contains(&csharp_checks_rule()),
             "failing dotnet step should bounce: {violations:?}"
@@ -2319,7 +2386,7 @@ mod tests {
             rule_subset: vec![],
             allowed_paths: vec![],
         };
-        let violations = runner.check(&role, &dir).await.unwrap();
+        let violations = runner.check(&role, &dir).await.unwrap().violated;
         assert_eq!(violations, vec![], "noop reports no violations");
     }
 
@@ -2346,7 +2413,7 @@ mod tests {
             rule_subset: vec![],
             allowed_paths: vec![],
         };
-        let violations = GoCheckRunner::new().check(&role, &dir).await.unwrap();
+        let violations = GoCheckRunner::new().check(&role, &dir).await.unwrap().violated;
         assert!(
             violations.contains(&go_checks_rule()),
             "unformatted Go should bounce, got: {violations:?}"
@@ -2493,14 +2560,25 @@ mod tests {
     /// A fake sub-runner that records the path it was checked against and returns
     /// a fixed result (violations or an error).
     struct FakeRunner {
-        result: std::sync::Mutex<Option<anyhow::Result<Vec<RuleId>>>>,
+        result: std::sync::Mutex<Option<anyhow::Result<CheckOutcome>>>,
         seen: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
     }
 
     impl FakeRunner {
         fn ok(rules: Vec<RuleId>, seen: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>) -> Self {
             Self {
-                result: std::sync::Mutex::new(Some(Ok(rules))),
+                result: std::sync::Mutex::new(Some(Ok(CheckOutcome::new(rules, "")))),
+                seen,
+            }
+        }
+        /// Like [`ok`], but with diagnostics text (to exercise diagnostics merging).
+        fn ok_with_diag(
+            rules: Vec<RuleId>,
+            diagnostics: &str,
+            seen: std::sync::Arc<std::sync::Mutex<Vec<PathBuf>>>,
+        ) -> Self {
+            Self {
+                result: std::sync::Mutex::new(Some(Ok(CheckOutcome::new(rules, diagnostics)))),
                 seen,
             }
         }
@@ -2514,7 +2592,7 @@ mod tests {
 
     #[async_trait]
     impl CheckRunner for FakeRunner {
-        async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+        async fn check(&self, _role: &Role, worktree: &Path) -> anyhow::Result<CheckOutcome> {
             self.seen.lock().unwrap().push(worktree.to_path_buf());
             self.result.lock().unwrap().take().unwrap()
         }
@@ -2551,7 +2629,7 @@ mod tests {
             ),
         ]);
 
-        let violations = runner.check(&role(), Path::new("/work")).await.unwrap();
+        let violations = runner.check(&role(), Path::new("/work")).await.unwrap().violated;
 
         // Union of all sub-runner violations.
         assert!(violations.contains(&js_checks_rule()));
@@ -2564,6 +2642,42 @@ mod tests {
         assert!(seen.contains(&api));
         assert!(seen.contains(&tool));
         assert!(!seen.contains(&PathBuf::from("/work")), "must not run against root");
+    }
+
+    #[tokio::test]
+    async fn polyglot_merges_subrunner_diagnostics_attributed_by_language() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let ui = PathBuf::from("/work/apps/ui");
+        let api = PathBuf::from("/work/services/api");
+
+        let runner = composite(vec![
+            (
+                WorktreeLanguage::JavaScript,
+                ui.clone(),
+                Box::new(FakeRunner::ok_with_diag(
+                    vec![js_checks_rule()],
+                    "TS2322: Type 'string' is not assignable to type 'number'.",
+                    seen.clone(),
+                )),
+            ),
+            (
+                WorktreeLanguage::Python,
+                api.clone(),
+                Box::new(FakeRunner::ok_with_diag(
+                    vec![python_checks_rule()],
+                    "ruff: F401 imported but unused",
+                    seen.clone(),
+                )),
+            ),
+        ]);
+
+        let outcome = runner.check(&role(), Path::new("/work")).await.unwrap();
+        // Both sub-runners' verbatim diagnostics survive into the merged tail...
+        assert!(outcome.diagnostics.contains("TS2322"), "js diag missing: {:?}", outcome.diagnostics);
+        assert!(outcome.diagnostics.contains("F401 imported but unused"), "py diag missing: {:?}", outcome.diagnostics);
+        // ...each attributed to its language so a polyglot bounce stays legible.
+        assert!(outcome.diagnostics.contains("JavaScript"));
+        assert!(outcome.diagnostics.contains("Python"));
     }
 
     #[tokio::test]
@@ -2620,7 +2734,7 @@ mod tests {
                 Box::new(FakeRunner::ok(vec![], seen.clone())),
             ),
         ]);
-        let violations = runner.check(&role(), Path::new("/")).await.unwrap();
+        let violations = runner.check(&role(), Path::new("/")).await.unwrap().violated;
         assert!(violations.is_empty(), "{violations:?}");
     }
 
@@ -2653,7 +2767,7 @@ mod tests {
     async fn selector_no_manifest_returns_noop_reporting_clean() {
         let dir = tmp(); // no manifest anywhere
         let runner = runner_for_worktree(&dir);
-        let violations = runner.check(&role(), &dir).await.unwrap();
+        let violations = runner.check(&role(), &dir).await.unwrap().violated;
         assert_eq!(violations, vec![], "noop reports clean for no-manifest tree");
     }
 
@@ -2729,7 +2843,7 @@ mod tests {
 
         // Runner with NO heartbeat — this simply asserts it compiles + runs clean.
         let runner = JsCheckRunner::new();
-        let violations = runner.check(&role(), &dir).await.unwrap();
+        let violations = runner.check(&role(), &dir).await.unwrap().violated;
         assert!(violations.is_empty(), "no-heartbeat path should run clean: {violations:?}");
     }
 
@@ -2778,7 +2892,7 @@ mod tests {
         let detected = detect_languages(&dir);
         let composite = PolyglotCheckRunner::from_detected(detected);
         // Should run clean; no panic / no false stall.
-        let violations = composite.check(&role(), &js_dir).await.unwrap();
+        let violations = composite.check(&role(), &js_dir).await.unwrap().violated;
         assert!(violations.is_empty(), "no-heartbeat polyglot should run clean: {violations:?}");
     }
 }

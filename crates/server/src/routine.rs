@@ -19,9 +19,9 @@
 
 pub use camerata_app_core::routine::{
     builtin_templates, default_model, instantiate_from_template, resolve_model, scaffold_prompt,
-    CreateRoutineReq, DraftPromptReq, DraftPromptResp, Routine, RoutineRun,
-    ROUTINE_RUN_HISTORY_CAP, RoutineRunSummary, RoutineStatus, RoutineTemplate, RunTrigger,
-    SetEnabledReq, DEFAULT_ROUTINE_MODEL,
+    CreateRoutineReq, DraftPromptReq, DraftPromptResp, PathScope, Routine, RoutineRun,
+    RoutineScope, ROUTINE_RUN_HISTORY_CAP, RoutineRunSummary, RoutineStatus, RoutineTemplate,
+    RuleSubsetRef, RunTrigger, SetEnabledReq, WritePolicy, DEFAULT_ROUTINE_MODEL,
 };
 
 use std::path::PathBuf;
@@ -80,6 +80,7 @@ impl RoutineStore {
         let store = Self::new();
         let mk =
             |id: &str, name: &str, schedule: &str, intent: &str, scope: &str, enabled: bool| {
+                let scope = RoutineScope::from_legacy_string(scope);
                 Routine {
                     id: id.to_string(),
                     name: name.to_string(),
@@ -87,8 +88,8 @@ impl RoutineStore {
                     intent: intent.to_string(),
                     // Demo data: the operational prompt is the scaffold of the intent
                     // (the live create path does the same, or AI-authors it).
-                    prompt: scaffold_prompt(intent, scope),
-                    scope: scope.to_string(),
+                    prompt: scaffold_prompt(intent, &scope),
+                    scope,
                     enabled,
                     last_run: None,
                     provisioned: true,
@@ -138,10 +139,13 @@ impl RoutineStore {
 
     pub fn create(&self, req: &CreateRoutineReq) -> Routine {
         let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
+        // The user's raw string scope maps onto the STRUCTURED, enforceable scope
+        // (GAP-8) so the routine's governance is a real boundary, not prose.
+        let scope = RoutineScope::from_legacy_string(&req.scope);
         // The user's raw intent is never run as-is: if the reviewed operational
         // prompt is empty, scaffold one from the intent.
         let prompt = if req.prompt.trim().is_empty() {
-            scaffold_prompt(&req.intent, &req.scope)
+            scaffold_prompt(&req.intent, &scope)
         } else {
             req.prompt.clone()
         };
@@ -151,7 +155,7 @@ impl RoutineStore {
             schedule: req.schedule.clone(),
             intent: req.intent.clone(),
             prompt,
-            scope: req.scope.clone(),
+            scope,
             enabled: true,
             last_run: None,
             // Created here, so it's provisioned on this backend immediately.
@@ -175,8 +179,9 @@ impl RoutineStore {
     /// import). Shares the id counter with [`create`] so ids never collide.
     pub fn create_imported(&self, req: &CreateRoutineReq, project_id: &str) -> Routine {
         let n = self.counter.fetch_add(1, Ordering::SeqCst) + 1;
+        let scope = RoutineScope::from_legacy_string(&req.scope);
         let prompt = if req.prompt.trim().is_empty() {
-            scaffold_prompt(&req.intent, &req.scope)
+            scaffold_prompt(&req.intent, &scope)
         } else {
             req.prompt.clone()
         };
@@ -186,7 +191,7 @@ impl RoutineStore {
             schedule: req.schedule.clone(),
             intent: req.intent.clone(),
             prompt,
-            scope: req.scope.clone(),
+            scope,
             enabled: false,
             last_run: None,
             provisioned: false,
@@ -240,9 +245,9 @@ impl RoutineStore {
         r.name = req.name.clone();
         r.schedule = req.schedule.clone();
         r.intent = req.intent.clone();
-        r.scope = req.scope.clone();
+        r.scope = RoutineScope::from_legacy_string(&req.scope);
         r.prompt = if req.prompt.trim().is_empty() {
-            scaffold_prompt(&req.intent, &req.scope)
+            scaffold_prompt(&req.intent, &r.scope)
         } else {
             req.prompt.clone()
         };
@@ -316,6 +321,39 @@ impl RoutineStore {
         drop(guard);
         self.flush();
         Some(updated)
+    }
+
+    /// GAP-8 ENFORCEMENT SEAM: resolve a routine's STRUCTURED scope into the
+    /// concrete gateway session registration a live governed run uses (the SAME
+    /// rule-subset + tool-allowlist + write-jail primitives a dev run registers
+    /// via `prepare_session`).
+    ///
+    /// This is the seam a live routine run WILL call before spawning its agent:
+    /// it maps `routine.scope` onto `governed_role` + `allowed_tools_for_role` +
+    /// the `prepare_session` worktree arg, so the routine's scope is a real,
+    /// enforced boundary and not decorative prose. Live routine execution is
+    /// still latent (the auto-fire scheduler runs the token-free scripted gate
+    /// via [`run_now`](Self::run_now) today; see the routine ADR + GAP-8), so no
+    /// production caller spawns a routine agent yet — but the resolution is real
+    /// and tested, so enforcement is wired the moment execution lands.
+    ///
+    /// `worktree` is the run's prepared worktree (used as the write jail when the
+    /// scope grants write). Returns `None` for an unknown id.
+    pub async fn resolve_run_registration(
+        &self,
+        id: &str,
+        worktree: Option<&std::path::Path>,
+    ) -> Option<anyhow::Result<crate::scope_registration::RoutineSessionRegistration>> {
+        // Snapshot the routine's scope + name under the lock, then resolve
+        // outside it (resolution is async I/O over the rule corpus).
+        let (scope, name) = {
+            let guard = self.items.lock().ok()?;
+            let r = guard.iter().find(|r| r.id == id)?;
+            (r.scope.clone(), r.name.clone())
+        };
+        Some(
+            crate::scope_registration::resolve_scope_registration(&scope, &name, worktree).await,
+        )
     }
 
     /// Run a routine now ON DEMAND ("Run now"): execute a governed run via the REAL gate script,
@@ -526,6 +564,68 @@ mod tests {
         assert!(store.run_now("nope").is_none());
     }
 
+    // ── GAP-8: the scope-enforcement seam ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn a_write_scope_routine_resolves_to_an_enforced_write_registration() {
+        // A routine created with a "write (gated)" scope resolves, at the run
+        // seam, to a registration that jails writes to the worktree AND carries
+        // every enforced gate rule (the floor a routine's scope can't lower).
+        let store = RoutineStore::new();
+        let r = store.create(&CreateRoutineReq {
+            name: "Nightly security".into(),
+            schedule: "daily 04:00".into(),
+            intent: "scan deps".into(),
+            prompt: "P".into(),
+            scope: "write (gated)".into(),
+            project_id: None,
+            model: None,
+        });
+        assert_eq!(r.scope.write, WritePolicy::WriteGated);
+
+        let wt = std::env::temp_dir().join("camerata-gap8-seam-worktree");
+        let reg = store
+            .resolve_run_registration(&r.id, Some(&wt))
+            .await
+            .expect("known id")
+            .expect("resolves");
+
+        // Write jail is the worktree; the write path is enforced (gated + jailed).
+        assert_eq!(reg.write_jail.as_deref(), Some(wt.as_path()));
+        assert!(reg.is_writing());
+        // The tool allowlist is the uniform gated surface a dev run uses.
+        assert!(reg
+            .tool_allowlist
+            .iter()
+            .any(|t| t == camerata_agent::GATED_WRITE_TOOL));
+        // Every enforced gate rule is in force.
+        for gate_rule in camerata_gateway::enforced_gate_rules() {
+            assert!(reg.role.rule_subset.contains(&gate_rule));
+        }
+    }
+
+    #[tokio::test]
+    async fn a_read_only_scope_routine_resolves_to_no_write_jail() {
+        let store = RoutineStore::seeded();
+        // rt-2 is the seeded read-only "Stale-PR auditor".
+        assert_eq!(store.list()[1].scope.write, WritePolicy::ReadOnly);
+        let wt = std::env::temp_dir().join("camerata-gap8-seam-ro-worktree");
+        let reg = store
+            .resolve_run_registration("rt-2", Some(&wt))
+            .await
+            .expect("known id")
+            .expect("resolves");
+        // Even given a worktree, a read-only scope opens NO write path.
+        assert!(reg.write_jail.is_none());
+        assert!(!reg.is_writing());
+    }
+
+    #[tokio::test]
+    async fn resolve_run_registration_unknown_id_is_none() {
+        let store = RoutineStore::new();
+        assert!(store.resolve_run_registration("nope", None).await.is_none());
+    }
+
     #[test]
     fn update_edits_fields_and_preserves_enabled_and_last_run() {
         let store = RoutineStore::seeded();
@@ -548,7 +648,11 @@ mod tests {
             .unwrap();
         assert_eq!(edited.name, "Renamed");
         assert_eq!(edited.schedule, "weekly Mon,Wed 09:00");
-        assert_eq!(edited.scope, "write (gated)");
+        // The structured scope maps the "write (gated)" level onto the write
+        // policy + a worktree write jail (GAP-8), and preserves the label.
+        assert_eq!(edited.scope.write, WritePolicy::WriteGated);
+        assert_eq!(edited.scope.write_jail, Some(PathScope::Worktree));
+        assert_eq!(edited.scope.label(), "write (gated)");
         assert!(
             edited.prompt.contains("new intent"),
             "empty prompt re-scaffolded"

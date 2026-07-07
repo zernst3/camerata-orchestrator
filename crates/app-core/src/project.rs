@@ -68,12 +68,20 @@ pub fn default_watched_secs() -> u64 {
         .unwrap_or(120)
 }
 
+/// Default stall threshold (seconds) for ROUTINE / autonomous (walk-away) runs. LIFECYCLE-6:
+/// autonomous runs auto-cancel on stall with NO architect watching, so the default is
+/// deliberately GENEROUS (30 min) to avoid killing a legitimately long unattended run. A stall
+/// only trips when the liveness heartbeat has been silent this whole window. When the env
+/// override (`CAMERATA_RUN_STALL_THRESHOLD_SECS`) is set it takes precedence (scaled x5 off the
+/// watched base, min floor 120s), so ops can tune it up OR down; absent it, the generous default.
+pub const DEFAULT_ROUTINE_STALL_SECS: u64 = 1_800;
+
 pub fn default_routine_secs() -> u64 {
     std::env::var("CAMERATA_RUN_STALL_THRESHOLD_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map(|s| s.max(120) * 5)
-        .unwrap_or(600)
+        .unwrap_or(DEFAULT_ROUTINE_STALL_SECS)
 }
 
 /// The project's model efficiency profile. Controls which models are assigned to each
@@ -408,7 +416,8 @@ pub struct Project {
     #[serde(default)]
     pub step_models: StepModels,
     /// Per-project stall detection thresholds split by run context (watched = interactive,
-    /// routine = autonomous/walk-away). Defaults to 120s watched / 600s routine.
+    /// routine = autonomous/walk-away). Defaults to 120s watched / 1800s routine (the generous
+    /// autonomous auto-cancel default, LIFECYCLE-6).
     #[serde(default)]
     pub stall_thresholds: StallThresholds,
     /// Layer-3 agentic code-review gate (R7). Opt-in per project. When off, the human
@@ -1211,10 +1220,32 @@ mod tests {
 
     #[test]
     fn stall_thresholds_default_when_absent_from_legacy_json() {
+        // Guard against a stray env override from the test host: assert against the
+        // functions that also produce the serde defaults, so this stays true whether or not
+        // CAMERATA_RUN_STALL_THRESHOLD_SECS is set in the environment.
         let json = r#"{"id":"p","name":"P","repos":[],"ruleset":{},"onboarded":[]}"#;
         let p: Project = serde_json::from_str(json).unwrap();
-        assert_eq!(p.stall_thresholds.watched_secs, 120);
-        assert_eq!(p.stall_thresholds.routine_secs, 600);
+        assert_eq!(p.stall_thresholds.watched_secs, default_watched_secs());
+        assert_eq!(p.stall_thresholds.routine_secs, default_routine_secs());
+    }
+
+    /// LIFECYCLE-6: with no env override, the ROUTINE (autonomous) default is the generous
+    /// 30-minute floor, so a walk-away run that auto-cancels on stall gets a long grace period.
+    #[test]
+    fn routine_stall_default_is_generous_when_env_absent() {
+        if std::env::var("CAMERATA_RUN_STALL_THRESHOLD_SECS").is_ok() {
+            // An override is set on this host; the env-scaled branch is exercised elsewhere.
+            return;
+        }
+        assert_eq!(default_routine_secs(), DEFAULT_ROUTINE_STALL_SECS);
+        assert_eq!(DEFAULT_ROUTINE_STALL_SECS, 1_800);
+        // And an autonomous run reads the generous threshold in ms.
+        let json = r#"{"id":"p","name":"P","repos":[],"ruleset":{},"onboarded":[]}"#;
+        let p: Project = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            p.stall_threshold_ms(true),
+            u128::from(DEFAULT_ROUTINE_STALL_SECS) * 1_000
+        );
     }
 
     // ── model_tier co-split: pure serde tests that operate on a Project literal ──

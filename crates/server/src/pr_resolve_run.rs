@@ -23,8 +23,9 @@
 //! Nothing is faked.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
-use camerata_agent::prepare_session;
+use camerata_agent::{prepare_session, HeartbeatFn};
 use camerata_core::AgentDriver;
 use camerata_fleet::{governed_role, locate_gateway_bin};
 
@@ -142,8 +143,32 @@ pub async fn execute_pr_resolve_run(
             },
         );
         uow.append_history(&story_id, "pr_resolve", &format!("Resolve PR feedback failed: {detail}"));
-        runs.set_status(&run_id, RunStatus::AwaitingQa, true);
+        // LIFECYCLE-2: a failure is a genuine FAILED terminal, not a silent AwaitingQa.
+        runs.fail_with_reason(&run_id, detail);
     };
+    // LIFECYCLE-1: honor a cancel that arrived mid-run. Record it on the trail and stop —
+    // the terminal Cancelled state is already set by RunStore::cancel; we do NOT advance to
+    // AwaitingQa and (crucially) never reach a commit or push after this returns.
+    let cancelled_stop = |runs: &RunStore, uow: &UowStore, where_: &str| {
+        runs.push_event(
+            &run_id,
+            GateEvent {
+                seq: next_seq(),
+                layer: "pr-resolve".to_string(),
+                verdict: "info".to_string(),
+                rule: None,
+                detail: format!("Run cancelled {where_}; stopped before any git mutation."),
+                content_hash: None,
+            },
+        );
+        uow.append_history(&story_id, "pr_resolve", &format!("Cancelled {where_}."));
+    };
+
+    // Honor a cancel that arrived before the executor got scheduled.
+    if runs.is_cancelled(&run_id) {
+        cancelled_stop(&runs, &uow, "before start");
+        return;
+    }
 
     event(
         &runs,
@@ -206,7 +231,13 @@ pub async fn execute_pr_resolve_run(
             return;
         }
     };
-    let driver = spawn.driver.with_model(&model);
+    // LIFECYCLE-7: wire the run's activity heartbeat so the resolver's streamed output keeps
+    // last_activity_ms fresh throughout its (potentially long) execution and a healthy run is
+    // not reported stalled. Mirrors update_branch_run / investigation_run.
+    let store_hb = runs.clone();
+    let rid_hb = run_id.clone();
+    let on_activity: HeartbeatFn = Arc::new(move || store_hb.touch_activity(&rid_hb, None));
+    let driver = spawn.driver.with_model(&model).with_on_activity(on_activity);
 
     event(
         &runs,
@@ -220,6 +251,13 @@ pub async fn execute_pr_resolve_run(
     let task = resolve_prompt(&story_id, pr_number, &target_branch, &review_comments, &failing_checks, grounding.as_deref());
     if let Err(e) = driver.run(&role, &task).await {
         fail(&runs, &uow, format!("resolution agent failed: {e}"));
+        return;
+    }
+
+    // LIFECYCLE-1: check for cancel IMMEDIATELY before the git mutation. A Stop that
+    // arrived while the agent ran must halt the run BEFORE the server commits anything.
+    if runs.is_cancelled(&run_id) {
+        cancelled_stop(&runs, &uow, "before commit");
         return;
     }
 
@@ -248,6 +286,13 @@ pub async fn execute_pr_resolve_run(
             fail(&runs, &uow, format!("could not commit the resolution: {e}"));
             return;
         }
+    }
+
+    // LIFECYCLE-1: check for cancel IMMEDIATELY before the push (network git mutation).
+    // The commit above is local; a cancel here stops us short of publishing it.
+    if runs.is_cancelled(&run_id) {
+        cancelled_stop(&runs, &uow, "before push");
+        return;
     }
 
     // Optionally push so the PR re-runs CI. Token-gated: with no token, the fix is
@@ -359,7 +404,10 @@ mod tests {
         .await;
 
         let run = runs.get(&run_id).expect("run exists");
-        assert_eq!(run.status, RunStatus::AwaitingQa);
+        // LIFECYCLE-2: an inability to do the work is a genuine FAILED terminal, not a
+        // success (AwaitingQa). The provenance stamper keys off this to withhold the stage
+        // advance + QA evidence for work that never happened.
+        assert!(matches!(run.status, RunStatus::Failed { .. }));
         assert!(run.done);
         assert!(run.events.iter().any(|e| e.verdict == "error"));
         assert!(run.events.iter().any(|e| e.detail.contains("live mode is off")));

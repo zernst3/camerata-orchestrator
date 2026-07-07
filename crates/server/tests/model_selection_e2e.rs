@@ -629,6 +629,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         limiter.clone(),
         None,
         false, // escalation
+        None,  // on_activity heartbeat
     );
     assert!(claude.is_ok(), "claude driver builds without a key");
 
@@ -646,6 +647,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         limiter.clone(),
         None,
         false, // escalation
+        None,  // on_activity heartbeat
     );
     assert!(or.is_ok(), "openrouter driver builds with a key");
 
@@ -662,6 +664,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         limiter,
         None,
         false, // escalation
+        None,  // on_activity heartbeat
     );
     let msg = match err {
         Err(e) => e.to_string(),
@@ -840,6 +843,7 @@ fn server_orch_factory(
         limiter(),
         std::path::PathBuf::from("/bin/camerata-gateway"),
         Some("run-7".to_string()),
+        None,
     )
 }
 
@@ -978,6 +982,7 @@ fn scope7_gate_lead_is_orchestrator_child_is_not() {
         std::path::PathBuf::from("/bin/camerata-gateway"),
         vec![camerata_core::RuleId("GOV-1".to_string())],
         Some("run-7".to_string()),
+        None,
     );
     let tmp = tempfile::TempDir::new().unwrap();
     // build_child requires a real worktree dir for prepare_session; tmp suffices.

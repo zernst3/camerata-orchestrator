@@ -20,7 +20,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use camerata_core::{
-    AgentDriver, AgentOutcome, CheckRunner, Decision, FleetCoordinator, FleetStage,
+    AgentDriver, AgentOutcome, CheckOutcome, CheckRunner, Decision, FleetCoordinator, FleetStage,
     GovernanceGateway, Role, RuleId, SessionId, ToolCall,
 };
 use camerata_gateway::{enforced_gate_rules, evaluate_call, gov1_rule, GovernedGateway};
@@ -72,13 +72,14 @@ impl DirtyThenCleanChecks {
 
 #[async_trait::async_trait]
 impl CheckRunner for DirtyThenCleanChecks {
-    async fn check(&self, _role: &Role, _worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
+    async fn check(&self, _role: &Role, _worktree: &Path) -> anyhow::Result<CheckOutcome> {
         let n = {
             let mut c = self.checks.lock().expect("gate-probe mutex poisoned");
             *c += 1;
             *c
         };
-        Ok(if n == 1 { vec![gov1_rule()] } else { vec![] })
+        let violated = if n == 1 { vec![gov1_rule()] } else { vec![] };
+        Ok(CheckOutcome::new(violated, ""))
     }
 }
 

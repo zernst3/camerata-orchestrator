@@ -229,3 +229,46 @@ consistency. These are phase-2 enhancements to the kernel + a correction.
    reasons) is exactly the missing half of this loop: feeding the stack-appropriate error output back into
    the next attempt is the single highest-leverage fix for open-weight consistency, and it is elevated from
    "medium bug" to a strategic priority for the model-agnostic goal.
+
+## Phase-2 status (2026-07-05): cache-layering + kernel v2 LANDED on `fix/prompt-cache-layering`
+
+The following items from the scratch design note (`~/.claude/prefix-cache-layering-2026-07-05.md`)
+and the Addendum above are now implemented, with docs + tests. What shipped:
+
+- **DONE (the 3-layer geological assembly is formalized).** `camerata_app_core::LayeredPrompt`
+  (`crates/app-core/src/prompt_layers.rs`) is the pure, deterministic assembler: Layer 1 (global
+  immutable: kernel + role) at the top, Layer 2 (grounding / epic context) in the middle, Layer 3
+  (the specific story + the LIFECYCLE-5 toolchain/gate error tail + the turn request) at the bottom.
+  `dev_implement_run.rs::implement_prompt` builds through it, keeping all volatile content in
+  Layer 3 so nothing leaks upward. The LIFECYCLE-5 tail append (`append_bounce_feedback`) stays at
+  the very bottom, unchanged.
+- **DONE (byte-stable static prefix + test, requirement #2).** `LayeredPrompt::stable_prefix` /
+  `stable_prefix_len` serialize Layers 1+2 deterministically (trimmed layers, ordered joins, no
+  timestamps, no nondeterministic iteration). Unit tests prove the prefix is byte-identical across
+  two builds that differ ONLY in the Layer-3 input
+  (`prompt_layers::tests::stable_prefix_is_byte_identical_across_differing_layer3` and
+  `dev_implement_run::tests::implement_prompt_prefix_is_stable_across_differing_story`).
+- **DONE (provider-neutral cache activation, requirement #3).** Builders stay provider-neutral
+  (they emit the grounding terminator marker via `grounding::assemble`, never a `cache_control`).
+  The Anthropic body builder (`api_agent_driver.rs::build_anthropic_request_body`) is the ONLY place
+  that translates the layering into Anthropic breakpoints: the top-level `system` block (end of
+  Layer 1) plus a second `cache_control` at the end of the Layer-2 grounding block inside the first
+  user message (`apply_grounding_cache_breakpoint` / `split_grounding_prefix`). DeepSeek/GLM are
+  automatic (stable prefix, no config). The single-shot path already carried the provider-neutral
+  `LlmRequest::with_cache_prefix_len` seam.
+- **DONE (cache-hit logging, requirement #4).** `LlmResponse::cache_hit_ratio` computes the cached
+  fraction of input tokens; `run_loop` logs it per turn so prefix stability is verifiable in
+  practice (climbs toward 1.0 as the prefix holds).
+- **DONE (kernel v2, requirement #5).** (a) A mandatory, STACK-NEUTRAL `<Reasoning>` block added to
+  `GOVERNANCE_KERNEL` (clause 2b): the model must name the risks specific to THIS language/stack
+  (memory/ownership, types, concurrency, null/None), how it handles state, and the exact
+  signatures/interfaces it will change, before any code (phrased generically, no "borrow-checker").
+  (b) State-machine phase framing added to the fast (2-phase) and balanced (3-phase, test-first)
+  tier addenda in `kernel_for`: "you are in Phase N of M; you may only output X; any other output is
+  rejected." Kernel presence tests updated.
+
+- **PENDING follow-up (rollout 6-9)** (section 5): the remaining prompt rewrites
+  (pr_resolve / update_branch / stage_task / delegate / authoring / decompose / draft_routine),
+  the emitted AGENTS.md/CONVENTIONS.md compliance-protocol preamble in `onboard.rs`, and the audit
+  lens prompts. These are unchanged by this phase and still carry the section-3/4 rewrites as a
+  future task.

@@ -651,6 +651,29 @@ impl UowStore {
         uow
     }
 
+    /// ROUTES-8: return the UoW for `story_id` WITHOUT creating one, or `None` if absent.
+    ///
+    /// READ handlers (`GET /api/uow/:id`, attachments, diagram, and the mockup parent lookup)
+    /// must use this, not `get_or_create`: a GET with a typo'd / non-existent id used to
+    /// materialize AND PERSIST a junk empty UoW that then showed up in every list view. A read
+    /// has no business writing. `get_or_create` remains for WRITE paths that legitimately
+    /// upsert (author, attach, diagram-set, publish, run start).
+    pub fn get(&self, story_id: &str) -> Option<UnitOfWork> {
+        let map = self.mem.lock().expect("uow mutex poisoned");
+        map.get(story_id).cloned()
+    }
+
+    /// ROUTES-8: return the stored UoW for `story_id`, or a TRANSIENT default (with the
+    /// `story_id` set) that is NOT persisted. For read handlers that must always return a
+    /// UoW-shaped body (e.g. `GET /api/uow/:id`) but must not write a junk record for an
+    /// unknown id. The prior `get_or_create` behaviour persisted the default; this does not.
+    pub fn get_or_default(&self, story_id: &str) -> UnitOfWork {
+        self.get(story_id).unwrap_or_else(|| UnitOfWork {
+            story_id: story_id.to_string(),
+            ..Default::default()
+        })
+    }
+
     /// Create a blank DRAFT UoW with an empty authoring state and no work item.
     ///
     /// The key is a draft id (`draft-<uuid>`); the UoW carries `authoring =
@@ -1332,17 +1355,15 @@ impl UowStore {
     /// already loaded during the idempotency check, so `decisions_for` reuses that
     /// result instead of issuing a second `load_decisions_from_store` query.
     pub fn decisions_for(&self, story_id: &str) -> Vec<DecisionRecord> {
-        // Take a snapshot of the inline cache under a single lock acquisition.
+        // ROUTES-8: this is a READ (the decisions-review GET calls it), so it must NOT
+        // create a UoW for an unknown/typo'd id. Snapshot the inline cache without inserting;
+        // an absent story yields an empty decisions slice (and the store branch below, if
+        // any, hydrates real decisions on demand).
         let inline = {
-            let mut map = self.mem.lock().expect("uow mutex poisoned");
-            map.entry(story_id.to_string())
-                .or_insert_with(|| UnitOfWork {
-                    story_id: story_id.to_string(),
-                    updated: Self::now_rfc3339(),
-                    ..Default::default()
-                })
-                .decisions
-                .clone()
+            let map = self.mem.lock().expect("uow mutex poisoned");
+            map.get(story_id)
+                .map(|uow| uow.decisions.clone())
+                .unwrap_or_default()
         };
         if self.artifacts.is_none() {
             return inline;
@@ -1983,6 +2004,48 @@ mod tests {
         // set_status to Done.
         store.set_status("CAM-1", DevStatus::Done);
         assert_eq!(store.get_or_create("CAM-1").dev_status, DevStatus::Done);
+    }
+
+    /// ROUTES-8: `get` is a pure read — an unknown id returns None and does NOT persist a
+    /// junk UoW (so it never leaks into `list`).
+    #[test]
+    fn get_does_not_create_a_uow_for_an_unknown_id() {
+        let store = UowStore::new();
+        assert!(store.get("typo/repo#999").is_none(), "unknown id yields None");
+        assert!(store.list().is_empty(), "a read must not have created a record");
+
+        // A real create is still found by get.
+        store.get_or_create("me/api#1");
+        assert!(store.get("me/api#1").is_some());
+        assert_eq!(store.list().len(), 1, "only the explicitly-created UoW exists");
+    }
+
+    /// ROUTES-8: `get_or_default` returns a transient (story_id-stamped) UoW for an unknown
+    /// id but does NOT persist it — the read handlers use this to always return a UoW-shaped
+    /// body without writing junk.
+    #[test]
+    fn get_or_default_returns_transient_without_persisting() {
+        let store = UowStore::new();
+        let uow = store.get_or_default("ghost/repo#7");
+        assert_eq!(uow.story_id, "ghost/repo#7", "story_id is stamped on the default");
+        assert_eq!(uow.dev_status, DevStatus::New);
+        assert!(uow.attachments.is_empty());
+        assert!(uow.diagram.is_none());
+        // Crucially: nothing was persisted.
+        assert!(store.get("ghost/repo#7").is_none(), "the default must not be stored");
+        assert!(store.list().is_empty(), "list stays empty after a get_or_default read");
+    }
+
+    /// ROUTES-8: `decisions_for` (a read, called by the decisions-review GET) must not
+    /// materialize a UoW for an unknown id.
+    #[test]
+    fn decisions_for_does_not_create_a_uow() {
+        let store = UowStore::new();
+        assert!(store.decisions_for("unknown/repo#3").is_empty());
+        assert!(
+            store.list().is_empty(),
+            "reading decisions for an unknown id must not create a record"
+        );
     }
 
     #[test]

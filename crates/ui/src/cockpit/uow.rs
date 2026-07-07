@@ -253,6 +253,195 @@ pub(super) async fn append_development_chat(story_id: &str, role: &str, text: &s
         .unwrap_or(false)
 }
 
+// ── Phase chat: real LLM plumbing (GAP-4) ─────────────────────────────────────
+//
+// The Investigation and Development phase chats are grounded, live AI conversations
+// (NOT stubs). Both reuse the SAME `POST /api/chat` endpoint the global assistant uses
+// (see `crates/ui/src/chat.rs`): a single-shot completion with a `system` grounding
+// prompt + a `history` transcript. The difference is the grounding:
+//
+//   * Investigation chat grounds on the story id, the investigation note (the agent's
+//     written findings), and the approved decisions — so the architect can interrogate
+//     the refinement (why a decision was made, what a note means, what is still open).
+//   * Development chat grounds on the story id + the approved decisions — the decisions
+//     the development run is bound to build under — so "why did the build do X?" gets a
+//     decision-grounded answer.
+//
+// Both persist the REAL AI turn to the phase transcript via `append_investigation_chat`
+// / `append_development_chat` (which already persist the user turn), so the conversation
+// round-trips on reload exactly like the stub did.
+
+/// One prior phase-chat turn sent to `/api/chat` as history. Mirrors the server's
+/// `ChatTurn` ({ role: "user" | "assistant", content }).
+#[derive(Clone, serde::Serialize, PartialEq, Debug)]
+pub(super) struct PhaseChatHistoryTurn {
+    pub role: String,
+    pub content: String,
+}
+
+/// Convert the phase chat's local `(role, text)` messages into the `/api/chat` history
+/// wire shape. The local role is "user" | "assistant"; the persisted transcript uses
+/// "agent" for the AI turn, so normalize anything non-"user" to "assistant". The NEW
+/// message being sent is NOT included here (it is `prompt` on the request).
+pub(super) fn phase_history_from_messages(msgs: &[(String, String)]) -> Vec<PhaseChatHistoryTurn> {
+    msgs.iter()
+        .map(|(role, text)| PhaseChatHistoryTurn {
+            role: if role == "user" {
+                "user".to_string()
+            } else {
+                "assistant".to_string()
+            },
+            content: text.clone(),
+        })
+        .collect()
+}
+
+/// Build the grounding system prompt for the INVESTIGATION phase chat. Grounds the agent
+/// in the story, the investigation note, and the approved decisions so it answers about
+/// THIS refinement, not Camerata in general. `note`/`decisions` are the persisted
+/// investigation artifacts (may be empty pre-run).
+pub(super) fn investigation_chat_system_prompt(
+    story_id: &str,
+    note: Option<&str>,
+    approved_decisions: &[String],
+) -> String {
+    let mut p = format!(
+        "You are Camerata's investigation & refinement agent for story {story_id}. You help \
+         the architect refine this story: explain the investigation findings, discuss the \
+         decisions and their trade-offs, and answer clarifying questions about scope. Answer \
+         ONLY from the story context below plus general engineering judgment; do NOT invent \
+         findings or decisions that are not present. Be concise and concrete.\n\n\
+         === STORY ===\n{story_id}\n\n"
+    );
+    p.push_str("=== INVESTIGATION NOTE ===\n");
+    match note {
+        Some(n) if !n.trim().is_empty() => {
+            p.push_str(n.trim());
+            p.push('\n');
+        }
+        _ => p.push_str("(no investigation note recorded yet)\n"),
+    }
+    p.push_str("\n=== APPROVED DECISIONS ===\n");
+    if approved_decisions.is_empty() {
+        p.push_str("(no decisions approved yet)\n");
+    } else {
+        for d in approved_decisions {
+            p.push_str(&format!("- {d}\n"));
+        }
+    }
+    p
+}
+
+/// Build the grounding system prompt for the DEVELOPMENT phase chat. Grounds the agent in
+/// the story + the approved decisions the development run is bound to, so the architect can
+/// add context / ask about the run against the decisions it must build under.
+pub(super) fn development_chat_system_prompt(
+    story_id: &str,
+    approved_decisions: &[String],
+) -> String {
+    let mut p = format!(
+        "You are Camerata's development agent for story {story_id}. You are implementing this \
+         story under a governed run, bound to the approved decisions below. Help the architect \
+         by answering questions about the work and taking additional context they provide into \
+         account. Answer ONLY from the story context below plus general engineering judgment; \
+         do NOT invent decisions that are not present. Be concise and concrete.\n\n\
+         === STORY ===\n{story_id}\n\n\
+         === APPROVED DECISIONS (this run is bound to these) ===\n"
+    );
+    if approved_decisions.is_empty() {
+        p.push_str("(no decisions approved yet)\n");
+    } else {
+        for d in approved_decisions {
+            p.push_str(&format!("- {d}\n"));
+        }
+    }
+    p
+}
+
+/// Build the JSON body for a phase-chat `POST /api/chat` request. Pure (no I/O) so the
+/// request shape is unit-testable without a live model call. Mirrors the global
+/// assistant's body: `{ prompt, model, system, history }`.
+pub(super) fn phase_chat_body(
+    prompt: &str,
+    model: &str,
+    system: &str,
+    history: &[PhaseChatHistoryTurn],
+) -> serde_json::Value {
+    serde_json::json!({
+        "prompt": prompt,
+        "model": model,
+        "system": system,
+        "history": history,
+    })
+}
+
+/// The AI reply text returned by `/api/chat` (`crate::llm::LlmResponse`); only `text` is
+/// needed here.
+#[derive(serde::Deserialize)]
+struct PhaseChatResp {
+    #[serde(default)]
+    text: String,
+}
+
+/// Send one phase-chat turn to the SHARED `POST /api/chat` endpoint (the same one the
+/// global assistant uses) with a phase-grounded `system` prompt + prior `history`. Returns
+/// the AI reply text on success, or an `Err(message)` the caller surfaces as a toast.
+///
+/// This is the ONE LLM call for both phase chats; the grounding differs by which
+/// `system` prompt the caller built (`investigation_chat_system_prompt` /
+/// `development_chat_system_prompt`).
+pub(super) async fn send_phase_chat(
+    prompt: &str,
+    model: &str,
+    system: &str,
+    history: Vec<PhaseChatHistoryTurn>,
+) -> Result<String, String> {
+    let body = phase_chat_body(prompt, model, system, &history);
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/chat", crate::bff_base()))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("request to /api/chat failed: {e}"))?;
+    let status = resp.status();
+    // Read the body as text first so a non-2xx error body is preserved verbatim instead of
+    // being swallowed by a failed deserialize (mirrors the global assistant's send_chat).
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("backend error {status}: {text}"));
+    }
+    let parsed: PhaseChatResp = serde_json::from_str(&text)
+        .map_err(|e| format!("could not parse chat response ({e}); raw body: {text}"))?;
+    if parsed.text.trim().is_empty() {
+        return Err("the model returned an empty response".to_string());
+    }
+    Ok(parsed.text)
+}
+
+/// Extract the approved-decision one-liners from an investigation review, for grounding the
+/// phase-chat system prompts. Each is rendered `label: rationale` (rationale omitted when
+/// blank). Only `Approved` decisions are included (the run is bound to those).
+pub(super) fn approved_decision_lines(review: &InvestigationReviewView) -> Vec<String> {
+    review
+        .decisions
+        .iter()
+        .filter(|d| d.outcome.is_approved())
+        .map(|d| {
+            let label = if d.label.trim().is_empty() {
+                d.question.trim()
+            } else {
+                d.label.trim()
+            };
+            if d.rationale.trim().is_empty() {
+                label.to_string()
+            } else {
+                format!("{label}: {}", d.rationale.trim())
+            }
+        })
+        .filter(|s| !s.trim().is_empty())
+        .collect()
+}
+
 /// Persist the prose interface contract + the boundary flag (R3.g / §4.6). Returns `true`
 /// on a 2xx.
 pub(super) async fn save_contract(story_id: &str, contract: &str, crosses_boundary: bool) -> bool {
@@ -4117,22 +4306,60 @@ pub(super) fn InvestigationPhaseView(
                             let sid = sid.clone();
                             let msg = chat_input().trim().to_string();
                             if msg.is_empty() { return; }
+                            let model = invest_model();
+                            let toasts = toasts_inv;
+                            // History = the transcript BEFORE this new message (the prompt).
+                            let history = phase_history_from_messages(&chat_messages());
                             chat_sending.set(true);
                             let mut msgs = chat_messages();
                             msgs.push(("user".to_string(), msg.clone()));
                             chat_messages.set(msgs);
-                            chat_input.set(String::new());
                             spawn(async move {
+                                // Hold the global loading indicator for the whole async span
+                                // (Bombe invariant): a real LLM call is in flight.
+                                let _guard = crate::loading::LoadingGuard::new();
                                 // Persist the user turn to the UoW investigation transcript (#105).
                                 let _ = append_investigation_chat(&sid, "user", &msg).await;
-                                // TODO(#105): call the real investigation agent chat endpoint (B2).
-                                // For now the agent reply is a stub; still persist it so the
-                                // transcript round-trips on reload.
-                                let stub = "(Investigation agent response — coming soon. TODO #105)".to_string();
-                                let _ = append_investigation_chat(&sid, "agent", &stub).await;
-                                let mut msgs = chat_messages();
-                                msgs.push(("assistant".to_string(), stub));
-                                chat_messages.set(msgs);
+                                // Ground the investigation agent in the story's note + approved
+                                // decisions (fetched fresh so the chat reflects the latest state).
+                                let review = fetch_investigation_review(&sid).await;
+                                let note = review
+                                    .as_ref()
+                                    .and_then(|r| r.note.as_ref())
+                                    .map(|n| n.note.clone());
+                                let decisions = review
+                                    .as_ref()
+                                    .map(approved_decision_lines)
+                                    .unwrap_or_default();
+                                let system = investigation_chat_system_prompt(
+                                    &sid,
+                                    note.as_deref(),
+                                    &decisions,
+                                );
+                                match send_phase_chat(&msg, &model, &system, history).await {
+                                    Ok(reply) => {
+                                        // Persist the REAL AI turn (role "agent") so the
+                                        // transcript round-trips on reload.
+                                        let _ = append_investigation_chat(&sid, "agent", &reply).await;
+                                        let mut msgs = chat_messages();
+                                        msgs.push(("assistant".to_string(), reply));
+                                        chat_messages.set(msgs);
+                                        // Clear the input only on success.
+                                        chat_input.set(String::new());
+                                    }
+                                    Err(e) => {
+                                        // Roll the user turn back out of the local view (it stays in
+                                        // the persisted transcript) and surface the failure.
+                                        let mut msgs = chat_messages();
+                                        msgs.pop();
+                                        chat_messages.set(msgs);
+                                        crate::toast::push_toast(
+                                            toasts,
+                                            crate::toast::ToastKind::Error,
+                                            format!("Investigation chat failed: {e}"),
+                                        );
+                                    }
+                                }
                                 chat_sending.set(false);
                             });
                             }
@@ -4730,21 +4957,48 @@ pub(super) fn DevelopmentPhaseView(
                                             let sid = sid.clone();
                                             let msg = dev_chat_input().trim().to_string();
                                             if msg.is_empty() { return; }
+                                            let model = dev_balanced();
+                                            let toasts = toasts;
+                                            // History = the transcript BEFORE this new message.
+                                            let history = phase_history_from_messages(&dev_chat_messages());
                                             dev_chat_sending.set(true);
                                             let mut msgs = dev_chat_messages();
                                             msgs.push(("user".to_string(), msg.clone()));
                                             dev_chat_messages.set(msgs);
-                                            dev_chat_input.set(String::new());
                                             spawn(async move {
+                                                // Hold the global loading indicator for the async span
+                                                // (Bombe invariant): a real LLM call is in flight.
+                                                let _guard = crate::loading::LoadingGuard::new();
                                                 // Persist the user turn to the UoW development transcript (#105).
                                                 let _ = append_development_chat(&sid, "user", &msg).await;
-                                                // TODO(#105): call the real dev-agent chat endpoint (B3). For now the
-                                                // agent reply is a stub; still persist it so the chat round-trips.
-                                                let stub = "(Development agent response — coming soon. TODO #105)".to_string();
-                                                let _ = append_development_chat(&sid, "agent", &stub).await;
-                                                let mut msgs = dev_chat_messages();
-                                                msgs.push(("assistant".to_string(), stub));
-                                                dev_chat_messages.set(msgs);
+                                                // Ground the dev agent in the story's approved decisions
+                                                // (the decisions the run is bound to build under).
+                                                let decisions = fetch_investigation_review(&sid)
+                                                    .await
+                                                    .map(|r| approved_decision_lines(&r))
+                                                    .unwrap_or_default();
+                                                let system = development_chat_system_prompt(&sid, &decisions);
+                                                match send_phase_chat(&msg, &model, &system, history).await {
+                                                    Ok(reply) => {
+                                                        // Persist the REAL AI turn so the chat round-trips.
+                                                        let _ = append_development_chat(&sid, "agent", &reply).await;
+                                                        let mut msgs = dev_chat_messages();
+                                                        msgs.push(("assistant".to_string(), reply));
+                                                        dev_chat_messages.set(msgs);
+                                                        // Clear the input only on success.
+                                                        dev_chat_input.set(String::new());
+                                                    }
+                                                    Err(e) => {
+                                                        let mut msgs = dev_chat_messages();
+                                                        msgs.pop();
+                                                        dev_chat_messages.set(msgs);
+                                                        crate::toast::push_toast(
+                                                            toasts,
+                                                            crate::toast::ToastKind::Error,
+                                                            format!("Development chat failed: {e}"),
+                                                        );
+                                                    }
+                                                }
                                                 dev_chat_sending.set(false);
                                             });
                                             }
@@ -6894,6 +7148,194 @@ mod bff_tests {
         std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
+    }
+
+    // ── Phase chat: real LLM plumbing (GAP-4) ─────────────────────────────────
+
+    #[test]
+    fn phase_history_normalizes_agent_role_to_assistant() {
+        let msgs = vec![
+            ("user".to_string(), "why?".to_string()),
+            ("assistant".to_string(), "because".to_string()),
+            // The persisted transcript uses "agent"; it must map to "assistant".
+            ("agent".to_string(), "still because".to_string()),
+        ];
+        let hist = super::phase_history_from_messages(&msgs);
+        assert_eq!(hist.len(), 3);
+        assert_eq!(hist[0].role, "user");
+        assert_eq!(hist[0].content, "why?");
+        assert_eq!(hist[1].role, "assistant");
+        assert_eq!(hist[2].role, "assistant", "agent -> assistant");
+        assert_eq!(hist[2].content, "still because");
+    }
+
+    #[test]
+    fn investigation_prompt_grounds_in_story_note_and_decisions() {
+        let sys = super::investigation_chat_system_prompt(
+            "CAM-42",
+            Some("The auth token is not refreshed."),
+            &["Use rotating refresh tokens".to_string()],
+        );
+        assert!(sys.contains("CAM-42"), "story id grounded");
+        assert!(sys.contains("investigation & refinement agent"));
+        assert!(sys.contains("The auth token is not refreshed."), "note grounded");
+        assert!(sys.contains("Use rotating refresh tokens"), "decision grounded");
+    }
+
+    #[test]
+    fn investigation_prompt_marks_empty_note_and_decisions() {
+        let sys = super::investigation_chat_system_prompt("CAM-1", None, &[]);
+        assert!(sys.contains("no investigation note recorded yet"));
+        assert!(sys.contains("no decisions approved yet"));
+        // A blank note string is treated as absent, not echoed as an empty section.
+        let sys2 = super::investigation_chat_system_prompt("CAM-1", Some("   "), &[]);
+        assert!(sys2.contains("no investigation note recorded yet"));
+    }
+
+    #[test]
+    fn development_prompt_grounds_in_story_and_approved_decisions() {
+        let sys = super::development_chat_system_prompt(
+            "CAM-7",
+            &["Ship behind a feature flag".to_string()],
+        );
+        assert!(sys.contains("CAM-7"), "story id grounded");
+        assert!(sys.contains("development agent"));
+        assert!(sys.contains("bound to the approved decisions"));
+        assert!(sys.contains("Ship behind a feature flag"), "decision grounded");
+    }
+
+    #[test]
+    fn development_prompt_marks_no_decisions() {
+        let sys = super::development_chat_system_prompt("CAM-1", &[]);
+        assert!(sys.contains("no decisions approved yet"));
+    }
+
+    #[test]
+    fn phase_chat_body_matches_api_chat_wire_shape() {
+        let hist = vec![super::PhaseChatHistoryTurn {
+            role: "user".to_string(),
+            content: "earlier".to_string(),
+        }];
+        let body = super::phase_chat_body("hello", "claude-sonnet-4-6", "SYS", &hist);
+        assert_eq!(body["prompt"], "hello");
+        assert_eq!(body["model"], "claude-sonnet-4-6");
+        assert_eq!(body["system"], "SYS");
+        assert_eq!(body["history"][0]["role"], "user");
+        assert_eq!(body["history"][0]["content"], "earlier");
+    }
+
+    #[test]
+    fn approved_decision_lines_includes_only_approved_and_formats_rationale() {
+        use super::{
+            DecisionOutcomeView, DecisionRecordView, InvestigationReviewView,
+            RevisionProvenanceView,
+        };
+        let mk = |label: &str, rationale: &str, outcome: DecisionOutcomeView| DecisionRecordView {
+            artifact_id: "a".to_string(),
+            story_id: "CAM-1".to_string(),
+            label: label.to_string(),
+            question: String::new(),
+            rationale: rationale.to_string(),
+            alternatives_considered: vec![],
+            outcome,
+            provenance: RevisionProvenanceView::default(),
+        };
+        let review = InvestigationReviewView {
+            story_id: "CAM-1".to_string(),
+            note_present: false,
+            note: None,
+            decisions: vec![
+                mk("Use Postgres", "matches existing infra", DecisionOutcomeView::Approved),
+                mk("Use SQLite", "", DecisionOutcomeView::Pending),
+                mk(
+                    "Skip caching",
+                    "",
+                    DecisionOutcomeView::Rejected { reason: "no".to_string() },
+                ),
+                mk("Add index", "", DecisionOutcomeView::Approved),
+            ],
+        };
+        let lines = super::approved_decision_lines(&review);
+        assert_eq!(lines.len(), 2, "only Approved decisions included");
+        assert_eq!(lines[0], "Use Postgres: matches existing infra");
+        assert_eq!(lines[1], "Add index", "no rationale -> label only");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn send_phase_chat_posts_to_api_chat_and_returns_text() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let hist = vec![super::PhaseChatHistoryTurn {
+            role: "user".to_string(),
+            content: "prior".to_string(),
+        }];
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .and(body_json(serde_json::json!({
+                "prompt": "hi",
+                "model": "m",
+                "system": "SYS",
+                "history": [ { "role": "user", "content": "prior" } ],
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "text": "grounded reply",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::send_phase_chat("hi", "m", "SYS", hist).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(out.unwrap(), "grounded reply");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn send_phase_chat_surfaces_backend_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("claude cli failed"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::send_phase_chat("hi", "m", "SYS", vec![]).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let err = out.unwrap_err();
+        assert!(err.contains("500"), "status surfaced: {err}");
+        assert!(err.contains("claude cli failed"), "body preserved: {err}");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn send_phase_chat_rejects_empty_model_reply() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "text": "  " })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::send_phase_chat("hi", "m", "SYS", vec![]).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(out.unwrap_err().contains("empty response"));
     }
 
     #[tokio::test]
