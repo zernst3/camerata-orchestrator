@@ -540,10 +540,14 @@ Development page. The settings that affect runs are:
 - **Stall thresholds** — two numeric fields (in seconds) that control how long a run can be idle
   before Camerata considers it stalled:
   - **Watched (interactive)** — default 120 s. Applies to dev runs you are actively watching. On
-    stall, an amber warning appears in the run panel; the run keeps going and you decide what to do.
-  - **Routine (autonomous)** — default 600 s. Applies to walk-away autonomous runs (scheduled
-    routines). On stall, the run is auto-cancelled and transitions to **Failed** with the stall
-    reason recorded. Both values must be positive integers greater than zero; saving zero is blocked.
+    stall, an amber warning appears in the run panel; the run keeps going and **you decide** what to
+    do (alert-only, never auto-cancelled).
+  - **Routine (autonomous)** — default **1800 s (30 min)**, a deliberately generous grace period.
+    Applies to walk-away autonomous runs (scheduled routines). Because no one is watching them,
+    autonomous runs **auto-cancel on stall by default**: on stall the run transitions to **Failed**
+    with the stall reason recorded (idle time + threshold). A background sweep enforces this; watched
+    runs are never swept. Both values must be positive integers greater than zero; saving zero is
+    blocked.
 
 These are project defaults, not per-UoW knobs. Per-run model overrides stay on the UoW card; they
 default from the project tier-map and override only that one run.

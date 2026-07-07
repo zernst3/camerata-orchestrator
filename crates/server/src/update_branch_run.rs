@@ -183,8 +183,31 @@ pub async fn execute_update_branch_run(
             },
         );
         uow.append_history(&story_id, "update_branch", &format!("Update branch failed: {detail}"));
-        runs.set_status(&run_id, RunStatus::AwaitingQa, true);
+        // LIFECYCLE-2: a failure is a genuine FAILED terminal, not a silent AwaitingQa.
+        runs.fail_with_reason(&run_id, detail);
     };
+    // LIFECYCLE-1: honor a cancel mid-run. The terminal Cancelled state is already set by
+    // RunStore::cancel; record it and stop before any git mutation (merge / commit).
+    let cancelled_stop = |runs: &RunStore, uow: &UowStore, where_: &str| {
+        runs.push_event(
+            &run_id,
+            GateEvent {
+                seq: next_seq(),
+                layer: "update-branch".to_string(),
+                verdict: "info".to_string(),
+                rule: None,
+                detail: format!("Run cancelled {where_}; stopped before any git mutation."),
+                content_hash: None,
+            },
+        );
+        uow.append_history(&story_id, "update_branch", &format!("Cancelled {where_}."));
+    };
+
+    // Honor a cancel that arrived before the executor got scheduled.
+    if runs.is_cancelled(&run_id) {
+        cancelled_stop(&runs, &uow, "before start");
+        return;
+    }
 
     // 1. Ensure the UoW branch is checked out.
     if let Err(e) = workspace::switch_branch(&dir, &target_branch).await {
@@ -218,6 +241,12 @@ pub async fn execute_update_branch_run(
 
     let mref = merge_ref(&source_branch, source_kind);
     info(&runs, format!("Merging `{mref}` into `{target_branch}`."));
+
+    // LIFECYCLE-1: cancel check IMMEDIATELY before the merge (a git mutation).
+    if runs.is_cancelled(&run_id) {
+        cancelled_stop(&runs, &uow, "before merge");
+        return;
+    }
 
     // 2. Merge.
     let outcome = match workspace::merge_source(&dir, &mref).await {
@@ -308,7 +337,8 @@ async fn resolve_conflicts_and_commit(
             "update_branch",
             &format!("Update branch failed: {detail} (merge aborted)."),
         );
-        runs.set_status(run_id, RunStatus::AwaitingQa, true);
+        // LIFECYCLE-2: a failed conflict resolution is a genuine FAILED terminal.
+        runs.fail_with_reason(run_id, detail);
     };
 
     // Token-free fallback: no agent can run, so a conflicting merge cannot be resolved.
@@ -392,6 +422,32 @@ async fn resolve_conflicts_and_commit(
             remaining.join(", ")
         ))
         .await;
+        return;
+    }
+
+    // LIFECYCLE-1: cancel check IMMEDIATELY before the merge commit. A Stop that arrived
+    // while the agent resolved conflicts must halt BEFORE the server commits the merge. We
+    // abort the in-progress merge so no half-merged tree lingers, then stop (the terminal
+    // Cancelled state is already set by RunStore::cancel).
+    if runs.is_cancelled(run_id) {
+        let _ = workspace::merge_abort(dir).await;
+        runs.push_event(
+            run_id,
+            GateEvent {
+                seq: next_seq(),
+                layer: "update-branch".to_string(),
+                verdict: "info".to_string(),
+                rule: None,
+                detail: "Run cancelled before the merge commit; merge aborted, tree restored."
+                    .to_string(),
+                content_hash: None,
+            },
+        );
+        uow.append_history(
+            story_id,
+            "update_branch",
+            "Cancelled before the merge commit (merge aborted).",
+        );
         return;
     }
 
@@ -529,7 +585,8 @@ mod tests {
         .await;
 
         let run = runs.get(&run_id).expect("run exists");
-        assert_eq!(run.status, RunStatus::AwaitingQa);
+        // LIFECYCLE-2: fail-closed means a genuine FAILED terminal, not AwaitingQa.
+        assert!(matches!(run.status, RunStatus::Failed { .. }));
         assert!(run.done);
         // It must have reported the live-mode-off failure and aborted the merge.
         assert!(run.events.iter().any(|e| e.verdict == "error"));
@@ -597,6 +654,77 @@ mod tests {
         assert!(run.events.iter().any(|e| e.detail.contains("Clean merge")));
         // The merge produced a commit and the tree is not mid-merge.
         assert!(!workspace::is_merge_in_progress(&base).await);
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// LIFECYCLE-1 (e2e): a run cancelled BEFORE it executes must NOT perform the merge
+    /// (a git mutation). The run stays in its terminal Cancelled state (never AwaitingQa),
+    /// and HEAD is unchanged — no merge commit landed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_run_does_not_merge_or_advance() {
+        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let base = std::env::temp_dir().join(format!("cam-upd-cancel-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let g = |dir: &std::path::Path, args: &[&str]| {
+            std::process::Command::new("git")
+                .current_dir(dir)
+                .args(args)
+                .output()
+                .expect("git runs")
+        };
+        g(&base, &["init", "-q", "-b", "main"]);
+        g(&base, &["config", "user.email", "t@example.com"]);
+        g(&base, &["config", "user.name", "Test"]);
+        std::fs::write(base.join("f.txt"), "base\n").unwrap();
+        g(&base, &["add", "."]);
+        g(&base, &["commit", "-q", "-m", "init"]);
+        g(&base, &["checkout", "-q", "-b", "src"]);
+        std::fs::write(base.join("other.txt"), "new\n").unwrap();
+        g(&base, &["add", "."]);
+        g(&base, &["commit", "-q", "-m", "add other"]);
+        g(&base, &["checkout", "-q", "main"]);
+
+        // Record HEAD on main BEFORE the run so we can prove no merge commit was created.
+        let head_before = String::from_utf8(
+            g(&base, &["rev-parse", "HEAD"]).stdout,
+        )
+        .unwrap();
+
+        let runs = RunStore::new();
+        let uow = UowStore::new();
+        let run_id = runs.create("o/r#9", "update-branch", crate::run::RunKind::Watched);
+        // Cancel BEFORE executing — the terminal Cancelled state is set here.
+        runs.cancel(&run_id);
+
+        execute_update_branch_run(
+            runs.clone(),
+            uow.clone(),
+            run_id.clone(),
+            "o/r#9".to_string(),
+            "o/r".to_string(),
+            base.clone(),
+            "main".to_string(),
+            "src".to_string(),
+            MergeSourceKind::Local,
+            None,
+            String::new(),
+            None,
+            Vec::new(),
+        )
+        .await;
+
+        let run = runs.get(&run_id).expect("run exists");
+        // LIFECYCLE-1: cancel wins — the run did NOT advance to AwaitingQa.
+        assert_eq!(run.status, RunStatus::Cancelled);
+        assert!(run.done);
+        // No merge happened: HEAD is unchanged and the tree is not mid-merge.
+        let head_after = String::from_utf8(g(&base, &["rev-parse", "HEAD"]).stdout).unwrap();
+        assert_eq!(head_before, head_after, "no merge commit on a cancelled run");
+        assert!(!workspace::is_merge_in_progress(&base).await);
+        // other.txt (only on src) never landed on main.
+        assert!(!base.join("other.txt").exists(), "source file not merged in");
 
         let _ = std::fs::remove_dir_all(&base);
     }

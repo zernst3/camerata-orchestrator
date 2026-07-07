@@ -92,18 +92,31 @@ async fn badly_formatted_crate_yields_rust_fmt_violation() {
     scaffold_crate(&wt, "fn   main( ){let x=1;println!(\"{}\",x );}\n");
 
     let runner = FmtCheckRunner::new();
-    let violations = runner
+    let outcome = runner
         .check(&any_role(), wt.path())
         .await
         .expect("fmt check should run the real subprocess without erroring");
 
     assert!(
-        !violations.is_empty(),
-        "a badly-formatted crate must produce at least one violation, got {violations:?}"
+        !outcome.violated.is_empty(),
+        "a badly-formatted crate must produce at least one violation, got {:?}",
+        outcome.violated
     );
     assert!(
-        violations.contains(&fmt_rule()),
-        "the violation set must contain the RUST-FMT rule id, got {violations:?}"
+        outcome.violated.contains(&fmt_rule()),
+        "the violation set must contain the RUST-FMT rule id, got {:?}",
+        outcome.violated
+    );
+    // LIFECYCLE-5: the CheckOutcome must carry the captured toolchain output so
+    // the bounce prompt can feed the actual error text back, not just the rule id.
+    assert!(
+        !outcome.diagnostics.trim().is_empty(),
+        "a violating fmt check must carry the cargo fmt diagnostics, got empty"
+    );
+    assert!(
+        outcome.diagnostics.contains("Diff") || outcome.diagnostics.contains("cargo fmt"),
+        "diagnostics should include the labelled cargo fmt output, got: {:?}",
+        outcome.diagnostics
     );
 }
 
@@ -117,13 +130,20 @@ async fn cleanly_formatted_crate_yields_no_violations() {
     );
 
     let runner = FmtCheckRunner::new();
-    let violations = runner
+    let outcome = runner
         .check(&any_role(), wt.path())
         .await
         .expect("fmt check should run the real subprocess without erroring");
 
     assert!(
-        violations.is_empty(),
-        "a cleanly-formatted crate must produce no violations, got {violations:?}"
+        outcome.violated.is_empty(),
+        "a cleanly-formatted crate must produce no violations, got {:?}",
+        outcome.violated
+    );
+    // A clean pass carries no diagnostics (keeps the eventual prompt lean).
+    assert!(
+        outcome.diagnostics.is_empty(),
+        "a clean fmt check must carry no diagnostics, got: {:?}",
+        outcome.diagnostics
     );
 }

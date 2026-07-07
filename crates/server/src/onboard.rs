@@ -1823,7 +1823,7 @@ mod tests {
         std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let jobs = crate::jobs::JobStore::new();
-        let jid = jobs.create("audit");
+        let jid = jobs.create("audit", None);
         let _ = audit_repos(
             &sources,
             &[],

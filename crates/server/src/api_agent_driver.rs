@@ -65,6 +65,7 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use async_trait::async_trait;
+use camerata_agent::HeartbeatFn;
 use camerata_core::{AgentDriver, AgentOutcome, Decision, Role, RuleId, ToolCall};
 use camerata_gateway::evaluate_call;
 use serde_json::Value;
@@ -186,6 +187,12 @@ pub struct ApiAgentDriver {
     /// `ANTHROPIC_API_KEY` (mirroring `llm.rs::complete_api`) and threaded in at build time.
     /// `None` on the OpenRouter path (the OpenRouter key is read off the completer instead).
     anthropic_api_key: Option<String>,
+    /// LIFECYCLE-7 liveness heartbeat. Fired once per agentic loop iteration so a healthy,
+    /// long-running API-driven run keeps `last_activity_ms` fresh and does NOT read as stalled.
+    /// The CLI path fires its heartbeat per output line via `ClaudeCliDriver::with_on_activity`;
+    /// the API loop has no line stream, so it beats per turn instead. `None` = no heartbeat
+    /// (tests / callers that don't wire one).
+    on_activity: Option<HeartbeatFn>,
 }
 
 impl ApiAgentDriver {
@@ -222,7 +229,16 @@ impl ApiAgentDriver {
             orchestrator_config: None,
             shape: ApiShape::OpenRouter,
             anthropic_api_key: None,
+            on_activity: None,
         }
+    }
+
+    /// Wire the LIFECYCLE-7 liveness heartbeat. Builder form. The callback fires once per
+    /// agentic loop iteration (each provider turn), keeping `last_activity_ms` fresh so a
+    /// healthy long API-driven run is never reported stalled. No-op when never set.
+    pub fn with_on_activity(mut self, cb: HeartbeatFn) -> Self {
+        self.on_activity = Some(cb);
+        self
     }
 
     /// Set the provider wire shape (URL + headers + tool-schema + tool-result + normalizer
@@ -364,6 +380,14 @@ async fn run_loop(
         }
         iteration += 1;
 
+        // LIFECYCLE-7: beat the liveness heartbeat once per turn. The API loop has no
+        // per-line output stream (unlike the CLI driver), so a multi-turn run that is
+        // healthily grinding through provider calls would otherwise look idle. Firing here
+        // keeps `last_activity_ms` fresh across the whole run.
+        if let Some(cb) = driver.on_activity.as_ref() {
+            cb();
+        }
+
         // ── Call the provider ──────────────────────────────────────────────
         let resp = call_provider(
             driver,
@@ -376,6 +400,22 @@ async fn run_loop(
         .with_context(|| format!("provider call failed on iteration {iteration}"))?;
         // Cache-bust is one-shot: reset after use so subsequent turns use cached responses.
         bust_cache_this_turn = false;
+
+        // CACHE-HIT LOGGING (prefix-stability verification): log the effective prompt-cache hit
+        // ratio for this call so the geological layering is verifiable in practice. If the stable
+        // Layer-1/Layer-2 prefix is holding, this climbs toward 1.0 after the first turn; a ratio
+        // stuck near 0 across turns signals the prefix is churning. Only logged when the backend
+        // reported input-token usage (the CLI/stub paths report none and are silently skipped).
+        if let Some(ratio) = resp.cache_hit_ratio() {
+            eprintln!(
+                "[camerata-server/api-agent] turn {iteration} cache-hit {:.0}% (read={} creation={} input={}) session={}",
+                ratio * 100.0,
+                resp.cache_read_input_tokens,
+                resp.cache_creation_input_tokens,
+                resp.input_tokens.unwrap_or(0),
+                driver.session_id,
+            );
+        }
 
         // Accumulate cost.
         if let Some(c) = resp.cost_usd {
@@ -679,6 +719,64 @@ async fn call_openrouter_with_tools(
     })
 }
 
+/// The provider-neutral marker that terminates the Layer-2 grounding block in a prompt (emitted
+/// by `grounding::assemble`). The prompt builders stay provider-neutral: they never mention
+/// Anthropic and never place a `cache_control`. This body builder is the ONLY place that knows
+/// how to translate the layering into Anthropic's cache breakpoints, so it detects the end of
+/// Layer 2 by this marker and splits the first user message there.
+const LAYER2_GROUNDING_TERMINATOR: &str = "=== END PROJECT GROUNDING ===";
+
+/// Split a first-user-message string into its cacheable stable prefix (Layer 1 in the system
+/// block already, plus Layer 2 grounding here) and its volatile Layer-3 tail, using the
+/// grounding terminator. Returns `Some((prefix, tail))` only when the marker is present AND
+/// there is real Layer-3 content after it (so we never place a degenerate breakpoint at the very
+/// end). The prefix INCLUDES the terminator line so the whole grounding block is cached.
+///
+/// Provider-neutral by construction: the builders emit the marker via `grounding::assemble`
+/// without knowing this split exists; only the Anthropic body builder consumes it.
+fn split_grounding_prefix(text: &str) -> Option<(&str, &str)> {
+    let idx = text.find(LAYER2_GROUNDING_TERMINATOR)?;
+    // Boundary = just past the terminator marker (end of Layer 2).
+    let boundary = idx + LAYER2_GROUNDING_TERMINATOR.len();
+    let (prefix, tail) = text.split_at(boundary);
+    // Only split when there is non-whitespace Layer-3 content after the boundary; otherwise the
+    // second breakpoint would be redundant with the end of the message.
+    if tail.trim().is_empty() {
+        return None;
+    }
+    Some((prefix, tail))
+}
+
+/// Wrap a first-user-message `Value` (whose content is a plain string) in a two-block content
+/// array with a `cache_control` breakpoint at the end of the Layer-2 grounding prefix, when that
+/// message carries a grounding block. Any other message (tool_result arrays, non-string content,
+/// or a message with no grounding marker) is returned unchanged. Pure: testable without HTTP.
+///
+/// This is the "end of Layer 2" breakpoint from the cache-layering design: the system block
+/// caches Layer 1, and this caches Layer 1+2's continuation in the first user turn, so only the
+/// volatile Layer-3 tail is billed at full price on each turn.
+fn apply_grounding_cache_breakpoint(first_user_msg: &Value) -> Value {
+    let Some(content) = first_user_msg.get("content").and_then(Value::as_str) else {
+        return first_user_msg.clone();
+    };
+    let Some((prefix, tail)) = split_grounding_prefix(content) else {
+        return first_user_msg.clone();
+    };
+    let mut msg = first_user_msg.clone();
+    msg["content"] = serde_json::json!([
+        {
+            "type": "text",
+            "text": prefix,
+            "cache_control": {"type": "ephemeral"}
+        },
+        {
+            "type": "text",
+            "text": tail
+        }
+    ]);
+    msg
+}
+
 /// Build the Anthropic Messages API request body (pure — no HTTP). Returns the body and
 /// whether prompt-caching is active (drives the `anthropic-beta` header in the caller).
 ///
@@ -687,22 +785,53 @@ async fn call_openrouter_with_tools(
 /// tool_result user messages), a top-level `system` text block with a `cache_control`
 /// ephemeral breakpoint (when a system prompt is present), and `tools` in Anthropic format
 /// (`{name, description, input_schema}`) with `tool_choice: {type:"auto"}`.
+///
+/// CACHE LAYERING: two `cache_control` breakpoints are placed, both provider-neutral in the
+/// builders (which never mention Anthropic):
+///   - the top-level `system` block = the end of Layer 1 (kernel + role);
+///   - the end of the Layer-2 grounding block INSIDE the first user message (detected via the
+///     grounding terminator marker), so Layer 2 is cached too and only the volatile Layer-3 tail
+///     is billed at full price on each turn.
 fn build_anthropic_request_body(
     model: &str,
     system: Option<&str>,
     messages: &[Value],
     tool_schemas: &[Value],
 ) -> (Value, bool) {
+    // Place the Layer-2 grounding breakpoint on the FIRST user message when it carries a
+    // grounding block. Every other message is passed through untouched.
+    let mut use_caching = false;
+    let shaped_messages: Vec<Value> = messages
+        .iter()
+        .enumerate()
+        .map(|(i, m)| {
+            if i == 0 && m.get("role").and_then(Value::as_str) == Some("user") {
+                let shaped = apply_grounding_cache_breakpoint(m);
+                // A shaped (array-content) first message means a grounding breakpoint was placed,
+                // so the beta header must be sent even if there is no system prompt.
+                if shaped
+                    .get("content")
+                    .map(Value::is_array)
+                    .unwrap_or(false)
+                {
+                    use_caching = true;
+                }
+                shaped
+            } else {
+                m.clone()
+            }
+        })
+        .collect();
+
     let mut body = serde_json::json!({
         "model": model,
         "max_tokens": 8192,
-        "messages": messages,
+        "messages": shaped_messages,
     });
 
     // Top-level `system` with a prompt-cache breakpoint on the static prefix. Sending it
     // as a single text block with `cache_control` (rather than a bare string) lets the
     // Anthropic prompt-caching beta cache the system prefix across the multi-turn loop.
-    let mut use_caching = false;
     if let Some(sys) = system {
         body["system"] = serde_json::json!([{
             "type": "text",
@@ -1597,6 +1726,12 @@ fn openai_tool_to_anthropic(tool: &Value) -> Option<Value> {
 ///
 /// `model` pins the kernel's per-tier addendum (`kernel_for(model)`); an empty model falls back
 /// to the base [`camerata_app_core::GOVERNANCE_KERNEL`] with no addendum.
+///
+/// LAYERING: this system prompt IS Layer 1 (global immutable) of the geological prompt layering —
+/// identical across every turn for a given role + model tier. `build_anthropic_request_body`
+/// places a `cache_control` breakpoint on it (the end-of-Layer-1 boundary). Layer 2 (grounding)
+/// and Layer 3 (the volatile task) travel in the user message. See
+/// `camerata_app_core::prompt_layers`.
 fn build_system_prompt(role: &Role, model: &str) -> Option<String> {
     let kernel = if model.trim().is_empty() {
         camerata_app_core::GOVERNANCE_KERNEL.to_string()
@@ -1662,13 +1797,32 @@ impl Completer for AnthropicNoopCompleter {
 /// Decide whether the `claude` provider should run via the Anthropic Messages API
 /// (`ApiAgentDriver` in [`ApiShape::Anthropic`]) instead of the `ClaudeCliDriver`.
 ///
-/// Returns `Some(key)` when BOTH `CAMERATA_LLM_BACKEND=api` AND `ANTHROPIC_API_KEY` is set
-/// (non-empty) — the same two signals `llm.rs` uses to select the Anthropic API backend.
-/// Returns `None` otherwise (the default `cli` path, or `api` with no key).
-fn anthropic_api_backend_key() -> Option<String> {
+/// Returns `Some(key)` when BOTH the effective backend is `api` AND an Anthropic key is
+/// available (non-empty) — the same two signals `llm.rs` uses to select the Anthropic API
+/// backend. Returns `None` otherwise (the default `cli` path, or `api` with no key).
+///
+/// ROUTES-9: the Anthropic key is read from the CREDENTIAL STORE first (with an env fallback
+/// for back-compat), NOT solely from `ANTHROPIC_API_KEY` env. The `set_credential` handler no
+/// longer mirrors a freshly-saved key into process env (that was a request-thread `set_var`
+/// racing worker-thread `getenv` — POSIX UB). Reading the store here means a freshly-saved
+/// key still takes effect without a restart, with no process-env mutation. The backend signal
+/// is still read from `CAMERATA_LLM_BACKEND` env, which is hydrated ONCE at single-threaded
+/// startup from the persisted setting (see `run`), so it is never written after threads spawn.
+fn anthropic_api_backend_key(creds: &dyn crate::credentials::CredentialStore) -> Option<String> {
     let backend = std::env::var("CAMERATA_LLM_BACKEND").ok();
     if backend.as_deref() != Some("api") {
         return None;
+    }
+    // Store-first, env-fallback: mirrors `credentials::resolve` so a keychain-saved key wins
+    // and existing dotenv/CI setups keep working. A store read error must not silently degrade
+    // to env with no trace, so warn and fall back (matches the resolve() posture).
+    match creds.get(crate::credentials::ANTHROPIC_API_KEY) {
+        Ok(Some(k)) if !k.trim().is_empty() => return Some(k),
+        Ok(_) => {}
+        Err(e) => eprintln!(
+            "[camerata-server] credential-store read of ANTHROPIC_API_KEY failed ({e}); \
+             falling back to env"
+        ),
     }
     std::env::var("ANTHROPIC_API_KEY")
         .ok()
@@ -1685,6 +1839,9 @@ fn anthropic_api_backend_key() -> Option<String> {
 /// worktree jail, same orchestrator gating).
 fn build_claude_driver(
     model_id: &str,
+    // ROUTES-9: credential store, consulted store-first (env fallback) for the Anthropic key
+    // instead of a per-request env `set_var`. See `anthropic_api_backend_key`.
+    creds: &dyn crate::credentials::CredentialStore,
     mcp_config_path: &str,
     rule_subset: Vec<RuleId>,
     worktree: Option<PathBuf>,
@@ -1692,8 +1849,11 @@ fn build_claude_driver(
     // Opt this CLI agent into the READ-CLASS `raise_escalation` gateway tool. Only meaningful on
     // the CLI path (the gateway MCP provides the tool); ignored by the Anthropic-API shape.
     escalation: bool,
+    // LIFECYCLE-7 liveness heartbeat. Wired onto whichever concrete driver is built (CLI: per
+    // output line; Anthropic API: per loop turn) so a healthy long run stays fresh.
+    on_activity: Option<HeartbeatFn>,
 ) -> Arc<dyn AgentDriver> {
-    if let Some(key) = anthropic_api_backend_key() {
+    if let Some(key) = anthropic_api_backend_key(creds) {
         // Anthropic Messages API agent. Same gate surface as every other ApiAgentDriver:
         // gated_write-only, worktree-jailed, delegate/fan_out only when orchestrator=true.
         let mut driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), model_id)
@@ -1703,6 +1863,9 @@ fn build_claude_driver(
             .with_anthropic_api_key(key);
         if let Some(wt) = worktree {
             driver = driver.with_worktree(wt);
+        }
+        if let Some(cb) = on_activity {
+            driver = driver.with_on_activity(cb);
         }
         Arc::new(driver)
     } else {
@@ -1714,6 +1877,9 @@ fn build_claude_driver(
         }
         if let Some(wt) = worktree {
             cli_driver = cli_driver.with_worktree(wt);
+        }
+        if let Some(cb) = on_activity {
+            cli_driver = cli_driver.with_on_activity(cb);
         }
         Arc::new(cli_driver)
     }
@@ -1757,6 +1923,12 @@ pub fn build_agent_driver(
     // for every caller except a governed dev run, which lets the agent self-escalate on rule
     // conditions. Adds no write path; the gate posture is unchanged.
     escalation: bool,
+    // LIFECYCLE-7 liveness heartbeat. Threaded onto the concrete driver (CLI, Anthropic API, or
+    // OpenRouter) so a healthy long run keeps `last_activity_ms` fresh and is not reported
+    // stalled. `None` for callers that don't wire one (tests / non-supervised builds). Runners
+    // pass `Arc::new(move || runs.touch_activity(&run_id, None))`, mirroring
+    // investigation_run / update_branch_run.
+    on_activity: Option<HeartbeatFn>,
 ) -> anyhow::Result<Arc<dyn AgentDriver>> {
     let provider = registry
         .all_entries()
@@ -1789,17 +1961,22 @@ pub fn build_agent_driver(
             if let Some(wt) = worktree {
                 driver = driver.with_worktree(wt);
             }
+            if let Some(cb) = on_activity {
+                driver = driver.with_on_activity(cb);
+            }
             Ok(Arc::new(driver))
         }
         // "claude" or any unrecognised provider: CLI by default, or the Anthropic Messages
         // API agent when CAMERATA_LLM_BACKEND=api + ANTHROPIC_API_KEY are set.
         _ => Ok(build_claude_driver(
             model_id,
+            creds,
             mcp_config_path,
             rule_subset,
             worktree,
             orchestrator,
             escalation,
+            on_activity,
         )),
     }
 }
@@ -1936,6 +2113,7 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
             self.limiter.clone(),
             self.run_session_id.as_deref(),
             false, // workers do not self-escalate (the governed dev-implement agent does)
+            None,  // child driver: heartbeat is owned by the parent run's supervised path
         )
         .map_err(|e| std::io::Error::other(format!("build child driver for `{model}`: {e}")))?;
 
@@ -2113,7 +2291,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
             // this factory builds, so only the lead can carry delegate/fan_out; its children
             // are built per-model + gated by the embedded ServerChildDriverFactory.
             _ => {
-                if let Some(key) = anthropic_api_backend_key() {
+                if let Some(key) = anthropic_api_backend_key(self.creds.as_ref()) {
                     // Native Anthropic-shape orchestrator. Mirrors the OpenRouter arm: a
                     // ServerChildDriverFactory resolves each delegate/fan_out child to ITS
                     // model's provider (CLI / Anthropic API / OpenRouter), gated.
@@ -2399,6 +2577,52 @@ mod tests {
                 "escape tool `{escape}` must NOT appear in worker schemas"
             );
         }
+    }
+
+    /// LIFECYCLE-7: the API agent loop fires the wired `on_activity` heartbeat at least once
+    /// per run so a healthy long API-driven run keeps `last_activity_ms` fresh (the API path has
+    /// no per-line output stream, unlike the CLI driver). Uses a two-turn completer so the loop
+    /// runs multiple iterations, and asserts the heartbeat fired once per turn.
+    #[tokio::test]
+    async fn api_driver_fires_liveness_heartbeat_per_turn() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Two turns: one tool call (gated_write to an allowed path), then final text.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wt = tmp.path().to_path_buf();
+        let completer = Arc::new(OneToolCallCompleter::new(
+            "gated_write",
+            serde_json::json!({ "path": "src/ok.rs", "content": "fn main() {}" }),
+            "done",
+        ));
+        let role = all_rules_role();
+
+        let beats = Arc::new(AtomicUsize::new(0));
+        let beats_cb = beats.clone();
+        let driver = driver_with(completer, &role, Some(wt))
+            .with_on_activity(Arc::new(move || {
+                beats_cb.fetch_add(1, Ordering::SeqCst);
+            }));
+
+        let _ = driver.run(&role, "do the thing").await;
+
+        // The loop ran two turns (tool-call turn + final-text turn); the heartbeat fires once
+        // at the top of each, so it must have fired at least twice.
+        assert!(
+            beats.load(Ordering::SeqCst) >= 2,
+            "heartbeat must fire per loop turn (got {})",
+            beats.load(Ordering::SeqCst)
+        );
+    }
+
+    /// A driver with NO heartbeat wired must run without panicking (the callback is optional).
+    #[tokio::test]
+    async fn api_driver_without_heartbeat_runs_fine() {
+        let completer = Arc::new(StubCompleter("done".to_string()));
+        let role = test_role();
+        let driver = driver_with(completer, &role, None); // no with_on_activity
+        let out = driver.run(&role, "hi").await;
+        assert!(out.is_ok(), "no-heartbeat run must succeed");
     }
 
     #[test]
@@ -2879,6 +3103,7 @@ mod tests {
             limiter,
             None,                 // run_session_id
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         );
         assert!(
             result.is_ok(),
@@ -2931,6 +3156,7 @@ mod tests {
             limiter,
             None, // run_session_id
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         );
         assert!(
             result.is_ok(),
@@ -2960,6 +3186,7 @@ mod tests {
             limiter,
             None, // run_session_id
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         );
         assert!(
             result.is_err(),
@@ -3146,6 +3373,7 @@ mod tests {
             limiter,
             Some("uow-story-id-42"), // run_session_id
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         )
         .expect("build must succeed");
 
@@ -3516,6 +3744,69 @@ mod tests {
         assert!(body.get("tool_choice").is_none());
     }
 
+    // ── Anthropic shape: Layer-2 grounding cache breakpoint ───────────────────
+
+    #[test]
+    fn split_grounding_prefix_splits_at_the_terminator_when_layer3_follows() {
+        let text = "=== PROJECT GROUNDING ===\nrepo digest\n=== END PROJECT GROUNDING ===\n\n## Story\nvolatile tail";
+        let (prefix, tail) = split_grounding_prefix(text).expect("must split");
+        // Prefix includes the terminator (whole grounding block cached).
+        assert!(prefix.ends_with(LAYER2_GROUNDING_TERMINATOR));
+        assert!(prefix.contains("repo digest"));
+        // Tail is the volatile Layer-3 content only.
+        assert!(tail.contains("## Story"));
+        assert!(!tail.contains("repo digest"));
+    }
+
+    #[test]
+    fn split_grounding_prefix_none_without_marker_or_without_tail() {
+        // No grounding marker at all.
+        assert!(split_grounding_prefix("just a plain task with no grounding").is_none());
+        // Marker present but nothing meaningful after it → no degenerate breakpoint.
+        assert!(split_grounding_prefix("digest\n=== END PROJECT GROUNDING ===\n\n  ").is_none());
+    }
+
+    #[test]
+    fn anthropic_first_user_message_gets_layer2_breakpoint_when_grounded() {
+        let task = "=== PROJECT GROUNDING ===\ndigest here\n=== END PROJECT GROUNDING ===\n\n## Story\ndo the thing";
+        let messages = vec![serde_json::json!({"role": "user", "content": task})];
+        let (body, use_caching) =
+            build_anthropic_request_body("claude-opus-4-8", None, &messages, &[]);
+        // Even without a system prompt, the grounding breakpoint activates caching.
+        assert!(use_caching, "grounded first message → caching active");
+        let content = &body["messages"][0]["content"];
+        assert!(content.is_array(), "first message content must be a two-block array");
+        assert_eq!(content[0]["type"].as_str(), Some("text"));
+        assert_eq!(content[0]["cache_control"]["type"].as_str(), Some("ephemeral"));
+        assert!(content[0]["text"].as_str().unwrap().ends_with(LAYER2_GROUNDING_TERMINATOR));
+        // Second block is the volatile tail with NO cache_control.
+        assert!(content[1]["text"].as_str().unwrap().contains("## Story"));
+        assert!(content[1].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn anthropic_first_user_message_unchanged_without_grounding() {
+        let messages = vec![serde_json::json!({"role": "user", "content": "plain task, no grounding"})];
+        let (body, _use_caching) =
+            build_anthropic_request_body("claude-opus-4-8", Some("sys"), &messages, &[]);
+        // No grounding marker → first message content stays a plain string.
+        assert_eq!(body["messages"][0]["content"].as_str(), Some("plain task, no grounding"));
+    }
+
+    #[test]
+    fn anthropic_only_the_first_user_message_is_reshaped() {
+        // A later user message (e.g. tool_result array) that happens to contain the marker must
+        // not be reshaped — only index 0 is the grounded opening turn.
+        let messages = vec![
+            serde_json::json!({"role": "user", "content": "plain opener no marker"}),
+            serde_json::json!({"role": "user", "content": "later =[END PROJECT GROUNDING]= x\n\ntail"}),
+        ];
+        let (body, _) = build_anthropic_request_body("claude-opus-4-8", None, &messages, &[]);
+        // Index 0 has no marker → stays a string; index 1 is passed through untouched.
+        assert!(body["messages"][0]["content"].is_string());
+        assert!(body["messages"][1]["content"].is_string());
+    }
+
     // ── Anthropic shape: tool-result feedback format ──────────────────────────
 
     #[test]
@@ -3628,12 +3919,19 @@ mod tests {
 
     // ── Routing: build_claude_driver respects backend + key ───────────────────
     //
-    // anthropic_api_backend_key() reads process env. These tests mutate env, so they
-    // run serially under a shared mutex to avoid cross-test interference.
+    // anthropic_api_backend_key() reads the backend from process env and the key
+    // store-first (env fallback). These tests exercise the ENV-fallback path with an
+    // EMPTY credential store, so they mutate env and run serially under a shared mutex.
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// An empty credential store: the helper's key lookup misses and falls back to the
+    /// `ANTHROPIC_API_KEY` env var these routing tests set.
+    fn empty_creds() -> crate::credentials::MemoryCredentialStore {
+        crate::credentials::MemoryCredentialStore::new()
     }
 
     /// RAII guard that snapshots + restores the two env vars routing depends on.
@@ -3666,35 +3964,67 @@ mod tests {
     fn anthropic_backend_key_requires_both_signals() {
         let _g = env_lock();
         let _snap = EnvSnapshot::capture();
+        // Empty store: the key comes from the env fallback these assertions set.
+        let creds = empty_creds();
 
         // Neither set → None.
         std::env::remove_var("CAMERATA_LLM_BACKEND");
         std::env::remove_var("ANTHROPIC_API_KEY");
-        assert!(anthropic_api_backend_key().is_none());
+        assert!(anthropic_api_backend_key(&creds).is_none());
 
         // backend=api but no key → None.
         std::env::set_var("CAMERATA_LLM_BACKEND", "api");
         std::env::remove_var("ANTHROPIC_API_KEY");
-        assert!(anthropic_api_backend_key().is_none());
+        assert!(anthropic_api_backend_key(&creds).is_none());
 
         // key but backend not api (default cli) → None.
         std::env::remove_var("CAMERATA_LLM_BACKEND");
         std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-x");
-        assert!(anthropic_api_backend_key().is_none());
+        assert!(anthropic_api_backend_key(&creds).is_none());
 
         // backend=cli explicitly + key → None.
         std::env::set_var("CAMERATA_LLM_BACKEND", "cli");
         std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-x");
-        assert!(anthropic_api_backend_key().is_none());
+        assert!(anthropic_api_backend_key(&creds).is_none());
 
         // Both signals → Some(key).
         std::env::set_var("CAMERATA_LLM_BACKEND", "api");
         std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-x");
-        assert_eq!(anthropic_api_backend_key().as_deref(), Some("sk-ant-x"));
+        assert_eq!(anthropic_api_backend_key(&creds).as_deref(), Some("sk-ant-x"));
 
         // backend=api + empty key → None.
         std::env::set_var("ANTHROPIC_API_KEY", "   ");
-        assert!(anthropic_api_backend_key().is_none());
+        assert!(anthropic_api_backend_key(&creds).is_none());
+    }
+
+    /// ROUTES-9: the credential STORE is consulted first for the Anthropic key, so a
+    /// store-saved key routes to the Anthropic API path with NO `ANTHROPIC_API_KEY` env set
+    /// (proving the removed per-request `set_var` is no longer needed for no-restart effect).
+    #[test]
+    fn anthropic_backend_key_reads_store_without_env() {
+        use crate::credentials::CredentialStore as _;
+        let _g = env_lock();
+        let _snap = EnvSnapshot::capture();
+
+        // Backend=api (startup-hydrated env), NO ANTHROPIC_API_KEY env at all.
+        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+
+        let creds = empty_creds();
+        // Empty store + no env → None.
+        assert!(anthropic_api_backend_key(&creds).is_none());
+
+        // Save the key to the store only → helper returns it with no env mutation.
+        creds.set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-store").unwrap();
+        assert_eq!(
+            anthropic_api_backend_key(&creds).as_deref(),
+            Some("sk-ant-store"),
+            "a store-saved key must route to the API path with no env set"
+        );
+        assert!(
+            std::env::var("ANTHROPIC_API_KEY").is_err(),
+            "reading the store must not have mutated process env"
+        );
     }
 
     // The driver-selection routing decision is `anthropic_api_backend_key()` (exhaustively
@@ -3709,31 +4039,36 @@ mod tests {
     fn build_claude_driver_builds_on_api_and_cli_paths_without_spawn() {
         let _g = env_lock();
         let _snap = EnvSnapshot::capture();
+        let creds = empty_creds();
 
         // claude + api + key: routing helper fires, driver builds (no claude spawn).
         std::env::set_var("CAMERATA_LLM_BACKEND", "api");
         std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
-        assert!(anthropic_api_backend_key().is_some());
+        assert!(anthropic_api_backend_key(&creds).is_some());
         let _api_driver = build_claude_driver(
             "claude-opus-4-8",
+            &creds,
             "/tmp/fake-mcp.json",
             vec![gov1_rule()],
             Some(PathBuf::from("/tmp/wt")),
             false,
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         ); // building must not panic / spawn
 
         // default cli: routing helper does not fire, CLI driver builds.
         std::env::remove_var("CAMERATA_LLM_BACKEND");
         std::env::remove_var("ANTHROPIC_API_KEY");
-        assert!(anthropic_api_backend_key().is_none());
+        assert!(anthropic_api_backend_key(&creds).is_none());
         let _cli_driver = build_claude_driver(
             "claude-opus-4-8",
+            &creds,
             "/tmp/fake-mcp.json",
             vec![gov1_rule()],
             None,
             false,
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         );
     }
 
@@ -3750,7 +4085,7 @@ mod tests {
 
         // Routing decision fires, and build_agent_driver must succeed (Anthropic API path,
         // no OpenRouter credential needed, no claude binary spawn at build time).
-        assert!(anthropic_api_backend_key().is_some());
+        assert!(anthropic_api_backend_key(&creds).is_some());
         let result = build_agent_driver(
             "claude-sonnet-4-6",
             &registry,
@@ -3762,6 +4097,7 @@ mod tests {
             limiter,
             None,
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         );
         assert!(result.is_ok(), "claude+api+key must build: {:?}", result.err().map(|e| e.to_string()));
     }
@@ -3777,7 +4113,7 @@ mod tests {
         let creds = crate::credentials::MemoryCredentialStore::new();
         let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
 
-        assert!(anthropic_api_backend_key().is_none());
+        assert!(anthropic_api_backend_key(&creds).is_none());
         let result = build_agent_driver(
             "claude-sonnet-4-6",
             &registry,
@@ -3789,6 +4125,7 @@ mod tests {
             limiter,
             None,
             false, // escalation
+            None,  // on_activity — no heartbeat in this unit test
         );
         assert!(result.is_ok(), "claude+cli must build: {:?}", result.err().map(|e| e.to_string()));
     }

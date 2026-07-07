@@ -40,6 +40,13 @@ pub struct RunStore {
     /// subprocess (the between-step `is_cancelled` checks only fire when the loop is
     /// running). Registered when the run task is spawned; removed when it finishes.
     abort_handles: Arc<Mutex<HashMap<String, tokio::task::AbortHandle>>>,
+    /// Per-run completion signal (LIFECYCLE-3). Notified the instant a run reaches a
+    /// terminal (`done = true`) state — success (`AwaitingQa`), `Failed`, or `Cancelled`.
+    /// The provenance-stamping watcher awaits this instead of polling for 5 minutes, so a
+    /// live run that legitimately outlives the old poll budget still gets stamped. Created
+    /// lazily in [`Self::create`]; `Notify` retains a single permit, so a terminal state
+    /// reached BEFORE the watcher starts awaiting is not lost.
+    completion: Arc<Mutex<HashMap<String, Arc<tokio::sync::Notify>>>>,
 }
 
 impl RunStore {
@@ -49,6 +56,7 @@ impl RunStore {
             counter: Arc::new(AtomicUsize::new(0)),
             cancel_signals: Arc::new(Mutex::new(HashMap::new())),
             abort_handles: Arc::new(Mutex::new(HashMap::new())),
+            completion: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -85,6 +93,10 @@ impl RunStore {
                 Arc::new(std::sync::atomic::AtomicBool::new(false)),
             );
         }
+        // Register a completion signal (LIFECYCLE-3): notified when the run goes terminal.
+        if let Ok(mut completion) = self.completion.lock() {
+            completion.insert(id.clone(), Arc::new(tokio::sync::Notify::new()));
+        }
         id
     }
 
@@ -92,12 +104,68 @@ impl RunStore {
         self.runs.lock().ok()?.get(id).cloned()
     }
 
+    /// LIFECYCLE-9 (single-flight guard): return the FIRST active (non-`done`) run on
+    /// `story_id`, if any. "Active" is simply `!run.done` — a run is done only once it
+    /// reaches a terminal state (AwaitingQa success, Failed, Cancelled) or is marked done
+    /// (a superseded paused run). A story with an active run must not start a second run
+    /// (two runs would share one worktree) and its worktree must not be torn down.
+    /// Returns a cloned snapshot so the caller holds no lock.
+    pub fn active_run_for_story(&self, story_id: &str) -> Option<Run> {
+        let guard = self.runs.lock().ok()?;
+        guard
+            .values()
+            .find(|r| r.story_id == story_id && !r.done)
+            .cloned()
+    }
+
+    /// LIFECYCLE-6 (stall sweep): snapshot every ACTIVE (non-`done`) run. Returns cloned
+    /// snapshots so the caller (the background stall sweep) holds no lock while it evaluates
+    /// each run's stall decision and, when needed, cancels it. Done runs are excluded because
+    /// a terminal run can never stall.
+    pub fn snapshot_active(&self) -> Vec<Run> {
+        match self.runs.lock() {
+            Ok(guard) => guard.values().filter(|r| !r.done).cloned().collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Return `true` when this status is a TERMINAL run status that must never be
+    /// overwritten by a late executor (LIFECYCLE-1 / LIFECYCLE-2): an explicit
+    /// `Cancelled` or `Failed`. `AwaitingQa` (the success terminal) is intentionally NOT
+    /// here — it is still reached via the normal `set_status(.., true)` success path, and
+    /// the `done` guard below prevents any further mutation once it lands.
+    fn is_terminal_status(status: &RunStatus) -> bool {
+        matches!(status, RunStatus::Cancelled | RunStatus::Failed { .. })
+    }
+
+    /// Notify the per-run completion signal (LIFECYCLE-3). Called by every terminal setter
+    /// so a `wait_until_done` awaiter wakes the instant the run finishes.
+    fn signal_completion(&self, id: &str) {
+        if let Ok(completion) = self.completion.lock() {
+            if let Some(n) = completion.get(id) {
+                n.notify_one();
+            }
+        }
+    }
+
     pub(crate) fn set_status(&self, id: &str, status: RunStatus, done: bool) {
+        let mut became_done = false;
         if let Ok(mut guard) = self.runs.lock() {
             if let Some(run) = guard.get_mut(id) {
+                // TERMINAL GUARD (LIFECYCLE-1): once a run is done, or has been explicitly
+                // Cancelled/Failed, refuse any further status mutation. This stops a late
+                // executor (one that kept running past a cancel/fail) from resurrecting a
+                // terminal run and, e.g., advancing it to AwaitingQa as if it had succeeded.
+                if run.done || Self::is_terminal_status(&run.status) {
+                    return;
+                }
                 run.status = status;
                 run.done = done;
+                became_done = done;
             }
+        }
+        if became_done {
+            self.signal_completion(id);
         }
     }
 
@@ -106,10 +174,15 @@ impl RunStore {
     /// run. Preserving the last status keeps the history honest (it really did stop at review),
     /// while `done = true` stops it lingering as an open run forever.
     pub fn mark_done(&self, id: &str) {
+        let mut became_done = false;
         if let Ok(mut guard) = self.runs.lock() {
             if let Some(run) = guard.get_mut(id) {
+                became_done = !run.done;
                 run.done = true;
             }
+        }
+        if became_done {
+            self.signal_completion(id);
         }
     }
 
@@ -140,13 +213,26 @@ impl RunStore {
         }
     }
 
-    /// Mark a run as failed with a human-readable reason. Sets `done = true`.
+    /// Mark a run as failed with a human-readable reason. Sets `done = true` and a genuine
+    /// `Failed` terminal status (LIFECYCLE-2: a failure is NOT a success). Idempotent
+    /// terminal: an already-terminal run (done / Cancelled / Failed) is left untouched so a
+    /// late failure can't clobber a cancel, and a cancel can't be relabelled a failure.
     pub fn fail_with_reason(&self, id: &str, reason: String) {
-        let mut runs = self.runs.lock().unwrap();
-        if let Some(run) = runs.get_mut(id) {
-            run.status = RunStatus::Failed { reason: reason.clone() };
-            run.failure_reason = Some(reason);
-            run.done = true;
+        let mut became_done = false;
+        {
+            let mut runs = self.runs.lock().unwrap();
+            if let Some(run) = runs.get_mut(id) {
+                if run.done || Self::is_terminal_status(&run.status) {
+                    return;
+                }
+                run.status = RunStatus::Failed { reason: reason.clone() };
+                run.failure_reason = Some(reason);
+                run.done = true;
+                became_done = true;
+            }
+        }
+        if became_done {
+            self.signal_completion(id);
         }
     }
 
@@ -190,13 +276,20 @@ impl RunStore {
         }
         // Update the run record to a terminal Cancelled state so GET /api/runs/:id reports
         // it (the aborted task can no longer set status itself).
-        let mut runs = self.runs.lock().unwrap();
-        if let Some(run) = runs.get_mut(id) {
-            // Don't clobber an already-terminal failure/cancel.
-            if !run.done {
-                run.status = RunStatus::Cancelled;
-                run.done = true;
+        let mut became_done = false;
+        {
+            let mut runs = self.runs.lock().unwrap();
+            if let Some(run) = runs.get_mut(id) {
+                // Don't clobber an already-terminal failure/cancel.
+                if !run.done {
+                    run.status = RunStatus::Cancelled;
+                    run.done = true;
+                    became_done = true;
+                }
             }
+        }
+        if became_done {
+            self.signal_completion(id);
         }
     }
 
@@ -207,6 +300,46 @@ impl RunStore {
             .get(id)
             .map(|sig| sig.load(std::sync::atomic::Ordering::SeqCst))
             .unwrap_or(false)
+    }
+
+    /// Await the run's terminal (`done`) state and return the final [`Run`] snapshot
+    /// (LIFECYCLE-3). Completion-driven: the future resolves the instant a terminal setter
+    /// (`set_status(.., true)`, `fail_with_reason`, `cancel`, `mark_done`) fires the
+    /// per-run completion signal, so a live run that outlives the old 5-minute poll budget
+    /// is still stamped. `safety_timeout` is a backstop, NOT the normal path: if it elapses
+    /// (the run wedged without ever going terminal, or the run id is unknown) the future
+    /// resolves to `None` and the caller stamps nothing. The completion `Notify` retains a
+    /// permit, so a run that went terminal BEFORE this is called still wakes immediately.
+    pub async fn wait_until_done(&self, id: &str, safety_timeout: Duration) -> Option<Run> {
+        // Grab the per-run notifier up front. Missing → unknown run id; nothing to await.
+        let notify = {
+            let completion = self.completion.lock().ok()?;
+            completion.get(id).cloned()?
+        };
+        loop {
+            // Register interest BEFORE the done-check to close the notify/observe race: if
+            // the run goes terminal between this and the check below, the retained permit
+            // makes the subsequent `notified().await` return immediately.
+            let notified = notify.notified();
+            if let Some(run) = self.get(id) {
+                if run.done {
+                    return Some(run);
+                }
+            } else {
+                return None;
+            }
+            match tokio::time::timeout(safety_timeout, notified).await {
+                Ok(()) => {
+                    // Woken by a terminal transition; re-check on the next loop turn.
+                    continue;
+                }
+                Err(_) => {
+                    // Backstop elapsed. Return the terminal run if it somehow finished
+                    // without notifying, else `None` (wedged / unknown).
+                    return self.get(id).filter(|r| r.done);
+                }
+            }
+        }
     }
 }
 
@@ -668,6 +801,81 @@ mod tests {
         assert!(run.done);
         // The cancel signal is still set (between-step checks would see it), which is fine.
         assert!(store.is_cancelled(&id));
+    }
+
+    #[test]
+    fn set_status_cannot_overwrite_a_terminal_cancelled_run() {
+        // LIFECYCLE-1: a late executor calling set_status(AwaitingQa, true) on a run that
+        // was already Cancelled must be a no-op — no resurrection to a success terminal.
+        let store = RunStore::new();
+        let id = store.create("S-GUARD-C", "live", RunKind::Watched);
+        store.cancel(&id);
+        // A stale executor tries to complete the run as if it succeeded.
+        store.set_status(&id, RunStatus::AwaitingQa, true);
+        let run = store.get(&id).unwrap();
+        assert_eq!(run.status, RunStatus::Cancelled);
+        assert!(run.done);
+    }
+
+    #[test]
+    fn set_status_cannot_overwrite_a_terminal_failed_run() {
+        // LIFECYCLE-2: a failed run stays failed; a late AwaitingQa cannot relabel it.
+        let store = RunStore::new();
+        let id = store.create("S-GUARD-F", "live", RunKind::Watched);
+        store.fail_with_reason(&id, "gateway binary missing".to_string());
+        store.set_status(&id, RunStatus::AwaitingQa, true);
+        let run = store.get(&id).unwrap();
+        assert_eq!(
+            run.status,
+            RunStatus::Failed { reason: "gateway binary missing".to_string() }
+        );
+        assert!(run.done);
+    }
+
+    #[test]
+    fn fail_with_reason_does_not_clobber_a_cancelled_run() {
+        // A cancel that raced ahead of a failure wins: the run stays Cancelled.
+        let store = RunStore::new();
+        let id = store.create("S-GUARD-CF", "live", RunKind::Watched);
+        store.cancel(&id);
+        store.fail_with_reason(&id, "late failure".to_string());
+        let run = store.get(&id).unwrap();
+        assert_eq!(run.status, RunStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn wait_until_done_resolves_on_terminal_transition() {
+        // LIFECYCLE-3: the completion path resolves when the run goes terminal, WITHOUT a
+        // wall-clock poll. A tiny background task flips the run to AwaitingQa; the awaiter
+        // wakes on the signal (safety timeout is a generous backstop, never the path).
+        let store = RunStore::new();
+        let id = store.create("S-WAIT", "live", RunKind::Watched);
+        let store2 = store.clone();
+        let id2 = id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            store2.set_status(&id2, RunStatus::AwaitingQa, true);
+        });
+        let run = store
+            .wait_until_done(&id, Duration::from_secs(30))
+            .await
+            .expect("terminal run");
+        assert_eq!(run.status, RunStatus::AwaitingQa);
+        assert!(run.done);
+    }
+
+    #[tokio::test]
+    async fn wait_until_done_returns_immediately_when_already_terminal() {
+        // The Notify retains a permit: a run that went terminal BEFORE the awaiter starts
+        // is not lost — wait_until_done returns the terminal snapshot right away.
+        let store = RunStore::new();
+        let id = store.create("S-WAIT-PRE", "live", RunKind::Watched);
+        store.fail_with_reason(&id, "boom".to_string());
+        let run = store
+            .wait_until_done(&id, Duration::from_secs(30))
+            .await
+            .expect("terminal run");
+        assert!(matches!(run.status, RunStatus::Failed { .. }));
     }
 
     #[test]

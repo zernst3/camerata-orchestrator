@@ -15,6 +15,7 @@ pub mod escalation;
 pub mod lifecycle;
 pub mod project;
 pub mod prompt_kernel;
+pub mod prompt_layers;
 pub mod readiness;
 pub mod routine;
 pub mod run;
@@ -26,3 +27,8 @@ pub mod uow;
 pub use prompt_kernel::{
     kernel_for, tier_of, KernelTier, GOVERNANCE_KERNEL, GOVERNANCE_KERNEL_READONLY,
 };
+
+// The geological prompt layering (prefix-cache-optimal assembly): builders assemble Layer 1
+// (global immutable) / Layer 2 (grounding) / Layer 3 (volatile) in order and read the stable
+// prefix length off `LayeredPrompt` for a provider-neutral cache breakpoint.
+pub use prompt_layers::LayeredPrompt;

@@ -308,6 +308,36 @@ Layer-2 is the deterministic gate that runs on the agent's OUTPUT after a task
 finishes, in the coordinator's bounce-and-revise loop. It is **cross-language,
 polyglot, repo-pinned, and fail-closed** — no longer Rust-only-hardcoded.
 
+### The `CheckRunner` return: `CheckOutcome { violated, diagnostics }`
+
+`CheckRunner::check` returns a `CheckOutcome`, not a bare `Vec<RuleId>`:
+
+```rust
+pub struct CheckOutcome {
+    pub violated: Vec<RuleId>,   // the rule-id verdict the loop bounces on
+    pub diagnostics: String,     // captured, truncation-bounded toolchain stdout/stderr
+}
+```
+
+`violated` is unchanged behaviour: the structural verdict. `diagnostics` is the
+raw toolchain output (clippy / tsc / pytest / go vet / manifest command
+stdout+stderr) each runner captures while producing that verdict — the "strict
+stack trace" a literal open-weight model needs in order to self-correct rather
+than guessing from the rule id alone. Every runner populates it (empty on a clean
+pass, or when the tool has no meaningful stdout). The composites (`RustCheckRunner`,
+`PolyglotCheckRunner`, `CombinedCheckRunner`, `ManifestCheckRunner`) concatenate
+their sub-runners' diagnostics in cheapest-first order so the most-relevant output
+lands last.
+
+To bound prompt size and keep the KV-prefix cache warm, `CheckOutcome` caps
+`diagnostics` at **`DIAGNOSTICS_CAP_BYTES` = 16 KiB**, dropping the OLDEST bytes
+(head) and keeping the TAIL — the failing assertion / final error summary — on a
+UTF-8 char boundary. The Layer-2 bounce (`dev_implement_run.rs`) appends this
+diagnostics text AFTER the violated rule ids, at the same cache-friendly prompt
+tail `append_bounce_feedback` uses (see the LIFECYCLE-5 ADR,
+`2026-07-05_lifecycle-loop-and-concurrency.md`). This is stack-agnostic: the loop
+forwards whatever the detected toolchain emitted and hardcodes no tool.
+
 ### The SSOT manifest (`.camerata/checks.toml`)
 
 `.camerata/checks.toml` is the **single source of truth** for custom deterministic
@@ -445,8 +475,10 @@ concrete sub-runners:
   test or compile failure to `RuleId("RUST-TEST")`.
 
 `RustCheckRunner::check` runs them sequentially, cheapest-first (fmt errors make
-clippy noisy; a compile failure makes tests redundant) and deduplicates the
-resulting `Vec<RuleId>`. The subprocess invocation layer
+clippy noisy; a compile failure makes tests redundant), deduplicates the resulting
+`violated` rule ids, and accumulates each sub-runner's captured stdout/stderr into
+the `CheckOutcome.diagnostics` in that same cheapest-first order (test failures
+land last). The subprocess invocation layer
 (`crates/checks/src/subprocess.rs`) and the output-to-`RuleId` mapping layer
 (`crates/checks/src/parse.rs`) are kept separate so the mapping logic is
 unit-testable without spawning real subprocesses.
@@ -616,8 +648,11 @@ One `statvfs` syscall; no shell-out to `df`.
 
 **3. Terminal-state worktree teardown + startup sweep.**
 
-- **On sign-off teardown** — already in place (calls `remove_uow_worktree` at
-  `lib.rs`). No change.
+- **On sign-off teardown** — calls `remove_uow_worktree` in `sign_off_run` (`lib.rs`).
+  **Deferred while a run is live (LIFECYCLE-9):** the destructive teardown is withheld until
+  `run.done`, so a sign-off cannot yank the worktree out from under a still-running agent. The
+  sign-off itself is still recorded; only `remove_uow_worktree` is deferred (with an honest history
+  note) until the run reaches a terminal state.
 - **Startup sweep (extended):** Pass 1 — Terminal-state sweep: for every UoW in
   `SignedOff` state that has a branch, call `remove_uow_worktree` (reclaims
   worktrees that leaked through crashes between sign-off and the on-sign-off
@@ -692,11 +727,47 @@ Key design points:
   (`GET /api/v1/models`). Each entry is tagged with capability flags:
   `free`, `tool_use`, `caching`, `vision`, plus `input_price`/`output_price`
   (per-million-token). The registry is fetched once per session and cached.
-- **Prompt caching**: ephemeral `cache_control` blocks are injected on the
-  static system-prompt prefix, making the prefix cache-eligible. OpenRouter
-  response caching is honoured via `X-OpenRouter-Cache` (the driver reads
-  `Cache-Status` and `Cache-Clear` response headers). Both forms of caching are
-  transparent to the caller.
+- **Prompt caching + geological layering**: every agent prompt is assembled in a
+  strict, prefix-cache-optimal order (static at the top, volatile at the bottom) so
+  the cacheable prefix stays byte-identical across calls that differ only in the tail.
+  `camerata_app_core::LayeredPrompt` (`crates/app-core/src/prompt_layers.rs`) is the
+  pure, deterministic assembler with three layers:
+    - **Layer 1 (global immutable, top):** the governance kernel + role framing +
+      project rules/schemas. Identical across every call for a project/model tier.
+    - **Layer 2 (epic/session context, middle):** the grounding block (repo digest +
+      rule context) for the current work area. Changes only every few days.
+    - **Layer 3 (volatile, bottom):** the specific story, the LATEST toolchain/gate
+      error (the LIFECYCLE-5 feedback appended at the very tail), and the turn request.
+  `LayeredPrompt::stable_prefix_len` reports the byte length of Layers 1+2 so a
+  provider adapter can place a cache breakpoint exactly at that boundary. The prefix
+  serializes deterministically (trimmed layers, ordered joins, no timestamps, no
+  nondeterministic map iteration); a unit test proves it is byte-identical across two
+  builds that differ only in Layer-3 input.
+  **Provider-neutral activation:** the prompt builders never mention a vendor. The
+  Anthropic body builder (`api_agent_driver.rs::build_anthropic_request_body`) is the
+  only place that translates the layering into `cache_control` breakpoints: ephemeral
+  blocks on the static system prefix (end of Layer 1) and at the end of the Layer-2
+  grounding block inside the first user message (detected via the grounding terminator
+  marker `=== END PROJECT GROUNDING ===`, so only the volatile Layer-3 tail is billed at
+  full price on each turn). DeepSeek/GLM cache the same stable prefix automatically with
+  no config. The single-shot audit path carries the same seam via
+  `LlmRequest::with_cache_prefix_len`. OpenRouter response caching is honoured via
+  `X-OpenRouter-Cache` (the driver reads `Cache-Status` and `Cache-Clear` response
+  headers). All forms of caching are transparent to the caller.
+  **Verification:** `LlmResponse::cache_hit_ratio` computes the cached fraction of the
+  call's input tokens; the API agent loop logs it per turn, so a prefix that is holding
+  drives the ratio toward 1.0 after the first turn and a churning prefix shows up as a
+  ratio stuck near 0.
+- **Governance kernel (v2)**: the one shared operating protocol every agent prompt
+  embeds (`crates/app-core/src/prompt_kernel.rs`: `GOVERNANCE_KERNEL` /
+  `GOVERNANCE_KERNEL_READONLY`, specialized per model tier by `kernel_for`). v2 adds a
+  mandatory, STACK-NEUTRAL `<Reasoning>` block the writing agent must emit before any
+  code (naming this stack's real correctness risks such as memory/ownership, types,
+  concurrency, null/None; how it manages state; and the exact signatures/interfaces it
+  will change; phrased generically, not Rust-specifically), plus state-machine phase
+  framing on the fast (2-phase) and balanced (3-phase, test-first) tier addenda ("you
+  are in Phase N of M; you may only output X; any other output is rejected") so literal
+  open-weight models stay predictable.
 - **Rate limiting**: per-provider rate-limit headers are parsed and respected;
   on a 429 the driver backs off and retries within the per-request fallback policy.
 - **Request-level fallback**: if the configured primary model returns an error
@@ -786,9 +857,25 @@ issue.
 `on_activity` callback calls `RunStore::touch_activity` so each streamed output line
 also advances the clock.
 
+**Every agent-driving runner wires the heartbeat (LIFECYCLE-7).** `investigation_run`,
+`update_branch_run`, `dev_implement_run`, and `pr_resolve_run` all pass
+`Arc::new(move || runs.touch_activity(&run_id, None))` onto their driver.
+`build_agent_driver` / `build_claude_driver` take an `Option<HeartbeatFn>` and wire it onto
+whichever concrete driver they build. The **CLI driver** beats per streamed output line; the
+**`ApiAgentDriver`** (OpenRouter / Anthropic-API in-process loop) has no line stream, so it
+beats **once per loop turn** via an `on_activity` field fired at the top of each iteration.
+Without this, the two longest paths (dev-implement, pr-resolve) false-reported as stalled the
+moment they went quiet during a long tool call.
+
 Two pure functions derive stall state:
 - `idle_ms(last_activity_ms, now_ms) -> u128`
 - `is_stalled(idle_ms, threshold_ms) -> bool`
+
+**Done and parked runs are never stalled.** `get_run` reports `stalled = false` for any `done`
+run and for a human-PARKED run (`RunStatus::is_parked()` → `AwaitingReview` /
+`AwaitingClarification`) regardless of idle time — those are intentionally idle, not wedged.
+`stall_decision` short-circuits the same cases to `Ok`, so the banner and the auto-cancel sweep
+agree.
 
 For onboarding scan jobs, `JobMeta.last_activity_ms` is updated by
 `det_tool_running` and `det_tool_done`, so scan jobs carry the same liveness
@@ -831,10 +918,22 @@ endpoints and renders stall state from the response fields.
 | `Autonomous` (routine / walk-away) | `Cancel` | The run is auto-stopped into a terminal `Failed { reason }` state. The recorded failure reason IS the operator signal for a walk-away job. |
 
 `stall_decision()` is the pure transition function from stall state + policy to action.
+`start_governed_run` takes the `RunKind`: the interactive HTTP start passes `Watched`; the
+routine/scheduler-driven walk-away path passes `Autonomous`.
+
+**The auto-cancel actor is a background sweep (LIFECYCLE-6).** `crate::stall_sweep`, spawned
+from `serve()` (not `router`, so router-only tests never auto-cancel), periodically snapshots
+every ACTIVE run and applies `stall_decision(run, project.stall_threshold_ms(kind), now)`. On
+`StallDecision::Cancel` it calls `RunStore::fail_with_reason` with an honest reason (idle
+seconds + threshold). `Cancel` is only ever returned for a `Cancel`-policy run, i.e. an
+`Autonomous` run — so the sweep **only auto-cancels autonomous runs**. Watched runs that stall
+stay running (alert-only); done / parked runs are never touched. Cadence is
+`CAMERATA_STALL_SWEEP_SECS` (default 30 s), independent of the threshold itself.
 
 **The key distinction:** for a human-watched run, a stall is unusual but the human
 is present to decide. For an autonomous routine, there is no human watching — auto-
-cancel with a reason is strictly more useful than hanging indefinitely.
+cancel with a reason is strictly more useful than hanging indefinitely. See
+`docs/decisions/2026-07-05_liveness-and-stall.md`.
 
 ### Per-project dual thresholds (`StallThresholds`)
 
@@ -845,12 +944,18 @@ project JSON):
 | Field | Default | Applies to |
 |---|---|---|
 | `watched_secs` | 120 | `RunKind::Watched` (interactive dev runs) |
-| `routine_secs` | 600 | `RunKind::Autonomous` (routines) |
+| `routine_secs` | 1800 (`DEFAULT_ROUTINE_STALL_SECS`) | `RunKind::Autonomous` (routines) |
 
-`project.stall_threshold_ms(autonomous: bool)` selects the right field and
-converts to milliseconds. There is **no env-var fallback** once a project exists —
-the project's stored value is authoritative, mirroring the `StepModels` pattern.
-Per-project isolation: a change to project A's thresholds never touches project B.
+The routine default is deliberately **generous (30 min)**: an autonomous run auto-cancels on
+stall with no human watching, so it earns a long grace period before the sweep reaps it. The
+env override `CAMERATA_RUN_STALL_THRESHOLD_SECS` still applies to the serde defaults (scaled x5
+off the watched base) when set.
+
+`project.stall_threshold_ms(autonomous: bool)` selects the right field and converts to
+milliseconds. `get_run` and the stall sweep both read the **active project's** value, falling
+back to the env/default only when no project is active — so the reported `stalled` flag and the
+auto-cancel decision use the same threshold. Per-project isolation: a change to project A's
+thresholds never touches project B.
 
 **Why two thresholds?** A human-watched run warrants a shorter patience window —
 the operator can act if something is wrong. A walk-away autonomous routine warrants
@@ -880,6 +985,54 @@ Two endpoints cancel a run or scan job, both idempotent, both returning `204 No 
 The distinction matters: **Failed** (with a reason) signals an unintended stop —
 for an autonomous routine, the reason is the actionable diagnostic. **Cancelled**
 signals an intentional, operator-initiated stop.
+
+**Cancel really stops (LIFECYCLE-1).** Every run spawn (the two `live_fleet` spawns,
+`spawn_brownfield_dev_run` (fresh + resume), `update_branch`, `pr_resolve`, and
+investigation) registers a `tokio` abort handle in `RunStore`. `POST /cancel` sets an
+atomic flag AND aborts the driving task; the aborted future drops the agent driver, whose
+`claude` child is `kill_on_drop(true)`, so a Stop reaches a run blocked inside a live
+subprocess. Each runner also checks `is_cancelled` between major steps and **immediately
+before every git mutation** (before commit, before push, and before the merge / merge
+commit in `update_branch`). On cancel the runner stops BEFORE any git write: no commit, no
+push (a mid-merge cancel aborts the merge so no half-merged tree lingers). Finally,
+`RunStore::set_status` carries a **terminal guard** (it refuses to mutate a run that is
+already `done` or `Cancelled` / `Failed`), so a late executor can no longer resurrect a
+cancelled run and advance it to `AwaitingQa`.
+
+**Single-flight per story (LIFECYCLE-9).** A story may have at most one active (non-`done`)
+run at a time — two concurrent runs would resolve the SAME per-UoW worktree and edit each
+other's files. `RunStore::active_run_for_story` returns the first non-`done` run on a story;
+`start_run` rejects a second start with **409** (naming the active run), BEFORE the development
+gate. The paused-then-resumed path is not blocked (a resume marks the paused run `done` before
+the resume run supersedes it). See `docs/decisions/2026-07-05_lifecycle-loop-and-concurrency.md`.
+
+### Provenance stamping: completion-driven and success-gated
+
+When a governed run finishes, a per-run watcher (`stamp_provenance_when_done`, spawned by
+`spawn_provenance_watcher` for BOTH fresh `start_governed_run` and resumed
+`resume_governed_run`, LIFECYCLE-4) freezes the run's gate accounting onto the story's UoW.
+
+- **Completion-driven, not polled (LIFECYCLE-3).** The watcher awaits
+  `RunStore::wait_until_done`, which resolves the instant a terminal setter fires the run's
+  `tokio::sync::Notify` completion signal (the `Notify` retains a permit, so a run that
+  finishes before the watcher awaits is not missed). A live run of any duration is stamped
+  the moment it finishes; the old `MAX_POLLS = 600` (~5 min) poll cliff is gone. A 6 h
+  `safety_timeout` is a backstop against a wedged run, never the normal path.
+- **Advances only on success (LIFECYCLE-2).** The watcher branches on the terminal STATUS:
+
+  | Terminal status | Gate provenance frozen | Stage `Development → AwaitingQa` | QA evidence attached |
+  |---|---|---|---|
+  | `AwaitingQa` (success) | yes | yes | yes |
+  | `Failed { reason }` | yes (honest record of what the gate saw) | no | no |
+  | `Cancelled` | no | no | no |
+
+  Runner failure paths now call `fail_with_reason` (a genuine `Failed` terminal) rather than
+  the old `AwaitingQa + done`, so the sign-off gate can trust that AwaitingQa + attached
+  evidence means the gate actually saw completed work. The enforcement-catch ledger capture
+  runs in every terminal case (it records the gate decisions the run produced, independent of
+  whether the work advanced).
+
+See `docs/decisions/2026-07-05_lifecycle-provenance.md` for the full rationale.
 
 ### Reusability
 
@@ -944,9 +1097,18 @@ intact. A SOFT-FLAG logs a run event and continues.
 **Resume = re-spawn from the checkpoint.** Resolving the review (`answer_escalation`) branches on the
 human's action: Approve/Amend call `resume_governed_run`, which re-spawns the implement run from the
 checkpoint's worktree with the human's translated directive injected into grounding (so the agent
-continues, not restarts), marking the checkpoint resumed once-only; Reject reverts the worktree
-(`git checkout -- . && git clean -fd`) and stops. Both fresh-start and resume go through one shared
-`spawn_brownfield_dev_run` helper, so they cannot drift.
+continues, not restarts), marking the checkpoint resumed once-only; Reject reverts the worktree and
+stops. Both fresh-start and resume go through one shared `spawn_brownfield_dev_run` helper, so they
+cannot drift.
+
+**Reject reverts COMMITTED snapshots too (LIFECYCLE-12).** The bounce loop makes a `camerata:
+snapshot` COMMIT per iteration, so discarding only uncommitted changes would leave the agent's work on
+the branch (pushable). `revert_worktree(worktree_dir, base_commit)` therefore runs
+`git reset --hard <checkpoint.base_commit>` FIRST — dropping every snapshot commit added since the
+branch point — THEN `git clean -fd`. Without a stored `base_commit` (older checkpoints) it falls back
+to the uncommitted-only revert (`git checkout -- . && git clean -fd`). The checkpoint always stores
+`base_commit`, so the Reject path always gets the full reset. See
+`docs/decisions/2026-07-05_lifecycle-loop-and-concurrency.md`.
 
 **UI.** The paused run surfaces in the Governed Development NEEDS YOU queue as a `UowReviewPanel`
 (Approve / Amend / Reject + a clarifying chat); a toast fires on the pause. See
@@ -1540,7 +1702,7 @@ downgraded. A finding is marked `suppressed-self-reference` when BOTH conditions
   `CONVENTIONS.md` matches Condition 2, but Condition 1 fails for `app/config.py` so no suppression
   occurs.
 - **Real secrets pasted into governance files still flag.** A developer who pastes a real token
-  (e.g., `ghp_…`) into `CONVENTIONS.md` produces a finding whose snippet is not in any rule
+  (e.g., `ghp_...`) into `CONVENTIONS.md` produces a finding whose snippet is not in any rule
   description. Condition 2 fails, so the finding stays `active`. The file is still scanned;
   only provably-self-referential matches are downranked.
 - **The gateway source (`crates/gateway/src/lib.rs`) is out of scope.** It is application source
@@ -1604,8 +1766,8 @@ pins — preview is indicative, the gate is authoritative.
 
 Mechanism:
 1. **linter → tool.** `tool_for_rule` / `tool_for_linter` derive the rule's tool
-   from its corpus `linter` source: `clippy: …`/`clippy::…` → clippy; `Ruff:
-   …`/bare `RUF…`/`S…` codes → ruff; `semgrep` → semgrep; an eslint-family id →
+   from its corpus `linter` source: `clippy: ...`/`clippy::...` → clippy; `Ruff:
+   ...`/bare `RUF...`/`S...` codes → ruff; `semgrep` → semgrep; an eslint-family id →
    eslint. The `ScanTool` enum has those four variants. Only `Mechanical` rules
    enter this path; Architectural are excluded before it.
 2. **group + run once per tool.** `group_by_tool` groups the selected rules by
@@ -1718,6 +1880,12 @@ of the picked batch mode. The `DeterministicProgress` component (`cockpit.rs`) r
 AI agent-activity drawer (overall done/total bar + per-tool rows) — the primary progress view in
 deterministic-only mode, where the AI drawer is empty. See
 `docs/decisions/2026-06-22_scan_ux_selector_and_det_progress.md`.
+
+**Deep-report export is project-scoped (ROUTES-5).** Each `JobState` carries a `project_id`
+(captured from the active project at creation) and a `completed_at_ms` (stamped in `finish`).
+`GET /api/projects/:id/deep-report` calls `latest_deep_report(project_id)`, which filters to THAT
+project's completed deep jobs and returns the newest by completion time, not an arbitrary job in
+`HashMap` order. See `docs/decisions/2026-07-05_routes-correctness.md`.
 
 ### Onboarding emits stories; the dev layer does the work
 
@@ -1991,7 +2159,7 @@ project a chosen work item onto a UoW. The handlers (in `lib.rs`, using the
   created_at }] }` — fetch the issue's comment thread for the work-item modal. Backed by
   `github_issues::get_issue_comments`. Token-less / malformed-id / fetch-error → empty list
   (graceful at the endpoint layer, never an error).
-- `POST /api/workitems/assignees` `{ work_item_id }` → `{ users: ["login", …] }` — the repo's
+- `POST /api/workitems/assignees` `{ work_item_id }` → `{ users: ["login", ...] }` — the repo's
   assignable users, driving the comment box's `@`-mention autocomplete. Backed by
   `github_issues::get_assignees`. Token-less / error → empty list (the dropdown simply never
   shows). The candidate set is GitHub's repo **assignees** (the practical mention set, not full
@@ -2063,6 +2231,14 @@ UoW API routes include `GET /api/uow`, `GET /api/uow/:story_id`,
 `POST .../status`, `POST .../branch`, `POST .../history`, plus the lifecycle
 transition and sign-off endpoints.
 
+**Read vs. write store access (ROUTES-8).** READ handlers use a NON-creating getter:
+`UowStore::get(id) -> Option<UnitOfWork>` (or `get_or_default(id)`, a transient `story_id`-stamped
+UoW that is not persisted). A GET for an unknown/typo'd id returns a UoW-shaped body with nothing
+written; it never materializes a phantom draft that would then leak into the list view. WRITE
+handlers (author, attach, diagram-set, status/branch, publish, run start) use `get_or_create`,
+which legitimately upserts and persists. `decisions_for` (a read) reads without inserting. See
+`docs/decisions/2026-07-05_routes-correctness.md`.
+
 ### Config vs. data storage separation
 
 Project **config** (transferable) and project **data** (local) are kept in separate stores:
@@ -2080,6 +2256,23 @@ history, sign-off). Transferring them would cause two developers who import the 
 inherit each other's half-finished work. Export stays config-only by design.
 
 See `docs/decisions/2026-06-21_project_config_vs_data_separation.md`.
+
+### HTTP error model (`AppError`, ROUTES-7)
+
+Handlers that can fail return `Result<_, AppError>`. `AppError { status, err }` renders as
+`(status, Json({ "error": err.to_string() }))`. The status is chosen at the failure site:
+
+| Constructor | Status | Use |
+|---|---|---|
+| `AppError(e)` / `?` conversion | 500 Internal | a genuine internal fault (default) |
+| `AppError::not_found(e)` | 404 | a missing resource (run/project/story/routine/escalation/...) |
+| `AppError::bad_request(e)` | 400 | invalid request input (malformed repo, empty body, bad id) |
+| `AppError::with_status(s, e)` | any | e.g. 409 Conflict for an already-resolved escalation |
+
+The BODY shape (`{ "error": "..." }`) is stable across all statuses, so UI code that parses `{error}`
+is unaffected by the status classification. Before ROUTES-7 every failure mapped to 500 regardless
+of cause; the field always existed but the constructors that set 4xx were rarely used. See
+`docs/decisions/2026-07-05_routes-correctness.md`.
 
 ### Investigation run (`POST /api/uow/:story_id/begin-investigation`)
 
@@ -2269,7 +2462,7 @@ gated agent to resolve the markers and `git add` — the agent does NOT commit o
 completes the merge commit. The gated agent is built from the SAME
 `camerata_fleet::governed_role` + `camerata_agent::prepare_session` machinery the investigation
 runner uses, so it carries the identical `--allowedTools` = `gated_write` only and the identical
-denylist (`Task`, `Write`, `Bash`, …); its only mutation path is layer-1, it cannot spawn
+denylist (`Task`, `Write`, `Bash`, ...); its only mutation path is layer-1, it cannot spawn
 sub-agents, and the repo dir jails its writes. None of `crates/agent`, `crates/gateway`, or
 `crates/fleet` internals were modified.
 
@@ -2748,6 +2941,19 @@ In `execute_dev_implement_run` (`crates/server/src/dev_implement_run.rs`):
 4. If L3 bounces, the bounce reasons are fed back to the agent on the next iteration (shared
    bounce-and-revise budget with L2). A `layer-3 bounce` event is recorded in the run log.
 
+**The bounce loop feeds failures back into the re-prompt (LIFECYCLE-5).** The implement prompt is
+split into a stable `base_task` (built once — the cache-friendly prefix) and a per-pass `task`. On
+each bounce, `append_bounce_feedback(&base_task, iteration, &feedback)` rebuilds `task` with the
+failed iteration's feedback appended at the **tail**, so the re-run agent gets NEW information instead
+of re-reading the identical prompt. Tail placement keeps the KV-cache prefix warm (only the error
+delta is new). `feedback` is **stack-agnostic** — whatever the check emitted: the violated rule ids
+from Layer-2 (Rust clippy/test, tsc, pytest, go vet, manifest checks), the Layer-3 reviewer's
+findings, or the integration-gate contract-mismatch reason — applied at all five bounce points. It
+mirrors the `directive_grounding` tail-append from `resume_governed_run`. (Honest limit: the
+`CheckRunner` trait returns `Vec<RuleId>`, so Layer-2 feedback carries rule ids, not raw compiler
+stdout; L3 and the gate carry full reason text. Richer Layer-2 feedback awaits a trait change routed
+separately.)
+
 L3 therefore runs **once the change is code-complete and has passed L1+L2** (the reviewer never
 sees code that hasn't cleared the mechanical checks). It can run on more than one iteration only
 because an L3 bounce sends the agent back, after which L1+L2 must pass clean again before L3 re-runs
@@ -2804,7 +3010,7 @@ descriptive message when no local workspace is configured.
 The single **"Emit rules locally"** button in the **Rules view** (`crates/ui/src/cockpit/rules.rs`)
 calls `POST /api/projects/:id/emit-local`, sending the three cascading toggles (Save emits on a new
 branch → Push to GitHub → Open a PR). The old separate "Emit ruleset to repos (re-emit)" PR button
-is removed. The label switches to "Emitting…" while in flight.
+is removed. The label switches to "Emitting..." while in flight.
 
 The Rules view also exposes **"Reconcile with repos"** (`GET /api/projects/:id/reconcile`,
 `reconcile_project`), which reads each repo's emitted gate config (local working copy first, then
@@ -2896,7 +3102,7 @@ selector** checkboxes live on the Onboard tab's audit UI (§6), not here.
 
 `WorkItemTable` (in `cockpit.rs`) renders GitHub issues grouped by their hierarchy.
 The grouping is generic: for each issue, an `ancestor_path` is computed from the
-GitHub issue tree (parent issue → grandparent → …). Each ancestor depth level gets
+GitHub issue tree (parent issue → grandparent → ...). Each ancestor depth level gets
 its own **Chorale grouping column** in the table. GitHub enforces an 8-level
 ceiling on sub-issue nesting, so at most 8 grouping columns appear.
 

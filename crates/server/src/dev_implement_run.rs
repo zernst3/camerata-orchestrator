@@ -53,7 +53,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use camerata_agent::prepare_session;
+use camerata_agent::{prepare_session, HeartbeatFn};
 use camerata_checks::runner_for_worktree;
 use camerata_core::{AgentDriver, RuleId};
 use camerata_fleet::{governed_role, locate_gateway_bin};
@@ -652,11 +652,22 @@ pub fn implement_prompt(
         camerata_app_core::kernel_for(model)
     };
 
-    format!(
+    // GEOLOGICAL LAYERING (prefix-cache-optimal, provider-neutral):
+    //   Layer 1 (global immutable, top; maximal cache) = the role header + the governance kernel.
+    //     Identical across every call for this model tier and project.
+    //   Layer 2 (epic/session context, middle; highly cached) = the grounding block (repo digest
+    //     + rule context). Changes only every few days.
+    //   Layer 3 (volatile execution state, bottom; never cached) = the story, the approved
+    //     decisions, the escalation conditions, the required procedure, and (appended later by
+    //     `append_bounce_feedback`) the LATEST toolchain/gate error. Different on almost every call.
+    // The volatile story/error/diff MUST stay at the bottom so it never perturbs the cached
+    // prefix. See camerata_app_core::prompt_layers and the plan's cache-layering section.
+    let layer1_global = format!(
         "You are the BROWNFIELD IMPLEMENTER for story `{story_id}` (branch `{target_branch}`).\n\n\
-         {kernel}\n\n\
-         {grounding_block}\
-         ## Story\n\n\
+         {kernel}"
+    );
+    let layer3_volatile = format!(
+        "## Story\n\n\
          Title: {story_title}\n\
          Description: {story_desc}\n\n\
          ## Architect-approved decisions (the spec)\n\n\
@@ -683,6 +694,44 @@ pub fn implement_prompt(
          Do NOT change unrelated files. Never weaken or skip tests.\n\n\
          ## Final report (exact format)\n\n\
          CHANGES / TESTS / DECISIONS-TRACE / CONCERNS (NONE if empty)."
+    );
+
+    let mut layered = camerata_app_core::LayeredPrompt::new(layer1_global, layer3_volatile);
+    if !grounding_block.trim().is_empty() {
+        layered = layered.with_grounding(grounding_block);
+    }
+    layered.render()
+}
+
+/// LIFECYCLE-5: append the previous bounce iteration's failure feedback to the TAIL of the
+/// base implement prompt, so the re-run agent gets the NEW information (violated rule ids +
+/// the full toolchain / gate error text) instead of re-reading the identical prompt.
+///
+/// Tail placement is deliberate and cache-friendly: the base prompt (`base_task`) is the
+/// stable, cached prefix; only this delta at the end is new, so the KV-cache prefix stays
+/// warm across iterations. The block mirrors the `directive_grounding` append pattern from
+/// `resume_governed_run` — it addresses the agent directly with the correction to apply.
+///
+/// STACK-AGNOSTIC: `feedback` is whatever the Layer-2 / Layer-3 / integration-gate check
+/// emitted for this stack (clippy / tsc / pytest / go vet / gate deny reasons / contract
+/// mismatch). Nothing here names a specific toolchain — it forwards the check's own output
+/// verbatim. Pure + testable: no I/O, no async.
+///
+/// `iteration` is the count of passes that have failed so far (1 after the first bounce),
+/// used only to label the revise block. `feedback` is the already-assembled failure detail.
+pub fn append_bounce_feedback(base_task: &str, iteration: usize, feedback: &str) -> String {
+    if feedback.trim().is_empty() {
+        return base_task.to_string();
+    }
+    format!(
+        "{base_task}\n\n\
+         ## REVISE — a previous pass (#{iteration}) failed the gate\n\n\
+         Your previous pass did NOT pass the post-task checks. Do NOT re-submit the same work: \
+         READ the failure output below, find the ROOT cause in the code you touched, and fix it. \
+         The exact violated rule ids and the verbatim toolchain / gate output from the failed \
+         checks follow — treat them as the authoritative signal for what to change:\n\n\
+         {feedback}",
+        feedback = feedback.trim(),
     )
 }
 
@@ -811,8 +860,34 @@ pub async fn execute_dev_implement_run(
             "dev_implement",
             &format!("Brownfield implement failed: {detail}"),
         );
-        runs.set_status(&run_id, RunStatus::AwaitingQa, true);
+        // LIFECYCLE-2: a failure is a genuine FAILED terminal, not a silent AwaitingQa. This
+        // is what lets stamp_provenance_when_done withhold the stage advance + QA evidence
+        // for work that never completed, while still freezing the honest gate provenance.
+        runs.fail_with_reason(&run_id, detail);
     };
+    // LIFECYCLE-1: honor a cancel mid-run. The terminal Cancelled state is already set by
+    // RunStore::cancel; record it on the trail and stop BEFORE any git mutation (commit /
+    // push). We never advance to AwaitingQa on a cancel.
+    let cancelled_stop = |runs: &RunStore, uow: &UowStore, where_: &str| {
+        runs.push_event(
+            &run_id,
+            GateEvent {
+                seq: next_seq(),
+                layer: "dev-implement".to_string(),
+                verdict: "info".to_string(),
+                rule: None,
+                detail: format!("Run cancelled {where_}; stopped before any git mutation."),
+                content_hash: None,
+            },
+        );
+        uow.append_history(&story_id, "dev_implement", &format!("Cancelled {where_}."));
+    };
+
+    // Honor a cancel that arrived before the executor got scheduled.
+    if runs.is_cancelled(&run_id) {
+        cancelled_stop(&runs, &uow, "before start");
+        return;
+    }
 
     let approved_count = decisions
         .iter()
@@ -933,6 +1008,13 @@ pub async fn execute_dev_implement_run(
     // TODO(provider-agnostic-followup): agentic-level tier-chain fallback and
     // orchestrator-via-API delegate/fan_out dispatch are not yet implemented.
     let mcp_config_path = spawn.mcp_config.display().to_string();
+    // LIFECYCLE-7: wire the run's activity heartbeat onto the built driver so a healthy long
+    // implement run keeps last_activity_ms fresh and is not reported stalled. The CLI path
+    // fires it per output line; the API path fires it per loop turn (both wired inside
+    // build_agent_driver). Mirrors investigation_run / update_branch_run / pr_resolve_run.
+    let store_hb = runs.clone();
+    let rid_hb = run_id.clone();
+    let on_activity: HeartbeatFn = Arc::new(move || store_hb.touch_activity(&rid_hb, None));
     let driver: Arc<dyn AgentDriver> = match build_agent_driver(
         &model,
         &registry,
@@ -949,6 +1031,7 @@ pub async fn execute_dev_implement_run(
         // Opt the implementer into the READ-CLASS raise_escalation tool so it can self-escalate
         // when its work meets a selected rule's escalation condition (the rule-agnostic path).
         true,
+        Some(on_activity),
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -982,7 +1065,12 @@ pub async fn execute_dev_implement_run(
         ),
     );
 
-    let task = implement_prompt(
+    // The STABLE base prompt (LIFECYCLE-5): built once, it is the cache-friendly prefix
+    // that never changes across bounce iterations. On a bounce, the failed iteration's
+    // rule ids + verbatim toolchain / gate output are appended at the TAIL via
+    // `append_bounce_feedback` to form the pass-specific `task`, so the re-run agent gets
+    // the NEW failure information instead of re-reading the identical prompt.
+    let base_task = implement_prompt(
         &story_id,
         &story_title,
         &story_desc,
@@ -992,6 +1080,9 @@ pub async fn execute_dev_implement_run(
         &escalations_in_scope,
         &model,
     );
+    // The prompt actually handed to the agent this pass. First pass = the base prompt; each
+    // bounce rebuilds it with the prior iteration's failure feedback appended at the tail.
+    let mut task = base_task.clone();
 
     // Bounce-and-revise loop: up to `max_iterations` passes. On each pass, run the
     // agent (layer-1 gate enforced by the gateway), then run layer-2 checks (real
@@ -1166,6 +1257,15 @@ pub async fn execute_dev_implement_run(
                     }
                     // Snapshot the iteration before bouncing.
                     let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
+                    // LIFECYCLE-5: feed the L3 reviewer's reasons into the next pass's prompt tail.
+                    task = append_bounce_feedback(
+                        &base_task,
+                        iteration,
+                        &format!(
+                            "Layer-3 code review bounced. Reviewer findings:\n{}",
+                            l3_bounce_reasons.join("\n")
+                        ),
+                    );
                     continue;
                 }
             }
@@ -1195,6 +1295,12 @@ pub async fn execute_dev_implement_run(
                         ));
                     }
                     let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
+                    // LIFECYCLE-5: feed the integration-gate mismatch reason into the next pass.
+                    task = append_bounce_feedback(
+                        &base_task,
+                        iteration,
+                        &format!("Integration gate (R3.e) bounced — contract mismatch:\n{reason}"),
+                    );
                     continue;
                 }
             }
@@ -1202,10 +1308,12 @@ pub async fn execute_dev_implement_run(
         }
 
         let checks = runner_for_worktree(&dir);
-        // CheckRunner::check(role, worktree) → Vec<RuleId> (violated rules).
+        // CheckRunner::check(role, worktree) → CheckOutcome { violated, diagnostics }.
+        // `violated` is the rule-id verdict we bounce on; `diagnostics` is the captured,
+        // truncation-bounded toolchain stdout/stderr fed back into the revise prompt tail.
         let check_result = checks.check(&role, &dir).await;
         match &check_result {
-            Ok(violations) if violations.is_empty() => {
+            Ok(outcome) if outcome.violated.is_empty() => {
                 // Clean L2 pass. Run L3 if enabled before declaring victory.
                 event(&runs, "pass", "Stage 1/1 passed layer-2 checks.".to_string());
                 runs.push_event(
@@ -1236,6 +1344,15 @@ pub async fn execute_dev_implement_run(
                         }
                         // Snapshot the iteration before bouncing.
                         let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
+                        // LIFECYCLE-5: feed the L3 reviewer's reasons into the next pass's prompt tail.
+                        task = append_bounce_feedback(
+                            &base_task,
+                            iteration,
+                            &format!(
+                                "Layer-3 code review bounced. Reviewer findings:\n{}",
+                                l3_bounce_reasons.join("\n")
+                            ),
+                        );
                         // Bounce: re-run the agent with the L3 reasons.
                         continue;
                     }
@@ -1264,16 +1381,26 @@ pub async fn execute_dev_implement_run(
                             ));
                         }
                         let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
+                        // LIFECYCLE-5: feed the integration-gate mismatch reason into the next pass.
+                        task = append_bounce_feedback(
+                            &base_task,
+                            iteration,
+                            &format!("Integration gate (R3.e) bounced — contract mismatch:\n{reason}"),
+                        );
                         // Bounce: re-run the agent to fix the contract mismatch.
                         continue;
                     }
                 }
                 break Ok(());
             }
-            Ok(violations) => {
+            Ok(outcome) => {
+                let violations = &outcome.violated;
                 let rule_ids: Vec<String> =
                     violations.iter().map(|RuleId(id)| id.clone()).collect();
                 let rule_summary = rule_ids.join(", ");
+                // The captured toolchain diagnostics (clippy/tsc/pytest/go stdout+stderr),
+                // already truncation-bounded by the CheckOutcome; forwarded verbatim.
+                let diagnostics = outcome.diagnostics.as_str();
                 runs.push_event(
                     &run_id,
                     GateEvent {
@@ -1323,6 +1450,23 @@ pub async fn execute_dev_implement_run(
                     },
                 );
                 let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
+                // LIFECYCLE-5: feed the failure back into the NEXT pass's prompt at the tail.
+                // The Layer-2 check emits the violated rule ids AND the verbatim toolchain
+                // diagnostics (stack-agnostic: whatever the detected toolchain flagged — Rust
+                // clippy/test, tsc, pytest, go vet, manifest checks). We forward BOTH so a
+                // literal open-weight model gets the actual error text to self-correct, not
+                // just the rule id. The diagnostics go LAST (cache-friendly tail) and are
+                // already truncation-bounded by CheckOutcome so the warm prefix cache holds.
+                let l2_feedback = if diagnostics.trim().is_empty() {
+                    format!("Layer-2 checks failed. Violated rule id(s): {rule_summary}")
+                } else {
+                    format!(
+                        "Layer-2 checks failed. Violated rule id(s): {rule_summary}\n\n\
+                         Verbatim toolchain output from the failed checks (authoritative — \
+                         fix the ROOT cause it describes):\n{diagnostics}"
+                    )
+                };
+                task = append_bounce_feedback(&base_task, iteration, &l2_feedback);
             }
             Err(e) => {
                 // A hard check-runner error (e.g. toolchain not found) is surfaced as a
@@ -1507,6 +1651,14 @@ pub async fn execute_dev_implement_run(
         }
     }
 
+    // LIFECYCLE-1: cancel check IMMEDIATELY before the git mutation. A Stop that arrived
+    // while the agent ran (or during layer-2 / the test-tamper guard) must halt the run
+    // BEFORE the server commits anything to the worktree.
+    if runs.is_cancelled(&run_id) {
+        cancelled_stop(&runs, &uow, "before commit");
+        return;
+    }
+
     // The SERVER commits the agent's implementation (commit stays server-side, never
     // the agent — mirrors pr_resolve_run exactly).
     //
@@ -1551,6 +1703,14 @@ pub async fn execute_dev_implement_run(
             );
             return;
         }
+    }
+
+    // LIFECYCLE-1: cancel check IMMEDIATELY before the push (network git mutation). The
+    // commit above is local; a cancel here stops us short of publishing the branch, and the
+    // run stays in its terminal Cancelled state (never advances to AwaitingQa).
+    if runs.is_cancelled(&run_id) {
+        cancelled_stop(&runs, &uow, "before push (implementation committed locally)");
+        return;
     }
 
     // Optionally push so the branch is available for CI / PR opening. Token-gated:
@@ -1789,6 +1949,74 @@ mod tests {
         );
     }
 
+    /// GEOLOGICAL LAYERING: the kernel (Layer 1) leads, the grounding block (Layer 2) sits in
+    /// the middle, and the volatile story + procedure (Layer 3) is at the bottom, so the stable
+    /// Layer-1/Layer-2 prefix never has volatile content leak above it.
+    #[test]
+    fn implement_prompt_orders_layers_kernel_then_grounding_then_story() {
+        let grounding = "=== PROJECT GROUNDING ===\nrepo digest here\n=== END PROJECT GROUNDING ===";
+        let p = implement_prompt(
+            "s/r#9",
+            "MY-STORY-TITLE",
+            "desc",
+            "b",
+            &[approved_decision("opt", "Q", "R")],
+            Some(grounding),
+            &[],
+            "claude-opus-4-8",
+        );
+        let i_kernel = p.find("=== CAMERATA OPERATING PROTOCOL").expect("layer 1");
+        let i_grounding = p.find("=== PROJECT GROUNDING ===").expect("layer 2");
+        let i_story = p.find("MY-STORY-TITLE").expect("layer 3");
+        assert!(
+            i_kernel < i_grounding,
+            "Layer 1 (kernel) must lead Layer 2 (grounding)"
+        );
+        assert!(
+            i_grounding < i_story,
+            "Layer 2 (grounding) must precede Layer 3 (story)"
+        );
+        // The whole grounding block is above the story: no volatile content leaks up.
+        let i_grounding_end = p.find("=== END PROJECT GROUNDING ===").expect("grounding end");
+        assert!(
+            i_grounding_end < i_story,
+            "the story (Layer 3) must sit entirely below the grounding block"
+        );
+    }
+
+    /// The stable Layer-1/Layer-2 prefix is byte-identical across two builds that differ only in
+    /// the Layer-3 story/description input (the prefix-cache-stability invariant).
+    #[test]
+    fn implement_prompt_prefix_is_stable_across_differing_story() {
+        let grounding = "=== PROJECT GROUNDING ===\ndigest\n=== END PROJECT GROUNDING ===";
+        let mk = |title: &str, desc: &str| {
+            implement_prompt(
+                "s/r#1",
+                title,
+                desc,
+                "b",
+                &[approved_decision("opt", "Q", "R")],
+                Some(grounding),
+                &[],
+                "claude-opus-4-8",
+            )
+        };
+        let a = mk("Story A", "description alpha");
+        let b = mk("Story B totally different", "description beta");
+        // Both share the identical stable prefix up to the end of the grounding block.
+        let end = "=== END PROJECT GROUNDING ===";
+        let a_prefix_len = a.find(end).unwrap() + end.len();
+        let b_prefix_len = b.find(end).unwrap() + end.len();
+        assert_eq!(a_prefix_len, b_prefix_len, "prefix boundary must be at the same byte offset");
+        assert_eq!(
+            &a[..a_prefix_len],
+            &b[..b_prefix_len],
+            "the Layer-1/Layer-2 prefix must be byte-identical across differing Layer-3 input"
+        );
+        // The bodies themselves differ (Layer 3 changed).
+        assert_ne!(a, b);
+    }
+
     /// Only APPROVED decisions appear in the prompt; Pending decisions are excluded.
     #[test]
     fn implement_prompt_only_includes_approved_decisions() {
@@ -1976,6 +2204,154 @@ mod tests {
         }
     }
 
+    // ── 2c. LIFECYCLE-5: bounce loop feeds errors back into the re-prompt ────────
+
+    /// The second pass's prompt CONTAINS the prior iteration's rule ids + error text at the
+    /// TAIL, and DIFFERS from the first pass's prompt. This is the open-weight linchpin: the
+    /// re-run agent gets new information instead of re-reading the identical prompt.
+    #[test]
+    fn append_bounce_feedback_puts_rule_ids_and_errors_at_the_tail() {
+        let base = implement_prompt(
+            "acme/api#42",
+            "Add login",
+            "Support email/password login.",
+            "camerata/story-42",
+            &[approved_decision("auth", "JWT?", "Use JWT.")],
+            None,
+            &[],
+            "",
+        );
+        // Feedback carries a violated rule id AND verbatim toolchain error text.
+        let feedback = "Layer-2 checks failed. Violated rule id(s): RUST-CLIPPY\n\
+                        error[E0308]: mismatched types\n  --> src/auth.rs:12:5";
+        let second = append_bounce_feedback(&base, 1, feedback);
+
+        // It differs from the first prompt.
+        assert_ne!(second, base, "the bounce prompt must differ from the first pass");
+        // The base prompt is a PREFIX (cache-friendly tail placement): the whole base is
+        // still present, unchanged, at the head of the second prompt.
+        assert!(second.starts_with(&base), "base prompt must remain the cached prefix");
+        // The rule id + verbatim error text are present.
+        assert!(second.contains("RUST-CLIPPY"), "violated rule id must be fed back");
+        assert!(
+            second.contains("error[E0308]: mismatched types"),
+            "verbatim toolchain error text must be fed back"
+        );
+        assert!(second.contains("src/auth.rs:12:5"), "error location must be fed back");
+        // The feedback sits at the TAIL (after the base prompt), not in the middle.
+        let feedback_pos = second.find("error[E0308]").unwrap();
+        assert!(
+            feedback_pos > base.len().saturating_sub(1),
+            "the error feedback must be appended AFTER the base prompt (tail placement)"
+        );
+        // The revise header is present so the agent knows this is a correction pass.
+        assert!(second.contains("REVISE"), "the revise header must be present");
+    }
+
+    /// LIFECYCLE-5 (CheckRunner full-diagnostics): the L2 bounce feedback assembled at
+    /// the call site now carries the FULL toolchain diagnostics captured by the runner
+    /// (not just rule ids), and they ride the CACHE-FRIENDLY TAIL of the re-prompt.
+    #[test]
+    fn append_bounce_feedback_carries_full_runner_diagnostics_at_the_tail() {
+        use camerata_core::CheckOutcome;
+
+        let base = implement_prompt("s/r#7", "T", "D", "b", &[], None, &[], "");
+        // Mirror the runner → call-site path: a CheckOutcome with violated rule ids
+        // AND captured toolchain diagnostics (the "strict stack trace").
+        let outcome = CheckOutcome::new(
+            vec![camerata_core::RuleId("RUST-TEST".into())],
+            "$ cargo test\nrunning 1 test\ntest auth::login_rejects_bad_password ... FAILED\n\
+             thread 'auth::login_rejects_bad_password' panicked at 'assertion failed: \
+             `(left == right)`\n  left: `401`,\n right: `200`', src/auth.rs:88:9",
+        );
+        // Same assembly the L2 arm performs: rule ids first, verbatim diagnostics last.
+        let rule_summary = outcome
+            .violated
+            .iter()
+            .map(|r| r.0.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let l2_feedback = format!(
+            "Layer-2 checks failed. Violated rule id(s): {rule_summary}\n\n\
+             Verbatim toolchain output from the failed checks (authoritative — \
+             fix the ROOT cause it describes):\n{}",
+            outcome.diagnostics
+        );
+        let second = append_bounce_feedback(&base, 1, &l2_feedback);
+
+        assert!(second.starts_with(&base), "base prompt must remain the cached prefix");
+        // The FULL diagnostic body (panic message + assertion + file:line), not just the id.
+        assert!(second.contains("RUST-TEST"), "rule id must be present");
+        assert!(
+            second.contains("assertion failed") && second.contains("src/auth.rs:88:9"),
+            "the FULL toolchain diagnostics must be fed back, not just the rule id"
+        );
+        // Diagnostics ride the tail: the panic text lands AFTER the rule-id citation.
+        let ids_pos = second.find("RUST-TEST").unwrap();
+        let diag_pos = second.find("assertion failed").unwrap();
+        assert!(diag_pos > ids_pos, "diagnostics must be appended after the rule ids");
+    }
+
+    /// LIFECYCLE-5 truncation: diagnostics larger than the cap are bounded by
+    /// `CheckOutcome` BEFORE they reach the prompt, so the warm prefix cache holds.
+    /// The oldest head is dropped and the failing tail is preserved.
+    #[test]
+    fn oversized_runner_diagnostics_are_truncated_before_the_reprompt() {
+        use camerata_core::{CheckOutcome, DIAGNOSTICS_CAP_BYTES};
+
+        let base = implement_prompt("s/r#8", "T", "D", "b", &[], None, &[], "");
+        let mut outcome = CheckOutcome::new(vec![camerata_core::RuleId("RUST-CLIPPY".into())], "");
+        outcome.push_diagnostics("HEAD_NOISE_TO_EVICT");
+        outcome.push_diagnostics(&"clippy warning line\n".repeat(DIAGNOSTICS_CAP_BYTES / 10));
+        outcome.push_diagnostics("FINAL_ERROR_SUMMARY_KEEP_ME");
+
+        let second = append_bounce_feedback(&base, 1, &outcome.diagnostics);
+
+        // Bounded: base prompt + a diagnostics block near the cap + the fixed revise
+        // header prose. The point is the diagnostics can't grow unbounded with the raw
+        // toolchain output — it stays within the cap plus a small constant overhead.
+        assert!(
+            second.len() <= base.len() + DIAGNOSTICS_CAP_BYTES + 1024,
+            "the re-prompt diagnostics must be bounded by the cap, got {} extra bytes",
+            second.len() - base.len()
+        );
+        assert!(
+            second.contains("FINAL_ERROR_SUMMARY_KEEP_ME"),
+            "the failing tail must survive truncation"
+        );
+        assert!(
+            !second.contains("HEAD_NOISE_TO_EVICT"),
+            "the oldest head must be evicted past the cap"
+        );
+    }
+
+    /// Empty feedback is a no-op: the prompt is unchanged (defensive — never append an
+    /// empty revise block).
+    #[test]
+    fn append_bounce_feedback_empty_is_noop() {
+        let base = implement_prompt("s/r#1", "T", "D", "b", &[], None, &[], "");
+        assert_eq!(append_bounce_feedback(&base, 1, "   "), base);
+        assert_eq!(append_bounce_feedback(&base, 1, ""), base);
+    }
+
+    /// STACK-AGNOSTIC: whatever the check emitted is forwarded verbatim — the helper never
+    /// hardcodes a toolchain. A tsc error, a pytest failure, and a go vet finding all pass
+    /// through identically.
+    #[test]
+    fn append_bounce_feedback_is_stack_agnostic() {
+        let base = implement_prompt("s/r#1", "T", "D", "b", &[], None, &[], "");
+        for feedback in [
+            "src/app.ts(10,3): error TS2322: Type 'string' is not assignable to type 'number'.",
+            "FAILED tests/test_auth.py::test_login - assert 401 == 200",
+            "./main.go:8:2: undefined: foo",
+            "Integration gate (R3.e) bounced — contract mismatch:\nbackend omits email field",
+        ] {
+            let out = append_bounce_feedback(&base, 1, feedback);
+            assert!(out.contains(feedback), "the check's own output must pass through verbatim: {feedback}");
+            assert!(out.starts_with(&base), "base stays the prefix for {feedback}");
+        }
+    }
+
     // ── 3. GATE UNCHANGED assertion ────────────────────────────────────────────
 
     /// The brownfield implement run uses `governed_role` + `prepare_session(..., Some(worktree))`
@@ -2035,8 +2411,10 @@ mod tests {
 
         let run = runs.get(&run_id).expect("run exists");
 
-        // The run must complete (AwaitingQa).
-        assert_eq!(run.status, RunStatus::AwaitingQa);
+        // LIFECYCLE-2: an inability to implement (live mode off) is a genuine FAILED
+        // terminal, not a spurious AwaitingQa success. The stamper keys off this to withhold
+        // the stage advance + QA evidence for work that never happened.
+        assert!(matches!(run.status, RunStatus::Failed { .. }));
         assert!(run.done);
 
         // It must report an honest error — never fake a resolution.

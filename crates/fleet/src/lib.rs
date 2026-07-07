@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use camerata_agent::{prepare_session, HeartbeatFn, GATED_WRITE_TOOL};
 use camerata_checks::{runner_for_worktree, runner_for_worktree_with_heartbeat};
-use camerata_core::{AgentDriver, CheckRunner, FleetCoordinator, FleetStage, Role, RuleId};
+use camerata_core::{AgentDriver, CheckOutcome, CheckRunner, FleetCoordinator, FleetStage, Role};
 use camerata_gateway::enforced_gate_rules;
 use camerata_intake::{Plan, PlanTask, TaskKind};
 use camerata_rules::role_from_corpus;
@@ -49,8 +49,8 @@ pub struct NoopChecks;
 
 #[async_trait::async_trait]
 impl CheckRunner for NoopChecks {
-    async fn check(&self, _role: &Role, _worktree: &Path) -> anyhow::Result<Vec<RuleId>> {
-        Ok(vec![])
+    async fn check(&self, _role: &Role, _worktree: &Path) -> anyhow::Result<CheckOutcome> {
+        Ok(CheckOutcome::clean())
     }
 }
 
@@ -935,7 +935,7 @@ pub async fn build_from_plan_with_tier_map_layer2_and_activity(
 mod tests {
     use super::*;
     use camerata_agent::{HeartbeatFn, GATED_WRITE_TOOL};
-    use camerata_core::Role;
+    use camerata_core::{Role, RuleId};
     use camerata_intake::PlanTask;
 
     // ── scaffold_crate ────────────────────────────────────────────────────────
@@ -999,7 +999,7 @@ mod tests {
         let noop = layer2_runner_with_activity(&dir, true, None);
         let noop_res = noop.check(&role, &dir).await;
         assert_eq!(
-            noop_res.expect("the bootstrap no-op runner must not error"),
+            noop_res.expect("the bootstrap no-op runner must not error").violated,
             Vec::<RuleId>::new(),
             "the bootstrap no-op runner reports no violations (skips layer 2)"
         );
@@ -1069,7 +1069,7 @@ mod tests {
         );
 
         // And the crate must be clean (no violations on a minimal canonical crate).
-        let violations = result.expect("layer2_runner_with_activity must not error on a valid Rust crate");
+        let violations = result.expect("layer2_runner_with_activity must not error on a valid Rust crate").violated;
         assert!(
             violations.is_empty(),
             "a canonical Rust crate must produce no layer-2 violations, got {violations:?}"

@@ -2544,7 +2544,10 @@ pub(super) fn StallThresholdsEditor(project: ProjectView) -> Element {
             p { class: "section-hint tier-map-hint",
                 "How long a run may be idle before Camerata flags it as stalled. \
                  Watched (interactive) runs are expected to respond faster; \
-                 Routine (autonomous) runs have a longer grace period."
+                 Routine (autonomous) runs have a longer grace period. \
+                 Watched runs are ALERT-ONLY when stalled (you decide); \
+                 Routine (autonomous) runs AUTO-CANCEL on stall by default \
+                 (no one is watching them), after the generous grace period below."
             }
             div { class: "tier-map-rows",
                 div { class: "tier-map-row",

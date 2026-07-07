@@ -54,6 +54,7 @@ pub mod run;
 pub mod scan_cache;
 pub mod scan_routing;
 pub mod scan_tools;
+pub mod stall_sweep;
 // `schedule` (routine string parsing + is_due/next_fire) is now the framework-agnostic
 // `camerata_app_core::schedule` (RUST-HEADLESS-CORE-1); re-exported so `crate::schedule::*` call
 // sites (auto_fire, lib) are unchanged.
@@ -972,6 +973,12 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     // start firing routines. Cadence: CAMERATA_ROUTINE_TICK_SECS (default 60).
     crate::auto_fire::spawn_routine_scheduler(state.routines.clone(), state.escalations.clone());
 
+    // Stall sweep (LIFECYCLE-6): periodically auto-cancel AUTONOMOUS runs that have stalled
+    // (no activity past the active project's routine threshold). Watched runs stay alert-only.
+    // Spawned here (not in `router`) so tests that build the router don't auto-cancel runs.
+    // Cadence: CAMERATA_STALL_SWEEP_SECS (default 30).
+    crate::stall_sweep::spawn_stall_sweep(state.runs.clone(), state.projects.clone());
+
     // Per-UoW worktree housekeeping (Decision 1): on startup, prune stale worktree admin
     // records from every known repo clone AND remove worktrees for UoWs that are already
     // in a terminal state (SignedOff). Two cleanup passes, both best-effort + non-blocking:
@@ -1186,6 +1193,27 @@ async fn start_run(
         None => (None, None, false),
     };
 
+    // LIFECYCLE-9 (single-flight guard): reject a second run on a story that already has an
+    // active (non-done) run. Two concurrent runs on one story would share a single worktree —
+    // corrupting each other's edits — and a sign-off could tear down a still-live run. The
+    // paused-then-resumed path is NOT blocked: a resume marks the paused run done before the
+    // resume run supersedes it (see `resume_governed_run` / escalation resolve). Enforced
+    // BEFORE the development gate so a duplicate start is refused as early as possible.
+    if let Some(active) = state.runs.active_run_for_story(&story_id) {
+        let body = Json(serde_json::json!({
+            "error": "a run is already active for this story",
+            "reason": format!(
+                "Run {} is still in progress for story {story_id} (status: {:?}). Only one \
+                 run may be active on a story at a time (concurrent runs would share one \
+                 worktree). Cancel or let the active run finish before starting another.",
+                active.id, active.status,
+            ),
+            "story_id": story_id,
+            "active_run_id": active.id,
+        }));
+        return (StatusCode::CONFLICT, body).into_response();
+    }
+
     // The no-code-first gate (Pillar 2): a governed run cannot start until every
     // DecisionRecord on this story's UoW is approved (decisions_approved_for_development).
     // We block + surface exactly why, rather than silently starting a run that the
@@ -1200,8 +1228,17 @@ async fn start_run(
         return (StatusCode::CONFLICT, body).into_response();
     }
 
-    let (run_id, mode) =
-        start_governed_run(&state, &story_id, model, tier_map, skip_layer2).await;
+    // Interactive HTTP start: Watched (alert-only on stall). The autonomous/routine path
+    // passes RunKind::Autonomous (see start_governed_run's `kind` param).
+    let (run_id, mode) = start_governed_run(
+        &state,
+        &story_id,
+        model,
+        tier_map,
+        skip_layer2,
+        crate::run::RunKind::Watched,
+    )
+    .await;
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id, "mode": mode }))
         .into_response()
 }
@@ -1292,20 +1329,38 @@ pub fn ensure_development_gate(state: &AppState, story_id: &str) -> Result<(), S
 /// bounce) so a brownfield repo can install the tooling layer-2 needs. It skips ONLY
 /// layer 2: layer 1 (the deny-before-write gate) and the no-code-first decisions gate
 /// (`ensure_development_gate`, already enforced in the caller) are unchanged. The scripted
-/// Revert a paused run's uncommitted work in `worktree_dir` (used on Reject). Best-effort:
-/// discards tracked changes (`git checkout -- .`) and removes new untracked files (`git clean
-/// -fd`), leaving the branch at its committed state. Errors are swallowed (the worktree may be
-/// gone); the caller records the outcome regardless.
-async fn revert_worktree(worktree_dir: &str) {
+/// Revert a paused run's work in `worktree_dir` (used on Reject). Best-effort.
+///
+/// LIFECYCLE-12: the per-iteration bounce loop makes `camerata: snapshot` COMMITS, so
+/// discarding only uncommitted changes (`git checkout -- .` + `git clean -fd`) would leave
+/// the agent's committed work on the branch — where it could still be pushed. A Reject
+/// promises to "revert the agent's work", so when `base_commit` is known we FIRST
+/// `git reset --hard <base_commit>` to drop every commit the run added since the branch
+/// point, THEN clean untracked files. Without a base_commit (older checkpoints) we fall back
+/// to the uncommitted-only revert. Errors are swallowed (the worktree may be gone); the
+/// caller records the outcome regardless.
+async fn revert_worktree(worktree_dir: &str, base_commit: Option<&str>) {
     let dir = std::path::Path::new(worktree_dir);
     if !dir.exists() {
         return;
     }
-    let _ = tokio::process::Command::new("git")
-        .args(["checkout", "--", "."])
-        .current_dir(dir)
-        .output()
-        .await;
+    // Drop the run's committed snapshots first: reset the branch back to the branch-point
+    // commit so nothing the agent committed survives. Only when we actually have the base.
+    if let Some(base) = base_commit.filter(|b| !b.trim().is_empty()) {
+        let _ = tokio::process::Command::new("git")
+            .args(["reset", "--hard", base])
+            .current_dir(dir)
+            .output()
+            .await;
+    } else {
+        // No base commit recorded: discard tracked changes (uncommitted-only fallback).
+        let _ = tokio::process::Command::new("git")
+            .args(["checkout", "--", "."])
+            .current_dir(dir)
+            .output()
+            .await;
+    }
+    // Remove any new untracked files the agent left behind (a reset --hard leaves these).
     let _ = tokio::process::Command::new("git")
         .args(["clean", "-fd"])
         .current_dir(dir)
@@ -1338,6 +1393,9 @@ async fn resume_governed_run(
 
     if !live {
         // Scripted mode has no live agent to re-spawn; record the decision honestly and stop.
+        // LIFECYCLE-4: spawn the provenance watcher BEFORE the terminal transition so the
+        // resumed run gets provenance + stage advance on success, mirroring a fresh run.
+        spawn_provenance_watcher(state, &run_id, &story_id);
         state
             .runs
             .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
@@ -1367,6 +1425,11 @@ async fn resume_governed_run(
          worktree state (your prior work is still here) and apply this decision \
          exactly:\n\n{directive}"
     );
+    // LIFECYCLE-4: the resumed live run now gets the SAME completion-driven, success-gated
+    // provenance-stamping watcher a fresh run does — previously the resume path spawned none,
+    // so a resumed run never got provenance / evidence / a stage advance. Spawned BEFORE
+    // handing `story_id` to the implement run; the watcher awaits the run's terminal state.
+    spawn_provenance_watcher(state, &run_id, &story_id);
     spawn_brownfield_dev_run(
         state,
         run_id.clone(),
@@ -1547,7 +1610,12 @@ async fn spawn_brownfield_dev_run(
     let impl_registry = state.model_registry.clone();
     let impl_creds = state.credential_store.clone();
     let impl_limiter = state.rate_limiter.clone();
-    tokio::spawn(async move {
+    // LIFECYCLE-1: register the abort handle so a Stop can reap a run blocked inside the
+    // live implement agent subprocess (kill_on_drop). Cleared when the run finishes.
+    let runs_for_clear = state.runs.clone();
+    let rid_for_clear = run_id.clone();
+    let rid_for_clear2 = run_id.clone();
+    let handle = tokio::spawn(async move {
         crate::dev_implement_run::execute_dev_implement_run(
             store,
             uow_store,
@@ -1578,8 +1646,10 @@ async fn spawn_brownfield_dev_run(
             impl_projects,
             impl_project_id,
         )
-        .await
+        .await;
+        runs_for_clear.clear_abort(&rid_for_clear);
     });
+    state.runs.register_abort(&rid_for_clear2, handle.abort_handle());
 }
 
 /// path has no layer-2 bounce, so the flag is a no-op there.
@@ -1589,10 +1659,14 @@ async fn start_governed_run(
     model: Option<String>,
     tier_map: Option<crate::model_tier::TierMap>,
     skip_layer2: bool,
+    // LIFECYCLE-6: the run kind decides the stall threshold + auto-cancel posture. Interactive
+    // (HTTP) starts pass `Watched` (alert-only); a routine-/scheduler-driven walk-away run passes
+    // `Autonomous` (longer threshold + auto-cancel by the background sweep).
+    kind: crate::run::RunKind,
 ) -> (String, &'static str) {
     let live = live_mode_enabled();
     let mode = if live { "live" } else { "scripted" };
-    let run_id = state.runs.create(story_id, mode, crate::run::RunKind::Watched);
+    let run_id = state.runs.create(story_id, mode, kind);
     let store = state.runs.clone();
     let rid = run_id.clone();
 
@@ -1721,7 +1795,12 @@ async fn start_governed_run(
                     let live_registry = state.model_registry.clone();
                     let live_creds = state.credential_store.clone();
                     let live_limiter = state.rate_limiter.clone();
-                    tokio::spawn(async move {
+                    // LIFECYCLE-1: register the abort handle so a Stop reaps the greenfield
+                    // fleet's live agent subprocesses (kill_on_drop). Cleared on finish.
+                    let runs_for_clear = state.runs.clone();
+                    let rid_for_clear = rid.clone();
+                    let rid_register = rid.clone();
+                    let handle = tokio::spawn(async move {
                         live_fleet::execute_live_run_tiered(
                             store,
                             rid,
@@ -1735,12 +1814,18 @@ async fn start_governed_run(
                             live_creds,
                             live_limiter,
                         )
-                        .await
+                        .await;
+                        runs_for_clear.clear_abort(&rid_for_clear);
                     });
+                    state.runs.register_abort(&rid_register, handle.abort_handle());
                 }
                 // Single-model path (back-compat): one operator-wide model for every agent.
                 None => {
-                    tokio::spawn(async move {
+                    // LIFECYCLE-1: register the abort handle (see tiered arm above).
+                    let runs_for_clear = state.runs.clone();
+                    let rid_for_clear = rid.clone();
+                    let rid_register = rid.clone();
+                    let handle = tokio::spawn(async move {
                         live_fleet::execute_live_run(
                             store,
                             rid,
@@ -1750,8 +1835,10 @@ async fn start_governed_run(
                             max_iterations,
                             skip_layer2,
                         )
-                        .await
+                        .await;
+                        runs_for_clear.clear_abort(&rid_for_clear);
                     });
+                    state.runs.register_abort(&rid_register, handle.abort_handle());
                 }
             }
         }
@@ -1763,37 +1850,54 @@ async fn start_governed_run(
         tokio::spawn(async move { execute_run(store, transcripts, rid).await });
     }
 
-    // Provenance-stamping watcher (Pillar 2): once the run reaches its terminal
-    // (`done`) state, freeze the gate provenance onto the story's UoW and advance the
-    // lifecycle stage Development → AwaitingQa. This persists the honest accounting an
-    // architect reviews at QA, and survives the in-memory RunStore being lost. Runs as
-    // its own task so the run executor stays unaware of the UoW (keeps the layers thin).
-    //
-    // Evidence assembly (issue #53): the watcher also builds the SOC-2 evidence record
-    // from the run's gate decisions + provenance + scoped audit over the changed files,
-    // attaches it to the UoW, and posts it as a PR comment when a PR number is known
-    // from the UoW's branch. Graceful degradation: evidence failure never blocks the run.
-    //
-    // Enforcement-catch ledger capture: after the run is done, iterate its gate events
-    // and write one catch per deny to the enforcement ledger (best-effort, fail-soft).
-    {
-        let runs = state.runs.clone();
-        let uow = state.uow.clone();
-        let watch_id = run_id.clone();
-        let watch_story = story_id.to_string();
-        let ledger = state.enforcement_ledger.clone();
-        tokio::spawn(async move {
-            stamp_provenance_when_done(runs, uow, ledger, watch_id, watch_story).await;
-        });
-    }
+    // Provenance-stamping watcher (Pillar 2), shared by fresh + resume runs (LIFECYCLE-4).
+    spawn_provenance_watcher(state, &run_id, story_id);
 
     (run_id, mode)
 }
 
-/// Poll a run until it reports `done`, then freeze its gate provenance onto the story's
-/// UoW, advance the lifecycle stage to `AwaitingQa`, and assemble + attach the SOC-2
-/// evidence record (issue #53). Bounded poll loop so a never-completing run (e.g. a
-/// wedged live fleet) can't leak the task forever.
+/// Spawn the completion-driven, success-gated provenance-stamping watcher for `run_id`
+/// (Pillar 2). Called by BOTH [`start_governed_run`] (fresh) and [`resume_governed_run`]
+/// (resumed, LIFECYCLE-4) so a resumed run gets provenance + a stage advance on success
+/// exactly like a fresh one.
+///
+/// Once the run reaches its terminal state the watcher freezes the gate provenance onto the
+/// story's UoW and, ON SUCCESS ONLY, advances the lifecycle stage Development → AwaitingQa
+/// and attaches the SOC-2 QA evidence (issue #53) — see [`stamp_provenance_when_done`] for
+/// the full success/failure/cancel semantics. Runs as its own task so the run executor stays
+/// unaware of the UoW (keeps the layers thin). Graceful degradation throughout: evidence /
+/// ledger failures never block the run.
+fn spawn_provenance_watcher(state: &AppState, run_id: &str, story_id: &str) {
+    let runs = state.runs.clone();
+    let uow = state.uow.clone();
+    let watch_id = run_id.to_string();
+    let watch_story = story_id.to_string();
+    let ledger = state.enforcement_ledger.clone();
+    tokio::spawn(async move {
+        stamp_provenance_when_done(runs, uow, ledger, watch_id, watch_story).await;
+    });
+}
+
+/// Await a run's terminal state (COMPLETION-driven, LIFECYCLE-3) and then stamp its UoW
+/// according to the terminal STATUS (LIFECYCLE-2). Shared by BOTH a fresh governed run
+/// ([`start_governed_run`]) and a RESUMED one ([`resume_governed_run`], LIFECYCLE-4) so the
+/// two never drift.
+///
+/// LIFECYCLE-3 (completion signal, not a poll): the watcher awaits [`RunStore::wait_until_done`],
+/// which resolves the instant a terminal setter fires the per-run completion `Notify`. A live
+/// run that legitimately outlives the old 5-minute poll budget is still stamped. The generous
+/// `safety_timeout` is a backstop against a run that wedges without ever going terminal, never
+/// the normal path.
+///
+/// LIFECYCLE-2 (advance only on success):
+/// - SUCCESS (`AwaitingQa`): freeze gate provenance, `finish_development` (advance the stage),
+///   and assemble + attach the SOC-2 QA evidence.
+/// - FAILURE (`Failed`): still freeze gate provenance (an honest record of what the gate saw)
+///   but do NOT advance the stage and do NOT attach QA evidence — the work never completed.
+/// - CANCEL (`Cancelled`): freeze nothing, advance nothing, attach nothing.
+///
+/// In every terminal case the enforcement-catch ledger capture still runs (it is a record of
+/// the gate decisions the run produced, independent of whether the work advanced).
 async fn stamp_provenance_when_done(
     runs: RunStore,
     uow: crate::uow::UowStore,
@@ -1801,59 +1905,63 @@ async fn stamp_provenance_when_done(
     run_id: String,
     story_id: String,
 ) {
-    // Up to ~5 minutes of 500ms polls. The scripted path finishes in a few seconds;
-    // the live path is operator-driven and may legitimately take longer, but we cap to
-    // avoid an unbounded task. If it times out, no provenance is stamped (the architect
-    // can still read the live run + sign off; the durable copy is best-effort).
-    const MAX_POLLS: usize = 600;
-    for _ in 0..MAX_POLLS {
-        if let Some(run) = runs.get(&run_id) {
-            if run.done {
-                let rules = camerata_gateway::enforced_gate_rules();
-                let prov = run_provenance(&run, &rules);
-                let frozen = crate::uow::GateProvenance {
-                    run_id: prov.run_id.clone(),
-                    mode: prov.mode.clone(),
-                    allow_count: prov.allow_count,
-                    deny_count: prov.deny_count,
-                    total_bounces: prov.total_bounces,
-                    rules_fired: prov.rules_fired.clone(),
-                    recorded: chrono::Utc::now().to_rfc3339(),
-                };
-                uow.record_gate_provenance(&story_id, frozen);
-                // Advance Development → AwaitingQa (best-effort: only legal from
-                // Development; a UoW elsewhere is left as-is, never forced).
+    // Backstop only: the completion signal is the normal wake path (LIFECYCLE-3). 6 hours
+    // comfortably covers a long operator-driven live run without leaking the task forever.
+    const SAFETY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
+    let run = match runs.wait_until_done(&run_id, SAFETY_TIMEOUT).await {
+        Some(run) => run,
+        // Wedged without ever going terminal, or an unknown run id. Nothing to stamp.
+        None => return,
+    };
+
+    let rules = camerata_gateway::enforced_gate_rules();
+    let prov = run_provenance(&run, &rules);
+
+    // Branch on the TERMINAL STATUS — this is the LIFECYCLE-2 fix. The old code advanced the
+    // stage + attached evidence on ANY `done` run (including failed and cancelled ones).
+    match &run.status {
+        // CANCEL: freeze nothing, advance nothing, attach nothing. The run stopped before
+        // any completed work; there is no honest gate accounting to record.
+        crate::run::RunStatus::Cancelled => {
+            // Ledger capture still records whatever gate decisions occurred before the stop.
+        }
+        // FAILURE and SUCCESS both freeze the gate provenance (the honest record of what the
+        // gate actually saw). Only SUCCESS advances the stage + attaches QA evidence.
+        crate::run::RunStatus::Failed { .. } | crate::run::RunStatus::AwaitingQa => {
+            let frozen = crate::uow::GateProvenance {
+                run_id: prov.run_id.clone(),
+                mode: prov.mode.clone(),
+                allow_count: prov.allow_count,
+                deny_count: prov.deny_count,
+                total_bounces: prov.total_bounces,
+                rules_fired: prov.rules_fired.clone(),
+                recorded: chrono::Utc::now().to_rfc3339(),
+            };
+            uow.record_gate_provenance(&story_id, frozen);
+
+            if matches!(run.status, crate::run::RunStatus::AwaitingQa) {
+                // SUCCESS ONLY: advance Development → AwaitingQa (best-effort: only legal
+                // from Development; a UoW elsewhere is left as-is, never forced).
                 let _ = uow.finish_development(&story_id);
 
-                // ── Evidence assembly (issue #53) ────────────────────────────────
-                // Build the SOC-2 evidence record from the run's gate decisions +
-                // provenance + a scoped audit over the changed files. Attach it to the
-                // UoW so the sign-off gate and PR renderer can use it. All steps are
-                // best-effort: a failure here never blocks the run's AwaitingQa state.
+                // SUCCESS ONLY — Evidence assembly (issue #53): build the SOC-2 evidence
+                // record and attach it. A failed run attaches NO QA evidence, so the sign-off
+                // gate can never mistake failed work for verified work.
                 let evidence = assemble_evidence_for_run(&run, &prov, &story_id);
                 uow.attach_evidence(&story_id, evidence);
-
-                // ── Enforcement-catch ledger capture (terminal point 1) ──────────
-                // After run is done, write one catch per deny/bounce gate event to the
-                // append-only enforcement ledger. Best-effort / fail-soft: errors are
-                // logged and swallowed inside `capture_run_finalization`; a ledger
-                // failure never affects the run's terminal state or provenance.
-                crate::enforcement_ledger::capture_run_finalization(
-                    &ledger,
-                    &run.events,
-                    &run.id,
-                    &story_id,
-                )
-                .await;
-
-                return;
             }
-        } else {
-            // The run vanished from the store; nothing to stamp.
-            return;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        // A non-terminal status behind a `done` flag should not occur (the terminal guard in
+        // RunStore keeps done runs at a terminal status). Be conservative: stamp nothing.
+        _ => {}
     }
+
+    // ── Enforcement-catch ledger capture (terminal point 1) ──────────────────
+    // Write one catch per deny/bounce gate event to the append-only enforcement ledger,
+    // regardless of the terminal kind. Best-effort / fail-soft: errors are logged and
+    // swallowed inside `capture_run_finalization`; a ledger failure never affects state.
+    crate::enforcement_ledger::capture_run_finalization(&ledger, &run.events, &run.id, &story_id)
+        .await;
 }
 
 /// Build a [`crate::evidence::UowEvidenceRecord`] from a completed run's provenance
@@ -2001,14 +2109,27 @@ async fn get_run(
     let run = state
         .runs
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("run not found: {id}")))?;
-    let threshold_ms = crate::run::run_stall_threshold_ms();
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("run not found: {id}")))?;
+    // LIFECYCLE-6: the effective threshold comes from the ACTIVE project's per-kind stall
+    // setting (autonomous vs. watched), falling back to the env/default when no project is
+    // active. This is the SAME threshold the background sweep applies, so the reported
+    // `stalled` flag and the auto-cancel decision agree.
+    let threshold_ms = state
+        .projects
+        .active()
+        .map(|p| p.stall_threshold_ms(run.kind.is_autonomous()))
+        .unwrap_or_else(crate::run::run_stall_threshold_ms);
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis();
     let idle = crate::run::idle_ms(u128::from(run.tracker.last_activity_ms()), now_ms);
-    let stalled = crate::run::is_stalled(idle, threshold_ms);
+    // LIFECYCLE-7: a `done` run (success/failed/cancelled) or a PARKED run
+    // (AwaitingReview / AwaitingClarification, waiting on a human) is NEVER stalled — it is
+    // intentionally idle, not wedged. Only a live, in-flight run can stall.
+    let stalled = !run.done
+        && !run.status.is_parked()
+        && crate::run::is_stalled(idle, threshold_ms);
     let stall_policy = run.stall_policy.clone();
     let failure_reason = run.failure_reason.clone();
     Ok(Json(RunStatusResponse {
@@ -2050,7 +2171,7 @@ async fn get_run_provenance(
     let run = state
         .runs
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("run not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("run not found: {id}")))?;
     let rules = camerata_gateway::enforced_gate_rules();
     Ok(Json(run_provenance(&run, &rules)))
 }
@@ -2114,7 +2235,7 @@ async fn sign_off_run(
     let run = state
         .runs
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("run not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("run not found: {id}")))?;
 
     // ── Critical-finding sign-off gate (issue #53) ───────────────────────────
     // Read the UoW's attached evidence. If it has a critical scoped-scan finding,
@@ -2206,18 +2327,37 @@ async fn sign_off_run(
     // reclaimed. Best-effort + non-fatal: a missing worktree, an unresolved repo, or a
     // git error never blocks sign-off. The shared clone and the branch itself are left
     // intact (the branch may still be wanted for the PR); only the extra checkout is removed.
-    if let Some(branch) = uow.branch.as_deref().filter(|b| !b.trim().is_empty()) {
-        if let Some(repo) = repo_from_story_id(&run.story_id) {
-            let override_path = state.settings.repo_path(&repo);
-            let workspace_root = state.settings.workspace_root();
-            if let Some(clone) = crate::workspace::resolve_repo_dir(
-                override_path.as_deref(),
-                workspace_root.as_deref(),
-                &repo,
-            ) {
-                crate::workspace::remove_uow_worktree(&clone, branch).await;
+    //
+    // LIFECYCLE-9 (single-flight guard): NEVER tear down the worktree while the run is still
+    // live. A sign-off that arrives before the run reaches a terminal (`done`) state must not
+    // yank the worktree out from under the agent mid-edit. The sign-off itself is recorded
+    // above; only the destructive teardown is withheld until `run.done`.
+    let run_after_signoff = state.runs.get(&run.id).unwrap_or_else(|| run.clone());
+    if run_after_signoff.done {
+        if let Some(branch) = uow.branch.as_deref().filter(|b| !b.trim().is_empty()) {
+            if let Some(repo) = repo_from_story_id(&run.story_id) {
+                let override_path = state.settings.repo_path(&repo);
+                let workspace_root = state.settings.workspace_root();
+                if let Some(clone) = crate::workspace::resolve_repo_dir(
+                    override_path.as_deref(),
+                    workspace_root.as_deref(),
+                    &repo,
+                ) {
+                    crate::workspace::remove_uow_worktree(&clone, branch).await;
+                }
             }
         }
+    } else {
+        // The run is still live: record that teardown was deferred so the trail is honest.
+        state.uow.append_history(
+            &run.story_id,
+            "sign_off",
+            &format!(
+                "Sign-off recorded, but worktree teardown deferred: run {} is still live \
+                 (not done). The worktree stays intact until the run reaches a terminal state.",
+                run.id
+            ),
+        );
     }
 
     Ok(Json(uow).into_response())
@@ -2298,7 +2438,7 @@ async fn answer_clarification(
     let answered = state
         .clarifications
         .answer_structured(&cid, selection, &req.answered_by)
-        .ok_or_else(|| AppError(anyhow::anyhow!("clarification not found: {cid}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("clarification not found: {cid}")))?;
 
     // Phase 3b: if a gated run is PARKED on this clarification, resume it now. The resume
     // context is consumed (no double-resume); the re-spawned agent gets the original task
@@ -2407,7 +2547,7 @@ async fn export_project(
     let project = state
         .projects
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     let routines = state.routines.list_for_project(&id);
     Ok(Json(ProjectExportDoc { project, routines }))
 }
@@ -4119,14 +4259,16 @@ async fn onboard_audit_start(
     // Local-first: resolve each repo's local working tree up front (the spawned job owns them).
     let (sources, notes) = resolve_local_sources(&state, &repos);
 
-    let job_id = state.jobs.create("audit");
+    // Capture the active project up front: the job is stamped with it (ROUTES-5, so a
+    // project's deep-report export finds ITS OWN latest deep report) AND it seeds the
+    // incremental-scan manifest lookup below.
+    let project_id = state.projects.active().map(|p| p.id);
+    let job_id = state.jobs.create("audit", project_id.clone());
     state.transcripts.clear(SCAN_AUDIT_KEY);
 
     let jobs = state.jobs.clone();
     let transcripts = state.transcripts.clone();
     let jid = job_id.clone();
-    // Incremental scan: capture the prior manifest + the cache store for the spawned task.
-    let project_id = state.projects.active().map(|p| p.id);
     let prior = if req.incremental {
         project_id
             .as_deref()
@@ -5181,7 +5323,7 @@ async fn onboard_ignore(
     Json(req): Json<IgnoreReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     if req.reason.trim().is_empty() {
-        return Err(AppError(anyhow::anyhow!(
+        return Err(AppError::bad_request(anyhow::anyhow!(
             "a reason is required to ignore a finding"
         )));
     }
@@ -5194,7 +5336,7 @@ async fn onboard_ignore(
     let (owner, name) = req
         .repo
         .split_once('/')
-        .ok_or_else(|| AppError(anyhow::anyhow!("repo must be owner/repo")))?;
+        .ok_or_else(|| AppError::bad_request(anyhow::anyhow!("repo must be owner/repo")))?;
 
     let mut baseline = fetch_baseline(owner, name, &token).await;
     let now = chrono::Utc::now().to_rfc3339();
@@ -5234,7 +5376,7 @@ async fn project_suppressions(
     let project = state
         .projects
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     // Local-first: the waiver registry reads each repo's local working tree, not GitHub.
     let (sources, _notes) = resolve_local_sources(&state, &project.repos);
     // Refresh = best-effort fast-forward pull of each local repo so the listing reflects the
@@ -6727,7 +6869,7 @@ async fn adopt_issue(
 ) -> Result<Json<CanonicalStory>, AppError> {
     let repo = req.repo.trim();
     if camerata_worktracker::RepoCoord::parse(repo).is_none() {
-        return Err(AppError(anyhow::anyhow!(
+        return Err(AppError::bad_request(anyhow::anyhow!(
             "repo must be `owner/name`, got `{repo}`"
         )));
     }
@@ -6751,7 +6893,7 @@ async fn decompose_propose(
         .get(&story_id)
         .await
         .map_err(AppError)?
-        .ok_or_else(|| AppError(anyhow::anyhow!("story not found: {story_id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("story not found: {story_id}")))?;
     // AI decomposition (grounded children), with the deterministic propose as fallback.
     let llm = state.llm();
     // Decomposition is a NON-FLEET step: model from the active project's per-step config.
@@ -6783,7 +6925,7 @@ async fn suggest_clarifications(
         .get(&story_id)
         .await
         .map_err(AppError)?
-        .ok_or_else(|| AppError(anyhow::anyhow!("story not found: {story_id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("story not found: {story_id}")))?;
     let system = "You are the engineer about to build this story. List the clarifying \
         questions you GENUINELY need answered before writing code: ambiguities, missing \
         decisions, edge cases, unstated constraints. Be specific to this story. Return \
@@ -6974,7 +7116,7 @@ async fn instantiate_routine_from_template(
     let template = templates
         .iter()
         .find(|t| t.id == template_id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("template not found: {template_id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("template not found: {template_id}")))?;
     Ok(Json(crate::routine::instantiate_from_template(template)))
 }
 
@@ -6988,7 +7130,7 @@ async fn set_routine_enabled(
         .routines
         .set_enabled(&id, req.enabled)
         .map(Json)
-        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("routine not found: {id}")))
 }
 
 /// Provision a routine on this backend (the "Set up" action for one that arrived via a
@@ -7002,7 +7144,7 @@ async fn provision_routine(
         .routines
         .set_provisioned(&id)
         .map(Json)
-        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("routine not found: {id}")))
 }
 
 /// Run a routine now (a governed run via the real gate; records the summary). If the run
@@ -7015,7 +7157,7 @@ async fn run_routine_now(
     let routine = state
         .routines
         .run_now(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("routine not found: {id}")))?;
     // If the run blocked, raise a review and link it to this run's history entry.
     if let Some(esc_id) = crate::escalation::raise_if_blocked(&state.escalations, &routine) {
         let _ = state.routines.link_last_run_escalation(&id, &esc_id);
@@ -7032,7 +7174,7 @@ async fn routine_runs(
         .routines
         .runs(&id)
         .map(Json)
-        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("routine not found: {id}")))
 }
 
 /// Query for `GET /api/escalations`: `?open=true` returns only open reviews.
@@ -7066,7 +7208,7 @@ async fn raise_escalation(
         .into_iter()
         .find(|r| r.id == req.routine_id)
         .map(|r| r.name)
-        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {}", req.routine_id)))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("routine not found: {}", req.routine_id)))?;
     Ok(Json(state.escalations.raise_deduped(req, &name)))
 }
 
@@ -7090,7 +7232,7 @@ async fn chat_escalation(
     let esc = state
         .escalations
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("escalation not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("escalation not found: {id}")))?;
     // GROUNDING (the invariant): the lead-engineer review chat reasons about the ACTUAL
     // project — append the active project's repo + rule digest to the system prompt.
     let system = match state.project_grounding().await {
@@ -7126,7 +7268,7 @@ async fn chat_escalation(
         .escalations
         .append_turn(&id, &req.message, &reply)
         .map(Json)
-        .ok_or_else(|| AppError(anyhow::anyhow!("escalation not found: {id}")))
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("escalation not found: {id}")))
 }
 
 /// Resolve an escalation with the human's answer. The answer is run through the
@@ -7143,9 +7285,14 @@ async fn answer_escalation(
     let esc = state
         .escalations
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("escalation not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("escalation not found: {id}")))?;
     if esc.status != crate::escalation::EscalationStatus::Open {
-        return Err(AppError(anyhow::anyhow!("no open escalation: {id}")));
+        // The escalation EXISTS but is already resolved: a state conflict, not a missing
+        // resource. 409 (not 404), so a caller can distinguish "gone" from "already answered".
+        return Err(AppError::with_status(
+            StatusCode::CONFLICT,
+            anyhow::anyhow!("no open escalation: {id}"),
+        ));
     }
     // Translate the human answer into a structured resume payload via the real LLM seam
     // (model-selectable, with a deterministic fallback inside translate_answer_ai).
@@ -7170,7 +7317,7 @@ async fn answer_escalation(
     let resolved = state
         .escalations
         .resolve_with_payload(&id, &req.answer, &payload)
-        .ok_or_else(|| AppError(anyhow::anyhow!("no open escalation: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("no open escalation: {id}")))?;
     // Act on the resolution by subject. A ROUTINE review returns the routine to Idle so the
     // scheduler can run its next slot. A UoW (Governed Development) review RESUMES the paused run
     // from its checkpoint (Approve/Amend) — or, on Reject, reverts the worktree and stops cleanly.
@@ -7203,13 +7350,18 @@ async fn answer_escalation(
                         // checkpoint, and record the abandonment on the UoW (routine_id holds the
                         // story_id for a UoW escalation).
                         let _ = state.checkpoints.mark_resumed(&ckpt.id);
-                        revert_worktree(&ckpt.worktree_dir).await;
+                        // LIFECYCLE-12: reset --hard to the checkpoint's base_commit FIRST so the
+                        // per-iteration snapshot COMMITS are reverted too (not just uncommitted
+                        // changes), matching the UI's "revert the agent's work" promise.
+                        revert_worktree(&ckpt.worktree_dir, Some(&ckpt.base_commit)).await;
                         state.uow.append_history(
                             &resolved.routine_id,
                             "dev_implement",
                             &format!(
-                                "Run REJECTED at review; reverted the worktree's uncommitted \
-                                 changes. {directive}"
+                                "Run REJECTED at review; reset the worktree to its base commit \
+                                 ({base}) — the agent's committed snapshots and uncommitted \
+                                 changes are fully reverted. {directive}",
+                                base = ckpt.base_commit,
                             ),
                         );
                     }
@@ -7256,7 +7408,7 @@ async fn update_routine(
         .routines
         .update(&id, &req)
         .map(Json)
-        .ok_or_else(|| AppError(anyhow::anyhow!("routine not found: {id}")))
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("routine not found: {id}")))
 }
 
 /// Delete a routine.
@@ -7267,7 +7419,7 @@ async fn delete_routine(
     if state.routines.delete(&id) {
         Ok(Json(serde_json::json!({ "deleted": id })))
     } else {
-        Err(AppError(anyhow::anyhow!("routine not found: {id}")))
+        Err(AppError::not_found(anyhow::anyhow!("routine not found: {id}")))
     }
 }
 
@@ -7566,11 +7718,19 @@ struct LlmBackendReq {
     backend: String,
 }
 
-/// Set the APP-LEVEL LLM backend (`"cli"` | `"api"`). Persists the choice AND hydrates the
-/// `CAMERATA_LLM_BACKEND` env var so it takes effect for subsequent runs WITHOUT a restart
-/// (the env-driven selection sites re-read it at construction time). Rejects any value other
-/// than `"cli"`/`"api"` with 400. Returns the stored backend plus `api_key_present` so the UI
-/// can immediately warn when `api` is selected with no Anthropic key.
+/// Set the APP-LEVEL LLM backend (`"cli"` | `"api"`). Persists the choice to the settings
+/// store, which is the single source of truth the driver-selection path reads at run-build
+/// time (via [`AppState::settings`]). Rejects any value other than `"cli"`/`"api"` with 400.
+/// Returns the stored backend plus `api_key_present` so the UI can immediately warn when
+/// `api` is selected with no Anthropic key.
+///
+/// ROUTES-9: this handler used to `std::env::set_var("CAMERATA_LLM_BACKEND", ...)` so a
+/// runtime backend switch took effect without a restart. That mutated process-global env
+/// from a request-handler thread while worker threads called `getenv` on the same var —
+/// undefined behaviour on POSIX, and the concurrent writer made the credential env-fallback
+/// test flaky. The env write is gone: the effective backend is now read from the persisted
+/// settings store (see `effective_backend_from`), so a runtime switch still takes effect
+/// without a restart AND without touching process env.
 async fn set_llm_backend(
     State(state): State<AppState>,
     Json(req): Json<LlmBackendReq>,
@@ -7586,9 +7746,6 @@ async fn set_llm_backend(
         );
     }
     state.settings.set_llm_backend(Some(backend.clone()));
-    // Take effect for subsequent runs without a restart: the selection sites read this env
-    // var at construction time. Edition 2021, so `set_var` is safe here.
-    std::env::set_var("CAMERATA_LLM_BACKEND", &backend);
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -7658,13 +7815,14 @@ async fn set_credential(
             })),
         );
     }
-    // Hydrate the Anthropic key into the env var on save so switching to the `api`
-    // backend + entering a key takes effect immediately for subsequent runs, with no
-    // restart. Scoped to the anthropic key only — the github token has its own
-    // `CAMERATA_GITHUB_TOKEN` handling and must not be mirrored into an env var here.
-    if name == crate::credentials::ANTHROPIC_API_KEY && !req.value.trim().is_empty() {
-        std::env::set_var("ANTHROPIC_API_KEY", &req.value);
-    }
+    // ROUTES-9: this handler used to `std::env::set_var("ANTHROPIC_API_KEY", ...)` so a
+    // freshly-saved key took effect for the `api` backend without a restart. That mutated
+    // process-global env from a request-handler thread while worker threads read the same var
+    // via `getenv` — undefined behaviour on POSIX, and the concurrent writer made the
+    // credential env-fallback test flaky. The env write is gone: the driver-selection path
+    // now reads the Anthropic key from the credential store (this same store) with an env
+    // fallback for back-compat, so a freshly-saved key takes effect without a restart AND
+    // without touching process env. See `anthropic_api_backend_key`.
     // Return the masked form so the UI can confirm what was stored.
     let masked = state
         .credential_store
@@ -7707,7 +7865,7 @@ async fn checkout_status(
     let project = state
         .projects
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     // Override-aware (issue #33/#38): resolve each repo via its per-repo path override first,
     // falling back to `<workspace_root>/<owner>/<repo>`. A repo can resolve via an override even
     // when no workspace root is set, so we do NOT hard-fail on a missing workspace root — repos
@@ -7736,7 +7894,7 @@ async fn checkout_project(
     let project = state
         .projects
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     let Some(root) = state.settings.workspace_root() else {
         return Err(AppError(anyhow::anyhow!(
             "no workspace folder is set — pick one first"
@@ -7793,12 +7951,12 @@ async fn checkout_branch(
     let project = state
         .projects
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     // GAP-2 / PROCESS-BRANCH-NAMING-1 chokepoint. HARD-BLOCK a branch name that violates the
     // project's branch-naming rule. Branch-naming is opt-in (disabled by default), so for
     // projects that have not enabled it this gate is a no-op and any name passes.
     if let Err(e) = crate::vcs_choke::gated_branch(&project.process_rule_config, &req.branch) {
-        return Err(AppError(anyhow::anyhow!(
+        return Err(AppError::bad_request(anyhow::anyhow!(
             "VCS-action gate blocked the branch name `{}`: {e}",
             req.branch
         )));
@@ -7838,7 +7996,7 @@ async fn ship_repo(
     let _project = state
         .projects
         .get(&id)
-        .ok_or_else(|| AppError(anyhow::anyhow!("project not found: {id}")))?;
+        .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
     let Some(root) = state.settings.workspace_root() else {
         return Err(AppError(anyhow::anyhow!("no workspace folder is set")));
     };
@@ -8135,12 +8293,14 @@ async fn uow_list(State(state): State<AppState>) -> Json<Vec<crate::uow::UnitOfW
     Json(state.uow.list_for_project(&p.id, &p.repos))
 }
 
-/// The UoW for a story. Creates a default one if the story has no UoW yet.
+/// The UoW for a story. ROUTES-8: a READ must not create — an unknown/typo'd id returns a
+/// transient default UoW (story_id set) that is NOT persisted, instead of materializing a junk
+/// record that then leaked into every list view. WRITE handlers still `get_or_create`.
 async fn uow_get(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
 ) -> Json<crate::uow::UnitOfWork> {
-    Json(state.uow.get_or_create(&story_id))
+    Json(state.uow.get_or_default(&story_id))
 }
 
 // ── Provider-agnostic WorkItem + UoW layer (governed-dev surface) ──────────────
@@ -8243,7 +8403,7 @@ async fn workitems_comment(
         .github_token()
         .ok_or_else(|| AppError(anyhow::anyhow!("no GitHub token — set CAMERATA_GITHUB_TOKEN")))?;
     if req.body.trim().is_empty() {
-        return Err(AppError(anyhow::anyhow!("comment body must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!("comment body must not be empty")));
     }
     let (repo, number) = parse_github_work_item_id(&req.work_item_id)?;
     let url = crate::github_issues::comment_on_issue(&repo, number, &req.body, &token)
@@ -8414,23 +8574,23 @@ async fn workitems_set_parent(
 /// Errors when the provider is not `github` or the shape is malformed.
 fn parse_github_work_item_id(work_item_id: &str) -> Result<(String, u64), AppError> {
     let rest = work_item_id.strip_prefix("github:").ok_or_else(|| {
-        AppError(anyhow::anyhow!(
+        AppError::bad_request(anyhow::anyhow!(
             "work_item_id must be `github:OWNER/REPO#NUMBER`, got `{work_item_id}`"
         ))
     })?;
     let (repo, num) = rest.rsplit_once('#').ok_or_else(|| {
-        AppError(anyhow::anyhow!(
+        AppError::bad_request(anyhow::anyhow!(
             "work_item_id missing `#NUMBER`: `{work_item_id}`"
         ))
     })?;
     if camerata_worktracker::RepoCoord::parse(repo).is_none() {
-        return Err(AppError(anyhow::anyhow!(
+        return Err(AppError::bad_request(anyhow::anyhow!(
             "work_item_id repo is not `owner/repo`: `{repo}`"
         )));
     }
     let number: u64 = num
         .parse()
-        .map_err(|_| AppError(anyhow::anyhow!("work_item_id number is not a u64: `{num}`")))?;
+        .map_err(|_| AppError::bad_request(anyhow::anyhow!("work_item_id number is not a u64: `{num}`")))?;
     Ok((repo.to_string(), number))
 }
 
@@ -8732,7 +8892,7 @@ async fn uow_author(
 ) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
     let message = req.message.trim().to_string();
     if message.is_empty() {
-        return Err(AppError(anyhow::anyhow!("message must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!("message must not be empty")));
     }
     // Snapshot the prior chat + draft so we can preserve the draft if the LLM is off/fails.
     let before = state.uow.get_or_create(&story_id);
@@ -8847,20 +9007,20 @@ async fn uow_publish(
     Json(req): Json<UowPublishReq>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let coord = camerata_worktracker::RepoCoord::parse(&req.repo).ok_or_else(|| {
-        AppError(anyhow::anyhow!(
+        AppError::bad_request(anyhow::anyhow!(
             "repo must be `owner/repo`, got `{}`",
             req.repo
         ))
     })?;
     let token = state.github_token().ok_or_else(|| {
-        AppError(anyhow::anyhow!(
+        AppError::bad_request(anyhow::anyhow!(
             "Connect GitHub (set CAMERATA_GITHUB_TOKEN) to publish the story to the board."
         ))
     })?;
     let uow = state.uow.get_or_create(&story_id);
     let authoring = uow.authoring.clone().unwrap_or_default();
     if authoring.draft_title.trim().is_empty() {
-        return Err(AppError(anyhow::anyhow!(
+        return Err(AppError::bad_request(anyhow::anyhow!(
             "The story has no drafted title yet. Author the story before publishing."
         )));
     }
@@ -8974,7 +9134,8 @@ async fn uow_list_attachments(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
 ) -> Json<serde_json::Value> {
-    let uow = state.uow.get_or_create(&story_id);
+    // ROUTES-8: READ — must not create. An unknown id yields an empty attachment list.
+    let uow = state.uow.get_or_default(&story_id);
     let list: Vec<serde_json::Value> = uow
         .attachments
         .iter()
@@ -9006,7 +9167,7 @@ async fn uow_add_attachment(
     Json(req): Json<AddAttachmentReq>,
 ) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
     if req.name.trim().is_empty() {
-        return Err(AppError(anyhow::anyhow!("attachment name must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!("attachment name must not be empty")));
     }
     let attachment = crate::uow::UowAttachment {
         name: req.name.trim().to_string(),
@@ -9023,7 +9184,9 @@ async fn uow_get_attachment(
     State(state): State<AppState>,
     Path((story_id, name)): Path<(String, String)>,
 ) -> Json<serde_json::Value> {
-    let uow = state.uow.get_or_create(&story_id);
+    // ROUTES-8: READ — must not create. An unknown UoW id has no attachments, so the
+    // not-found branch fires (no junk UoW persisted).
+    let uow = state.uow.get_or_default(&story_id);
     match uow.attachments.iter().find(|a| a.name == name) {
         Some(a) => Json(serde_json::json!({
             "attachment": { "name": a.name, "mime": a.mime, "content": a.content }
@@ -9089,7 +9252,8 @@ async fn uow_get_diagram(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
 ) -> Json<serde_json::Value> {
-    let uow = state.uow.get_or_create(&story_id);
+    // ROUTES-8: READ — must not create. An unknown id yields `{ "diagram": null }`.
+    let uow = state.uow.get_or_default(&story_id);
     Json(serde_json::json!({ "diagram": uow.diagram }))
 }
 
@@ -9303,17 +9467,19 @@ async fn uow_generate_mockup(
         || !authoring.draft_body.trim().is_empty()
         || !authoring.requirements_prompt.trim().is_empty();
     if message.is_empty() && !has_node_context {
-        return Err(AppError(anyhow::anyhow!(
+        return Err(AppError::bad_request(anyhow::anyhow!(
             "message must not be empty when there is no node context to ground on"
         )));
     }
 
     // Resolve the PARENT (epic/story) so the mockup is grounded in its context, not just
-    // this node's title/body.
+    // this node's title/body. ROUTES-8: this is a READ for grounding — use the non-creating
+    // getter so a stale `draft_parent_id` does not persist a junk parent UoW. Absent parent =
+    // no extra grounding (the node's own context still drives the mockup).
     let parent = uow
         .draft_parent_id
         .as_ref()
-        .map(|pid| state.uow.get_or_create(pid));
+        .and_then(|pid| state.uow.get(pid));
 
     let prompt = build_mockup_prompt(
         &authoring,
@@ -9514,7 +9680,7 @@ async fn design_author(
 ) -> Result<Json<crate::uow::UnitOfWork>, AppError> {
     let message = req.message.trim().to_string();
     if message.is_empty() {
-        return Err(AppError(anyhow::anyhow!("message must not be empty")));
+        return Err(AppError::bad_request(anyhow::anyhow!("message must not be empty")));
     }
     let before = state.uow.get_or_create(&id);
     let prior = before.authoring.clone().unwrap_or_default();
@@ -11504,7 +11670,11 @@ async fn uow_update_branch(
             .active()
             .map(|p| p.process_rule_config)
             .unwrap_or_default();
-        tokio::spawn(async move {
+        // LIFECYCLE-1: register the abort handle so a Stop can reap a run blocked inside the
+        // live agent subprocess (kill_on_drop). Cleared when the run finishes.
+        let runs_for_clear = state.runs.clone();
+        let rid_for_clear = run_id.clone();
+        let handle = tokio::spawn(async move {
             crate::update_branch_run::execute_update_branch_run(
                 runs,
                 uow_store,
@@ -11522,7 +11692,9 @@ async fn uow_update_branch(
                 vcs_config,
             )
             .await;
+            runs_for_clear.clear_abort(&rid_for_clear);
         });
+        state.runs.register_abort(&run_id, handle.abort_handle());
     }
 
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id })).into_response()
@@ -11649,7 +11821,9 @@ async fn uow_pr_get(
     let Some(repo) = repo_from_story_id(&story_id) else {
         return Json(empty("Could not derive owner/repo from the story id."));
     };
-    let uow = state.uow.get_or_create(&story_id);
+    // ROUTES-8: READ — must not create. An unknown id resolves to a default UoW (no PR ref),
+    // so the "No PR" path fires without persisting a junk UoW.
+    let uow = state.uow.get_or_default(&story_id);
     let Some(info) = crate::pr::resolve_pr_for_uow(&state.uow, &story_id, &uow, &repo, &token).await
     else {
         return Json(empty("No PR for this UoW yet."));
@@ -11797,7 +11971,11 @@ async fn uow_pr_resolve(
             .active()
             .map(|p| p.process_rule_config)
             .unwrap_or_default();
-        tokio::spawn(async move {
+        // LIFECYCLE-1: register the abort handle so a Stop can reap a run blocked inside the
+        // live agent subprocess (kill_on_drop). Cleared when the run finishes.
+        let runs_for_clear = state.runs.clone();
+        let rid_for_clear = run_id.clone();
+        let handle = tokio::spawn(async move {
             crate::pr_resolve_run::execute_pr_resolve_run(
                 runs,
                 uow_store,
@@ -11816,7 +11994,9 @@ async fn uow_pr_resolve(
                 vcs_config,
             )
             .await;
+            runs_for_clear.clear_abort(&rid_for_clear);
         });
+        state.runs.register_abort(&run_id, handle.abort_handle());
     }
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id })).into_response()
 }
@@ -12392,16 +12572,16 @@ async fn export_deep_report(
             .into_response();
     }
 
-    // Find the most recent deep report from the job store (any completed job
-    // with a deep field). Jobs are stored with their ScanReport; we look for the
-    // most recently completed one that has a deep section.
-    let deep_report = state.jobs.latest_deep_report();
+    // ROUTES-5: find THIS project's most recent completed deep report (filtered by
+    // project_id, newest by completion time). Previously this returned an arbitrary job's
+    // deep report regardless of which project it belonged to.
+    let deep_report = state.jobs.latest_deep_report(&id);
     let Some(deep) = deep_report else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
                 "ok": false,
-                "message": "No deep-tier report available. Run an audit with `deep=true` first."
+                "message": "No deep-tier report available for this project. Run an audit with `deep=true` first."
             })),
         )
             .into_response();
@@ -12463,15 +12643,23 @@ fn render_deep_report_markdown(deep: &crate::ai_audit::DeepReport, soc2_enabled:
 
 // ── error type ──────────────────────────────────────────────────────────────
 
-/// Maps any backend error to a 500 with a JSON body, so handlers can use `?`.
+/// A handler error carrying an explicit HTTP status + a JSON body, so handlers can use `?`.
+///
+/// ROUTES-7: this type used to map EVERY failure to 500, including not-found and bad-request
+/// conditions that handler docs promise as 4xx. The `status` field lets a handler classify:
+/// use [`AppError::not_found`] for a missing resource (404), [`AppError::bad_request`] for
+/// invalid input (400), and the bare `AppError(e)` / `?` conversion for a genuine internal
+/// fault (500). The response BODY shape is unchanged (`{ "error": "…" }`) — only the status
+/// code is corrected, so UI code that parses `{error}` keeps working.
 struct AppError {
     status: StatusCode,
     err: anyhow::Error,
 }
 
-/// Construct a 500 `AppError` (the default). The `AppError(e)` call form is preserved via a
-/// same-named free function (types and values live in separate namespaces), so every existing
-/// call site keeps compiling; use [`AppError::with_status`] for a non-500 code.
+/// Construct a 500 `AppError` (the default, for a genuine internal fault). The `AppError(e)`
+/// call form is preserved via a same-named free function (types and values live in separate
+/// namespaces), so every existing call site keeps compiling; use [`AppError::not_found`] /
+/// [`AppError::bad_request`] / [`AppError::with_status`] for a 4xx code.
 #[allow(non_snake_case)]
 fn AppError(err: anyhow::Error) -> AppError {
     AppError {
@@ -12484,6 +12672,17 @@ impl AppError {
     /// An `AppError` that renders with a specific HTTP status (e.g. 409 Conflict).
     fn with_status(status: StatusCode, err: anyhow::Error) -> Self {
         AppError { status, err }
+    }
+
+    /// ROUTES-7: a 404 for a missing resource (the message becomes the `{error}` body).
+    fn not_found(err: anyhow::Error) -> Self {
+        AppError { status: StatusCode::NOT_FOUND, err }
+    }
+
+    /// ROUTES-7: a 400 for invalid input / a request the server understood but can't act on
+    /// as posed (the message becomes the `{error}` body).
+    fn bad_request(err: anyhow::Error) -> Self {
+        AppError { status: StatusCode::BAD_REQUEST, err }
     }
 }
 
@@ -12643,6 +12842,41 @@ mod tests {
         assert_eq!(state.settings.llm_backend().as_deref(), Some("api"));
     }
 
+    /// ROUTES-9: `POST /api/settings/llm-backend` persists to the settings store WITHOUT
+    /// mutating the `CAMERATA_LLM_BACKEND` process-env var. The previous implementation did a
+    /// `std::env::set_var` from the request thread, racing worker-thread `getenv` (POSIX UB)
+    /// and making the credential env-fallback test flaky. The store is now the source of truth.
+    #[tokio::test]
+    async fn post_llm_backend_does_not_mutate_process_env() {
+        // Sentinel value the handler must NOT overwrite.
+        std::env::set_var("CAMERATA_LLM_BACKEND", "sentinel-untouched");
+
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/settings/llm-backend")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"backend":"api"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The setting is persisted to the store...
+        assert_eq!(state.settings.llm_backend().as_deref(), Some("api"));
+        // ...but the process env was left exactly as it was (no per-request set_var).
+        assert_eq!(
+            std::env::var("CAMERATA_LLM_BACKEND").as_deref(),
+            Ok("sentinel-untouched"),
+            "the handler must not mutate CAMERATA_LLM_BACKEND"
+        );
+        std::env::remove_var("CAMERATA_LLM_BACKEND");
+    }
+
     /// `POST /api/settings/llm-backend` rejects a bogus backend with 400 and does not
     /// mutate the stored setting.
     #[tokio::test]
@@ -12694,6 +12928,49 @@ mod tests {
             json["message"].as_str().unwrap_or_default().contains("VCS-action gate"),
             "the block message must name the VCS-action gate: {json}"
         );
+    }
+
+    /// LIFECYCLE-7: `GET /api/runs/:id` must NOT report `stalled` for a `done` run or a
+    /// PARKED run (AwaitingReview / AwaitingClarification), no matter how long idle. Only a
+    /// live, in-flight run can stall. A freshly-created (active, just-touched) run is also not
+    /// stalled. Exercises the handler's done/parked short-circuit end-to-end.
+    #[tokio::test]
+    async fn get_run_does_not_report_stalled_for_done_or_parked_runs() {
+        use crate::run::{RunKind, RunStatus};
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+
+        // Helper: GET a run and return its `stalled` flag.
+        async fn stalled_flag(state: &AppState, id: &str) -> bool {
+            let app = router(state.clone());
+            let resp = app
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri(format!("/api/runs/{id}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            body_json(resp).await["stalled"].as_bool().unwrap()
+        }
+
+        // A fresh, active dev-implement run (just touched activity) is not stalled.
+        let active = state.runs.create("CAM-live", "live", RunKind::Watched);
+        state.runs.set_status(&active, RunStatus::Executing, false);
+        state.runs.touch_activity(&active, None);
+        assert!(!stalled_flag(&state, &active).await, "fresh active run not stalled");
+
+        // A DONE run is never stalled (even though it will sit idle forever).
+        let done = state.runs.create("CAM-done", "live", RunKind::Watched);
+        state.runs.set_status(&done, RunStatus::AwaitingQa, true);
+        assert!(!stalled_flag(&state, &done).await, "done run never stalled");
+
+        // A run PARKED on human review is never stalled.
+        let parked = state.runs.create("CAM-parked", "live", RunKind::Watched);
+        state.runs.set_status(&parked, RunStatus::AwaitingReview, false);
+        assert!(!stalled_flag(&state, &parked).await, "parked run never stalled");
     }
 
     #[test]
@@ -13969,6 +14246,9 @@ mod tests {
     }
 
     /// #20: a malformed repo (not `owner/name`) is rejected, not silently adopted.
+    ///
+    /// ROUTES-7: invalid REQUEST INPUT is a 400 Bad Request, not a 500. (Previously every
+    /// AppError mapped to 500; this asserts the corrected status for the bad-input class.)
     #[tokio::test]
     async fn adopt_issue_rejects_a_malformed_repo() {
         let app = router(AppState::new(
@@ -13988,7 +14268,46 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        // The body shape is unchanged: UI parses `{error}`.
+        let json = body_json(resp).await;
+        assert!(json["error"].is_string(), "body keeps the {{error}} shape");
+    }
+
+    /// ROUTES-7: a GET for a missing run returns 404 Not Found (not 500), with the
+    /// unchanged `{error}` body shape the UI parses.
+    #[tokio::test]
+    async fn get_run_missing_returns_404_not_500() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/runs/does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let json = body_json(resp).await;
+        assert!(json["error"].is_string(), "body keeps the {{error}} shape");
+    }
+
+    /// ROUTES-7: the AppError constructors carry the right status while keeping the
+    /// `{error}` body — the single source of truth all handlers route through.
+    #[tokio::test]
+    async fn app_error_status_codes_map_correctly() {
+        use axum::response::IntoResponse;
+        let cases = [
+            (AppError(anyhow::anyhow!("boom")), StatusCode::INTERNAL_SERVER_ERROR),
+            (AppError::not_found(anyhow::anyhow!("gone")), StatusCode::NOT_FOUND),
+            (AppError::bad_request(anyhow::anyhow!("nope")), StatusCode::BAD_REQUEST),
+        ];
+        for (err, expected) in cases {
+            let resp = err.into_response();
+            assert_eq!(resp.status(), expected);
+        }
     }
 
     /// #20: with no GitHub token the list endpoint degrades gracefully — `ok:false`,
@@ -14099,6 +14418,260 @@ mod tests {
             state.uow.get_or_create(story).stage,
             lifecycle::UowStage::Development
         );
+    }
+
+    // ── LIFECYCLE-9: single-flight guard per story ───────────────────────────────
+
+    /// A second start on a story that already has an active (non-done) run returns 409,
+    /// naming the active run — two runs must never share one worktree.
+    #[tokio::test]
+    async fn lifecycle9_second_start_with_active_run_returns_409() {
+        let state = AppState::seeded();
+        let story = "SF-1";
+        // Approve a decision so the development gate would otherwise pass.
+        seed_approved_decision(&state, story);
+        // Seed an ACTIVE (Planned, not done) run on the story — simulating a run already
+        // in flight.
+        let active = state.runs.create(story, "scripted", crate::run::RunKind::Watched);
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/stories/{story}/run"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::CONFLICT,
+            "a second start with an active run must be rejected with 409"
+        );
+        let json = body_json(resp).await;
+        assert_eq!(json["active_run_id"], active);
+        assert!(json["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Only one"));
+    }
+
+    /// Once the active run is done, a fresh start proceeds (the guard only blocks LIVE runs).
+    #[tokio::test]
+    async fn lifecycle9_start_proceeds_once_prior_run_is_done() {
+        let state = AppState::seeded();
+        let story = "SF-2";
+        seed_approved_decision(&state, story);
+        // A prior run that has completed (done) must NOT block a new start.
+        let prior = state.runs.create(story, "scripted", crate::run::RunKind::Watched);
+        state.runs.mark_done(&prior);
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/stories/{story}/run"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "a done prior run must not block a new start"
+        );
+    }
+
+    /// Sign-off on a story whose run is still LIVE (not done) must NOT tear down the
+    /// worktree — it records a deferral note instead. Once the run is done, sign-off proceeds
+    /// without the deferral note.
+    #[tokio::test]
+    async fn lifecycle9_signoff_defers_teardown_while_run_is_live() {
+        let state = AppState::seeded();
+        let story = "SF-3";
+        // A UoW branch so the teardown path would otherwise be reached.
+        state.uow.set_branch(story, Some("camerata/sf-3".to_string()));
+        // A LIVE run (Planned, not done).
+        let run_id = state.runs.create(story, "live", crate::run::RunKind::Watched);
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/runs/{run_id}/sign-off"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "sign-off itself still succeeds");
+
+        // A deferral history entry was recorded (teardown withheld while live).
+        let uow = state.uow.get_or_create(story);
+        assert!(
+            uow.history
+                .iter()
+                .any(|h| h.kind == "sign_off" && h.text.contains("teardown deferred")),
+            "a live run must defer worktree teardown and record why"
+        );
+    }
+
+    /// When the run is done, sign-off does NOT record the deferral note (teardown proceeds).
+    #[tokio::test]
+    async fn lifecycle9_signoff_tears_down_when_run_is_done() {
+        let state = AppState::seeded();
+        let story = "SF-4";
+        state.uow.set_branch(story, Some("camerata/sf-4".to_string()));
+        let run_id = state.runs.create(story, "live", crate::run::RunKind::Watched);
+        state
+            .runs
+            .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/runs/{run_id}/sign-off"))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let uow = state.uow.get_or_create(story);
+        assert!(
+            !uow.history
+                .iter()
+                .any(|h| h.kind == "sign_off" && h.text.contains("teardown deferred")),
+            "a done run must not record a teardown-deferral note"
+        );
+    }
+
+    /// `active_run_for_story` returns the non-done run and ignores done runs.
+    #[test]
+    fn lifecycle9_active_run_for_story_ignores_done_runs() {
+        let runs = crate::run::RunStore::new();
+        let done = runs.create("S-A", "scripted", crate::run::RunKind::Watched);
+        runs.mark_done(&done);
+        assert!(
+            runs.active_run_for_story("S-A").is_none(),
+            "a story with only done runs has no active run"
+        );
+        let live = runs.create("S-A", "scripted", crate::run::RunKind::Watched);
+        assert_eq!(
+            runs.active_run_for_story("S-A").map(|r| r.id),
+            Some(live),
+            "the live run is surfaced as the active run"
+        );
+        // A different story is unaffected.
+        assert!(runs.active_run_for_story("S-B").is_none());
+    }
+
+    // ── LIFECYCLE-12: reject-after-bounce reverts committed snapshots ─────────────
+
+    /// Helper: run a git command in `dir`, returning trimmed stdout.
+    async fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+        let out = tokio::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// E2E (real git repo): after per-iteration snapshot COMMITS, a Reject resets the worktree
+    /// HARD to the checkpoint's base_commit — HEAD returns to base_commit and the snapshot
+    /// commits are gone. This is the LIFECYCLE-12 fix: without the reset, those committed
+    /// snapshots would survive a Reject and could be pushed.
+    #[tokio::test]
+    async fn lifecycle12_reject_hard_resets_to_base_commit() {
+        let dir = std::env::temp_dir().join(format!("cam-l12-reject-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init"]).await;
+        git_in(&dir, &["config", "user.email", "t@example.com"]).await;
+        git_in(&dir, &["config", "user.name", "Test"]).await;
+        std::fs::write(dir.join("README.md"), "base").unwrap();
+        git_in(&dir, &["add", "."]).await;
+        git_in(&dir, &["commit", "-m", "base"]).await;
+        let base_commit = git_in(&dir, &["rev-parse", "HEAD"]).await;
+
+        // The agent commits two per-iteration `camerata: snapshot` commits.
+        std::fs::write(dir.join("work.rs"), "fn a() {}").unwrap();
+        git_in(&dir, &["add", "."]).await;
+        git_in(&dir, &["commit", "-m", "camerata: snapshot iteration 0"]).await;
+        std::fs::write(dir.join("work.rs"), "fn a() {} fn b() {}").unwrap();
+        git_in(&dir, &["add", "."]).await;
+        git_in(&dir, &["commit", "-m", "camerata: snapshot iteration 1"]).await;
+        // Plus an uncommitted change on top.
+        std::fs::write(dir.join("untracked.rs"), "fn c() {}").unwrap();
+
+        // HEAD has moved past base and the snapshots exist.
+        assert_ne!(git_in(&dir, &["rev-parse", "HEAD"]).await, base_commit);
+
+        // Reject: revert with the base commit → hard reset + clean.
+        revert_worktree(&dir.to_string_lossy(), Some(&base_commit)).await;
+
+        // HEAD is back at base_commit; the snapshot commits are gone.
+        assert_eq!(
+            git_in(&dir, &["rev-parse", "HEAD"]).await,
+            base_commit,
+            "HEAD must be reset back to the checkpoint base_commit"
+        );
+        let log = git_in(&dir, &["log", "--oneline"]).await;
+        assert!(
+            !log.contains("snapshot"),
+            "the per-iteration snapshot commits must be gone after Reject: {log}"
+        );
+        // The agent's committed file and untracked file are both gone.
+        assert!(!dir.join("work.rs").exists(), "committed work file must be reverted");
+        assert!(!dir.join("untracked.rs").exists(), "untracked file must be cleaned");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without a base_commit (older checkpoints), revert_worktree falls back to the
+    /// uncommitted-only revert: committed work survives, only uncommitted changes are dropped.
+    #[tokio::test]
+    async fn lifecycle12_revert_without_base_only_drops_uncommitted() {
+        let dir = std::env::temp_dir().join(format!("cam-l12-nobase-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        git_in(&dir, &["init"]).await;
+        git_in(&dir, &["config", "user.email", "t@example.com"]).await;
+        git_in(&dir, &["config", "user.name", "Test"]).await;
+        std::fs::write(dir.join("README.md"), "base").unwrap();
+        git_in(&dir, &["add", "."]).await;
+        git_in(&dir, &["commit", "-m", "base"]).await;
+        std::fs::write(dir.join("committed.rs"), "fn a() {}").unwrap();
+        git_in(&dir, &["add", "."]).await;
+        git_in(&dir, &["commit", "-m", "camerata: snapshot"]).await;
+        let head_with_commit = git_in(&dir, &["rev-parse", "HEAD"]).await;
+        // Uncommitted edit on top.
+        std::fs::write(dir.join("dirty.rs"), "fn d() {}").unwrap();
+
+        revert_worktree(&dir.to_string_lossy(), None).await;
+
+        // The committed snapshot SURVIVES (no base to reset to); only uncommitted is dropped.
+        assert_eq!(
+            git_in(&dir, &["rev-parse", "HEAD"]).await,
+            head_with_commit,
+            "without a base_commit, committed work is not reset (documented fallback)"
+        );
+        assert!(dir.join("committed.rs").exists(), "committed file survives the fallback");
+        assert!(!dir.join("dirty.rs").exists(), "uncommitted file is cleaned");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── Contract precondition (R3.g) ─────────────────────────────────────────────
@@ -14614,6 +15187,264 @@ mod tests {
         id
     }
 
+    // ── LIFECYCLE-2/3/4: completion-driven, success-gated provenance stamping ─────────
+
+    /// Drive a fresh in-memory UoW for `story` to the `Development` stage (the stage a
+    /// governed dev run stamps from). Seeds one APPROVED decision so the no-code-first
+    /// transitions succeed: Intake → Investigating → DecisionsApproved → Development.
+    fn uow_at_development(uow: &crate::uow::UowStore, story: &str) {
+        use camerata_worktracker::investigation::{
+            DecisionOutcome, DecisionRecord, RevisionActor, RevisionProvenance,
+        };
+        let decision = DecisionRecord {
+            artifact_id: format!("{story}/decision/d1"),
+            story_id: story.to_string(),
+            label: "d1".to_string(),
+            question: "Q?".to_string(),
+            rationale: "R".to_string(),
+            alternatives_considered: vec![],
+            outcome: DecisionOutcome::Approved,
+            provenance: RevisionProvenance::new(RevisionActor::Ai, chrono::Utc::now()),
+        };
+        uow.set_decisions(story, vec![decision]);
+        uow.begin_investigation(story).expect("→ Investigating");
+        uow.approve_decisions(story).expect("→ DecisionsApproved");
+        uow.start_development(story).expect("→ Development");
+        assert_eq!(
+            uow.get_or_create(story).stage,
+            lifecycle::UowStage::Development
+        );
+    }
+
+    /// LIFECYCLE-2 (success): a SUCCESSFUL run advances Development → AwaitingQa, freezes
+    /// gate provenance, AND attaches QA evidence. Driven through the SAME completion-driven
+    /// stamping path a real run uses (`stamp_provenance_when_done`), not a hand-stamp.
+    #[tokio::test]
+    async fn stamp_on_success_advances_stage_and_attaches_evidence() {
+        let runs = RunStore::new();
+        let uow = crate::uow::UowStore::new();
+        let story = "LIFE-SUCCESS";
+        uow_at_development(&uow, story);
+
+        // A completed (AwaitingQa) run with real gate events (1 allow, 2 deny).
+        let run_id = make_run(&runs, story, 1, 2);
+
+        stamp_provenance_when_done(
+            runs.clone(),
+            uow.clone(),
+            crate::enforcement_ledger::EnforcementLedger::none(),
+            run_id.clone(),
+            story.to_string(),
+        )
+        .await;
+
+        let stamped = uow.get_or_create(story);
+        // Stage advanced.
+        assert_eq!(stamped.stage, lifecycle::UowStage::AwaitingQa);
+        // Provenance frozen with the honest tallies.
+        let prov = stamped.gate_provenance.expect("provenance frozen on success");
+        assert_eq!(prov.deny_count, 2);
+        assert_eq!(prov.allow_count, 1);
+        // QA evidence attached.
+        assert!(stamped.evidence.is_some(), "QA evidence attached on success");
+    }
+
+    /// LIFECYCLE-2 (failure): a FAILED run (e.g. gateway binary missing) does NOT advance
+    /// to AwaitingQa and attaches NO QA evidence, but its gate provenance IS still frozen
+    /// (an honest record of what the gate saw). This is the core fix: the old code advanced
+    /// the stage + attached evidence for work that never completed.
+    #[tokio::test]
+    async fn stamp_on_failure_freezes_provenance_but_does_not_advance_or_attach() {
+        let runs = RunStore::new();
+        let uow = crate::uow::UowStore::new();
+        let story = "LIFE-FAIL";
+        uow_at_development(&uow, story);
+
+        // A run with gate events that then FAILS (genuine Failed terminal).
+        let run_id = make_run(&runs, story, 1, 2);
+        // make_run leaves it AwaitingQa; flip to a fresh run that fails instead so the
+        // terminal status is Failed (the terminal guard blocks re-setting a done run).
+        let run_id = {
+            let id = runs.create(story, "live", crate::run::RunKind::Watched);
+            for ev in runs.get(&run_id).unwrap().events {
+                runs.push_event(&id, ev);
+            }
+            runs.fail_with_reason(&id, "gateway binary missing".to_string());
+            id
+        };
+
+        stamp_provenance_when_done(
+            runs.clone(),
+            uow.clone(),
+            crate::enforcement_ledger::EnforcementLedger::none(),
+            run_id.clone(),
+            story.to_string(),
+        )
+        .await;
+
+        let stamped = uow.get_or_create(story);
+        // Stage did NOT advance — still Development.
+        assert_eq!(stamped.stage, lifecycle::UowStage::Development);
+        // Provenance IS frozen (honest record of what the gate saw).
+        assert!(
+            stamped.gate_provenance.is_some(),
+            "provenance frozen even on failure"
+        );
+        // NO QA evidence for work that never completed.
+        assert!(
+            stamped.evidence.is_none(),
+            "no QA evidence attached on failure"
+        );
+    }
+
+    /// LIFECYCLE-2 (cancel): a CANCELLED run freezes nothing, advances nothing, attaches
+    /// nothing — the run stopped before any completed work, so there is no honest gate
+    /// accounting to record.
+    #[tokio::test]
+    async fn stamp_on_cancel_does_nothing() {
+        let runs = RunStore::new();
+        let uow = crate::uow::UowStore::new();
+        let story = "LIFE-CANCEL";
+        uow_at_development(&uow, story);
+
+        let run_id = runs.create(story, "live", crate::run::RunKind::Watched);
+        runs.cancel(&run_id);
+
+        stamp_provenance_when_done(
+            runs.clone(),
+            uow.clone(),
+            crate::enforcement_ledger::EnforcementLedger::none(),
+            run_id.clone(),
+            story.to_string(),
+        )
+        .await;
+
+        let stamped = uow.get_or_create(story);
+        assert_eq!(stamped.stage, lifecycle::UowStage::Development);
+        assert!(stamped.gate_provenance.is_none(), "cancel freezes no provenance");
+        assert!(stamped.evidence.is_none(), "cancel attaches no evidence");
+    }
+
+    /// LIFECYCLE-3: the completion path stamps correctly for a run that reaches its terminal
+    /// state LATER (would exceed the old 5-minute poll budget). We drive the completion
+    /// signal directly — a background task flips the run terminal after the watcher is
+    /// already awaiting — proving the stamp is completion-driven, not wall-clock-driven.
+    #[tokio::test]
+    async fn stamp_is_completion_driven_not_polled() {
+        let runs = RunStore::new();
+        let uow = crate::uow::UowStore::new();
+        let story = "LIFE-LATE";
+        uow_at_development(&uow, story);
+
+        // Create a run that is NOT yet done and give it gate events.
+        let run_id = runs.create(story, "live", crate::run::RunKind::Watched);
+        runs.push_event(
+            &run_id,
+            crate::run::GateEvent {
+                seq: 1,
+                layer: "layer-1".to_string(),
+                verdict: "allow".to_string(),
+                rule: None,
+                detail: "src/late.rs".to_string(),
+                content_hash: None,
+            },
+        );
+
+        // Start the watcher; it parks on the completion signal (run is not done yet).
+        let watch = {
+            let runs = runs.clone();
+            let uow = uow.clone();
+            let rid = run_id.clone();
+            let sid = story.to_string();
+            tokio::spawn(async move {
+                stamp_provenance_when_done(
+                    runs,
+                    uow,
+                    crate::enforcement_ledger::EnforcementLedger::none(),
+                    rid,
+                    sid,
+                )
+                .await;
+            })
+        };
+
+        // Complete the run AFTER the watcher is already awaiting — the completion signal (not
+        // a poll) wakes it. A short sleep makes the ordering deterministic.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        runs.set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
+
+        watch.await.expect("watcher task completes");
+
+        let stamped = uow.get_or_create(story);
+        assert_eq!(stamped.stage, lifecycle::UowStage::AwaitingQa);
+        assert!(stamped.gate_provenance.is_some());
+        assert!(stamped.evidence.is_some());
+    }
+
+    /// LIFECYCLE-4: a RESUMED governed run gets the SAME completion-driven, success-gated
+    /// provenance watcher a fresh run does. Previously the resume path spawned none, so a
+    /// resumed run never got provenance / a stage advance. Exercised through the real
+    /// `resume_governed_run` in scripted mode (CI default): it completes the resumed run to
+    /// AwaitingQa and the watcher must then freeze provenance + advance the UoW stage.
+    #[tokio::test]
+    async fn resumed_run_gets_provenance_and_stage_advance_on_success() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let story = "me/api#7";
+        uow_at_development(&state.uow, story);
+
+        // Seed a resumable checkpoint (as a test-tamper pause would).
+        let esc = state.escalations.raise(
+            crate::escalation::RaiseEscalationReq {
+                subject_kind: crate::escalation::SubjectKind::Uow,
+                checkpoint_id: None,
+                routine_id: story.to_string(),
+                reason: "AGENTIC-NO-TEST-TAMPER-1".to_string(),
+                stopped_for: "review".to_string(),
+                suggestions: vec![],
+                raw_context: String::new(),
+            },
+            "story",
+        );
+        let ckpt = state.checkpoints.create(crate::checkpoint::NewCheckpoint {
+            story_id: story.to_string(),
+            run_id: "run-orig".to_string(),
+            escalation_id: esc.id.clone(),
+            pause_reason: "test-tamper".to_string(),
+            repo: "me/api".to_string(),
+            branch: "camerata/me-api-7".to_string(),
+            worktree_dir: "/camerata/nonexistent-wt".to_string(),
+            base_commit: "abc123".to_string(),
+            iteration: 0,
+            max_iterations: 1,
+            model: "claude-opus-4-8".to_string(),
+            project_id: None,
+        });
+
+        let (run_id, _mode) = resume_governed_run(&state, &ckpt, "Approved: proceed.")
+            .await
+            .expect("resume succeeds");
+
+        // The resumed run completes to AwaitingQa (scripted mode); wait for the spawned
+        // watcher to observe the completion signal and stamp.
+        let stamped = state.runs.get(&run_id).expect("resumed run exists");
+        assert!(stamped.done, "resumed scripted run is terminal");
+
+        // Poll briefly for the watcher's stamp (it runs on its own task).
+        let mut advanced = false;
+        for _ in 0..50 {
+            if state.uow.get_or_create(story).stage == lifecycle::UowStage::AwaitingQa {
+                advanced = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(advanced, "LIFECYCLE-4: resumed run's watcher advanced the stage");
+        assert!(
+            state.uow.get_or_create(story).gate_provenance.is_some(),
+            "LIFECYCLE-4: resumed run's watcher froze provenance"
+        );
+    }
+
     #[test]
     fn assemble_evidence_for_run_builds_valid_record() {
         let run_store = RunStore::new();
@@ -15002,7 +15833,7 @@ mod tests {
         std::env::set_var("CAMERATA_GITHUB_TOKEN", "ghp_test");
         let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
 
-        // Empty body → 500 (validation error).
+        // ROUTES-7: an empty body is invalid REQUEST INPUT → 400 Bad Request (was 500).
         let body = serde_json::json!({ "work_item_id": "github:o/r#20", "body": "  " }).to_string();
         let resp = app
             .clone()
@@ -15016,7 +15847,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         std::env::remove_var("CAMERATA_GITHUB_TOKEN");
     }
 
@@ -17713,6 +18544,50 @@ mod tests {
         assert!(masked.starts_with("ghp_"), "masked starts with first 4 chars");
     }
 
+    /// ROUTES-9: saving the Anthropic key via `POST /api/credentials/anthropic_api_key`
+    /// stores it in the credential store WITHOUT mutating the `ANTHROPIC_API_KEY` process-env
+    /// var. The old handler mirrored the value into env via `std::env::set_var` from the
+    /// request thread — POSIX UB against worker-thread `getenv`, and the concurrent writer made
+    /// the credential env-fallback test flaky. The driver path now reads the key store-first, so
+    /// no env mutation is needed for a freshly-saved key to take effect.
+    #[tokio::test]
+    async fn set_anthropic_credential_does_not_mutate_process_env() {
+        // Sentinel value the handler must NOT overwrite.
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-sentinel");
+
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/credentials/anthropic_api_key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"value":"sk-ant-freshly-saved"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // The key is in the store...
+        assert_eq!(
+            state
+                .credential_store
+                .get(crate::credentials::ANTHROPIC_API_KEY)
+                .unwrap()
+                .as_deref(),
+            Some("sk-ant-freshly-saved"),
+        );
+        // ...but the process env was left exactly as it was (no per-request set_var).
+        assert_eq!(
+            std::env::var("ANTHROPIC_API_KEY").as_deref(),
+            Ok("sk-ant-sentinel"),
+            "the handler must not mutate ANTHROPIC_API_KEY"
+        );
+        std::env::remove_var("ANTHROPIC_API_KEY");
+    }
+
     /// `AppState::github_token()` prefers the credential store over the env var.
     #[test]
     fn github_token_method_prefers_store_over_env() {
@@ -17930,6 +18805,51 @@ mod tests {
         );
     }
 
+    /// ROUTES-8: a `GET /api/uow/:id` with an UNKNOWN id returns a (transient) UoW body but
+    /// does NOT persist a junk record — the UoW list stays empty afterwards. Previously the
+    /// read `get_or_create`d the id, leaking an empty UoW into every list view.
+    #[tokio::test]
+    async fn uow_get_read_does_not_persist_unknown_id() {
+        // An active project so /api/uow (list) is not short-circuited to empty.
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let pid = state
+            .projects
+            .create("Proj", vec!["me/api".to_string()])
+            .unwrap()
+            .id;
+        state.projects.set_active(&pid);
+        let app = router(state.clone());
+
+        // GET a UoW for an id that was never created. A single-segment (slash-free) draft
+        // id keeps the `:story_id` route matching clean while still being an unknown id.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/uow/draft-does-not-exist")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["story_id"], "draft-does-not-exist", "returns a UoW-shaped body");
+
+        // The store must not have materialized it — neither the direct getter nor the raw
+        // list sees any record after a read of an unknown id.
+        assert!(
+            state.uow.get("draft-does-not-exist").is_none(),
+            "a GET must not persist a UoW for an unknown id"
+        );
+        assert!(
+            state.uow.list().is_empty(),
+            "the junk UoW must not leak into the store"
+        );
+        let _ = pid; // project made active only so the list endpoint isn't short-circuited
+    }
+
     // ── Diagram embed / strip tests ───────────────────────────────────────────
 
     #[test]
@@ -18083,7 +19003,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        // ROUTES-7: an empty message with no node context is invalid input → 400 (was 500).
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = body_json(resp).await;
         assert!(
             body["error"].as_str().unwrap_or("").contains("must not be empty"),
