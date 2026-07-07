@@ -843,6 +843,7 @@ fn server_orch_factory(
         limiter(),
         std::path::PathBuf::from("/bin/camerata-gateway"),
         Some("run-7".to_string()),
+        None,
     )
 }
 
@@ -981,6 +982,7 @@ fn scope7_gate_lead_is_orchestrator_child_is_not() {
         std::path::PathBuf::from("/bin/camerata-gateway"),
         vec![camerata_core::RuleId("GOV-1".to_string())],
         Some("run-7".to_string()),
+        None,
     );
     let tmp = tempfile::TempDir::new().unwrap();
     // build_child requires a real worktree dir for prepare_session; tmp suffices.

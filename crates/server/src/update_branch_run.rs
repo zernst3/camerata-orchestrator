@@ -712,6 +712,7 @@ mod tests {
             String::new(),
             None,
             Vec::new(),
+            camerata_checks::vcs_action::ProcessRuleConfig::default(),
         )
         .await;
 
