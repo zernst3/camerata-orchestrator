@@ -1,0 +1,38 @@
+id = "INTEGRATION-AUTH-SEAM-1"
+title = "Every UI-gated affordance maps to a guarded endpoint"
+tag = "stack"
+domain = "integration"
+layer = "universal"
+enforcement = "mechanical"
+default = false
+opt_in_only = true
+layer3_only = false
+verification = "grounded"
+
+[[sources]]
+url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
+title = "Cross-agent rules: the integration gate — cross-cutting policy holds end to end"
+
+[[sources]]
+url = "docs/decisions/2026-07-05_integration-gate-generic-engine.md"
+title = "Integration gate: the generic reconciliation engine + per-stack extractors"
+
+[[sources]]
+url = "CONVENTIONS.md"
+title = "CONVENTIONS.md — §ARCH-SERVER-AUTHZ-1 (authorization on the server; UI renders permission hints)"
+
+[decision]
+question = "How does the project verify that every UI affordance it gates on a permission maps to a producer endpoint that enforces that permission server-side?"
+why = "The classic authorization gap is a cross-agent inconsistency no per-agent gate catches: the UI agent hides a button behind a permission and ships a clean diff; the API agent ships a clean diff for an endpoint that enforces nothing; and the SEAM is wrong (the button is hidden but the endpoint is open). The integration tier is the only place positioned to enforce 'every gated affordance maps to a guarded endpoint.' The rule is RELATIONAL and PER-SEAM: it fires ONLY for affordances the UI actually gates. A public endpoint the UI does not gate is out of scope — no false positive — and an intentionally-public endpoint is waived per-endpoint."
+
+[[option]]
+id = "reconcile-gated-affordance-to-guarded-endpoint"
+label = "Reconcile each UI-gated affordance to a guarded producer endpoint (per-seam, deterministic)"
+directive = "On the assembled tree, run the integration gate's auth-seam reconciliation for this rule. The extractor marks each consumed endpoint call as ui_gated when the UI conditions it on a permission (e.g. it reads a server-computed _can flag), and marks each produced endpoint as guarded when it enforces an auth/permission check server-side. The rule fires PER SEAM: for every ui_gated call, the matching producer endpoint must be guarded. A gated affordance whose endpoint enforces no guard fails deterministically and bounces to the API agent. A call the UI does NOT gate is out of scope (never flagged). Where the producer's guard status cannot be determined statically on the stack, that seam is reported review-tier (human QA), never a faked green. An intentionally-public endpoint (a webhook, a health check the UI happens to gate for cosmetics) is waived per-endpoint with an inline `camerata:allow INTEGRATION-AUTH-SEAM-1 -- <reason>` or a baseline entry. Intra-project mix (some endpoints gated, some public) is handled by the per-seam firing plus explicit waivers; the rule never assumes the whole project is uniform."
+why = "Server-side authorization is a whole-system property, not a per-file one; the integration tier is the only gate that sees both the UI's gating and the endpoint's enforcement at once, so it can deterministically require that a hidden button maps to a guarded endpoint — while per-seam firing plus waivers keep a legitimately-public endpoint from becoming a false positive."
+
+[[option]]
+id = "no-auth-seam-check"
+label = "No cross-agent auth-seam check"
+directive = "the project does not reconcile UI-gated affordances against server-side endpoint guards on the assembled tree, so an affordance the UI hides behind a permission can map to a producer endpoint that enforces nothing, leaving the action open to any caller who bypasses the UI"
+why = "The UI hiding a button is not authorization; without the integration gate the open-endpoint-behind-a-hidden-button gap ships undetected, because each agent's diff is individually clean and only the seam is wrong."

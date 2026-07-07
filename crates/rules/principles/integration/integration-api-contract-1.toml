@@ -1,0 +1,41 @@
+id = "INTEGRATION-API-CONTRACT-1"
+title = "Consumer endpoint calls match a producer route and shape"
+tag = "stack"
+domain = "integration"
+layer = "universal"
+enforcement = "mechanical"
+# No adopted default: this is a cross-agent seam rule, opted into per project when
+# the story spans a producer (API) and a consumer (UI / worker) agent.
+default = false
+# Opt-in only: the integration gate runs on the ASSEMBLED tree, so it is turned on
+# by projects that decompose stories across agents; it must never be auto-checked
+# at onboarding for a single-repo project with no seam.
+opt_in_only = true
+# Not layer3-only: the check is a deterministic reconciliation of neutral records
+# on the integrated tree (the third tier), NOT an agentic review.
+layer3_only = false
+verification = "grounded"
+
+[[sources]]
+url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
+title = "Cross-agent rules: the integration gate (a third enforcement tier)"
+
+[[sources]]
+url = "docs/decisions/2026-07-05_integration-gate-generic-engine.md"
+title = "Integration gate: the generic reconciliation engine + per-stack extractors"
+
+[decision]
+question = "How does the project verify that a consumer's endpoint calls match what the producer actually exposes across the agent seam?"
+why = "A single story decomposed across agents (an API agent and a UI agent) can ship two individually-clean diffs that disagree at the seam: the API exposes POST /members/export, the UI calls POST /members/csv, and no per-agent gate can see the mismatch because each only sees its own worktree. In a Rust monorepo a shared compiled type makes drift impossible; a JavaScript fullstack app has no shared compiler holding the seam. The integration gate reconciles the consumer's calls against the producer's routes deterministically on the assembled tree — a comparison of neutral records, never a model judging consistency."
+
+[[option]]
+id = "reconcile-consumer-calls-against-producer-routes"
+label = "Reconcile consumer endpoint calls against producer routes (deterministic)"
+directive = "On the assembled tree (all role agents' worktrees combined), run the integration gate's reconciliation engine for this rule. A per-stack extractor normalizes each repo's source into PRODUCED routes (method + normalized path + optional request/response shape + status codes) and CONSUMED calls. Every consumed endpoint must match a produced route by method and normalized path; where both sides carry a recoverable shape, the shapes must agree (the consumer must not read a response field the producer does not emit, nor send a request field it does not accept, nor handle a status code it never returns). Field names are matched casing-insensitively (member_id == memberId) so only genuine drift fails. A mismatch bounces to the responsible agent with the specific delta; a genuine two-sides-incompatible design fork escalates to the architect. Where a seam's stack has no extractor, the seam is reported review-tier (human QA), never a faked green. Intentional exceptions are waived per-endpoint with an inline `camerata:allow INTEGRATION-API-CONTRACT-1 -- <reason>` or a baseline entry."
+why = "The contract becomes a deterministic comparison of neutral records on the integrated whole — the one place positioned to see both sides of the seam — instead of a per-agent gate that structurally cannot, or an LLM eyeballing whether prose contracts line up (probabilistic convention wearing the gate's uniform)."
+
+[[option]]
+id = "no-cross-agent-contract-check"
+label = "No cross-agent contract check (per-agent gates only)"
+directive = "the project relies solely on the per-agent Layer-1 and Layer-2 gates and does not reconcile consumer endpoint calls against producer routes on the assembled tree, so a producer/consumer contract drift across the agent seam ships undetected when the stack has no shared compiled type holding the boundary"
+why = "Both per-agent tiers can pass green for every agent while the seam between them is broken; without the integration gate the drift surfaces only when the pieces are combined in production, exactly the gap this tier exists to close."

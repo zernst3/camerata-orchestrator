@@ -663,6 +663,65 @@ One `statvfs` syscall; no shell-out to `df`.
 
 ---
 
+## 3a. The cross-agent integration gate — the third tier (GAP-6)
+
+**Where:** `crates/checks/src/integration/` (engine + extractors + vocabulary),
+`crates/rules/principles/integration/` (the opt-in rules), and
+`run_multi_repo_integration_gate` in `crates/server/src/dev_implement_run.rs` (the
+wiring). **When:** once on the ASSEMBLED tree (all role agents' worktrees combined),
+after per-agent execution and before the branch ships. **Power:** deterministic bounce /
+architect-escalate; a seam with no extractor is review-tier (human QA), never a faked
+green.
+
+Where Layer 1 evaluates one write and Layer 2 evaluates one agent's worktree, this tier
+evaluates the seam BETWEEN agents — the API agent exposes `POST /members/export`, the UI
+agent calls `POST /members/csv`, and each diff is individually clean. It is the
+cross-agent sibling of the per-agent `CheckRunner`.
+
+**Stack-generalized architecture.** Nothing about a particular stack lives in the engine;
+the ONLY stack-aware code is the pluggable extractor:
+
+```
+per-repo source ──[ Extractor (per-stack) ]──▶ produced/consumed (neutral vocab)
+                                                       │
+                       assemble across all repos ──────┤
+                                                       ▼
+                                       [ reconcile engine (100% generic) ]
+                                                       │
+                        waivers + review-tier split ───┤
+                                                       ▼
+                                                 GateVerdict
+```
+
+- **Neutral vocabulary** (`vocab.rs`): `ArtifactKind` = `Endpoint {method, path}` /
+  `Type` / `Event` / `Entity` / `ConfigKey`, carried as `Produced` (what a repo exposes)
+  and `Consumed` (what a repo depends on) lists. `normalize_path` collapses every param
+  spelling + concrete ids to `{}` so routes reconcile across stacks; `normalize_field`
+  makes `member_id` == `memberId`. Literal-segment casing is preserved (a real drift).
+- **Generic engine** (`engine.rs`): `AssembledTree::from_repos` concatenates + sorts all
+  repos' lists; `reconcile(tree, SeamRule)` emits deterministic `Finding`s. No
+  `match language` exists in this layer. A shared compiled Rust type is the case where the
+  extractor emits matching records and the engine finds zero drift.
+- **Pluggable extractors** (`extractor.rs`): `select_extractors(WorktreeLanguage)` chooses
+  them off the SAME detection the Layer-2 linters use. Built: `GenericRouteExtractor`
+  (endpoint) and `GenericEventExtractor` (event). Staged: full schema, migration-vs-entity,
+  config-key, and AST extractors.
+- **Rules** (`INTEGRATION-API-CONTRACT-1`, `INTEGRATION-EVENT-WIRING-1`,
+  `INTEGRATION-AUTH-SEAM-1`): opt-in, RELATIONAL, PER-SEAM. The auth-seam rule fires ONLY
+  for affordances the UI actually gates; an intentional-public endpoint is waived
+  per-endpoint via `camerata:allow INTEGRATION-AUTH-SEAM-1 -- <reason>` (reusing the
+  Layer-2 suppression model).
+- **Wiring**: `run_multi_repo_integration_gate` runs `camerata_checks::run_gate` FIRST
+  (deterministic, authoritative), driven by the project's selected `INTEGRATION-*` rules.
+  The old model-backed prose-contract check survives only as an optional advisory when a
+  contract + an LLM are present. A `GateVerdict::bounce_targets()` groups failures by
+  responsible repo for the bounce-and-revise loop.
+
+See ADRs `2026-06-15_cross_agent_integration_gate` and
+`2026-07-05_integration-gate-generic-engine`.
+
+---
+
 ## 4. Agent runtime
 
 `crates/agent/` contains two `AgentDriver` implementations that share the same
