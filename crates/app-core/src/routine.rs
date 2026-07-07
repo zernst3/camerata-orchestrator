@@ -7,7 +7,8 @@
 //!
 //! The `RoutineStore` (Arc<Mutex> + fs persistence + run engine) stays in `camerata-server`.
 
-use serde::{Deserialize, Serialize};
+use camerata_core::RuleId;
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// The default model used when a routine does not specify one. This mirrors the
 /// `DEFAULT_MODEL` constant in `camerata-server::llm`, but is declared here independently
@@ -97,6 +98,222 @@ pub struct RoutineRun {
 /// How many runs of history each routine retains (FIFO; the oldest is dropped past this).
 pub const ROUTINE_RUN_HISTORY_CAP: usize = 20;
 
+// ─── RoutineScope: the STRUCTURED, ENFORCEABLE permission boundary (GAP-8) ─────
+//
+// `scope` used to be a decorative `String` that was only interpolated into the
+// scaffolded prompt (an advisory guardrail, the exact anti-pattern Camerata
+// exists to reject). GAP-8 replaces it with a structured value that maps onto
+// the SAME enforcement primitives a live DEV run registers with the gateway:
+//
+//   1. a RULE SUBSET (which `RuleId`s the gate evaluates for the session),
+//   2. a TOOL ALLOWLIST (which tools the agent may call), and
+//   3. a WRITE JAIL (whether — and where — `gated_write` may write at all).
+//
+// The resolution fn that turns a `RoutineScope` into the concrete gateway
+// session registration lives in the server adapter (`camerata_server::routine`),
+// because building the corpus-backed `Role` is I/O and belongs above this pure
+// domain crate. This crate owns the data shape + the pure policy decision
+// (`WritePolicy`), and the server maps that onto `governed_role` +
+// `allowed_tools_for_role` + the `prepare_session` worktree arg.
+
+/// How much write authority a routine's scope grants. This is the pure policy
+/// axis the resolution fn reads: `ReadOnly` means NO write jail is registered
+/// (so `gated_write` has no target and the agent can only Read/Grep/Glob/LS),
+/// while the two write levels DO register a write jail. The PR distinction does
+/// not change the in-run gate (nothing auto-pushes mid-run); it is recorded so a
+/// downstream push/PR step can honor it, and so the scope stays legible.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WritePolicy {
+    /// Inspect and report only: no write jail is registered, so the agent has no
+    /// write path at all. The default (a scope with no explicit policy is the
+    /// safest one).
+    #[default]
+    ReadOnly,
+    /// Gated edits on a branch, no push: a write jail IS registered, so
+    /// `gated_write` may write inside the worktree (every write still passes the
+    /// gate). Nothing is pushed.
+    WriteGated,
+    /// Gated edits, then pushed for review as a PR. Same in-run gate as
+    /// `WriteGated`; the PR step is a separate, post-run action.
+    WriteOpenPr,
+}
+
+impl WritePolicy {
+    /// True when this policy grants any write path (i.e. a write jail must be
+    /// registered). `ReadOnly` is the only non-writing policy.
+    pub fn is_writing(&self) -> bool {
+        !matches!(self, WritePolicy::ReadOnly)
+    }
+
+    /// A short, stable label (also what serde emits via `snake_case`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WritePolicy::ReadOnly => "read_only",
+            WritePolicy::WriteGated => "write_gated",
+            WritePolicy::WriteOpenPr => "write_open_pr",
+        }
+    }
+}
+
+/// A reference to the rule subset a routine runs under. `All` = every enforced
+/// gate rule (the same universal blend `governed_role` delivers — the safe
+/// default). `Ids` names an explicit subset of `RuleId`s; the resolution fn
+/// still UNIONS the enforced gate rules in (the gate's floor is never lowered by
+/// a routine's scope), so this only ever ADDS domain rules on top.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleSubsetRef {
+    /// Every enforced gate rule (the default: the full governed blend).
+    All,
+    /// The enforced gate rules PLUS these explicit domain rule ids.
+    Ids(Vec<RuleId>),
+}
+
+impl Default for RuleSubsetRef {
+    fn default() -> Self {
+        RuleSubsetRef::All
+    }
+}
+
+/// The write-jail path a routine's writes are confined to, when it writes at
+/// all. `Worktree` jails writes to the run's prepared worktree (the usual case;
+/// the concrete path is only known at spawn, so this is a marker, not an
+/// absolute path baked into persisted config). The resolution fn passes the
+/// actual worktree to `prepare_session`, which sets `CAMERATA_WORKTREE_ROOT`.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PathScope {
+    /// Writes are jailed to the run's prepared worktree.
+    Worktree,
+}
+
+/// The STRUCTURED, ENFORCEABLE permission scope a routine runs under (GAP-8).
+///
+/// Replaces the old decorative `scope: String`. It carries the three inputs the
+/// gateway session registration needs — a rule subset, a tool-allowlist policy
+/// (derived from `write`), and a write jail — so a routine's governance is a
+/// real boundary, not prose. `note` preserves the human-authored scope text
+/// (e.g. `"SEC-* + maintenance, write behind the gate"`) so nothing is lost when
+/// a legacy string-scoped routine is loaded, and so the UI can keep showing a
+/// readable label.
+///
+/// Serde accepts BOTH shapes for backward compatibility (see the custom
+/// `Deserialize` on the containing `Routine.scope` field): a legacy JSON STRING
+/// deserializes into a `RoutineScope` whose `note` carries that string and whose
+/// enforcement fields take their defaults (read-only, all enforced gate rules,
+/// no jail — the safe interpretation), and the structured object form
+/// deserializes directly.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct RoutineScope {
+    /// The rule subset the gate evaluates for this routine. Defaults to `All`
+    /// (every enforced gate rule).
+    #[serde(default)]
+    pub rule_subset: RuleSubsetRef,
+    /// How much write authority the scope grants. Drives both the tool allowlist
+    /// and whether a write jail is registered. Defaults to `ReadOnly`.
+    #[serde(default)]
+    pub write: WritePolicy,
+    /// The write jail, when the policy writes. `None` for a read-only scope (no
+    /// write path). Defaults to `None`.
+    #[serde(default)]
+    pub write_jail: Option<PathScope>,
+    /// The original human-authored scope label (from a legacy string scope, or a
+    /// UI-supplied description). Kept so nothing is lost and the scope stays
+    /// legible in the dashboard. Empty when a purely structured scope was built.
+    #[serde(default)]
+    pub note: String,
+}
+
+impl Default for RoutineScope {
+    fn default() -> Self {
+        RoutineScope {
+            rule_subset: RuleSubsetRef::All,
+            write: WritePolicy::ReadOnly,
+            write_jail: None,
+            note: String::new(),
+        }
+    }
+}
+
+impl RoutineScope {
+    /// Build a `RoutineScope` from a legacy / UI-supplied scope STRING, mapping
+    /// the known UI levels onto the structured enforcement fields and preserving
+    /// the original text in `note`.
+    ///
+    /// The three UI levels the routine form emits are recognized:
+    /// - `"read-only"` (and any string not matching a write level) -> read-only,
+    ///   no jail (the safe default);
+    /// - a string containing `"open pr"` / `"open-pr"` / `"+ pr"` -> write + open PR;
+    /// - any other string containing `"write"` -> write (gated).
+    ///
+    /// Unknown / free-text scopes fall through to read-only, so an unrecognized
+    /// label can never silently grant write authority.
+    pub fn from_legacy_string(s: &str) -> Self {
+        let note = s.trim().to_string();
+        let lower = note.to_lowercase();
+        let mentions_pr =
+            lower.contains("open pr") || lower.contains("open-pr") || lower.contains("+ pr");
+        let mentions_write = lower.contains("write");
+
+        let write = if mentions_write && mentions_pr {
+            WritePolicy::WriteOpenPr
+        } else if mentions_write {
+            WritePolicy::WriteGated
+        } else {
+            WritePolicy::ReadOnly
+        };
+        let write_jail = if write.is_writing() {
+            Some(PathScope::Worktree)
+        } else {
+            None
+        };
+        RoutineScope {
+            rule_subset: RuleSubsetRef::All,
+            write,
+            write_jail,
+            note,
+        }
+    }
+
+    /// A short, human-readable label for the scope, for the dashboard. Prefers
+    /// the preserved `note` (the author's own words) and falls back to a label
+    /// derived from the write policy.
+    pub fn label(&self) -> String {
+        if !self.note.trim().is_empty() {
+            return self.note.clone();
+        }
+        match self.write {
+            WritePolicy::ReadOnly => "read-only".to_string(),
+            WritePolicy::WriteGated => "write (gated)".to_string(),
+            WritePolicy::WriteOpenPr => "write + open PR".to_string(),
+        }
+    }
+}
+
+/// Custom deserializer for `Routine.scope` (and `RoutineTemplate.scope`) that
+/// accepts BOTH a legacy JSON string and the structured `RoutineScope` object,
+/// so old persisted routines (scope was a `String`) load with no data loss.
+///
+/// A string maps through [`RoutineScope::from_legacy_string`]; an object
+/// deserializes directly. Any other JSON type is an error.
+pub fn deserialize_scope<'de, D>(deserializer: D) -> Result<RoutineScope, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum LegacyOrStructured {
+        Legacy(String),
+        Structured(RoutineScope),
+    }
+
+    match LegacyOrStructured::deserialize(deserializer)? {
+        LegacyOrStructured::Legacy(s) => Ok(RoutineScope::from_legacy_string(&s)),
+        LegacyOrStructured::Structured(scope) => Ok(scope),
+    }
+}
+
 /// A scheduled governed routine.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Routine {
@@ -113,9 +330,14 @@ pub struct Routine {
     /// lead-engineer AI (model tiering, directives, governance framing) and
     /// human-reviewed. Never the user's raw description verbatim.
     pub prompt: String,
-    /// The permission / rule scope the routine runs under (shown so an unattended
-    /// agent's governance is legible).
-    pub scope: String,
+    /// The STRUCTURED, ENFORCEABLE permission scope the routine runs under
+    /// (GAP-8): a rule subset + tool-allowlist policy + write jail, resolved into
+    /// the gateway session registration when the routine spawns a governed run.
+    /// Serde accepts both a legacy string and the structured object (see
+    /// [`deserialize_scope`]), so routines persisted with a string `scope` load
+    /// with no data loss. Defaults to a read-only scope for pre-field JSON.
+    #[serde(default, deserialize_with = "deserialize_scope")]
+    pub scope: RoutineScope,
     pub enabled: bool,
     pub last_run: Option<RoutineRunSummary>,
     /// Whether this routine is provisioned on THIS backend (registered with the
@@ -220,11 +442,12 @@ pub struct DraftPromptResp {
 /// so the flow is usable offline and the user always reviews a structured prompt
 /// rather than running their raw description. The real AI authoring replaces this
 /// when Claude is connected.
-pub fn scaffold_prompt(intent: &str, scope: &str) -> String {
-    let scope = if scope.trim().is_empty() {
-        "read-only"
+pub fn scaffold_prompt(intent: &str, scope: &RoutineScope) -> String {
+    let label = scope.label();
+    let scope = if label.trim().is_empty() {
+        "read-only".to_string()
     } else {
-        scope.trim()
+        label
     };
     format!(
         "Objective (from the user's description):\n{intent}\n\n\
@@ -270,10 +493,12 @@ pub struct RoutineTemplate {
     /// Defaults to "daily 09:00" if not specified.
     #[serde(default = "default_template_schedule")]
     pub schedule: String,
-    /// Default permission/rule scope (e.g., "read-only", "write (gated)").
-    /// Defaults to "read-only" if not specified.
-    #[serde(default = "default_template_scope")]
-    pub scope: String,
+    /// Default STRUCTURED permission scope (GAP-8). Serde accepts both a legacy
+    /// string (e.g. `"read-only"`, `"write (gated)"`) and the structured object,
+    /// so templates authored with a string scope still load. Defaults to a
+    /// read-only scope.
+    #[serde(default, deserialize_with = "deserialize_scope")]
+    pub scope: RoutineScope,
     /// The operational prompt the routine will run (fully authored, governance-framed).
     /// Never the user's raw description; always a structured directive ready for execution.
     pub prompt: String,
@@ -285,10 +510,6 @@ pub struct RoutineTemplate {
 
 fn default_template_schedule() -> String {
     "daily 09:00".to_string()
-}
-
-fn default_template_scope() -> String {
-    "read-only".to_string()
 }
 
 /// Instantiate a routine from a template. This creates a fresh Routine prefilled
@@ -337,7 +558,7 @@ pub fn builtin_templates() -> Vec<RoutineTemplate> {
             description: "Summarize open bugs and flag stale/duplicate issues for review."
                 .to_string(),
             schedule: "daily 09:00".to_string(),
-            scope: "read-only".to_string(),
+            scope: RoutineScope::from_legacy_string("read-only"),
             prompt: r#"Objective:
 Audit the project's bug tracker. Summarize open bugs by status / age, flag any that
 have been sitting for 30+ days without activity, and surface likely duplicates for
@@ -360,7 +581,7 @@ The architect will review your report and file any blocking issues."#
             description: "Scan dependencies for known vulnerabilities and propose patches."
                 .to_string(),
             schedule: "daily 04:00".to_string(),
-            scope: "write (gated)".to_string(),
+            scope: RoutineScope::from_legacy_string("write (gated)"),
             prompt: r#"Objective:
 Perform a nightly security audit. Scan all direct and transitive dependencies for
 known CVEs and security advisories, then author governed PRs to patch safe upgrades.
@@ -394,6 +615,81 @@ mod tests {
         assert!(r.runs.is_empty());
     }
 
+    // ── GAP-8: RoutineScope structured-scope serde + policy ───────────────────
+
+    #[test]
+    fn legacy_string_scope_deserializes_into_structured_read_only() {
+        // A routine persisted with `scope` as a plain STRING must load with no
+        // data loss: the string becomes the `note`, and the enforcement fields
+        // take the safe read-only defaults (no write jail).
+        let json = r#"{"id":"rt-1","name":"Old","schedule":"manual","intent":"i",
+            "prompt":"p","scope":"read-only","enabled":true,"last_run":null}"#;
+        let r: Routine = serde_json::from_str(json).unwrap();
+        assert_eq!(r.scope.write, WritePolicy::ReadOnly);
+        assert!(r.scope.write_jail.is_none());
+        assert_eq!(r.scope.rule_subset, RuleSubsetRef::All);
+        assert_eq!(r.scope.note, "read-only");
+    }
+
+    #[test]
+    fn legacy_string_write_scopes_map_to_write_policies() {
+        // The two write levels the UI emits map onto the write policies + a jail.
+        let gated = RoutineScope::from_legacy_string("write (gated)");
+        assert_eq!(gated.write, WritePolicy::WriteGated);
+        assert_eq!(gated.write_jail, Some(PathScope::Worktree));
+
+        let pr = RoutineScope::from_legacy_string("write + open PR");
+        assert_eq!(pr.write, WritePolicy::WriteOpenPr);
+        assert_eq!(pr.write_jail, Some(PathScope::Worktree));
+
+        // An unrecognized free-text scope can NEVER silently grant write.
+        let unknown = RoutineScope::from_legacy_string("SEC-* + maintenance, read-only");
+        assert_eq!(unknown.write, WritePolicy::ReadOnly);
+        assert!(unknown.write_jail.is_none());
+        assert_eq!(unknown.note, "SEC-* + maintenance, read-only");
+    }
+
+    #[test]
+    fn structured_scope_round_trips_through_serde() {
+        // The structured object form serializes and deserializes losslessly.
+        let scope = RoutineScope {
+            rule_subset: RuleSubsetRef::Ids(vec![RuleId("SEC-1".to_string())]),
+            write: WritePolicy::WriteGated,
+            write_jail: Some(PathScope::Worktree),
+            note: "SEC-* behind the gate".to_string(),
+        };
+        let json = serde_json::to_string(&scope).unwrap();
+        let back: RoutineScope = serde_json::from_str(&json).unwrap();
+        assert_eq!(scope, back);
+    }
+
+    #[test]
+    fn structured_scope_deserializes_via_field_deserializer() {
+        // A routine persisted with the STRUCTURED object form loads directly.
+        let json = r#"{"id":"rt-2","name":"New","schedule":"manual","intent":"i",
+            "prompt":"p","enabled":true,"last_run":null,
+            "scope":{"rule_subset":{"ids":["SEC-1"]},"write":"write_gated",
+                     "write_jail":"worktree","note":"n"}}"#;
+        let r: Routine = serde_json::from_str(json).unwrap();
+        assert_eq!(r.scope.write, WritePolicy::WriteGated);
+        assert_eq!(r.scope.write_jail, Some(PathScope::Worktree));
+        assert_eq!(
+            r.scope.rule_subset,
+            RuleSubsetRef::Ids(vec![RuleId("SEC-1".to_string())])
+        );
+        assert_eq!(r.scope.note, "n");
+    }
+
+    #[test]
+    fn missing_scope_defaults_to_read_only() {
+        // A routine JSON with NO scope field at all defaults to a read-only scope.
+        let json = r#"{"id":"rt-3","name":"NoScope","schedule":"manual","intent":"i",
+            "prompt":"p","enabled":true,"last_run":null}"#;
+        let r: Routine = serde_json::from_str(json).unwrap();
+        assert_eq!(r.scope.write, WritePolicy::ReadOnly);
+        assert!(r.scope.write_jail.is_none());
+    }
+
     #[test]
     fn builtin_templates_exist_and_are_valid() {
         let templates = builtin_templates();
@@ -409,7 +705,7 @@ mod tests {
             assert!(!t.description.is_empty());
             assert!(!t.prompt.is_empty());
             assert!(!t.schedule.is_empty());
-            assert!(!t.scope.is_empty());
+            assert!(!t.scope.label().is_empty());
         }
     }
 

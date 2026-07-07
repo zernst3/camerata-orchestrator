@@ -77,6 +77,23 @@ wrong input for a value with a small known shape:
   opens a PR; nothing auto-merges) — with an inline explanation, not an opaque free-text
   field.
 
+### Scope is a STRUCTURED, ENFORCED boundary, not prose (2026-07-05, GAP-8)
+
+`Routine.scope` was a decorative `String`: it was only interpolated into the scaffolded
+prompt, never an enforced boundary. That is the advisory-guardrail anti-pattern Camerata
+exists to reject, so the audit flagged it (GAP-8). It is now a structured `RoutineScope`
+(`crates/app-core/src/routine.rs`): a **rule subset** + a **write policy** (which drives
+the **tool allowlist**) + a **write jail**. These are the SAME enforcement primitives a
+live DEV run registers with the gateway, so a routine's scope maps directly onto
+`governed_role` + `allowed_tools_for_role` + the `prepare_session` worktree arg via
+`resolve_scope_registration` (`crates/server/src/scope_registration.rs`), wired at the
+routine-run seam (`RoutineStore::resolve_run_registration`). Serde accepts BOTH a legacy
+string scope and the structured object, so routines persisted (or exported) with a string
+`scope` load with no data loss. The honest limit: live routine execution itself is still
+latent (the auto-fire scheduler runs the token-free scripted gate today), so the
+resolution is a real, tested seam that WILL enforce the scope the moment execution lands.
+Full rationale: ADR [`routine-structured-scope`](2026-07-05_routine-structured-scope.md).
+
 ## Open questions
 
 - The scheduler: in-process timer vs an OS scheduler (launchd/cron) vs a cloud

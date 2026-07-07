@@ -51,6 +51,7 @@ pub mod reconcile;
 pub mod review_agent;
 pub mod routine;
 pub mod run;
+pub mod scope_registration;
 pub mod scan_cache;
 pub mod scan_routing;
 pub mod scan_tools;
@@ -2627,8 +2628,12 @@ struct ImportedRoutine {
     intent: String,
     #[serde(default)]
     prompt: String,
-    #[serde(default)]
-    scope: String,
+    /// The routine's scope. GAP-8: an exported `Routine` now serializes `scope`
+    /// as a STRUCTURED object, while older exports carry a plain string; the
+    /// shared [`camerata_app_core::routine::deserialize_scope`] accepts BOTH so a
+    /// project export from either era imports with no data loss.
+    #[serde(default, deserialize_with = "camerata_app_core::routine::deserialize_scope")]
+    scope: crate::routine::RoutineScope,
     /// The routine's model travels with it; blank/absent falls back to the server default.
     #[serde(default)]
     model: Option<String>,
@@ -2648,10 +2653,17 @@ fn import_project_routines(state: &AppState, project_id: &str, routines: &[Impor
             schedule: r.schedule.clone(),
             intent: r.intent.clone(),
             prompt: r.prompt.clone(),
-            scope: if r.scope.trim().is_empty() {
-                "read-only".to_string()
-            } else {
-                r.scope.clone()
+            // Feed the imported scope back through the wire (string) form; the
+            // store re-parses it into the structured scope via
+            // `RoutineScope::from_legacy_string`. `label()` preserves the
+            // human-authored note (or a policy-derived label) with no data loss.
+            scope: {
+                let label = r.scope.label();
+                if label.trim().is_empty() {
+                    "read-only".to_string()
+                } else {
+                    label
+                }
             },
             project_id: Some(project_id.to_string()),
             model: r.model.clone(),
@@ -7094,7 +7106,10 @@ async fn draft_routine_prompt(
             authored_by: "claude".to_string(),
         }),
         _ => Json(crate::routine::DraftPromptResp {
-            prompt: crate::routine::scaffold_prompt(&req.intent, &req.scope),
+            prompt: crate::routine::scaffold_prompt(
+                &req.intent,
+                &crate::routine::RoutineScope::from_legacy_string(&req.scope),
+            ),
             authored_by: "scaffold".to_string(),
         }),
     }
