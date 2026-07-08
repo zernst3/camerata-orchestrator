@@ -60,7 +60,7 @@ use camerata_fleet::{governed_role, locate_gateway_bin};
 use camerata_worktracker::investigation::DecisionRecord;
 
 use crate::api_agent_driver::build_agent_driver;
-use crate::llm::Completer;
+use crate::llm::LlmPort;
 use crate::run::{live_mode_enabled, GateEvent, RunStatus, RunStore};
 use crate::review_agent::{run_l3_review, L3ReviewInput, ReviewVerdict};
 use crate::uow::UowStore;
@@ -149,7 +149,7 @@ pub struct L3ReviewBundle {
     /// The model to run the L3 reviewer on.
     pub model: String,
     /// The LLM seam to use (typically `Arc<Llm>` from `AppState::llm()`).
-    pub llm: Arc<dyn Completer>,
+    pub llm: Arc<dyn LlmPort>,
 }
 
 /// Bundle for the integration-gate check (R3.e / GAP-6).
@@ -181,7 +181,7 @@ pub struct IntegrationGateBundle {
     /// The model to use for the optional prose-contract advisory pass.
     pub model: String,
     /// The LLM seam. `None` disables the advisory pass (deterministic-only).
-    pub llm: Option<Arc<dyn Completer>>,
+    pub llm: Option<Arc<dyn LlmPort>>,
 }
 
 /// One in-scope repo's worktree, branch, and base commit — the per-repo wiring
@@ -2813,7 +2813,7 @@ mod tests {
     struct PassLlm;
 
     #[async_trait::async_trait]
-    impl crate::llm::Completer for PassLlm {
+    impl crate::llm::LlmPort for PassLlm {
         async fn complete(
             &self,
             _req: crate::llm::LlmRequest,
@@ -2846,7 +2846,7 @@ mod tests {
     struct MismatchLlm;
 
     #[async_trait::async_trait]
-    impl crate::llm::Completer for MismatchLlm {
+    impl crate::llm::LlmPort for MismatchLlm {
         async fn complete(
             &self,
             _req: crate::llm::LlmRequest,
@@ -2885,7 +2885,7 @@ mod tests {
         let seq = std::sync::atomic::AtomicUsize::new(0);
         let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
 
-        let llm: Arc<dyn crate::llm::Completer> = Arc::new(PassLlm);
+        let llm: Arc<dyn crate::llm::LlmPort> = Arc::new(PassLlm);
         let bundle = Some(IntegrationGateBundle {
             selected_integration_rules: Vec::new(), // model-advisory-only path here
             waivers: Vec::new(),
@@ -2933,7 +2933,7 @@ mod tests {
         let seq = std::sync::atomic::AtomicUsize::new(0);
         let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
 
-        let llm: Arc<dyn crate::llm::Completer> = Arc::new(MismatchLlm);
+        let llm: Arc<dyn crate::llm::LlmPort> = Arc::new(MismatchLlm);
         let bundle = Some(IntegrationGateBundle {
             selected_integration_rules: Vec::new(),
             waivers: Vec::new(),
@@ -3095,7 +3095,7 @@ mod tests {
         let seq = std::sync::atomic::AtomicUsize::new(0);
         let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
 
-        let llm: Arc<dyn crate::llm::Completer> = Arc::new(PassLlm);
+        let llm: Arc<dyn crate::llm::LlmPort> = Arc::new(PassLlm);
         let bundle = Some(IntegrationGateBundle {
             selected_integration_rules: Vec::new(),
             waivers: Vec::new(),

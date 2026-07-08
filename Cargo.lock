@@ -807,6 +807,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "camerata-llm"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "camerata-api-types",
+ "keyring",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "camerata-maintenance"
 version = "0.0.0"
 dependencies = [
@@ -868,6 +882,7 @@ dependencies = [
  "camerata-gateway",
  "camerata-intake",
  "camerata-liveness",
+ "camerata-llm",
  "camerata-persistence",
  "camerata-rules",
  "camerata-worktracker",

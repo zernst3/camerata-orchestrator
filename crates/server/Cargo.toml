@@ -23,6 +23,10 @@ path = "src/main.rs"
 # `credentials`, and `model_registry` re-export their relocated DTOs from here so every
 # existing `crate::X` call site keeps resolving unchanged.
 camerata-api-types = { path = "../api-types" }
+# The LLM/provider stack (Phase B of the extraction): the `llm`, `credentials`,
+# `model_registry`, `rate_limit`, and `usage_ledger` modules are now re-export shims
+# over this crate so every existing `crate::X` call site keeps resolving unchanged.
+camerata-llm = { path = "../llm" }
 axum = { version = "0.7", features = ["ws"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "process", "io-util"] }
 tower = "0.5"

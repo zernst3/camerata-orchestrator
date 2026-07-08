@@ -1532,7 +1532,7 @@ async fn spawn_brownfield_dev_run(
             let l3_model = proj.l3_model().to_string();
             let rules_prose = grounding.clone().unwrap_or_default();
             let story_text = format!("{title}\n\n{desc}");
-            let llm: Arc<dyn crate::llm::Completer> = Arc::new(state.llm());
+            let llm: Arc<dyn crate::llm::LlmPort> = Arc::new(state.llm());
             Some(crate::dev_implement_run::L3ReviewBundle {
                 story_text,
                 rules_prose,
@@ -1576,7 +1576,7 @@ async fn spawn_brownfield_dev_run(
             };
             // The model advisory only runs with a prose contract; otherwise llm=None
             // keeps the gate deterministic-only.
-            let llm: Option<Arc<dyn crate::llm::Completer>> = if has_contract {
+            let llm: Option<Arc<dyn crate::llm::LlmPort>> = if has_contract {
                 Some(Arc::new(state.llm()))
             } else {
                 None
@@ -7664,7 +7664,7 @@ async fn chat(
     // setting — NOT the per-project ResearchChat step. Precedence: explicit per-request model
     // (the UI override) > app-level `chat_model` setting > DEFAULT_MODEL floor.
     let model = resolve_chat_model(Some(&req.model), state.settings.get().chat_model.as_deref());
-    // Route to the right Completer: OpenRouter for openrouter-provider models, Anthropic for all
+    // Route to the right LlmPort: OpenRouter for openrouter-provider models, Anthropic for all
     // others. Returns an error when the model is OpenRouter-provider but no key is set.
     let completer = crate::llm::build_completer(
         &model,

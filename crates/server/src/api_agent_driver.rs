@@ -8,7 +8,7 @@
 //!
 //! # Why it lives in `camerata-server`
 //!
-//! `camerata-agent` does NOT depend on `camerata-server`. The `Completer` trait +
+//! `camerata-agent` does NOT depend on `camerata-server`. The `LlmPort` trait +
 //! `OpenRouterCompleter` live in `camerata-server`. The gateway library lives in
 //! `camerata-gateway`. `camerata-server` already depends on both, so `ApiAgentDriver`
 //! placed here avoids a dependency cycle. The `AgentDriver` trait (from
@@ -70,7 +70,7 @@ use camerata_core::{AgentDriver, AgentOutcome, Decision, Role, RuleId, ToolCall}
 use camerata_gateway::evaluate_call;
 use serde_json::Value;
 
-use crate::llm::{Completer, LlmRequest, LlmResponse};
+use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -144,8 +144,8 @@ struct ToolInvocation {
 /// [`ApiAgentDriver::with_worktree`] to configure the mode and jail before calling `run`.
 #[derive(Clone)]
 pub struct ApiAgentDriver {
-    /// The `Completer` that makes the provider API calls.
-    completer: Arc<dyn Completer>,
+    /// The `LlmPort` that makes the provider API calls.
+    completer: Arc<dyn LlmPort>,
     /// Model id to request (empty = completer's default).
     pub model: String,
     /// Optional worktree the agent's writes are jailed to. Enforced by the gateway rules
@@ -200,8 +200,8 @@ impl ApiAgentDriver {
     ///
     /// If `completer` is an [`crate::llm::OpenRouterCompleter`], its `session_id` is
     /// inherited here so every direct HTTP call (the tool-schema path) uses the same
-    /// session id as bare-LLM calls made through the `Completer` trait.
-    pub fn new(completer: Arc<dyn Completer>, model: impl Into<String>) -> Self {
+    /// session id as bare-LLM calls made through the `LlmPort` trait.
+    pub fn new(completer: Arc<dyn LlmPort>, model: impl Into<String>) -> Self {
         // Inherit the session id from an OpenRouterCompleter when available; fall back to
         // a stable per-instance token for other completer types (no-op for them).
         let session_id = completer
@@ -532,18 +532,18 @@ fn append_tool_results(messages: &mut Vec<Value>, shape: ApiShape, results: &[(S
 /// Make one provider API call with the current conversation history and tool schemas.
 ///
 /// `tool_schemas` is embedded in the request body via the OpenAI `tools` field.
-/// The `Completer` trait doesn't natively carry tool schemas, so we build the
+/// The `LlmPort` trait doesn't natively carry tool schemas, so we build the
 /// request body manually here and call the underlying HTTP client directly.
 ///
 /// `session_id` enables sticky routing + KV-cache warmth (passed to OpenRouter via the
 /// request body). `bust_cache` adds `X-OpenRouter-Cache-Clear: true` for one-shot cache
 /// invalidation on stuck-loop retries. Both are no-ops for non-OR completers.
 ///
-/// **Design note:** The `Completer` trait is designed for bare-LLM (no tools). To send
+/// **Design note:** The `LlmPort` trait is designed for bare-LLM (no tools). To send
 /// tool schemas, we build the full OpenRouter request body and post it directly, bypassing
-/// the `Completer` abstraction for this specific call. The response normalization stays
+/// the `LlmPort` abstraction for this specific call. The response normalization stays
 /// shared. TODO(provider-agnostic-followup): extend `LlmRequest` to carry tool schemas so
-/// the `Completer` trait covers the agentic path too.
+/// the `LlmPort` trait covers the agentic path too.
 async fn call_provider(
     driver: &ApiAgentDriver,
     system: Option<&str>,
@@ -558,19 +558,19 @@ async fn call_provider(
     // Selected explicitly via `with_shape(ApiShape::Anthropic)` AND with a key attached.
     // The Anthropic key is carried on the driver (resolved from ANTHROPIC_API_KEY), not
     // read off the completer. If the shape is Anthropic but no key is attached, fall
-    // through to the schema-less Completer path so test stubs still work.
+    // through to the schema-less LlmPort path so test stubs still work.
     if driver.shape == ApiShape::Anthropic {
         if let Some(key) = driver.anthropic_api_key.as_deref() {
             return call_anthropic_with_tools(key, model, system, messages, tool_schemas).await;
         }
         // No key attached (e.g. a stub-completer unit test on the Anthropic shape):
-        // fall through to the Completer-trait path below.
+        // fall through to the LlmPort-trait path below.
     }
 
     // ── OpenRouter / OpenAI-compatible shape ───────────────────────────────
     // Attempt to downcast to OpenRouterCompleter for tool-schema support.
     // If the downcast fails (unknown completer type / stub), fall back to a schema-less
-    // call via the Completer trait (works for text-only models + tests).
+    // call via the LlmPort trait (works for text-only models + tests).
     let any = completer.as_any();
 
     if any.is::<crate::llm::OpenRouterCompleter>() {
@@ -587,9 +587,9 @@ async fn call_provider(
         )
         .await
     } else {
-        // Fallback: use the Completer trait (no tool schemas — text only).
+        // Fallback: use the LlmPort trait (no tool schemas — text only).
         // This handles test stubs and future completers.
-        // TODO(provider-agnostic-followup): wire tool schemas into the Completer trait.
+        // TODO(provider-agnostic-followup): wire tool schemas into the LlmPort trait.
         let prompt = messages_to_text_prompt(messages);
         let mut req = LlmRequest::new(prompt).with_model(model);
         if let Some(sys) = system {
@@ -601,7 +601,7 @@ async fn call_provider(
 
 /// Extract the OpenRouter API key from an `OpenRouterCompleter` reference.
 /// The field is private, so we use the `as_any` downcast + a dedicated accessor.
-fn get_openrouter_key_from_completer(completer: &dyn Completer) -> anyhow::Result<String> {
+fn get_openrouter_key_from_completer(completer: &dyn LlmPort) -> anyhow::Result<String> {
     // `OpenRouterCompleter` is in the same crate; we access the key via a helper method
     // added below (see `impl OpenRouterCompleter` extension).
     let any = completer.as_any();
@@ -1766,7 +1766,7 @@ fn build_system_prompt(role: &Role, model: &str) -> Option<String> {
 
 // ─── Anthropic-shape routing helpers ───────────────────────────────────────────
 
-/// A no-op `Completer` used as the placeholder completer for an Anthropic-shape
+/// A no-op `LlmPort` used as the placeholder completer for an Anthropic-shape
 /// `ApiAgentDriver`. The Anthropic path makes its HTTP call directly in
 /// `call_anthropic_with_tools` (using the key carried on the driver), so this completer's
 /// `complete` is only ever reached on the schema-less fallback — which the Anthropic path
@@ -1775,11 +1775,11 @@ fn build_system_prompt(role: &Role, model: &str) -> Option<String> {
 struct AnthropicNoopCompleter;
 
 #[async_trait]
-impl Completer for AnthropicNoopCompleter {
+impl LlmPort for AnthropicNoopCompleter {
     async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
         anyhow::bail!(
             "AnthropicNoopCompleter::complete reached — the Anthropic ApiAgentDriver should \
-             make its call via call_anthropic_with_tools, not the Completer trait"
+             make its call via call_anthropic_with_tools, not the LlmPort trait"
         )
     }
     async fn complete_streaming(
@@ -2427,11 +2427,11 @@ mod tests {
         assert!(p.contains("gated_write"), "constraints block must be preserved");
     }
 
-    /// A stub `Completer` that always returns a fixed final text (no tool calls).
+    /// A stub `LlmPort` that always returns a fixed final text (no tool calls).
     struct StubCompleter(String);
 
     #[async_trait::async_trait]
-    impl Completer for StubCompleter {
+    impl LlmPort for StubCompleter {
         async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
             Ok(LlmResponse {
                 text: self.0.clone(),
@@ -2459,7 +2459,7 @@ mod tests {
         }
     }
 
-    /// A stub `Completer` that returns one OpenAI-style `tool_calls` response then
+    /// A stub `LlmPort` that returns one OpenAI-style `tool_calls` response then
     /// a final text response on the second call.
     struct OneToolCallCompleter {
         tool_name: String,
@@ -2480,7 +2480,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl Completer for OneToolCallCompleter {
+    impl LlmPort for OneToolCallCompleter {
         async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
             let mut count = self.call_count.lock().unwrap();
             let n = *count;
@@ -2545,7 +2545,7 @@ mod tests {
 
     /// Build a driver backed by `completer` with `rule_subset` from `role`.
     fn driver_with(
-        completer: Arc<dyn Completer>,
+        completer: Arc<dyn LlmPort>,
         role: &Role,
         wt: Option<PathBuf>,
     ) -> ApiAgentDriver {

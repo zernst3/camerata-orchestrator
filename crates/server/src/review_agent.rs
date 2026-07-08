@@ -3,7 +3,7 @@
 //! A reviewer runs a single non-agentic LLM call via the existing `Llm::complete` path
 //! with a structured system prompt + inputs, and returns a typed `ReviewVerdict`.
 //! Reviewers produce judgments ONLY — they do NOT write code and need NO gated_write or
-//! MCP tools. They are pure read-call wrappers over the existing Completer seam.
+//! MCP tools. They are pure read-call wrappers over the existing LlmPort seam.
 //!
 //! Two reviewers live here:
 //! - **`run_l3_review`** (R7): the Layer-3 agentic code reviewer, which verifies a diff
@@ -26,7 +26,7 @@
 //! `LiveGateResult` (a thin server-side mirror of `IntegrationGateResult`) and the caller
 //! maps it where needed.
 
-use crate::llm::{Completer, LlmRequest};
+use crate::llm::{LlmPort, LlmRequest};
 
 // ── Shared verdict type ────────────────────────────────────────────────────────
 
@@ -96,7 +96,7 @@ Be specific and terse. Do not include explanation outside the verdict format.";
 /// three inputs above are forwarded. Returns `ReviewVerdict::Pass` or a list of reasons
 /// to bounce back to the developer.
 pub async fn run_l3_review(
-    llm: &dyn Completer,
+    llm: &dyn LlmPort,
     input: &L3ReviewInput<'_>,
 ) -> anyhow::Result<ReviewVerdict> {
     let user_prompt = build_l3_prompt(input);
@@ -194,7 +194,7 @@ fn integration_system_prompt() -> String {
 /// cross-repo contract. Returns `ReviewVerdict::Pass` or `ReviewVerdict::Bounce` with
 /// the mismatches.
 pub async fn run_integration_gate_review(
-    llm: &dyn Completer,
+    llm: &dyn LlmPort,
     input: &IntegrationGateReviewInput<'_>,
 ) -> anyhow::Result<ReviewVerdict> {
     let user_prompt = build_integration_prompt(input);
@@ -265,7 +265,7 @@ pub enum LiveGateResult {
 /// - LLM returns `MISMATCH` → `BounceToOrchestrator`.
 /// - LLM call fails → propagates the error (the caller decides to fall through or block).
 pub async fn check_integration_gate_live(
-    llm: &dyn Completer,
+    llm: &dyn LlmPort,
     contract: Option<&str>,
     repo_outputs: &[(&str, &str)],
     model: &str,
@@ -542,7 +542,7 @@ mod tests {
     async fn check_integration_gate_live_no_contract_short_circuits() {
         struct PanicLlm;
         #[async_trait::async_trait]
-        impl crate::llm::Completer for PanicLlm {
+        impl crate::llm::LlmPort for PanicLlm {
             async fn complete(
                 &self,
                 _req: crate::llm::LlmRequest,
@@ -565,11 +565,11 @@ mod tests {
         assert_eq!(result, LiveGateResult::NoContractRequired);
     }
 
-    /// A stub Completer that returns a canned response — used for verdict mapping tests.
+    /// A stub LlmPort that returns a canned response — used for verdict mapping tests.
     struct StubLlm(String);
 
     #[async_trait::async_trait]
-    impl crate::llm::Completer for StubLlm {
+    impl crate::llm::LlmPort for StubLlm {
         async fn complete(
             &self,
             _req: crate::llm::LlmRequest,

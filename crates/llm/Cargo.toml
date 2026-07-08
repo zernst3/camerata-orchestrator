@@ -1,0 +1,35 @@
+[package]
+name = "camerata-llm"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+version = "0.0.0"
+
+[lints]
+workspace = true
+
+# The LLM/provider stack (Phase B of the headless-core extraction): the `LlmPort`
+# completion seam, the `Llm` Anthropic transport (CLI + API + Message Batches), the
+# `OpenRouterCompleter`, the provider-selecting `build_completer` factory + chain
+# fallback, the OS-keychain credential store, the model registry (static Claude +
+# OpenRouter discovery), the per-provider rate limiter, and the cumulative usage
+# ledger. Extracted from `camerata-server` so the provider stack is reusable outside
+# the Axum adapter; the server re-exports everything here so its module paths
+# (`crate::llm::*`, `crate::credentials::*`, ...) keep resolving unchanged.
+
+[dependencies]
+# Pure-serde wire DTOs (Phase A): `LlmResponse`, the credential wire shapes + name
+# consts + `CredentialError`, the registry wire shapes, and `DEFAULT_MODEL`.
+camerata-api-types = { path = "../api-types" }
+tokio = { workspace = true, features = ["time", "io-util", "sync"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+# Object-safe async trait for the `LlmPort` completion seam.
+async-trait = { workspace = true }
+# HTTP transport for the Anthropic Messages/Batches APIs + the OpenRouter
+# chat-completions + model-discovery endpoints. Same version/features as the server.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# OS-keychain credential storage (macOS Keychain / Windows Credential Manager /
+# libsecret) for the `KeyringCredentialStore`. Same version as the server used.
+keyring = "3"

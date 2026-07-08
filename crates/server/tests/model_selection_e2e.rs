@@ -3,20 +3,20 @@
 //! THE CLAIM under test: for every entry point in camerata-orchestrator, the model id
 //! a user SELECTS (what the UI POSTs / the project config holds) is the EXACT id that
 //! reaches the model-call boundary (the CLI `--model` arg / the OpenRouter request body
-//! / the `LlmRequest.model` a `Completer` receives).
+//! / the `LlmRequest.model` a `LlmPort` receives).
 //!
 //! This is the critical regression net for a class of model-wiring bugs where a
 //! selection silently resolves to the wrong model between request and call.
 //!
 //! HERMETIC: NO real `claude` spawn, NO network. Construction-only `Llm::from_env()`,
 //! a fake in-memory `CredentialStore`, a seeded in-memory `AppState`, and a CAPTURING
-//! `Completer` that records `req.model` are the only seams used.
+//! `LlmPort` that records `req.model` are the only seams used.
 //!
 //! Coverage levels are labelled per test:
 //!   - RESOLUTION-LEVEL: asserts the selected id at the point where the model is resolved
 //!     (e.g. `TierMap::model_for_task`, `step_model_or`, `DelegateModels::resolve`,
 //!     `ClaudeCliDriver.model`).
-//!   - BOUNDARY-CAPTURE: drives a real code path into a capturing `Completer` and asserts
+//!   - BOUNDARY-CAPTURE: drives a real code path into a capturing `LlmPort` and asserts
 //!     the recorded `req.model` IS the selected/override id (closes the loop).
 
 use std::sync::Arc;
@@ -25,7 +25,7 @@ use async_trait::async_trait;
 
 use camerata_server::credentials::{CredentialStore, MemoryCredentialStore, OPENROUTER_API_KEY};
 use camerata_server::llm::{
-    build_completer, Completer, Llm, LlmRequest, LlmResponse, OpenRouterCompleter, DEFAULT_MODEL,
+    build_completer, LlmPort, Llm, LlmRequest, LlmResponse, OpenRouterCompleter, DEFAULT_MODEL,
 };
 use camerata_server::model_registry::{ModelRegistry, RegistryEntry};
 use camerata_server::model_tier::{CapabilityBand, TierMap};
@@ -42,7 +42,7 @@ use camerata_intake::{Plan, PlanTask, TaskKind};
 // Shared fixtures
 // ════════════════════════════════════════════════════════════════════════════════════
 
-/// A CAPTURING `Completer`: records every `req.model` it is asked to complete, and returns
+/// A CAPTURING `LlmPort`: records every `req.model` it is asked to complete, and returns
 /// a fixed response. This is the boundary seam — whatever model reaches a real model call
 /// lands here, so asserting on `captured()` proves the selected id flowed end to end.
 struct CapturingCompleter {
@@ -66,7 +66,7 @@ impl CapturingCompleter {
 }
 
 #[async_trait]
-impl Completer for CapturingCompleter {
+impl LlmPort for CapturingCompleter {
     async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         self.seen.lock().unwrap().push(req.model.clone());
         Ok(LlmResponse {
