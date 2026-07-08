@@ -41,6 +41,10 @@ chorale-dioxus = "0.2.3"
 # pure logic, data shapes, and state transitions live in camerata-ui-core (no dioxus dep), unit-tested
 # there with no VirtualDom. Extraction is incremental (docs/plans/2026-07-01_ui-core-extraction.md).
 camerata-ui-core = { path = "../ui-core" }
+# The pure-serde wire-contract leaf. The `WorkItem` wire mirror the cockpit deserializes
+# lives there (Phase C moved it out so camerata-ui-core's GovDevState can hold it);
+# `cockpit::uow` re-exports it so existing call sites resolve unchanged.
+camerata-api-types = { path = "../api-types" }
 # The BFF the desktop shell embeds and the cockpit talks to over HTTP.
 camerata-server = { path = "../server" }
 # The cockpit deserializes the canonical Story spine (status etc.) from the BFF.

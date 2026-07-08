@@ -914,6 +914,7 @@ name = "camerata-ui"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "camerata-api-types",
  "camerata-server",
  "camerata-ui-core",
  "camerata-worktracker",
@@ -937,6 +938,7 @@ dependencies = [
 name = "camerata-ui-core"
 version = "0.0.0"
 dependencies = [
+ "camerata-api-types",
  "serde",
  "serde_json",
 ]

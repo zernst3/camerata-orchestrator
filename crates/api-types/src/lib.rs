@@ -18,6 +18,9 @@
 //!   known-name constants + error enum only).
 //! - [`model_registry`] — relocated from `camerata_server::model_registry` (the wire
 //!   shapes only).
+//! - [`workitems`] — relocated from `camerata_ui::cockpit::uow` (the UI-side `WorkItem`
+//!   wire mirror only; Phase C of the UI-core extraction so `camerata-ui-core` can hold
+//!   pulled items without a UI dep).
 //!
 //! Every relocated module's origin re-exports everything below so existing call sites
 //! (`camerata_app_core::uow::X`, `crate::llm::LlmResponse`, etc.) resolve unchanged.
@@ -28,3 +31,4 @@ pub mod llm;
 pub mod model_registry;
 pub mod project;
 pub mod uow;
+pub mod workitems;
