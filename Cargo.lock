@@ -634,7 +634,9 @@ dependencies = [
  "anyhow",
  "async-trait",
  "camerata-agent",
+ "camerata-api-types",
  "camerata-checks",
+ "camerata-client",
  "camerata-core",
  "camerata-deploy",
  "camerata-fleet",
@@ -645,9 +647,12 @@ dependencies = [
  "camerata-server",
  "camerata-worktracker",
  "chrono",
+ "clap",
  "dotenvy",
+ "serde",
  "serde_json",
  "tokio",
+ "wiremock",
 ]
 
 [[package]]
