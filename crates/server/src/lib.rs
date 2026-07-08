@@ -1069,7 +1069,11 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     // (no activity past the active project's routine threshold). Watched runs stay alert-only.
     // Spawned here (not in `router`) so tests that build the router don't auto-cancel runs.
     // Cadence: CAMERATA_STALL_SWEEP_SECS (default 30).
-    crate::stall_sweep::spawn_stall_sweep(state.runs.clone(), state.projects.clone());
+    crate::stall_sweep::spawn_stall_sweep(
+        state.runs.clone(),
+        state.projects.clone(),
+        state.governance_log.clone(),
+    );
 
     // Per-UoW worktree housekeeping (Decision 1): on startup, prune stale worktree admin
     // records from every known repo clone AND remove worktrees for UoWs that are already
@@ -1482,6 +1486,13 @@ async fn resume_governed_run(
         _ => (story_id.clone(), String::new()),
     };
     let run_id = state.runs.create(&story_id, mode, crate::run::RunKind::Watched);
+    state
+        .record_governance(
+            camerata_persistence::GovernanceEvent::info(run_id.clone(), "run_started", "system")
+                .with_story_id(story_id.clone())
+                .with_reason(format!("resumed run (mode={mode}) after human review")),
+        )
+        .await;
 
     if !live {
         // Scripted mode has no live agent to re-spawn; record the decision honestly and stop.
@@ -1732,6 +1743,10 @@ async fn spawn_brownfield_dev_run(
     let impl_registry = state.model_registry.clone();
     let impl_creds = state.credential_store.clone();
     let impl_limiter = state.rate_limiter.clone();
+    // Phase H2: threaded into `execute_dev_implement_run` so the audit trail (agent_step,
+    // gate_allow/deny, escalation_raised, check_failed/layer2_bounce) is recorded under
+    // THIS run's id. `None` in tests / on open failure (fail-soft — see AppState::from_env).
+    let impl_governance_log = state.governance_log.clone();
     // LIFECYCLE-1: register the abort handle so a Stop can reap a run blocked inside the
     // live implement agent subprocess (kill_on_drop). Cleared when the run finishes.
     let runs_for_clear = state.runs.clone();
@@ -1767,6 +1782,7 @@ async fn spawn_brownfield_dev_run(
             escalations_in_scope,
             impl_projects,
             impl_project_id,
+            impl_governance_log,
         )
         .await;
         runs_for_clear.clear_abort(&rid_for_clear);
@@ -1788,7 +1804,15 @@ async fn start_governed_run(
 ) -> (String, &'static str) {
     let live = live_mode_enabled();
     let mode = if live { "live" } else { "scripted" };
+    let kind_label = format!("{kind:?}");
     let run_id = state.runs.create(story_id, mode, kind);
+    state
+        .record_governance(
+            camerata_persistence::GovernanceEvent::info(run_id.clone(), "run_started", "system")
+                .with_story_id(story_id.to_string())
+                .with_reason(format!("governed run started (mode={mode}, kind={kind_label})")),
+        )
+        .await;
     let store = state.runs.clone();
     let rid = run_id.clone();
 
@@ -1995,8 +2019,9 @@ fn spawn_provenance_watcher(state: &AppState, run_id: &str, story_id: &str) {
     let watch_id = run_id.to_string();
     let watch_story = story_id.to_string();
     let ledger = state.enforcement_ledger.clone();
+    let governance_log = state.governance_log.clone();
     tokio::spawn(async move {
-        stamp_provenance_when_done(runs, uow, ledger, watch_id, watch_story).await;
+        stamp_provenance_when_done(runs, uow, ledger, governance_log, watch_id, watch_story).await;
     });
 }
 
@@ -2024,6 +2049,9 @@ async fn stamp_provenance_when_done(
     runs: RunStore,
     uow: crate::uow::UowStore,
     ledger: crate::enforcement_ledger::EnforcementLedger,
+    // Phase H2: the governance-event audit trail. `None` in tests / on open failure
+    // (fail-soft — see `AppState::record_governance`).
+    governance_log: Option<Arc<camerata_persistence::GovernanceLog>>,
     run_id: String,
     story_id: String,
 ) {
@@ -2035,6 +2063,24 @@ async fn stamp_provenance_when_done(
         // Wedged without ever going terminal, or an unknown run id. Nothing to stamp.
         None => return,
     };
+
+    // Phase H2: `run_finished` — the single convergence point for every governed run
+    // (fresh or resumed, brownfield or greenfield, tiered or single-model), keyed on the
+    // TERMINAL status: info for the success terminal (AwaitingQa), warn for Failed/Cancelled.
+    let finished_detail = serde_json::json!({ "status": format!("{:?}", run.status) }).to_string();
+    let finished_event = if matches!(run.status, crate::run::RunStatus::AwaitingQa) {
+        camerata_persistence::GovernanceEvent::info(run_id.clone(), "run_finished", "system")
+    } else {
+        camerata_persistence::GovernanceEvent::warn(run_id.clone(), "run_finished", "system")
+    }
+    .with_story_id(story_id.clone())
+    .with_reason(format!("run finished with status {:?}", run.status))
+    .with_detail(finished_detail);
+    if let Some(log) = governance_log.as_ref() {
+        if let Err(e) = log.record(finished_event).await {
+            tracing::warn!(error = %e, run_id = %run_id, "failed to record run_finished governance event");
+        }
+    }
 
     let rules = camerata_gateway::enforced_gate_rules();
     let prov = run_provenance(&run, &rules);
@@ -2403,6 +2449,19 @@ async fn sign_off_run(
     let mut uow = state
         .uow
         .sign_off(&run.story_id, &by, &run.id, effective_note.as_deref());
+
+    // Phase H2: durable record of the human sign-off decision, keyed on the run it signs off.
+    state
+        .record_governance(
+            camerata_persistence::GovernanceEvent::info(run.id.clone(), "sign_off", "human")
+                .with_story_id(run.story_id.clone())
+                .with_reason(
+                    effective_note
+                        .clone()
+                        .unwrap_or_else(|| format!("signed off by {by}")),
+                ),
+        )
+        .await;
 
     // ── Post evidence as PR comment (issue #53) ───────────────────────────────
     // When the UoW has an evidence record AND the caller supplied a PR number + repo,
@@ -7480,6 +7539,21 @@ async fn answer_escalation(
                     .map(|p| p.directive.clone())
                     .filter(|d| !d.trim().is_empty())
                     .unwrap_or_else(|| req.answer.clone());
+                // Phase H2: durable record of the human's answer, keyed on the PAUSED run's
+                // id (the checkpoint is the only place a UoW escalation carries one — a
+                // Routine-subject escalation has no run_id and is out of scope for this
+                // per-run audit trail; see the module note).
+                state
+                    .record_governance(
+                        camerata_persistence::GovernanceEvent::info(
+                            ckpt.run_id.clone(),
+                            "escalation_answered",
+                            "human",
+                        )
+                        .with_story_id(resolved.routine_id.clone())
+                        .with_reason(format!("{:?}: {}", req.action, req.answer)),
+                    )
+                    .await;
                 match req.action {
                     crate::escalation::EscalationAction::Reject => {
                         // Stop cleanly: discard the agent's uncommitted work, consume the
@@ -15596,6 +15670,7 @@ mod tests {
             runs.clone(),
             uow.clone(),
             crate::enforcement_ledger::EnforcementLedger::none(),
+            None, // governance_log — not exercised in this unit test
             run_id.clone(),
             story.to_string(),
         )
@@ -15640,6 +15715,7 @@ mod tests {
             runs.clone(),
             uow.clone(),
             crate::enforcement_ledger::EnforcementLedger::none(),
+            None, // governance_log — not exercised in this unit test
             run_id.clone(),
             story.to_string(),
         )
@@ -15677,6 +15753,7 @@ mod tests {
             runs.clone(),
             uow.clone(),
             crate::enforcement_ledger::EnforcementLedger::none(),
+            None, // governance_log — not exercised in this unit test
             run_id.clone(),
             story.to_string(),
         )
@@ -15724,6 +15801,7 @@ mod tests {
                     runs,
                     uow,
                     crate::enforcement_ledger::EnforcementLedger::none(),
+                    None, // governance_log — not exercised in this unit test
                     rid,
                     sid,
                 )

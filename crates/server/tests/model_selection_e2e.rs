@@ -630,6 +630,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         None,
         false, // escalation
         None,  // on_activity heartbeat
+        None, // governance — no log wired in this unit test
     );
     assert!(claude.is_ok(), "claude driver builds without a key");
 
@@ -648,6 +649,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         None,
         false, // escalation
         None,  // on_activity heartbeat
+        None, // governance — no log wired in this unit test
     );
     assert!(or.is_ok(), "openrouter driver builds with a key");
 
@@ -665,6 +667,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         None,
         false, // escalation
         None,  // on_activity heartbeat
+        None, // governance — no log wired in this unit test
     );
     let msg = match err {
         Err(e) => e.to_string(),
