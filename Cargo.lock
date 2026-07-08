@@ -847,6 +847,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "camerata-mcp"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "camerata-api-types",
+ "camerata-client",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "camerata-persistence"
 version = "0.0.0"
 dependencies = [

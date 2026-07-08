@@ -15,6 +15,7 @@ members = [
     "crates/fleet",       # reusable governed-fleet build logic (used by CLI + UI)
     "crates/server",      # Axum HTTP/WS the cockpit talks to (embedded in orchestrator)
     "crates/client",      # typed HTTP client over the BFF's /api/* routes (shared by MCP + CLI adapters)
+    "crates/mcp",         # first MCP adapter rung: rmcp stdio server exposing first-rung verbs via camerata-client (Phase E)
     "crates/cli",         # binary entrypoint wiring it all together
     "crates/ui",          # Dioxus cockpit (separate process) — the thin rendering ADAPTER
     "crates/ui-core",     # framework-agnostic UI logic/state (RUST-HEADLESS-CORE-1); no dioxus dep
