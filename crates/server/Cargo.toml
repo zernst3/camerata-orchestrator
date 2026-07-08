@@ -64,6 +64,10 @@ fs2 = { workspace = true }
 # Respects .gitignore / .git/info/exclude / global gitignore so committed secrets are
 # still found while truly gitignored build artifacts are skipped.
 ignore = { workspace = true }
+# Structured logging (Phase H1: governance-event-trail foundation). `tracing-subscriber`
+# is initialized once in `main.rs`; `tracing` is the facade handlers/services emit through.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 # The backend contracts the BFF exposes.
 camerata-gateway = { path = "../gateway" }

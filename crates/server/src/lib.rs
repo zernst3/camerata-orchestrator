@@ -176,6 +176,13 @@ pub struct AppState {
     /// (prevented-merges dataset). Write-only in app code; fail-soft: if it can't be
     /// opened the run/scan paths are unaffected. `None` in tests and on open failure.
     pub enforcement_ledger: crate::enforcement_ledger::EnforcementLedger,
+    /// The readable governance-event audit trail (Phase H1 foundation; SQLite). Unlike
+    /// `enforcement_ledger`, this store is meant to be READ BACK (e.g. a per-run activity
+    /// timeline). Opened best-effort in [`AppState::from_env`], same fail-soft pattern as
+    /// `enforcement_ledger`: `None` in tests and on open failure. NOT YET instrumented at
+    /// any lifecycle site as of Phase H1 — that instrumentation is a later phase. Use
+    /// [`AppState::record_governance`] as the single call-site helper when it lands.
+    pub governance_log: Option<Arc<camerata_persistence::GovernanceLog>>,
     /// App-wide credential store backed by the OS keychain in production and an
     /// in-memory map in tests.  Never exposes full values over HTTP; handlers call
     /// `.masked()`.  Service code (e.g. [`github_token`]) reads the full value
@@ -229,6 +236,8 @@ impl AppState {
             usage_ledger: Arc::new(crate::usage_ledger::UsageLedger::new()),
             // Tests and in-process runs start without a ledger (no-op; fail-soft).
             enforcement_ledger: crate::enforcement_ledger::EnforcementLedger::none(),
+            // Tests and in-process runs start without a governance log (no-op; fail-soft).
+            governance_log: None,
             // Tests use an in-memory credential store; production uses the OS keychain.
             credential_store: Arc::new(crate::credentials::MemoryCredentialStore::new()),
             // The registry always has the static Claude entries; OpenRouter is empty until
@@ -247,6 +256,27 @@ impl AppState {
     /// sees ALL call paths. Reads vendor/transport/model from the environment, same as before.
     pub fn llm(&self) -> crate::llm::Llm {
         crate::llm::Llm::from_env_with_ledger(self.usage_ledger.clone())
+    }
+
+    /// Record one governance event to the audit trail (Phase H1 foundation).
+    ///
+    /// The single call-site helper future lifecycle-instrumentation phases (H2+) should
+    /// use, e.g.:
+    /// `state.record_governance(GovernanceEvent::info(run_id, "run_started", "system")).await;`
+    ///
+    /// Fail-soft by construction: a `None` log (tests, or an open failure at startup) is
+    /// a silent no-op, and a write error is logged via `tracing::warn!` and swallowed —
+    /// callers never need to match on a `Result`. Async (not spawned) so a caller that
+    /// wants the write to have landed before proceeding (e.g. before returning an HTTP
+    /// response) can simply `.await` it; callers that don't care about ordering can
+    /// `tokio::spawn` the call themselves.
+    pub async fn record_governance(&self, event: camerata_persistence::GovernanceEvent) {
+        let Some(log) = self.governance_log.as_ref() else {
+            return;
+        };
+        if let Err(e) = log.record(event).await {
+            tracing::warn!(error = %e, "failed to record governance event");
+        }
     }
 
     /// Read-only accessor for the project store. Exposed so integration tests can seed a
@@ -626,6 +656,36 @@ impl AppState {
                         crate::enforcement_ledger::EnforcementLedger::open(&ledger_path),
                     )
                 });
+
+                // Governance-event audit trail (Phase H1 foundation): a READABLE SQLite
+                // log of a governed run's lifecycle (run started, agent steps, gate
+                // verdicts, escalations, sign-off, commit/PR gates, how it finished).
+                // Opened best-effort, same fail-soft pattern as the enforcement ledger
+                // above: on open failure, log a warning and leave `governance_log` as
+                // `None` so startup and every run/scan path is unaffected. No lifecycle
+                // site calls `record_governance` yet in this phase — that instrumentation
+                // is a later phase; this just wires the plumbing.
+                let governance_path = dir.join("governance_events.db");
+                state.governance_log = match tokio::task::block_in_place(|| {
+                    handle.block_on(camerata_persistence::GovernanceLog::open(&governance_path))
+                }) {
+                    Ok(log) => {
+                        tracing::info!(
+                            path = %governance_path.display(),
+                            "governance-event log opened"
+                        );
+                        Some(Arc::new(log))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %governance_path.display(),
+                            error = %e,
+                            "governance-event log could not open; governance events will \
+                             not be recorded this session"
+                        );
+                        None
+                    }
+                };
             }
             // Routines persist too, so a scheduled governed run an architect set up
             // survives a restart instead of being lost on every launch.

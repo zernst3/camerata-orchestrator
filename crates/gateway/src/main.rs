@@ -43,6 +43,28 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tracing_subscriber::EnvFilter;
+
+/// Install the process-global `tracing` subscriber, once (Phase H1 foundation).
+///
+/// MUST write to STDERR, never stdout: this binary's stdout IS the MCP stdio
+/// transport (`rmcp`'s `stdio()`), so any log line written to stdout would corrupt
+/// the protocol stream the orchestrator is parsing. This mirrors every existing
+/// `eprintln!` trace already in this file.
+///
+/// Filter precedence: `CAMERATA_LOG` env var, then the conventional `RUST_LOG`, then
+/// a hardcoded `"info"` default. Uses `try_init()` (not `init()`) so a double-init —
+/// this binary is routinely spawned as a subprocess of `camerata-server`, and may
+/// itself be re-exec'd or tested in-process — is a silent no-op instead of a panic.
+fn init_tracing() {
+    let filter = EnvFilter::try_from_env("CAMERATA_LOG")
+        .or_else(|_| EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
 
 // The spawn modules now live in the gateway LIBRARY (so the in-process server path can
 // reuse the SAME gated `run_delegated`/`run_fan_out` primitives). The binary references
@@ -1050,6 +1072,7 @@ impl ServerHandler for Gateway {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    init_tracing();
     let subset = load_rule_subset();
     eprintln!(
         "[gateway] Camerata Rust MCP governance gateway up (rmcp 1.7, stdio); active subset: {}",
