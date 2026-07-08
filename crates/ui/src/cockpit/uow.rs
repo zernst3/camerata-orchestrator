@@ -1042,6 +1042,15 @@ pub(super) struct WorkItem {
     /// `IssueSummary::parent_number` on a pull.
     #[serde(default)]
     pub parent_number: Option<u64>,
+    /// The logins of the users assigned to the item. Empty when unassigned. Populated on
+    /// the single-issue refresh path (Pull latest); the bulk pull + spine-resolved paths
+    /// leave it empty (those sources don't carry it).
+    #[serde(default)]
+    pub assignees: Vec<String>,
+    /// The item's last-updated ISO-8601 timestamp as the tracker returns it. Empty when
+    /// absent. The update-poll uses it as the per-UoW last-seen baseline / change signal.
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 /// A work item augmented with N-level hierarchy grouping columns for the Chorale table.
@@ -1121,6 +1130,8 @@ mod issue_group_label_tests {
             url: String::new(),
             labels: vec![],
             parent_number: None,
+            assignees: vec![],
+            updated_at: String::new(),
         }
     }
 
@@ -1410,6 +1421,244 @@ pub(super) struct WorkItemAssigneesResult {
     pub users: Vec<String>,
 }
 
+/// The `GET /api/me` envelope: the authenticated GitHub login, or `None` when there is no
+/// token / the lookup failed (the UI then hides/disables "Assign to me").
+#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+pub(super) struct MeResult {
+    #[serde(default)]
+    pub login: Option<String>,
+}
+
+/// The `POST /api/workitems/assign` envelope: the item's UPDATED assignee logins, and the
+/// issue's `updated_at` from the same response. On a successful assign the caller
+/// re-baselines the change-poll last-seen value to `updated_at` (when non-empty) so
+/// assigning does not itself flag the item CHANGED on the next background poll.
+#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+pub(super) struct AssignResult {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub assignees: Vec<String>,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
+/// One row from `POST /api/workitems/updated-check`: the work item's id, its freshly
+/// polled updated-at timestamp, and its open/closed state.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug, Default)]
+pub(super) struct WorkItemUpdateRow {
+    #[serde(default)]
+    pub work_item_id: String,
+    #[serde(default)]
+    pub updated_at: String,
+    #[serde(default)]
+    pub state: String,
+}
+
+/// The `POST /api/workitems/updated-check` envelope.
+#[derive(Clone, PartialEq, serde::Deserialize, Default)]
+pub(super) struct UpdatedCheckResult {
+    #[serde(default)]
+    pub updates: Vec<WorkItemUpdateRow>,
+}
+
+/// App-lifetime, per-work-item LAST-SEEN `updated_at`, keyed by the work item's stable id
+/// (`github:OWNER/REPO#N`). Captured when a UoW is opened / its work item is pulled, and
+/// used as the baseline the background poll compares fresh timestamps against. A
+/// `GlobalSignal` so the poll (in `GovernedDevPage`), the nav cards, and the UoW detail
+/// header all read/write one shared map.
+pub(super) static UOW_LAST_SEEN: GlobalSignal<std::collections::HashMap<String, String>> =
+    Signal::global(std::collections::HashMap::new);
+
+/// App-lifetime set of work item ids currently flagged CHANGED (the board moved since the
+/// last-seen baseline). Shown as a change icon on both the UoW detail header and the
+/// left-nav card; cleared by "Pull latest".
+pub(super) static UOW_CHANGED: GlobalSignal<std::collections::HashSet<String>> =
+    Signal::global(std::collections::HashSet::new);
+
+/// Fold ONE poll result into the shared last-seen + changed state. Pure over the two maps
+/// so the change-flag logic is unit-testable without the UI:
+/// - No last-seen baseline yet for this id → establish it (this poll is the baseline; NOT
+///   flagged, so a first poll never marks everything changed).
+/// - Polled `updated_at` strictly NEWER than last-seen → flag CHANGED. (ISO-8601 UTC
+///   timestamps compare correctly as strings.)
+/// - Equal / older / empty polled value → no change.
+pub(super) fn fold_poll_update(
+    last_seen: &mut std::collections::HashMap<String, String>,
+    changed: &mut std::collections::HashSet<String>,
+    work_item_id: &str,
+    polled_updated_at: &str,
+) {
+    if polled_updated_at.is_empty() {
+        return;
+    }
+    match last_seen.get(work_item_id) {
+        Some(seen) => {
+            if polled_updated_at > seen.as_str() {
+                changed.insert(work_item_id.to_string());
+            }
+        }
+        None => {
+            last_seen.insert(work_item_id.to_string(), polled_updated_at.to_string());
+        }
+    }
+}
+
+/// Clear the CHANGED flag for a work item and bump its last-seen baseline to the freshly
+/// pulled `updated_at`. Called after a "Pull latest" (and on open) so the notification is
+/// dismissed and the next change is measured against the value we just saw. Pure over the
+/// two maps for testability.
+pub(super) fn clear_changed_and_bump(
+    last_seen: &mut std::collections::HashMap<String, String>,
+    changed: &mut std::collections::HashSet<String>,
+    work_item_id: &str,
+    new_updated_at: &str,
+) {
+    changed.remove(work_item_id);
+    if !new_updated_at.is_empty() {
+        last_seen.insert(work_item_id.to_string(), new_updated_at.to_string());
+    }
+}
+
+/// The label the UoW detail / nav card shows for the item's assignee(s): the joined
+/// logins, or "Unassigned" when empty. Pure so it is unit-testable.
+pub(super) fn assignee_label(assignees: &[String]) -> String {
+    if assignees.is_empty() {
+        "Unassigned".to_string()
+    } else {
+        assignees.join(", ")
+    }
+}
+
+#[cfg(test)]
+mod assignee_and_update_tests {
+    use super::{assignee_label, clear_changed_and_bump, fold_poll_update};
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn assignee_label_joins_or_unassigned() {
+        assert_eq!(assignee_label(&[]), "Unassigned");
+        assert_eq!(assignee_label(&["octocat".to_string()]), "octocat");
+        assert_eq!(
+            assignee_label(&["octocat".to_string(), "hubot".to_string()]),
+            "octocat, hubot"
+        );
+    }
+
+    #[test]
+    fn fold_poll_first_sight_sets_baseline_without_flagging() {
+        let mut last_seen = HashMap::new();
+        let mut changed = HashSet::new();
+        // No baseline yet: this poll ESTABLISHES it and does not flag changed.
+        fold_poll_update(&mut last_seen, &mut changed, "github:o/r#1", "2026-07-05T12:00:00Z");
+        assert_eq!(last_seen.get("github:o/r#1").map(String::as_str), Some("2026-07-05T12:00:00Z"));
+        assert!(!changed.contains("github:o/r#1"), "first poll must not flag");
+    }
+
+    #[test]
+    fn fold_poll_newer_flags_changed_equal_or_older_does_not() {
+        let mut last_seen = HashMap::new();
+        last_seen.insert("wi".to_string(), "2026-07-05T12:00:00Z".to_string());
+        let mut changed = HashSet::new();
+
+        // Equal → not changed.
+        fold_poll_update(&mut last_seen, &mut changed, "wi", "2026-07-05T12:00:00Z");
+        assert!(!changed.contains("wi"), "equal timestamp is not a change");
+
+        // Older → not changed.
+        fold_poll_update(&mut last_seen, &mut changed, "wi", "2026-07-04T09:00:00Z");
+        assert!(!changed.contains("wi"), "older timestamp is not a change");
+
+        // Empty polled → not changed (resilient: a blank value never flags).
+        fold_poll_update(&mut last_seen, &mut changed, "wi", "");
+        assert!(!changed.contains("wi"), "empty polled value is not a change");
+
+        // Strictly newer → changed. The last-seen baseline is deliberately NOT advanced
+        // here (only a pull/open advances it), so the flag persists until the user syncs.
+        fold_poll_update(&mut last_seen, &mut changed, "wi", "2026-07-06T08:00:00Z");
+        assert!(changed.contains("wi"), "newer timestamp flags changed");
+        assert_eq!(
+            last_seen.get("wi").map(String::as_str),
+            Some("2026-07-05T12:00:00Z"),
+            "a poll does not advance the baseline"
+        );
+    }
+
+    #[test]
+    fn clear_changed_and_bump_clears_flag_and_advances_baseline() {
+        let mut last_seen = HashMap::new();
+        last_seen.insert("wi".to_string(), "2026-07-05T12:00:00Z".to_string());
+        let mut changed = HashSet::new();
+        changed.insert("wi".to_string());
+
+        // A pull-latest with the fresh timestamp: flag clears, baseline advances.
+        clear_changed_and_bump(&mut last_seen, &mut changed, "wi", "2026-07-06T08:00:00Z");
+        assert!(!changed.contains("wi"), "pull-latest clears the flag");
+        assert_eq!(
+            last_seen.get("wi").map(String::as_str),
+            Some("2026-07-06T08:00:00Z"),
+            "pull-latest advances the last-seen baseline"
+        );
+
+        // After the bump, a poll at the same (now-baseline) timestamp does NOT re-flag.
+        fold_poll_update(&mut last_seen, &mut changed, "wi", "2026-07-06T08:00:00Z");
+        assert!(!changed.contains("wi"), "no re-flag once the baseline caught up");
+    }
+
+    #[test]
+    fn clear_changed_with_empty_timestamp_still_clears_flag() {
+        // A refresh that returned no updated_at must still dismiss the notification, and
+        // must not overwrite a good baseline with an empty string.
+        let mut last_seen = HashMap::new();
+        last_seen.insert("wi".to_string(), "2026-07-05T12:00:00Z".to_string());
+        let mut changed = HashSet::new();
+        changed.insert("wi".to_string());
+        clear_changed_and_bump(&mut last_seen, &mut changed, "wi", "");
+        assert!(!changed.contains("wi"), "flag clears even with an empty timestamp");
+        assert_eq!(
+            last_seen.get("wi").map(String::as_str),
+            Some("2026-07-05T12:00:00Z"),
+            "an empty timestamp must not clobber the baseline"
+        );
+    }
+
+    /// Assigning a work item (including "Assign to me") must NOT itself cause the next
+    /// background poll to flag the item CHANGED, because the assign response's
+    /// `updated_at` re-baselines last-seen (same mechanism as a manual "Pull latest").
+    /// A LATER real update (a strictly newer `updated_at`) must still flag. This is the
+    /// full sequence: baseline established -> self-assign re-baselines -> same-timestamp
+    /// poll does not flag -> newer-timestamp poll does flag.
+    #[test]
+    fn self_assign_rebaselines_so_the_next_poll_does_not_self_flag() {
+        let mut last_seen = HashMap::new();
+        let mut changed = HashSet::new();
+        let wid = "github:o/r#20";
+
+        // 1. Baseline established (e.g. on UoW open / initial pull).
+        fold_poll_update(&mut last_seen, &mut changed, wid, "2026-07-05T12:00:00Z");
+        assert_eq!(last_seen.get(wid).map(String::as_str), Some("2026-07-05T12:00:00Z"));
+        assert!(!changed.contains(wid));
+
+        // 2. Self-assign ("Assign to me") succeeds; GitHub's assign response carries a
+        // fresh `updated_at` (the assignment itself bumped the issue). The UI calls
+        // clear_changed_and_bump with that timestamp to re-baseline.
+        let assign_updated_at = "2026-07-05T12:05:00Z";
+        clear_changed_and_bump(&mut last_seen, &mut changed, wid, assign_updated_at);
+        assert_eq!(last_seen.get(wid).map(String::as_str), Some(assign_updated_at));
+        assert!(!changed.contains(wid), "a successful assign must not leave a stale flag");
+
+        // 3. The next background poll observes the SAME `updated_at` the assign already
+        // re-baselined to (this is the case the assign itself produced) -> must NOT flag.
+        fold_poll_update(&mut last_seen, &mut changed, wid, assign_updated_at);
+        assert!(!changed.contains(wid), "the poll must not self-flag the assign's own update");
+
+        // 4. The story is updated again afterward by something else (a strictly newer
+        // `updated_at`) -> the poll must still flag it CHANGED.
+        fold_poll_update(&mut last_seen, &mut changed, wid, "2026-07-05T13:00:00Z");
+        assert!(changed.contains(wid), "a later real update must still flag changed");
+    }
+}
+
 /// The label a work item's State badge shows. Pure mapping over the wire string so
 /// any casing / unknown value still renders sensibly. Returns (display, css-modifier).
 pub(super) fn work_item_state_badge(state: &str) -> (&'static str, &'static str) {
@@ -1671,6 +1920,64 @@ pub(super) async fn refresh_work_item(work_item_id: &str) -> Option<WorkItem> {
         .await
         .ok()?;
     serde_json::from_value(v.get("item")?.clone()).ok()
+}
+
+/// Resolve the authenticated GitHub login (`GET /api/me`). `None` when there is no token
+/// or the lookup failed, in which case the caller hides / disables "Assign to me".
+pub(super) async fn fetch_me_login() -> Option<String> {
+    reqwest::get(format!("{}/api/me", crate::bff_base()))
+        .await
+        .ok()?
+        .json::<MeResult>()
+        .await
+        .ok()
+        .and_then(|r| r.login)
+        .filter(|l| !l.is_empty())
+}
+
+/// Assign `assignee` (a login) to a work item's source issue (`POST /api/workitems/assign`).
+/// Returns the full [`AssignResult`] (updated assignee logins + `updated_at`) on success,
+/// `None` on any failure (the caller toasts). The UI passes the current user's login for
+/// "assign to me", and uses `updated_at` to re-baseline the change-poll last-seen value so
+/// the assign itself does not flag the item CHANGED on the next poll.
+pub(super) async fn assign_work_item(work_item_id: &str, assignee: &str) -> Option<AssignResult> {
+    let res = reqwest::Client::new()
+        .post(format!("{}/api/workitems/assign", crate::bff_base()))
+        .json(&serde_json::json!({ "work_item_id": work_item_id, "assignee": assignee }))
+        .send()
+        .await
+        .ok()?;
+    let parsed = res.json::<AssignResult>().await.ok()?;
+    if parsed.ok {
+        Some(parsed)
+    } else {
+        None
+    }
+}
+
+/// Background "has anything changed?" probe (`POST /api/workitems/updated-check`). Takes
+/// `(work_item_id, repo, number)` triples so the server can batch ONE list call per repo.
+/// Returns the update rows, or `None` on any failure (a failed poll is silent: the caller
+/// retains prior state and never toasts).
+pub(super) async fn check_work_items_updated(
+    items: &[(String, String, u64)],
+) -> Option<Vec<WorkItemUpdateRow>> {
+    let payload: Vec<serde_json::Value> = items
+        .iter()
+        .map(|(id, repo, number)| {
+            serde_json::json!({ "work_item_id": id, "repo": repo, "number": number })
+        })
+        .collect();
+    reqwest::Client::new()
+        .post(format!("{}/api/workitems/updated-check", crate::bff_base()))
+        .json(&serde_json::json!({ "items": payload }))
+        .send()
+        .await
+        .ok()?
+        .json::<UpdatedCheckResult>()
+        .await
+        .ok()
+        .map(|r| r.updates)
 }
 
 /// Comment back onto the source issue (`POST /api/workitems/comment`). Returns the
@@ -2037,6 +2344,39 @@ pub(super) fn GovernedDevPage() -> Element {
 
     let uows = uows_res.read().clone().flatten().unwrap_or_default();
 
+    // ── Background update poll (Feature 3) ─────────────────────────────────────────
+    // Every ~60s, quietly ask the board whether any of this project's UoWs changed. This
+    // holds NO LoadingGuard (it is a passive check, not AI work), and a failed poll is
+    // silent (retains prior state, no toast). Each fresh `updated_at` is folded into the
+    // shared last-seen / changed maps: a value NEWER than the per-UoW baseline flags that
+    // UoW CHANGED (rendered as an icon on the nav card + the detail header). The loop reads
+    // `uows_res` each tick so it always polls the current UoW set.
+    use_future(move || async move {
+        loop {
+            // Snapshot the current linked UoWs' work items as (id, repo, number) triples.
+            let items: Vec<(String, String, u64)> = uows_res
+                .read()
+                .clone()
+                .flatten()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|u| u.work_item.as_ref())
+                .filter(|wi| !wi.id.is_empty() && !wi.repo.is_empty())
+                .map(|wi| (wi.id.clone(), wi.repo.clone(), wi.number))
+                .collect();
+            if !items.is_empty() {
+                if let Some(updates) = check_work_items_updated(&items).await {
+                    let mut last_seen = UOW_LAST_SEEN.write();
+                    let mut changed = UOW_CHANGED.write();
+                    for row in updates {
+                        fold_poll_update(&mut last_seen, &mut changed, &row.work_item_id, &row.updated_at);
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    });
+
     rsx! {
         div { class: "govdev",
             // ── LEFT NAV: Issue Management + one card per UoW ──────────────────
@@ -2070,6 +2410,15 @@ pub(super) fn GovernedDevPage() -> Element {
                                 Some(wi) => wi.repo.clone(),
                                 None => String::new(),
                             };
+                            // Assignee(s) for the card meta, and whether the board changed for
+                            // this UoW's work item since its last-seen baseline (change icon).
+                            let (assignees, changed) = match &u.work_item {
+                                Some(wi) => (
+                                    assignee_label(&wi.assignees),
+                                    UOW_CHANGED.read().contains(&wi.id),
+                                ),
+                                None => ("Unassigned".to_string(), false),
+                            };
                             let stage = if u.authoring { "Authoring" } else { u.stage.label() };
                             let confirming = confirm_delete() == Some(uid.clone());
                             let uid_sel = uid.clone();
@@ -2080,11 +2429,24 @@ pub(super) fn GovernedDevPage() -> Element {
                                     div {
                                         class: "govdev-uow-cardmain",
                                         onclick: move |_| sel.set(GovDevSel::Uow(uid_sel.clone())),
-                                        span { class: "govdev-uow-title", "{title}" }
+                                        div { class: "govdev-uow-titlerow",
+                                            span { class: "govdev-uow-title", "{title}" }
+                                            // Change icon: the board moved for this UoW since it was
+                                            // last opened / pulled. Clicking the card (above) opens the
+                                            // UoW, where "Pull latest" re-syncs and clears the flag.
+                                            if changed {
+                                                span {
+                                                    class: "govdev-uow-changed",
+                                                    title: "Updated on the board since you last pulled. Open and Pull latest to sync.",
+                                                    "\u{1f504}"
+                                                }
+                                            }
+                                        }
                                         div { class: "govdev-uow-meta",
                                             if !repo.is_empty() {
                                                 span { class: "govdev-uow-repo", "{repo}" }
                                             }
+                                            span { class: "govdev-uow-assignee", "{assignees}" }
                                             span { class: "govdev-uow-stage", "{stage}" }
                                         }
                                     }
@@ -3145,6 +3507,40 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
         item.set(wi.unwrap_or_default())
     }));
 
+    // Assign-to-me identity: resolve the authenticated GitHub login once (cached server
+    // side). `None` while loading OR when there is no token, so the button is hidden then.
+    let me_login_res = use_resource(fetch_me_login);
+    let me_login = me_login_res.read().clone().flatten();
+    // In-flight flag for the "Assign to me" call.
+    let mut assigning = use_signal(|| false);
+
+    // On open: quietly pull the latest work item so its assignees + updated_at populate
+    // (the /api/uows-resolved item is spine-derived and carries neither), and set the
+    // last-seen baseline + clear any stale CHANGED flag for this UoW. Runs once per mount
+    // (the component is keyed by UoW id, so switching UoWs remounts and re-baselines).
+    {
+        let wid = uow
+            .work_item
+            .as_ref()
+            .map(|w| w.id.clone())
+            .unwrap_or_default();
+        use_future(move || {
+            let wid = wid.clone();
+            async move {
+                if wid.is_empty() {
+                    return;
+                }
+                if let Some(updated) = refresh_work_item(&wid).await {
+                    let ua = updated.updated_at.clone();
+                    item.set(updated);
+                    let mut last_seen = UOW_LAST_SEEN.write();
+                    let mut changed = UOW_CHANGED.write();
+                    clear_changed_and_bump(&mut last_seen, &mut changed, &wid, &ua);
+                }
+            }
+        });
+    }
+
     // The reused per-UoW UoW panel / run live behind a refresh tick, same as the old page.
     let uow_refresh = use_signal(|| 0u32);
 
@@ -3313,6 +3709,9 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
 
     let it = item.read().clone();
     let (state_label, state_cls) = work_item_state_badge(&it.state);
+    // Assignee label + whether the board changed for this item since its last-seen baseline.
+    let assignees_label = assignee_label(&it.assignees);
+    let item_changed = !it.id.is_empty() && UOW_CHANGED.read().contains(&it.id);
 
     rsx! {
         div { class: "uow-dev",
@@ -3321,8 +3720,85 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                 span { class: "uow-dev-repo", "{it.repo}" }
                 span { class: "uow-dev-num", "#{it.number}" }
                 span { class: "wi-state {state_cls}", "{state_label}" }
+                // Assignee(s), showing "Unassigned" when empty.
+                span { class: "uow-dev-assignee", title: "Assigned to", "Assigned: {assignees_label}" }
+                // Change icon: the board moved since this UoW was last opened / pulled.
+                // Clicking it re-syncs (same as "Pull latest") and clears the flag.
+                if item_changed {
+                    button {
+                        class: "uow-dev-changed",
+                        title: "Updated on the board since you last pulled. Click to pull latest and clear.",
+                        disabled: refreshing(),
+                        onclick: move |_| {
+                            let wid = item.read().id.clone();
+                            let toasts = toasts;
+                            refreshing.set(true);
+                            spawn(async move {
+                                match refresh_work_item(&wid).await {
+                                    Some(updated) => {
+                                        let ua = updated.updated_at.clone();
+                                        item.set(updated);
+                                        let mut last_seen = UOW_LAST_SEEN.write();
+                                        let mut changed = UOW_CHANGED.write();
+                                        clear_changed_and_bump(&mut last_seen, &mut changed, &wid, &ua);
+                                    }
+                                    None => crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Warning,
+                                        "Could not pull the latest work item (check the GitHub token / that the issue still exists).".to_string(),
+                                    ),
+                                }
+                                refreshing.set(false);
+                            });
+                        },
+                        "\u{1f504} Updated"
+                    }
+                }
                 if !it.url.is_empty() {
                     a { class: "wi-detail-link", href: "{it.url}", target: "_blank", "Open issue ↗" }
+                }
+                // ── Assign to me ──────────────────────────────────────────────────
+                // Shown only when we resolved an authenticated login (a token is set). On
+                // success the displayed assignees update, AND the change-poll last-seen
+                // baseline is re-bumped to the assign response's `updated_at` -- so this
+                // assign does not itself flag the item CHANGED on the next poll (a later
+                // real update still will). On failure we toast.
+                if let Some(login) = me_login.clone() {
+                    {
+                        let already = it.assignees.iter().any(|a| a == &login);
+                        rsx! {
+                            button {
+                                class: "btn-edit-sm uow-dev-assign-me",
+                                disabled: assigning() || already,
+                                title: if already { "You are already assigned" } else { "Assign this issue to you" },
+                                onclick: move |_| {
+                                    let wid = item.read().id.clone();
+                                    let login = login.clone();
+                                    let toasts = toasts;
+                                    assigning.set(true);
+                                    spawn(async move {
+                                        match assign_work_item(&wid, &login).await {
+                                            Some(result) => {
+                                                item.with_mut(|w| w.assignees = result.assignees);
+                                                if !result.updated_at.is_empty() {
+                                                    let mut last_seen = UOW_LAST_SEEN.write();
+                                                    let mut changed = UOW_CHANGED.write();
+                                                    clear_changed_and_bump(&mut last_seen, &mut changed, &wid, &result.updated_at);
+                                                }
+                                            }
+                                            None => crate::toast::push_toast(
+                                                toasts,
+                                                crate::toast::ToastKind::Warning,
+                                                "Could not assign the issue (check the GitHub token / permissions).".to_string(),
+                                            ),
+                                        }
+                                        assigning.set(false);
+                                    });
+                                },
+                                if assigning() { "Assigning…" } else if already { "Assigned to you" } else { "Assign to me" }
+                            }
+                        }
+                    }
                 }
             }
             p { class: "uow-dev-title", "{it.title}" }
@@ -3345,7 +3821,15 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                         refreshing.set(true);
                         spawn(async move {
                             match refresh_work_item(&wid).await {
-                                Some(updated) => item.set(updated),
+                                Some(updated) => {
+                                    // Sync the item AND clear the CHANGED flag + bump the
+                                    // last-seen baseline to what we just pulled.
+                                    let ua = updated.updated_at.clone();
+                                    item.set(updated);
+                                    let mut last_seen = UOW_LAST_SEEN.write();
+                                    let mut changed = UOW_CHANGED.write();
+                                    clear_changed_and_bump(&mut last_seen, &mut changed, &wid, &ua);
+                                }
                                 None => crate::toast::push_toast(
                                     toasts,
                                     crate::toast::ToastKind::Warning,
@@ -7759,6 +8243,124 @@ mod bff_tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].id, "github:o/r#1");
         assert_eq!(items[0].title, "Bug");
+    }
+
+    // ── assign_work_item: POST /api/workitems/assign builds the right call ──────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn assign_work_item_posts_login_and_returns_updated_assignees() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // The request body MUST carry the work_item_id + the login as `assignee`.
+        Mock::given(method("POST"))
+            .and(path("/api/workitems/assign"))
+            .and(body_json(serde_json::json!({
+                "work_item_id": "github:o/r#20",
+                "assignee": "octocat"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "assignees": ["octocat"],
+                "updated_at": "2026-07-06T08:00:00Z"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::assign_work_item("github:o/r#20", "octocat").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let result = out.expect("assign result");
+        assert_eq!(result.assignees, vec!["octocat".to_string()]);
+        assert_eq!(result.updated_at, "2026-07-06T08:00:00Z");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn assign_work_item_returns_none_when_not_ok() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/workitems/assign"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": false
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::assign_work_item("github:o/r#20", "octocat").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(out.is_none(), "ok:false must map to None so the caller toasts");
+    }
+
+    // ── fetch_me_login: GET /api/me → login ─────────────────────────────────────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_me_login_reads_login_and_none_when_null() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Present login.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "login": "octocat" })))
+            .mount(&server)
+            .await;
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::fetch_me_login().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+        assert_eq!(out, Some("octocat".to_string()));
+
+        // Null login → None (button hidden).
+        let server2 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "login": null })))
+            .mount(&server2)
+            .await;
+        std::env::set_var("CAMERATA_BFF_URL", server2.uri());
+        let out2 = super::fetch_me_login().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+        assert!(out2.is_none());
+    }
+
+    // ── check_work_items_updated: POST /api/workitems/updated-check → updates ────
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn check_work_items_updated_parses_update_rows() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/workitems/updated-check"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "updates": [
+                    { "work_item_id": "github:o/r#20", "updated_at": "2026-07-06T08:00:00Z", "state": "open" }
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let items = vec![("github:o/r#20".to_string(), "o/r".to_string(), 20u64)];
+        let out = super::check_work_items_updated(&items).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let rows = out.expect("updates parse");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].work_item_id, "github:o/r#20");
+        assert_eq!(rows[0].updated_at, "2026-07-06T08:00:00Z");
+        assert_eq!(rows[0].state, "open");
     }
 
     // ── fetch_uows: GET /api/uows → uows ────────────────────────────────────────

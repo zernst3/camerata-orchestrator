@@ -555,16 +555,41 @@ default from the project tier-map and override only that one run.
 ### Issue Management — pull work items
 
 At the top of the view, an **Issue Management** panel shows the GitHub connection status (`● GitHub
-connected`, or a no-token notice). Click **Pull work items** to do a **manual** pull (there is **no
-auto-poll**) that pulls **all open issues across every repo in the active project** into a
-**WorkItem table with a Repo column**. Click any row to read the full work item (title, body, state,
-labels, and an **Open issue ↗** link to the source).
+connected`, or a no-token notice). Click **Pull work items** to do a **manual** pull (the work-item
+table is **never auto-refreshed**) that pulls **all open issues across every repo in the active
+project** into a **WorkItem table with a Repo column**. Click any row to read the full work item
+(title, body, state, labels, and an **Open issue ↗** link to the source). (Separately, once you have
+Units of Work, a quiet background check watches the board for changes to those specific issues (see
+**Assignees, Assign to me, and update notifications** below).
 
 ### Create a Unit of Work from a work item
 
 From a work item's detail, click **Create Unit of Work from this issue**. This is **deduped by
 external reference**: if a UoW already exists for that item the button reads **Open Unit of Work**
 and selects the existing one instead of making a duplicate.
+
+### Assignees, Assign to me, and update notifications
+
+Once a work item is a Unit of Work, the UoW surface keeps it in step with the board:
+
+- **Assignee display.** The UoW detail header shows **Assigned: `<login(s)>`** (or **Unassigned**),
+  and each left-nav UoW card shows a compact assignee chip. Assignees come from the source issue and
+  are populated when the UoW is opened or after a **Pull latest** (the underlying issue's assignee
+  list is not carried by the lighter bulk pull).
+- **Assign to me.** When a GitHub token is configured, the header shows an **Assign to me** button. It
+  resolves your GitHub login (once, via `GET /api/me`, cached server side), adds you as an assignee on
+  the source issue, and updates the displayed assignee on success. The button hides when there is no
+  token (no identity to assign) and reads **Assigned to you** once you are on the issue. A failure
+  toasts rather than silently doing nothing.
+- **Update notification + Pull latest.** A **quiet background poll (~60s)** checks whether any of this
+  project's UoW issues changed on the board (it is a passive check: it never runs an agent and never
+  spams toasts; a failed poll is silent and keeps the prior state). When an issue's last-updated time
+  is **newer than what you last saw**, that UoW is flagged **changed**: a 🔄 change icon appears **both**
+  on the UoW's left-nav card and in the UoW detail header. Click **Pull latest** (or the header's
+  **🔄 Updated** affordance) to re-fetch the issue, refresh the displayed metadata, and clear the flag;
+  the "last seen" baseline is reset to what you just pulled, so the next change is measured from there.
+  The baseline is captured when you open a UoW or pull it, so opening a UoW never leaves it falsely
+  flagged.
 
 ### Author a story from a blank UoW with AI
 

@@ -3865,6 +3865,15 @@ html, body {
   font-size: 10px; font-weight: 700; letter-spacing: .03em; color: var(--accent-ink);
   background: var(--accent-wash); border: 1px solid #e5c9bd; padding: 1px 7px; border-radius: 5px;
 }
+/* Assignee chip on the nav card. */
+.govdev-uow-assignee {
+  font-size: 10px; color: var(--ink-soft); background: var(--paper);
+  border: 1px solid var(--line); padding: 1px 6px; border-radius: 5px;
+  max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* Title row + the "updated on the board" change icon on the nav card. */
+.govdev-uow-titlerow { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.govdev-uow-changed { font-size: 12px; line-height: 1; flex: none; }
 /* Transparent: this sits INSIDE .cockpit-scroll, which already carries the single
    --page-tint. Tinting here too would double-stack and make gov-dev read denser than
    every other page. Letting the .cockpit-scroll tint show through keeps it identical. */
@@ -3941,6 +3950,15 @@ html, body {
 .uow-dev-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
 .uow-dev-repo { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-soft); }
 .uow-dev-num { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-faint); }
+/* Assignee label in the UoW detail header. */
+.uow-dev-assignee { font-size: 11.5px; color: var(--ink-soft); }
+/* "Updated on the board" change affordance in the UoW detail header. */
+.uow-dev-changed {
+  font-size: 11px; font-weight: 700; color: #b45309; background: #fef3c7;
+  border: 1px solid #fcd34d; border-radius: 6px; padding: 2px 8px; cursor: pointer;
+}
+.uow-dev-changed:disabled { opacity: .6; cursor: default; }
+.uow-dev-assign-me { flex: none; }
 .uow-dev-title { font-size: 17px; font-weight: 700; color: var(--ink); margin: 0 0 14px; }
 .uow-dev-pull-row { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
 .uow-comment { margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; background: rgba(26,24,22,0.55); padding: 14px 16px; }

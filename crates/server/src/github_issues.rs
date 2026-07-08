@@ -309,6 +309,16 @@ struct RawIssueWithState {
     state: String,
     #[serde(default)]
     labels: Vec<RawLabel>,
+    /// The users assigned to the issue. GitHub shape: `[{ "login": "octocat", ... }]`.
+    /// `#[serde(default)]` so an issue with no assignees (the field is `[]` or absent)
+    /// round-trips without error.
+    #[serde(default)]
+    assignees: Vec<RawUser>,
+    /// The issue's last-updated ISO-8601 timestamp (e.g. `2026-07-05T12:00:00Z`). Used by
+    /// the update-polling path as the change signal. `Option` so an absent field is empty,
+    /// never a parse error.
+    #[serde(default)]
+    updated_at: Option<String>,
     #[serde(default)]
     pull_request: Option<serde_json::Value>,
 }
@@ -335,10 +345,17 @@ pub struct IssueDetail {
     pub state: String,
     /// The label names on the issue.
     pub labels: Vec<String>,
+    /// The logins of the users assigned to the issue. Empty when unassigned.
+    pub assignees: Vec<String>,
+    /// The issue's last-updated ISO-8601 timestamp (e.g. `2026-07-05T12:00:00Z`), as
+    /// GitHub returns it. Empty when absent. The update-poll path compares this against
+    /// a per-UoW last-seen value to detect board changes.
+    pub updated_at: String,
 }
 
-/// Parse a single GitHub issue JSON object into an [`IssueDetail`] (carrying state +
-/// labels). Errors if the row is actually a pull request. Pure (no I/O).
+/// Parse a single GitHub issue JSON object into an [`IssueDetail`] (carrying state,
+/// labels, assignees, and the updated-at timestamp). Errors if the row is actually a
+/// pull request. Pure (no I/O).
 pub fn parse_issue_detail(json: &str) -> anyhow::Result<IssueDetail> {
     let raw: RawIssueWithState =
         serde_json::from_str(json).map_err(|e| anyhow::anyhow!("parse_issue_detail: {e}"))?;
@@ -352,6 +369,8 @@ pub fn parse_issue_detail(json: &str) -> anyhow::Result<IssueDetail> {
         url: raw.html_url,
         state: raw.state,
         labels: raw.labels.into_iter().map(|l| l.name).collect(),
+        assignees: raw.assignees.into_iter().filter_map(|u| u.login).collect(),
+        updated_at: raw.updated_at.unwrap_or_default(),
     })
 }
 
@@ -502,6 +521,188 @@ pub async fn get_assignees(repo: &str, token: &str) -> anyhow::Result<Vec<String
         anyhow::bail!("GitHub get assignees: HTTP {}", resp.status);
     }
     parse_assignees(&resp.body)
+}
+
+/// Parse the GitHub `GET /user` response into the authenticated user's login. Pure (no
+/// I/O). Errors when the JSON is malformed or carries no `login`.
+pub fn parse_authenticated_login(json: &str) -> anyhow::Result<String> {
+    let raw: RawUser = serde_json::from_str(json)
+        .map_err(|e| anyhow::anyhow!("parse_authenticated_login: {e}"))?;
+    raw.login
+        .filter(|l| !l.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("GitHub /user response carried no login"))
+}
+
+/// Fetch the AUTHENTICATED user's login for the configured token
+/// (`GET https://api.github.com/user`). Returns the login on success. This is the
+/// "who am I" call behind the UI's "Assign to me" affordance; the caller caches it in
+/// `AppState` so it is fetched once, not per request.
+pub async fn get_authenticated_login(token: &str) -> anyhow::Result<String> {
+    let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
+    let resp = transport.get("https://api.github.com/user").await?;
+    if !(200..300).contains(&resp.status) {
+        anyhow::bail!("GitHub get authenticated user: HTTP {}", resp.status);
+    }
+    parse_authenticated_login(&resp.body)
+}
+
+/// Build the `POST .../assignees` request body for adding one assignee: `{"assignees":[login]}`.
+/// Pure so the request shape is unit-testable without a network call.
+pub fn assign_payload(login: &str) -> serde_json::Value {
+    serde_json::json!({ "assignees": [login] })
+}
+
+/// Parse the assignee-mutation response (GitHub returns the full issue object) into its
+/// current assignee logins. Pure (no I/O).
+pub fn parse_issue_assignees(json: &str) -> anyhow::Result<Vec<String>> {
+    #[derive(Deserialize)]
+    struct IssueAssignees {
+        #[serde(default)]
+        assignees: Vec<RawUser>,
+    }
+    let raw: IssueAssignees = serde_json::from_str(json)
+        .map_err(|e| anyhow::anyhow!("parse_issue_assignees: {e}"))?;
+    Ok(raw.assignees.into_iter().filter_map(|u| u.login).collect())
+}
+
+/// The result of adding an assignee to an issue: the issue's UPDATED assignee logins,
+/// and its `updated_at` timestamp read from the SAME response. The `/api/workitems/assign`
+/// route forwards `updated_at` to the UI, which re-baselines its change-poll last-seen
+/// value to it on a successful assign -- so assigning (including "Assign to me") does not
+/// itself cause the next background poll to flag the item CHANGED, unless the story is
+/// updated again afterward with a strictly newer timestamp. `updated_at` is empty when the
+/// field is absent from GitHub's response; the UI treats that as "no re-baseline", which is
+/// safe (the poll is just compared against whatever baseline already existed).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AssignOutcome {
+    /// The issue's current assignee logins after the mutation.
+    pub assignees: Vec<String>,
+    /// The issue's `updated_at` ISO-8601 timestamp from the assign response. Empty when
+    /// GitHub's response lacked the field.
+    pub updated_at: String,
+}
+
+/// Parse the assignee-mutation response (GitHub returns the full issue object) into its
+/// current assignee logins AND its `updated_at` timestamp. Pure (no I/O).
+pub fn parse_issue_assign_outcome(json: &str) -> anyhow::Result<AssignOutcome> {
+    #[derive(Deserialize)]
+    struct RawAssignOutcome {
+        #[serde(default)]
+        assignees: Vec<RawUser>,
+        #[serde(default)]
+        updated_at: Option<String>,
+    }
+    let raw: RawAssignOutcome = serde_json::from_str(json)
+        .map_err(|e| anyhow::anyhow!("parse_issue_assign_outcome: {e}"))?;
+    Ok(AssignOutcome {
+        assignees: raw.assignees.into_iter().filter_map(|u| u.login).collect(),
+        updated_at: raw.updated_at.unwrap_or_default(),
+    })
+}
+
+/// Add `assignee` (a login) to an issue via
+/// `POST /repos/:owner/:repo/issues/:number/assignees` with body `{"assignees":[login]}`,
+/// returning the issue's UPDATED assignee logins and `updated_at` (see [`AssignOutcome`]).
+/// `repo` must be `owner/name`. GitHub treats assignment as additive (idempotent for an
+/// already-assigned user).
+pub async fn add_assignee_to_issue(
+    repo: &str,
+    number: u64,
+    assignee: &str,
+    token: &str,
+) -> anyhow::Result<AssignOutcome> {
+    let coord = RepoCoord::parse(repo)
+        .ok_or_else(|| anyhow::anyhow!("repo must be `owner/name`, got `{repo}`"))?;
+    let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
+    let url = format!(
+        "https://api.github.com/repos/{}/{}/issues/{number}/assignees",
+        coord.owner, coord.repo
+    );
+    let payload = serde_json::to_string(&assign_payload(assignee))
+        .map_err(|e| anyhow::anyhow!("encode assign payload: {e}"))?;
+    let resp = transport.post(&url, &payload).await?;
+    if !(200..300).contains(&resp.status) {
+        anyhow::bail!(
+            "GitHub add assignee `{assignee}` to #{number}: HTTP {}",
+            resp.status
+        );
+    }
+    parse_issue_assign_outcome(&resp.body)
+}
+
+/// One lightweight issue-update row for the update-polling path: the issue number, its
+/// last-updated ISO timestamp, and its open/closed state. Deliberately minimal so a
+/// single list call per repo can answer "has anything changed?" cheaply.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct IssueUpdateRow {
+    /// The issue number (the per-repo `#N`).
+    pub number: u64,
+    /// The issue's last-updated ISO-8601 timestamp as GitHub returns it.
+    pub updated_at: String,
+    /// `"open"` or `"closed"`.
+    pub state: String,
+}
+
+/// The minimal issue shape read from the list endpoint for update polling. Carries the
+/// number, updated_at, state, and the PR marker (so PRs are filtered out).
+#[derive(Debug, Deserialize)]
+struct RawIssueUpdate {
+    number: u64,
+    #[serde(default)]
+    updated_at: Option<String>,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    pull_request: Option<serde_json::Value>,
+}
+
+/// Parse the GitHub issues-list JSON array into [`IssueUpdateRow`]s, dropping pull
+/// requests. Pure (no I/O), so it is unit-testable against a fixture without a network
+/// call or a token.
+pub fn parse_issue_update_rows(json: &str) -> anyhow::Result<Vec<IssueUpdateRow>> {
+    let raw: Vec<RawIssueUpdate> =
+        serde_json::from_str(json).map_err(|e| anyhow::anyhow!("parse_issue_update_rows: {e}"))?;
+    Ok(raw
+        .into_iter()
+        .filter(|i| i.pull_request.is_none())
+        .map(|i| IssueUpdateRow {
+            number: i.number,
+            updated_at: i.updated_at.unwrap_or_default(),
+            state: i.state.unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// List issues for `owner/repo` for UPDATE POLLING via ONE cheap REST list call
+/// (`state=all`, `sort=updated`, `direction=desc`, `per_page=100`, plus `since` when
+/// supplied). Returns lightweight [`IssueUpdateRow`]s (number + updated_at + state),
+/// PRs filtered out. This batches what would otherwise be N single-issue GETs into one
+/// request per repo, minding GitHub's rate limits. `repo` must be `owner/name`.
+///
+/// The 100-row cap means a repo with more than 100 issues returns only its most-recently
+/// updated 100; the polling caller treats an item missing from the result as "unchanged"
+/// (it retains its prior last-seen), which is the resilient default for a background check.
+pub async fn list_issue_update_rows(
+    repo: &str,
+    since: Option<&str>,
+    token: &str,
+) -> anyhow::Result<Vec<IssueUpdateRow>> {
+    let coord = RepoCoord::parse(repo)
+        .ok_or_else(|| anyhow::anyhow!("repo must be `owner/name`, got `{repo}`"))?;
+    let transport = ReqwestTransport::new(format!("Bearer {token}"))?;
+    let mut url = format!(
+        "https://api.github.com/repos/{}/{}/issues?state=all&sort=updated&direction=desc&per_page=100",
+        coord.owner, coord.repo
+    );
+    if let Some(since) = since.filter(|s| !s.is_empty()) {
+        url.push_str("&since=");
+        url.push_str(since);
+    }
+    let resp = transport.get(&url).await?;
+    if !(200..300).contains(&resp.status) {
+        anyhow::bail!("GitHub list issue updates: HTTP {}", resp.status);
+    }
+    parse_issue_update_rows(&resp.body)
 }
 
 /// Normalize a user-supplied parent issue identifier to a bare number string.
@@ -828,7 +1029,9 @@ mod tests {
             "body": "We need CSV exports.",
             "html_url": "https://github.com/o/r/issues/42",
             "state": "open",
-            "labels": [{"name":"bug"},{"name":"camerata:status:intake"}]
+            "labels": [{"name":"bug"},{"name":"camerata:status:intake"}],
+            "assignees": [{"login":"octocat"},{"login":"hubot"}],
+            "updated_at": "2026-07-05T12:00:00Z"
         }"#;
         let d = parse_issue_detail(json).expect("parse");
         assert_eq!(d.number, 42);
@@ -837,6 +1040,17 @@ mod tests {
         assert_eq!(d.url, "https://github.com/o/r/issues/42");
         assert_eq!(d.state, "open");
         assert_eq!(d.labels, vec!["bug", "camerata:status:intake"]);
+        assert_eq!(d.assignees, vec!["octocat", "hubot"]);
+        assert_eq!(d.updated_at, "2026-07-05T12:00:00Z");
+
+        // Missing assignees / updated_at deserialize to empty, never a panic.
+        let bare = r#"{
+            "number": 43, "title": "No meta", "html_url": "https://github.com/o/r/issues/43",
+            "state": "open"
+        }"#;
+        let d2 = parse_issue_detail(bare).expect("parse");
+        assert!(d2.assignees.is_empty(), "absent assignees -> empty");
+        assert_eq!(d2.updated_at, "", "absent updated_at -> empty");
 
         // A PR row is rejected.
         let pr = r#"{
@@ -901,6 +1115,112 @@ mod tests {
     #[test]
     fn parse_assignees_rejects_non_array_json() {
         assert!(parse_assignees("{\"message\":\"Not Found\"}").is_err());
+    }
+
+    #[test]
+    fn parse_authenticated_login_reads_login() {
+        let json = r#"{ "login": "octocat", "id": 1, "type": "User" }"#;
+        assert_eq!(parse_authenticated_login(json).expect("parse"), "octocat");
+    }
+
+    #[test]
+    fn parse_authenticated_login_errors_without_login() {
+        // No login field -> error (the caller degrades to "no assignable identity").
+        assert!(parse_authenticated_login(r#"{ "id": 1 }"#).is_err());
+        // Empty login is treated as absent.
+        assert!(parse_authenticated_login(r#"{ "login": "" }"#).is_err());
+        // Malformed JSON -> error, never a panic.
+        assert!(parse_authenticated_login("not json").is_err());
+    }
+
+    #[test]
+    fn assign_payload_wraps_login_in_assignees_array() {
+        // The GitHub add-assignees endpoint wants `{"assignees":[login]}`.
+        assert_eq!(
+            assign_payload("octocat"),
+            serde_json::json!({ "assignees": ["octocat"] })
+        );
+    }
+
+    #[test]
+    fn parse_issue_assignees_reads_updated_assignees_from_issue() {
+        // The assign endpoint returns the full issue object; we read its assignees back.
+        let json = r#"{
+            "number": 42,
+            "title": "x",
+            "assignees": [{"login":"octocat"},{"login":"hubot"},{"id":3}]
+        }"#;
+        let users = parse_issue_assignees(json).expect("parse");
+        // The login-less row is dropped.
+        assert_eq!(users, vec!["octocat", "hubot"]);
+    }
+
+    #[test]
+    fn parse_issue_assignees_empty_when_none() {
+        let json = r#"{ "number": 1, "title": "x", "assignees": [] }"#;
+        assert!(parse_issue_assignees(json).expect("parse").is_empty());
+    }
+
+    #[test]
+    fn parse_issue_assign_outcome_reads_assignees_and_updated_at() {
+        // A representative GitHub assign response: the full issue object, including
+        // `updated_at`. The assign route forwards this so the UI can re-baseline its
+        // change-poll last-seen value at assign time.
+        let json = r#"{
+            "number": 42,
+            "title": "x",
+            "assignees": [{"login":"octocat"},{"login":"hubot"},{"id":3}],
+            "updated_at": "2026-07-06T08:00:00Z"
+        }"#;
+        let outcome = parse_issue_assign_outcome(json).expect("parse");
+        assert_eq!(outcome.assignees, vec!["octocat", "hubot"]);
+        assert_eq!(outcome.updated_at, "2026-07-06T08:00:00Z");
+    }
+
+    #[test]
+    fn parse_issue_assign_outcome_updated_at_empty_when_absent() {
+        // If GitHub's response somehow lacks `updated_at`, the outcome carries an empty
+        // string rather than erroring -- the caller treats that as "no re-baseline",
+        // which is safe.
+        let json = r#"{ "number": 1, "title": "x", "assignees": [] }"#;
+        let outcome = parse_issue_assign_outcome(json).expect("parse");
+        assert!(outcome.assignees.is_empty());
+        assert_eq!(outcome.updated_at, "");
+    }
+
+    #[test]
+    fn parse_issue_update_rows_maps_and_skips_prs() {
+        let json = r#"[
+            {
+                "number": 20,
+                "updated_at": "2026-07-05T12:00:00Z",
+                "state": "open",
+                "html_url": "https://github.com/o/r/issues/20"
+            },
+            {
+                "number": 21,
+                "updated_at": "2026-07-05T13:00:00Z",
+                "state": "closed"
+            },
+            {
+                "number": 22,
+                "updated_at": "2026-07-05T14:00:00Z",
+                "state": "open",
+                "pull_request": { "url": "https://api.github.com/.../pulls/22" }
+            }
+        ]"#;
+        let rows = parse_issue_update_rows(json).expect("parse");
+        assert_eq!(rows.len(), 2, "the PR row must be filtered out");
+        assert_eq!(rows[0].number, 20);
+        assert_eq!(rows[0].updated_at, "2026-07-05T12:00:00Z");
+        assert_eq!(rows[0].state, "open");
+        assert_eq!(rows[1].number, 21);
+        assert_eq!(rows[1].state, "closed");
+    }
+
+    #[test]
+    fn parse_issue_update_rows_rejects_non_array_json() {
+        assert!(parse_issue_update_rows("{\"message\":\"Not Found\"}").is_err());
     }
 
     #[test]

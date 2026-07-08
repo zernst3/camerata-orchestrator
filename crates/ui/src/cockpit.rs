@@ -3505,6 +3505,8 @@ mod tests {
             url: String::new(),
             labels: vec![],
             parent_number: None,
+            assignees: vec![],
+            updated_at: String::new(),
         }
     }
 
@@ -3531,6 +3533,8 @@ mod tests {
             url: String::new(),
             labels: Vec::new(),
             parent_number,
+            assignees: Vec::new(),
+            updated_at: String::new(),
         }
     }
 

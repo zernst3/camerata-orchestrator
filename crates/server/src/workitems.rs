@@ -71,6 +71,16 @@ pub struct WorkItem {
     /// single-issue refresh path (which does not carry the parent field).
     #[serde(default)]
     pub parent_number: Option<u64>,
+    /// The logins of the users assigned to the item. Empty when unassigned. Populated on
+    /// the single-issue refresh path (`from_github_issue`); the bulk pull path and the
+    /// canonical-story bridge leave it empty (the fields are not on those sources).
+    #[serde(default)]
+    pub assignees: Vec<String>,
+    /// The item's last-updated ISO-8601 timestamp as the provider returns it. Empty when
+    /// absent. The UI's update-poll captures this as the per-UoW last-seen baseline and
+    /// flags the item CHANGED when a later poll reports a newer value.
+    #[serde(default)]
+    pub updated_at: String,
 }
 
 impl WorkItem {
@@ -93,6 +103,8 @@ impl WorkItem {
             url: issue.url.clone(),
             labels: issue.labels.clone(),
             parent_number: None,
+            assignees: issue.assignees.clone(),
+            updated_at: issue.updated_at.clone(),
         }
     }
 
@@ -129,6 +141,10 @@ impl WorkItem {
             url: ext.url.clone(),
             labels: Vec::new(),
             parent_number: None,
+            // The canonical story spine does not carry assignees or the updated-at
+            // timestamp; they populate on the single-issue refresh path (Pull latest).
+            assignees: Vec::new(),
+            updated_at: String::new(),
         })
     }
 }
@@ -170,6 +186,8 @@ mod tests {
             url: format!("https://github.com/o/r/issues/{number}"),
             state: state.to_string(),
             labels: vec!["bug".to_string(), "camerata:status:intake".to_string()],
+            assignees: vec!["octocat".to_string()],
+            updated_at: "2026-07-05T12:00:00Z".to_string(),
         }
     }
 
@@ -193,6 +211,11 @@ mod tests {
         assert_eq!(wi.state, "open");
         assert_eq!(wi.url, "https://github.com/o/r/issues/20");
         assert_eq!(wi.labels, vec!["bug", "camerata:status:intake"]);
+        assert_eq!(wi.assignees, vec!["octocat"], "assignees thread onto the item");
+        assert_eq!(
+            wi.updated_at, "2026-07-05T12:00:00Z",
+            "updated_at threads onto the item"
+        );
     }
 
     #[test]
