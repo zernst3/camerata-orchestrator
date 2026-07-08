@@ -144,3 +144,18 @@ PR #115 (overnight design-page work, still open) touches these UI files, so Phas
   ui-core (re-export back to scan.rs). That makes it a two-file re-export move (rules.rs + scan.rs), the
   biggest so far. Mechanical + compiler-verified, but wants a fresh budget, not a long-session tail.
   After it: the `use_*` hook state-lift (the genuinely structural part).
+
+- **Phase 2 beachhead landed (2026-07-08, commit `206a067`, branch `feat/adapter-ladder-headless-core`):
+  the governed-dev state lift.** This is the first Phase 2 surface (a `use_*` hook state-lift, not just
+  a pure-function move): the three governed-dev `GlobalSignal`s (`UOW_LAST_SEEN`, `UOW_CHANGED`,
+  `PULLED_WORK_ITEMS`) collapsed into one `GovDevState` TEA model in `camerata_ui_core::govdev`, driven
+  by a `GovDevMsg` enum (`PollObserved`/`PulledLatest`/`WorkItemsPulled`) through a single pure `apply()`
+  reducer, with selectors (`is_changed`/`changed_count`/`pulled_for`/`assignee_label`) replacing direct
+  signal reads. The poll/change-detection logic that used to live in the view is now a headless,
+  unit-tested transition; the Dioxus adapter holds one `GlobalSignal<GovDevState>` and only translates
+  events into messages. `WorkItem` moved to `camerata-api-types` so the core can hold it without a
+  framework dependency. `ui-core` stays dioxus-free throughout. Driven out of the 2026-07-04 Fable 5
+  audit's GAP-3 escalation, not this plan's own sequencing, so it landed out of order relative to the
+  rules view-model cluster above; that cluster and the rest of the surface-by-surface state lift remain
+  open. See `docs/decisions/2026-07-08_adapter-ladder-and-headless-core.md` for the full batch this rode
+  in with (GAP-1/GAP-3/GAP-7).
