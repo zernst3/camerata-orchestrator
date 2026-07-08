@@ -948,7 +948,6 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "camerata-api-types",
- "camerata-server",
  "camerata-ui-core",
  "camerata-worktracker",
  "chorale-core",

@@ -54,7 +54,7 @@ impl DevStatus {
 /// A single entry in the AI development history for a UoW. Appended by the
 /// governed run (Pillar 2) when it takes an action on this story's behalf; also
 /// appendable via the API for manual notes.
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub struct HistoryEntry {
     /// RFC 3339 timestamp of the action.
     pub ts: String,

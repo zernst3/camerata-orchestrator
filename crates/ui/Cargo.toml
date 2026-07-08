@@ -23,7 +23,8 @@ path = "src/main.rs"
 [dependencies]
 dioxus = { version = "0.7", features = ["desktop"] }
 # `time` drives the calm Build-narrative dwell; `rt-multi-thread` lets the desktop
-# shell stand up a background Tokio runtime that hosts the embedded BFF (see main.rs).
+# shell stand up a background Tokio runtime for the BFF-subprocess launch sequence
+# (health polling — see src/server_process.rs).
 tokio = { version = "1", features = ["time", "rt-multi-thread"] }
 # The cockpit is an HTTP client of the BFF (camerata-server): it fetches the story
 # spine and the enforced rules over localhost rather than calling crates in-process,
@@ -45,8 +46,6 @@ camerata-ui-core = { path = "../ui-core" }
 # lives there (Phase C moved it out so camerata-ui-core's GovDevState can hold it);
 # `cockpit::uow` re-exports it so existing call sites resolve unchanged.
 camerata-api-types = { path = "../api-types" }
-# The BFF the desktop shell embeds and the cockpit talks to over HTTP.
-camerata-server = { path = "../server" }
 # The cockpit deserializes the canonical Story spine (status etc.) from the BFF.
 camerata-worktracker = { path = "../worktracker" }
 anyhow = { workspace = true }

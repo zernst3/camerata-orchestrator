@@ -692,45 +692,11 @@ impl DevStatus {
     }
 }
 
-/// The governed-development lifecycle stage of a Unit of Work (Pillar 2). Mirrors
-/// `camerata_server::lifecycle::UowStage`; orthogonal to (and richer than) `DevStatus`.
-#[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, Default, Debug)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum UowStage {
-    #[default]
-    Intake,
-    Investigating,
-    DecisionsApproved,
-    Development,
-    AwaitingQa,
-    SignedOff,
-}
-
-impl UowStage {
-    /// A short display label for the lifecycle strip.
-    fn label(self) -> &'static str {
-        match self {
-            Self::Intake => "Intake",
-            Self::Investigating => "Investigating",
-            Self::DecisionsApproved => "Decisions approved",
-            Self::Development => "Development",
-            Self::AwaitingQa => "Awaiting QA",
-            Self::SignedOff => "Signed off",
-        }
-    }
-
-    /// Monotonic ordinal (0 = Intake .. 5 = SignedOff), for "has reached" comparisons.
-    fn ordinal(self) -> usize {
-        match self {
-            Self::Intake => 0,
-            Self::Investigating => 1,
-            Self::DecisionsApproved => 2,
-            Self::Development => 3,
-            Self::AwaitingQa => 4,
-            Self::SignedOff => 5,
-        }
-    }
-}
+/// The governed-development lifecycle stage of a Unit of Work (Pillar 2) — the canonical
+/// enum from the shared `camerata-api-types` leaf (Phase G cleanup: this was a hand-kept
+/// mirror; the api-types version is the exact type the server serializes, with identical
+/// serde names, `label()`, and `ordinal()`). Orthogonal to (and richer than) `DevStatus`.
+pub(super) use camerata_api_types::lifecycle::UowStage;
 
 // ── 3-phase cockpit types ─────────────────────────────────────────────────────
 
@@ -842,16 +808,12 @@ mod stage_mapping_tests {
 
 // ── End 3-phase cockpit types ─────────────────────────────────────────────────
 
-/// A single entry in the AI development history.
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-pub(super) struct HistoryEntryView {
-    pub ts: String,
-    pub kind: String,
-    pub text: String,
-}
+/// A single entry in the AI development history — the canonical `camerata-api-types`
+/// shape (Phase G cleanup; the `View` name is kept so call sites read unchanged).
+pub(super) use camerata_api_types::uow::HistoryEntry as HistoryEntryView;
 
 /// The frozen gate provenance stamped onto a UoW after a governed run finishes.
-/// Mirrors `camerata_server::uow::GateProvenance`.
+/// Mirrors `camerata_api_types::uow::GateProvenance` (the `recorded` field is tolerated absent here).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct GateProvenanceView {
     pub run_id: String,
@@ -865,17 +827,11 @@ pub(super) struct GateProvenanceView {
     pub recorded: String,
 }
 
-/// An architect's sign-off on a story's governed run (issue #21).
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-pub(super) struct SignOffView {
-    pub ts: String,
-    pub by: String,
-    pub run_id: String,
-    #[serde(default)]
-    pub note: Option<String>,
-}
+/// An architect's sign-off on a story's governed run (issue #21) — the canonical
+/// `camerata-api-types` shape (Phase G cleanup; the `View` name is kept for call sites).
+pub(super) use camerata_api_types::uow::SignOff as SignOffView;
 
-/// One turn in a per-phase agent chat transcript (mirrors `camerata_server::uow::ChatTurn`).
+/// One turn in a per-phase agent chat transcript (mirrors `camerata_api_types::uow::ChatTurn`, fields tolerated absent).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 pub(super) struct ChatTurnView {
     #[serde(default)]
@@ -884,7 +840,7 @@ pub(super) struct ChatTurnView {
     pub text: String,
 }
 
-/// One in-scope repo + its branch mode (mirrors `camerata_server::uow::RepoScope`). The
+/// One in-scope repo + its branch mode (mirrors `camerata_api_types::uow::RepoScope`). The
 /// `branch` field is the tagged-enum `BranchMode` JSON, kept raw so the UI can read either
 /// variant without a sum-type round-trip.
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -895,7 +851,7 @@ pub(super) struct RepoScopeView {
     pub branch: serde_json::Value,
 }
 
-/// The persisted Intake state (mirrors `camerata_server::uow::IntakeState`).
+/// The persisted Intake state (mirrors `camerata_api_types::uow::IntakeState`).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 pub(super) struct IntakeStateView {
     #[serde(default)]
@@ -904,7 +860,7 @@ pub(super) struct IntakeStateView {
     pub repos: Vec<RepoScopeView>,
 }
 
-/// The persisted Investigation state (mirrors `camerata_server::uow::InvestigationState`).
+/// The persisted Investigation state (mirrors `camerata_api_types::uow::InvestigationState`).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 pub(super) struct InvestigationStateView {
     #[serde(default)]
@@ -915,7 +871,7 @@ pub(super) struct InvestigationStateView {
     pub crosses_boundary: bool,
 }
 
-/// The persisted Development state (mirrors `camerata_server::uow::DevelopmentState`).
+/// The persisted Development state (mirrors `camerata_api_types::uow::DevelopmentState`).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 pub(super) struct DevelopmentStateView {
     #[serde(default)]
