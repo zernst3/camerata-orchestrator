@@ -17,6 +17,8 @@
 //! | `list_uows` | READ | [`Client::list_uows`] | `GET /api/uows` |
 //! | `assign_work_item` | GOVERNED WRITE | [`Client::assign_work_item`] | `POST /api/workitems/assign` |
 //! | `start_run` | GOVERNED WRITE | [`Client::start_run`] | `POST /api/stories/:id/run` |
+//! | `run_events` | READ | [`Client::run_events`] | `GET /api/runs/:id/events` |
+//! | `recent_events` | READ | [`Client::recent_events`] | `GET /api/governance/events` |
 //!
 //! "Governed write" here means the WRITE SEMANTICS live behind the BFF (tracker
 //! mutation / governed-run spawn with its gate stack) — this adapter adds no policy of
@@ -95,6 +97,22 @@ pub struct StartRunArgs {
     /// (gated) behavior.
     #[serde(default)]
     pub skip_layer2: Option<bool>,
+}
+
+/// Arguments for the `run_events` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RunEventsArgs {
+    /// The run id (e.g. as returned by `start_run`).
+    pub run_id: String,
+}
+
+/// Arguments for the `recent_events` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct RecentEventsArgs {
+    /// Max number of recent events to return across all runs. Leave unset for the
+    /// server default (100), capped server-side at 1000.
+    #[serde(default)]
+    pub limit: Option<u32>,
 }
 
 /// Shape a client verb's outcome into a [`CallToolResult`]:
@@ -225,6 +243,28 @@ impl Camerata {
                 .await,
         )
     }
+
+    /// READ — `GET /api/runs/:id/events` via [`Client::run_events`].
+    #[tool(
+        name = "run_events",
+        description = "Get the full governance-event audit trail for one run, in insertion order. READ-ONLY. Returns a JSON array of events, each with `ts`, `kind` (run_started/agent_step/gate_allow/gate_deny/escalation_raised/escalation_answered/sign_off/commit_gate/pr_gate/stall_cancel/run_finished/...), `severity` (info/warn/error), `actor` (agent/human/system), and optional `rule_id`/`reason`/`detail`. Empty array if governance logging is not active this session (fail-soft, never an error)."
+    )]
+    pub async fn run_events(&self, args: Parameters<RunEventsArgs>) -> CallToolResult {
+        dto_tool_result(self.client.run_events(&args.0.run_id).await)
+    }
+
+    /// READ — `GET /api/governance/events?limit=N` via [`Client::recent_events`].
+    #[tool(
+        name = "recent_events",
+        description = "Get the most recently recorded governance events across ALL runs, newest first. READ-ONLY. Args: optional `limit` (default 100, capped at 1000 server-side). Same event shape as `run_events`. Useful for a global recent-activity view without knowing a specific run id."
+    )]
+    pub async fn recent_events(&self, args: Parameters<RecentEventsArgs>) -> CallToolResult {
+        dto_tool_result(
+            self.client
+                .recent_events(args.0.limit.unwrap_or(100))
+                .await,
+        )
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -240,7 +280,9 @@ impl ServerHandler for Camerata {
             "Camerata orchestrator over MCP (first rung). Read the story spine \
              (list_stories), Units of Work (list_uows), and run state (get_run); \
              assign tracker work items (assign_work_item) and start governed runs \
-             (start_run). Every tool is a live HTTP call to the Camerata BFF — it \
+             (start_run). Read the governance-event audit trail per run \
+             (run_events) or the most recent events across all runs \
+             (recent_events). Every tool is a live HTTP call to the Camerata BFF — it \
              must be running (default http://127.0.0.1:8787, override via \
              CAMERATA_BFF_URL)."
                 .to_string(),
@@ -276,6 +318,8 @@ mod tests {
                 "get_run",
                 "list_stories",
                 "list_uows",
+                "recent_events",
+                "run_events",
                 "start_run",
             ]
         );
@@ -407,6 +451,114 @@ mod tests {
             serde_json::from_str(text_of(&result)).expect("content must be valid JSON");
         assert_eq!(json["run_id"], "run-42");
         assert_eq!(json["mode"], "scripted");
+    }
+
+    /// READ delegation: the `run_events` tool method drives a real HTTP GET against
+    /// the (mock) BFF's id-scoped route and returns the DTO array as JSON content.
+    #[tokio::test]
+    async fn run_events_tool_hits_the_bff_and_returns_json_content() {
+        let bff = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/runs/run-1/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 1,
+                    "run_id": "run-1",
+                    "story_id": null,
+                    "ts": "2026-07-08T00:00:00Z",
+                    "kind": "run_started",
+                    "severity": "info",
+                    "actor": "system",
+                    "rule_id": null,
+                    "reason": null,
+                    "detail": null,
+                }
+            ])))
+            .expect(1)
+            .mount(&bff)
+            .await;
+
+        let server = Camerata::with_client(Client::with_base(bff.uri()));
+        let result = server
+            .run_events(Parameters(RunEventsArgs {
+                run_id: "run-1".to_string(),
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(false));
+        let json: serde_json::Value =
+            serde_json::from_str(text_of(&result)).expect("content must be valid JSON");
+        assert_eq!(json[0]["run_id"], "run-1");
+        assert_eq!(json[0]["kind"], "run_started");
+    }
+
+    /// READ delegation: the `recent_events` tool method defaults `limit` to 100 when
+    /// unset and returns the DTO array as JSON content.
+    #[tokio::test]
+    async fn recent_events_tool_hits_the_bff_with_default_limit() {
+        let bff = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/governance/events"))
+            .and(wiremock::matchers::query_param("limit", "100"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 2,
+                    "run_id": "run-2",
+                    "story_id": null,
+                    "ts": "2026-07-08T00:01:00Z",
+                    "kind": "gate_deny",
+                    "severity": "error",
+                    "actor": "agent",
+                    "rule_id": "SEC-1",
+                    "reason": "denied",
+                    "detail": null,
+                }
+            ])))
+            .expect(1)
+            .mount(&bff)
+            .await;
+
+        let server = Camerata::with_client(Client::with_base(bff.uri()));
+        let result = server
+            .recent_events(Parameters(RecentEventsArgs { limit: None }))
+            .await;
+
+        assert_eq!(result.is_error, Some(false));
+        let json: serde_json::Value =
+            serde_json::from_str(text_of(&result)).expect("content must be valid JSON");
+        assert_eq!(json[0]["run_id"], "run-2");
+        assert_eq!(json[0]["kind"], "gate_deny");
+    }
+
+    /// A ClientError (here: BFF 404) maps to an MCP TOOL error for `run_events` —
+    /// `is_error: Some(true)` with the status + body in the text.
+    #[tokio::test]
+    async fn run_events_client_error_maps_to_tool_error() {
+        let bff = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/runs/nope/events"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({ "error": "run not found: nope" })),
+            )
+            .expect(1)
+            .mount(&bff)
+            .await;
+
+        let server = Camerata::with_client(Client::with_base(bff.uri()));
+        let result = server
+            .run_events(Parameters(RunEventsArgs {
+                run_id: "nope".to_string(),
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(true));
+        let text = text_of(&result);
+        assert!(text.contains("404"), "error text must carry the status: {text}");
+        assert!(
+            text.contains("run not found"),
+            "error text must carry the BFF body: {text}"
+        );
     }
 
     /// A ClientError (here: BFF 404) maps to an MCP TOOL error — `is_error:

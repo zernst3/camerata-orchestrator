@@ -623,8 +623,57 @@ pub(super) fn LiveRunPanel(run: RunView, uow_refresh: Signal<u32>) -> Element {
                 }
             }
 
+            GovernanceEventsPanel { run_id: run.id.clone() }
+
             if run.done {
                 RunProvenancePanel { run_id: run.id.clone(), uow_refresh }
+            }
+        }
+    }
+}
+
+/// Phase H3: the compact governance-event audit trail for one run — a read-only table
+/// (`ts` · `kind` · `severity` · `rule` · `reason`) over `GET /api/runs/:id/events`.
+/// Distinct from the `live-events` feed above (the in-memory `RunView::events` the run
+/// tracker holds for THIS process's lifetime): this is the durable, restart-surviving
+/// audit ledger (Phase H1/H2), so it also covers events from before a page reload.
+/// Renders nothing while loading and nothing when the trail is empty (e.g. no
+/// governance log open this session) — a quiet diagnostic, not a headline feature.
+#[component]
+pub(super) fn GovernanceEventsPanel(run_id: String) -> Element {
+    let rid = run_id.clone();
+    let events_res = use_resource(move || {
+        let rid = rid.clone();
+        async move { fetch_governance_events(&rid).await }
+    });
+    let events = events_res.read().clone().unwrap_or_default();
+
+    rsx! {
+        if !events.is_empty() {
+            div { class: "governance-events",
+                p { class: "run-provenance-h", "GOVERNANCE EVENTS" }
+                table { class: "governance-events-table",
+                    thead {
+                        tr {
+                            th { "ts" }
+                            th { "kind" }
+                            th { "severity" }
+                            th { "rule" }
+                            th { "reason" }
+                        }
+                    }
+                    tbody {
+                        for ev in events.iter() {
+                            tr { class: "governance-event-row severity-{ev.severity}",
+                                td { "{ev.ts}" }
+                                td { "{ev.kind}" }
+                                td { "{ev.severity}" }
+                                td { "{ev.rule_id.clone().unwrap_or_default()}" }
+                                td { "{ev.reason.clone().unwrap_or_default()}" }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -1016,6 +1065,26 @@ mod render_tests {
         assert!(
             html.contains("never auto-opens a PR"),
             "the explicit-sign-off hint renders; html=\n{html}"
+        );
+    }
+
+    // ── Tier-1 render: GovernanceEventsPanel — renders nothing while its
+    // use_resource is pending (first render, no data yet) rather than an empty
+    // heading/table (Phase H3: it's a quiet diagnostic, not a headline feature).
+    fn governance_events_harness() -> Element {
+        rsx! {
+            super::GovernanceEventsPanel { run_id: "run-1".to_string() }
+        }
+    }
+
+    #[test]
+    fn governance_events_panel_renders_nothing_before_the_fetch_resolves() {
+        let mut vdom = VirtualDom::new(governance_events_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            !html.contains("GOVERNANCE EVENTS") && !html.contains("governance-events-table"),
+            "no table/heading before the first fetch resolves; html=\n{html}"
         );
     }
 }

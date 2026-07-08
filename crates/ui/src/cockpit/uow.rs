@@ -566,6 +566,36 @@ pub(super) async fn fetch_provenance(run_id: &str) -> Option<RunProvenanceView> 
         .ok()
 }
 
+/// One entry in the governance-event audit trail (Phase H3, `GET /api/runs/:id/events`)
+/// — a faithful client-side mirror of the server's `camerata_persistence::GovernanceEvent`
+/// wire shape. All fields default-tolerant, matching the read-only `RunProvenanceView`
+/// idiom above.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(super) struct GovernanceEventView {
+    #[serde(default)]
+    pub ts: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub severity: String,
+    #[serde(default)]
+    pub rule_id: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Fetch the governance-event audit trail for a run (Phase H3). Empty (never an error)
+/// when the request fails or no governance log is open server-side — the panel simply
+/// renders nothing rather than surfacing a fetch error for what is a read-only diagnostic
+/// view.
+pub(super) async fn fetch_governance_events(run_id: &str) -> Vec<GovernanceEventView> {
+    let resp = match reqwest::get(format!("{}/api/runs/{}/events", crate::bff_base(), run_id)).await {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    resp.json::<Vec<GovernanceEventView>>().await.unwrap_or_default()
+}
+
 /// Send a stop/cancel request for ANY active run (investigation / dev / update-branch /
 /// resolve). Fire-and-forget: 204 = success; any other status or a network error is
 /// treated as benign (the run may already be done). The server aborts the driving task,

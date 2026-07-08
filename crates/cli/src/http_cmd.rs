@@ -84,6 +84,19 @@ pub async fn handle_start_run(
     Ok(to_json_string(&resp))
 }
 
+/// `events <RUN_ID>` — `GET /api/runs/:id/events` via [`Client::run_events`].
+pub async fn handle_events(client: &Client, run_id: &str) -> Result<String, ClientError> {
+    let events = client.run_events(run_id).await?;
+    Ok(to_json_string(&events))
+}
+
+/// `recent-events [--limit N]` — `GET /api/governance/events?limit=N` via
+/// [`Client::recent_events`].
+pub async fn handle_recent_events(client: &Client, limit: u32) -> Result<String, ClientError> {
+    let events = client.recent_events(limit).await?;
+    Ok(to_json_string(&events))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +236,69 @@ mod tests {
         .expect("must succeed");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be JSON");
         assert_eq!(parsed["run_id"], "run-42");
+    }
+
+    #[tokio::test]
+    async fn handle_events_hits_the_id_scoped_route() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/runs/run-1/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 1,
+                    "run_id": "run-1",
+                    "story_id": null,
+                    "ts": "2026-07-08T00:00:00Z",
+                    "kind": "run_started",
+                    "severity": "info",
+                    "actor": "system",
+                    "rule_id": null,
+                    "reason": null,
+                    "detail": null,
+                }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = Client::with_base(server.uri());
+        let json = handle_events(&client, "run-1").await.expect("must succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be JSON");
+        assert_eq!(parsed[0]["run_id"], "run-1");
+        assert_eq!(parsed[0]["kind"], "run_started");
+    }
+
+    #[tokio::test]
+    async fn handle_recent_events_hits_the_route_with_limit_query() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/governance/events"))
+            .and(wiremock::matchers::query_param("limit", "25"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 2,
+                    "run_id": "run-2",
+                    "story_id": null,
+                    "ts": "2026-07-08T00:01:00Z",
+                    "kind": "gate_deny",
+                    "severity": "error",
+                    "actor": "agent",
+                    "rule_id": "SEC-1",
+                    "reason": "denied",
+                    "detail": null,
+                }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = Client::with_base(server.uri());
+        let json = handle_recent_events(&client, 25)
+            .await
+            .expect("must succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be JSON");
+        assert_eq!(parsed[0]["run_id"], "run-2");
+        assert_eq!(parsed[0]["kind"], "gate_deny");
     }
 
     /// A `ClientError` (here: BFF 404) must propagate as `Err`, never a panic and never

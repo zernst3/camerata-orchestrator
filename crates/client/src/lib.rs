@@ -32,7 +32,18 @@
 //! Every non-2xx response maps to [`ClientError::Api`] (status + raw body), never a
 //! panic; a transport-level failure (connection refused, TLS, JSON decode) maps to
 //! [`ClientError::Request`].
+//!
+//! # Governance-event read path (Phase H3)
+//!
+//! Two more verbs over the governance-event audit trail (Phase H1/H2's write-only
+//! ledger, exposed for reading in Phase H3):
+//!
+//! | Method | [`Client`] fn | Route |
+//! |---|---|---|
+//! | GET | [`Client::run_events`] | `/api/runs/:id/events` |
+//! | GET | [`Client::recent_events`] | `/api/governance/events` |
 
+use camerata_api_types::governance::GovernanceEventDto;
 use camerata_api_types::run::{RunStatusResponse, StartRunRequest, StartRunResponse};
 use camerata_api_types::stories::CanonicalStory;
 use camerata_api_types::uow::UowListResponse;
@@ -206,6 +217,22 @@ impl Client {
         )
         .await
     }
+
+    /// `GET /api/runs/:id/events` — the full governance-event audit trail for one run,
+    /// in insertion order. Empty when no governance log is open server-side. See
+    /// `crates/server/src/lib.rs::get_run_events`.
+    pub async fn run_events(&self, run_id: &str) -> Result<Vec<GovernanceEventDto>, ClientError> {
+        self.get_json(&format!("/api/runs/{}/events", Self::enc_seg(run_id)))
+            .await
+    }
+
+    /// `GET /api/governance/events?limit=N` — the `N` most recently recorded governance
+    /// events across all runs, newest first. See
+    /// `crates/server/src/lib.rs::recent_governance_events`.
+    pub async fn recent_events(&self, limit: u32) -> Result<Vec<GovernanceEventDto>, ClientError> {
+        self.get_json(&format!("/api/governance/events?limit={limit}"))
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -372,6 +399,99 @@ mod tests {
     fn enc_seg_encodes_slash_and_hash() {
         assert_eq!(Client::enc_seg("acme/web#42"), "acme%2Fweb%2342");
         assert_eq!(Client::enc_seg("CAM-7_v.1~x"), "CAM-7_v.1~x");
+    }
+
+    #[tokio::test]
+    async fn run_events_hits_the_id_scoped_path_and_decodes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/runs/run-1/events"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 1,
+                    "run_id": "run-1",
+                    "story_id": "owner/repo#1",
+                    "ts": "2026-07-08T00:00:00Z",
+                    "kind": "run_started",
+                    "severity": "info",
+                    "actor": "system",
+                    "rule_id": null,
+                    "reason": null,
+                    "detail": null,
+                }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = Client::with_base(server.uri());
+        let events = client.run_events("run-1").await.expect("must decode 200");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].run_id, "run-1");
+        assert_eq!(events[0].kind, "run_started");
+        assert_eq!(events[0].severity, "info");
+    }
+
+    #[tokio::test]
+    async fn recent_events_hits_get_with_limit_query_and_decodes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/governance/events"))
+            .and(wiremock::matchers::query_param("limit", "50"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 2,
+                    "run_id": "run-2",
+                    "story_id": null,
+                    "ts": "2026-07-08T00:01:00Z",
+                    "kind": "gate_deny",
+                    "severity": "error",
+                    "actor": "agent",
+                    "rule_id": "SEC-1",
+                    "reason": "denied",
+                    "detail": null,
+                }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = Client::with_base(server.uri());
+        let events = client.recent_events(50).await.expect("must decode 200");
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].run_id, "run-2");
+        assert_eq!(events[0].kind, "gate_deny");
+        assert_eq!(events[0].rule_id.as_deref(), Some("SEC-1"));
+    }
+
+    #[tokio::test]
+    async fn run_events_non_2xx_maps_to_client_error_api() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/runs/nope/events"))
+            .respond_with(
+                ResponseTemplate::new(404)
+                    .set_body_json(serde_json::json!({ "error": "run not found: nope" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = Client::with_base(server.uri());
+        let err = client
+            .run_events("nope")
+            .await
+            .expect_err("a 404 must be an Err, not a panic");
+
+        match err {
+            ClientError::Api { status, body } => {
+                assert_eq!(status, reqwest::StatusCode::NOT_FOUND);
+                assert!(body.contains("run not found"));
+            }
+            other => panic!("expected ClientError::Api, got {other:?}"),
+        }
     }
 
     #[tokio::test]

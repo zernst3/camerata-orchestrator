@@ -28,11 +28,15 @@
 //! - [`run`] — Phase D: a pure-serde mirror of `camerata_app_core::run`'s `Run`/
 //!   `RunStatus`/`GateEvent`/`RunKind`/`StallPolicy` plus the server's `RunStatusResponse`
 //!   (`GET /api/runs/:id`) and `StartRunReq`/response (`POST /api/stories/:id/run`).
+//! - [`governance`] — Phase H3: a pure-serde mirror of
+//!   `camerata_persistence::GovernanceEvent`'s wire shape, for `GET /api/runs/:id/events`
+//!   and `GET /api/governance/events` (added for `camerata-client`).
 //!
 //! Every relocated module's origin re-exports everything below so existing call sites
 //! (`camerata_app_core::uow::X`, `crate::llm::LlmResponse`, etc.) resolve unchanged.
 
 pub mod credentials;
+pub mod governance;
 pub mod lifecycle;
 pub mod llm;
 pub mod model_registry;

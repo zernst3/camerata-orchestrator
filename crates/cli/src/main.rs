@@ -86,6 +86,20 @@ enum Command {
         #[arg(long)]
         skip_layer2: bool,
     },
+    /// Get the governance-event audit trail for one run via the BFF
+    /// (GET /api/runs/:id/events).
+    Events {
+        /// The run id, e.g. as returned by `start-run`.
+        run_id: String,
+    },
+    /// List the most recently recorded governance events across all runs via the BFF
+    /// (GET /api/governance/events).
+    RecentEvents {
+        /// Max number of events to return, newest first (server default 100, capped
+        /// at 1000).
+        #[arg(long, default_value_t = 100)]
+        limit: u32,
+    },
 }
 
 #[tokio::main]
@@ -137,6 +151,14 @@ async fn main() -> anyhow::Result<()> {
                 camerata::http_cmd::handle_start_run(&client, &story_id, model, skip_layer2)
                     .await,
             )
+        }
+        Command::Events { run_id } => {
+            let client = make_client(bff_url);
+            print_result(camerata::http_cmd::handle_events(&client, &run_id).await)
+        }
+        Command::RecentEvents { limit } => {
+            let client = make_client(bff_url);
+            print_result(camerata::http_cmd::handle_recent_events(&client, limit).await)
         }
     }
 }
@@ -403,5 +425,31 @@ mod cli_parse_tests {
     #[test]
     fn missing_subcommand_fails_to_parse() {
         assert!(Cli::try_parse_from(["camerata"]).is_err());
+    }
+
+    #[test]
+    fn events_requires_a_run_id_positional() {
+        let cli = Cli::try_parse_from(["camerata", "events", "run-42"]).expect("must parse");
+        match cli.command {
+            Command::Events { run_id } => assert_eq!(run_id, "run-42"),
+            other => panic!("expected Command::Events, got a different variant: {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["camerata", "events"]).is_err());
+    }
+
+    #[test]
+    fn recent_events_defaults_limit_to_100_and_accepts_override() {
+        let cli = Cli::try_parse_from(["camerata", "recent-events"]).expect("must parse");
+        match cli.command {
+            Command::RecentEvents { limit } => assert_eq!(limit, 100),
+            other => panic!("expected Command::RecentEvents, got a different variant: {other:?}"),
+        }
+
+        let cli = Cli::try_parse_from(["camerata", "recent-events", "--limit", "25"])
+            .expect("must parse");
+        match cli.command {
+            Command::RecentEvents { limit } => assert_eq!(limit, 25),
+            other => panic!("expected Command::RecentEvents, got a different variant: {other:?}"),
+        }
     }
 }

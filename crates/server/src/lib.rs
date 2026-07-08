@@ -756,6 +756,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/runs/:id/agents", get(get_run_agents))
         .route("/api/runs/:id/provenance", get(get_run_provenance))
         .route("/api/runs/:id/sign-off", post(sign_off_run))
+        // Governance-event audit trail read path (Phase H3): per-run + cross-run recent.
+        .route("/api/runs/:id/events", get(get_run_events))
+        .route("/api/governance/events", get(recent_governance_events))
         .route(
             "/api/stories/:id/clarifications",
             get(list_clarifications).post(post_clarification),
@@ -2342,6 +2345,48 @@ async fn get_run_provenance(
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("run not found: {id}")))?;
     let rules = camerata_gateway::enforced_gate_rules();
     Ok(Json(run_provenance(&run, &rules)))
+}
+
+/// `GET /api/runs/:id/events` — the full governance-event audit trail for one run, in
+/// insertion order (Phase H3: the read path over the Phase H1/H2 governance-event
+/// ledger). Returns an empty array — never an error — when no governance log is open
+/// this session; the ledger is fail-soft by design (see `AppState::record_governance`),
+/// so its absence must not surface as a 500 to a caller just asking to see the trail.
+async fn get_run_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<camerata_persistence::GovernanceEvent>>, AppError> {
+    let Some(log) = state.governance_log.as_ref() else {
+        return Ok(Json(Vec::new()));
+    };
+    let events = log
+        .by_run(&id)
+        .await
+        .map_err(|e| AppError(e.into()))?;
+    Ok(Json(events))
+}
+
+/// Query for `GET /api/governance/events`: `?limit=N` caps the page. Defaults to 100,
+/// capped at 1000 so an unbounded request can't page the entire table in one response.
+#[derive(serde::Deserialize)]
+struct RecentGovernanceEventsQuery {
+    limit: Option<u32>,
+}
+
+/// `GET /api/governance/events?limit=N` — the `N` most recently recorded governance
+/// events across ALL runs, newest first (Phase H3). Default `N=100`, capped at 1000.
+/// Returns an empty array — never an error — when no governance log is open this
+/// session (same fail-soft contract as [`get_run_events`]).
+async fn recent_governance_events(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<RecentGovernanceEventsQuery>,
+) -> Result<Json<Vec<camerata_persistence::GovernanceEvent>>, AppError> {
+    let Some(log) = state.governance_log.as_ref() else {
+        return Ok(Json(Vec::new()));
+    };
+    let limit = i64::from(q.limit.unwrap_or(100).min(1000));
+    let events = log.recent(limit).await.map_err(|e| AppError(e.into()))?;
+    Ok(Json(events))
 }
 
 #[derive(serde::Deserialize)]
@@ -14729,6 +14774,112 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let json = body_json(resp).await;
         assert!(json["error"].is_string(), "body keeps the {{error}} shape");
+    }
+
+    /// Phase H3: `GET /api/runs/:id/events` returns an empty array (200), never an
+    /// error, when no governance log is open this session — the fail-soft contract
+    /// (see `AppState::record_governance`) must extend to the read path.
+    #[tokio::test]
+    async fn get_run_events_returns_empty_array_when_no_governance_log() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/runs/some-run/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    /// Phase H3: `GET /api/governance/events` also returns an empty array (200) with no
+    /// governance log open, same fail-soft contract as the per-run route.
+    #[tokio::test]
+    async fn recent_governance_events_returns_empty_array_when_no_governance_log() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/governance/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    /// Phase H3: with a real (in-memory) governance log attached, `GET
+    /// /api/runs/:id/events` returns exactly that run's recorded events, in insertion
+    /// order, and `GET /api/governance/events?limit=N` returns the N most recent across
+    /// all runs, newest first — the read path over the Phase H1/H2 write path.
+    #[tokio::test]
+    async fn governance_event_routes_read_back_recorded_events() {
+        let log = camerata_persistence::GovernanceLog::open_in_memory()
+            .await
+            .expect("open in-memory governance log");
+        log.record(camerata_persistence::GovernanceEvent::info(
+            "run-a",
+            "run_started",
+            "system",
+        ))
+        .await
+        .expect("record run-a event");
+        log.record(
+            camerata_persistence::GovernanceEvent::error("run-b", "gate_deny", "agent")
+                .with_rule_id("SEC-1")
+                .with_reason("denied"),
+        )
+        .await
+        .expect("record run-b event");
+
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.governance_log = Some(std::sync::Arc::new(log));
+        let app = router(state);
+
+        // Per-run: only run-a's event comes back.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/runs/run-a/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["run_id"], "run-a");
+        assert_eq!(json[0]["kind"], "run_started");
+
+        // Cross-run recent: both events come back, newest (run-b) first.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/governance/events?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 2);
+        assert_eq!(json[0]["run_id"], "run-b");
+        assert_eq!(json[0]["rule_id"], "SEC-1");
+        assert_eq!(json[1]["run_id"], "run-a");
     }
 
     /// ROUTES-7: the AppError constructors carry the right status while keeping the
