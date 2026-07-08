@@ -714,6 +714,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "camerata-client"
+version = "0.0.0"
+dependencies = [
+ "camerata-api-types",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "wiremock",
+]
+
+[[package]]
 name = "camerata-core"
 version = "0.0.0"
 dependencies = [

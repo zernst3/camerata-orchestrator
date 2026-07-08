@@ -50,3 +50,29 @@ pub struct WorkItem {
     #[serde(default)]
     pub updated_at: String,
 }
+
+// ── Assign (Phase D: `camerata-client`) ────────────────────────────────────────
+
+/// Request body for `POST /api/workitems/assign` (mirrors the server's private
+/// `WorkItemAssignReq` in `crates/server/src/lib.rs::workitems_assign`).
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Debug)]
+pub struct AssignWorkItemRequest {
+    pub work_item_id: String,
+    pub assignee: String,
+}
+
+/// Response body for `POST /api/workitems/assign`: `{ ok, assignees, updated_at }`
+/// (mirrors `crates/server/src/lib.rs::workitems_assign`'s `Json(serde_json::json!(...))`
+/// body, which in turn carries `crate::github_issues::AssignOutcome`'s two fields plus
+/// `ok: true`). This is the SAME wire shape as the UI's private
+/// `camerata_ui::cockpit::uow::AssignResult` — that type stays `pub(super)` in the UI
+/// crate; this is the shared, dependency-free mirror for non-UI callers (MCP/CLI).
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize, Debug, Default)]
+pub struct AssignWorkItemResponse {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub assignees: Vec<String>,
+    #[serde(default)]
+    pub updated_at: String,
+}

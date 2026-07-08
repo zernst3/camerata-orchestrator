@@ -20,7 +20,14 @@
 //!   shapes only).
 //! - [`workitems`] — relocated from `camerata_ui::cockpit::uow` (the UI-side `WorkItem`
 //!   wire mirror only; Phase C of the UI-core extraction so `camerata-ui-core` can hold
-//!   pulled items without a UI dep).
+//!   pulled items without a UI dep). Also carries the `POST /api/workitems/assign`
+//!   request/response mirror (Phase D).
+//! - [`stories`] — Phase D: a pure-serde mirror of `camerata_worktracker::CanonicalStory`
+//!   (and its `RepoTarget`/`ExternalRef`/`FeatureStatus`/`Provider` sub-shapes) for
+//!   `GET /api/stories`, added for `camerata-client`.
+//! - [`run`] — Phase D: a pure-serde mirror of `camerata_app_core::run`'s `Run`/
+//!   `RunStatus`/`GateEvent`/`RunKind`/`StallPolicy` plus the server's `RunStatusResponse`
+//!   (`GET /api/runs/:id`) and `StartRunReq`/response (`POST /api/stories/:id/run`).
 //!
 //! Every relocated module's origin re-exports everything below so existing call sites
 //! (`camerata_app_core::uow::X`, `crate::llm::LlmResponse`, etc.) resolve unchanged.
@@ -30,5 +37,7 @@ pub mod lifecycle;
 pub mod llm;
 pub mod model_registry;
 pub mod project;
+pub mod run;
+pub mod stories;
 pub mod uow;
 pub mod workitems;

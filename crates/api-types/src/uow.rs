@@ -364,6 +364,36 @@ pub struct SignOff {
     pub note: Option<String>,
 }
 
+// ── `GET /api/uows` list view (Phase D: `camerata-client`) ─────────────────────
+
+/// One row of `GET /api/uows`'s response (mirrors the server's private `UowView` in
+/// `crates/server/src/lib.rs`): a UoW with the [`crate::workitems::WorkItem`] it
+/// references (when resolved) and its lifecycle stage.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize, Debug, Default)]
+pub struct UowListItem {
+    /// The UoW id (its story id, e.g. `OWNER/REPO#123`, or `draft-<token>` for an
+    /// AI-authoring draft).
+    pub id: String,
+    /// The work item this UoW references, when it maps to one. `None` for
+    /// native/legacy stories with no external ref, and for a draft not yet published.
+    #[serde(default)]
+    pub work_item: Option<crate::workitems::WorkItem>,
+    /// The lifecycle stage as a snake_case wire string (`"intake"`, `"development"`, …).
+    #[serde(default)]
+    pub stage: String,
+    /// `true` when this is a blank/authoring DRAFT UoW (authoring state, no work item yet).
+    #[serde(default)]
+    pub authoring: bool,
+}
+
+/// The response body of `GET /api/uows`: `{ "uows": [...] }` (mirrors
+/// `crates/server/src/lib.rs::uows_list`'s `Json(serde_json::json!({ "uows": views }))`).
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize, Debug, Default)]
+pub struct UowListResponse {
+    #[serde(default)]
+    pub uows: Vec<UowListItem>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
