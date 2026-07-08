@@ -217,3 +217,65 @@ unaffected by the moves (re-export shims kept every old call site compiling and 
   bundle, whatever ships GAP-1's severance to users) must place both binaries side by side, or the
   exe-sibling resolution falls through to the dev-only `target/debug` fallback, which does not
   exist outside a checked-out workspace.
+
+## Follow-on (2026-07-08): governance audit trail + gate-boundary verification
+
+The same PR also closed two gaps that were not part of the adapter-ladder scope above, but landed in
+the same batch: the gate denied silently with no human-visible record, and the deny-before-execute
+claim was verified only at the `evaluate_call`/`apply_rule` function level, never at the actual MCP
+tool boundary. Both are now fixed.
+
+### H1: the `governance_events` audit trail (`camerata-persistence`)
+
+A new SQLite table, `governance_events`, plus a `GovernanceLog` store
+(`crates/persistence/src/governance_event.rs`): `record()` writes one row (`run_id`, `story_id`,
+`ts`, `kind`, `severity`, `actor`, `rule_id`, `reason`, `detail`); `by_run(run_id)` reads a run's
+events in insertion order; `recent(limit)` reads the most recent events across all runs. This is a
+READ-BACK log, distinct from the pre-existing write-only `enforcement_catch` provenance ledger.
+
+### H2: `tracing` initialization
+
+A `tracing`/`tracing-subscriber` stack is now initialized in both `crates/server/src/main.rs` and
+`crates/gateway/src/main.rs`, each via an `init_tracing()` function that reads a `CAMERATA_LOG` env
+filter (falling back to `RUST_LOG`, then `"info"`) and writes to stderr
+(`with_writer(std::io::stderr)`, `try_init()` for double-init safety). Stderr-only is load-bearing
+in the gateway: stdout IS the MCP stdio transport, so logging to it would corrupt the protocol
+stream.
+
+### H3: lifecycle instrumentation
+
+The governed-dev lifecycle now emits a `GovernanceEvent` at every decision point, each row
+correlated by run id: `gate_deny` (carrying the actual human-readable denial reason string, never a
+hash, so an operator reading the log sees why, not just that), `gate_allow`, `agent_step` (one row
+per tool call, not per token), `run_started`, `run_finished`, `layer2_bounce`, `check_failed`,
+`escalation_raised` (carrying the agent's own justification text), `escalation_answered`,
+`sign_off`, and `stall_cancel`. Emission sites: `crates/server/src/api_agent_driver.rs`
+(`record_agent_step`, `record_gate_allow`, `record_gate_deny`), `crates/server/src/dev_implement_run.rs`
+(`check_failed`, `layer2_bounce`, `escalation_raised`), `crates/server/src/lib.rs` (`run_started`,
+`run_finished`, `escalation_answered`, `sign_off`), and `crates/server/src/stall_sweep.rs`
+(`stall_cancel`).
+
+**Read path:** `GET /api/runs/:id/events` and `GET /api/governance/events` (`crates/server/src/lib.rs`);
+`Client::run_events` / `Client::recent_events` (`crates/client/src/lib.rs`); the `events` /
+`recent-events` CLI subcommands (`crates/cli`); the `run_events` / `recent_events` MCP tools
+(`crates/mcp/src/lib.rs`); and a `GovernanceEventsPanel` Dioxus component
+(`crates/ui/src/cockpit/live_run.rs`) rendering the per-run event table in the cockpit.
+
+### Phase T: MCP-boundary gate verification
+
+Prior gate tests exercised `evaluate_call`/`apply_rule` directly: proof the RULE LOGIC denies
+correctly, not proof the MCP TOOL BOUNDARY denies correctly. Phase T closes that gap:
+
+- `crates/gateway/src/main.rs` (`mod mcp_gated_write_boundary_tests`): 19 tests, each driving the
+  real `gated_write` rmcp tool method across every one of the 13 rules `enforced_gate_rules()`
+  returns: a deny leaves the target file absent, an allow leaves the exact content on disk, the
+  gate-events sink faithfully records both a deny and an allow verdict, and jail-precedence (a jail
+  violation wins over a rule denial) is covered separately.
+- `crates/gateway/tests/mcp_gated_write_deny.rs`: one real-transport test that spawns the
+  `camerata-gateway` binary and drives an actual `tools/call` over MCP stdio, asserting `DENIED` on
+  the wire for a forbidden write, with no file created.
+
+Together, H1-H3 and Phase T mean the gate's decisions are no longer just correct in theory: they are
+recorded, correlated, and readable after the fact, and the boundary they are enforced at is the real
+one, test-verified rather than designed-only. See `docs/ENFORCEMENT.md` for the corresponding
+Verification note.
