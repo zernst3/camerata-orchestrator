@@ -25,33 +25,16 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use thiserror::Error;
-
-// ── Error ─────────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Error)]
-pub enum CredentialError {
-    #[error("keychain error: {0}")]
-    Keychain(String),
-    #[error("credential name '{0}' is not in the known-credential allowlist")]
-    UnknownName(String),
-}
-
-// ── Known credential names ────────────────────────────────────────────────────
-
-/// OpenRouter API key (model discovery + API driver).
-pub const OPENROUTER_API_KEY: &str = "openrouter_api_key";
-/// GitHub PAT (issues / PRs / push).  Replaces `CAMERATA_GITHUB_TOKEN` env var,
-/// which remains supported as a back-compat fallback.
-pub const GITHUB_TOKEN: &str = "github_token";
-/// Anthropic API key for the `api` Claude backend.  Hydrated into the
-/// `ANTHROPIC_API_KEY` env var at startup and on save; the env var remains supported
-/// as a back-compat fallback.
-pub const ANTHROPIC_API_KEY: &str = "anthropic_api_key";
-
-/// Canonical set of all known credential names. Used by the list endpoint and as an
-/// allowlist in the set endpoint (rejects arbitrary names).
-pub const ALL_CREDENTIALS: &[&str] = &[OPENROUTER_API_KEY, GITHUB_TOKEN, ANTHROPIC_API_KEY];
+// ── Error + known credential names + HTTP wire shapes ─────────────────────────
+//
+// Relocated to `camerata_api_types::credentials` (Phase A of the DTO extraction) — pure
+// data with no dependency on the `CredentialStore` trait / keychain behavior below.
+// Re-exported so every existing `crate::credentials::X` call site keeps resolving
+// unchanged.
+pub use camerata_api_types::credentials::{
+    CredentialError, CredentialListItem, SetCredentialReq, SetCredentialResp, ALL_CREDENTIALS,
+    ANTHROPIC_API_KEY, GITHUB_TOKEN, OPENROUTER_API_KEY,
+};
 
 // ── Trait ─────────────────────────────────────────────────────────────────────
 
@@ -145,30 +128,6 @@ impl CredentialStore for MemoryCredentialStore {
         let guard = self.map.lock().unwrap_or_else(|e| e.into_inner());
         Ok(guard.get(name).filter(|v| !v.is_empty()).cloned())
     }
-}
-
-// ── HTTP request/response shapes ──────────────────────────────────────────────
-
-/// Response item for `GET /api/credentials`.
-#[derive(serde::Serialize)]
-pub struct CredentialListItem {
-    pub name: String,
-    pub is_set: bool,
-    /// Masked form (first 4 chars + `••••`), or `None` when not set.
-    pub masked: Option<String>,
-}
-
-/// Body for `POST /api/credentials/:name`.
-#[derive(serde::Deserialize)]
-pub struct SetCredentialReq {
-    pub value: String,
-}
-
-/// Response for `POST /api/credentials/:name`.
-#[derive(serde::Serialize)]
-pub struct SetCredentialResp {
-    pub ok: bool,
-    pub masked: String,
 }
 
 // ── Handler helpers ───────────────────────────────────────────────────────────

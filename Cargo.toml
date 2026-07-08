@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/api-types",   # pure-serde wire-contract leaf crate (Phase A of the DTO extraction); no camerata deps
     "crates/liveness",    # leaf crate: LivenessTracker + mtime probe + HeartbeatFn (no camerata deps)
     "crates/core",        # orchestrator brain: roles, tasks, DAG, coordination (zero model calls)
     "crates/app-core",    # framework-agnostic backend app-orchestration (RUST-HEADLESS-CORE-1); no axum dep

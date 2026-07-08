@@ -668,11 +668,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "camerata-api-types"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "camerata-app-core"
 version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "camerata-api-types",
  "camerata-checks",
  "camerata-core",
  "camerata-fleet",
@@ -849,6 +860,7 @@ dependencies = [
  "axum",
  "base64",
  "camerata-agent",
+ "camerata-api-types",
  "camerata-app-core",
  "camerata-checks",
  "camerata-core",

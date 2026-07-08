@@ -19,6 +19,10 @@ name = "camerata-server"
 path = "src/main.rs"
 
 [dependencies]
+# The pure-serde wire-contract leaf crate (Phase A of the DTO extraction): `llm`,
+# `credentials`, and `model_registry` re-export their relocated DTOs from here so every
+# existing `crate::X` call site keeps resolving unchanged.
+camerata-api-types = { path = "../api-types" }
 axum = { version = "0.7", features = ["ws"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "process", "io-util"] }
 tower = "0.5"
