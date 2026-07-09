@@ -25,7 +25,7 @@ use camerata_persistence::{
 };
 use camerata_worktracker::investigation::{DecisionRecord, DecisionOutcome, InvestigationArtifact};
 
-use crate::lifecycle::{TransitionError, UowStage};
+use crate::lifecycle::{TransitionError, UowStage, UowTransitions};
 
 // The pure, serde-only leaf domain types now live in the framework-agnostic core
 // (RUST-HEADLESS-CORE-1); re-exported so every `crate::uow::X` call site — including the

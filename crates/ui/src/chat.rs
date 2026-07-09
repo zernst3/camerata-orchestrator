@@ -821,7 +821,7 @@ pub struct ChatBubbleProps {
     #[props(default)]
     pub finding: Option<FindingContext>,
     /// Pre-rendered issue spine injected by the caller from the app-lifetime
-    /// `PULLED_WORK_ITEMS` cache. When `Some`, this becomes Layer 3b of the
+    /// `GOV_DEV_STATE` pull cache. When `Some`, this becomes Layer 3b of the
     /// system prompt. The caller computes the text; `ChatBubble` injects it
     /// opaquely, keeping the chat module free of WorkItem dependencies.
     #[props(default)]

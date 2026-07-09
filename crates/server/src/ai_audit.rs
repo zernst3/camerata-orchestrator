@@ -22,7 +22,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::llm::{Completer, Llm, LlmRequest};
+use crate::llm::{LlmPort, Llm, LlmRequest};
 use crate::onboard::{Finding, ProposedRule};
 
 /// Aggregated REAL usage across every LLM call in one audit — all chunk×rule passes, the
@@ -594,7 +594,7 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
 /// deliberately NOT re-sent the whole digest, so it judges exploitability/context, not
 /// code minutiae). Graceful: on any model failure the findings pass through unchanged.
 pub async fn verify_findings(
-    llm: &dyn Completer,
+    llm: &dyn LlmPort,
     repo: &str,
     findings: Vec<Finding>,
     calibration_model: Option<&str>,
@@ -841,7 +841,7 @@ fn parse_needs_files(raw: &str) -> Vec<String> {
 /// chunk. The CLI backend ignores this (no-op). Pass `None` to disable caching (default).
 #[allow(clippy::too_many_arguments)]
 async fn audit_pass(
-    llm: &dyn Completer,
+    llm: &dyn LlmPort,
     audit_model: Option<&str>,
     prompt: String,
     cache_prefix_len: Option<usize>,
@@ -1040,7 +1040,7 @@ impl ScanMode {
 /// under N independently-invented names across N language groups.
 #[allow(clippy::too_many_arguments)]
 async fn run_passes(
-    llm: &dyn Completer,
+    llm: &dyn LlmPort,
     repo: &str,
     repo_map: &str,
     adopted: &std::collections::HashSet<String>,
@@ -1567,7 +1567,7 @@ const MIN_MERGE_SNIPPET: usize = 8;
 /// Returns the same tuple as [`run_passes`]: `(findings, proposed, requested, ok, last_err)`.
 #[allow(clippy::too_many_arguments)]
 async fn run_routed_passes(
-    llm: &dyn Completer,
+    llm: &dyn LlmPort,
     repo: &str,
     files: &[(String, String)],
     selected: &[(String, String)],
@@ -1761,7 +1761,7 @@ async fn run_routed_passes(
 /// batch path is a follow-up (tracked in `docs/decisions/2026-06-20_rule_routing_wiring.md`).
 #[allow(clippy::too_many_arguments)]
 pub async fn audit_repo(
-    llm: &dyn Completer,
+    llm: &dyn LlmPort,
     repo: &str,
     files: &[(String, String)],
     selected: &[(String, String)],
@@ -1850,14 +1850,14 @@ pub async fn audit_repo(
             selected.chunks(batch_size.max(1)).collect()
         };
         // The Message-Batches path is concrete-only (API-key-gated; `submit_batch` et al.
-        // are not part of the minimal `Completer` seam), so recover the concrete `&Llm` via
+        // are not part of the minimal `LlmPort` seam), so recover the concrete `&Llm` via
         // the `as_any` downcast. In production this is always a real `Llm`, so the downcast
         // always succeeds and the behavior is unchanged. A non-`Llm` completer (a test stub)
         // can only drive the non-batch real-time path; batch mode is not reachable for it.
         let llm_concrete = llm.as_any().downcast_ref::<Llm>().ok_or_else(|| {
             anyhow::anyhow!(
                 "batch mode requires the concrete Llm client (the Message-Batches API is not \
-                 part of the Completer seam); use parallel/sequential mode with a custom completer"
+                 part of the LlmPort seam); use parallel/sequential mode with a custom completer"
             )
         })?;
         run_passes_batch(
@@ -2424,7 +2424,7 @@ pub fn parse_threats(raw: &str) -> (String, Vec<Threat>) {
 /// live. Graceful: on any model failure the lens result carries the error, never panics.
 #[allow(clippy::too_many_arguments)]
 async fn run_prose_lens(
-    llm: &dyn Completer,
+    llm: &dyn LlmPort,
     lens: DeepLens,
     repo: &str,
     repo_map: &str,
@@ -2513,7 +2513,7 @@ async fn run_prose_lens(
 /// provenance honest.
 #[allow(clippy::too_many_arguments)]
 async fn run_security_lens(
-    llm: &dyn Completer,
+    llm: &dyn LlmPort,
     repo: &str,
     files: &[(String, String)],
     repo_map: &str,
@@ -2563,7 +2563,7 @@ async fn run_security_lens(
 /// differs. Single-batch (free-form security read), so there is no rule-batch dimension.
 #[allow(clippy::too_many_arguments)]
 async fn run_security_passes(
-    llm: &dyn Completer,
+    llm: &dyn LlmPort,
     repo: &str,
     repo_map: &str,
     adopted: &std::collections::HashSet<String>,
@@ -2680,7 +2680,7 @@ async fn run_security_passes(
 /// Pass `true` (the flag default) to run all three lenses as before.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_deep_tier(
-    llm: &dyn Completer,
+    llm: &dyn LlmPort,
     repo: &str,
     files: &[(String, String)],
     audit_model: Option<&str>,
@@ -4005,25 +4005,25 @@ mod tests {
         assert!(threat.advisory);
     }
 
-    // ── Completer seam: AI-failure guard (#audit-llm-seam-guard) ──────────────────────
+    // ── LlmPort seam: AI-failure guard (#audit-llm-seam-guard) ──────────────────────
     //
     // These tests exercise the load-bearing behavior that was previously untestable
     // without a live model: when the LLM is UNAVAILABLE in an AI-review ("both") scan,
     // every audit pass errors, and `audit_repo` must SURFACE that the AI review was
     // skipped (return `Err`) — NEVER a silent clean Ok([]) — so the caller
     // (`onboard::audit_repos`) records "AI audit skipped" while the deterministic floor
-    // findings still return independently. The `Completer` trait is the seam that lets a
+    // findings still return independently. The `LlmPort` trait is the seam that lets a
     // test substitute a model client without any token, env mutation, or network.
 
-    use crate::llm::{Completer, LlmRequest, LlmResponse};
+    use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 
-    /// A `Completer` whose every call fails — simulates the LLM being unavailable
+    /// A `LlmPort` whose every call fails — simulates the LLM being unavailable
     /// (CLI not installed, API key invalid, network down). Both `complete` and
     /// `complete_streaming` return `Err`, so every audit pass that touches it fails.
     struct FailingCompleter;
 
     #[async_trait::async_trait]
-    impl Completer for FailingCompleter {
+    impl LlmPort for FailingCompleter {
         async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
             anyhow::bail!("simulated LLM unavailable (complete)")
         }
@@ -4039,7 +4039,7 @@ mod tests {
         }
     }
 
-    /// A `Completer` that returns canned text — proves the seam works in the OTHER
+    /// A `LlmPort` that returns canned text — proves the seam works in the OTHER
     /// direction (a stub can feed the audit findings without a live model). The text is
     /// the audit's expected JSON shape so `parse_ai_findings` yields a finding.
     struct StubCompleter {
@@ -4047,7 +4047,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl Completer for StubCompleter {
+    impl LlmPort for StubCompleter {
         async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
             Ok(LlmResponse {
                 text: self.text.clone(),

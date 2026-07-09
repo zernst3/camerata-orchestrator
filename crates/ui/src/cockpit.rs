@@ -271,86 +271,14 @@ async fn set_hierarchy_schema(id: &str, schema: &HierarchySchemaView) -> bool {
         .unwrap_or(false)
 }
 
-/// UI mirror of `camerata_server::project::L3ReviewConfig`.
-/// Default: off, empty model (falls back to balanced tier).
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-struct L3ReviewView {
-    #[serde(default)]
-    enabled: bool,
-    /// The model id for the L3 reviewer. Empty = use the project's balanced tier model.
-    #[serde(default)]
-    model: String,
-}
-
-impl Default for L3ReviewView {
-    fn default() -> Self {
-        Self { enabled: false, model: String::new() }
-    }
-}
-
-/// UI mirror of `camerata_server::project::StepModels`. One model-id slot per NON-FLEET AI
-/// step. Serde defaults match the server's `DEFAULT_MODEL`.
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-struct StepModelsView {
-    #[serde(default = "default_step_model_str")]
-    audit: String,
-    #[serde(default = "default_step_model_str")]
-    calibration: String,
-    #[serde(default = "default_step_model_str")]
-    research_chat: String,
-    #[serde(default = "default_step_model_str")]
-    story_authoring: String,
-    #[serde(default = "default_step_model_str")]
-    decomposition: String,
-    #[serde(default = "default_step_model_str")]
-    escalation: String,
-    #[serde(default = "default_step_model_str")]
-    clarification: String,
-}
-
-/// The shipped server `DEFAULT_MODEL` (`crate::llm::DEFAULT_MODEL`). Kept in sync here so a
-/// project JSON missing a step field renders the same default the server seeds at creation.
-fn default_step_model_str() -> String {
-    "claude-sonnet-4-6".to_string()
-}
-
-impl Default for StepModelsView {
-    fn default() -> Self {
-        Self {
-            audit: default_step_model_str(),
-            calibration: default_step_model_str(),
-            research_chat: default_step_model_str(),
-            story_authoring: default_step_model_str(),
-            decomposition: default_step_model_str(),
-            escalation: default_step_model_str(),
-            clarification: default_step_model_str(),
-        }
-    }
-}
-
-/// UI mirror of `camerata_server::project::StallThresholds`. Two u64 slots.
-/// Serde defaults match the server's defaults (120s watched, 1800s routine — the generous
-/// autonomous auto-cancel default, LIFECYCLE-6).
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-struct StallThresholdsView {
-    #[serde(default = "default_watched_secs")]
-    watched_secs: u64,
-    #[serde(default = "default_routine_secs")]
-    routine_secs: u64,
-}
-
-fn default_watched_secs() -> u64 { 120 }
-
-/// The generous routine (autonomous) default, mirroring the server's
-/// `camerata_app_core::project::DEFAULT_ROUTINE_STALL_SECS`. Autonomous runs auto-cancel on
-/// stall with no architect watching, so the default grace period is deliberately long (30 min).
-fn default_routine_secs() -> u64 { 1_800 }
-
-impl Default for StallThresholdsView {
-    fn default() -> Self {
-        Self { watched_secs: default_watched_secs(), routine_secs: default_routine_secs() }
-    }
-}
+/// The canonical wire shapes for the project's L3-review / per-step-model / stall-threshold
+/// config, straight from the shared `camerata-api-types` leaf (Phase G cleanup — these were
+/// hand-maintained UI mirrors before; the api-types versions are the very structs the server
+/// serializes, so defaults can never drift again). The `*View` names are kept so the many
+/// existing call sites read unchanged.
+use camerata_api_types::project::L3ReviewConfig as L3ReviewView;
+use camerata_api_types::project::StallThresholds as StallThresholdsView;
+use camerata_api_types::project::StepModels as StepModelsView;
 
 /// UI mirror of `camerata_fleet::tier::TierMap`. Three model-id slots, one per
 /// capability band. `fast` and `balanced` are ordered chains (Vec<String>); `strongest`

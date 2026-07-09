@@ -13,7 +13,7 @@
 
 ## 1. System overview and crate map
 
-Camerata is a single Rust workspace. The shipped app is 16 crates under
+Camerata is a single Rust workspace. The shipped app is 22 crates under
 `crates/` (plus one maintainer-only tool, `tools/corpus-verifier`, that is NOT a
 dependency of any app crate). All load-bearing code is Rust; the only optional
 non-Rust piece is a future TypeScript AST sidecar described in
@@ -23,17 +23,23 @@ non-Rust piece is a future TypeScript AST sidecar described in
 
 | Crate | Binary / Lib | One-line purpose |
 |---|---|---|
+| `camerata-api-types` | lib | Pure serde wire-contract leaf. DTOs shared across every layer (uow/project/lifecycle/llm-response/credentials/model-registry/workitems/stories/run/governance). Zero `camerata-*` dependencies (only `serde`/`serde_json`/`chrono`/`thiserror`). |
 | `camerata-core` | lib | Orchestrator brain: roles, tasks, DAG, coordination. Makes ZERO model calls. Defines the shared traits (`GovernanceGateway`, `AgentDriver`, `CheckRunner`) the rest of the stack depends on. |
+| `camerata-app-core` | lib | Framework-agnostic backend domain types + pure state transitions (`RUST-HEADLESS-CORE-1`); no `axum` dependency. Depends on `camerata-api-types`. |
+| `camerata-ui-core` | lib | Framework-agnostic UI logic + state (`RUST-HEADLESS-CORE-1`); no `dioxus` dependency. Holds the `GovDevState` TEA model (governed-dev poll/change-detection). Depends on `camerata-api-types`. |
+| `camerata-llm` | lib | The `LlmPort` seam (renamed from `Completer`, relocated out of `camerata-server`): the `Llm` Anthropic transport, `OpenRouterCompleter`, `build_completer` + fallback chain, the batch path, the credential store, model registry, rate limiter, usage ledger. Depends only on `camerata-api-types`. |
 | `camerata-intake` | lib | PO-mode intake form schema + LeadEngineer (architect-abstracted second level). |
 | `camerata-gateway` | lib + bin (`camerata-gateway`) | Layer-1 real-time governance gate. A Rust MCP server; also usable in-process. |
 | `camerata-agent` | lib | Agent runtime: drives `claude -p` subprocesses, parses stream-json. Implements `AgentDriver`. |
 | `camerata-rules` | lib | Rule corpus loader, `EnforcementKind` classifier, rule-subset selection. |
-| `camerata-persistence` | lib | SQLite state store (`sqlx`) + JSON provenance. |
-| `camerata-checks` | lib | Layer-2 post-task gate: `CheckRunner` + `cargo fmt`/`cargo clippy`/`cargo test` subprocess runners. |
+| `camerata-persistence` | lib | SQLite state store (`sqlx`) + JSON provenance, plus the `governance_events` audit-trail table (`GovernanceLog`). |
+| `camerata-checks` | lib | Layer-2 post-task gate: `CheckRunner` + `cargo fmt`/`cargo clippy`/`cargo test` subprocess runners (plus the polyglot and cross-agent integration runners, §3/§3a). |
 | `camerata-fleet` | lib | Reusable governed-fleet build logic, shared by CLI and UI. |
-| `camerata-server` | lib + bin | Axum HTTP/WS server the cockpit talks to. Embedded in the UI process. Contains the onboarding scan pipeline, arm/emit, workspace/git controls, the WorkItem/UoW layer, and all HTTP routes. |
-| `camerata-cli` | bin (`camerata`) | CLI binary entry point wiring everything together, including `live-demo`. |
-| `camerata-ui` | bin (`camerata-ui`) | Dioxus desktop cockpit. Separate process; talks to the embedded `camerata-server` over localhost HTTP. |
+| `camerata-server` | lib + bin | Axum HTTP/WS BFF the cockpit talks to. As of the 2026-07-08 adapter-ladder batch, `camerata-ui` reaches it by spawning it as a subprocess, not by embedding it in-process. Contains the onboarding scan pipeline, arm/emit, workspace/git controls, the WorkItem/UoW layer, all HTTP routes, and re-export shims for the DTOs/provider stack relocated to `api-types`/`llm`. |
+| `camerata-client` | lib | Typed async HTTP client over the BFF's `/api/*` routes (base URL from `CAMERATA_BFF_URL`, default `http://127.0.0.1:8787`). Shared plumbing under the MCP and CLI adapters. Depends only on `camerata-api-types` plus generic HTTP/serde crates. |
+| `camerata-mcp` | lib + bin (`camerata-mcp`) | First MCP adapter rung: an `rmcp` 1.7 stdio server exposing Camerata verbs (`list_stories`/`get_run`/`list_uows`/`assign_work_item`/`start_run`/`run_events`/`recent_events`) as MCP tools, each delegating to `camerata-client`. |
+| `camerata-cli` | bin (`camerata`) | CLI binary entry point. Reworked into an HTTP adapter over `camerata-client` (clap-based: `stories`/`run`/`uows`/`assign`/`start-run`/`events`/`recent-events`), in addition to its existing in-process demo subcommands (`live-demo`, `po-demo`, etc). Still depends on `camerata-server`, but only for the `eval` subcommand. |
+| `camerata-ui` | bin (`camerata-ui`) | Dioxus desktop cockpit. SPAWNS `camerata-server` as a subprocess (runtime binary resolution, health-poll readiness, reuse-if-already-healthy, kill-on-exit watchdog) rather than embedding it; no crate dependency on `camerata-server`. Talks to the BFF over localhost HTTP/WS (currently via raw `reqwest`, not yet via `camerata-client`). |
 | `camerata-worktracker` | lib | `WorkItemProvider` port: canonical story shapes, sync policy, native provider, and adapters for GitHub Issues, GitHub Projects v2, Jira Cloud, Azure DevOps Boards. |
 | `camerata-maintenance` | lib | Tier-2 standing post-publish ops agent (dependency upgrades, security patches, secret rotation). |
 | `camerata-deploy` | lib | Tier-2 BYO-infra publish: `DeployTarget` seam + local + Azure adapter. |
@@ -53,12 +59,19 @@ without forming a real cycle).
 
 ```mermaid
 graph TD
-    %% Binaries (thin entry points)
-    ui["camerata-ui<br/>Dioxus desktop · bin"]
-    cli["camerata-cli<br/>demos + gate-probe · bin"]
+    %% Binaries (thin entry points / adapters)
+    ui["camerata-ui<br/>Dioxus desktop · bin<br/>(spawns server as subprocess)"]
+    cli["camerata-cli<br/>HTTP adapter + demos · bin"]
+    mcp["camerata-mcp<br/>MCP adapter (rmcp stdio) · bin"]
+    client["camerata-client<br/>typed HTTP client over /api/*"]
 
     %% Composition root
     server["camerata-server<br/>Axum BFF + orchestrator · lib+bin"]
+
+    %% Headless cores
+    appcore["camerata-app-core<br/>headless backend orchestration · no axum"]
+    uicore["camerata-ui-core<br/>headless UI logic/state (incl. GovDevState) · no dioxus"]
+    llm["camerata-llm<br/>LlmPort seam + provider stack"]
 
     %% Capabilities
     fleet["camerata-fleet<br/>tiered governed run"]
@@ -69,7 +82,7 @@ graph TD
     maintenance["camerata-maintenance<br/>standing ops · staged"]
 
     %% Infrastructure / adapters
-    persistence["camerata-persistence<br/>versioned store"]
+    persistence["camerata-persistence<br/>versioned store + governance_events"]
     worktracker["camerata-worktracker<br/>board adapter · port"]
     deploy["camerata-deploy<br/>cloud deploy seam · staged"]
 
@@ -79,8 +92,20 @@ graph TD
     liveness["camerata-liveness<br/>stall detection"]
     linter["camerata-linter-registry<br/>linter-id map"]
 
-    ui --> server
+    %% Pure contract leaf (bottom of everything)
+    apitypes["camerata-api-types<br/>pure serde wire-contract leaf · ZERO camerata deps"]
+
+    ui -.->|spawns as subprocess, no crate dep| server
     ui --> worktracker
+    ui --> uicore
+
+    cli --> client
+    cli -.->|only for the eval subcommand| server
+    cli -.-> maintenance
+    cli -.-> deploy
+
+    mcp --> client
+    client --> apitypes
 
     server --> gateway
     server --> fleet
@@ -92,6 +117,12 @@ graph TD
     server --> rules
     server --> liveness
     server --> core
+    server --> appcore
+    server --> llm
+
+    appcore --> apitypes
+    uicore --> apitypes
+    llm --> apitypes
 
     fleet --> agent
     fleet --> checks
@@ -115,31 +146,42 @@ graph TD
     intake --> core
     persistence --> core
     rules --> core
-
-    cli -.->|links every lib for its demos| server
-    cli -.-> maintenance
-    cli -.-> deploy
 ```
 
-Read it bottom-up. `camerata-core` and the leaf utilities (`liveness`, `linter-registry`)
-depend on nothing. Adapters (`persistence`, `worktracker`, `deploy`) and capabilities
-(`agent`, `gateway`, `checks`, `intake`, `fleet`) build on the floor. `camerata-server` is
-the **composition root** that wires them behind the Axum BFF, and `camerata-ui` /
-`camerata-cli` are thin binaries on top. Every arrow points down the stack: the graph is a
-DAG, and the compiler enforces it — a cycle between library crates does not compile.
-(`camerata-cli` links the libraries directly to drive its demos/probes — those edges are
-dashed; `camerata-linter-registry` is consumed by the maintainer-only `corpus-verifier`
-tool, so it carries no app-crate edge.)
+Read it bottom-up. `camerata-api-types` is the true floor: a pure-serde leaf with zero
+`camerata-*` dependencies, so `camerata-app-core`, `camerata-ui-core`, `camerata-llm`, and
+`camerata-client` can all depend on it directly with no cycle between each other.
+`camerata-core` and the leaf utilities (`liveness`, `linter-registry`) also depend on
+nothing. Adapters (`persistence`, `worktracker`, `deploy`) and capabilities (`agent`,
+`gateway`, `checks`, `intake`, `fleet`) build on the floor. `camerata-server` is the
+**composition root** that wires them behind the Axum BFF, re-exporting the DTOs/provider
+stack it handed off to `api-types`/`llm` via shims so old call sites keep compiling.
+`camerata-client` is the shared typed-HTTP plumbing under both new adapters:
+`camerata-mcp` (an MCP server exposing the same verbs as tools) and `camerata-cli` (now an
+HTTP adapter, `-.->` since it only touches `camerata-server` for its `eval` subcommand).
+`camerata-ui` no longer depends on the `camerata-server` crate at all: it spawns the
+`camerata-server` binary as a subprocess (dashed edge) rather than linking it. Every solid
+arrow points down the stack: the graph is a DAG, and the compiler enforces it (a cycle
+between library crates does not compile). (`camerata-linter-registry` is consumed by the
+maintainer-only `corpus-verifier` tool, so it carries no app-crate edge.)
 
 ### Process and runtime model
 
 When you run `cargo run -p camerata-ui`:
 
-1. The Dioxus desktop process starts. In `crates/ui/src/main.rs`, `use_hook`
-   spawns a dedicated OS thread that starts a `tokio::Runtime` and calls
-   `camerata_server::serve("127.0.0.1:8787")`. This is the **embedded BFF**.
+1. The Dioxus desktop process starts. As of the 2026-07-08 adapter-ladder batch,
+   `crates/ui/src/server_process.rs` SPAWNS `camerata-server` as a **subprocess**
+   rather than embedding `camerata_server::serve()` in-process on an OS thread:
+   it resolves the binary (`CAMERATA_SERVER_BIN` env var, then a binary next to
+   the running `camerata-ui` executable, then a `target/debug` dev fallback),
+   health-polls `/api/health` for readiness, reuses an already-healthy server
+   already on the port instead of spawning a duplicate, and runs a detached
+   watchdog that kills the child process when the desktop app exits.
+   `camerata-ui` no longer has a crate dependency on `camerata-server` at all.
 2. The BFF binds Axum to `127.0.0.1:8787`. All cockpit data flows over
-   localhost HTTP/WebSocket. The cockpit never calls backend crates directly.
+   localhost HTTP/WebSocket (today via raw `reqwest` calls from `crates/ui`,
+   not yet through the typed `camerata-client`). The cockpit never calls
+   backend crates directly.
 3. When a governed run is triggered, the orchestrator inside `camerata-server`
    spawns short-lived `claude -p` subprocesses (one per task/role), each locked
    to the MCP governance gate.
@@ -147,6 +189,10 @@ When you run `cargo run -p camerata-ui`:
    `GovernanceGateway` trait implementation in `crates/gateway/src/lib.rs`) or
    as a separate stdio MCP server binary (`crates/gateway/src/main.rs`). Both
    call the same pure `evaluate_call` function — no divergence.
+5. Other adapters reach the same BFF without going through the desktop app at
+   all: `camerata-cli`'s HTTP subcommands and `camerata-mcp` (an `rmcp` stdio
+   MCP server) both go through `camerata-client`, the typed async client over
+   `/api/*` (base URL from `CAMERATA_BFF_URL`, default `127.0.0.1:8787`).
 
 ### Language boundary
 
@@ -208,9 +254,9 @@ filesystem.
   arms. Each entry is `(id, description, arm: RuleArmFn)` where `RuleArmFn` is
   `fn(path: &str, content: &str) -> Result<(), String>`.
 
-The gate currently enforces eleven rules across `RULE_REGISTRY`. The
-**deterministic security floor** — the seven `SEC-*`/`ARCH-*` content and path
-rules — is the conceptual backbone for the enforcement tables in §5a:
+The gate currently enforces 13 rules across `RULE_REGISTRY` (`enforced_gate_rules()` returns all
+13). The **deterministic security floor** (the seven `SEC-*`/`ARCH-*` content and path
+rules) is the conceptual backbone for the enforcement tables in §5a:
 
 | Rule ID | Keys off | What it denies |
 |---|---|---|
@@ -224,17 +270,21 @@ rules — is the conceptual backbone for the enforcement tables in §5a:
 | `SEC-NO-VENDOR-TOKEN-1` | content | High-precision vendor credential token shapes: AWS `AKIA`/`ASIA`, GitHub `gh*_`, Slack `xox*-`, Stripe `sk_live_`, Google `AIza*`, Anthropic `sk-ant-`. |
 | `SEC-NO-SECRET-FILE-1` | path | Writing a path whose name marks it as secret-bearing (`.pem`, `.p12`, `.pfx`, `.key`, `.jks`, `.keystore`, `id_rsa`/`dsa`/`ecdsa`/`ed25519`, real `.env` files). Companion to `SEC-NO-SECRET-FILES-1` for the brownfield audit. |
 | `SEC-NO-DISABLED-TLS-1` | content | Content that disables TLS verification (`verify=False`, `rejectUnauthorized:false`, `InsecureSkipVerify:true`, `NODE_TLS_REJECT_UNAUTHORIZED=0`, `CURLOPT_SSL_VERIFYPEER false/0`). |
+| `SEC-NO-UNSAFE-DESERIALIZATION-1` | content | An unsafe deserialization call on untrusted input: Python `yaml.load` without `SafeLoader`/`FullLoader`, `yaml.unsafe_load`, `pickle.load`/`loads`; PHP `unserialize()`; Ruby `Marshal.load`/`restore`; .NET `BinaryFormatter`/`NetDataContractSerializer`/`LosFormatter`/`ObjectStateFormatter`. Java deserialization is a known gap (too many false positives without AST context). |
 | `SEC-NO-CAMERATA-CONFIG-1` | path | Any `gated_write` target whose path contains a `.camerata` segment (split on `/` and `\`). Protects the SSOT manifest and all operator config from agent edits. See §3 SSOT manifest. |
+| `SEC-NO-GIT-STATE-MUTATION-1` | content | File content containing a git command that mutates working-tree state (`git stash`, `git reset --hard`, `git clean -f/-d`, `git checkout -- ` / `git checkout .`, `git rebase`, `git restore`, `git worktree remove`). Agents have no shell access but could encode these in a script. |
 
 The **deterministic floor** is the seven `SEC-*`/`ARCH-*` content and path rules:
 `SEC-NO-HARDCODED-SECRETS-1`, `SEC-NO-RAW-SQL-CONCAT-1`, `ARCH-NO-SECRETS-IN-URL-1`,
 `SEC-NO-PRIVATE-KEY-1`, `SEC-NO-VENDOR-TOKEN-1`, `SEC-NO-SECRET-FILE-1`,
 `SEC-NO-DISABLED-TLS-1`. The path-escape and GOV-1 rules are write-time structural
 gates (not content scanners) and are NOT included in the brownfield audit floor;
-`SEC-NO-CAMERATA-CONFIG-1` is a manifest-protection rule, described separately.
-
-See `docs/decisions/2026-06-22_floor_rules_and_test_scope_gate.md` for the full
-expansion history and rationale.
+`SEC-NO-CAMERATA-CONFIG-1` is a manifest-protection rule, described separately; the
+unsafe-deserialization and git-state-mutation rules are later additions layered on top of the
+original seven (see `docs/decisions/2026-06-22_floor_rules_and_test_scope_gate.md` for the
+original expansion, and `docs/ENFORCEMENT.md` for the 2026-07-08 real-MCP-boundary verification
+of all 13 rules via `crates/gateway/src/main.rs`'s `mcp_gated_write_boundary_tests` plus the
+real-transport test in `crates/gateway/tests/mcp_gated_write_deny.rs`).
 
 ### Test-scope-aware gate (`TestScopePolicy`)
 
@@ -1288,7 +1338,7 @@ treat the selection RULE, not a fixed number, as the durable claim.
 
 ### Deterministic gate rules vs. LLM-semantic rules
 
-The eleven rules in `RULE_REGISTRY` (`crates/gateway/src/lib.rs`) have executable
+The 13 rules in `RULE_REGISTRY` (`crates/gateway/src/lib.rs`) have executable
 layer-1 enforcement. All other corpus rule ids are carried in the subset,
 delivered to the agent as context, but have no `apply_rule` arm and no
 `CheckRunner` mapping today. They are honest no-ops: the gate is permissive about
@@ -2016,6 +2066,32 @@ so stores live in `AppState`.
 structured storage for provenance/audit artifacts (`artifacts.rs`), the run log,
 and task/story state. The in-memory and JSON stores handle live session state
 (fast, no schema migration needed); SQLite handles longer-lived audit provenance.
+
+### Observability and the governance audit trail (2026-07-08)
+
+`crates/persistence/src/governance_event.rs` adds a `governance_events` SQLite table and a
+`GovernanceLog` store: `record()` writes one row (`run_id`, `story_id`, `ts`, `kind`, `severity`,
+`actor`, `rule_id`, `reason`, `detail`); `by_run(run_id)` reads a run's events in order; `recent(limit)`
+reads the most recent events across all runs. This is a READ-BACK log, distinct from the
+write-only `enforcement_catch` provenance ledger above it.
+
+The governed-dev lifecycle is instrumented end to end, every row correlated by run id
+(`crates/server/src/api_agent_driver.rs`, `dev_implement_run.rs`, `stall_sweep.rs`, `lib.rs`):
+`gate_deny` (carrying the human-readable denial reason, never a hash), `gate_allow`, `agent_step`
+(one row per tool call), `run_started`, `run_finished`, `layer2_bounce`, `check_failed`,
+`escalation_raised` (carrying the agent's own justification), `escalation_answered`, `sign_off`, and
+`stall_cancel`.
+
+A `tracing`/`tracing-subscriber` stack is initialized (stderr-only via `with_writer(std::io::stderr)`,
+so it never collides with `crates/gateway`'s stdio MCP transport) in both `crates/server/src/main.rs`
+and `crates/gateway/src/main.rs`, each honoring a `CAMERATA_LOG` env filter (falling back to the
+standard `RUST_LOG`, then `"info"`).
+
+**Read path:** `GET /api/runs/:id/events` and `GET /api/governance/events` (`crates/server/src/lib.rs`);
+`Client::run_events`/`Client::recent_events` (`crates/client/src/lib.rs`); the `events`/`recent-events`
+CLI subcommands (`crates/cli`); the `run_events`/`recent_events` MCP tools (`crates/mcp/src/lib.rs`);
+and a `GovernanceEventsPanel` Dioxus component (`crates/ui/src/cockpit/live_run.rs`) rendering the
+per-run event table in the cockpit.
 
 ### AppState composition
 
@@ -2957,15 +3033,15 @@ property that prevents rubber-stamping — the reviewer is spec-grounded and imp
 
 ### Inputs and config
 
-`L3ReviewBundle` is assembled in `start_governed_run` (`crates/server/src/lib.rs`) when the
-active project has `l3_review.enabled = true`:
+`L3ReviewBundle` is assembled in `start_governed_run` (`crates/server/src/dev_implement_run.rs`) when
+the active project has `l3_review.enabled = true`:
 
 ```rust
 pub struct L3ReviewBundle {
     pub story_text: String,    // title + description + contract
     pub rules_prose: String,   // the project's rules for this repo as prose
     pub model: String,         // from project.l3_model() — the configured or fallback model
-    pub llm: Arc<dyn Completer>,
+    pub llm: Arc<dyn LlmPort>, // the LlmPort seam (crates/llm), formerly named Completer
 }
 ```
 

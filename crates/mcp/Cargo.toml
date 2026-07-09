@@ -1,0 +1,45 @@
+[package]
+name = "camerata-mcp"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+version = "0.0.0"
+
+# Phase E (GAP-1) of the adapter ladder (docs/plans/2026-07-01_backend-headless-core.md):
+# the FIRST MCP adapter rung. An rmcp MCP server over stdio that exposes Camerata's
+# first-rung verbs as MCP tools, each a thin delegation to `camerata-client` (the typed
+# HTTP client over the BFF's /api/* routes). This proves the capability contract is
+# machine-consumable: an MCP host (e.g. Claude Code) can drive the SAME BFF surface the
+# Dioxus cockpit uses, with no camerata behavior crates linked in.
+#
+# NOT to be confused with `crates/gateway` — that is the layer-1 GOVERNANCE gate MCP
+# server (gated_write etc.). This crate is the outward-facing PRODUCT surface.
+
+[lints]
+workspace = true
+
+[lib]
+name = "camerata_mcp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "camerata-mcp"
+path = "src/main.rs"
+
+[dependencies]
+camerata-client = { path = "../client" }
+camerata-api-types = { path = "../api-types" }
+# Same version + features as crates/gateway — the rmcp macro API is version-sensitive,
+# so both in-repo MCP servers pin identically.
+rmcp = { version = "1.7", features = ["server", "transport-io"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = "1"
+anyhow = { workspace = true }
+
+[dev-dependencies]
+# Stands up a fake BFF so each tool's delegation through `camerata_client::Client`
+# (via `Client::with_base`) can be tested against a known request/response contract
+# without a real server — same idiom as `crates/client`'s own tests.
+wiremock = "0.6"

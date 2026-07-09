@@ -2,9 +2,10 @@
 //!
 //! The architect's control surface: brownfield onboarding (scan → propose a starter
 //! ruleset → audit → arm), findings triage, routines, and the local workspace. The
-//! desktop shell embeds the Axum BFF (`camerata-server`) and talks to it over localhost
-//! HTTP — the same server that runs in the cloud, so the UI never calls the backend
-//! crates in-process for cockpit data.
+//! desktop shell launches the Axum BFF (`camerata-server`) as a SUBPROCESS (or reuses a
+//! healthy one already on the port — see `server_process`) and talks to it over
+//! localhost HTTP — the same server that runs in the cloud, so the UI has no compile
+//! dependency on the backend crates and never calls them in-process for cockpit data.
 //!
 //! Run it with:
 //!     cargo run -p camerata-ui
@@ -18,6 +19,7 @@ mod credentials;
 pub mod loading;
 pub mod md;
 mod routines;
+mod server_process;
 mod style;
 mod terminal;
 mod toast;
@@ -28,7 +30,7 @@ mod workspace;
 
 use dioxus::prelude::*;
 
-/// Where the embedded BFF binds, and the URL the cockpit fetches from. The desktop
+/// Where the BFF subprocess binds, and the URL the cockpit fetches from. The desktop
 /// shell talks to this local server over HTTP (the same server that runs in the
 /// cloud later); the UI never calls the backend crates in-process for cockpit data.
 pub const BFF_ADDR: &str = "127.0.0.1:8787";
@@ -45,7 +47,7 @@ pub fn bff_base() -> String {
 
 fn main() {
     // Auto-load the gitignored .env at the repo root (and any parent), so the
-    // GitHub token etc. are available to the embedded BFF without exporting them.
+    // GitHub token etc. are inherited by the spawned BFF without exporting them.
     // Run from the repo dir (`cargo run -p camerata-ui`) so `.env` is found.
     let _ = dotenvy::dotenv();
     // Set the OS window title, install a native menu bar, and inject a
@@ -60,12 +62,13 @@ fn main() {
                 .with_window(WindowBuilder::new().with_title("Camerata Orchestrator"))
                 // Ensure closing the window CLOSES it (does not hide it — the macOS
                 // default for Dioxus when not set explicitly is WindowHides, which
-                // keeps the process alive and the embedded BFF bound on :8787).
+                // keeps the process alive and the BFF subprocess bound on :8787).
                 .with_close_behaviour(WindowCloseBehaviour::WindowCloses)
-                // Ensure the process exits when the last window closes.  The background
-                // BFF thread is NOT detached, so process exit drops it; the :8787 bind
-                // is released immediately.  Without this, a stale server shadows the
-                // freshly-built one on the next `cargo run`.
+                // Ensure the process exits when the last window closes.  The
+                // server_process exit watchdog notices the app is gone and SIGTERMs
+                // the spawned BFF, so the :8787 bind is released within ~a second.
+                // Without this, a hidden window keeps the process (and the stale
+                // server) alive to shadow the freshly-built one on the next `cargo run`.
                 .with_exits_when_last_window_closes(true)
                 // Google Fonts for "Courier Prime" (title/mono) and "Inter" (sans body),
                 // followed by the JS shim for Cmd-C / Cmd-X / Cmd-A.
@@ -74,42 +77,6 @@ fn main() {
         )
         .launch(App);
 }
-
-/// Kill whatever process(es) are currently holding `port`, so a fresh launch can
-/// take the socket over.  Used by the port-takeover retry loop in `App`: the newest
-/// Camerata launch must win, otherwise a stale server from a previous run shadows
-/// the freshly-built binary and the cockpit silently runs the OLD code.
-///
-/// On Unix (the app targets macOS) we ask `lsof -ti:<port>` for the holder PID(s)
-/// and `kill -9` each one.  These are instant probes, not long-running processes,
-/// so plain `std::process::Command` is fine (no async / kill_on_drop needed).  On
-/// non-Unix we can't reliably enumerate the holder, so this is a no-op and the
-/// caller simply retries / gives up.
-#[cfg(unix)]
-fn reclaim_port(port: &str) {
-    use std::process::Command;
-
-    let out = match Command::new("lsof").arg("-ti").arg(format!(":{port}")).output() {
-        Ok(out) => out,
-        Err(e) => {
-            eprintln!("[camerata-ui] could not run lsof to reclaim :{port}: {e}");
-            return;
-        }
-    };
-
-    let pids = String::from_utf8_lossy(&out.stdout);
-    for pid in pids.split_whitespace() {
-        match Command::new("kill").arg("-9").arg(pid).status() {
-            Ok(_) => eprintln!("[camerata-ui] killed stale :{port} holder pid {pid}"),
-            Err(e) => eprintln!("[camerata-ui] failed to kill pid {pid} on :{port}: {e}"),
-        }
-    }
-}
-
-/// Non-Unix fallback: we have no portable way to enumerate the port holder, so we
-/// can't reclaim it.  The caller just retries and ultimately gives up loudly.
-#[cfg(not(unix))]
-fn reclaim_port(_port: &str) {}
 
 /// Google Fonts <link> tags injected into <head> so that "Courier Prime"
 /// (title + monospace) and "Inter" (sans body) are available via the CDN.
@@ -286,84 +253,32 @@ fn app_menu_bar() -> dioxus::desktop::muda::Menu {
     menu
 }
 
-/// Root. Injects the global stylesheet, stands up the embedded BFF once, and shows the
+/// Root. Injects the global stylesheet, stands up the BFF subprocess once, and shows the
 /// Enterprise Cockpit.
 #[component]
 fn App() -> Element {
-    // Stand up the BFF once, on its own background Tokio runtime, so the desktop
-    // shell talks to the exact same HTTP server that will run in the cloud. If the
-    // port is already serving (e.g. a standalone `camerata-server`), this bind fails
-    // harmlessly and the cockpit uses the already-running one.
+    // Stand up the BFF once, as a SUBPROCESS (Phase G), so the desktop shell talks to
+    // the exact same HTTP server that will run in the cloud — without the UI compiling
+    // against the server crate.  `ensure_server_running` reuses a healthy BFF already
+    // on :8787 (e.g. a standalone `camerata-server`), otherwise spawns the resolved
+    // binary, waits for /api/health, and reclaims the port from unhealthy squatters
+    // (the old PORT-TAKEOVER retry loop, preserved in `server_process`).  The runtime
+    // lives only for the launch sequence; the guard is parked for the app's lifetime
+    // and the spawned child is SIGTERMed on app exit by the watchdog subprocess
+    // (tao exits via `process::exit`, so Drop alone would leak the server).
     use_hook(|| {
         std::thread::spawn(|| match tokio::runtime::Runtime::new() {
             Ok(rt) => rt.block_on(async {
-                // PORT TAKEOVER — the NEWEST launch must always win.
-                //
-                // The previous behaviour surrendered silently on `AddrInUse`: a stale
-                // Camerata server from an earlier run kept squatting on :8787 and the
-                // freshly-built binary quietly talked to the OLD code.  Closing +
-                // relaunching the app therefore did NOT reliably pick up new code.
-                //
-                // Instead, when the bind fails because the port is in use, we kill the
-                // process(es) holding it and retry, up to a small bounded number of
-                // attempts.  The fresh build wins; the stale server dies.
-                const MAX_ATTEMPTS: u32 = 3;
-                for attempt in 1..=MAX_ATTEMPTS {
-                    let err = match camerata_server::serve(BFF_ADDR).await {
-                        // serve() only returns on shutdown/error; Ok means a clean exit.
-                        Ok(()) => return,
-                        Err(e) => e,
-                    };
-
-                    // Is this an "address already in use" failure?  `AddrInUse` surfaces
-                    // as an `std::io::Error`; the Display string contains "address
-                    // already in use" (Linux) / "Address already in use" (macOS) or the
-                    // OS equivalent.  Match on the lowercased string to stay portable.
-                    let msg = err.to_string();
-                    let port_in_use = msg.to_lowercase().contains("address already in use")
-                        || msg.to_lowercase().contains("addr in use");
-
-                    if !port_in_use {
-                        // Some other failure (e.g. runtime error) — not recoverable by
-                        // reclaiming the port.  Report and stop.
-                        eprintln!("[camerata-ui] embedded BFF exited: {err}");
-                        return;
-                    }
-
-                    if attempt < MAX_ATTEMPTS {
-                        // Reclaim the port from whatever is squatting on it, then retry.
-                        let port = BFF_ADDR.rsplit(':').next().unwrap_or("8787");
-                        eprintln!(
-                            "[camerata-ui] :{port} in use (attempt {attempt}/{MAX_ATTEMPTS}); \
-                             killing stale holder(s) and retrying"
-                        );
-                        reclaim_port(port);
-                        // Give the OS a moment to release the socket after the kill.
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                        continue;
-                    }
-
-                    // Out of attempts: the port is still held and we could not take it
-                    // over.  Fail loudly so it's obvious the cockpit is NOT running this
-                    // build's code.
-                    eprintln!(
-                        "\n\
-                         ╔══════════════════════════════════════════════════════════════╗\n\
-                         ║  [camerata-ui] FATAL: :{} ALREADY IN USE                 ║\n\
-                         ║                                                              ║\n\
-                         ║  A stale Camerata server from a previous run is still        ║\n\
-                         ║  holding the port and could not be reclaimed after retries.  ║\n\
-                         ║  This build's code is NOT running —                          ║\n\
-                         ║  the cockpit is talking to the OLD server.                   ║\n\
-                         ║                                                              ║\n\
-                         ║  Fix: quit ALL Camerata instances, then relaunch.            ║\n\
-                         ╚══════════════════════════════════════════════════════════════╝\n",
-                        BFF_ADDR
-                    );
-                    return;
+                let cfg = server_process::ServerLaunchConfig::for_addr(BFF_ADDR);
+                match server_process::ensure_server_running(&cfg).await {
+                    Ok(guard) => server_process::hold_for_app_lifetime(guard),
+                    // ensure_server_running already exhausted the takeover retries;
+                    // its error carries the loud FATAL banner.  Print and give up —
+                    // the cockpit will show its connection-health toasts.
+                    Err(e) => eprintln!("{e}"),
                 }
             }),
-            Err(e) => eprintln!("[camerata-ui] could not start BFF runtime: {e}"),
+            Err(e) => eprintln!("[camerata-ui] could not start BFF launcher runtime: {e}"),
         });
     });
 

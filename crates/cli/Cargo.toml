@@ -26,14 +26,26 @@ camerata-worktracker = { path = "../worktracker" }
 camerata-maintenance = { path = "../maintenance" }
 camerata-deploy = { path = "../deploy" }
 camerata-server = { path = "../server" }
+# Phase F (GAP-7): the HTTP-adapter subcommands (stories/run/uows/assign/start-run) go
+# through the same typed client the MCP adapter (Phase E) uses — never in-process calls
+# into camerata-server for these verbs.
+camerata-client = { path = "../client" }
+camerata-api-types = { path = "../api-types" }
 anyhow.workspace = true
 tokio = { workspace = true }
 async-trait = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
 # Auto-load a gitignored .env (so `cargo run -p camerata -- worktracker-live` etc.
 # pick up the GitHub token without exporting it).
 dotenvy = "0.15"
+# Arg parsing (Phase F). Same version/features as tools/corpus-verifier's clap pin.
+clap = { version = "4", features = ["derive"] }
 
 [dev-dependencies]
 tokio = { workspace = true }
+# Stands up a fake BFF so the HTTP-adapter subcommand handlers (`src/http_cmd.rs`) can be
+# tested against a known request/response contract without a real server — same idiom as
+# `crates/client` and `crates/mcp`.
+wiremock = "0.6"

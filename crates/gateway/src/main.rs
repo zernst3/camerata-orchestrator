@@ -43,6 +43,28 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use tracing_subscriber::EnvFilter;
+
+/// Install the process-global `tracing` subscriber, once (Phase H1 foundation).
+///
+/// MUST write to STDERR, never stdout: this binary's stdout IS the MCP stdio
+/// transport (`rmcp`'s `stdio()`), so any log line written to stdout would corrupt
+/// the protocol stream the orchestrator is parsing. This mirrors every existing
+/// `eprintln!` trace already in this file.
+///
+/// Filter precedence: `CAMERATA_LOG` env var, then the conventional `RUST_LOG`, then
+/// a hardcoded `"info"` default. Uses `try_init()` (not `init()`) so a double-init —
+/// this binary is routinely spawned as a subprocess of `camerata-server`, and may
+/// itself be re-exec'd or tested in-process — is a silent no-op instead of a panic.
+fn init_tracing() {
+    let filter = EnvFilter::try_from_env("CAMERATA_LOG")
+        .or_else(|_| EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init();
+}
 
 // The spawn modules now live in the gateway LIBRARY (so the in-process server path can
 // reuse the SAME gated `run_delegated`/`run_fan_out` primitives). The binary references
@@ -1050,6 +1072,7 @@ impl ServerHandler for Gateway {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    init_tracing();
     let subset = load_rule_subset();
     eprintln!(
         "[gateway] Camerata Rust MCP governance gateway up (rmcp 1.7, stdio); active subset: {}",
@@ -1147,7 +1170,11 @@ mod gate_sink_tests {
     }
 
     // Serialize the env-mutating test so it is order-independent within the binary.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // `pub(super)` (not private) so other env-mutating test modules in this file
+    // (e.g. `mcp_gated_write_boundary_tests`) can share the SAME lock rather than
+    // adding a second, uncoordinated mutex that would race this one over the shared
+    // `CAMERATA_*` env vars.
+    pub(super) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
     fn sink_path_prefers_explicit_env_then_derives_from_rules_dir() {
@@ -1526,5 +1553,541 @@ mod integration_gate_module_tests {
             check_integration_gate(&input),
             IntegrationGateResult::Pending { .. }
         ));
+    }
+}
+
+// ─── Phase T: gate DENIAL verified at the real MCP tool-method boundary ───────────────────
+//
+// Every other gate test in this file either evaluates the PURE `evaluate_call` function
+// (no filesystem, no MCP wrapper) or exercises a different tool (`ask_clarification`).
+// These tests call the REAL `#[tool] Gateway::gated_write` method — the exact async fn
+// `rmcp`'s tool router dispatches an `mcp__camerata__gated_write` call to — and assert BOTH
+// the returned string AND the on-disk effect (or lack of one). This is the pure-function
+// coverage lifted one layer up: same rule arms, but now proven at the boundary an agent
+// actually calls through.
+//
+// # Coverage map (rule / case -> what's asserted)
+//
+// | Case                                   | Rule fired                        | Subset used   |
+// |-----------------------------------------|------------------------------------|---------------|
+// | forbidden path                          | GOV-1                              | full floor    |
+// | absolute path outside jail              | JAIL                                | full floor    |
+// | `..` climbing above the jail root       | JAIL                                | full floor    |
+// | hardcoded credential in content         | SEC-NO-HARDCODED-SECRETS-1          | full floor    |
+// | SQL built by concat/interpolation       | SEC-NO-RAW-SQL-CONCAT-1             | full floor    |
+// | secret in a URL query string            | ARCH-NO-SECRETS-IN-URL-1            | full floor    |
+// | `..` path SEGMENT (in-jail but flagged)  | SEC-NO-PATH-ESCAPE-1                | full floor    |
+// | `.git` path segment                     | SEC-NO-PATH-ESCAPE-1                | full floor    |
+// | real `.env` file                        | SEC-NO-SECRET-FILES-1               | full floor    |
+// | PEM private-key block                   | SEC-NO-PRIVATE-KEY-1                | ISOLATED (*)  |
+// | vendor credential token (sk-ant-…)       | SEC-NO-VENDOR-TOKEN-1               | full floor    |
+// | secret-bearing file extension (.p12)    | SEC-NO-SECRET-FILE-1                | ISOLATED (*)  |
+// | TLS/cert verification disabled          | SEC-NO-DISABLED-TLS-1               | full floor    |
+// | unsafe deserialization call              | SEC-NO-UNSAFE-DESERIALIZATION-1     | full floor    |
+// | write into `.camerata/`                 | SEC-NO-CAMERATA-CONFIG-1            | full floor    |
+// | git working-tree-mutating command       | SEC-NO-GIT-STATE-MUTATION-1         | full floor    |
+// | clean, compliant write                  | (ALLOWED control)                   | full floor    |
+// | one deny + one allow                    | sink faithfully records both        | full floor    |
+// | path both out-of-jail AND rule-forbidden | JAIL wins (checked before rules)   | full floor    |
+//
+// (*) SEC-NO-PRIVATE-KEY-1 and SEC-NO-SECRET-FILE-1 are each subsumed, under the FULL
+// enforced floor, by an earlier-ordered rule that matches the identical trigger (the
+// hardcoded-secrets arm's PEM alternative, and SEC-NO-SECRET-FILES-1's superset of key
+// extensions, respectively) — `evaluate_call` returns the FIRST matching rule in subset
+// order, so the full-floor gate would report the EARLIER rule's id, not theirs. This is
+// the same masking `camerata_fleet::gate_probe` already documents for the pure-function
+// layer (see `crates/fleet/src/gate_probe.rs`'s `Layer1Check::isolated_denied`). To prove
+// each arm ITSELF still denies at the real tool-method boundary (not just that the full
+// gate denies, potentially via a neighbour), these two cases construct the `Gateway` with
+// a single-rule subset — still the real `gated_write` method, just not the full floor.
+#[cfg(test)]
+mod mcp_gated_write_boundary_tests {
+    use super::gate_sink_tests::ENV_LOCK;
+    use super::*;
+
+    /// RAII guard: removes every env var it set, even if the test panics on an assertion —
+    /// so one failing test can never leak `CAMERATA_*` env state into the next test that
+    /// runs under the shared [`ENV_LOCK`].
+    #[derive(Default)]
+    struct EnvGuard {
+        keys: Vec<&'static str>,
+    }
+
+    impl EnvGuard {
+        fn set(&mut self, key: &'static str, val: impl AsRef<std::ffi::OsStr>) {
+            std::env::set_var(key, val);
+            self.keys.push(key);
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for key in &self.keys {
+                std::env::remove_var(key);
+            }
+        }
+    }
+
+    /// A fresh, empty, canonicalized temp directory to use as the jail root.
+    fn make_jail(label: &str) -> std::path::PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "cam-gw-mcp-{label}-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&root).expect("create jail dir");
+        std::fs::canonicalize(&root).expect("canonicalize jail dir")
+    }
+
+    /// Call the REAL `#[tool] gated_write` method (not `evaluate_call`, not a mock).
+    async fn call_gated_write(gw: &Gateway, path: &str, content: &str) -> String {
+        gw.gated_write(Parameters(WriteArgs {
+            path: path.to_string(),
+            content: content.to_string(),
+        }))
+        .await
+    }
+
+    // ── 1. GOV-1: forbidden path ───────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn forbidden_path_is_denied_and_never_written() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("gov1");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        let out = call_gated_write(&gw, "forbidden/leak.rs", "// agent tried to write here").await;
+
+        assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
+        assert!(out.contains("GOV-1"), "expected GOV-1 to fire, got: {out}");
+        assert!(
+            !jail.join("forbidden/leak.rs").exists(),
+            "a denied write must never touch disk"
+        );
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 2. JAIL: absolute path outside the jail ────────────────────────────────────────
+    #[tokio::test]
+    async fn absolute_path_outside_jail_is_denied_by_jail_not_by_a_rule() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("jail-abs");
+        let outside = make_jail("jail-abs-outside");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        let target = outside.join("leak.txt");
+        let out = call_gated_write(&gw, target.to_str().unwrap(), "harmless content").await;
+
+        assert!(
+            out.starts_with("DENIED [JAIL"),
+            "expected a JAIL denial, got: {out}"
+        );
+        assert!(!target.exists(), "a jail-denied write must never touch disk");
+
+        let _ = std::fs::remove_dir_all(&jail);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    // ── 3. JAIL: `..` traversal climbing entirely above the jail root ─────────────────
+    #[tokio::test]
+    async fn dotdot_traversal_escaping_the_jail_root_is_denied() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("jail-dotdot");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        // Climbs out of the jail root entirely (not just a `..` that stays inside it).
+        let out = call_gated_write(&gw, "../evil-sibling.txt", "harmless content").await;
+
+        assert!(
+            out.starts_with("DENIED [JAIL"),
+            "expected a JAIL denial, got: {out}"
+        );
+        let escaped = jail.parent().unwrap().join("evil-sibling.txt");
+        assert!(!escaped.exists(), "a jail-denied write must never touch disk");
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 4. SEC-NO-HARDCODED-SECRETS-1 ──────────────────────────────────────────────────
+    #[tokio::test]
+    async fn hardcoded_secret_in_content_is_denied_and_never_written() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("secrets");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        let out = call_gated_write(
+            &gw,
+            "sub/config.rs",
+            "let t = \"ghp_ABCDEFGHIJ1234567890abcdefghij12\";",
+        )
+        .await;
+
+        assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
+        assert!(out.contains("SEC-NO-HARDCODED-SECRETS-1"), "got: {out}");
+        assert!(!jail.join("sub/config.rs").exists());
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 5. SEC-NO-RAW-SQL-CONCAT-1 ─────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn raw_sql_concat_in_content_is_denied_and_never_written() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("sql-concat");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        let out = call_gated_write(
+            &gw,
+            "sub/db.rs",
+            "let q = \"SELECT * FROM users WHERE id = {}\";",
+        )
+        .await;
+
+        assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
+        assert!(out.contains("SEC-NO-RAW-SQL-CONCAT-1"), "got: {out}");
+        assert!(!jail.join("sub/db.rs").exists());
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 6. ARCH-NO-SECRETS-IN-URL-1 ────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn secret_in_url_content_is_denied_and_never_written() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("url-secret");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        let out = call_gated_write(
+            &gw,
+            "sub/api.rs",
+            "let e = \"https://api.example.com/data?access_token=abc123def456ghi789\";",
+        )
+        .await;
+
+        assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
+        assert!(out.contains("ARCH-NO-SECRETS-IN-URL-1"), "got: {out}");
+        assert!(!jail.join("sub/api.rs").exists());
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 7. SEC-NO-PATH-ESCAPE-1 via a `..` path SEGMENT (jail-legal, rule-forbidden) ──
+    #[tokio::test]
+    async fn dotdot_segment_that_stays_in_jail_is_denied_by_the_path_escape_rule() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("path-escape-dotdot");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        // Resolves (lexically) to `<jail>/secret.txt` — still INSIDE the jail, so the
+        // structural jail check passes; the rule fires on the raw path string's `..`
+        // segment, which the jail check does not police (it only cares about the
+        // resolved destination).
+        let out = call_gated_write(&gw, "sub/../secret.txt", "just a normal file").await;
+
+        assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
+        assert!(out.contains("SEC-NO-PATH-ESCAPE-1"), "got: {out}");
+        assert!(!jail.join("secret.txt").exists());
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 8. SEC-NO-PATH-ESCAPE-1 via a `.git` path segment ──────────────────────────────
+    #[tokio::test]
+    async fn git_directory_segment_is_denied_by_the_path_escape_rule() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("path-escape-git");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        let out = call_gated_write(&gw, "repo/.git/hooks/pre-commit", "#!/bin/sh\necho hi").await;
+
+        assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
+        assert!(out.contains("SEC-NO-PATH-ESCAPE-1"), "got: {out}");
+        assert!(!jail.join("repo/.git/hooks/pre-commit").exists());
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 9. SEC-NO-SECRET-FILES-1: a real `.env` ────────────────────────────────────────
+    #[tokio::test]
+    async fn real_dotenv_file_is_denied_and_never_written() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("dotenv");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        let out = call_gated_write(&gw, "config/.env", "API_SECRET=supersecretvalue").await;
+
+        assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
+        assert!(out.contains("SEC-NO-SECRET-FILES-1"), "got: {out}");
+        assert!(!jail.join("config/.env").exists());
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 10. SEC-NO-PRIVATE-KEY-1 (ISOLATED subset — see the masking note above) ───────
+    #[tokio::test]
+    async fn pem_private_key_block_is_denied_in_isolation_and_never_written() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("private-key");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        // Full-floor note: SEC-NO-HARDCODED-SECRETS-1 (earlier in registry order) also
+        // matches a PEM header, so under the full floor THIS test would observe
+        // "SEC-NO-HARDCODED-SECRETS-1" instead — a real masking, not a bug (both arms
+        // still each deny). Isolating the subset proves the SEC-NO-PRIVATE-KEY-1 arm
+        // itself denies at the real tool-method boundary.
+        let gw = Gateway::with_rules(vec![RuleId("SEC-NO-PRIVATE-KEY-1".to_string())]);
+        let out = call_gated_write(
+            &gw,
+            "sub/keys.rs",
+            "const K: &str = \"-----BEGIN RSA PRIVATE KEY-----\";",
+        )
+        .await;
+
+        assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
+        assert!(out.contains("SEC-NO-PRIVATE-KEY-1"), "got: {out}");
+        assert!(!jail.join("sub/keys.rs").exists());
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 11. SEC-NO-VENDOR-TOKEN-1 ──────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn vendor_credential_token_is_denied_and_never_written() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("vendor-token");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        let out = call_gated_write(
+            &gw,
+            "sub/vendor.rs",
+            "let k = \"sk-ant-api03-ABCDEFGHIJKLMNOPQRST\";",
+        )
+        .await;
+
+        assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
+        assert!(out.contains("SEC-NO-VENDOR-TOKEN-1"), "got: {out}");
+        assert!(!jail.join("sub/vendor.rs").exists());
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 12. SEC-NO-SECRET-FILE-1 (ISOLATED subset — see the masking note above) ───────
+    #[tokio::test]
+    async fn secret_bearing_file_extension_is_denied_in_isolation_and_never_written() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("secret-file-type");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        // Full-floor note: SEC-NO-SECRET-FILES-1 (earlier in registry order) also
+        // matches `.p12`, so this rule is subsumed under the full floor. Isolating the
+        // subset proves the SEC-NO-SECRET-FILE-1 arm itself denies at the boundary.
+        let gw = Gateway::with_rules(vec![RuleId("SEC-NO-SECRET-FILE-1".to_string())]);
+        let out = call_gated_write(&gw, "tls/prod.p12", "binary keystore bytes").await;
+
+        assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
+        assert!(out.contains("SEC-NO-SECRET-FILE-1"), "got: {out}");
+        assert!(!jail.join("tls/prod.p12").exists());
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 13. SEC-NO-DISABLED-TLS-1 ──────────────────────────────────────────────────────
+    #[tokio::test]
+    async fn disabled_tls_verification_is_denied_and_never_written() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("disabled-tls");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        let out = call_gated_write(&gw, "sub/http.rs", "requests.get(url, verify=False)").await;
+
+        assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
+        assert!(out.contains("SEC-NO-DISABLED-TLS-1"), "got: {out}");
+        assert!(!jail.join("sub/http.rs").exists());
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 14. SEC-NO-UNSAFE-DESERIALIZATION-1 ────────────────────────────────────────────
+    #[tokio::test]
+    async fn unsafe_deserialization_call_is_denied_and_never_written() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("unsafe-deser");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        let out = call_gated_write(&gw, "sub/loader.rs", "data = pickle.loads(untrusted)").await;
+
+        assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
+        assert!(out.contains("SEC-NO-UNSAFE-DESERIALIZATION-1"), "got: {out}");
+        assert!(!jail.join("sub/loader.rs").exists());
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 15. SEC-NO-CAMERATA-CONFIG-1 ───────────────────────────────────────────────────
+    #[tokio::test]
+    async fn camerata_config_write_is_denied_and_never_written() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("camerata-config");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        let out = call_gated_write(&gw, "sub/.camerata/checks.toml", "[gate]\ndisabled = true").await;
+
+        assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
+        assert!(out.contains("SEC-NO-CAMERATA-CONFIG-1"), "got: {out}");
+        assert!(!jail.join("sub/.camerata/checks.toml").exists());
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 16. SEC-NO-GIT-STATE-MUTATION-1 ────────────────────────────────────────────────
+    #[tokio::test]
+    async fn git_state_mutating_command_in_content_is_denied_and_never_written() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("git-mutation");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        let out = call_gated_write(&gw, "sub/scripts/reset.sh", "git reset --hard HEAD").await;
+
+        assert!(out.starts_with("DENIED ["), "expected a denial, got: {out}");
+        assert!(out.contains("SEC-NO-GIT-STATE-MUTATION-1"), "got: {out}");
+        assert!(!jail.join("sub/scripts/reset.sh").exists());
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 17. Allow control: a clean, in-jail, rule-compliant write ─────────────────────
+    #[tokio::test]
+    async fn clean_write_is_allowed_and_lands_on_disk_with_exact_content() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("allow-control");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        // `gated_write` shells out to `std::fs::write`, which (like a real editor tool)
+        // does not create missing parent directories — the parent must already exist,
+        // exactly as it would in a real checked-out worktree.
+        std::fs::create_dir_all(jail.join("sub")).expect("create parent dir");
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        let content = "pub fn feature() {}\n";
+        let out = call_gated_write(&gw, "sub/feature.rs", content).await;
+
+        assert!(out.starts_with("ALLOWED"), "expected an allow, got: {out}");
+        let written = std::fs::read_to_string(jail.join("sub/feature.rs"))
+            .expect("the gate must have written the file");
+        assert_eq!(written, content, "the file must hold EXACTLY the written content");
+
+        let _ = std::fs::remove_dir_all(&jail);
+    }
+
+    // ── 18. Sink assertion: one deny + one allow, faithfully recorded ─────────────────
+    #[tokio::test]
+    async fn sink_faithfully_records_a_deny_and_an_allow_verdict() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("sink");
+        let sink_dir = std::env::temp_dir().join(format!(
+            "cam-gw-mcp-sink-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&sink_dir).expect("create sink dir");
+        let sink = sink_dir.join("gate-events.jsonl");
+
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+        env.set(GATE_EVENTS_FILE_ENV, &sink);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        let deny_out = call_gated_write(&gw, "forbidden/leak.rs", "// denied content").await;
+        assert!(deny_out.starts_with("DENIED ["));
+        let allow_out = call_gated_write(&gw, "sub/ok.rs", "pub fn ok() {}").await;
+        assert!(allow_out.starts_with("ALLOWED"));
+
+        let text = std::fs::read_to_string(&sink).expect("sink file must exist");
+        let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+        assert_eq!(lines.len(), 2, "one record per gated_write call: {lines:?}");
+
+        let deny_rec: GateDecisionRecord =
+            serde_json::from_str(lines[0]).expect("deny record must be valid JSON");
+        assert_eq!(deny_rec.kind, "gate");
+        assert_eq!(deny_rec.verdict, "deny");
+        assert_eq!(deny_rec.target, "forbidden/leak.rs");
+        assert!(deny_rec.rule.as_deref().unwrap_or_default().contains("GOV-1"));
+        assert!(
+            deny_rec.content_hash.is_some(),
+            "a deny record must carry the content hash (never raw content)"
+        );
+
+        let allow_rec: GateDecisionRecord =
+            serde_json::from_str(lines[1]).expect("allow record must be valid JSON");
+        assert_eq!(allow_rec.kind, "gate");
+        assert_eq!(allow_rec.verdict, "allow");
+        assert_eq!(allow_rec.target, "sub/ok.rs");
+        assert!(allow_rec.rule.is_none());
+        assert!(
+            allow_rec.content_hash.is_none(),
+            "an allow record must carry no content hash"
+        );
+
+        let _ = std::fs::remove_dir_all(&jail);
+        let _ = std::fs::remove_dir_all(&sink_dir);
+    }
+
+    // ── 19. Ordering: jail escape AND rule-forbidden — JAIL must win ──────────────────
+    #[tokio::test]
+    async fn jail_escape_takes_precedence_over_a_rule_denial() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let jail = make_jail("ordering");
+        let outside = make_jail("ordering-outside");
+        let mut env = EnvGuard::default();
+        env.set(WORKTREE_ROOT_ENV, &jail);
+
+        let gw = Gateway::with_rules(enforced_gate_rules());
+        // BOTH conditions apply: absolute + outside the jail (JAIL), AND the path
+        // contains "forbidden" (GOV-1 would also deny it, in-jail). `gated_write` checks
+        // the jail FIRST and returns before ever calling `self.evaluate`, so the rule
+        // engine never runs at all for this call.
+        let target = outside.join("forbidden-leak.txt");
+        let out = call_gated_write(&gw, target.to_str().unwrap(), "harmless content").await;
+
+        assert!(
+            out.starts_with("DENIED [JAIL"),
+            "jail must win over the rule engine, got: {out}"
+        );
+        assert!(!out.contains("GOV-1"), "the rule engine must not have run at all: {out}");
+        assert!(!target.exists());
+
+        let _ = std::fs::remove_dir_all(&jail);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 }

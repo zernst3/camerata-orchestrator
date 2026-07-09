@@ -60,7 +60,7 @@ use camerata_fleet::{governed_role, locate_gateway_bin};
 use camerata_worktracker::investigation::DecisionRecord;
 
 use crate::api_agent_driver::build_agent_driver;
-use crate::llm::Completer;
+use crate::llm::LlmPort;
 use crate::run::{live_mode_enabled, GateEvent, RunStatus, RunStore};
 use crate::review_agent::{run_l3_review, L3ReviewInput, ReviewVerdict};
 use crate::uow::UowStore;
@@ -126,6 +126,57 @@ pub(crate) fn read_memory_proposals(session_dir: &std::path::Path) -> Vec<Memory
         .collect()
 }
 
+/// Record one governance event (Phase H2), fail-soft (mirrors `AppState::record_governance`
+/// exactly — this module has no `AppState` in scope, only the `Option<Arc<GovernanceLog>>`
+/// threaded in as a parameter). A `None` log is a silent no-op; a write error is
+/// `tracing::warn!`-logged and swallowed, never surfacing to the run.
+async fn record_governance(
+    log: &Option<Arc<camerata_persistence::GovernanceLog>>,
+    event: camerata_persistence::GovernanceEvent,
+) {
+    let Some(log) = log.as_ref() else {
+        return;
+    };
+    if let Err(e) = log.record(event).await {
+        tracing::warn!(error = %e, "failed to record governance event");
+    }
+}
+
+/// Record an `escalation_raised` governance event for one agent-raised escalation request —
+/// shared by BOTH the `SoftFlag` (run continues, logged only) and `HardPause` (run pauses)
+/// branches, so the durable audit row is identical regardless of how the severity resolves.
+/// `severity_label` is `"soft-flag"` | `"hard-pause"`.
+///
+/// The `reason` carried is the agent's OWN justification (`req.justification`) verbatim —
+/// this is the specific audit-trail value wanted here: the agent's stated reasoning for
+/// stopping, not a paraphrase. `condition_met` (what the agent says triggered the rule) and
+/// the resolved severity are carried in `detail` as structured JSON.
+async fn record_escalation_raised(
+    governance_log: &Option<Arc<camerata_persistence::GovernanceLog>>,
+    run_id: &str,
+    story_id: &str,
+    req: &EscalationRequestRecord,
+    severity_label: &str,
+) {
+    // HardPause is the more consequential outcome (the run stops); SoftFlag is routine.
+    let event = if severity_label == "hard-pause" {
+        camerata_persistence::GovernanceEvent::warn(run_id.to_string(), "escalation_raised", "agent")
+    } else {
+        camerata_persistence::GovernanceEvent::info(run_id.to_string(), "escalation_raised", "agent")
+    }
+    .with_story_id(story_id.to_string())
+    .with_rule_id(req.rule_id.clone())
+    .with_reason(req.justification.clone())
+    .with_detail(
+        serde_json::json!({
+            "severity": severity_label,
+            "condition_met": req.condition_met,
+        })
+        .to_string(),
+    );
+    record_governance(governance_log, event).await;
+}
+
 /// Map a proposal's `kind` string to the typed [`crate::project::MemoryKind`] (default Decision).
 fn memory_kind_from_str(s: &str) -> crate::project::MemoryKind {
     match s {
@@ -149,7 +200,7 @@ pub struct L3ReviewBundle {
     /// The model to run the L3 reviewer on.
     pub model: String,
     /// The LLM seam to use (typically `Arc<Llm>` from `AppState::llm()`).
-    pub llm: Arc<dyn Completer>,
+    pub llm: Arc<dyn LlmPort>,
 }
 
 /// Bundle for the integration-gate check (R3.e / GAP-6).
@@ -181,7 +232,7 @@ pub struct IntegrationGateBundle {
     /// The model to use for the optional prose-contract advisory pass.
     pub model: String,
     /// The LLM seam. `None` disables the advisory pass (deterministic-only).
-    pub llm: Option<Arc<dyn Completer>>,
+    pub llm: Option<Arc<dyn LlmPort>>,
 }
 
 /// One in-scope repo's worktree, branch, and base commit — the per-repo wiring
@@ -962,6 +1013,12 @@ pub async fn execute_dev_implement_run(
     // (`None` skips memory capture, e.g. project-less test runs).
     projects: crate::project::ProjectStore,
     project_id: Option<String>,
+    // Phase H2: the readable governance-event audit trail. `None` in tests / when
+    // `AppState::from_env` couldn't open it (fail-soft — see `AppState::record_governance`).
+    // Threaded onto the built agent driver (so `agent_step`/`gate_allow`/`gate_deny` are
+    // recorded per tool call) AND used directly here for `escalation_raised` and the
+    // Layer-2 `check_failed`/`layer2_bounce` events.
+    governance_log: Option<Arc<camerata_persistence::GovernanceLog>>,
 ) {
     runs.set_status(&run_id, RunStatus::Executing, false);
     let seq = AtomicUsize::new(0);
@@ -1170,6 +1227,10 @@ pub async fn execute_dev_implement_run(
         // when its work meets a selected rule's escalation condition (the rule-agnostic path).
         true,
         Some(on_activity),
+        // Phase H2: the top-level implementer driver IS wired into the governance log (the
+        // priority deny site) — pairs the log with THIS run's id so every gated_write
+        // allow/deny + agent_step this driver executes lands under `run_id`.
+        governance_log.clone().map(|log| (log, run_id.clone())),
     ) {
         Ok(d) => d,
         Err(e) => {
@@ -1290,12 +1351,21 @@ pub async fn execute_dev_implement_run(
                         },
                     );
                     uow.append_history(&story_id, "dev_implement", &flag);
+                    // Phase H2: record the raise even though the run continues — the agent's
+                    // own justification is the durable audit value here, not the outcome.
+                    record_escalation_raised(&governance_log, &run_id, &story_id, &req, "soft-flag")
+                        .await;
                     // Clear the sink so this same flag is not re-read on the next pass.
                     let _ = std::fs::remove_file(
                         spawn._dir.path().join("escalation-requests.jsonl"),
                     );
                 }
                 camerata_rules::EscalationSeverity::HardPause => {
+                    // Phase H2: record the raise + the agent's REASONING (its justification)
+                    // before we act on it — this is the audit-trail value Zach specifically
+                    // wants captured, independent of how the human later resolves it.
+                    record_escalation_raised(&governance_log, &run_id, &story_id, &req, "hard-pause")
+                        .await;
                     // PAUSE for human review: checkpoint + UoW review escalation + AwaitingReview,
                     // the SAME engine the test-tamper backstop uses. The worktree is left intact.
                     let just = if req.justification.trim().is_empty() {
@@ -1552,6 +1622,22 @@ pub async fn execute_dev_implement_run(
                         content_hash: None,
                     },
                 );
+                // Phase H2: durable record of the real toolchain failure. `reason` is the
+                // readable rule summary; `detail` carries the (already truncation-bounded)
+                // verbatim diagnostics so the audit trail shows WHY, not just a rule id.
+                record_governance(
+                    &governance_log,
+                    camerata_persistence::GovernanceEvent::warn(
+                        run_id.clone(),
+                        "check_failed",
+                        "system",
+                    )
+                    .with_story_id(story_id.clone())
+                    .with_rule_id(rule_summary.clone())
+                    .with_reason(format!("Stage 1/1 failed layer-2: {rule_summary}"))
+                    .with_detail(serde_json::json!({ "diagnostics": diagnostics }).to_string()),
+                )
+                .await;
                 iteration += 1;
                 if iteration >= max_iterations {
                     runs.push_event(
@@ -1587,6 +1673,24 @@ pub async fn execute_dev_implement_run(
                         content_hash: None,
                     },
                 );
+                // Phase H2: the bounce-and-revise decision itself, distinct from `check_failed`
+                // above (which recorded the raw failure) — this is the "sent back for pass N"
+                // moment, one row per real bounce (not per loop tick).
+                record_governance(
+                    &governance_log,
+                    camerata_persistence::GovernanceEvent::warn(
+                        run_id.clone(),
+                        "layer2_bounce",
+                        "system",
+                    )
+                    .with_story_id(story_id.clone())
+                    .with_rule_id(rule_summary.clone())
+                    .with_reason(format!(
+                        "bounce-and-revise pass {iteration}/{max_iterations} — sent back to fix {rule_summary}"
+                    ))
+                    .with_detail(serde_json::json!({ "diagnostics": diagnostics }).to_string()),
+                )
+                .await;
                 let _ = crate::workspace::snapshot_worktree(&dir, &format!("dev-implement iteration {}", iteration - 1)).await;
                 // LIFECYCLE-5: feed the failure back into the NEXT pass's prompt at the tail.
                 // The Layer-2 check emits the violated rule ids AND the verbatim toolchain
@@ -2544,6 +2648,7 @@ mod tests {
             Vec::new(), // no in-scope agent-driven escalations in this test
             crate::project::ProjectStore::new(),
             None, // no project to capture memory into in this test
+            None, // governance_log — not exercised in this unit test
         )
         .await;
 
@@ -2577,6 +2682,76 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Phase H2: governance-event audit trail ─────────────────────────────────
+
+    /// An escalation the agent raises with a HARD-PAUSE severity records an
+    /// `escalation_raised` governance row carrying the agent's OWN justification text
+    /// verbatim (not a paraphrase, not a hash) — the specific audit-trail value wanted:
+    /// the agent's reasoning for stopping. Exercises `record_escalation_raised` directly
+    /// (the same helper both the `SoftFlag` and `HardPause` branches of the real
+    /// bounce-and-revise loop call), against a real in-memory `GovernanceLog`.
+    #[tokio::test]
+    async fn escalation_raised_records_the_agents_justification() {
+        let log = std::sync::Arc::new(
+            camerata_persistence::GovernanceLog::open_in_memory()
+                .await
+                .expect("open in-memory governance log"),
+        );
+        let governance_log = Some(log.clone());
+        let req = EscalationRequestRecord {
+            rule_id: "ARCH-ONE-WAY-DOOR-1".to_string(),
+            condition_met: "proposed a new public API surface".to_string(),
+            justification: "I'm adding a new `pub trait Exporter` because the existing \
+                            `Store` trait can't express streaming writes without breaking \
+                            every implementor; this is the smallest surface that covers it."
+                .to_string(),
+        };
+
+        record_escalation_raised(&governance_log, "run-esc-1", "acme/api#7", &req, "hard-pause")
+            .await;
+
+        let events = log.by_run("run-esc-1").await.expect("by_run");
+        assert_eq!(events.len(), 1);
+        let ev = &events[0];
+        assert_eq!(ev.kind, "escalation_raised");
+        assert_eq!(ev.severity, "warn", "hard-pause escalations are warn-severity");
+        assert_eq!(ev.actor, "agent");
+        assert_eq!(ev.story_id.as_deref(), Some("acme/api#7"));
+        assert_eq!(ev.rule_id.as_deref(), Some("ARCH-ONE-WAY-DOOR-1"));
+        // The readable reason IS the agent's justification, verbatim.
+        assert_eq!(ev.reason.as_deref(), Some(req.justification.as_str()));
+        let detail: serde_json::Value =
+            serde_json::from_str(ev.detail.as_deref().expect("detail present")).unwrap();
+        assert_eq!(detail["severity"], "hard-pause");
+        assert_eq!(detail["condition_met"], "proposed a new public API surface");
+    }
+
+    /// The SOFT-FLAG severity records the same `escalation_raised` kind but at `info`
+    /// severity (the run continues; it's routine, not a stop-the-world event).
+    #[tokio::test]
+    async fn soft_flag_escalation_raised_is_info_severity() {
+        let log = std::sync::Arc::new(
+            camerata_persistence::GovernanceLog::open_in_memory()
+                .await
+                .expect("open in-memory governance log"),
+        );
+        let governance_log = Some(log.clone());
+        let req = EscalationRequestRecord {
+            rule_id: "STYLE-ADVISORY-1".to_string(),
+            condition_met: "minor style deviation".to_string(),
+            justification: "logged for visibility; continuing".to_string(),
+        };
+
+        record_escalation_raised(&governance_log, "run-esc-2", "acme/api#8", &req, "soft-flag")
+            .await;
+
+        let events = log.by_run("run-esc-2").await.expect("by_run");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "escalation_raised");
+        assert_eq!(events[0].severity, "info");
+        assert_eq!(events[0].reason.as_deref(), Some("logged for visibility; continuing"));
     }
 
     // ── 4. Branch handling ──────────────────────────────────────────────────────
@@ -2813,7 +2988,7 @@ mod tests {
     struct PassLlm;
 
     #[async_trait::async_trait]
-    impl crate::llm::Completer for PassLlm {
+    impl crate::llm::LlmPort for PassLlm {
         async fn complete(
             &self,
             _req: crate::llm::LlmRequest,
@@ -2846,7 +3021,7 @@ mod tests {
     struct MismatchLlm;
 
     #[async_trait::async_trait]
-    impl crate::llm::Completer for MismatchLlm {
+    impl crate::llm::LlmPort for MismatchLlm {
         async fn complete(
             &self,
             _req: crate::llm::LlmRequest,
@@ -2885,7 +3060,7 @@ mod tests {
         let seq = std::sync::atomic::AtomicUsize::new(0);
         let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
 
-        let llm: Arc<dyn crate::llm::Completer> = Arc::new(PassLlm);
+        let llm: Arc<dyn crate::llm::LlmPort> = Arc::new(PassLlm);
         let bundle = Some(IntegrationGateBundle {
             selected_integration_rules: Vec::new(), // model-advisory-only path here
             waivers: Vec::new(),
@@ -2933,7 +3108,7 @@ mod tests {
         let seq = std::sync::atomic::AtomicUsize::new(0);
         let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
 
-        let llm: Arc<dyn crate::llm::Completer> = Arc::new(MismatchLlm);
+        let llm: Arc<dyn crate::llm::LlmPort> = Arc::new(MismatchLlm);
         let bundle = Some(IntegrationGateBundle {
             selected_integration_rules: Vec::new(),
             waivers: Vec::new(),
@@ -3095,7 +3270,7 @@ mod tests {
         let seq = std::sync::atomic::AtomicUsize::new(0);
         let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
 
-        let llm: Arc<dyn crate::llm::Completer> = Arc::new(PassLlm);
+        let llm: Arc<dyn crate::llm::LlmPort> = Arc::new(PassLlm);
         let bundle = Some(IntegrationGateBundle {
             selected_integration_rules: Vec::new(),
             waivers: Vec::new(),

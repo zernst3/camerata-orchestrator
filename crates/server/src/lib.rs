@@ -176,6 +176,13 @@ pub struct AppState {
     /// (prevented-merges dataset). Write-only in app code; fail-soft: if it can't be
     /// opened the run/scan paths are unaffected. `None` in tests and on open failure.
     pub enforcement_ledger: crate::enforcement_ledger::EnforcementLedger,
+    /// The readable governance-event audit trail (Phase H1 foundation; SQLite). Unlike
+    /// `enforcement_ledger`, this store is meant to be READ BACK (e.g. a per-run activity
+    /// timeline). Opened best-effort in [`AppState::from_env`], same fail-soft pattern as
+    /// `enforcement_ledger`: `None` in tests and on open failure. NOT YET instrumented at
+    /// any lifecycle site as of Phase H1 — that instrumentation is a later phase. Use
+    /// [`AppState::record_governance`] as the single call-site helper when it lands.
+    pub governance_log: Option<Arc<camerata_persistence::GovernanceLog>>,
     /// App-wide credential store backed by the OS keychain in production and an
     /// in-memory map in tests.  Never exposes full values over HTTP; handlers call
     /// `.masked()`.  Service code (e.g. [`github_token`]) reads the full value
@@ -229,6 +236,8 @@ impl AppState {
             usage_ledger: Arc::new(crate::usage_ledger::UsageLedger::new()),
             // Tests and in-process runs start without a ledger (no-op; fail-soft).
             enforcement_ledger: crate::enforcement_ledger::EnforcementLedger::none(),
+            // Tests and in-process runs start without a governance log (no-op; fail-soft).
+            governance_log: None,
             // Tests use an in-memory credential store; production uses the OS keychain.
             credential_store: Arc::new(crate::credentials::MemoryCredentialStore::new()),
             // The registry always has the static Claude entries; OpenRouter is empty until
@@ -247,6 +256,27 @@ impl AppState {
     /// sees ALL call paths. Reads vendor/transport/model from the environment, same as before.
     pub fn llm(&self) -> crate::llm::Llm {
         crate::llm::Llm::from_env_with_ledger(self.usage_ledger.clone())
+    }
+
+    /// Record one governance event to the audit trail (Phase H1 foundation).
+    ///
+    /// The single call-site helper future lifecycle-instrumentation phases (H2+) should
+    /// use, e.g.:
+    /// `state.record_governance(GovernanceEvent::info(run_id, "run_started", "system")).await;`
+    ///
+    /// Fail-soft by construction: a `None` log (tests, or an open failure at startup) is
+    /// a silent no-op, and a write error is logged via `tracing::warn!` and swallowed —
+    /// callers never need to match on a `Result`. Async (not spawned) so a caller that
+    /// wants the write to have landed before proceeding (e.g. before returning an HTTP
+    /// response) can simply `.await` it; callers that don't care about ordering can
+    /// `tokio::spawn` the call themselves.
+    pub async fn record_governance(&self, event: camerata_persistence::GovernanceEvent) {
+        let Some(log) = self.governance_log.as_ref() else {
+            return;
+        };
+        if let Err(e) = log.record(event).await {
+            tracing::warn!(error = %e, "failed to record governance event");
+        }
     }
 
     /// Read-only accessor for the project store. Exposed so integration tests can seed a
@@ -626,6 +656,36 @@ impl AppState {
                         crate::enforcement_ledger::EnforcementLedger::open(&ledger_path),
                     )
                 });
+
+                // Governance-event audit trail (Phase H1 foundation): a READABLE SQLite
+                // log of a governed run's lifecycle (run started, agent steps, gate
+                // verdicts, escalations, sign-off, commit/PR gates, how it finished).
+                // Opened best-effort, same fail-soft pattern as the enforcement ledger
+                // above: on open failure, log a warning and leave `governance_log` as
+                // `None` so startup and every run/scan path is unaffected. No lifecycle
+                // site calls `record_governance` yet in this phase — that instrumentation
+                // is a later phase; this just wires the plumbing.
+                let governance_path = dir.join("governance_events.db");
+                state.governance_log = match tokio::task::block_in_place(|| {
+                    handle.block_on(camerata_persistence::GovernanceLog::open(&governance_path))
+                }) {
+                    Ok(log) => {
+                        tracing::info!(
+                            path = %governance_path.display(),
+                            "governance-event log opened"
+                        );
+                        Some(Arc::new(log))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %governance_path.display(),
+                            error = %e,
+                            "governance-event log could not open; governance events will \
+                             not be recorded this session"
+                        );
+                        None
+                    }
+                };
             }
             // Routines persist too, so a scheduled governed run an architect set up
             // survives a restart instead of being lost on every launch.
@@ -696,6 +756,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/runs/:id/agents", get(get_run_agents))
         .route("/api/runs/:id/provenance", get(get_run_provenance))
         .route("/api/runs/:id/sign-off", post(sign_off_run))
+        // Governance-event audit trail read path (Phase H3): per-run + cross-run recent.
+        .route("/api/runs/:id/events", get(get_run_events))
+        .route("/api/governance/events", get(recent_governance_events))
         .route(
             "/api/stories/:id/clarifications",
             get(list_clarifications).post(post_clarification),
@@ -1009,7 +1072,11 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     // (no activity past the active project's routine threshold). Watched runs stay alert-only.
     // Spawned here (not in `router`) so tests that build the router don't auto-cancel runs.
     // Cadence: CAMERATA_STALL_SWEEP_SECS (default 30).
-    crate::stall_sweep::spawn_stall_sweep(state.runs.clone(), state.projects.clone());
+    crate::stall_sweep::spawn_stall_sweep(
+        state.runs.clone(),
+        state.projects.clone(),
+        state.governance_log.clone(),
+    );
 
     // Per-UoW worktree housekeeping (Decision 1): on startup, prune stale worktree admin
     // records from every known repo clone AND remove worktrees for UoWs that are already
@@ -1422,6 +1489,13 @@ async fn resume_governed_run(
         _ => (story_id.clone(), String::new()),
     };
     let run_id = state.runs.create(&story_id, mode, crate::run::RunKind::Watched);
+    state
+        .record_governance(
+            camerata_persistence::GovernanceEvent::info(run_id.clone(), "run_started", "system")
+                .with_story_id(story_id.clone())
+                .with_reason(format!("resumed run (mode={mode}) after human review")),
+        )
+        .await;
 
     if !live {
         // Scripted mode has no live agent to re-spawn; record the decision honestly and stop.
@@ -1532,7 +1606,7 @@ async fn spawn_brownfield_dev_run(
             let l3_model = proj.l3_model().to_string();
             let rules_prose = grounding.clone().unwrap_or_default();
             let story_text = format!("{title}\n\n{desc}");
-            let llm: Arc<dyn crate::llm::Completer> = Arc::new(state.llm());
+            let llm: Arc<dyn crate::llm::LlmPort> = Arc::new(state.llm());
             Some(crate::dev_implement_run::L3ReviewBundle {
                 story_text,
                 rules_prose,
@@ -1576,7 +1650,7 @@ async fn spawn_brownfield_dev_run(
             };
             // The model advisory only runs with a prose contract; otherwise llm=None
             // keeps the gate deterministic-only.
-            let llm: Option<Arc<dyn crate::llm::Completer>> = if has_contract {
+            let llm: Option<Arc<dyn crate::llm::LlmPort>> = if has_contract {
                 Some(Arc::new(state.llm()))
             } else {
                 None
@@ -1672,6 +1746,10 @@ async fn spawn_brownfield_dev_run(
     let impl_registry = state.model_registry.clone();
     let impl_creds = state.credential_store.clone();
     let impl_limiter = state.rate_limiter.clone();
+    // Phase H2: threaded into `execute_dev_implement_run` so the audit trail (agent_step,
+    // gate_allow/deny, escalation_raised, check_failed/layer2_bounce) is recorded under
+    // THIS run's id. `None` in tests / on open failure (fail-soft — see AppState::from_env).
+    let impl_governance_log = state.governance_log.clone();
     // LIFECYCLE-1: register the abort handle so a Stop can reap a run blocked inside the
     // live implement agent subprocess (kill_on_drop). Cleared when the run finishes.
     let runs_for_clear = state.runs.clone();
@@ -1707,6 +1785,7 @@ async fn spawn_brownfield_dev_run(
             escalations_in_scope,
             impl_projects,
             impl_project_id,
+            impl_governance_log,
         )
         .await;
         runs_for_clear.clear_abort(&rid_for_clear);
@@ -1728,7 +1807,15 @@ async fn start_governed_run(
 ) -> (String, &'static str) {
     let live = live_mode_enabled();
     let mode = if live { "live" } else { "scripted" };
+    let kind_label = format!("{kind:?}");
     let run_id = state.runs.create(story_id, mode, kind);
+    state
+        .record_governance(
+            camerata_persistence::GovernanceEvent::info(run_id.clone(), "run_started", "system")
+                .with_story_id(story_id.to_string())
+                .with_reason(format!("governed run started (mode={mode}, kind={kind_label})")),
+        )
+        .await;
     let store = state.runs.clone();
     let rid = run_id.clone();
 
@@ -1935,8 +2022,9 @@ fn spawn_provenance_watcher(state: &AppState, run_id: &str, story_id: &str) {
     let watch_id = run_id.to_string();
     let watch_story = story_id.to_string();
     let ledger = state.enforcement_ledger.clone();
+    let governance_log = state.governance_log.clone();
     tokio::spawn(async move {
-        stamp_provenance_when_done(runs, uow, ledger, watch_id, watch_story).await;
+        stamp_provenance_when_done(runs, uow, ledger, governance_log, watch_id, watch_story).await;
     });
 }
 
@@ -1964,6 +2052,9 @@ async fn stamp_provenance_when_done(
     runs: RunStore,
     uow: crate::uow::UowStore,
     ledger: crate::enforcement_ledger::EnforcementLedger,
+    // Phase H2: the governance-event audit trail. `None` in tests / on open failure
+    // (fail-soft — see `AppState::record_governance`).
+    governance_log: Option<Arc<camerata_persistence::GovernanceLog>>,
     run_id: String,
     story_id: String,
 ) {
@@ -1975,6 +2066,24 @@ async fn stamp_provenance_when_done(
         // Wedged without ever going terminal, or an unknown run id. Nothing to stamp.
         None => return,
     };
+
+    // Phase H2: `run_finished` — the single convergence point for every governed run
+    // (fresh or resumed, brownfield or greenfield, tiered or single-model), keyed on the
+    // TERMINAL status: info for the success terminal (AwaitingQa), warn for Failed/Cancelled.
+    let finished_detail = serde_json::json!({ "status": format!("{:?}", run.status) }).to_string();
+    let finished_event = if matches!(run.status, crate::run::RunStatus::AwaitingQa) {
+        camerata_persistence::GovernanceEvent::info(run_id.clone(), "run_finished", "system")
+    } else {
+        camerata_persistence::GovernanceEvent::warn(run_id.clone(), "run_finished", "system")
+    }
+    .with_story_id(story_id.clone())
+    .with_reason(format!("run finished with status {:?}", run.status))
+    .with_detail(finished_detail);
+    if let Some(log) = governance_log.as_ref() {
+        if let Err(e) = log.record(finished_event).await {
+            tracing::warn!(error = %e, run_id = %run_id, "failed to record run_finished governance event");
+        }
+    }
 
     let rules = camerata_gateway::enforced_gate_rules();
     let prov = run_provenance(&run, &rules);
@@ -2238,6 +2347,48 @@ async fn get_run_provenance(
     Ok(Json(run_provenance(&run, &rules)))
 }
 
+/// `GET /api/runs/:id/events` — the full governance-event audit trail for one run, in
+/// insertion order (Phase H3: the read path over the Phase H1/H2 governance-event
+/// ledger). Returns an empty array — never an error — when no governance log is open
+/// this session; the ledger is fail-soft by design (see `AppState::record_governance`),
+/// so its absence must not surface as a 500 to a caller just asking to see the trail.
+async fn get_run_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<camerata_persistence::GovernanceEvent>>, AppError> {
+    let Some(log) = state.governance_log.as_ref() else {
+        return Ok(Json(Vec::new()));
+    };
+    let events = log
+        .by_run(&id)
+        .await
+        .map_err(|e| AppError(e.into()))?;
+    Ok(Json(events))
+}
+
+/// Query for `GET /api/governance/events`: `?limit=N` caps the page. Defaults to 100,
+/// capped at 1000 so an unbounded request can't page the entire table in one response.
+#[derive(serde::Deserialize)]
+struct RecentGovernanceEventsQuery {
+    limit: Option<u32>,
+}
+
+/// `GET /api/governance/events?limit=N` — the `N` most recently recorded governance
+/// events across ALL runs, newest first (Phase H3). Default `N=100`, capped at 1000.
+/// Returns an empty array — never an error — when no governance log is open this
+/// session (same fail-soft contract as [`get_run_events`]).
+async fn recent_governance_events(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<RecentGovernanceEventsQuery>,
+) -> Result<Json<Vec<camerata_persistence::GovernanceEvent>>, AppError> {
+    let Some(log) = state.governance_log.as_ref() else {
+        return Ok(Json(Vec::new()));
+    };
+    let limit = i64::from(q.limit.unwrap_or(100).min(1000));
+    let events = log.recent(limit).await.map_err(|e| AppError(e.into()))?;
+    Ok(Json(events))
+}
+
 #[derive(serde::Deserialize)]
 struct SignOffReq {
     /// Who is signing off (the architect's handle/name). Defaults to "architect".
@@ -2343,6 +2494,19 @@ async fn sign_off_run(
     let mut uow = state
         .uow
         .sign_off(&run.story_id, &by, &run.id, effective_note.as_deref());
+
+    // Phase H2: durable record of the human sign-off decision, keyed on the run it signs off.
+    state
+        .record_governance(
+            camerata_persistence::GovernanceEvent::info(run.id.clone(), "sign_off", "human")
+                .with_story_id(run.story_id.clone())
+                .with_reason(
+                    effective_note
+                        .clone()
+                        .unwrap_or_else(|| format!("signed off by {by}")),
+                ),
+        )
+        .await;
 
     // ── Post evidence as PR comment (issue #53) ───────────────────────────────
     // When the UoW has an evidence record AND the caller supplied a PR number + repo,
@@ -7420,6 +7584,21 @@ async fn answer_escalation(
                     .map(|p| p.directive.clone())
                     .filter(|d| !d.trim().is_empty())
                     .unwrap_or_else(|| req.answer.clone());
+                // Phase H2: durable record of the human's answer, keyed on the PAUSED run's
+                // id (the checkpoint is the only place a UoW escalation carries one — a
+                // Routine-subject escalation has no run_id and is out of scope for this
+                // per-run audit trail; see the module note).
+                state
+                    .record_governance(
+                        camerata_persistence::GovernanceEvent::info(
+                            ckpt.run_id.clone(),
+                            "escalation_answered",
+                            "human",
+                        )
+                        .with_story_id(resolved.routine_id.clone())
+                        .with_reason(format!("{:?}: {}", req.action, req.answer)),
+                    )
+                    .await;
                 match req.action {
                     crate::escalation::EscalationAction::Reject => {
                         // Stop cleanly: discard the agent's uncommitted work, consume the
@@ -7664,7 +7843,7 @@ async fn chat(
     // setting — NOT the per-project ResearchChat step. Precedence: explicit per-request model
     // (the UI override) > app-level `chat_model` setting > DEFAULT_MODEL floor.
     let model = resolve_chat_model(Some(&req.model), state.settings.get().chat_model.as_deref());
-    // Route to the right Completer: OpenRouter for openrouter-provider models, Anthropic for all
+    // Route to the right LlmPort: OpenRouter for openrouter-provider models, Anthropic for all
     // others. Returns an error when the model is OpenRouter-provider but no key is set.
     let completer = crate::llm::build_completer(
         &model,
@@ -14597,6 +14776,112 @@ mod tests {
         assert!(json["error"].is_string(), "body keeps the {{error}} shape");
     }
 
+    /// Phase H3: `GET /api/runs/:id/events` returns an empty array (200), never an
+    /// error, when no governance log is open this session — the fail-soft contract
+    /// (see `AppState::record_governance`) must extend to the read path.
+    #[tokio::test]
+    async fn get_run_events_returns_empty_array_when_no_governance_log() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/runs/some-run/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    /// Phase H3: `GET /api/governance/events` also returns an empty array (200) with no
+    /// governance log open, same fail-soft contract as the per-run route.
+    #[tokio::test]
+    async fn recent_governance_events_returns_empty_array_when_no_governance_log() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/governance/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    /// Phase H3: with a real (in-memory) governance log attached, `GET
+    /// /api/runs/:id/events` returns exactly that run's recorded events, in insertion
+    /// order, and `GET /api/governance/events?limit=N` returns the N most recent across
+    /// all runs, newest first — the read path over the Phase H1/H2 write path.
+    #[tokio::test]
+    async fn governance_event_routes_read_back_recorded_events() {
+        let log = camerata_persistence::GovernanceLog::open_in_memory()
+            .await
+            .expect("open in-memory governance log");
+        log.record(camerata_persistence::GovernanceEvent::info(
+            "run-a",
+            "run_started",
+            "system",
+        ))
+        .await
+        .expect("record run-a event");
+        log.record(
+            camerata_persistence::GovernanceEvent::error("run-b", "gate_deny", "agent")
+                .with_rule_id("SEC-1")
+                .with_reason("denied"),
+        )
+        .await
+        .expect("record run-b event");
+
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.governance_log = Some(std::sync::Arc::new(log));
+        let app = router(state);
+
+        // Per-run: only run-a's event comes back.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/runs/run-a/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["run_id"], "run-a");
+        assert_eq!(json[0]["kind"], "run_started");
+
+        // Cross-run recent: both events come back, newest (run-b) first.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/governance/events?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 2);
+        assert_eq!(json[0]["run_id"], "run-b");
+        assert_eq!(json[0]["rule_id"], "SEC-1");
+        assert_eq!(json[1]["run_id"], "run-a");
+    }
+
     /// ROUTES-7: the AppError constructors carry the right status while keeping the
     /// `{error}` body — the single source of truth all handlers route through.
     #[tokio::test]
@@ -15536,6 +15821,7 @@ mod tests {
             runs.clone(),
             uow.clone(),
             crate::enforcement_ledger::EnforcementLedger::none(),
+            None, // governance_log — not exercised in this unit test
             run_id.clone(),
             story.to_string(),
         )
@@ -15580,6 +15866,7 @@ mod tests {
             runs.clone(),
             uow.clone(),
             crate::enforcement_ledger::EnforcementLedger::none(),
+            None, // governance_log — not exercised in this unit test
             run_id.clone(),
             story.to_string(),
         )
@@ -15617,6 +15904,7 @@ mod tests {
             runs.clone(),
             uow.clone(),
             crate::enforcement_ledger::EnforcementLedger::none(),
+            None, // governance_log — not exercised in this unit test
             run_id.clone(),
             story.to_string(),
         )
@@ -15664,6 +15952,7 @@ mod tests {
                     runs,
                     uow,
                     crate::enforcement_ledger::EnforcementLedger::none(),
+                    None, // governance_log — not exercised in this unit test
                     rid,
                     sid,
                 )

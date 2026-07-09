@@ -564,7 +564,7 @@ struct RegistryResp {
     openrouter_fetched: bool,
 }
 
-/// One entry from the registry wire response. Mirrors `camerata_server::model_registry::RegistryEntry`.
+/// One entry from the registry wire response. Mirrors `camerata_api_types::model_registry::RegistryEntry` (subset, fields tolerated absent).
 #[derive(serde::Deserialize)]
 struct RegistryEntryWire {
     id: String,

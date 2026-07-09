@@ -1,5 +1,10 @@
 use super::*;
 
+// The renderer-free Governed-Development state machine (poll / change-detection state +
+// pull cache) and its pure helpers. This module is the thin Dioxus adapter over it: it
+// holds ONE `GlobalSignal<GovDevState>` (see `GOV_DEV_STATE`) and drives every mutation
+// through `apply(GovDevMsg::…)`.
+use camerata_ui_core::govdev::{assignee_label, GovDevMsg, GovDevState};
 
 /// The branches a UoW can merge FROM (`POST /api/uow/:story_id/branches`), split by
 /// where they live. Populates the "Update branch" picker.
@@ -561,6 +566,36 @@ pub(super) async fn fetch_provenance(run_id: &str) -> Option<RunProvenanceView> 
         .ok()
 }
 
+/// One entry in the governance-event audit trail (Phase H3, `GET /api/runs/:id/events`)
+/// — a faithful client-side mirror of the server's `camerata_persistence::GovernanceEvent`
+/// wire shape. All fields default-tolerant, matching the read-only `RunProvenanceView`
+/// idiom above.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+pub(super) struct GovernanceEventView {
+    #[serde(default)]
+    pub ts: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub severity: String,
+    #[serde(default)]
+    pub rule_id: Option<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Fetch the governance-event audit trail for a run (Phase H3). Empty (never an error)
+/// when the request fails or no governance log is open server-side — the panel simply
+/// renders nothing rather than surfacing a fetch error for what is a read-only diagnostic
+/// view.
+pub(super) async fn fetch_governance_events(run_id: &str) -> Vec<GovernanceEventView> {
+    let resp = match reqwest::get(format!("{}/api/runs/{}/events", crate::bff_base(), run_id)).await {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    resp.json::<Vec<GovernanceEventView>>().await.unwrap_or_default()
+}
+
 /// Send a stop/cancel request for ANY active run (investigation / dev / update-branch /
 /// resolve). Fire-and-forget: 204 = success; any other status or a network error is
 /// treated as benign (the run may already be done). The server aborts the driving task,
@@ -687,45 +722,11 @@ impl DevStatus {
     }
 }
 
-/// The governed-development lifecycle stage of a Unit of Work (Pillar 2). Mirrors
-/// `camerata_server::lifecycle::UowStage`; orthogonal to (and richer than) `DevStatus`.
-#[derive(Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize, Default, Debug)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum UowStage {
-    #[default]
-    Intake,
-    Investigating,
-    DecisionsApproved,
-    Development,
-    AwaitingQa,
-    SignedOff,
-}
-
-impl UowStage {
-    /// A short display label for the lifecycle strip.
-    fn label(self) -> &'static str {
-        match self {
-            Self::Intake => "Intake",
-            Self::Investigating => "Investigating",
-            Self::DecisionsApproved => "Decisions approved",
-            Self::Development => "Development",
-            Self::AwaitingQa => "Awaiting QA",
-            Self::SignedOff => "Signed off",
-        }
-    }
-
-    /// Monotonic ordinal (0 = Intake .. 5 = SignedOff), for "has reached" comparisons.
-    fn ordinal(self) -> usize {
-        match self {
-            Self::Intake => 0,
-            Self::Investigating => 1,
-            Self::DecisionsApproved => 2,
-            Self::Development => 3,
-            Self::AwaitingQa => 4,
-            Self::SignedOff => 5,
-        }
-    }
-}
+/// The governed-development lifecycle stage of a Unit of Work (Pillar 2) — the canonical
+/// enum from the shared `camerata-api-types` leaf (Phase G cleanup: this was a hand-kept
+/// mirror; the api-types version is the exact type the server serializes, with identical
+/// serde names, `label()`, and `ordinal()`). Orthogonal to (and richer than) `DevStatus`.
+pub(super) use camerata_api_types::lifecycle::UowStage;
 
 // ── 3-phase cockpit types ─────────────────────────────────────────────────────
 
@@ -837,16 +838,12 @@ mod stage_mapping_tests {
 
 // ── End 3-phase cockpit types ─────────────────────────────────────────────────
 
-/// A single entry in the AI development history.
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-pub(super) struct HistoryEntryView {
-    pub ts: String,
-    pub kind: String,
-    pub text: String,
-}
+/// A single entry in the AI development history — the canonical `camerata-api-types`
+/// shape (Phase G cleanup; the `View` name is kept so call sites read unchanged).
+pub(super) use camerata_api_types::uow::HistoryEntry as HistoryEntryView;
 
 /// The frozen gate provenance stamped onto a UoW after a governed run finishes.
-/// Mirrors `camerata_server::uow::GateProvenance`.
+/// Mirrors `camerata_api_types::uow::GateProvenance` (the `recorded` field is tolerated absent here).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct GateProvenanceView {
     pub run_id: String,
@@ -860,17 +857,11 @@ pub(super) struct GateProvenanceView {
     pub recorded: String,
 }
 
-/// An architect's sign-off on a story's governed run (issue #21).
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
-pub(super) struct SignOffView {
-    pub ts: String,
-    pub by: String,
-    pub run_id: String,
-    #[serde(default)]
-    pub note: Option<String>,
-}
+/// An architect's sign-off on a story's governed run (issue #21) — the canonical
+/// `camerata-api-types` shape (Phase G cleanup; the `View` name is kept for call sites).
+pub(super) use camerata_api_types::uow::SignOff as SignOffView;
 
-/// One turn in a per-phase agent chat transcript (mirrors `camerata_server::uow::ChatTurn`).
+/// One turn in a per-phase agent chat transcript (mirrors `camerata_api_types::uow::ChatTurn`, fields tolerated absent).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 pub(super) struct ChatTurnView {
     #[serde(default)]
@@ -879,7 +870,7 @@ pub(super) struct ChatTurnView {
     pub text: String,
 }
 
-/// One in-scope repo + its branch mode (mirrors `camerata_server::uow::RepoScope`). The
+/// One in-scope repo + its branch mode (mirrors `camerata_api_types::uow::RepoScope`). The
 /// `branch` field is the tagged-enum `BranchMode` JSON, kept raw so the UI can read either
 /// variant without a sum-type round-trip.
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -890,7 +881,7 @@ pub(super) struct RepoScopeView {
     pub branch: serde_json::Value,
 }
 
-/// The persisted Intake state (mirrors `camerata_server::uow::IntakeState`).
+/// The persisted Intake state (mirrors `camerata_api_types::uow::IntakeState`).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 pub(super) struct IntakeStateView {
     #[serde(default)]
@@ -899,7 +890,7 @@ pub(super) struct IntakeStateView {
     pub repos: Vec<RepoScopeView>,
 }
 
-/// The persisted Investigation state (mirrors `camerata_server::uow::InvestigationState`).
+/// The persisted Investigation state (mirrors `camerata_api_types::uow::InvestigationState`).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 pub(super) struct InvestigationStateView {
     #[serde(default)]
@@ -910,7 +901,7 @@ pub(super) struct InvestigationStateView {
     pub crosses_boundary: bool,
 }
 
-/// The persisted Development state (mirrors `camerata_server::uow::DevelopmentState`).
+/// The persisted Development state (mirrors `camerata_api_types::uow::DevelopmentState`).
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
 pub(super) struct DevelopmentStateView {
     #[serde(default)]
@@ -1010,48 +1001,12 @@ pub(super) async fn post_uow_transition(story_id: &str, action: &str) -> Transit
     }
 }
 
-/// A normalized work item from any tracker provider (`POST /api/workitems/pull`,
-/// `POST /api/workitems/refresh`). The server maps a provider's native issue (today:
-/// the worktracker GitHub adapter's `CanonicalStory`) into this shape so the UI never
-/// touches a provider-specific payload.
-#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Debug, Default)]
-pub(super) struct WorkItem {
-    /// Stable cross-provider id, e.g. `"github:OWNER/REPO#123"`. The dedup key for UoWs.
-    pub id: String,
-    /// The provider that owns this item (today always `"github"`).
-    #[serde(default)]
-    pub provider: String,
-    /// `OWNER/REPO` the item belongs to. Each pulled item carries its own repo.
-    #[serde(default)]
-    pub repo: String,
-    #[serde(default)]
-    pub number: u64,
-    #[serde(default)]
-    pub title: String,
-    #[serde(default)]
-    pub body: String,
-    /// `"open"` | `"closed"`.
-    #[serde(default)]
-    pub state: String,
-    #[serde(default)]
-    pub url: String,
-    #[serde(default)]
-    pub labels: Vec<String>,
-    /// The parent issue number when this item is a GitHub sub-issue (Epic → child).
-    /// `None` for top-level or standalone issues. Populated from the server's
-    /// `IssueSummary::parent_number` on a pull.
-    #[serde(default)]
-    pub parent_number: Option<u64>,
-    /// The logins of the users assigned to the item. Empty when unassigned. Populated on
-    /// the single-issue refresh path (Pull latest); the bulk pull + spine-resolved paths
-    /// leave it empty (those sources don't carry it).
-    #[serde(default)]
-    pub assignees: Vec<String>,
-    /// The item's last-updated ISO-8601 timestamp as the tracker returns it. Empty when
-    /// absent. The update-poll uses it as the per-UoW last-seen baseline / change signal.
-    #[serde(default)]
-    pub updated_at: String,
-}
+/// The normalized work item the BFF returns (`POST /api/workitems/pull`,
+/// `POST /api/workitems/refresh`). The wire-mirror struct itself now lives in the
+/// pure-serde leaf crate (`camerata_api_types::workitems`, moved in Phase C of the
+/// UI-core extraction so `camerata_ui_core::govdev::GovDevState` can hold pulled items
+/// renderer-free); re-exported here so existing cockpit call sites resolve unchanged.
+pub(super) use camerata_api_types::workitems::WorkItem;
 
 /// A work item augmented with N-level hierarchy grouping columns for the Chorale table.
 ///
@@ -1327,22 +1282,24 @@ pub(super) fn render_pulled_issues_for_chat(items: &[WorkItem]) -> String {
     s
 }
 
-/// App-lifetime cache of the last work-item pull, keyed by project id (so switching
-/// projects never shows stale items). A `GlobalSignal` persists for the lifetime of the
-/// process, so navigating away from Governed Development and back does NOT require a
-/// re-pull — the pull is held in memory until Camerata closes or the user pulls again.
-/// Manual pull only; there is no auto-poll.
-pub(super) static PULLED_WORK_ITEMS: GlobalSignal<Option<(String, Vec<WorkItem>)>> =
-    Signal::global(|| None);
+/// The ONE app-lifetime Governed-Development state: the last work-item pull (keyed by
+/// project id), the per-work-item last-seen `updated_at` baselines, and the set of ids
+/// currently flagged CHANGED. The state machine itself is the renderer-free
+/// `camerata_ui_core::govdev::GovDevState` (RUST-HEADLESS-CORE-1); this adapter drives
+/// it exclusively through `GOV_DEV_STATE.write().apply(GovDevMsg::…)` and renders from
+/// its selectors. A `GlobalSignal` persists for the lifetime of the process, so
+/// navigating away from Governed Development and back does NOT require a re-pull — the
+/// pull is held in memory until Camerata closes or the user pulls again.
+pub(super) static GOV_DEV_STATE: GlobalSignal<GovDevState> = Signal::global(GovDevState::new);
 
 /// Returns the pre-rendered issue spine for the chat system prompt (Layer 3b), reading
-/// from the app-lifetime `PULLED_WORK_ITEMS` cache. Returns `None` when no pull has
+/// from the app-lifetime `GOV_DEV_STATE` pull cache. Returns `None` when no pull has
 /// happened this session (the chat caller omits the layer entirely in that case).
 /// Called from `main.rs` to pass the section into `ChatBubble` without exposing the
-/// `PULLED_WORK_ITEMS` signal or `WorkItem` type outside this module.
+/// `GOV_DEV_STATE` signal or `WorkItem` type outside this module.
 pub(crate) fn pulled_issues_chat_section() -> Option<String> {
-    let guard = PULLED_WORK_ITEMS.read();
-    let (_, items) = guard.as_ref()?;
+    let guard = GOV_DEV_STATE.read();
+    let items = guard.pulled_items()?;
     let section = render_pulled_issues_for_chat(items);
     if section.is_empty() {
         None
@@ -1462,202 +1419,12 @@ pub(super) struct UpdatedCheckResult {
     pub updates: Vec<WorkItemUpdateRow>,
 }
 
-/// App-lifetime, per-work-item LAST-SEEN `updated_at`, keyed by the work item's stable id
-/// (`github:OWNER/REPO#N`). Captured when a UoW is opened / its work item is pulled, and
-/// used as the baseline the background poll compares fresh timestamps against. A
-/// `GlobalSignal` so the poll (in `GovernedDevPage`), the nav cards, and the UoW detail
-/// header all read/write one shared map.
-pub(super) static UOW_LAST_SEEN: GlobalSignal<std::collections::HashMap<String, String>> =
-    Signal::global(std::collections::HashMap::new);
-
-/// App-lifetime set of work item ids currently flagged CHANGED (the board moved since the
-/// last-seen baseline). Shown as a change icon on both the UoW detail header and the
-/// left-nav card; cleared by "Pull latest".
-pub(super) static UOW_CHANGED: GlobalSignal<std::collections::HashSet<String>> =
-    Signal::global(std::collections::HashSet::new);
-
-/// Fold ONE poll result into the shared last-seen + changed state. Pure over the two maps
-/// so the change-flag logic is unit-testable without the UI:
-/// - No last-seen baseline yet for this id → establish it (this poll is the baseline; NOT
-///   flagged, so a first poll never marks everything changed).
-/// - Polled `updated_at` strictly NEWER than last-seen → flag CHANGED. (ISO-8601 UTC
-///   timestamps compare correctly as strings.)
-/// - Equal / older / empty polled value → no change.
-pub(super) fn fold_poll_update(
-    last_seen: &mut std::collections::HashMap<String, String>,
-    changed: &mut std::collections::HashSet<String>,
-    work_item_id: &str,
-    polled_updated_at: &str,
-) {
-    if polled_updated_at.is_empty() {
-        return;
-    }
-    match last_seen.get(work_item_id) {
-        Some(seen) => {
-            if polled_updated_at > seen.as_str() {
-                changed.insert(work_item_id.to_string());
-            }
-        }
-        None => {
-            last_seen.insert(work_item_id.to_string(), polled_updated_at.to_string());
-        }
-    }
-}
-
-/// Clear the CHANGED flag for a work item and bump its last-seen baseline to the freshly
-/// pulled `updated_at`. Called after a "Pull latest" (and on open) so the notification is
-/// dismissed and the next change is measured against the value we just saw. Pure over the
-/// two maps for testability.
-pub(super) fn clear_changed_and_bump(
-    last_seen: &mut std::collections::HashMap<String, String>,
-    changed: &mut std::collections::HashSet<String>,
-    work_item_id: &str,
-    new_updated_at: &str,
-) {
-    changed.remove(work_item_id);
-    if !new_updated_at.is_empty() {
-        last_seen.insert(work_item_id.to_string(), new_updated_at.to_string());
-    }
-}
-
-/// The label the UoW detail / nav card shows for the item's assignee(s): the joined
-/// logins, or "Unassigned" when empty. Pure so it is unit-testable.
-pub(super) fn assignee_label(assignees: &[String]) -> String {
-    if assignees.is_empty() {
-        "Unassigned".to_string()
-    } else {
-        assignees.join(", ")
-    }
-}
-
-#[cfg(test)]
-mod assignee_and_update_tests {
-    use super::{assignee_label, clear_changed_and_bump, fold_poll_update};
-    use std::collections::{HashMap, HashSet};
-
-    #[test]
-    fn assignee_label_joins_or_unassigned() {
-        assert_eq!(assignee_label(&[]), "Unassigned");
-        assert_eq!(assignee_label(&["octocat".to_string()]), "octocat");
-        assert_eq!(
-            assignee_label(&["octocat".to_string(), "hubot".to_string()]),
-            "octocat, hubot"
-        );
-    }
-
-    #[test]
-    fn fold_poll_first_sight_sets_baseline_without_flagging() {
-        let mut last_seen = HashMap::new();
-        let mut changed = HashSet::new();
-        // No baseline yet: this poll ESTABLISHES it and does not flag changed.
-        fold_poll_update(&mut last_seen, &mut changed, "github:o/r#1", "2026-07-05T12:00:00Z");
-        assert_eq!(last_seen.get("github:o/r#1").map(String::as_str), Some("2026-07-05T12:00:00Z"));
-        assert!(!changed.contains("github:o/r#1"), "first poll must not flag");
-    }
-
-    #[test]
-    fn fold_poll_newer_flags_changed_equal_or_older_does_not() {
-        let mut last_seen = HashMap::new();
-        last_seen.insert("wi".to_string(), "2026-07-05T12:00:00Z".to_string());
-        let mut changed = HashSet::new();
-
-        // Equal → not changed.
-        fold_poll_update(&mut last_seen, &mut changed, "wi", "2026-07-05T12:00:00Z");
-        assert!(!changed.contains("wi"), "equal timestamp is not a change");
-
-        // Older → not changed.
-        fold_poll_update(&mut last_seen, &mut changed, "wi", "2026-07-04T09:00:00Z");
-        assert!(!changed.contains("wi"), "older timestamp is not a change");
-
-        // Empty polled → not changed (resilient: a blank value never flags).
-        fold_poll_update(&mut last_seen, &mut changed, "wi", "");
-        assert!(!changed.contains("wi"), "empty polled value is not a change");
-
-        // Strictly newer → changed. The last-seen baseline is deliberately NOT advanced
-        // here (only a pull/open advances it), so the flag persists until the user syncs.
-        fold_poll_update(&mut last_seen, &mut changed, "wi", "2026-07-06T08:00:00Z");
-        assert!(changed.contains("wi"), "newer timestamp flags changed");
-        assert_eq!(
-            last_seen.get("wi").map(String::as_str),
-            Some("2026-07-05T12:00:00Z"),
-            "a poll does not advance the baseline"
-        );
-    }
-
-    #[test]
-    fn clear_changed_and_bump_clears_flag_and_advances_baseline() {
-        let mut last_seen = HashMap::new();
-        last_seen.insert("wi".to_string(), "2026-07-05T12:00:00Z".to_string());
-        let mut changed = HashSet::new();
-        changed.insert("wi".to_string());
-
-        // A pull-latest with the fresh timestamp: flag clears, baseline advances.
-        clear_changed_and_bump(&mut last_seen, &mut changed, "wi", "2026-07-06T08:00:00Z");
-        assert!(!changed.contains("wi"), "pull-latest clears the flag");
-        assert_eq!(
-            last_seen.get("wi").map(String::as_str),
-            Some("2026-07-06T08:00:00Z"),
-            "pull-latest advances the last-seen baseline"
-        );
-
-        // After the bump, a poll at the same (now-baseline) timestamp does NOT re-flag.
-        fold_poll_update(&mut last_seen, &mut changed, "wi", "2026-07-06T08:00:00Z");
-        assert!(!changed.contains("wi"), "no re-flag once the baseline caught up");
-    }
-
-    #[test]
-    fn clear_changed_with_empty_timestamp_still_clears_flag() {
-        // A refresh that returned no updated_at must still dismiss the notification, and
-        // must not overwrite a good baseline with an empty string.
-        let mut last_seen = HashMap::new();
-        last_seen.insert("wi".to_string(), "2026-07-05T12:00:00Z".to_string());
-        let mut changed = HashSet::new();
-        changed.insert("wi".to_string());
-        clear_changed_and_bump(&mut last_seen, &mut changed, "wi", "");
-        assert!(!changed.contains("wi"), "flag clears even with an empty timestamp");
-        assert_eq!(
-            last_seen.get("wi").map(String::as_str),
-            Some("2026-07-05T12:00:00Z"),
-            "an empty timestamp must not clobber the baseline"
-        );
-    }
-
-    /// Assigning a work item (including "Assign to me") must NOT itself cause the next
-    /// background poll to flag the item CHANGED, because the assign response's
-    /// `updated_at` re-baselines last-seen (same mechanism as a manual "Pull latest").
-    /// A LATER real update (a strictly newer `updated_at`) must still flag. This is the
-    /// full sequence: baseline established -> self-assign re-baselines -> same-timestamp
-    /// poll does not flag -> newer-timestamp poll does flag.
-    #[test]
-    fn self_assign_rebaselines_so_the_next_poll_does_not_self_flag() {
-        let mut last_seen = HashMap::new();
-        let mut changed = HashSet::new();
-        let wid = "github:o/r#20";
-
-        // 1. Baseline established (e.g. on UoW open / initial pull).
-        fold_poll_update(&mut last_seen, &mut changed, wid, "2026-07-05T12:00:00Z");
-        assert_eq!(last_seen.get(wid).map(String::as_str), Some("2026-07-05T12:00:00Z"));
-        assert!(!changed.contains(wid));
-
-        // 2. Self-assign ("Assign to me") succeeds; GitHub's assign response carries a
-        // fresh `updated_at` (the assignment itself bumped the issue). The UI calls
-        // clear_changed_and_bump with that timestamp to re-baseline.
-        let assign_updated_at = "2026-07-05T12:05:00Z";
-        clear_changed_and_bump(&mut last_seen, &mut changed, wid, assign_updated_at);
-        assert_eq!(last_seen.get(wid).map(String::as_str), Some(assign_updated_at));
-        assert!(!changed.contains(wid), "a successful assign must not leave a stale flag");
-
-        // 3. The next background poll observes the SAME `updated_at` the assign already
-        // re-baselined to (this is the case the assign itself produced) -> must NOT flag.
-        fold_poll_update(&mut last_seen, &mut changed, wid, assign_updated_at);
-        assert!(!changed.contains(wid), "the poll must not self-flag the assign's own update");
-
-        // 4. The story is updated again afterward by something else (a strictly newer
-        // `updated_at`) -> the poll must still flag it CHANGED.
-        fold_poll_update(&mut last_seen, &mut changed, wid, "2026-07-05T13:00:00Z");
-        assert!(changed.contains(wid), "a later real update must still flag changed");
-    }
-}
+// NOTE (Phase C, RUST-HEADLESS-CORE-1): the poll / change-detection state that used to
+// live here as three process-global signals (`UOW_LAST_SEEN`, `UOW_CHANGED`,
+// `PULLED_WORK_ITEMS`) plus the pure helpers (`fold_poll_update`,
+// `clear_changed_and_bump`, `assignee_label`) moved into the renderer-free
+// `camerata_ui_core::govdev` module (its unit tests moved with it). This adapter now
+// holds the single `GOV_DEV_STATE` signal above and applies `GovDevMsg`s.
 
 /// The label a work item's State badge shows. Pure mapping over the wire string so
 /// any casing / unknown value still renders sensibly. Returns (display, css-modifier).
@@ -2366,10 +2133,14 @@ pub(super) fn GovernedDevPage() -> Element {
                 .collect();
             if !items.is_empty() {
                 if let Some(updates) = check_work_items_updated(&items).await {
-                    let mut last_seen = UOW_LAST_SEEN.write();
-                    let mut changed = UOW_CHANGED.write();
+                    // Fold each polled row into the pure state machine; the change-flag
+                    // logic itself lives (and is unit-tested) in ui-core's reducer.
+                    let mut state = GOV_DEV_STATE.write();
                     for row in updates {
-                        fold_poll_update(&mut last_seen, &mut changed, &row.work_item_id, &row.updated_at);
+                        state.apply(GovDevMsg::PollObserved {
+                            id: row.work_item_id,
+                            updated_at: row.updated_at,
+                        });
                     }
                 }
             }
@@ -2415,7 +2186,7 @@ pub(super) fn GovernedDevPage() -> Element {
                             let (assignees, changed) = match &u.work_item {
                                 Some(wi) => (
                                     assignee_label(&wi.assignees),
-                                    UOW_CHANGED.read().contains(&wi.id),
+                                    GOV_DEV_STATE.read().is_changed(&wi.id),
                                 ),
                                 None => ("Unassigned".to_string(), false),
                             };
@@ -2564,10 +2335,10 @@ pub(super) fn IssueManagementPanel(
     // back), keyed by project id so a project switch never shows stale items. None = not
     // pulled yet for the active project.
     let proj_id = proj.as_ref().map(|p| p.id.clone()).unwrap_or_default();
-    let item_list: Option<Vec<WorkItem>> = match PULLED_WORK_ITEMS.read().clone() {
-        Some((pid, list)) if !proj_id.is_empty() && pid == proj_id => Some(list),
-        _ => None,
-    };
+    // `pulled_for` returns the cache only when it belongs to the active project (and
+    // never for an empty project id) — a project switch never shows stale items.
+    let item_list: Option<Vec<WorkItem>> =
+        GOV_DEV_STATE.read().pulled_for(&proj_id).map(<[WorkItem]>::to_vec);
     // Resolve the open detail item against the current pull.
     let open_item = match (&item_list, detail_id()) {
         (Some(list), Some(id)) => list.iter().find(|it| it.id == id).cloned(),
@@ -2608,7 +2379,10 @@ pub(super) fn IssueManagementPanel(
                             spawn(async move {
                                 match pull_work_items().await {
                                     Some(pulled) => {
-                                        *PULLED_WORK_ITEMS.write() = Some((proj_id, pulled));
+                                        GOV_DEV_STATE.write().apply(GovDevMsg::WorkItemsPulled {
+                                            project_id: proj_id,
+                                            items: pulled,
+                                        });
                                         detail_id.set(None);
                                         pull_seq += 1;
                                     }
@@ -2660,7 +2434,10 @@ pub(super) fn IssueManagementPanel(
                             let proj_id = proj_id.clone();
                             spawn(async move {
                                 if let Some(pulled) = pull_work_items().await {
-                                    *PULLED_WORK_ITEMS.write() = Some((proj_id, pulled));
+                                    GOV_DEV_STATE.write().apply(GovDevMsg::WorkItemsPulled {
+                                        project_id: proj_id,
+                                        items: pulled,
+                                    });
                                     pull_seq += 1;
                                 }
                             });
@@ -3533,9 +3310,11 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                 if let Some(updated) = refresh_work_item(&wid).await {
                     let ua = updated.updated_at.clone();
                     item.set(updated);
-                    let mut last_seen = UOW_LAST_SEEN.write();
-                    let mut changed = UOW_CHANGED.write();
-                    clear_changed_and_bump(&mut last_seen, &mut changed, &wid, &ua);
+                    // Re-baseline: clear any stale CHANGED flag and advance last-seen to
+                    // what was just pulled.
+                    GOV_DEV_STATE
+                        .write()
+                        .apply(GovDevMsg::PulledLatest { id: wid, updated_at: ua });
                 }
             }
         });
@@ -3711,7 +3490,7 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
     let (state_label, state_cls) = work_item_state_badge(&it.state);
     // Assignee label + whether the board changed for this item since its last-seen baseline.
     let assignees_label = assignee_label(&it.assignees);
-    let item_changed = !it.id.is_empty() && UOW_CHANGED.read().contains(&it.id);
+    let item_changed = !it.id.is_empty() && GOV_DEV_STATE.read().is_changed(&it.id);
 
     rsx! {
         div { class: "uow-dev",
@@ -3738,9 +3517,10 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                                     Some(updated) => {
                                         let ua = updated.updated_at.clone();
                                         item.set(updated);
-                                        let mut last_seen = UOW_LAST_SEEN.write();
-                                        let mut changed = UOW_CHANGED.write();
-                                        clear_changed_and_bump(&mut last_seen, &mut changed, &wid, &ua);
+                                        // Re-sync clears the flag + advances the baseline.
+                                        GOV_DEV_STATE
+                                            .write()
+                                            .apply(GovDevMsg::PulledLatest { id: wid, updated_at: ua });
                                     }
                                     None => crate::toast::push_toast(
                                         toasts,
@@ -3780,10 +3560,15 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                                         match assign_work_item(&wid, &login).await {
                                             Some(result) => {
                                                 item.with_mut(|w| w.assignees = result.assignees);
+                                                // Only re-baseline when the assign response
+                                                // actually carried an `updated_at` (preserves
+                                                // the pre-extraction behavior: an empty value
+                                                // here touches nothing, not even the flag).
                                                 if !result.updated_at.is_empty() {
-                                                    let mut last_seen = UOW_LAST_SEEN.write();
-                                                    let mut changed = UOW_CHANGED.write();
-                                                    clear_changed_and_bump(&mut last_seen, &mut changed, &wid, &result.updated_at);
+                                                    GOV_DEV_STATE.write().apply(GovDevMsg::PulledLatest {
+                                                        id: wid,
+                                                        updated_at: result.updated_at,
+                                                    });
                                                 }
                                             }
                                             None => crate::toast::push_toast(
@@ -3826,9 +3611,9 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                                     // last-seen baseline to what we just pulled.
                                     let ua = updated.updated_at.clone();
                                     item.set(updated);
-                                    let mut last_seen = UOW_LAST_SEEN.write();
-                                    let mut changed = UOW_CHANGED.write();
-                                    clear_changed_and_bump(&mut last_seen, &mut changed, &wid, &ua);
+                                    GOV_DEV_STATE
+                                        .write()
+                                        .apply(GovDevMsg::PulledLatest { id: wid, updated_at: ua });
                                 }
                                 None => crate::toast::push_toast(
                                     toasts,

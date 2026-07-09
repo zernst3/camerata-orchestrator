@@ -8,7 +8,7 @@
 //!
 //! # Why it lives in `camerata-server`
 //!
-//! `camerata-agent` does NOT depend on `camerata-server`. The `Completer` trait +
+//! `camerata-agent` does NOT depend on `camerata-server`. The `LlmPort` trait +
 //! `OpenRouterCompleter` live in `camerata-server`. The gateway library lives in
 //! `camerata-gateway`. `camerata-server` already depends on both, so `ApiAgentDriver`
 //! placed here avoids a dependency cycle. The `AgentDriver` trait (from
@@ -70,7 +70,7 @@ use camerata_core::{AgentDriver, AgentOutcome, Decision, Role, RuleId, ToolCall}
 use camerata_gateway::evaluate_call;
 use serde_json::Value;
 
-use crate::llm::{Completer, LlmRequest, LlmResponse};
+use crate::llm::{LlmPort, LlmRequest, LlmResponse};
 
 // ─── constants ────────────────────────────────────────────────────────────────
 
@@ -144,8 +144,8 @@ struct ToolInvocation {
 /// [`ApiAgentDriver::with_worktree`] to configure the mode and jail before calling `run`.
 #[derive(Clone)]
 pub struct ApiAgentDriver {
-    /// The `Completer` that makes the provider API calls.
-    completer: Arc<dyn Completer>,
+    /// The `LlmPort` that makes the provider API calls.
+    completer: Arc<dyn LlmPort>,
     /// Model id to request (empty = completer's default).
     pub model: String,
     /// Optional worktree the agent's writes are jailed to. Enforced by the gateway rules
@@ -193,6 +193,15 @@ pub struct ApiAgentDriver {
     /// the API loop has no line stream, so it beats per turn instead. `None` = no heartbeat
     /// (tests / callers that don't wire one).
     on_activity: Option<HeartbeatFn>,
+    /// Phase H2: the audit-trail governance log this driver's tool calls are recorded into,
+    /// paired with the run id every recorded event is tagged with. `None` = no governance
+    /// trail (tests, or a caller that hasn't wired one) — every record site is a no-op then,
+    /// same fail-soft posture as [`crate::AppState::record_governance`]. Set together via
+    /// [`Self::with_governance`] (a bare log with no run id is useless — every row needs one).
+    governance_log: Option<Arc<camerata_persistence::GovernanceLog>>,
+    /// The run id every governance event this driver records is tagged with. `None` unless
+    /// [`Self::with_governance`] was called.
+    run_id: Option<String>,
 }
 
 impl ApiAgentDriver {
@@ -200,8 +209,8 @@ impl ApiAgentDriver {
     ///
     /// If `completer` is an [`crate::llm::OpenRouterCompleter`], its `session_id` is
     /// inherited here so every direct HTTP call (the tool-schema path) uses the same
-    /// session id as bare-LLM calls made through the `Completer` trait.
-    pub fn new(completer: Arc<dyn Completer>, model: impl Into<String>) -> Self {
+    /// session id as bare-LLM calls made through the `LlmPort` trait.
+    pub fn new(completer: Arc<dyn LlmPort>, model: impl Into<String>) -> Self {
         // Inherit the session id from an OpenRouterCompleter when available; fall back to
         // a stable per-instance token for other completer types (no-op for them).
         let session_id = completer
@@ -230,6 +239,8 @@ impl ApiAgentDriver {
             shape: ApiShape::OpenRouter,
             anthropic_api_key: None,
             on_activity: None,
+            governance_log: None,
+            run_id: None,
         }
     }
 
@@ -320,6 +331,22 @@ impl ApiAgentDriver {
         if !m.trim().is_empty() {
             self.model = m;
         }
+        self
+    }
+
+    /// Wire the Phase H2 governance-event audit trail: every `gated_write` deny/allow and
+    /// every agentic step this driver executes is recorded into `log` under `run_id`. Builder
+    /// form. Fail-soft by construction (mirrors [`crate::AppState::record_governance`]): a
+    /// write error is `tracing::warn!`-logged and swallowed, never surfaced to the caller.
+    /// Not called ⇒ `governance_log` stays `None` and every record site is a no-op — the
+    /// default for tests and any driver built without an `AppState` in scope.
+    pub fn with_governance(
+        mut self,
+        log: Arc<camerata_persistence::GovernanceLog>,
+        run_id: impl Into<String>,
+    ) -> Self {
+        self.governance_log = Some(log);
+        self.run_id = Some(run_id.into());
         self
     }
 }
@@ -532,18 +559,18 @@ fn append_tool_results(messages: &mut Vec<Value>, shape: ApiShape, results: &[(S
 /// Make one provider API call with the current conversation history and tool schemas.
 ///
 /// `tool_schemas` is embedded in the request body via the OpenAI `tools` field.
-/// The `Completer` trait doesn't natively carry tool schemas, so we build the
+/// The `LlmPort` trait doesn't natively carry tool schemas, so we build the
 /// request body manually here and call the underlying HTTP client directly.
 ///
 /// `session_id` enables sticky routing + KV-cache warmth (passed to OpenRouter via the
 /// request body). `bust_cache` adds `X-OpenRouter-Cache-Clear: true` for one-shot cache
 /// invalidation on stuck-loop retries. Both are no-ops for non-OR completers.
 ///
-/// **Design note:** The `Completer` trait is designed for bare-LLM (no tools). To send
+/// **Design note:** The `LlmPort` trait is designed for bare-LLM (no tools). To send
 /// tool schemas, we build the full OpenRouter request body and post it directly, bypassing
-/// the `Completer` abstraction for this specific call. The response normalization stays
+/// the `LlmPort` abstraction for this specific call. The response normalization stays
 /// shared. TODO(provider-agnostic-followup): extend `LlmRequest` to carry tool schemas so
-/// the `Completer` trait covers the agentic path too.
+/// the `LlmPort` trait covers the agentic path too.
 async fn call_provider(
     driver: &ApiAgentDriver,
     system: Option<&str>,
@@ -558,19 +585,19 @@ async fn call_provider(
     // Selected explicitly via `with_shape(ApiShape::Anthropic)` AND with a key attached.
     // The Anthropic key is carried on the driver (resolved from ANTHROPIC_API_KEY), not
     // read off the completer. If the shape is Anthropic but no key is attached, fall
-    // through to the schema-less Completer path so test stubs still work.
+    // through to the schema-less LlmPort path so test stubs still work.
     if driver.shape == ApiShape::Anthropic {
         if let Some(key) = driver.anthropic_api_key.as_deref() {
             return call_anthropic_with_tools(key, model, system, messages, tool_schemas).await;
         }
         // No key attached (e.g. a stub-completer unit test on the Anthropic shape):
-        // fall through to the Completer-trait path below.
+        // fall through to the LlmPort-trait path below.
     }
 
     // ── OpenRouter / OpenAI-compatible shape ───────────────────────────────
     // Attempt to downcast to OpenRouterCompleter for tool-schema support.
     // If the downcast fails (unknown completer type / stub), fall back to a schema-less
-    // call via the Completer trait (works for text-only models + tests).
+    // call via the LlmPort trait (works for text-only models + tests).
     let any = completer.as_any();
 
     if any.is::<crate::llm::OpenRouterCompleter>() {
@@ -587,9 +614,9 @@ async fn call_provider(
         )
         .await
     } else {
-        // Fallback: use the Completer trait (no tool schemas — text only).
+        // Fallback: use the LlmPort trait (no tool schemas — text only).
         // This handles test stubs and future completers.
-        // TODO(provider-agnostic-followup): wire tool schemas into the Completer trait.
+        // TODO(provider-agnostic-followup): wire tool schemas into the LlmPort trait.
         let prompt = messages_to_text_prompt(messages);
         let mut req = LlmRequest::new(prompt).with_model(model);
         if let Some(sys) = system {
@@ -601,7 +628,7 @@ async fn call_provider(
 
 /// Extract the OpenRouter API key from an `OpenRouterCompleter` reference.
 /// The field is private, so we use the `as_any` downcast + a dedicated accessor.
-fn get_openrouter_key_from_completer(completer: &dyn Completer) -> anyhow::Result<String> {
+fn get_openrouter_key_from_completer(completer: &dyn LlmPort) -> anyhow::Result<String> {
     // `OpenRouterCompleter` is in the same crate; we access the key via a helper method
     // added below (see `impl OpenRouterCompleter` extension).
     let any = completer.as_any();
@@ -1066,13 +1093,26 @@ fn normalize_anthropic_tool_use(block: &Value) -> Option<ToolInvocation> {
 ///   coupling) when an `OrchestratorConfig` (with factory) is attached, else an honest
 ///   "not configured" message and NO spawn.
 /// - For anything else (including `shell`, `Task`, `Write`, `Edit`, `Bash`): deny.
+///
+/// Phase H2: records one routine `agent_step` governance event per call (when a governance
+/// log is wired), plus a `gate_allow`/`gate_deny` event specifically for `gated_write` — the
+/// only mutation path this driver has. Fail-soft throughout: a `None` governance log (no
+/// `with_governance` call) makes every record a no-op, identical to `AppState::record_governance`.
 async fn execute_tool(
     driver: &ApiAgentDriver,
     role: &Role,
     inv: &ToolInvocation,
 ) -> (String, Option<String>) {
+    record_agent_step(driver, &inv.name).await;
     match inv.name.as_str() {
-        GATED_WRITE => execute_gated_write(driver, role, inv),
+        GATED_WRITE => {
+            let (text, denial) = execute_gated_write(driver, role, inv);
+            match &denial {
+                Some(d) => record_gate_deny(driver, d).await,
+                None => record_gate_allow(driver, &inv.input).await,
+            }
+            (text, denial.map(|d| d.message))
+        }
         TOOL_READ => (execute_read(inv, driver.worktree.as_deref()), None),
         TOOL_GLOB => (execute_glob(inv, driver.worktree.as_deref()), None),
         TOOL_GREP => (execute_grep(inv, driver.worktree.as_deref()), None),
@@ -1101,6 +1141,83 @@ async fn execute_tool(
             );
             (msg.clone(), Some(msg))
         }
+    }
+}
+
+/// Structured detail behind a `gated_write` denial, carried alongside the plain-text
+/// message every caller/test already matches on. `rule_id` is `Some` only for a Layer-1
+/// (`evaluate_call`) deny; the size-guard and worktree-jail denials are validation, not a
+/// named rule, so they carry `None` there and the readable `reason` alone.
+struct GateDenial {
+    /// The exact text handed back to the model as the tool result (and, historically, what
+    /// callers matched on via `Option<String>`).
+    message: String,
+    /// The Layer-1 rule id, when the denial came from `evaluate_call`.
+    rule_id: Option<String>,
+    /// Human-readable reason, independent of the tool-facing `message` wording.
+    reason: String,
+    /// The write path in question, when known at the point of denial.
+    path: Option<String>,
+}
+
+/// Record one routine `agent_step` info event: one per tool call, not per token or per
+/// provider turn (LIFECYCLE-tasteful — see module docs). No-op when no governance log is
+/// wired.
+async fn record_agent_step(driver: &ApiAgentDriver, tool_name: &str) {
+    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref())
+    else {
+        return;
+    };
+    let event = camerata_persistence::GovernanceEvent::info(run_id.clone(), "agent_step", "agent")
+        .with_reason(format!("called tool `{tool_name}`"));
+    if let Err(e) = log.record(event).await {
+        tracing::warn!(error = %e, run_id = %run_id, "failed to record agent_step governance event");
+    }
+}
+
+/// Record a `gate_allow` info event for a `gated_write` that passed Layer-1 + the worktree
+/// jail and was actually written. No-op when no governance log is wired.
+async fn record_gate_allow(driver: &ApiAgentDriver, input: &Value) {
+    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref())
+    else {
+        return;
+    };
+    let path = input["path"].as_str().unwrap_or("<unknown>");
+    let event = camerata_persistence::GovernanceEvent::info(run_id.clone(), "gate_allow", "agent")
+        .with_reason(format!("gated_write allowed: {path}"));
+    if let Err(e) = log.record(event).await {
+        tracing::warn!(error = %e, run_id = %run_id, "failed to record gate_allow governance event");
+    }
+}
+
+/// Record a `gate_deny` warn event at the moment a `gated_write` is denied — the HIGHEST
+/// PRIORITY Phase H2 site. Emits a `tracing::warn!` alongside the durable row (both keyed on
+/// `run_id`) so the deny is visible in both the live log and the readable audit trail. The
+/// `reason` recorded is the human-readable denial text (rule reason, size-guard message, or
+/// jail-violation message) — never a hash or opaque code. No-op when no governance log is
+/// wired (tests, or a driver built without `with_governance`).
+async fn record_gate_deny(driver: &ApiAgentDriver, denial: &GateDenial) {
+    tracing::warn!(
+        rule = denial.rule_id.as_deref().unwrap_or("<none>"),
+        path = denial.path.as_deref().unwrap_or("<unknown>"),
+        run_id = driver.run_id.as_deref().unwrap_or("<none>"),
+        reason = %denial.reason,
+        "gate denied write"
+    );
+    let (Some(log), Some(run_id)) = (driver.governance_log.as_ref(), driver.run_id.as_ref())
+    else {
+        return;
+    };
+    let mut event = camerata_persistence::GovernanceEvent::warn(run_id.clone(), "gate_deny", "agent")
+        .with_reason(denial.reason.clone());
+    if let Some(rule) = &denial.rule_id {
+        event = event.with_rule_id(rule.clone());
+    }
+    if let Some(path) = &denial.path {
+        event = event.with_detail(serde_json::json!({ "path": path }).to_string());
+    }
+    if let Err(e) = log.record(event).await {
+        tracing::warn!(error = %e, run_id = %run_id, "failed to record gate_deny governance event");
     }
 }
 
@@ -1200,23 +1317,39 @@ async fn execute_fan_out(
 /// 4. Enforce worktree jail (path must be under `driver.worktree` when set).
 /// 5. If everything passes: write the file, returning an allow message.
 /// 6. If denied: return the denial reason without writing.
+///
+/// Returns `(result_text, Option<GateDenial>)` — the structured [`GateDenial`] (rather than
+/// just the plain-text message) is what lets [`execute_tool`] record a `gate_deny`
+/// governance event with the real rule id + readable reason, not a re-parse of the message.
 fn execute_gated_write(
     driver: &ApiAgentDriver,
     _role: &Role,
     inv: &ToolInvocation,
-) -> (String, Option<String>) {
+) -> (String, Option<GateDenial>) {
     let path = match inv.input["path"].as_str() {
         Some(p) => p.to_string(),
         None => {
             let msg = "DENIED: gated_write requires a `path` string field in input".to_string();
-            return (msg.clone(), Some(msg));
+            let denial = GateDenial {
+                message: msg.clone(),
+                rule_id: None,
+                reason: "gated_write called without a `path` field".to_string(),
+                path: None,
+            };
+            return (msg, Some(denial));
         }
     };
     let content = match inv.input["content"].as_str() {
         Some(c) => c.to_string(),
         None => {
             let msg = "DENIED: gated_write requires a `content` string field in input".to_string();
-            return (msg.clone(), Some(msg));
+            let denial = GateDenial {
+                message: msg.clone(),
+                rule_id: None,
+                reason: "gated_write called without a `content` field".to_string(),
+                path: Some(path),
+            };
+            return (msg, Some(denial));
         }
     };
 
@@ -1227,7 +1360,16 @@ fn execute_gated_write(
             MAX_WRITE_BYTES,
             content.len()
         );
-        return (msg.clone(), Some(msg));
+        let denial = GateDenial {
+            message: msg.clone(),
+            rule_id: None,
+            reason: format!(
+                "content exceeds the {MAX_WRITE_BYTES}-byte size guard ({} bytes)",
+                content.len()
+            ),
+            path: Some(path),
+        };
+        return (msg, Some(denial));
     }
 
     // ── Gateway rule evaluation (Layer-1) ──────────────────────────────────
@@ -1239,7 +1381,13 @@ fn execute_gated_write(
     match decision {
         Decision::Deny { rule, reason } => {
             let msg = format!("DENIED by {} — {}", rule.0, reason);
-            return (msg.clone(), Some(msg));
+            let denial = GateDenial {
+                message: msg.clone(),
+                rule_id: Some(rule.0),
+                reason,
+                path: Some(path),
+            };
+            return (msg, Some(denial));
         }
         Decision::Allow => {}
     }
@@ -1253,7 +1401,13 @@ fn execute_gated_write(
             Ok(resolved) => resolved,
             Err(e) => {
                 let msg = format!("DENIED: worktree jail violation — {e}");
-                return (msg.clone(), Some(msg));
+                let denial = GateDenial {
+                    message: msg.clone(),
+                    rule_id: None,
+                    reason: format!("worktree jail violation — {e}"),
+                    path: Some(path),
+                };
+                return (msg, Some(denial));
             }
         }
     } else {
@@ -1766,7 +1920,7 @@ fn build_system_prompt(role: &Role, model: &str) -> Option<String> {
 
 // ─── Anthropic-shape routing helpers ───────────────────────────────────────────
 
-/// A no-op `Completer` used as the placeholder completer for an Anthropic-shape
+/// A no-op `LlmPort` used as the placeholder completer for an Anthropic-shape
 /// `ApiAgentDriver`. The Anthropic path makes its HTTP call directly in
 /// `call_anthropic_with_tools` (using the key carried on the driver), so this completer's
 /// `complete` is only ever reached on the schema-less fallback — which the Anthropic path
@@ -1775,11 +1929,11 @@ fn build_system_prompt(role: &Role, model: &str) -> Option<String> {
 struct AnthropicNoopCompleter;
 
 #[async_trait]
-impl Completer for AnthropicNoopCompleter {
+impl LlmPort for AnthropicNoopCompleter {
     async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
         anyhow::bail!(
             "AnthropicNoopCompleter::complete reached — the Anthropic ApiAgentDriver should \
-             make its call via call_anthropic_with_tools, not the Completer trait"
+             make its call via call_anthropic_with_tools, not the LlmPort trait"
         )
     }
     async fn complete_streaming(
@@ -1852,6 +2006,11 @@ fn build_claude_driver(
     // LIFECYCLE-7 liveness heartbeat. Wired onto whichever concrete driver is built (CLI: per
     // output line; Anthropic API: per loop turn) so a healthy long run stays fresh.
     on_activity: Option<HeartbeatFn>,
+    // Phase H2: the governance-event audit trail + this run's id, threaded onto the ApiAgentDriver
+    // path only (the CLI path's own gate denials are recorded at the MCP boundary, Phase T — see
+    // the module-level Phase H2 note). `None` for callers with no governance log wired (tests) or
+    // for a caller that intentionally skips this instrumentation (delegated/fanned-out children).
+    governance: Option<(Arc<camerata_persistence::GovernanceLog>, String)>,
 ) -> Arc<dyn AgentDriver> {
     if let Some(key) = anthropic_api_backend_key(creds) {
         // Anthropic Messages API agent. Same gate surface as every other ApiAgentDriver:
@@ -1866,6 +2025,9 @@ fn build_claude_driver(
         }
         if let Some(cb) = on_activity {
             driver = driver.with_on_activity(cb);
+        }
+        if let Some((log, run_id)) = governance {
+            driver = driver.with_governance(log, run_id);
         }
         Arc::new(driver)
     } else {
@@ -1929,6 +2091,13 @@ pub fn build_agent_driver(
     // pass `Arc::new(move || runs.touch_activity(&run_id, None))`, mirroring
     // investigation_run / update_branch_run.
     on_activity: Option<HeartbeatFn>,
+    // Phase H2: the governance-event audit trail + this run's id, so the built driver records
+    // `agent_step` / `gate_allow` / `gate_deny` events as it executes tool calls. `None` for
+    // callers with no log wired (tests) or that intentionally skip it (delegated children —
+    // see `ServerChildDriverFactory::build_child`). Only takes effect on the `ApiAgentDriver`
+    // path (OpenRouter, or Anthropic-API-backend); the CLI path ignores it (see
+    // `build_claude_driver`).
+    governance: Option<(Arc<camerata_persistence::GovernanceLog>, String)>,
 ) -> anyhow::Result<Arc<dyn AgentDriver>> {
     let provider = registry
         .all_entries()
@@ -1964,6 +2133,9 @@ pub fn build_agent_driver(
             if let Some(cb) = on_activity {
                 driver = driver.with_on_activity(cb);
             }
+            if let Some((log, run_id)) = governance {
+                driver = driver.with_governance(log, run_id);
+            }
             Ok(Arc::new(driver))
         }
         // "claude" or any unrecognised provider: CLI by default, or the Anthropic Messages
@@ -1977,6 +2149,7 @@ pub fn build_agent_driver(
             orchestrator,
             escalation,
             on_activity,
+            governance,
         )),
     }
 }
@@ -2114,6 +2287,13 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
             self.run_session_id.as_deref(),
             false, // workers do not self-escalate (the governed dev-implement agent does)
             None,  // child driver: heartbeat is owned by the parent run's supervised path
+            // Phase H2: delegated/fanned-out children are NOT individually wired into the
+            // governance log — threading it here would also require adding a governance field
+            // to `ServerChildDriverFactory` (and its own construction call sites), and a
+            // child's denials already surface in the parent's `delegate`/`fan_out` result text
+            // (visible to the parent's own agent_step trail). Documented skip; the top-level
+            // implementer driver (built directly in `dev_implement_run.rs`) IS wired.
+            None,
         )
         .map_err(|e| std::io::Error::other(format!("build child driver for `{model}`: {e}")))?;
 
@@ -2427,11 +2607,11 @@ mod tests {
         assert!(p.contains("gated_write"), "constraints block must be preserved");
     }
 
-    /// A stub `Completer` that always returns a fixed final text (no tool calls).
+    /// A stub `LlmPort` that always returns a fixed final text (no tool calls).
     struct StubCompleter(String);
 
     #[async_trait::async_trait]
-    impl Completer for StubCompleter {
+    impl LlmPort for StubCompleter {
         async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
             Ok(LlmResponse {
                 text: self.0.clone(),
@@ -2459,7 +2639,7 @@ mod tests {
         }
     }
 
-    /// A stub `Completer` that returns one OpenAI-style `tool_calls` response then
+    /// A stub `LlmPort` that returns one OpenAI-style `tool_calls` response then
     /// a final text response on the second call.
     struct OneToolCallCompleter {
         tool_name: String,
@@ -2480,7 +2660,7 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl Completer for OneToolCallCompleter {
+    impl LlmPort for OneToolCallCompleter {
         async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
             let mut count = self.call_count.lock().unwrap();
             let n = *count;
@@ -2545,7 +2725,7 @@ mod tests {
 
     /// Build a driver backed by `completer` with `rule_subset` from `role`.
     fn driver_with(
-        completer: Arc<dyn Completer>,
+        completer: Arc<dyn LlmPort>,
         role: &Role,
         wt: Option<PathBuf>,
     ) -> ApiAgentDriver {
@@ -3104,6 +3284,7 @@ mod tests {
             None,                 // run_session_id
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
+            None, // governance — no log wired in this unit test
         );
         assert!(
             result.is_ok(),
@@ -3157,6 +3338,7 @@ mod tests {
             None, // run_session_id
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
+            None, // governance — no log wired in this unit test
         );
         assert!(
             result.is_ok(),
@@ -3187,6 +3369,7 @@ mod tests {
             None, // run_session_id
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
+            None, // governance — no log wired in this unit test
         );
         assert!(
             result.is_err(),
@@ -3265,6 +3448,106 @@ mod tests {
         assert!(
             !wt.join("forbidden/config.rs").exists(),
             "denied file must not exist"
+        );
+    }
+
+    /// Phase H2: the SAME denied write ALSO lands as a durable `gate_deny` row in an
+    /// injected [`camerata_persistence::GovernanceLog`] — not just the in-memory
+    /// `AgentOutcome.denials` the test above covers. Proves the wiring end-to-end:
+    /// `ApiAgentDriver::run` → `execute_gated_write` deny → `record_gate_deny` → the
+    /// injected log. The recorded `reason` must be the READABLE rule reason (the actual
+    /// gate message), never a hash or opaque code.
+    #[tokio::test]
+    async fn end_to_end_denied_write_recorded_in_governance_log() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wt = tmp.path().to_path_buf();
+        let log = Arc::new(
+            camerata_persistence::GovernanceLog::open_in_memory()
+                .await
+                .expect("open in-memory governance log"),
+        );
+
+        let completer = Arc::new(OneToolCallCompleter::new(
+            "gated_write",
+            serde_json::json!({
+                "path": "forbidden/config.rs",
+                "content": "// secret"
+            }),
+            "I tried to write to the forbidden path.",
+        ));
+
+        let role = all_rules_role();
+        let driver = ApiAgentDriver::new(completer, "stub-model")
+            .with_rule_subset(role.rule_subset.clone())
+            .with_worktree(wt.clone())
+            .with_governance(log.clone(), "run-deny-gov-1");
+
+        let outcome = driver.run(&role, "write to forbidden").await.unwrap();
+        assert!(!outcome.denials.is_empty(), "denial must still be recorded in the outcome");
+        assert!(!wt.join("forbidden/config.rs").exists(), "denied file must not exist");
+
+        let events = log.by_run("run-deny-gov-1").await.expect("by_run");
+        let deny = events
+            .iter()
+            .find(|e| e.kind == "gate_deny")
+            .expect("a gate_deny row must be recorded in the governance log");
+        assert_eq!(deny.severity, "warn");
+        assert_eq!(deny.actor, "agent");
+        assert!(deny.rule_id.is_some(), "the Layer-1 rule id must be carried");
+        // The reason must be READABLE — the gate's actual denial text — never a bare hash.
+        let reason = deny.reason.as_deref().expect("reason present");
+        assert!(
+            !reason.chars().all(|c| c.is_ascii_hexdigit()) || reason.len() < 8,
+            "reason must not look like a bare hash: {reason}"
+        );
+        assert!(reason.contains(' '), "reason must be a readable phrase, not a code: {reason}");
+        // agent_step + gate_allow/deny both recorded — the routine trail plus the deny.
+        assert!(
+            events.iter().any(|e| e.kind == "agent_step"),
+            "a routine agent_step must also be recorded"
+        );
+    }
+
+    /// A CLEAN (allowed) `gated_write` records a `gate_allow` row in the injected
+    /// governance log, alongside the routine `agent_step` — the "everything is fine"
+    /// path of the same audit trail the deny test above exercises.
+    #[tokio::test]
+    async fn end_to_end_allowed_write_recorded_as_gate_allow() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wt = tmp.path().to_path_buf();
+        let log = Arc::new(
+            camerata_persistence::GovernanceLog::open_in_memory()
+                .await
+                .expect("open in-memory governance log"),
+        );
+
+        let completer = Arc::new(OneToolCallCompleter::new(
+            "gated_write",
+            serde_json::json!({
+                "path": "src/lib.rs",
+                "content": "pub fn hello() -> &'static str { \"hello\" }"
+            }),
+            "Done! I wrote src/lib.rs.",
+        ));
+
+        let role = all_rules_role();
+        let driver = ApiAgentDriver::new(completer, "stub-model")
+            .with_rule_subset(role.rule_subset.clone())
+            .with_worktree(wt.clone())
+            .with_governance(log.clone(), "run-allow-gov-1");
+
+        let outcome = driver.run(&role, "write the hello function").await.unwrap();
+        assert!(outcome.denials.is_empty(), "no denials expected: {:?}", outcome.denials);
+        assert!(wt.join("src/lib.rs").exists(), "file must have been written");
+
+        let events = log.by_run("run-allow-gov-1").await.expect("by_run");
+        assert!(
+            events.iter().any(|e| e.kind == "gate_allow"),
+            "a gate_allow row must be recorded for the clean write"
+        );
+        assert!(
+            !events.iter().any(|e| e.kind == "gate_deny"),
+            "a clean write must not record any gate_deny"
         );
     }
 
@@ -3374,6 +3657,7 @@ mod tests {
             Some("uow-story-id-42"), // run_session_id
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
+            None, // governance — no log wired in this unit test
         )
         .expect("build must succeed");
 
@@ -4054,6 +4338,7 @@ mod tests {
             false,
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
+            None, // governance — no log wired in this unit test
         ); // building must not panic / spawn
 
         // default cli: routing helper does not fire, CLI driver builds.
@@ -4069,6 +4354,7 @@ mod tests {
             false,
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
+            None, // governance — no log wired in this unit test
         );
     }
 
@@ -4098,6 +4384,7 @@ mod tests {
             None,
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
+            None, // governance — no log wired in this unit test
         );
         assert!(result.is_ok(), "claude+api+key must build: {:?}", result.err().map(|e| e.to_string()));
     }
@@ -4126,6 +4413,7 @@ mod tests {
             None,
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
+            None, // governance — no log wired in this unit test
         );
         assert!(result.is_ok(), "claude+cli must build: {:?}", result.err().map(|e| e.to_string()));
     }

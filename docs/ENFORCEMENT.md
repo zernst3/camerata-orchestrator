@@ -81,6 +81,24 @@ function plus one `RuleEntry`. Unknown rule ids are a **safe no-op** — the gat
 is permissive about rules it has not implemented, never about calls. The gate is
 sub-millisecond even over a 71-rule subset (see latency below).
 
+**Verification (2026-07-08): the gate's denial is now tested at the real MCP boundary.** Two test
+surfaces prove the gate denies at the actual `gated_write` MCP tool boundary, not just at the
+`evaluate_call`/`apply_rule` function level:
+
+- `crates/gateway/src/main.rs` (`mod mcp_gated_write_boundary_tests`): 19 tests, each driving the
+  real `gated_write` rmcp tool method across every one of the 13 rules in `enforced_gate_rules()`:
+  a deny leaves the target file absent, an allow leaves the exact content on disk, and the
+  gate-events sink faithfully records both a deny and an allow verdict. Jail-precedence (a jail
+  violation wins over a rule denial) is also covered.
+- `crates/gateway/tests/mcp_gated_write_deny.rs`: a real-transport test that spawns the
+  `camerata-gateway` binary and drives an actual `tools/call` over MCP stdio, asserting `DENIED` on
+  the wire for a forbidden write, with no file created. This is the one test that exercises the
+  full stdio transport rather than the in-process tool method.
+
+Together these close the gap between "the gate's logic is unit-tested" and "the gate denies when a
+real MCP client calls the real tool over the real transport": the MCP-boundary denial is now
+test-verified, not designed-only.
+
 **Test-scope policy (GATE-F7, 2026-07-05):** the gateway's `test_scope_policy` function applies a
 rule-specific relief for violations inside genuine test code (`#[cfg(test)]` blocks, paths whose
 path-component is `tests`, `test`, `fixtures`, or similar). After the GATE-F7 fix:

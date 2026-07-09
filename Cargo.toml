@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/api-types",   # pure-serde wire-contract leaf crate (Phase A of the DTO extraction); no camerata deps
     "crates/liveness",    # leaf crate: LivenessTracker + mtime probe + HeartbeatFn (no camerata deps)
     "crates/core",        # orchestrator brain: roles, tasks, DAG, coordination (zero model calls)
     "crates/app-core",    # framework-agnostic backend app-orchestration (RUST-HEADLESS-CORE-1); no axum dep
@@ -10,8 +11,11 @@ members = [
     "crates/rules",       # rule corpus loader, enforcement_kind, rule-subset selection
     "crates/persistence", # SQLite state + JSON provenance
     "crates/checks",      # layer-2 post-task gate: CheckRunner + ESLint subprocess
+    "crates/llm",         # LLM/provider stack: LlmPort seam + Llm/OpenRouter transports, credentials, model registry, rate limiter, usage ledger (Phase B; deps: api-types only)
     "crates/fleet",       # reusable governed-fleet build logic (used by CLI + UI)
     "crates/server",      # Axum HTTP/WS the cockpit talks to (embedded in orchestrator)
+    "crates/client",      # typed HTTP client over the BFF's /api/* routes (shared by MCP + CLI adapters)
+    "crates/mcp",         # first MCP adapter rung: rmcp stdio server exposing first-rung verbs via camerata-client (Phase E)
     "crates/cli",         # binary entrypoint wiring it all together
     "crates/ui",          # Dioxus cockpit (separate process) — the thin rendering ADAPTER
     "crates/ui-core",     # framework-agnostic UI logic/state (RUST-HEADLESS-CORE-1); no dioxus dep
@@ -62,3 +66,10 @@ ignore = "0.4"
 # ledger stays safe to share/port as proof (a hashed code slice that MIGHT contain a
 # secret cannot be brute-forced back). Workspace dep so gateway + persistence agree.
 sha2 = "0.10"
+# Structured logging (Phase H1: governance-event-trail foundation). `tracing` is the
+# facade any crate can emit through; `tracing-subscriber` (with `env-filter`) is the
+# STARTUP-ONLY subscriber the two binary entrypoints (server, gateway) install once.
+# Library crates should depend on `tracing` alone, never `tracing-subscriber` — only a
+# `main()` installs a global subscriber.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

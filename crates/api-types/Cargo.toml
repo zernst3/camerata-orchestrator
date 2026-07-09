@@ -1,0 +1,22 @@
+[package]
+name = "camerata-api-types"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+version = "0.0.0"
+
+[lints]
+workspace = true
+
+# Pure-serde wire-contract leaf crate (Phase A of the DTO extraction). Holds the
+# request/response and domain-serde shapes shared across the backend layers, with
+# NO dependency on any other camerata-* crate — this is the bottom of the dependency
+# graph so any crate can depend on it without pulling in transport/framework code.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+# `credentials::CredentialError` is a typed error enum (thiserror::Error derive).
+# thiserror is a general-purpose leaf crate (not a camerata-* dep), so it stays
+# consistent with the "pure serde leaf" rule.
+thiserror = { workspace = true }

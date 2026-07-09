@@ -19,6 +19,14 @@ name = "camerata-server"
 path = "src/main.rs"
 
 [dependencies]
+# The pure-serde wire-contract leaf crate (Phase A of the DTO extraction): `llm`,
+# `credentials`, and `model_registry` re-export their relocated DTOs from here so every
+# existing `crate::X` call site keeps resolving unchanged.
+camerata-api-types = { path = "../api-types" }
+# The LLM/provider stack (Phase B of the extraction): the `llm`, `credentials`,
+# `model_registry`, `rate_limit`, and `usage_ledger` modules are now re-export shims
+# over this crate so every existing `crate::X` call site keeps resolving unchanged.
+camerata-llm = { path = "../llm" }
 axum = { version = "0.7", features = ["ws"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "signal", "time", "process", "io-util"] }
 tower = "0.5"
@@ -56,6 +64,10 @@ fs2 = { workspace = true }
 # Respects .gitignore / .git/info/exclude / global gitignore so committed secrets are
 # still found while truly gitignored build artifacts are skipped.
 ignore = { workspace = true }
+# Structured logging (Phase H1: governance-event-trail foundation). `tracing-subscriber`
+# is initialized once in `main.rs`; `tracing` is the facade handlers/services emit through.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 # The backend contracts the BFF exposes.
 camerata-gateway = { path = "../gateway" }

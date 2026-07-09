@@ -1,0 +1,28 @@
+[package]
+name = "camerata-client"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+version = "0.0.0"
+
+[lints]
+workspace = true
+
+# Typed HTTP client over the running BFF's `/api/*` routes (Phase D of the DTO
+# extraction). This is the shared adapter both the MCP server (Phase E) and the HTTP
+# CLI (Phase F) call — it depends ONLY on `camerata-api-types` (the pure-serde wire
+# leaf) plus generic HTTP/serde/error crates, never on `camerata-server` or any other
+# behavior-carrying camerata crate.
+[dependencies]
+camerata-api-types = { path = "../api-types" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# Stands up a fake BFF so the reqwest-based verbs can be tested against a known
+# request/response contract without a real server (see `crates/ui`'s use of the same
+# crate for its BFF helper tests).
+wiremock = "0.6"

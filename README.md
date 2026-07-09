@@ -34,7 +34,12 @@ The fastest way to see it: `cargo run -p camerata-ui` (the Enterprise Cockpit, a
     ▸ CONSOLIDATED SETTINGS: one Settings nav item covering cross-project
       credentials (keychain-backed, masked) + Bombe animation controls, and
       per-project model configuration. The Rules page is rules-only.
-    ▸ 18-crate Rust workspace · ~2,800 tests · governs its OWN source in CI.
+    ▸ 22-crate Rust workspace · ~3,350 tests · governs its OWN source in CI.
+    ▸ ADAPTER LADDER: a typed `camerata-client`, a first `camerata-mcp` server (stdio),
+      and `camerata-cli` as a real HTTP adapter all drive the same BFF surface the
+      cockpit does. `camerata-ui` now spawns `camerata-server` as a subprocess instead
+      of embedding it. A `governance_events` audit trail (SQLite + `tracing`) makes
+      every gate decision and lifecycle event readable after the fact.
 
  ⏳ STAGED — built & tested, NOT yet validated live (please don't grade these as proven)
     ▸ The gate inside a full LIVE development cycle — the engine + UI are wired and
@@ -119,7 +124,7 @@ A compiling, tested, all-Rust workspace, not a design folder.
 
 **Verified at runtime (you can reproduce it):**
 
-- An **18-crate workspace, ~2,800 passing tests**, `clippy -D warnings` + `unsafe`-forbidden + fmt enforced in CI, governing its OWN source ([`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)).
+- A **22-crate workspace, ~3,350 passing tests**, `clippy -D warnings` + `unsafe`-forbidden + fmt enforced in CI, governing its OWN source ([`docs/ENFORCEMENT.md`](docs/ENFORCEMENT.md)).
 - **Brownfield onboarding, end to end** on fixture repos: per-repo detection and rule proposal, the two-tier audit with calibration and dedup, the triage tables, Process emitting baseline waivers and GitHub issues, and Apply writing the governance branch.
 - **The gate denies a real agent (standalone)** via `camerata -- live-demo`, with the gateway's verdict + jail tests covered by `cargo test`.
 - **The governed development console** — issue pull + Epic/sub-issue tree, UoW creation and the full lifecycle UI, the project-aware chat assistant, and the deterministic gate self-check — wired and unit-tested in-app.
@@ -147,6 +152,15 @@ cargo run -p camerata -- maintenance-demo   # the standing ops agent (recommenda
 cargo run -p camerata -- deploy-demo        # the draft->publish gate, a local deploy, and the Azure az-CLI plan
 ```
 
+With a `camerata-server` already running (started automatically by the UI, or standalone via
+`cargo run -p camerata-server`), the adapter ladder is drivable directly:
+
+```
+cargo run -p camerata -- stories            # CLI HTTP adapter: list stories over the BFF
+cargo run -p camerata -- run <RUN_ID>       # (also: uows / assign / start-run / events / recent-events)
+cargo run -p camerata-mcp                   # MCP server over stdio: the same verbs as MCP tools for any MCP host
+```
+
 ## Read in this order
 
 1. [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md): the flows and features, how to use them.
@@ -157,12 +171,13 @@ cargo run -p camerata -- deploy-demo        # the draft->publish gate, a local d
 
 ## Architecture in one breath
 
-- **Everything load-bearing is Rust** (no TypeScript core; that early design was abandoned on evidence). One Tokio process is the server, the brain, and the gate.
+- **Everything load-bearing is Rust** (no TypeScript core; that early design was abandoned on evidence). `camerata-server` is one Tokio process that is the server, the brain, and the gate; the Dioxus cockpit (`camerata-ui`) spawns it as a subprocess (health-polled, watchdog-killed on exit) rather than embedding it in-process.
+- **The adapter ladder:** a pure-serde contract leaf (`camerata-api-types`, zero `camerata-*` deps) sits under a typed HTTP client (`camerata-client`), a first MCP adapter (`camerata-mcp`, stdio), and the CLI's HTTP subcommands (`camerata-cli`). Any of them, or the cockpit, drives the exact same BFF surface. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 - **Orchestrator core:** deterministic Rust that makes ZERO model calls (intake, rule selection, planning, worktrees, coordination, provenance).
-- **Governance gateway:** a Rust MCP server. Every agent tool call routes through it; it allows or denies before anything executes (deny-before-execute).
-- **Agent layer:** short-lived agents, one per role, scoped by prompt, allowed tools, path boundaries, and rule subset. Each gets read access to all of the project's repos; writes are jailed to its worktree. Two drivers: `ClaudeCliDriver` (subscription path, drives `claude -p`) and `ApiAgentDriver` (in-process, owns the MCP tool-use loop, works with any OpenRouter-listed or Anthropic API provider).
+- **Governance gateway:** a Rust MCP server. Every agent tool call routes through it; it allows or denies before anything executes (deny-before-execute). Denials and lifecycle events (`gate_deny`/`gate_allow`/`run_started`/`escalation_raised`/etc.) are now recorded to a `governance_events` audit trail, correlated by run id and readable via API/CLI/MCP/UI.
+- **Agent layer:** short-lived agents, one per role, scoped by prompt, allowed tools, path boundaries, and rule subset. Each gets read access to all of the project's repos; writes are jailed to its worktree. Two drivers: `ClaudeCliDriver` (subscription path, drives `claude -p`) and `ApiAgentDriver` (in-process, owns the MCP tool-use loop, works with any OpenRouter-listed or Anthropic API provider) over the `LlmPort` seam (`camerata-llm`).
 - **Model registry:** Claude static entries merged with live OpenRouter discovery. Each entry is flagged for free tier, tool-use support, prompt caching, vision capability, and pricing. Fleet routing is domain-first (visual work to the Designer band) then by difficulty within the Strongest / Balanced / Fast logic ladder.
-- **Persistence:** a versioned store (SQLite now, Postgres later behind the same trait seam) so every user/AI edit is saved with full history.
+- **Persistence:** a versioned store (SQLite now, Postgres later behind the same trait seam) so every user/AI edit is saved with full history, plus the `governance_events` audit trail above.
 - **UI:** a Dioxus desktop app whose Bletchley Bombe background is an AI-activity indicator: it powers up (lights up, rotors spin) only while genuine AI / heavy work is in flight (chat turns, authoring, investigation/live-run, scans/audits) and powers down to a dim idle the rest of the time, with the rotor knobs freezing in place between runs. Trivial fetches never animate it. Tabular surfaces dogfood [Chorale](../rust-chorale).
 
 ## The crate dependency graph
@@ -175,34 +190,48 @@ on top.
 
 ```mermaid
 graph TD
-    ui["camerata-ui<br/>Dioxus desktop · bin"]
-    cli["camerata-cli<br/>demos + gate-probe · bin"]
+    ui["camerata-ui<br/>Dioxus desktop · bin<br/>(spawns server as subprocess)"]
+    cli["camerata-cli<br/>HTTP adapter + demos · bin"]
+    mcp["camerata-mcp<br/>MCP adapter (rmcp stdio) · bin"]
+    client["camerata-client<br/>typed HTTP client over /api/*"]
     server["camerata-server<br/>Axum BFF + orchestrator · lib+bin"]
     appcore["camerata-app-core<br/>headless backend orchestration · no axum"]
     uicore["camerata-ui-core<br/>headless UI logic/state · no dioxus"]
+    llm["camerata-llm<br/>LlmPort seam + provider stack"]
     fleet["camerata-fleet<br/>tiered governed run"]
     gateway["camerata-gateway<br/>Layer-1 gate · MCP"]
     agent["camerata-agent<br/>claude -p driver"]
     checks["camerata-checks<br/>Layer-2 runner"]
     intake["camerata-intake<br/>lead-engineer / clarify"]
     maintenance["camerata-maintenance<br/>standing ops · staged"]
-    persistence["camerata-persistence<br/>versioned store"]
+    persistence["camerata-persistence<br/>versioned store + governance_events"]
     worktracker["camerata-worktracker<br/>board adapter · port"]
     deploy["camerata-deploy<br/>cloud deploy · staged"]
     core["camerata-core<br/>domain + ports · ZERO model calls"]
     rules["camerata-rules<br/>rule corpus"]
     liveness["camerata-liveness<br/>stall detection"]
     linter["camerata-linter-registry<br/>linter-id map"]
+    apitypes["camerata-api-types<br/>pure serde wire-contract leaf · ZERO camerata deps"]
 
-    ui --> server
+    ui -.->|spawns as subprocess, no crate dep| server
     ui --> worktracker
     ui --> uicore
+    cli --> client
+    cli -.->|only for the eval subcommand| server
+    cli -.-> maintenance
+    cli -.-> deploy
+    mcp --> client
+    client --> apitypes
     server --> appcore
+    server --> llm
+    appcore --> apitypes
     appcore --> fleet
     appcore --> checks
     appcore --> worktracker
     appcore --> liveness
     appcore --> core
+    uicore --> apitypes
+    llm --> apitypes
     server --> gateway
     server --> fleet
     server --> intake
@@ -231,14 +260,16 @@ graph TD
     intake --> core
     persistence --> core
     rules --> core
-    cli -.->|links libs for demos| server
-    cli -.-> maintenance
-    cli -.-> deploy
 ```
 
-The dashed `camerata-cli` edges are its demo/probe harness reaching each subsystem directly;
-`camerata-linter-registry` is used by the maintainer-only `corpus-verifier` tool, so it has
-no app-crate edge. Full crate map + the runtime model in [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §1.
+`camerata-api-types` is the true floor: a pure-serde leaf with zero `camerata-*` dependencies, so
+`camerata-app-core`, `camerata-ui-core`, `camerata-llm`, and `camerata-client` all depend on it
+directly with no cycle between each other. `camerata-client` is the shared typed-HTTP plumbing under
+both new adapters, `camerata-mcp` and `camerata-cli` (dashed into `server` since the CLI only touches
+it for its `eval` subcommand). `camerata-ui` no longer depends on the `camerata-server` crate at all:
+it spawns the `camerata-server` binary as a subprocess (dashed edge). `camerata-linter-registry` is
+used by the maintainer-only `corpus-verifier` tool, so it has no app-crate edge. Full crate map + the
+runtime model in [`docs/TECHNICAL.md`](docs/TECHNICAL.md) §1.
 
 ## How an AI agent fits behind the gate
 
