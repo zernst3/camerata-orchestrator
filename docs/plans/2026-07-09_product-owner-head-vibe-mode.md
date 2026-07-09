@@ -291,6 +291,80 @@ steady-state (~19s cold). `dx serve` survives compile errors and reports them. T
   click-to-report layer to the running preview.
 Full evidence: `docs/spikes/2026-07-09_dioxus-live-preview-spike.md`.
 
+## Deployment: the DevOps abstraction ladder (Zach's big unknown)
+
+Honest current state: `DeployTarget` + `AzureWebAppTarget` exist, but `deploy()` only BUILDS
+the command plan (`az group create` + `az webapp up` + show) and returns `Pending`. It does
+NOT execute (needs the user's Azure creds wired). No DB provisioning, no GitHub automation,
+and the greenfield hook creates a LOCAL-ONLY repo. So deployment is designed, not wired.
+
+"Just say deploy, get a URL" decomposes into five things Camerata must own: (1) a source of
+truth (repo), (2) build (Rust release + wasm), (3) provision (compute + DB + networking),
+(4) deploy (push artifact, run migrations, inject secrets), (5) return the URL and manage
+lifecycle (redeploy, rollback, teardown). The decisions:
+
+**D1. Repo management.** Recommend: Camerata AUTO-CREATES a GitHub repo per app under the
+user's account (one-time token, already how Camerata works). Repo = source of truth + CI/CD +
+durability + history. Extends today's local-only greenfield to create+push. (Alt: local-only
+or BYO-repo; not recommended.)
+
+**D2. Hosting target = the DevOps abstraction dial (three rungs):**
+- **Rung 1 (Zach, near-term): BYO-Azure.** Deploy to the USER's Azure; creds stored once in
+  the vault; "deploy" runs the (currently unexecuted) plan with their creds and returns their
+  URL. WIRE THIS NOW.
+- **Rung 2: BYO-any-cloud** via the DeployTarget seam (AWS/GCP/Fly/Render as pluggable
+  siblings).
+- **Rung 3 (product extreme, "dev-team-as-a-service"): Camerata-managed hosting.** Camerata's
+  own platform hosts it; user needs no cloud account, just gets a URL (the Vercel/Railway
+  model, on the multi-tenant cloud). Beyond Zach's personal need; the seam keeps it open.
+
+**D3. Provisioning depth.** `az webapp up` (compute only, simplest) vs terraform full stack
+(app service + managed Postgres + networking, matching the reference apps' terraform).
+Recommend: terraform full stack by default so "deploy" yields a working DATA app, not just
+compute. The reference apps' terraform is the template.
+
+**D4. First-deploy vs redeploy.** Recommend: Camerata-direct for the first provision
+(terraform apply, Class-C, gated with a cost preview); GitHub Actions on push for redeploys
+(Camerata scaffolds the deploy workflow, so redeploy "just happens" on merge).
+
+**D5. Data + migrations.** Managed Postgres via terraform; sqlx migrations run on deploy
+behind the Class-C gate (migrations can lose data).
+
+**D6. Runtime secrets.** App secrets (DB URL, API keys) flow from the per-tenant vault into
+the app-service config at deploy. Ties to the per-project-secrets gap (section 7).
+
+**D7. URL / domain.** Default to the platform URL (azurewebsites.net); custom domain opt-in
+(user provides DNS).
+
+**D8. Lifecycle + cost.** Rollback via CI + versioned artifacts. Teardown via terraform
+destroy (Class-C, gated). Infra spend is REAL money (unlike LLM spend), so every
+provision/deploy shows a cost preview, and idle auto-sleep is worth considering. Extend the
+ORCH-BUDGET rules to cover infra spend.
+
+**Everything in deploy (provision / deploy / migrate / destroy) is Class C** (irreversible /
+costs money) and is ALWAYS human-gated with a plan + cost preview. That is how "just deploy"
+still keeps you in the loop: one approve, with cost visibility.
+
+## Broader decision inventory (what else needs deciding)
+
+Beyond deployment, the open product/architecture decisions, roughly in priority order:
+- **Dial UX:** inferred level vs literal slider (recommend inferred + overridable).
+- **Design-approval granularity:** per app / per epic / per story (recommend per epic, fast
+  path for trivial changes).
+- **Voice:** on-device vs cloud STT/TTS; does the audit trail record the voice transcript?
+- **Preview targets:** web-only to start, or desktop/mobile Dioxus targets early?
+- **Multi-app management:** a user builds many apps, how is that surfaced (an app gallery)?
+- **Stack profiles:** one Rust-fullstack profile now; when do siblings arrive?
+- **DB schema ownership:** orchestrator proposes the schema, human reviews (backstopped by the
+  gated migration, so schema mistakes are Class-C-caught).
+- **Runtime observability of the DEPLOYED app:** capture errors from the live app to feed
+  "there's a bug" automatically, or user-reported only? (Auto-capture is a strong later
+  feature; the governance trail is the local analog.)
+- **Cost controls:** infra budget caps per user/app.
+- **The built apps' OWN auth:** does a given bespoke app need end-user logins? A per-app
+  decision the orchestrator should raise (Class D, clarify).
+- **Rollback strategy:** last-good-artifact redeploy, exposed as a one-word "roll back".
+
 ## Open questions (for Zach)
 - Dial UX: a literal slider, an inferred level, or a per-request "how sure should you be
   before asking me" phrasing? (Recommend: inferred + overridable.)
