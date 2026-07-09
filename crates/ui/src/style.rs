@@ -2641,7 +2641,7 @@ html, body {
 .git-section { display: flex; flex-direction: column; gap: 8px; }
 .git-section-label { font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); margin: 0; }
 .git-log-hint { font-weight: 400; text-transform: none; letter-spacing: 0; font-size: 11px; color: var(--ink-faint); }
-.git-branch-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.git-branch-list { display: flex; flex-wrap: wrap; align-content: flex-start; gap: 6px; max-height: 18rem; overflow-y: auto; }
 .git-branch { display: inline-flex; align-items: center; gap: 6px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface); cursor: pointer; transition: border-color .2s var(--ease), background .2s var(--ease); }
 .git-branch:hover { border-color: var(--accent); color: var(--accent-ink); }
 .git-branch.current { background: var(--accent-wash); border-color: #efd9d0; cursor: default; font-weight: 700; }

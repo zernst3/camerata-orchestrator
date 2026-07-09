@@ -136,6 +136,10 @@ Repository Workspace · Settings · Docs**.
 - **Routines** — schedule governed runs (templates, an in-app auto-fire scheduler, run history, and
   blocked-run review). Full walkthrough in §18.
 - **Repository Workspace** — the local clones: clone status, branch, and ship (push + PR) for dev work.
+  If no workspace folder is chosen yet but a repo is already linked to a local folder, the page
+  suggests that repo's parent folder as the workspace folder, one click to accept. The git panel's
+  Sync row has **Pull, Push, and Fetch all** (fetch all origin branches with no merge or checkout).
+  The branch list scrolls once it gets long, and always shows main (or master) first.
 - **Settings**: all configuration in one place, split into two clearly-labeled scopes (see §17). The
   Soft-context group also holds the **Work hierarchy** builder (define your work-item types and nesting).
 - **Docs** — the in-app documentation viewer (this guide and the technical reference).

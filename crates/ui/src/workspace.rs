@@ -123,11 +123,15 @@ async fn fetch_checkout(project_id: &str) -> Option<Vec<RepoCheckout>> {
 /// reuses this exact checkout flow (do NOT reimplement cloning). Returns `true` when the checkout
 /// call succeeded (a repo list came back).
 pub async fn clone_project_public(project_id: &str) -> bool {
-    clone_project(project_id).await.is_some()
+    clone_project(project_id).await.is_ok()
 }
 
-async fn clone_project(project_id: &str) -> Option<Vec<RepoCheckout>> {
-    reqwest::Client::new()
+/// Clone/update every repo in a project. On success, returns the list of checkout statuses. On
+/// failure, returns the server's real error message (e.g. "no workspace folder is set...", "no
+/// GitHub token set...") instead of a generic string, so the caller can tell the user WHY it
+/// failed rather than toasting a blanket "could not clone" message.
+async fn clone_project(project_id: &str) -> Result<Vec<RepoCheckout>, String> {
+    let resp = reqwest::Client::new()
         .post(format!(
             "{}/api/projects/{}/checkout",
             crate::bff_base(),
@@ -135,10 +139,19 @@ async fn clone_project(project_id: &str) -> Option<Vec<RepoCheckout>> {
         ))
         .send()
         .await
-        .ok()?
-        .json::<Vec<RepoCheckout>>()
-        .await
-        .ok()
+        .map_err(|e| format!("network error: {e}"))?;
+    if resp.status().is_success() {
+        resp.json::<Vec<RepoCheckout>>()
+            .await
+            .map_err(|e| format!("could not read the server's response: {e}"))
+    } else {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        Err(body
+            .get("error")
+            .and_then(|e| e.as_str())
+            .unwrap_or("clone or update failed")
+            .to_string())
+    }
 }
 
 async fn start_branch(project_id: &str, repo: &str, branch: &str) -> Option<RepoCheckout> {
@@ -344,6 +357,33 @@ async fn api_git_pull(project_id: &str, repo: &str, branch: &str) -> (bool, Stri
     (ok, out)
 }
 
+/// Fetch every branch from origin (no merge/checkout) so the branch list and ahead/behind counts
+/// reflect what's on the remote, without touching the working tree.
+async fn api_git_fetch(project_id: &str, repo: &str) -> (bool, String) {
+    let v: serde_json::Value = match reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/git/fetch",
+            crate::bff_base(),
+            project_id
+        ))
+        .json(&serde_json::json!({ "repo": repo }))
+        .send()
+        .await
+        .ok()
+    {
+        Some(r) => r.json().await.unwrap_or_default(),
+        None => return (false, "network error".to_string()),
+    };
+    let ok = v.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
+    let out = v
+        .get("output")
+        .or_else(|| v.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+    (ok, out)
+}
+
 async fn api_git_cherry_pick(project_id: &str, repo: &str, sha: &str) -> (bool, String) {
     let v: serde_json::Value = match reqwest::Client::new()
         .post(format!(
@@ -523,27 +563,85 @@ pub fn WorkspaceView() -> Element {
                             }
                         }
                     },
-                    None => rsx! {
-                        div { class: "ws-folder-row",
-                            span { class: "ws-path none", "No workspace folder chosen yet." }
-                            button {
-                                class: "btn-run",
-                                onclick: move |_| {
-                                    spawn(async move {
-                                        if let Some(folder) = rfd::AsyncFileDialog::new()
-                                            .set_title("Choose workspace folder")
-                                            .pick_folder()
-                                            .await
-                                        {
-                                            let p = folder.path().to_string_lossy().to_string();
-                                            if set_workspace(&p).await.is_some() {
-                                                refresh += 1;
-                                            }
-                                        }
-                                    });
-                                },
-                                "Choose folder…"
+                    None => {
+                        // No workspace folder chosen yet. When a repo already resolves to a real
+                        // local clone via a per-repo path override ("Link to this folder"), derive
+                        // a suggested workspace folder from that clone's PARENT directory instead of
+                        // showing a bare empty-state — a repo is already linked somewhere, so
+                        // re-asking "no folder chosen" is confusing. The user can accept it in one
+                        // click or still pick a different folder.
+                        let derived_parent: Option<String> = checkouts.iter().find_map(|c| {
+                            if !c.cloned || c.path.is_empty() {
+                                return None;
                             }
+                            std::path::Path::new(&c.path)
+                                .parent()
+                                .filter(|p| !p.as_os_str().is_empty())
+                                .map(|p| p.to_string_lossy().into_owned())
+                        });
+                        match derived_parent {
+                            Some(parent) => rsx! {
+                                div { class: "ws-folder-row",
+                                    span { class: "ws-path", "{parent}" }
+                                    button {
+                                        class: "btn-run",
+                                        onclick: {
+                                            let parent = parent.clone();
+                                            move |_| {
+                                                let parent = parent.clone();
+                                                spawn(async move {
+                                                    if set_workspace(&parent).await.is_some() {
+                                                        refresh += 1;
+                                                    }
+                                                });
+                                            }
+                                        },
+                                        "Use the repo's parent folder"
+                                    }
+                                    button {
+                                        class: "btn-edit-sm",
+                                        onclick: move |_| {
+                                            spawn(async move {
+                                                if let Some(folder) = rfd::AsyncFileDialog::new()
+                                                    .set_title("Choose workspace folder")
+                                                    .pick_folder()
+                                                    .await
+                                                {
+                                                    let p = folder.path().to_string_lossy().to_string();
+                                                    if set_workspace(&p).await.is_some() {
+                                                        refresh += 1;
+                                                    }
+                                                }
+                                            });
+                                        },
+                                        "Choose a different folder…"
+                                    }
+                                }
+                                p { class: "ws-hint", "Defaulting to the repo's parent folder, since a linked repo already lives there and no workspace folder is set yet." }
+                            },
+                            None => rsx! {
+                                div { class: "ws-folder-row",
+                                    span { class: "ws-path none", "No workspace folder chosen yet." }
+                                    button {
+                                        class: "btn-run",
+                                        onclick: move |_| {
+                                            spawn(async move {
+                                                if let Some(folder) = rfd::AsyncFileDialog::new()
+                                                    .set_title("Choose workspace folder")
+                                                    .pick_folder()
+                                                    .await
+                                                {
+                                                    let p = folder.path().to_string_lossy().to_string();
+                                                    if set_workspace(&p).await.is_some() {
+                                                        refresh += 1;
+                                                    }
+                                                }
+                                            });
+                                        },
+                                        "Choose folder…"
+                                    }
+                                }
+                            },
                         }
                     },
                 }
@@ -580,12 +678,11 @@ pub fn WorkspaceView() -> Element {
                                             let mut busy = busy;
                                             busy.set(true);
                                             spawn(async move {
-                                                let ok = clone_project(&id).await.is_some();
+                                                let result = clone_project(&id).await;
                                                 busy.set(false);
-                                                if ok {
-                                                    refresh += 1;
-                                                } else {
-                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not clone / update the repos (check the workspace folder and GitHub token).".to_string());
+                                                match result {
+                                                    Ok(_) => refresh += 1,
+                                                    Err(msg) => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Could not clone or update the repos: {msg}")),
                                                 }
                                             });
                                         },
@@ -920,7 +1017,10 @@ fn GitPanel(
     });
 
     let git_status = status_res.read().clone().flatten();
-    let branch_list = branches_res.read().clone().flatten().unwrap_or_default();
+    let mut branch_list = branches_res.read().clone().flatten().unwrap_or_default();
+    // Pin main/master first so the default branch is always easiest to find in a long list
+    // (pure helper in ui-core so the sort itself is unit-testable).
+    branch_list.branches = camerata_ui_core::git::sort_branches(&branch_list.branches);
     let commits: Vec<CommitRow> = log_res
         .read()
         .as_ref()
@@ -1198,6 +1298,31 @@ fn GitPanel(
                         },
                         if net_working() { "Working…" } else { "Push" }
                     }
+                    button {
+                        class: "btn-edit-sm",
+                        disabled: net_working(),
+                        title: "Fetch every branch from origin (no merge, no checkout)",
+                        onclick: {
+                            let pid = project_id.clone();
+                            let rp = repo.clone();
+                            move |_| {
+                                let pid = pid.clone();
+                                let rp = rp.clone();
+                                net_working.set(true);
+                                spawn(async move {
+                                    let (ok, out) = api_git_fetch(&pid, &rp).await;
+                                    net_working.set(false);
+                                    if ok {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Fetched all branches from origin.".to_string());
+                                        git_refresh += 1;
+                                    } else {
+                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, format!("Fetch failed: {out}"));
+                                    }
+                                });
+                            }
+                        },
+                        if net_working() { "Working…" } else { "Fetch all" }
+                    }
                 }
             }
 
@@ -1470,18 +1595,21 @@ mod tests {
         assert_eq!(rows[0].detail, "cloned");
     }
 
-    // A server error must surface as `None` so the caller can toast a failure (workspace-F4)
-    // instead of silently ending the spinner with no feedback.
+    // A server error must surface as `Err(message)` — carrying the server's real error text —
+    // so the caller can toast WHY it failed (workspace-F4) instead of a generic message.
     #[tokio::test]
     #[serial_test::serial(bff_env)]
-    async fn clone_project_returns_none_on_server_error() {
+    async fn clone_project_returns_err_with_server_message_on_failure() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/proj-7/checkout"))
-            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_json(serde_json::json!({ "error": "no GitHub token set" })),
+            )
             .expect(1)
             .mount(&server)
             .await;
@@ -1490,7 +1618,10 @@ mod tests {
         let out = super::clone_project("proj-7").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert!(out.is_none(), "a 500 body yields None so the caller can toast a failure");
+        match out {
+            Err(msg) => assert_eq!(msg, "no GitHub token set"),
+            Ok(_) => panic!("a non-2xx response must yield Err so the caller can toast a failure"),
+        }
     }
 
     #[tokio::test]
@@ -1781,6 +1912,57 @@ mod tests {
 
         assert!(!ok);
         assert_eq!(out, "merge conflict");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn api_git_fetch_posts_repo() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-7/git/fetch"))
+            .and(body_json(serde_json::json!({ "repo": "zernst3/agora" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "output": "fetched",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let (ok, out) = super::api_git_fetch("proj-7", "zernst3/agora").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(ok);
+        assert_eq!(out, "fetched");
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn api_git_fetch_reports_failure_message() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-7/git/fetch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": false,
+                "message": "no GitHub token set. Set CAMERATA_GITHUB_TOKEN to fetch.",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let (ok, out) = super::api_git_fetch("proj-7", "zernst3/agora").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(!ok);
+        assert_eq!(out, "no GitHub token set. Set CAMERATA_GITHUB_TOKEN to fetch.");
     }
 
     #[tokio::test]
