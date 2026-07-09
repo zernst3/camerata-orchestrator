@@ -886,6 +886,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "camerata-preview"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serial_test",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "camerata-rules"
 version = "0.0.0"
 dependencies = [

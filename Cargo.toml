@@ -19,6 +19,7 @@ members = [
     "crates/cli",         # binary entrypoint wiring it all together
     "crates/ui",          # Dioxus cockpit (separate process) — the thin rendering ADAPTER
     "crates/ui-core",     # framework-agnostic UI logic/state (RUST-HEADLESS-CORE-1); no dioxus dep
+    "crates/preview",     # local-first `dx serve` live-preview adapter: status parser + process manager + edit-verify fallback (docs/spikes/2026-07-09_dioxus-live-preview-spike.md)
     "crates/worktracker", # WorkItemProvider port: canonical shapes, sync policy, native provider
     "crates/maintenance", # Tier-2 standing post-publish ops agent (upgrades, security, rotation)
     "crates/deploy",          # Tier-2 BYO-infra publish: DeployTarget seam + local + Azure adapter
