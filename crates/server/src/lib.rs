@@ -907,6 +907,10 @@ pub fn router(state: AppState) -> Router {
         // Derived readiness gate + "link existing local clone" (readiness-gate ADR).
         .route("/api/projects/:id/readiness", get(project_readiness))
         .route("/api/projects/:id/repos/:repo/link", post(link_repo))
+        .route(
+            "/api/projects/:id/reset-onboarding",
+            post(reset_onboarding),
+        )
         .route("/api/projects/:id/branch", post(checkout_branch))
         .route("/api/projects/:id/ship", post(ship_repo))
         // ── Local git controls (issue #37) ───────────────────────────────────
@@ -5395,6 +5399,30 @@ async fn link_repo(
         StatusCode::OK,
         Json(serde_json::json!({ "ok": true, "readiness": readiness })),
     )
+}
+
+/// `POST /api/projects/:id/reset-onboarding` — clear the PROJECT-LEVEL onboarded marker so a
+/// repo (or all of them) can be re-scanned, WITHOUT deleting the project, its repos, or its
+/// ruleset. Onboarding is a one-time gate (`Project.onboarded`); this is the only UI-reachable
+/// way to unwind it short of deleting the whole project.
+///
+/// Also drops the project's in-progress onboarding draft (`DraftStore::clear`) so a fresh scan
+/// starts clean rather than resuming stale selections from before the reset.
+///
+/// Success (200): `{ "ok": true }`. Failure (400): `{ "ok": false, "error": "unknown project" }`.
+async fn reset_onboarding(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if state.projects.get(&id).is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "unknown project" })),
+        );
+    }
+    state.projects.update(&id, |p| p.onboarded.clear());
+    state.draft.clear(&id);
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
 }
 
 /// Load the saved onboarding draft (scan + audit + selections + dispositions), or `null`.
@@ -13861,6 +13889,84 @@ mod tests {
         )
         .await;
         assert!(state.projects.active().unwrap().memory.is_empty());
+    }
+
+    /// `POST /api/projects/:id/reset-onboarding` clears the onboarded marker (and drops the
+    /// in-progress draft) but leaves the project's repos and ruleset (incl. custom rules)
+    /// exactly as they were — the "Reset onboarding" UI action must never look like project
+    /// deletion.
+    #[tokio::test]
+    async fn reset_onboarding_clears_marker_and_draft_but_preserves_repos_and_ruleset() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .expect("project created");
+        state
+            .projects
+            .update(&p.id, |proj| {
+                proj.mark_onboarded(&["me/api".to_string()]);
+                proj.merge_custom(&[crate::project::CustomRule {
+                    name: "house-style".to_string(),
+                    body: "Prefer X.".to_string(),
+                    domain: "*".to_string(),
+                    repos: Vec::new(),
+                }]);
+            })
+            .expect("project updated");
+        state.draft.save(&p.id, serde_json::json!({"scan": "in-progress"}));
+        assert!(!state.projects.get(&p.id).unwrap().onboarded.is_empty());
+        assert!(state.draft.load(&p.id).is_some());
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/reset-onboarding", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], true);
+
+        let after = state.projects.get(&p.id).unwrap();
+        assert!(after.onboarded.is_empty(), "onboarded marker is cleared");
+        assert_eq!(after.repos, vec!["me/api".to_string()], "repos untouched");
+        assert_eq!(
+            after.ruleset.custom.len(),
+            1,
+            "the ruleset (incl. custom rules) survives a reset"
+        );
+        assert!(
+            state.draft.load(&p.id).is_none(),
+            "the in-progress onboarding draft is dropped so a fresh scan starts clean"
+        );
+    }
+
+    /// Resetting onboarding for an unknown project id is a clean 400, not a panic.
+    #[tokio::test]
+    async fn reset_onboarding_unknown_project_is_bad_request() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/does-not-exist/reset-onboarding")
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
     }
 
     /// The design-page hierarchy endpoints: GET returns the seeded default ladder; POST replaces the

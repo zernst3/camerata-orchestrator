@@ -666,7 +666,7 @@ pub fn WorkspaceView() -> Element {
                         div { class: "ws-project",
                             div { class: "ws-project-head",
                                 div {
-                                    p { class: "section-label", "Project — {proj.name}" }
+                                    p { class: "section-label", "Project: {proj.name}" }
                                     p { class: "ws-hint", "{proj.repos.len()} repo(s) in scope." }
                                 }
                                 div { class: "ws-project-actions",
@@ -882,7 +882,7 @@ fn RepoCard(
                     }
                 }
                 if dirty {
-                    p { class: "ws-repo-dirty", "Uncommitted changes in the working copy — commit them before shipping." }
+                    p { class: "ws-repo-dirty", "Uncommitted changes in the working copy. Commit them before shipping." }
                 }
                 if !pr_url().is_empty() {
                     p { class: "ws-repo-pr",
@@ -1244,7 +1244,7 @@ fn GitPanel(
 
             // ── Push / Pull ───────────────────────────────────────────────
             div { class: "git-section git-net-row",
-                p { class: "git-section-label", "Sync — {current_branch}" }
+                p { class: "git-section-label", "Sync ({current_branch})" }
                 div { class: "git-net-btns",
                     button {
                         class: "btn-edit-sm",

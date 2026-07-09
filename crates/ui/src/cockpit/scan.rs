@@ -1767,6 +1767,7 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
                         },
                         "Browse for a local repo folder\u{2026}"
                     }
+                    p { class: "scan-section-sub", "Scans only the currently checked-out branch of each repo. Switch branches first if you want a different branch scanned." }
                     button {
                         class: "onboard-cta",
                         disabled: repo().trim().is_empty() || scanning(),
