@@ -542,6 +542,14 @@ impl Project {
         }
     }
 
+    /// Clear the onboarded marker for a single `repo` so it can be re-scanned, WITHOUT
+    /// touching `self.repos` or `self.ruleset` — onboarding is a one-time-per-repo gate, not
+    /// project membership, so "reset onboarding" must leave the project's repo list and its
+    /// (possibly hand-tuned) ruleset exactly as they were.
+    pub fn clear_onboarded(&mut self, repo: &str) {
+        self.onboarded.retain(|x| x != repo);
+    }
+
     /// Set the loop-guard ceiling (#29), clamped to at least `1` — a project can
     /// never disable the bounce, only cap how many revise passes a stage may take.
     pub fn set_max_iterations(&mut self, n: usize) {
@@ -877,6 +885,39 @@ mod tests {
                 custom: vec![],
             },
         }
+    }
+
+    #[test]
+    fn clear_onboarded_round_trip_preserves_repos_and_ruleset() {
+        let mut p = proj_on_balanced();
+        p.repos = vec!["me/api".into(), "me/ui".into()];
+        p.ruleset.custom = vec![custom("house-style", "Prefer X.")];
+
+        // Onboard both repos, then reset just one — this is the "Reset onboarding" UI
+        // action: it must clear the marker WITHOUT touching repos or the ruleset.
+        p.mark_onboarded(&["me/api".to_string(), "me/ui".to_string()]);
+        assert_eq!(p.onboarded, vec!["me/api", "me/ui"]);
+
+        p.clear_onboarded("me/api");
+        assert_eq!(
+            p.onboarded,
+            vec!["me/ui"],
+            "only the cleared repo leaves the onboarded set"
+        );
+        assert_eq!(
+            p.repos,
+            vec!["me/api", "me/ui"],
+            "repos in scope are untouched by clearing onboarded"
+        );
+        assert_eq!(
+            p.ruleset.custom.len(),
+            1,
+            "the ruleset survives an onboarding reset"
+        );
+
+        // Clearing a repo that was never onboarded (or already cleared) is a harmless no-op.
+        p.clear_onboarded("me/api");
+        assert_eq!(p.onboarded, vec!["me/ui"]);
     }
 
     #[test]

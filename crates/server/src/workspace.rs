@@ -259,6 +259,41 @@ pub async fn clone_or_pull(root: &Path, repo: &str, token: &str) -> RepoCheckout
     }
 }
 
+/// Refresh an ALREADY-RESOLVED repo checkout (an override path or the standard workspace layout
+/// that already passed origin validation) by fast-forward pulling its current branch from an
+/// authenticated origin URL. Used by "Clone / update all repos" so a repo that's already
+/// linked/cloned actually gets updated instead of just being re-reported as-is. Best-effort: a
+/// diverged/detached/offline branch just falls through to reporting the live status below —
+/// `pull_branch` is `--ff-only`, so this never clobbers local work.
+pub async fn refresh_resolved(dir: &Path, repo: &str, token: &str) -> RepoCheckout {
+    let path_str = dir.to_string_lossy().into_owned();
+    let branch = git(Some(dir), &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    if let Some(b) = &branch {
+        let _ = pull_branch(dir, repo, b, token).await;
+    }
+    let dirty = git(Some(dir), &["status", "--porcelain"])
+        .await
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+    let detail = match (&branch, dirty) {
+        (Some(b), true) => format!("on {b} · uncommitted changes"),
+        (Some(b), false) => format!("on {b} · clean"),
+        (None, _) => "cloned".to_string(),
+    };
+    RepoCheckout {
+        repo: repo.to_string(),
+        cloned: true,
+        path: path_str,
+        branch,
+        dirty,
+        detail,
+    }
+}
+
 /// Read the GitHub `owner/repo` from a local git checkout's `origin` remote, so the UI
 /// can let a developer NAVIGATE to a repo folder instead of typing `owner/repo`. Returns
 /// a specific human error so the UI can tell the user exactly what went wrong.
@@ -1305,6 +1340,31 @@ pub async fn fetch_branch(dir: &Path, repo: &str, branch: &str, token: &str) -> 
         return Ok(());
     }
     anyhow::bail!("git fetch {branch}: {}", stderr_of(&out));
+}
+
+/// Fetch EVERY branch from origin into its local `refs/remotes/origin/*` tracking ref, using an
+/// authenticated transient URL (the token never lands in `.git/config`). Unlike [`fetch_branch`]
+/// (a single named branch), this brings the full set of origin branches up to date locally in one
+/// call, e.g. so the branch list / ahead-behind counts reflect branches other people pushed. Never
+/// touches the working tree or any local branch — a pure network refresh.
+pub async fn fetch_all(dir: &Path, repo: &str, token: &str) -> anyhow::Result<String> {
+    let out = git(
+        Some(dir),
+        &[
+            "fetch",
+            &authed_url(repo, token),
+            "+refs/heads/*:refs/remotes/origin/*",
+        ],
+    )
+    .await?;
+    if out.status.success() {
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !stdout.is_empty() {
+            return Ok(stdout);
+        }
+        return Ok(stderr_of(&out));
+    }
+    anyhow::bail!("git fetch --all: {}", stderr_of(&out));
 }
 
 /// Stage all changes with `git add -A` then commit with `message`. Returns the

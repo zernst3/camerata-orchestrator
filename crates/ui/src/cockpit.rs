@@ -1604,6 +1604,21 @@ async fn delete_project(id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Clear a project's onboarded marker (keeping its repos and ruleset) so it can be
+/// re-scanned from a clean slate. Returns true on success.
+async fn reset_project_onboarding(id: &str) -> bool {
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/reset-onboarding",
+            crate::bff_base(),
+            id
+        ))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false)
+}
+
 /// Open a file picker, read the JSON, and POST it to the import endpoint with
 /// `overwrite: false`. Returns `ImportResult` so the caller can decide whether to
 /// prompt for overwrite confirmation.
@@ -1739,6 +1754,9 @@ fn ProjectsHome() -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     // The project id awaiting a delete confirm (two-click, with a warning toast).
     let mut pending_delete = use_signal(|| Option::<String>::None);
+    // The project id awaiting a reset-onboarding confirm (two-click, with a warning toast) —
+    // mirrors `pending_delete` but clears the onboarded marker instead of the whole project.
+    let mut pending_reset = use_signal(|| Option::<String>::None);
     // An import that hit a name collision: holds (project name, raw JSON payload).
     // While set, a confirm modal is visible.
     let mut pending_import_overwrite = use_signal(|| Option::<(String, String)>::None);
@@ -1868,7 +1886,10 @@ fn ProjectsHome() -> Element {
                                 let id_open = p.id.clone();
                                 let id_del = p.id.clone();
                                 let name_del = p.name.clone();
+                                let id_reset = p.id.clone();
+                                let has_onboarded = !p.onboarded.is_empty();
                                 let is_pending = pending_delete().as_deref() == Some(p.id.as_str());
+                                let is_pending_reset = pending_reset().as_deref() == Some(p.id.as_str());
                                 rsx! {
                                     div { class: "pg-card", key: "{p.id}",
                                         div { class: "pg-card-main",
@@ -1900,6 +1921,31 @@ fn ProjectsHome() -> Element {
                                                     });
                                                 },
                                                 "Export"
+                                            }
+                                            if has_onboarded {
+                                                button {
+                                                    class: if is_pending_reset { "pg-btn-secondary confirm" } else { "pg-btn-secondary" },
+                                                    onclick: move |_| {
+                                                        let id = id_reset.clone();
+                                                        if pending_reset().as_deref() == Some(id.as_str()) {
+                                                            // Second click — reset.
+                                                            pending_reset.set(None);
+                                                            spawn(async move {
+                                                                if reset_project_onboarding(&id).await {
+                                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Onboarding reset. Rescan when ready.");
+                                                                    refresh += 1;
+                                                                } else {
+                                                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not reset onboarding.");
+                                                                }
+                                                            });
+                                                        } else {
+                                                            // First click — warn + arm the confirm.
+                                                            pending_reset.set(Some(id));
+                                                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "Click Confirm to reset onboarding for this project. This clears the onboarded state so you can rescan. Your repos and ruleset are kept.");
+                                                        }
+                                                    },
+                                                    if is_pending_reset { "Confirm reset" } else { "Reset onboarding" }
+                                                }
                                             }
                                             button {
                                                 class: if is_pending { "pg-btn-danger confirm" } else { "pg-btn-danger" },

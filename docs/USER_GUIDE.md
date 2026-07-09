@@ -136,6 +136,10 @@ Repository Workspace · Settings · Docs**.
 - **Routines** — schedule governed runs (templates, an in-app auto-fire scheduler, run history, and
   blocked-run review). Full walkthrough in §18.
 - **Repository Workspace** — the local clones: clone status, branch, and ship (push + PR) for dev work.
+  If no workspace folder is chosen yet but a repo is already linked to a local folder, the page
+  suggests that repo's parent folder as the workspace folder, one click to accept. The git panel's
+  Sync row has **Pull, Push, and Fetch all** (fetch all origin branches with no merge or checkout).
+  The branch list scrolls once it gets long, and always shows main (or master) first.
 - **Settings**: all configuration in one place, split into two clearly-labeled scopes (see §17). The
   Soft-context group also holds the **Work hierarchy** builder (define your work-item types and nesting).
 - **Docs** — the in-app documentation viewer (this guide and the technical reference).
@@ -163,11 +167,18 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    **Already-onboarded guard:** if you point at a repo this project has already onboarded, Camerata
    **refuses with an error** rather than silently re-running. Onboarding is a one-time act per repo;
    to change a repo's rules after the fact, edit them in the **Rules** view (§4), don't re-onboard.
+   If you genuinely need to rescan a repo from scratch, use **Reset onboarding** on the project card
+   in **Projects** home. It clears the onboarded marker (and the in-progress draft) so the repo can
+   go through the scan again; your repos and ruleset are kept as-is.
 2. **Scan + propose per-repo rules** — Camerata reads each repo's **local working tree** (it never
    downloads code from GitHub) and detects its stack: languages from extensions, frameworks from
    manifests, **IaC** (Terraform, Terragrunt, Bicep, Pulumi, CloudFormation) and **CI/CD** (GitHub
    Actions, GitLab CI, CircleCI, Azure Pipelines, Travis, Bitbucket, Drone, Jenkins). It proposes a
    starter ruleset **per repo**.
+
+   **The scan is current-branch-only.** It reads whatever is checked out on disk right now; it does
+   not check out or select a branch for you. Switch branches first if you want a different branch
+   scanned.
 
    **The scan follows your `.gitignore`** (gitignore-aware walking). For git repos, Camerata walks
    the working tree with ripgrep's gitignore engine, which honours `.gitignore` at the root and in

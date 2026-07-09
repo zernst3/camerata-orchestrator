@@ -907,6 +907,10 @@ pub fn router(state: AppState) -> Router {
         // Derived readiness gate + "link existing local clone" (readiness-gate ADR).
         .route("/api/projects/:id/readiness", get(project_readiness))
         .route("/api/projects/:id/repos/:repo/link", post(link_repo))
+        .route(
+            "/api/projects/:id/reset-onboarding",
+            post(reset_onboarding),
+        )
         .route("/api/projects/:id/branch", post(checkout_branch))
         .route("/api/projects/:id/ship", post(ship_repo))
         // ── Local git controls (issue #37) ───────────────────────────────────
@@ -917,6 +921,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/git/commit", post(git_commit))
         .route("/api/projects/:id/git/push", post(git_push))
         .route("/api/projects/:id/git/pull", post(git_pull))
+        .route("/api/projects/:id/git/fetch", post(git_fetch))
         .route("/api/projects/:id/git/cherry-pick", post(git_cherry_pick))
         // ── Unit of Work (issue #39) ─────────────────────────────────────────
         // ── Provider-agnostic WorkItem + UoW layer (governed-dev surface) ─────
@@ -5396,6 +5401,30 @@ async fn link_repo(
     )
 }
 
+/// `POST /api/projects/:id/reset-onboarding` — clear the PROJECT-LEVEL onboarded marker so a
+/// repo (or all of them) can be re-scanned, WITHOUT deleting the project, its repos, or its
+/// ruleset. Onboarding is a one-time gate (`Project.onboarded`); this is the only UI-reachable
+/// way to unwind it short of deleting the whole project.
+///
+/// Also drops the project's in-progress onboarding draft (`DraftStore::clear`) so a fresh scan
+/// starts clean rather than resuming stale selections from before the reset.
+///
+/// Success (200): `{ "ok": true }`. Failure (400): `{ "ok": false, "error": "unknown project" }`.
+async fn reset_onboarding(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if state.projects.get(&id).is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "ok": false, "error": "unknown project" })),
+        );
+    }
+    state.projects.update(&id, |p| p.onboarded.clear());
+    state.draft.clear(&id);
+    (StatusCode::OK, Json(serde_json::json!({ "ok": true })))
+}
+
 /// Load the saved onboarding draft (scan + audit + selections + dispositions), or `null`.
 /// The active project's id, or `""` when none is active (drafts are keyed per project so
 /// opening another project never clobbers this one's in-progress onboarding).
@@ -8141,6 +8170,25 @@ async fn checkout_status(
     Ok(Json(out))
 }
 
+/// The effective workspace root (fix for the "no workspace folder chosen yet" dead end): the
+/// explicit `workspace_root` setting when one is chosen, otherwise the parent folder of the first
+/// in-scope repo that already has an explicit local path override (`settings.repo_path`). This lets
+/// a project whose repo was linked via "Link to this folder" (but never had a workspace folder
+/// picked) still resolve somewhere for "Clone / update all repos" to put its OTHER repos. `None`
+/// only when neither is available.
+fn effective_workspace_root(state: &AppState, project: &crate::project::Project) -> Option<String> {
+    if let Some(root) = state.settings.workspace_root() {
+        return Some(root);
+    }
+    project.repos.iter().find_map(|repo| {
+        let path = state.settings.repo_path(repo)?;
+        std::path::Path::new(&path)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_string_lossy().into_owned())
+    })
+}
+
 /// Clone (or fast-forward) every repo in a project into the workspace.
 async fn checkout_project(
     State(state): State<AppState>,
@@ -8150,24 +8198,26 @@ async fn checkout_project(
         .projects
         .get(&id)
         .ok_or_else(|| AppError::not_found(anyhow::anyhow!("project not found: {id}")))?;
-    let Some(root) = state.settings.workspace_root() else {
+    let Some(root) = effective_workspace_root(&state, &project) else {
         return Err(AppError(anyhow::anyhow!(
-            "no workspace folder is set — pick one first"
+            "no workspace folder is set, and no repo has a linked local folder to derive one from. Pick a workspace folder first."
         )));
     };
     let token = state.github_token().unwrap_or_default();
     if token.trim().is_empty() {
         return Err(AppError(anyhow::anyhow!(
-            "no GitHub token — set CAMERATA_GITHUB_TOKEN to clone"
+            "no GitHub token set. Set CAMERATA_GITHUB_TOKEN to clone."
         )));
     }
-    let workspace_root = state.settings.workspace_root();
-    let root = std::path::PathBuf::from(root);
+    let workspace_root = Some(root.clone());
+    let root = std::path::PathBuf::from(&root);
     let mut out = Vec::with_capacity(project.repos.len());
     for repo in &project.repos {
-        // If the repo ALREADY resolves (override-aware git checkout with a matching origin), don't
-        // clone a second copy into the derived path — report its resolved status. Only repos that
-        // do not already resolve get cloned into `<root>/<owner>/<repo>` (issue #38).
+        // If the repo ALREADY resolves (override-aware git checkout with a matching origin),
+        // REFRESH it (pull/fetch its current branch) instead of just re-reporting stale status —
+        // "Clone / update all repos" must actually update repos that are already linked/cloned, not
+        // just repos it clones fresh. Only repos that do not already resolve get cloned into
+        // `<root>/<owner>/<repo>` (issue #38).
         let override_path = state.settings.repo_path(repo);
         let resolution = crate::workspace::repo_resolution(
             override_path.as_deref(),
@@ -8176,14 +8226,11 @@ async fn checkout_project(
         )
         .await;
         if resolution.resolved {
-            out.push(
-                crate::workspace::checkout_status_resolved(
-                    override_path.as_deref(),
-                    workspace_root.as_deref(),
-                    repo,
-                )
-                .await,
-            );
+            let dir = resolution
+                .path
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| crate::workspace::repo_dir(&root, repo));
+            out.push(crate::workspace::refresh_resolved(&dir, repo, &token).await);
             continue;
         }
         out.push(crate::workspace::clone_or_pull(&root, repo, &token).await);
@@ -8509,6 +8556,33 @@ async fn git_pull(
         Err(e) => return e,
     };
     match crate::workspace::pull_branch(&dir, &req.repo, &req.branch, &token).await {
+        Ok(out) => Json(serde_json::json!({ "ok": true, "output": out })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct GitFetchReq {
+    repo: String,
+}
+
+/// Fetch every branch from origin (all remote-tracking refs), no merge/checkout involved.
+async fn git_fetch(
+    State(state): State<AppState>,
+    Path(_id): Path<String>,
+    Json(req): Json<GitFetchReq>,
+) -> Json<serde_json::Value> {
+    let token = state.github_token().unwrap_or_default();
+    if token.trim().is_empty() {
+        return Json(
+            serde_json::json!({ "ok": false, "message": "no GitHub token set. Set CAMERATA_GITHUB_TOKEN to fetch." }),
+        );
+    }
+    let dir = match resolve_git_dir(&state, &req.repo) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    match crate::workspace::fetch_all(&dir, &req.repo, &token).await {
         Ok(out) => Json(serde_json::json!({ "ok": true, "output": out })),
         Err(e) => Json(serde_json::json!({ "ok": false, "message": format!("{e}") })),
     }
@@ -13359,6 +13433,74 @@ mod tests {
         std::env::remove_var("CAMERATA_LLM_BACKEND");
     }
 
+    // ── `effective_workspace_root` (workspace-folder-derivation fix) ─────────────
+
+    /// An explicit `workspace_root` setting always wins, even when a repo override is
+    /// also set — the architect's explicit choice is never second-guessed.
+    #[test]
+    fn effective_workspace_root_prefers_explicit_setting() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.settings.set_workspace_root(Some("/explicit/root".to_string()));
+        state
+            .settings
+            .set_repo_path("me/api", Some("/other/place/me-api".to_string()));
+        let project = state
+            .projects
+            .create("P", vec!["me/api".to_string()])
+            .unwrap();
+        assert_eq!(
+            effective_workspace_root(&state, &project).as_deref(),
+            Some("/explicit/root")
+        );
+    }
+
+    /// With no explicit workspace root, the parent of the first in-scope repo's linked
+    /// local path is used as the effective root.
+    #[test]
+    fn effective_workspace_root_derives_from_first_repo_override_parent() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state
+            .settings
+            .set_repo_path("me/api", Some("/Users/z/Repos/api".to_string()));
+        let project = state
+            .projects
+            .create("P", vec!["me/api".to_string(), "me/other".to_string()])
+            .unwrap();
+        assert_eq!(
+            effective_workspace_root(&state, &project).as_deref(),
+            Some("/Users/z/Repos")
+        );
+    }
+
+    /// A repo with no override is skipped in favor of a later repo that has one.
+    #[test]
+    fn effective_workspace_root_skips_repos_with_no_override() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state
+            .settings
+            .set_repo_path("me/second", Some("/Users/z/Repos/second".to_string()));
+        let project = state
+            .projects
+            .create("P", vec!["me/first".to_string(), "me/second".to_string()])
+            .unwrap();
+        assert_eq!(
+            effective_workspace_root(&state, &project).as_deref(),
+            Some("/Users/z/Repos")
+        );
+    }
+
+    /// Neither an explicit root nor any repo override → None (the caller reports a
+    /// specific "pick a workspace folder" error rather than guessing).
+    #[test]
+    fn effective_workspace_root_none_when_nothing_is_set() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let project = state
+            .projects
+            .create("P", vec!["me/api".to_string()])
+            .unwrap();
+        assert!(effective_workspace_root(&state, &project).is_none());
+    }
+
     /// `POST /api/settings/llm-backend` rejects a bogus backend with 400 and does not
     /// mutate the stored setting.
     #[tokio::test]
@@ -13747,6 +13889,84 @@ mod tests {
         )
         .await;
         assert!(state.projects.active().unwrap().memory.is_empty());
+    }
+
+    /// `POST /api/projects/:id/reset-onboarding` clears the onboarded marker (and drops the
+    /// in-progress draft) but leaves the project's repos and ruleset (incl. custom rules)
+    /// exactly as they were — the "Reset onboarding" UI action must never look like project
+    /// deletion.
+    #[tokio::test]
+    async fn reset_onboarding_clears_marker_and_draft_but_preserves_repos_and_ruleset() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state
+            .projects
+            .create("Acme", vec!["me/api".to_string()])
+            .expect("project created");
+        state
+            .projects
+            .update(&p.id, |proj| {
+                proj.mark_onboarded(&["me/api".to_string()]);
+                proj.merge_custom(&[crate::project::CustomRule {
+                    name: "house-style".to_string(),
+                    body: "Prefer X.".to_string(),
+                    domain: "*".to_string(),
+                    repos: Vec::new(),
+                }]);
+            })
+            .expect("project updated");
+        state.draft.save(&p.id, serde_json::json!({"scan": "in-progress"}));
+        assert!(!state.projects.get(&p.id).unwrap().onboarded.is_empty());
+        assert!(state.draft.load(&p.id).is_some());
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/reset-onboarding", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], true);
+
+        let after = state.projects.get(&p.id).unwrap();
+        assert!(after.onboarded.is_empty(), "onboarded marker is cleared");
+        assert_eq!(after.repos, vec!["me/api".to_string()], "repos untouched");
+        assert_eq!(
+            after.ruleset.custom.len(),
+            1,
+            "the ruleset (incl. custom rules) survives a reset"
+        );
+        assert!(
+            state.draft.load(&p.id).is_none(),
+            "the in-progress onboarding draft is dropped so a fresh scan starts clean"
+        );
+    }
+
+    /// Resetting onboarding for an unknown project id is a clean 400, not a panic.
+    #[tokio::test]
+    async fn reset_onboarding_unknown_project_is_bad_request() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/does-not-exist/reset-onboarding")
+                    .header("content-type", "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
     }
 
     /// The design-page hierarchy endpoints: GET returns the seeded default ladder; POST replaces the
