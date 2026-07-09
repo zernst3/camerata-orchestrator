@@ -223,6 +223,74 @@ cockpit stays for architect-mode work.
 These are small decisions but they are load-bearing for the "you are the customer, not the
 operator" feel, so they are marked now to guide the head's implementation.
 
+## Hosting and multi-tenancy (cloud model, staged after local-first)
+
+Vision (Zach, 2026-07-09): the builder chat is eventually a **hosted, authenticated,
+multi-tenant service**. Friends log in securely and build their own apps. This is a governed
+cloud IDE (prior art: Cloud9, Gitpod, StackBlitz, Replit: per-workspace containers with a
+tunneled live preview). The headless / stateless-core design is precisely what enables the
+clean service split.
+
+**Service topology:**
+- **Chat/PO head** = its own deployed UI service, per-user authenticated sessions.
+- **Governed core** = one stateless app service (logic stateless; per-tenant state in a
+  backend). Replaces the local single-user stores (projects.json, keychain, SQLite) with a
+  multi-tenant, auth-scoped persistence layer (Postgres, tenant-scoped rows).
+- **Per-session build environment** = an ISOLATED container per user workspace: the app repo,
+  the governed fleet (`claude -p`), and `dx serve` all run there. Isolation is mandatory
+  (multi-tenant AI code execution). This is the biggest infra lift.
+- **Live preview** = the container's `dx serve` exposed as an authenticated per-session
+  preview URL (reverse-proxy / tunnel), rendered in the UI. Device-agnostic (it is a URL).
+- **Auth** = an identity layer (Azure Entra External ID / B2C, or similar), per-user tenancy.
+- **Secrets** = per-tenant cloud vault (Azure Key Vault) replacing the local keychain. Users
+  store their own cloud creds; Camerata deploys their apps to THEIR infra (the existing
+  BYO-infra DeployTarget model fits directly).
+
+**The gate is the enabler.** Multi-tenant cloud AI code execution is only safe because of the
+deny-before-execute gate + container isolation + egress control. The gate is the moat here
+even more than in the enterprise case.
+
+**Remote control (Claude-Code-style):** falls out of the hosted + authenticated model. Hosted
+sessions are reachable from any device, so "start a build on desktop, monitor/steer from
+phone" is just accessing your session. No separate mechanism needed.
+
+**Mobile:** the preview is an authenticated URL, so it renders on any device. Realistic usage:
+from a phone you build mobile-first apps (chat + a small preview pane); from a computer you
+have room for chat + a full preview. The simplified chat head (Aesthetic section) is
+mobile-friendly by design.
+
+**Staging (important):** build LOCAL-FIRST single-user first (the 2026-07-09 spike is that
+foundation), prove the PO head + live-preview + orchestrator on one machine, THEN lift to
+cloud (containerize the build env, add auth / tenancy / vault / preview-tunnel). Do not build
+multi-tenant cloud before the local loop is proven. "Right now it is only me" means local is
+the correct near-term; cloud is the shape to design toward.
+
+## Stack refinement from the spike: Dioxus FULLSTACK (server functions), not wasm + reqwest
+
+The live-preview spike surfaced that itinerary-app used `reqwest` directly in frontend code,
+which is native-only and breaks the wasm/web build. The default stack should therefore be
+**Dioxus fullstack with server functions**: network / DB I/O goes through server fns on the
+backend, keeping the wasm frontend clean. This is both more correct and a Class-A backstop
+target (the gate/checks should reject reqwest-in-wasm-frontend for the default stack), which
+reinforces the section-1 thesis: the more the default stack pushes I/O through
+compiler-checked seams, the higher the safe dial sits.
+
+## Live-preview adapter requirements (from the spike verdict: VIABLE)
+
+Measured: RSX/text edit hot-patches in ~1s; a Rust logic edit incremental-rebuilds in ~4-5s
+steady-state (~19s cold). `dx serve` survives compile errors and reports them. The
+`crates/preview` adapter (local first, container-hosted later) must:
+- Manage `dx serve` as a subprocess (reuse the `crates/ui/src/server_process.rs` lifecycle:
+  health, kill-on-exit).
+- Parse dx output for build/reload/error status (`Hotreloading:`, `Build completed`, rustc
+  errors).
+- **Handle the silent-ignore gap:** a syntax-invalid edit is dropped by dx's RSX pre-pass with
+  no error line. The adapter needs a post-edit timeout + `cargo check` fallback to detect a
+  broken fleet edit instead of serving stale content silently.
+- Surface the preview URL (local: localhost; cloud: an authenticated tunnel) and hook the
+  click-to-report layer to the running preview.
+Full evidence: `docs/spikes/2026-07-09_dioxus-live-preview-spike.md`.
+
 ## Open questions (for Zach)
 - Dial UX: a literal slider, an inferred level, or a per-request "how sure should you be
   before asking me" phrasing? (Recommend: inferred + overridable.)
