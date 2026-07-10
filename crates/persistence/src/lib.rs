@@ -15,6 +15,9 @@
 //! - [`content_hash`] — FNV-1a hex hash for offending content (NEVER store raw)
 //! - [`GovernanceEvent`], [`GovernanceLog`] — the readable governance-event audit
 //!   trail (run lifecycle, gate verdicts, escalations, sign-off, etc.)
+//! - [`FeedbackStore`] — the Product-Owner feedback loop's defect-report store (auto
+//!   capture + click-to-report), storing `camerata_api_types::feedback::DefectReport`
+//!   directly
 //!
 //! Conventions honored:
 //! - RUST-DOMAIN-4: newtype IDs
@@ -28,6 +31,7 @@
 pub mod artifacts;
 pub mod enforcement_catch;
 pub mod error;
+pub mod feedback;
 pub mod governance_event;
 pub mod model;
 pub mod store;
@@ -37,6 +41,7 @@ pub use artifacts::{
 };
 pub use enforcement_catch::{content_hash, EnforcementCatch, EnforcementCatchLedger};
 pub use error::PersistenceError;
+pub use feedback::FeedbackStore;
 pub use governance_event::{GovernanceEvent, GovernanceLog};
 pub use model::{ProvenanceEntry, SessionRecord};
 pub use store::{SqliteStore, Store};

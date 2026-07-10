@@ -19,6 +19,7 @@
 //! | `start_run` | GOVERNED WRITE | [`Client::start_run`] | `POST /api/stories/:id/run` |
 //! | `run_events` | READ | [`Client::run_events`] | `GET /api/runs/:id/events` |
 //! | `recent_events` | READ | [`Client::recent_events`] | `GET /api/governance/events` |
+//! | `project_feedback` | READ | [`Client::project_feedback`] | `GET /api/projects/:id/feedback` |
 //!
 //! "Governed write" here means the WRITE SEMANTICS live behind the BFF (tracker
 //! mutation / governed-run spawn with its gate stack) — this adapter adds no policy of
@@ -113,6 +114,13 @@ pub struct RecentEventsArgs {
     /// server default (100), capped server-side at 1000.
     #[serde(default)]
     pub limit: Option<u32>,
+}
+
+/// Arguments for the `project_feedback` tool.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ProjectFeedbackArgs {
+    /// Which app/project to list defect reports for.
+    pub project_id: String,
 }
 
 /// Shape a client verb's outcome into a [`CallToolResult`]:
@@ -265,6 +273,15 @@ impl Camerata {
                 .await,
         )
     }
+
+    /// READ — `GET /api/projects/:id/feedback` via [`Client::project_feedback`].
+    #[tool(
+        name = "project_feedback",
+        description = "List one project's defect reports (Product-Owner feedback loop: auto-capture + click-to-report), newest first. READ-ONLY. Args: `project_id`. Returns a JSON array of reports, each with `id`, `source` (auto/user), `kind` (runtime_error/user_report/build_error/other), `title`, `description`, `context` (route/element/stack/console/extra), `severity` (info/warning/error/critical), `status` (open/acknowledged/resolved), and `ts`. Empty array if no feedback store is open server-side (fail-soft, never an error)."
+    )]
+    pub async fn project_feedback(&self, args: Parameters<ProjectFeedbackArgs>) -> CallToolResult {
+        dto_tool_result(self.client.project_feedback(&args.0.project_id).await)
+    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -282,9 +299,10 @@ impl ServerHandler for Camerata {
              assign tracker work items (assign_work_item) and start governed runs \
              (start_run). Read the governance-event audit trail per run \
              (run_events) or the most recent events across all runs \
-             (recent_events). Every tool is a live HTTP call to the Camerata BFF — it \
-             must be running (default http://127.0.0.1:8787, override via \
-             CAMERATA_BFF_URL)."
+             (recent_events). Read a project's defect reports from the Product-Owner \
+             feedback loop (project_feedback). Every tool is a live HTTP call to the \
+             Camerata BFF — it must be running (default http://127.0.0.1:8787, \
+             override via CAMERATA_BFF_URL)."
                 .to_string(),
         );
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
@@ -318,6 +336,7 @@ mod tests {
                 "get_run",
                 "list_stories",
                 "list_uows",
+                "project_feedback",
                 "recent_events",
                 "run_events",
                 "start_run",
@@ -591,6 +610,71 @@ mod tests {
             text.contains("run not found"),
             "error text must carry the BFF body: {text}"
         );
+    }
+
+    /// READ delegation: the `project_feedback` tool method drives a real HTTP GET
+    /// against the (mock) BFF and returns the DTO array as JSON content.
+    #[tokio::test]
+    async fn project_feedback_tool_hits_the_bff_and_returns_json_content() {
+        let bff = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-1/feedback"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 1,
+                    "project_id": "proj-1",
+                    "source": "user",
+                    "kind": "user_report",
+                    "title": "button does nothing",
+                    "description": "",
+                    "context": { "route": null, "element": null, "stack": null, "console": null, "extra": {} },
+                    "severity": "info",
+                    "status": "open",
+                    "ts": "2026-07-08T00:00:00Z",
+                }
+            ])))
+            .expect(1)
+            .mount(&bff)
+            .await;
+
+        let server = Camerata::with_client(Client::with_base(bff.uri()));
+        let result = server
+            .project_feedback(Parameters(ProjectFeedbackArgs {
+                project_id: "proj-1".to_string(),
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(false));
+        let json: serde_json::Value =
+            serde_json::from_str(text_of(&result)).expect("content must be valid JSON");
+        assert_eq!(json[0]["project_id"], "proj-1");
+        assert_eq!(json[0]["title"], "button does nothing");
+    }
+
+    /// A BFF error (500) maps to a tool error for `project_feedback`.
+    #[tokio::test]
+    async fn project_feedback_client_error_maps_to_tool_error() {
+        let bff = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-x/feedback"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_json(serde_json::json!({ "error": "boom" })),
+            )
+            .expect(1)
+            .mount(&bff)
+            .await;
+
+        let server = Camerata::with_client(Client::with_base(bff.uri()));
+        let result = server
+            .project_feedback(Parameters(ProjectFeedbackArgs {
+                project_id: "proj-x".to_string(),
+            }))
+            .await;
+
+        assert_eq!(result.is_error, Some(true));
+        let text = text_of(&result);
+        assert!(text.contains("500"), "error text must carry the status: {text}");
     }
 
     /// A transport-level failure (nothing listening at the base URL) also maps to a

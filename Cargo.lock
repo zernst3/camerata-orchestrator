@@ -874,6 +874,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "camerata-api-types",
  "camerata-core",
  "chrono",
  "serde",

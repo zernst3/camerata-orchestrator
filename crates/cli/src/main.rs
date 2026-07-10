@@ -100,6 +100,12 @@ enum Command {
         #[arg(long, default_value_t = 100)]
         limit: u32,
     },
+    /// List one project's defect reports (Product-Owner feedback loop: auto-capture +
+    /// click-to-report) via the BFF (GET /api/projects/:id/feedback).
+    Feedback {
+        /// Which app/project to list defect reports for.
+        project_id: String,
+    },
 }
 
 #[tokio::main]
@@ -159,6 +165,10 @@ async fn main() -> anyhow::Result<()> {
         Command::RecentEvents { limit } => {
             let client = make_client(bff_url);
             print_result(camerata::http_cmd::handle_recent_events(&client, limit).await)
+        }
+        Command::Feedback { project_id } => {
+            let client = make_client(bff_url);
+            print_result(camerata::http_cmd::handle_feedback(&client, &project_id).await)
         }
     }
 }
@@ -451,5 +461,15 @@ mod cli_parse_tests {
             Command::RecentEvents { limit } => assert_eq!(limit, 25),
             other => panic!("expected Command::RecentEvents, got a different variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn feedback_requires_a_project_id_positional() {
+        let cli = Cli::try_parse_from(["camerata", "feedback", "proj-1"]).expect("must parse");
+        match cli.command {
+            Command::Feedback { project_id } => assert_eq!(project_id, "proj-1"),
+            other => panic!("expected Command::Feedback, got a different variant: {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["camerata", "feedback"]).is_err());
     }
 }

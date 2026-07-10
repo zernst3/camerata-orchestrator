@@ -183,6 +183,13 @@ pub struct AppState {
     /// any lifecycle site as of Phase H1 — that instrumentation is a later phase. Use
     /// [`AppState::record_governance`] as the single call-site helper when it lands.
     pub governance_log: Option<Arc<camerata_persistence::GovernanceLog>>,
+    /// The Product-Owner feedback loop's defect-report store (SQLite). Backs
+    /// `POST /api/feedback`, `GET /api/projects/:id/feedback`, and
+    /// `GET /api/feedback/recent`. Opened best-effort in [`AppState::from_env`], same
+    /// fail-soft pattern as `governance_log`: `None` in tests and on open failure — the
+    /// endpoints return `{ ok: false, ... }` / an empty list rather than a 500. Use
+    /// [`AppState::record_defect`] as the single call-site helper.
+    pub feedback_store: Option<Arc<camerata_persistence::FeedbackStore>>,
     /// App-wide credential store backed by the OS keychain in production and an
     /// in-memory map in tests.  Never exposes full values over HTTP; handlers call
     /// `.masked()`.  Service code (e.g. [`github_token`]) reads the full value
@@ -238,6 +245,8 @@ impl AppState {
             enforcement_ledger: crate::enforcement_ledger::EnforcementLedger::none(),
             // Tests and in-process runs start without a governance log (no-op; fail-soft).
             governance_log: None,
+            // Tests and in-process runs start without a feedback store (no-op; fail-soft).
+            feedback_store: None,
             // Tests use an in-memory credential store; production uses the OS keychain.
             credential_store: Arc::new(crate::credentials::MemoryCredentialStore::new()),
             // The registry always has the static Claude entries; OpenRouter is empty until
@@ -276,6 +285,28 @@ impl AppState {
         };
         if let Err(e) = log.record(event).await {
             tracing::warn!(error = %e, "failed to record governance event");
+        }
+    }
+
+    /// Record one defect report to the feedback store (Product-Owner feedback loop).
+    /// Fail-soft: `None` when no feedback store is open this session (tests, or an
+    /// open failure at startup) — mirrors [`Self::record_governance`]'s contract.
+    /// Returns the assigned row id on success, logging (and swallowing) a write error.
+    ///
+    /// Does NOT also write a governance-audit row — [`submit_feedback`] does that
+    /// itself (kind `"defect_reported"`) so the pairing stays visible at the one call
+    /// site that owns both writes, rather than being hidden inside this helper.
+    pub async fn record_defect(
+        &self,
+        report: camerata_api_types::feedback::DefectReport,
+    ) -> Option<i64> {
+        let store = self.feedback_store.as_ref()?;
+        match store.record(report).await {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to record defect report");
+                None
+            }
         }
     }
 
@@ -686,6 +717,34 @@ impl AppState {
                         None
                     }
                 };
+
+                // Product-Owner feedback loop: the defect-report store (auto-capture +
+                // click-to-report ingest). Opened best-effort, same fail-soft pattern as
+                // the governance log above: on open failure, log a warning and leave
+                // `feedback_store` as `None` so startup and every request path is
+                // unaffected (the endpoints degrade to `{ ok: false, ... }` / empty
+                // lists rather than a 500).
+                let feedback_path = dir.join("feedback.db");
+                state.feedback_store = match tokio::task::block_in_place(|| {
+                    handle.block_on(camerata_persistence::FeedbackStore::open(&feedback_path))
+                }) {
+                    Ok(store) => {
+                        tracing::info!(
+                            path = %feedback_path.display(),
+                            "feedback store opened"
+                        );
+                        Some(Arc::new(store))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %feedback_path.display(),
+                            error = %e,
+                            "feedback store could not open; defect reports will not be \
+                             recorded this session"
+                        );
+                        None
+                    }
+                };
             }
             // Routines persist too, so a scheduled governed run an architect set up
             // survives a restart instead of being lost on every launch.
@@ -759,6 +818,11 @@ pub fn router(state: AppState) -> Router {
         // Governance-event audit trail read path (Phase H3): per-run + cross-run recent.
         .route("/api/runs/:id/events", get(get_run_events))
         .route("/api/governance/events", get(recent_governance_events))
+        // Product-Owner feedback loop: defect-report ingest + read + status update.
+        .route("/api/feedback", post(submit_feedback))
+        .route("/api/projects/:id/feedback", get(project_feedback))
+        .route("/api/feedback/recent", get(recent_feedback))
+        .route("/api/feedback/:id/status", post(update_feedback_status))
         .route(
             "/api/stories/:id/clarifications",
             get(list_clarifications).post(post_clarification),
@@ -2392,6 +2456,150 @@ async fn recent_governance_events(
     let limit = i64::from(q.limit.unwrap_or(100).min(1000));
     let events = log.recent(limit).await.map_err(|e| AppError(e.into()))?;
     Ok(Json(events))
+}
+
+// ── Product-Owner feedback loop: defect-report ingest + read + status update ───────
+
+/// `POST /api/feedback` — ingest one [`camerata_api_types::feedback::DefectReport`]
+/// (Product-Owner feedback loop: a scaffolded app's auto-capture reporter, or a human's
+/// click-to-report). The server stamps `id`/`ts`/`status` fresh regardless of what the
+/// caller sent (never trust a client to assign its own row id, backdate its own
+/// timestamp, or submit a report already `Resolved`), stores it via
+/// [`AppState::record_defect`], AND records a paired governance-audit row (kind
+/// `"defect_reported"`, `severity` derived from the defect's severity, `actor`
+/// `"system"` for [`DefectSource::Auto`] / `"human"` for [`DefectSource::User`], `reason`
+/// the report's title, `detail` the full stored report as JSON) so the audit trail shows
+/// what was reported and by what/whom — the governance event's `run_id` is the report's
+/// `project_id` (there is no run backing a raw defect report; grouping by project is the
+/// natural browse key here, mirroring how `run_id` groups a run's own events).
+///
+/// Fail-soft: when no feedback store is open this session, responds `{ ok: false,
+/// message }` (200, never a 500) — an ingest endpoint going down must not take the
+/// reporting app down with it. On a genuine write failure (store open, insert failed),
+/// same `{ ok: false, message }` shape.
+async fn submit_feedback(
+    State(state): State<AppState>,
+    Json(mut report): Json<camerata_api_types::feedback::DefectReport>,
+) -> Json<serde_json::Value> {
+    use camerata_api_types::feedback::{DefectSeverity, DefectSource, DefectStatus};
+
+    report.id = None;
+    report.ts = chrono::Utc::now().to_rfc3339();
+    report.status = DefectStatus::Open;
+
+    let Some(store) = state.feedback_store.as_ref() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": "feedback store is not available this session",
+        }));
+    };
+
+    match store.record(report.clone()).await {
+        Ok(id) => {
+            let actor = match report.source {
+                DefectSource::Auto => "system",
+                DefectSource::User => "human",
+            };
+            let severity = match report.severity {
+                DefectSeverity::Info => "info",
+                DefectSeverity::Warning => "warn",
+                DefectSeverity::Error | DefectSeverity::Critical => "error",
+            };
+            let mut stamped = report;
+            stamped.id = Some(id);
+            let detail = serde_json::to_string(&stamped).unwrap_or_default();
+            state
+                .record_governance(
+                    camerata_persistence::GovernanceEvent::new(
+                        stamped.project_id.clone(),
+                        "defect_reported",
+                        severity,
+                        actor,
+                    )
+                    .with_reason(stamped.title.clone())
+                    .with_detail(detail),
+                )
+                .await;
+            Json(serde_json::json!({ "ok": true, "id": id }))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to record defect report");
+            Json(serde_json::json!({
+                "ok": false,
+                "message": format!("failed to record defect report: {e}"),
+            }))
+        }
+    }
+}
+
+/// `GET /api/projects/:id/feedback` — one project's defect reports, newest first.
+/// Returns an empty array — never an error — when no feedback store is open this
+/// session (fail-soft, same contract as [`get_run_events`]).
+async fn project_feedback(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<camerata_api_types::feedback::DefectReport>>, AppError> {
+    let Some(store) = state.feedback_store.as_ref() else {
+        return Ok(Json(Vec::new()));
+    };
+    let reports = store.by_project(&id).await.map_err(|e| AppError(e.into()))?;
+    Ok(Json(reports))
+}
+
+/// Query for `GET /api/feedback/recent`: `?limit=N` caps the page. Defaults to 100,
+/// capped at 1000 (mirrors [`RecentGovernanceEventsQuery`]).
+#[derive(serde::Deserialize)]
+struct RecentFeedbackQuery {
+    limit: Option<u32>,
+}
+
+/// `GET /api/feedback/recent?limit=N` — the `N` most recently recorded defect reports
+/// across ALL projects, newest first. Default `N=100`, capped at 1000. Returns an empty
+/// array — never an error — when no feedback store is open this session (same
+/// fail-soft contract as [`recent_governance_events`]).
+async fn recent_feedback(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<RecentFeedbackQuery>,
+) -> Result<Json<Vec<camerata_api_types::feedback::DefectReport>>, AppError> {
+    let Some(store) = state.feedback_store.as_ref() else {
+        return Ok(Json(Vec::new()));
+    };
+    let limit = i64::from(q.limit.unwrap_or(100).min(1000));
+    let reports = store.recent(limit).await.map_err(|e| AppError(e.into()))?;
+    Ok(Json(reports))
+}
+
+/// Body for `POST /api/feedback/:id/status`.
+#[derive(serde::Deserialize)]
+struct UpdateFeedbackStatusReq {
+    status: camerata_api_types::feedback::DefectStatus,
+}
+
+/// `POST /api/feedback/:id/status` — update one defect report's status (Open ->
+/// Acknowledged -> Resolved, or any direct transition; no state-machine enforcement
+/// here). Fail-soft: `{ ok: false, message }` (200, never a 500) when no feedback store
+/// is open this session, or on a genuine write failure.
+async fn update_feedback_status(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<UpdateFeedbackStatusReq>,
+) -> Json<serde_json::Value> {
+    let Some(store) = state.feedback_store.as_ref() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": "feedback store is not available this session",
+        }));
+    };
+    match store.set_status(id, req.status).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to update defect report status");
+            Json(serde_json::json!({
+                "ok": false,
+                "message": format!("failed to update status: {e}"),
+            }))
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -15100,6 +15308,275 @@ mod tests {
         assert_eq!(json[0]["run_id"], "run-b");
         assert_eq!(json[0]["rule_id"], "SEC-1");
         assert_eq!(json[1]["run_id"], "run-a");
+    }
+
+    // ── Product-Owner feedback loop: defect-report ingest + read + status update ───
+
+    /// Fail-soft: `GET /api/projects/:id/feedback` returns an empty array (200), never
+    /// an error, when no feedback store is open this session.
+    #[tokio::test]
+    async fn project_feedback_returns_empty_array_when_no_feedback_store() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/projects/proj-1/feedback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    /// Fail-soft: `GET /api/feedback/recent` also returns an empty array (200) with no
+    /// feedback store open, same contract as the per-project route.
+    #[tokio::test]
+    async fn recent_feedback_returns_empty_array_when_no_feedback_store() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/feedback/recent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    /// Fail-soft: `POST /api/feedback` responds `{ ok: false, message }` (200, never a
+    /// 500) when no feedback store is open this session.
+    #[tokio::test]
+    async fn submit_feedback_reports_ok_false_when_no_feedback_store() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feedback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": "proj-1",
+                            "title": "it broke",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+        assert!(json["message"].is_string());
+    }
+
+    /// The full ingest round trip with a REAL (in-memory) feedback store attached:
+    /// `POST /api/feedback` stores the report AND writes a paired `defect_reported`
+    /// governance row, `GET /api/projects/:id/feedback` lists it back, `GET
+    /// /api/feedback/recent` surfaces it cross-project, and `POST
+    /// /api/feedback/:id/status` updates its status.
+    #[tokio::test]
+    async fn feedback_routes_submit_store_and_list_with_paired_governance_row() {
+        let feedback = camerata_persistence::FeedbackStore::open_in_memory()
+            .await
+            .expect("open in-memory feedback store");
+        let governance = camerata_persistence::GovernanceLog::open_in_memory()
+            .await
+            .expect("open in-memory governance log");
+
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.feedback_store = Some(std::sync::Arc::new(feedback));
+        state.governance_log = Some(std::sync::Arc::new(governance));
+        let app = router(state);
+
+        // Submit an auto-captured report. Client-supplied id/status are ignored (the
+        // server stamps its own); severity "critical" -> governance "error" severity;
+        // source "auto" -> governance actor "system".
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feedback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": 999,
+                            "project_id": "proj-a",
+                            "source": "auto",
+                            "kind": "runtime_error",
+                            "title": "TypeError: x is undefined",
+                            "description": "thrown in render()",
+                            "severity": "critical",
+                            "status": "resolved",
+                            "context": { "route": "/dashboard", "stack": "at foo (app.js:1:1)" },
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let submit_json = body_json(resp).await;
+        assert_eq!(submit_json["ok"], true);
+        let id = submit_json["id"].as_i64().expect("id must be an integer");
+
+        // A second report for a different project, so cross-project `recent` has
+        // something to distinguish from the per-project list.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feedback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": "proj-b",
+                            "source": "user",
+                            "kind": "user_report",
+                            "title": "button does nothing",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["ok"], true);
+
+        // Per-project list: only proj-a's report, server-stamped id/status (NOT the
+        // client-supplied 999 / "resolved").
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/projects/proj-a/feedback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["id"], id);
+        assert_eq!(json[0]["title"], "TypeError: x is undefined");
+        assert_eq!(json[0]["status"], "open", "server stamps status Open regardless of client input");
+        assert_eq!(json[0]["context"]["route"], "/dashboard");
+
+        // Cross-project recent: both reports, newest (proj-b) first.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/feedback/recent?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 2);
+        assert_eq!(json[0]["project_id"], "proj-b");
+        assert_eq!(json[1]["project_id"], "proj-a");
+
+        // The paired governance row landed: kind defect_reported, actor system
+        // (source=auto), severity error (from "critical"), reason = title, run_id =
+        // project_id, detail decodes back to the stamped report.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/runs/proj-a/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["kind"], "defect_reported");
+        assert_eq!(json[0]["actor"], "system");
+        assert_eq!(json[0]["severity"], "error");
+        assert_eq!(json[0]["reason"], "TypeError: x is undefined");
+        let detail: serde_json::Value =
+            serde_json::from_str(json[0]["detail"].as_str().expect("detail must be a string"))
+                .expect("detail must decode as JSON");
+        assert_eq!(detail["id"], id);
+        assert_eq!(detail["status"], "open");
+
+        // Status update: Open -> Acknowledged.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/feedback/{id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "status": "acknowledged" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["ok"], true);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/projects/proj-a/feedback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json[0]["status"], "acknowledged");
+    }
+
+    /// Fail-soft: `POST /api/feedback/:id/status` responds `{ ok: false, message }`
+    /// (200, never a 500) when no feedback store is open this session.
+    #[tokio::test]
+    async fn update_feedback_status_reports_ok_false_when_no_feedback_store() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feedback/1/status")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "status": "resolved" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+        assert!(json["message"].is_string());
     }
 
     /// ROUTES-7: the AppError constructors carry the right status while keeping the
