@@ -400,6 +400,75 @@ hot-reloaded preview).
   work item. Recorded in the governance trail so "what was reported, and what the fleet did
   about it" is auditable.
 
+## Architect-orchestrator design (decided 2026-07-10, from the Fable review)
+
+The orchestrator is the top-tier-model brain that takes intent (new app / change / auto-defect),
+decides work WITHIN the dial, drives the existing fleet, and stops at human-review checkpoints.
+Decided design:
+
+- **Confidence is mechanical, never LLM self-report (DECIDED: mechanical class + calibration
+  loop).** The decision CLASS (A/B/C/D) comes from the action's effect-signature at the gate
+  boundary (write to `migrations/`, a terraform call, a spend, a secret-scope change, an
+  external POST = C), detected by the same interception the deny-before-execute gate owns.
+  Confidence within A/B is a coarse ordinal from checkable features (compiles, inside the
+  vetted skeleton, adds an out-of-vetted-set dep, previously redirected). Every autonomous
+  decision AND its outcome (human redirected / later defect-linked / survived) is recorded, so
+  the dial threshold is tuned against measured override rates. The moat artifact: "measured
+  override rate at max dial: X%." New governance-event kind `orchestrator_decision {class,
+  confidence, chosen, alternatives, assumption?}`.
+- **One spine, three intake policies.** Shared work-item + execution (`start_governed_run`);
+  the entry POLICY differs by source. **Class B requires a watcher** (DECIDED: watcher-
+  dependent): auto-fix mechanically-verifiable defects only while the human watches the live
+  preview; for deployed/idle apps, triage + fingerprint + a next-session digest, never
+  hot-patch unwatched.
+- **`crates/orchestrator` above the spine** (do not fork `dev_implement_run`), plus a
+  **micro-change lane** for Class-B preview edits (gated + `verify_after_edit`, but skips
+  decompose/story/L3 ceremony; micro-edits squash into PO-labeled keep-points).
+- **`DecisionRecord` gains `approved_by: human | orchestrator{class, confidence}`** — where the
+  audit trail proves "what it decided on its own."
+- **A living spec per app** (like budget-tracker's SPEC.md), updated after each accepted
+  change: the model's memory, contradiction detector, checkpoint-diff source, and the PO's
+  "what does my app do now." Highest-leverage single artifact.
+- **Design-approval is delta-triggered** (fires on a new noun: schema entity, integration,
+  secret, auth, out-of-vetted dep) and shown in PO language (screens + data + assumptions),
+  not story splits. Verbs: approve / redirect.
+- **Class-D asks only when ambiguity is load-bearing**; else assume-and-declare into an
+  assumptions ledger. Cap ~3 batched, customer-phrased questions per round.
+- **Keep-point undo** (revertable sentences, not SHAs); undo across a migration is Class C.
+- **From-scratch = refuse gracefully in v1** (the vetted skeleton is part of the backstop);
+  more vetted skeleton profiles later. Fix the `DISQUALIFYING_SIGNALS` false-positive on
+  "feels like a desktop app" once the orchestrator sets `AppTarget` structurally.
+- **Dial is inferred + VISIBLE + overridable**, persisted per project (an invisible inferred
+  dial is indistinguishable from no dial).
+
+## Usability backlog (Fable senior-PM review, 2026-07-10, ranked)
+
+Fold-in-now items DECIDED (built with the foundation): fingerprint + dedupe `DefectReport`
+(before it is baked into every scaffolded app), default-private deploy (single-user lock unless
+opted public), chat secret-interceptor (scrub pasted keys from transcript/memory/audit). The
+rest are the UX backlog for the head + orchestrator phases:
+
+1. **First 5 minutes are silent** -> render the branded empty skeleton immediately, narrate
+   progress in PO language (features appear into a running app). Governed is slower; silence
+   reads as broken. Also: one-line consent before auto-creating a GitHub repo (fine for Zach,
+   alarming for friends).
+2. **"Did it hear me?"** -> build-state indicator on accept + a "changed: X" toast on
+   `EditVerdict::Applied`; the orchestrator dedupes an in-flight matching intent instead of
+   forking a second run. Never surface rustc output ("I broke something, fixing it").
+3. **No brake** -> a first-class user "stop/wait" verb that checkpoints the in-flight run
+   (reuse `checkpoint.rs`) and hands control back.
+4. **Deploy cost surprises + idle apps** -> always $/month, restated at the C gate with "what
+   if I say no"; proactive sleep offers after idle; a standing cost line in the app gallery;
+   first-deploy dry-run (creds + quota) before "deploy day"; translate Azure errors; auto-retry
+   name collisions.
+5. **Close the feedback loop to the user** -> `DefectStatus` exists but nothing tells the user
+   their report was understood; restate on receipt, connect fix to report on resolve.
+6. **App gallery is the home screen** (status + monthly cost per app) + a one-verb archive
+   (tears down infra C-gated, keeps spec + history restorable).
+7. **Friends break every assumption at once** (staged): rung-3 managed hosting becomes the only
+   viable rung for no-cloud-account users; per-user LLM budget with graceful limits; per-persona
+   consequence-first approval copy. Build the cost-ledger + approval copy as if it is coming.
+
 ## Open questions (for Zach)
 - Dial UX: a literal slider, an inferred level, or a per-request "how sure should you be
   before asking me" phrasing? (Recommend: inferred + overridable.)
