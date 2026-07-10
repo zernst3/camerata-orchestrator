@@ -1,4 +1,4 @@
-use crate::AppRequirements;
+use crate::{AppRequirements, AppTarget};
 
 /// Which path the scaffolder takes for a given app's requirements.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -78,14 +78,25 @@ const DISQUALIFYING_SIGNALS: &[(&str, &str)] = &[
 /// - `needs_auth: true` — likewise layered on top later; the base skeleton ships
 ///   with no end-user auth by default.
 ///
-/// What DOES disqualify Skeleton: the requirements' free text (`summary` +
-/// `description`) mentioning a genuine structural incompatibility with "a web PWA" —
-/// a native desktop/mobile shell, a CLI/terminal app, a browser extension, an
-/// embedded/firmware target, or a background-only process with no page to render.
-/// See [`DISQUALIFYING_SIGNALS`] for the exact list.
+/// **The PRIMARY signal is `reqs.target`** ([`AppTarget`]): anything other than
+/// `AppTarget::WebPwa` is a structural mismatch with the skeleton by construction
+/// and returns `FromScratch` immediately, before the free-text scan ever runs.
+///
+/// **The SECONDARY signal** (belt-and-suspenders, only reached when `target` is
+/// `WebPwa`): the requirements' free text (`summary` + `description`) mentioning a
+/// genuine structural incompatibility with "a web PWA" — a native desktop/mobile
+/// shell, a CLI/terminal app, a browser extension, an embedded/firmware target, or a
+/// background-only process with no page to render. See [`DISQUALIFYING_SIGNALS`] for
+/// the exact list. This catches a `WebPwa`-targeted request whose actual wording
+/// still describes something the skeleton can't be (e.g. a target set by mistake,
+/// or a summary that drifted from the structured target).
 ///
 /// Everything else returns [`ScaffoldStrategy::Skeleton`].
 pub fn choose_strategy(reqs: &AppRequirements) -> ScaffoldStrategy {
+    if let Some(reason) = from_scratch_reason_for_target(reqs.target) {
+        return ScaffoldStrategy::FromScratch { reason };
+    }
+
     let haystack = format!("{} {}", reqs.summary, reqs.description).to_lowercase();
 
     for (signal, capability) in DISQUALIFYING_SIGNALS {
@@ -99,6 +110,21 @@ pub fn choose_strategy(reqs: &AppRequirements) -> ScaffoldStrategy {
     }
 
     ScaffoldStrategy::Skeleton
+}
+
+/// The `FromScratch` reason for a non-`WebPwa` target, or `None` when `target` is
+/// `WebPwa` (the skeleton-fitting case). Split out from [`choose_strategy`] so the
+/// target-routing and the free-text scan are each independently testable.
+fn from_scratch_reason_for_target(target: AppTarget) -> Option<String> {
+    let capability = match target {
+        AppTarget::WebPwa => return None,
+        AppTarget::Desktop => "a native desktop application shell",
+        AppTarget::Mobile => "a native mobile application",
+        AppTarget::Cli => "a command-line interface",
+    };
+    Some(format!(
+        "AppRequirements.target is {target:?}, which needs {capability}, not a web PWA — the vetted web PWA skeleton can't express that."
+    ))
 }
 
 #[cfg(test)]
@@ -162,6 +188,76 @@ mod tests {
     fn disqualifying_signal_in_description_is_also_caught() {
         let mut r = reqs("");
         r.description = "an Android app for tracking workouts".to_string();
+        assert!(matches!(
+            choose_strategy(&r),
+            ScaffoldStrategy::FromScratch { .. }
+        ));
+    }
+
+    // ── AppTarget routing (FIX A: the structured, primary signal) ───────────────
+
+    #[test]
+    fn default_target_is_web_pwa_and_fits_the_skeleton() {
+        let r = reqs("a plain app with no strong opinions");
+        assert_eq!(r.target, AppTarget::WebPwa);
+        assert_eq!(choose_strategy(&r), ScaffoldStrategy::Skeleton);
+    }
+
+    #[test]
+    fn desktop_target_is_from_scratch_even_with_an_ordinary_summary() {
+        let mut r = reqs("just tracks my flights, nothing unusual");
+        r.target = AppTarget::Desktop;
+        match choose_strategy(&r) {
+            ScaffoldStrategy::FromScratch { reason } => {
+                assert!(reason.contains("Desktop"), "reason was: {reason}");
+            }
+            other => panic!("expected FromScratch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mobile_target_is_from_scratch() {
+        let mut r = reqs("a workout tracker");
+        r.target = AppTarget::Mobile;
+        match choose_strategy(&r) {
+            ScaffoldStrategy::FromScratch { reason } => {
+                assert!(reason.contains("Mobile"), "reason was: {reason}");
+            }
+            other => panic!("expected FromScratch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_target_is_from_scratch() {
+        let mut r = reqs("renames files in bulk");
+        r.target = AppTarget::Cli;
+        match choose_strategy(&r) {
+            ScaffoldStrategy::FromScratch { reason } => {
+                assert!(reason.contains("Cli"), "reason was: {reason}");
+            }
+            other => panic!("expected FromScratch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn web_pwa_target_still_falls_back_on_a_disqualifying_keyword() {
+        // Secondary signal still applies to a WebPwa-targeted request whose free
+        // text describes something the skeleton can't be (belt-and-suspenders).
+        let mut r = reqs("actually I want this shipped as a native desktop app");
+        r.target = AppTarget::WebPwa;
+        assert!(matches!(
+            choose_strategy(&r),
+            ScaffoldStrategy::FromScratch { .. }
+        ));
+    }
+
+    #[test]
+    fn target_routing_is_checked_before_the_free_text_scan() {
+        // A Desktop target with free text that has NO disqualifying keyword at all
+        // must still be FromScratch — proves the target check runs independently of
+        // (and before) the keyword scan, not as a fallback to it.
+        let mut r = reqs("tracks flights and shows them on a timeline");
+        r.target = AppTarget::Desktop;
         assert!(matches!(
             choose_strategy(&r),
             ScaffoldStrategy::FromScratch { .. }

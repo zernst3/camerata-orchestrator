@@ -943,6 +943,7 @@ dependencies = [
  "camerata-llm",
  "camerata-persistence",
  "camerata-rules",
+ "camerata-scaffold",
  "camerata-worktracker",
  "chrono",
  "dirs",

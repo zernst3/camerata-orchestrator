@@ -17,10 +17,13 @@ when applying it (for example, per RUST-DIOXUS-9).
 The companion file AGENTS.md holds this project's prose-enforcement directives.
 
 The `RUST-DIOXUS-*` and `ARCH-STRUCTURED-ERRORS-1` IDs below are pulled verbatim from
-the shared Camerata principle library. `DB-ON-DEMAND-1` and `PWA-AUTO-CAPTURE-1` are
-this skeleton's own project-specific additions (not yet in the shared corpus) — they
-document decisions specific to this scaffolder template rather than a general Rust or
-Dioxus stance.
+the shared Camerata principle library. The two `### CUSTOM-*` blocks below
+(`CUSTOM-db-on-demand`, `CUSTOM-pwa-auto-capture`) are NOT corpus rules — they are
+architect-authored CUSTOM rules (Camerata's first-class `CustomRule` feature),
+specific to decisions this scaffolder template makes rather than a general Rust or
+Dioxus stance. When a Camerata project is registered for this scaffolded app (the
+`POST /api/apps` flow), these two are seeded into the project's ruleset verbatim, so
+this file and the project's ruleset stay in sync from birth.
 
 ---
 
@@ -39,11 +42,11 @@ The crate is organized by what a file does: page-level components under `pages`,
 ### ARCH-STRUCTURED-ERRORS-1 — Server functions return typed errors, not stringly-typed ones
 Server functions return `Result<T, ServerFnError>`; a server function that wraps a real failure mode (validation, a downstream call) constructs a specific, named error rather than a bare string, so a caller can pattern-match rather than substring-match a message.
 
-### DB-ON-DEMAND-1 — No database until a requirement needs one
-This skeleton ships with no Postgres, no `sqlx`, no migrations, and no ORM. Persistence is added by a later phase only when the app's actual requirements need it (see `AppRequirements::needs_persistence` in the scaffolder) — never speculatively.
+### CUSTOM-db-on-demand _(custom · domain: *)_
+No database until a requirement needs one. This skeleton ships with no Postgres, no `sqlx`, no migrations, and no ORM. Persistence is added by a later phase only when the app's actual requirements need it (see `AppRequirements::needs_persistence` in the scaffolder) — never speculatively.
 
-### PWA-AUTO-CAPTURE-1 — The auto-capture reporter is never removed or bypassed
-`assets/error-reporter.js` (window.onerror / unhandledrejection / failed-fetch) and `src/wasm_bridge.rs` (the Rust panic hook) together catch runtime defects before a user has to report them, and POST a `DefectReport`-shaped payload to the capture endpoint. New code must not swallow errors in a way that keeps them from reaching these listeners (e.g. a blanket `try/catch` around the whole render tree with no re-throw), and must not remove the reporter to "clean up" the entrypoint.
+### CUSTOM-pwa-auto-capture _(custom · domain: *)_
+The auto-capture reporter is never removed or bypassed. `assets/error-reporter.js` (window.onerror / unhandledrejection / failed-fetch) and `src/wasm_bridge.rs` (the Rust panic hook) together catch runtime defects before a user has to report them, and POST a `DefectReport`-shaped payload to the capture endpoint. New code must not swallow errors in a way that keeps them from reaching these listeners (e.g. a blanket `try/catch` around the whole render tree with no re-throw), and must not remove the reporter to "clean up" the entrypoint.
 
 ### CI hygiene
 `.github/workflows/ci.yml` runs `cargo check` / `cargo test` on every push and PR, plus the governance check declared there. A change that breaks either is not mergeable.

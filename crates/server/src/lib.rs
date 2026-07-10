@@ -21,6 +21,10 @@ pub mod dep_audit;
 pub mod clarify;
 pub mod clarify_resume;
 pub mod connections;
+/// `POST /api/apps` (Part 2 of the Rust-fullstack scaffolder): drives
+/// `camerata-scaffold`, creates + pushes the GitHub repo, and registers the
+/// resulting Camerata project. See the module doc comment for the full flow.
+pub mod create_app;
 pub mod decompose;
 pub mod draft;
 pub mod enforcement_ledger;
@@ -833,6 +837,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/clarifications", get(list_open_clarifications))
         .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/apps", post(create_app))
         .route("/api/projects/import", post(import_project))
         .route(
             "/api/projects/active",
@@ -2949,6 +2954,42 @@ async fn create_project(
     match state.projects.create(&req.name, req.repos) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "could not create project" })),
+    }
+}
+
+/// `POST /api/apps` — Part 2 of the Rust-fullstack scaffolder
+/// (`crate::create_app::run_create_app`). Body is an `AppRequirements`-shaped JSON
+/// document. `FromScratch` returns `{ ok:true, strategy:"from_scratch", reason }`
+/// without touching disk or GitHub; `Skeleton` scaffolds the app, creates + pushes a
+/// private GitHub repo, and registers an already-onboarded Camerata project (with the
+/// two invented rules seeded as CUSTOM rules), returning `{ ok:true,
+/// strategy:"skeleton", path, repo_url, project_id }`. Fail-soft on any error (missing
+/// workspace root, missing GitHub token, a GitHub API failure): `{ ok:false, message
+/// }`, never a 500 — mirrors this crate's other best-effort endpoints.
+///
+/// Builds a REAL `ReqwestTransport` (using whatever GitHub token is configured — an
+/// empty placeholder is harmless when the request turns out to be `FromScratch`,
+/// since that path never calls it) and the real [`crate::create_app::LiveRepoPusher`];
+/// this is a deliberate, explicitly user-invoked side effect (creating a repo), never
+/// triggered implicitly.
+async fn create_app(
+    State(state): State<AppState>,
+    Json(reqs): Json<camerata_scaffold::AppRequirements>,
+) -> Json<serde_json::Value> {
+    let token = state.github_token().unwrap_or_default();
+    let transport = match camerata_worktracker::ReqwestTransport::new(format!("Bearer {token}")) {
+        Ok(t) => t,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "message": format!("failed to build GitHub HTTP client: {e}"),
+            }))
+        }
+    };
+    let pusher = crate::create_app::LiveRepoPusher;
+    match crate::create_app::run_create_app(&state, reqs, &transport, &pusher).await {
+        Ok(body) => Json(body),
+        Err(message) => Json(serde_json::json!({ "ok": false, "message": message })),
     }
 }
 
@@ -19717,6 +19758,95 @@ mod tests {
         assert!(
             err.contains("GitHub token") || err.contains("no GitHub"),
             "error must mention missing GitHub token, got: {body:?}"
+        );
+    }
+
+    // ── POST /api/apps (create_app, Part 2 of the scaffolder) ──────────────────
+    //
+    // The happy Skeleton path (GitHub mocked, project registered with the two
+    // seeded custom rules, governance event recorded) is covered directly against
+    // `crate::create_app::run_create_app` in `create_app.rs`'s own test module —
+    // this handler is a thin wrapper (build a real transport/pusher, delegate) with
+    // no branching of its own worth re-testing through the HTTP layer. These router
+    // tests cover what IS specific to the HTTP wrapper: the FromScratch short-circuit
+    // and the two fail-soft error paths.
+
+    /// A `FromScratch` target returns the reason immediately, at 200 with `ok:true`
+    /// — never a scaffold, never a GitHub call, even with no workspace root or token
+    /// configured at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_app_from_scratch_target_returns_reason_without_scaffolding() {
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let state = AppState::seeded();
+        let app = router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/apps")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "name": "Music Library",
+                    "description": "",
+                    "target": "desktop",
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["strategy"], "from_scratch");
+        assert!(body["reason"].as_str().unwrap_or("").contains("Desktop"));
+    }
+
+    /// A `Skeleton` (default target) request with no workspace root configured fails
+    /// soft: `ok:false` with a message naming the workspace, never a 500.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_app_skeleton_without_workspace_root_fails_soft() {
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let state = AppState::seeded();
+        let app = router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/apps")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({ "name": "Trip Planner", "description": "" }).to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK, "fail-soft: never a 500");
+        let body = body_json(resp).await;
+        assert_eq!(body["ok"], false);
+        assert!(
+            body["message"].as_str().unwrap_or("").contains("workspace"),
+            "message must name the missing workspace root, got: {body:?}"
+        );
+    }
+
+    /// A `Skeleton` request with a workspace root but no GitHub token fails soft:
+    /// `ok:false` with a message naming the missing token.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_app_skeleton_without_github_token_fails_soft() {
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let state = AppState::seeded();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        state
+            .settings()
+            .set_workspace_root(Some(tmp.path().to_string_lossy().into_owned()));
+        let app = router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/apps")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({ "name": "Trip Planner", "description": "" }).to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK, "fail-soft: never a 500");
+        let body = body_json(resp).await;
+        assert_eq!(body["ok"], false);
+        assert!(
+            body["message"].as_str().unwrap_or("").contains("GitHub token"),
+            "message must name the missing GitHub token, got: {body:?}"
         );
     }
 

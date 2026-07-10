@@ -1387,6 +1387,49 @@ pub async fn commit_all(dir: &Path, message: &str) -> anyhow::Result<String> {
     anyhow::bail!("git commit: {err}");
 }
 
+/// Turn a bare directory (freshly scaffolded, no git history at all) into a git repo
+/// with one initial commit on `main`. Used only by the create-app flow (Part 2 of the
+/// scaffolder, `crate::create_app`) — every other function in this module operates on
+/// an already-cloned repo.
+///
+/// Sets a LOCAL (repo-scoped, not global) commit identity before committing: a
+/// freshly scaffolded app has no prior git identity to inherit, and the environment
+/// running Camerata may have no global `user.name`/`user.email` configured at all (a
+/// bare CI container, a fresh machine) — without this, the initial commit would fail
+/// with git's "Please tell me who you are" error.
+pub async fn init_repo_with_initial_commit(dir: &Path, message: &str) -> anyhow::Result<()> {
+    let init = git(Some(dir), &["init", "-b", "main"]).await?;
+    if !init.status.success() {
+        anyhow::bail!("git init: {}", stderr_of(&init));
+    }
+    let email = git(
+        Some(dir),
+        &["config", "user.email", "camerata-scaffold@camerata.local"],
+    )
+    .await?;
+    if !email.status.success() {
+        anyhow::bail!("git config user.email: {}", stderr_of(&email));
+    }
+    let name = git(Some(dir), &["config", "user.name", "Camerata Scaffolder"]).await?;
+    if !name.status.success() {
+        anyhow::bail!("git config user.name: {}", stderr_of(&name));
+    }
+    commit_all(dir, message).await?;
+    Ok(())
+}
+
+/// Point `dir`'s `origin` remote at `repo`'s TOKENLESS URL. Used right after
+/// [`init_repo_with_initial_commit`], before the actual (authenticated, transient)
+/// push — mirrors every other path in this module: the token only ever appears in a
+/// throwaway push argument (see [`push_branch`]), never in a persisted remote.
+pub async fn set_origin(dir: &Path, repo: &str) -> anyhow::Result<()> {
+    let out = git(Some(dir), &["remote", "add", "origin", &clean_url(repo)]).await?;
+    if out.status.success() {
+        return Ok(());
+    }
+    anyhow::bail!("git remote add origin: {}", stderr_of(&out));
+}
+
 /// Snapshot any uncommitted changes in `dir` with a `camerata: snapshot <task>` commit.
 ///
 /// Idempotent: when the working tree is already clean (nothing to commit), this is a no-op
@@ -2376,6 +2419,71 @@ mod tests {
         let msg = String::from_utf8_lossy(&log.stdout);
         assert!(msg.contains("camerata: snapshot dev-implement iteration 2"), "commit msg must contain task label; got: {msg}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── init_repo_with_initial_commit / set_origin (create-app flow, Part 2) ───────
+
+    /// `init_repo_with_initial_commit` turns a bare directory (no prior git history)
+    /// into a clean repo with one commit, WITHOUT relying on any global
+    /// `user.name`/`user.email` config — it sets a local bot identity itself, so this
+    /// must succeed even in an environment with no global git config at all (which is
+    /// exactly why the function sets it explicitly rather than assuming it exists).
+    #[tokio::test]
+    async fn init_repo_with_initial_commit_succeeds_with_no_global_git_identity() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("README.md"), "hello").unwrap();
+
+        init_repo_with_initial_commit(dir.path(), "Initial scaffold (Camerata)")
+            .await
+            .expect("init + commit must succeed even with no global git identity");
+
+        let status = tokio::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(dir.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(status.stdout.is_empty(), "tree must be clean after the initial commit");
+
+        let log = tokio::process::Command::new("git")
+            .args(["log", "-1", "--pretty=%s"])
+            .current_dir(dir.path())
+            .output()
+            .await
+            .unwrap();
+        assert!(String::from_utf8_lossy(&log.stdout).contains("Initial scaffold (Camerata)"));
+
+        let branch = tokio::process::Command::new("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(dir.path())
+            .output()
+            .await
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&branch.stdout).trim(), "main");
+    }
+
+    /// `set_origin` points `origin` at the TOKENLESS URL — the token must never land
+    /// in `.git/config`, even though the create-app flow that calls this has a real
+    /// token in hand for the (separate, transient) push step.
+    #[tokio::test]
+    async fn set_origin_persists_the_tokenless_url() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("README.md"), "hello").unwrap();
+        init_repo_with_initial_commit(dir.path(), "init")
+            .await
+            .expect("init + commit");
+
+        set_origin(dir.path(), "acme/my-app").await.expect("set_origin");
+
+        let remote = tokio::process::Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .current_dir(dir.path())
+            .output()
+            .await
+            .unwrap();
+        let url = String::from_utf8_lossy(&remote.stdout).trim().to_string();
+        assert_eq!(url, "https://github.com/acme/my-app.git");
+        assert!(!url.contains('@'), "persisted origin must carry no credentials");
     }
 
     // ── Link-existing-clone origin validation (readiness-gate ADR) ──────────────────

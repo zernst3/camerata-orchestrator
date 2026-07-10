@@ -1,6 +1,33 @@
+/// The kind of application shell the requirements ask for. `WebPwa` is the only
+/// target the vetted skeleton fits — the other three are structural mismatches with
+/// "a responsive, installable web PWA" and always route to
+/// [`crate::ScaffoldStrategy::FromScratch`] (see [`crate::choose_strategy`]).
+///
+/// This is the STRUCTURED signal a caller sets deliberately (e.g. the orchestrator's
+/// intake step classified the ask as desktop-only); the free-text
+/// `DISQUALIFYING_SIGNALS` keyword scan in `crate::strategy` remains a SECONDARY
+/// signal that still applies even to a `WebPwa` target (belt-and-suspenders: a
+/// `summary` that slips in "native desktop app" despite `target: WebPwa` still gets
+/// caught).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppTarget {
+    /// A responsive, installable web PWA — the shape the vetted skeleton is built
+    /// for. The default: most bespoke-app asks are this shape.
+    #[default]
+    WebPwa,
+    /// A native desktop application shell (not a web PWA).
+    Desktop,
+    /// A native mobile application (iOS/Android).
+    Mobile,
+    /// A command-line interface / terminal application.
+    Cli,
+}
+
 /// What the (future) orchestrator fills in to describe the app it wants built. This
-/// is intentionally small: a display name, a description, a couple of coarse
-/// capability flags, and a free-text summary the human actually typed (or said).
+/// is intentionally small: a display name, a description, a target platform, a
+/// couple of coarse capability flags, and a free-text summary the human actually
+/// typed (or said).
 ///
 /// `needs_persistence` and `needs_auth` do NOT by themselves rule out the vetted
 /// skeleton (see [`crate::choose_strategy`]'s doc comment for why) — they're read by
@@ -15,6 +42,11 @@ pub struct AppRequirements {
     /// A one-line description. Used as the manifest/HTML `<meta description>` and
     /// the `Cargo.toml` package description.
     pub description: String,
+    /// The kind of application shell requested. Defaults to [`AppTarget::WebPwa`]
+    /// (the shape the vetted skeleton fits) — [`crate::choose_strategy`] routes
+    /// anything else straight to [`crate::ScaffoldStrategy::FromScratch`].
+    #[serde(default)]
+    pub target: AppTarget,
     /// Whether the app's requirements imply a database. The base skeleton this
     /// crate emits never has one (DB-on-demand); a later phase adds persistence
     /// when this is `true`.

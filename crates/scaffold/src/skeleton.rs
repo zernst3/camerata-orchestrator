@@ -220,6 +220,7 @@ mod tests {
         AppRequirements {
             name: "Trip Planner".to_string(),
             description: "Track flights, stays, and an active itinerary.".to_string(),
+            target: crate::AppTarget::WebPwa,
             needs_persistence: false,
             needs_auth: false,
             summary: "an app that tracks my flights and shows them on a timeline".to_string(),
@@ -302,6 +303,41 @@ mod tests {
         assert!(!lower.contains("postgres"));
         assert!(!lower.contains("diesel"));
         assert!(!tmp.path().join("migrations").exists());
+    }
+
+    #[test]
+    fn conventions_md_reformats_invented_rules_as_custom_blocks() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        scaffold_skeleton(&sample_reqs(), tmp.path()).expect("scaffold");
+
+        let conventions = fs::read_to_string(tmp.path().join("CONVENTIONS.md")).unwrap();
+
+        // The two invented rules are CUSTOM blocks (FIX B), matching
+        // `render_custom`'s exact shape (`### CUSTOM-<name>`), not invented
+        // corpus-style rule IDs.
+        assert!(conventions.contains("### CUSTOM-db-on-demand"));
+        assert!(conventions.contains("### CUSTOM-pwa-auto-capture"));
+        assert!(!conventions.contains("DB-ON-DEMAND-1"));
+        assert!(!conventions.contains("PWA-AUTO-CAPTURE-1"));
+
+        // Real corpus references are untouched.
+        assert!(conventions.contains("RUST-DIOXUS-9"));
+        assert!(conventions.contains("RUST-DIOXUS-11"));
+        assert!(conventions.contains("ARCH-STRUCTURED-ERRORS-1"));
+
+        // The template's CUSTOM block bodies read identically to
+        // `default_custom_rules`'s bodies, so the freshly scaffolded repo and the
+        // Camerata project seeded from it (Part 2) never drift apart.
+        for (name, body) in crate::default_custom_rules() {
+            assert!(
+                conventions.contains(&format!("### CUSTOM-{name}")),
+                "missing CUSTOM-{name} block"
+            );
+            assert!(
+                conventions.contains(body),
+                "CONVENTIONS.md body for {name} does not match default_custom_rules"
+            );
+        }
     }
 
     #[test]

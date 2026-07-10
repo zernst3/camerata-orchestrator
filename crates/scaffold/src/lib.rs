@@ -26,8 +26,11 @@ mod skeleton;
 mod strategy;
 mod substitution;
 
+mod custom_rules;
+
+pub use custom_rules::default_custom_rules;
 pub use error::ScaffoldError;
 pub use outcome::ScaffoldOutcome;
-pub use requirements::AppRequirements;
+pub use requirements::{AppRequirements, AppTarget};
 pub use skeleton::scaffold_skeleton;
 pub use strategy::{choose_strategy, ScaffoldStrategy};

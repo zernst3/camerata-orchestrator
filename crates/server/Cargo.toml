@@ -91,6 +91,10 @@ camerata-intake = { path = "../intake" }
 camerata-rules = { path = "../rules" }
 # VCS-action gate configuration + bypass types (ProcessRuleConfig, build_rules, etc.).
 camerata-checks = { path = "../checks" }
+# The Rust-fullstack PWA scaffolder (Part 1) + fit-check (`AppRequirements`,
+# `choose_strategy`, `scaffold_skeleton`). `POST /api/apps` (`crate::create_app`,
+# Part 2) drives this crate directly.
+camerata-scaffold = { path = "../scaffold" }
 # The central, version-tracked SQLite artifact store: per-story decision records and
 # investigation notes are persisted here (ROUTE-A) for queryable, provenance-tracked
 # history instead of living inline on the UoW JSON.
