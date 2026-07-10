@@ -194,6 +194,17 @@ pub struct AppState {
     /// endpoints return `{ ok: false, ... }` / an empty list rather than a 500. Use
     /// [`AppState::record_defect`] as the single call-site helper.
     pub feedback_store: Option<Arc<camerata_persistence::FeedbackStore>>,
+    /// The confidence engine's decision + outcome + calibration store (SQLite). Backs
+    /// the Architect orchestrator's `orchestrator_decision` recording (the "measured
+    /// override rate at max dial" moat metric — see
+    /// `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`,
+    /// "Architect-orchestrator design"). Opened best-effort in [`AppState::from_env`],
+    /// same fail-soft pattern as `governance_log`/`feedback_store`: `None` in tests and
+    /// on open failure. NOT YET instrumented at any lifecycle site as of this phase —
+    /// that is the orchestrator LOOP, a later phase; this wires the recording
+    /// substrate. Use [`AppState::record_orchestrator_decision`] as the single
+    /// call-site helper when it lands.
+    pub orchestrator_decisions: Option<Arc<camerata_persistence::OrchestratorDecisionLog>>,
     /// App-wide credential store backed by the OS keychain in production and an
     /// in-memory map in tests.  Never exposes full values over HTTP; handlers call
     /// `.masked()`.  Service code (e.g. [`github_token`]) reads the full value
@@ -251,6 +262,8 @@ impl AppState {
             governance_log: None,
             // Tests and in-process runs start without a feedback store (no-op; fail-soft).
             feedback_store: None,
+            // Tests and in-process runs start without an orchestrator-decision store (no-op; fail-soft).
+            orchestrator_decisions: None,
             // Tests use an in-memory credential store; production uses the OS keychain.
             credential_store: Arc::new(crate::credentials::MemoryCredentialStore::new()),
             // The registry always has the static Claude entries; OpenRouter is empty until
@@ -309,6 +322,55 @@ impl AppState {
             Ok(id) => Some(id),
             Err(e) => {
                 tracing::warn!(error = %e, "failed to record defect report");
+                None
+            }
+        }
+    }
+
+    /// Record one autonomous decision to the confidence engine's decision store, AND
+    /// write a matching `governance_events` row (kind `"orchestrator_decision"`) so
+    /// the unified audit trail carries it alongside every other governed-run event.
+    /// Unlike [`Self::record_defect`] (whose paired governance write lives at the
+    /// `submit_feedback` call site), this helper owns BOTH writes itself — there is no
+    /// separate HTTP ingest endpoint for decisions yet; the orchestrator loop that
+    /// will call this directly is a later phase.
+    ///
+    /// Fail-soft: `None` when no decision store is open this session (tests, or an
+    /// open failure at startup) — mirrors [`Self::record_defect`]'s contract. The
+    /// governance-event write is best-effort on top (via [`Self::record_governance`]),
+    /// so a governance-log outage never blocks the decision itself from being
+    /// recorded.
+    pub async fn record_orchestrator_decision(
+        &self,
+        decision: camerata_persistence::OrchestratorDecision,
+    ) -> Option<i64> {
+        let store = self.orchestrator_decisions.as_ref()?;
+        match store.record_decision(decision.clone()).await {
+            Ok(id) => {
+                // Class C (irreversible) decisions are ALWAYS supposed to be
+                // human-gated before they execute (the dial can never override this —
+                // see the plan doc), so one showing up here at all is notable; every
+                // other class is routine.
+                let severity = if decision.class == "irreversible" { "warn" } else { "info" };
+                let detail = serde_json::to_string(&decision).unwrap_or_default();
+                self.record_governance(
+                    camerata_persistence::GovernanceEvent::new(
+                        decision.run_id.clone(),
+                        "orchestrator_decision",
+                        severity,
+                        "system",
+                    )
+                    .with_reason(format!(
+                        "{} (class {}, confidence {})",
+                        decision.chosen, decision.class, decision.confidence
+                    ))
+                    .with_detail(detail),
+                )
+                .await;
+                Some(id)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to record orchestrator decision");
                 None
             }
         }
@@ -745,6 +807,36 @@ impl AppState {
                             error = %e,
                             "feedback store could not open; defect reports will not be \
                              recorded this session"
+                        );
+                        None
+                    }
+                };
+
+                // The confidence engine's decision + calibration store. Opened
+                // best-effort, same fail-soft pattern as the stores above: on open
+                // failure, log a warning and leave `orchestrator_decisions` as `None`
+                // so startup is unaffected (no lifecycle site calls
+                // `record_orchestrator_decision` yet — that instrumentation is the
+                // orchestrator-loop phase; this just wires the plumbing).
+                let orchestrator_decisions_path = dir.join("orchestrator_decisions.db");
+                state.orchestrator_decisions = match tokio::task::block_in_place(|| {
+                    handle.block_on(camerata_persistence::OrchestratorDecisionLog::open(
+                        &orchestrator_decisions_path,
+                    ))
+                }) {
+                    Ok(log) => {
+                        tracing::info!(
+                            path = %orchestrator_decisions_path.display(),
+                            "orchestrator-decision log opened"
+                        );
+                        Some(Arc::new(log))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %orchestrator_decisions_path.display(),
+                            error = %e,
+                            "orchestrator-decision log could not open; decisions will not \
+                             be recorded this session"
                         );
                         None
                     }
@@ -2482,6 +2574,42 @@ async fn recent_governance_events(
 /// message }` (200, never a 500) — an ingest endpoint going down must not take the
 /// reporting app down with it. On a genuine write failure (store open, insert failed),
 /// same `{ ok: false, message }` shape.
+/// Compute the ingest-time dedupe fingerprint for a report: a stable hash of `kind` +
+/// the top stack frame (the FIRST line of `context.stack`, trimmed) + `context.route`.
+/// Reuses [`camerata_persistence::content_hash`] (SHA-256, already a dependency of this
+/// crate via `camerata-persistence`) rather than adding a new hashing dependency —
+/// this fingerprint does not need to be cryptographically strong, only stable, and
+/// `content_hash` already is.
+fn compute_feedback_fingerprint(report: &camerata_api_types::feedback::DefectReport) -> String {
+    let top_frame = report
+        .context
+        .stack
+        .as_deref()
+        .and_then(|s| s.lines().next())
+        .unwrap_or("")
+        .trim();
+    let route = report.context.route.as_deref().unwrap_or("");
+    let raw = format!("{}|{}|{}", report.kind.as_str(), top_frame, route);
+    camerata_persistence::content_hash(&raw)
+}
+
+/// `POST /api/feedback` — ingest one defect report (auto-capture or click-to-report).
+///
+/// Fail-soft: when no feedback store is open this session, responds `{ ok: false,
+/// message }` (200, never a 500) — an ingest endpoint going down must not take the
+/// reporting app down with it. On a genuine write failure (store open, insert failed),
+/// same `{ ok: false, message }` shape.
+///
+/// Fingerprint + dedupe fold (the "cheapest-now / most-expensive-later" fold — see
+/// `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`'s usability backlog): when
+/// the client did not already send a `fingerprint`, one is computed here
+/// ([`compute_feedback_fingerprint`]). If a recent OPEN report with the SAME
+/// fingerprint already exists for this project, this occurrence is folded into that
+/// row (`count` incremented) instead of inserting a new one, and NO new
+/// `defect_reported` governance row is written (the governance trail records the
+/// first sighting of a defect, not every repeat of it) — the response still carries
+/// the (existing) `id` and a `deduped: true` flag so a caller can tell the two cases
+/// apart.
 async fn submit_feedback(
     State(state): State<AppState>,
     Json(mut report): Json<camerata_api_types::feedback::DefectReport>,
@@ -2491,6 +2619,12 @@ async fn submit_feedback(
     report.id = None;
     report.ts = chrono::Utc::now().to_rfc3339();
     report.status = DefectStatus::Open;
+    report.count = 1;
+    if report.fingerprint.as_deref().unwrap_or("").is_empty() {
+        report.fingerprint = Some(compute_feedback_fingerprint(&report));
+    }
+    // Safe to unwrap: the branch above guarantees `Some` by this point.
+    let fingerprint = report.fingerprint.clone().unwrap_or_default();
 
     let Some(store) = state.feedback_store.as_ref() else {
         return Json(serde_json::json!({
@@ -2498,6 +2632,24 @@ async fn submit_feedback(
             "message": "feedback store is not available this session",
         }));
     };
+
+    match store.bump_fingerprint(&report.project_id, &fingerprint).await {
+        Ok(Some(existing_id)) => {
+            return Json(serde_json::json!({
+                "ok": true,
+                "id": existing_id,
+                "deduped": true,
+            }));
+        }
+        Ok(None) => {
+            // No matching open report — fall through to insert a genuinely new one.
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to check defect-report fingerprint for dedupe");
+            // Fail open on the DEDUPE check specifically: still attempt the insert
+            // below rather than losing the report entirely over a dedupe-lookup error.
+        }
+    }
 
     match store.record(report.clone()).await {
         Ok(id) => {
@@ -15594,6 +15746,345 @@ mod tests {
             .unwrap();
         let json = body_json(resp).await;
         assert_eq!(json[0]["status"], "acknowledged");
+    }
+
+    // ── fingerprint + dedupe fold (PART C) ──────────────────────────────────
+
+    /// Two reports that share the SAME logical error (same kind, same top stack
+    /// frame, same route) fold into ONE row with `count` incremented, and only the
+    /// FIRST occurrence writes a `defect_reported` governance row — the second is a
+    /// silent dedupe, not a second audit-trail entry.
+    #[tokio::test]
+    async fn submit_feedback_dedupes_same_fingerprint_reports_by_incrementing_count() {
+        let feedback = camerata_persistence::FeedbackStore::open_in_memory()
+            .await
+            .expect("open in-memory feedback store");
+        let governance = camerata_persistence::GovernanceLog::open_in_memory()
+            .await
+            .expect("open in-memory governance log");
+
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.feedback_store = Some(std::sync::Arc::new(feedback));
+        state.governance_log = Some(std::sync::Arc::new(governance));
+        let app = router(state);
+
+        let body = serde_json::json!({
+            "project_id": "proj-storm",
+            "source": "auto",
+            "kind": "runtime_error",
+            "title": "TypeError: x is undefined",
+            "context": { "route": "/dashboard", "stack": "at render (app.js:42:7)\nat foo (app.js:1:1)" },
+        })
+        .to_string();
+
+        // First occurrence: inserted fresh.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feedback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let first_json = body_json(resp).await;
+        assert_eq!(first_json["ok"], true);
+        assert!(
+            first_json.get("deduped").is_none(),
+            "first occurrence must not be flagged as deduped"
+        );
+        let id = first_json["id"].as_i64().expect("id must be an integer");
+
+        // Second occurrence: SAME kind/stack-top-frame/route (the render loop repeats
+        // the error). Must fold into the SAME row, not insert a second one.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feedback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let second_json = body_json(resp).await;
+        assert_eq!(second_json["ok"], true);
+        assert_eq!(second_json["id"], id, "dedupe returns the SAME row id");
+        assert_eq!(second_json["deduped"], true);
+
+        // Exactly one row for this project, with count folded to 2.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/projects/proj-storm/feedback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let reports = json.as_array().unwrap();
+        assert_eq!(reports.len(), 1, "the second occurrence must NOT insert a new row");
+        assert_eq!(reports[0]["id"], id);
+        assert_eq!(reports[0]["count"], 2);
+
+        // Exactly ONE governance row — the duplicate did not write a second one.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/runs/proj-storm/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let events = json.as_array().unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "only the FIRST occurrence writes a defect_reported governance row"
+        );
+        assert_eq!(events[0]["kind"], "defect_reported");
+    }
+
+    /// Reports with DIFFERENT fingerprints (different route) do NOT fold together —
+    /// each gets its own row.
+    #[tokio::test]
+    async fn submit_feedback_does_not_dedupe_across_different_routes() {
+        let feedback = camerata_persistence::FeedbackStore::open_in_memory()
+            .await
+            .expect("open in-memory feedback store");
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.feedback_store = Some(std::sync::Arc::new(feedback));
+        let app = router(state);
+
+        for route in ["/dashboard", "/settings"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/feedback")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "project_id": "proj-multi",
+                                "source": "auto",
+                                "kind": "runtime_error",
+                                "title": "TypeError: x is undefined",
+                                "context": { "route": route },
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(body_json(resp).await["ok"], true);
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/projects/proj-multi/feedback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(
+            json.as_array().unwrap().len(),
+            2,
+            "different routes must not fold into one row"
+        );
+    }
+
+    /// A client-supplied `fingerprint` is honored as-is (the server does not
+    /// recompute it), so a client with its OWN dedupe key still folds correctly.
+    #[tokio::test]
+    async fn submit_feedback_honors_client_provided_fingerprint() {
+        let feedback = camerata_persistence::FeedbackStore::open_in_memory()
+            .await
+            .expect("open in-memory feedback store");
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.feedback_store = Some(std::sync::Arc::new(feedback));
+        let app = router(state);
+
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/feedback")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "project_id": "proj-client-fp",
+                                "source": "auto",
+                                "kind": "runtime_error",
+                                "title": "boom",
+                                "fingerprint": "client-computed-fp",
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(body_json(resp).await["ok"], true);
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/projects/proj-client-fp/feedback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let reports = json.as_array().unwrap();
+        assert_eq!(reports.len(), 1, "client-provided fingerprint must dedupe too");
+        assert_eq!(reports[0]["fingerprint"], "client-computed-fp");
+        assert_eq!(reports[0]["count"], 2);
+    }
+
+    // ── record_orchestrator_decision: the confidence engine's recording substrate ──
+
+    /// `record_orchestrator_decision` records the decision AND a paired
+    /// `orchestrator_decision` governance row, readable back via the existing
+    /// `/api/runs/:id/events` endpoint. Severity is "info" for a routine class.
+    #[tokio::test]
+    async fn record_orchestrator_decision_stores_decision_and_paired_governance_row() {
+        let decisions = camerata_persistence::OrchestratorDecisionLog::open_in_memory()
+            .await
+            .expect("open in-memory decision store");
+        let governance = camerata_persistence::GovernanceLog::open_in_memory()
+            .await
+            .expect("open in-memory governance log");
+
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.orchestrator_decisions = Some(std::sync::Arc::new(decisions));
+        state.governance_log = Some(std::sync::Arc::new(governance));
+
+        let decision = camerata_persistence::OrchestratorDecision::new(
+            "run-1",
+            "mechanically_verified",
+            "high",
+            "picked the vetted default",
+        )
+        .with_alternatives(vec!["ask the human".to_string()])
+        .with_assumption("assumed the default rule option applies");
+
+        let id = state
+            .record_orchestrator_decision(decision)
+            .await
+            .expect("decision store is open, so an id must come back");
+        assert!(id > 0);
+
+        let events = state
+            .governance_log
+            .as_ref()
+            .unwrap()
+            .by_run("run-1")
+            .await
+            .expect("by_run");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "orchestrator_decision");
+        assert_eq!(events[0].severity, "info");
+        assert_eq!(events[0].actor, "system");
+        assert!(events[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("picked the vetted default"));
+
+        let calibration = state
+            .orchestrator_decisions
+            .as_ref()
+            .unwrap()
+            .calibration()
+            .await
+            .expect("calibration");
+        assert_eq!(calibration.len(), 1);
+        assert_eq!(calibration[0].class, "mechanically_verified");
+        assert_eq!(calibration[0].total, 1);
+    }
+
+    /// An Irreversible-class decision is notable (Class C is supposed to always be
+    /// human-gated before it executes), so its paired governance row is "warn", not
+    /// "info" — the one severity-mapping branch that differs from the routine case.
+    #[tokio::test]
+    async fn record_orchestrator_decision_uses_warn_severity_for_irreversible_class() {
+        let decisions = camerata_persistence::OrchestratorDecisionLog::open_in_memory()
+            .await
+            .expect("open in-memory decision store");
+        let governance = camerata_persistence::GovernanceLog::open_in_memory()
+            .await
+            .expect("open in-memory governance log");
+
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.orchestrator_decisions = Some(std::sync::Arc::new(decisions));
+        state.governance_log = Some(std::sync::Arc::new(governance));
+
+        let decision =
+            camerata_persistence::OrchestratorDecision::new("run-2", "irreversible", "low", "z");
+        state
+            .record_orchestrator_decision(decision)
+            .await
+            .expect("decision store is open");
+
+        let events = state
+            .governance_log
+            .as_ref()
+            .unwrap()
+            .by_run("run-2")
+            .await
+            .expect("by_run");
+        assert_eq!(events[0].severity, "warn");
+    }
+
+    /// Fail-soft: `None` when no decision store is open this session (mirrors
+    /// `record_defect`'s contract) — no governance row is written either.
+    #[tokio::test]
+    async fn record_orchestrator_decision_returns_none_when_no_decision_store() {
+        let governance = camerata_persistence::GovernanceLog::open_in_memory()
+            .await
+            .expect("open in-memory governance log");
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.governance_log = Some(std::sync::Arc::new(governance));
+
+        let decision =
+            camerata_persistence::OrchestratorDecision::new("run-3", "preview_reversible", "high", "x");
+        let result = state.record_orchestrator_decision(decision).await;
+        assert!(result.is_none());
+
+        let events = state
+            .governance_log
+            .as_ref()
+            .unwrap()
+            .by_run("run-3")
+            .await
+            .expect("by_run");
+        assert!(events.is_empty());
     }
 
     /// Fail-soft: `POST /api/feedback/:id/status` responds `{ ok: false, message }`

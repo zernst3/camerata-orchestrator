@@ -47,13 +47,22 @@ CREATE TABLE IF NOT EXISTS feedback (
     context     TEXT    NOT NULL,  -- JSON blob (DefectContext)
     severity    TEXT    NOT NULL,  -- 'info' | 'warning' | 'error' | 'critical'
     status      TEXT    NOT NULL,  -- 'open' | 'acknowledged' | 'resolved'
-    ts          TEXT    NOT NULL   -- RFC3339 UTC
+    ts          TEXT    NOT NULL,  -- RFC3339 UTC
+    fingerprint TEXT,              -- dedupe key (kind + top stack frame + route)
+    count       INTEGER NOT NULL DEFAULT 1  -- occurrences folded into this row
 );
 ";
 
 const CREATE_IDX_FEEDBACK_PROJECT_ID: &str = "
 CREATE INDEX IF NOT EXISTS idx_feedback_project_id
     ON feedback(project_id);
+";
+
+/// `fingerprint` is the dedupe lookup key `bump_fingerprint` filters on — index it
+/// alongside `project_id` (SQL-DB-INDEX-1/2).
+const CREATE_IDX_FEEDBACK_FINGERPRINT: &str = "
+CREATE INDEX IF NOT EXISTS idx_feedback_fingerprint
+    ON feedback(project_id, fingerprint);
 ";
 
 // ---------------------------------------------------------------------------
@@ -95,10 +104,31 @@ impl FeedbackStore {
         Ok(store)
     }
 
-    /// Create / migrate the `feedback` table and its index. Idempotent.
+    /// Create / migrate the `feedback` table and its indexes. Idempotent.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` is a no-op on a table that already exists, so an
+    /// on-disk database created before `fingerprint`/`count` existed would otherwise
+    /// never gain those columns. The `ALTER TABLE` pass below adds them to an
+    /// already-existing table; SQLite errors with "duplicate column name" if the
+    /// column is already present (i.e. a brand-new table, whose `CREATE TABLE` above
+    /// already included them), which is swallowed here as the expected no-op case —
+    /// any OTHER error still propagates.
     async fn migrate(&self) -> Result<(), PersistenceError> {
         sqlx::query(CREATE_FEEDBACK).execute(&self.pool).await?;
         sqlx::query(CREATE_IDX_FEEDBACK_PROJECT_ID)
+            .execute(&self.pool)
+            .await?;
+        for stmt in [
+            "ALTER TABLE feedback ADD COLUMN fingerprint TEXT",
+            "ALTER TABLE feedback ADD COLUMN count INTEGER NOT NULL DEFAULT 1",
+        ] {
+            if let Err(e) = sqlx::query(stmt).execute(&self.pool).await {
+                if !e.to_string().contains("duplicate column name") {
+                    return Err(e.into());
+                }
+            }
+        }
+        sqlx::query(CREATE_IDX_FEEDBACK_FINGERPRINT)
             .execute(&self.pool)
             .await?;
         Ok(())
@@ -110,8 +140,9 @@ impl FeedbackStore {
         let context_json = serde_json::to_string(&report.context)?;
         let row = sqlx::query(
             "INSERT INTO feedback
-                 (project_id, source, kind, title, description, context, severity, status, ts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                 (project_id, source, kind, title, description, context, severity, status, ts,
+                  fingerprint, count)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
              RETURNING id",
         )
         .bind(&report.project_id)
@@ -123,10 +154,47 @@ impl FeedbackStore {
         .bind(report.severity.as_str())
         .bind(report.status.as_str())
         .bind(&report.ts)
+        .bind(&report.fingerprint)
+        .bind(report.count)
         .fetch_one(&self.pool)
         .await?;
         let id: i64 = row.try_get("id")?;
         Ok(id)
+    }
+
+    /// The dedupe fold: if a recent OPEN report exists for `project_id` with the same
+    /// `fingerprint`, increment its `count` in place and return its id. Returns `None`
+    /// when there is no match (the caller should then `record` a new row).
+    ///
+    /// "Recent" here means "the most recently recorded OPEN report with this
+    /// fingerprint" (`ORDER BY id DESC LIMIT 1`) — there is no additional TTL/time
+    /// window cutoff. Adding one would require deciding a window duration, a product
+    /// choice this store does not make on its own; see the call site's doc for the
+    /// explicit flag.
+    pub async fn bump_fingerprint(
+        &self,
+        project_id: &str,
+        fingerprint: &str,
+    ) -> Result<Option<i64>, PersistenceError> {
+        let row = sqlx::query(
+            "SELECT id FROM feedback
+             WHERE project_id = ?1 AND fingerprint = ?2 AND status = 'open'
+             ORDER BY id DESC
+             LIMIT 1",
+        )
+        .bind(project_id)
+        .bind(fingerprint)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let id: i64 = row.try_get("id")?;
+        sqlx::query("UPDATE feedback SET count = count + 1 WHERE id = ?1")
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        Ok(Some(id))
     }
 
     /// Read all reports for `project_id`, newest first (`id DESC`).
@@ -135,7 +203,8 @@ impl FeedbackStore {
         project_id: &str,
     ) -> Result<Vec<DefectReport>, PersistenceError> {
         let rows = sqlx::query(
-            "SELECT id, project_id, source, kind, title, description, context, severity, status, ts
+            "SELECT id, project_id, source, kind, title, description, context, severity, status, ts,
+                    fingerprint, count
              FROM feedback
              WHERE project_id = ?1
              ORDER BY id DESC",
@@ -150,7 +219,8 @@ impl FeedbackStore {
     /// across ALL projects. Cross-project — used for a global recent-activity view.
     pub async fn recent(&self, limit: i64) -> Result<Vec<DefectReport>, PersistenceError> {
         let rows = sqlx::query(
-            "SELECT id, project_id, source, kind, title, description, context, severity, status, ts
+            "SELECT id, project_id, source, kind, title, description, context, severity, status, ts,
+                    fingerprint, count
              FROM feedback
              ORDER BY id DESC
              LIMIT ?1",
@@ -188,6 +258,8 @@ fn row_to_report(row: sqlx::sqlite::SqliteRow) -> Result<DefectReport, Persisten
         severity: DefectSeverity::parse(row.try_get::<String, _>("severity")?.as_str()),
         status: DefectStatus::parse(row.try_get::<String, _>("status")?.as_str()),
         ts: row.try_get("ts")?,
+        fingerprint: row.try_get("fingerprint")?,
+        count: row.try_get("count")?,
     })
 }
 
@@ -399,5 +471,119 @@ mod tests {
             Some("375x812")
         );
         assert_eq!(ctx.extra.get("browser").map(String::as_str), Some("safari"));
+    }
+
+    // ── fingerprint default + round trip ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn record_defaults_fingerprint_none_and_count_one() {
+        let store = FeedbackStore::open_in_memory().await.expect("open");
+        store
+            .record(DefectReport::auto("proj-fp", DefectKind::RuntimeError, "boom"))
+            .await
+            .expect("record");
+        let reports = store.by_project("proj-fp").await.expect("by_project");
+        assert!(reports[0].fingerprint.is_none());
+        assert_eq!(reports[0].count, 1);
+    }
+
+    #[tokio::test]
+    async fn record_persists_a_client_provided_fingerprint() {
+        let store = FeedbackStore::open_in_memory().await.expect("open");
+        store
+            .record(
+                DefectReport::auto("proj-fp", DefectKind::RuntimeError, "boom")
+                    .with_fingerprint("fp-123"),
+            )
+            .await
+            .expect("record");
+        let reports = store.by_project("proj-fp").await.expect("by_project");
+        assert_eq!(reports[0].fingerprint.as_deref(), Some("fp-123"));
+    }
+
+    // ── bump_fingerprint: the dedupe fold ────────────────────────────────────
+
+    #[tokio::test]
+    async fn bump_fingerprint_increments_count_on_matching_open_report() {
+        let store = FeedbackStore::open_in_memory().await.expect("open");
+        let id = store
+            .record(
+                DefectReport::auto("proj-a", DefectKind::RuntimeError, "first occurrence")
+                    .with_fingerprint("fp-match"),
+            )
+            .await
+            .expect("record");
+
+        let bumped = store
+            .bump_fingerprint("proj-a", "fp-match")
+            .await
+            .expect("bump_fingerprint")
+            .expect("a matching open report must be found");
+        assert_eq!(bumped, id);
+
+        let reports = store.by_project("proj-a").await.expect("by_project");
+        assert_eq!(reports.len(), 1, "no new row was inserted");
+        assert_eq!(reports[0].count, 2, "count incremented from 1 to 2");
+
+        // Bump again: count keeps climbing on the SAME row.
+        store
+            .bump_fingerprint("proj-a", "fp-match")
+            .await
+            .expect("bump_fingerprint")
+            .expect("still matches");
+        let reports = store.by_project("proj-a").await.expect("by_project");
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].count, 3);
+    }
+
+    #[tokio::test]
+    async fn bump_fingerprint_returns_none_when_no_match() {
+        let store = FeedbackStore::open_in_memory().await.expect("open");
+        store
+            .record(
+                DefectReport::auto("proj-a", DefectKind::RuntimeError, "x")
+                    .with_fingerprint("fp-one"),
+            )
+            .await
+            .expect("record");
+
+        // Different fingerprint.
+        assert!(store
+            .bump_fingerprint("proj-a", "fp-two")
+            .await
+            .expect("bump_fingerprint")
+            .is_none());
+
+        // Different project, same fingerprint.
+        assert!(store
+            .bump_fingerprint("proj-b", "fp-one")
+            .await
+            .expect("bump_fingerprint")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn bump_fingerprint_ignores_a_resolved_report() {
+        // A report the user already resolved should NOT silently reopen/absorb a new
+        // occurrence of the "same" fingerprint — a fresh row is the right call so the
+        // regression is visible again, not folded into an already-closed report.
+        let store = FeedbackStore::open_in_memory().await.expect("open");
+        let id = store
+            .record(
+                DefectReport::auto("proj-a", DefectKind::RuntimeError, "x")
+                    .with_fingerprint("fp-closed"),
+            )
+            .await
+            .expect("record");
+        store
+            .set_status(id, DefectStatus::Resolved)
+            .await
+            .expect("set_status");
+
+        assert!(store
+            .bump_fingerprint("proj-a", "fp-closed")
+            .await
+            .expect("bump_fingerprint")
+            .is_none());
     }
 }

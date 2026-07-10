@@ -1,0 +1,23 @@
+[package]
+name = "camerata-orchestrator-core"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+version = "0.0.0"
+
+# The confidence engine's effect-signature classifier (see src/lib.rs). Deliberately a
+# minimal, pure crate: no tokio, no serde — `classify` is a synchronous, side-effect-free
+# function so every branch is directly unit-testable. Package name is `-core` (not
+# `camerata-orchestrator`, which is the repo/binary name) per the naming note in the
+# root Cargo.toml.
+
+[lints]
+workspace = true
+
+[dependencies]
+# `classify` reuses the write-time gate's OWN rule arms (`lookup_arm`) and its
+# git-state-mutation guard (`is_git_state_mutation`) to ground the Irreversible (C)
+# triggers in the same logic the real deny-before-execute gate enforces, instead of
+# re-implementing overlapping regexes that could silently drift apart. See the module
+# doc in src/lib.rs.
+camerata-gateway = { path = "../gateway" }

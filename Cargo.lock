@@ -869,6 +869,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "camerata-orchestrator-core"
+version = "0.0.0"
+dependencies = [
+ "camerata-gateway",
+]
+
+[[package]]
 name = "camerata-persistence"
 version = "0.0.0"
 dependencies = [

@@ -11,9 +11,11 @@
 //
 // Matches the wire shape of `DefectReport` in `crates/api-types/src/feedback.rs`
 // (id, project_id, source, kind, title, description, context{route,element,stack,
-// console,extra}, severity, status, ts). The capture endpoint itself
-// (`/api/feedback` by default) is NOT implemented by this skeleton — that's Part 2
-// of the scaffolder. Until it exists these POSTs 404 harmlessly.
+// console,extra}, severity, status, fingerprint, count, ts). `fingerprint`/`count`
+// back the dedupe fold (see the fingerprint + rate-limit section below): this
+// reporter computes its own fingerprint and rate-limits per fingerprint so a
+// render-loop error storm never leaves the browser, and the ingest server folds
+// repeats of the same fingerprint into one row by incrementing `count`.
 (function () {
   var CAPTURE_URL = window.CAMERATA_CAPTURE_URL || "/api/feedback";
   var PROJECT_ID = window.CAMERATA_PROJECT_ID || "{{APP_NAME_SNAKE}}";
@@ -22,7 +24,56 @@
     return new Date().toISOString();
   }
 
+  // ---- Fingerprint + per-fingerprint rate limit (the dedupe fold, client side) ----
+  // Mirrors the ingest server's dedupe key (kind + top stack frame + route) — see
+  // `crates/server/src/lib.rs`'s `compute_feedback_fingerprint` and
+  // `crates/api-types/src/feedback.rs`'s `DefectReport.fingerprint`/`count` fields —
+  // so a render-loop error storm gets caught HERE, client-side, before it ever
+  // leaves the browser: the cheapest possible fold. Dependency-free: a small FNV-1a
+  // string hash, not the server's cryptographic SHA-256 (`content_hash`) — the two
+  // algorithms do not need to byte-match. What matters is that THIS client computes
+  // the SAME fingerprint for repeat occurrences of the SAME logical error, so (a) this
+  // reporter's own rate limit can recognize a repeat, and (b) the server's dedupe
+  // (which accepts whatever fingerprint the client sends, see `submit_feedback`) can
+  // fold repeats across separate POSTs too.
+  function fingerprintOf(kind, stack, route) {
+    var topFrame = (stack || "").split("\n")[0].trim();
+    var raw = kind + "|" + topFrame + "|" + (route || "");
+    var hash = 0x811c9dc5; // FNV-1a 32-bit offset basis
+    for (var i = 0; i < raw.length; i++) {
+      hash ^= raw.charCodeAt(i);
+      hash = (hash * 0x01000193) >>> 0; // FNV-1a prime; keep an unsigned 32-bit result
+    }
+    return hash.toString(16);
+  }
+
+  var RATE_LIMIT_WINDOW_MS = 60000; // 1 minute
+  var RATE_LIMIT_MAX_PER_FINGERPRINT = 5; // cap occurrences of the SAME error per window
+  var seenFingerprints = {}; // fingerprint -> { count, windowStart }
+
+  // True when `fingerprint` has NOT yet hit its cap for the current window. A
+  // render-loop / retry storm repeating the SAME error is exactly what this guards
+  // against — after the cap, further identical-fingerprint occurrences within the
+  // window are dropped locally (never POSTed at all), so the storm never leaves the
+  // app, let alone the browser.
+  function allowedByRateLimit(fingerprint) {
+    var now = Date.now();
+    var entry = seenFingerprints[fingerprint];
+    if (!entry || now - entry.windowStart > RATE_LIMIT_WINDOW_MS) {
+      seenFingerprints[fingerprint] = { count: 1, windowStart: now };
+      return true;
+    }
+    entry.count += 1;
+    return entry.count <= RATE_LIMIT_MAX_PER_FINGERPRINT;
+  }
+
   function post(report) {
+    if (report.fingerprint && !allowedByRateLimit(report.fingerprint)) {
+      // Rate-limited: drop silently. The server-side dedupe fold (count increment)
+      // handles the ones that DO get through; this is the earlier, cheaper fold that
+      // keeps a storm of the SAME error from ever leaving the browser.
+      return;
+    }
     try {
       fetch(CAPTURE_URL, {
         method: "POST",
@@ -39,15 +90,17 @@
   }
 
   function buildReport(title, description, stack) {
+    var route = window.location ? window.location.pathname : null;
+    var kind = "runtime_error";
     return {
       id: null,
       project_id: PROJECT_ID,
       source: "auto",
-      kind: "runtime_error",
+      kind: kind,
       title: title,
       description: description || "",
       context: {
-        route: window.location ? window.location.pathname : null,
+        route: route,
         element: null,
         stack: stack || null,
         console: null,
@@ -55,6 +108,8 @@
       },
       severity: "error",
       status: "open",
+      fingerprint: fingerprintOf(kind, stack || "", route || ""),
+      count: 1,
       ts: nowIso(),
     };
   }

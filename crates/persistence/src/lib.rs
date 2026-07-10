@@ -18,6 +18,10 @@
 //! - [`FeedbackStore`] — the Product-Owner feedback loop's defect-report store (auto
 //!   capture + click-to-report), storing `camerata_api_types::feedback::DefectReport`
 //!   directly
+//! - [`OrchestratorDecision`], [`DecisionOutcome`], [`DecisionOutcomeKind`],
+//!   [`ClassCalibration`], [`OrchestratorDecisionLog`] — the confidence engine's
+//!   decision + outcome + calibration store (the "measured override rate at max
+//!   dial" moat metric)
 //!
 //! Conventions honored:
 //! - RUST-DOMAIN-4: newtype IDs
@@ -34,6 +38,7 @@ pub mod error;
 pub mod feedback;
 pub mod governance_event;
 pub mod model;
+pub mod orchestrator_decision;
 pub mod store;
 
 pub use artifacts::{
@@ -44,4 +49,8 @@ pub use error::PersistenceError;
 pub use feedback::FeedbackStore;
 pub use governance_event::{GovernanceEvent, GovernanceLog};
 pub use model::{ProvenanceEntry, SessionRecord};
+pub use orchestrator_decision::{
+    ClassCalibration, DecisionOutcome, DecisionOutcomeKind, OrchestratorDecision,
+    OrchestratorDecisionLog,
+};
 pub use store::{SqliteStore, Store};

@@ -357,6 +357,35 @@ mod tests {
         }
     }
 
+    /// The shipped auto-capture reporter computes its own fingerprint and rate-limits
+    /// per fingerprint (PART C of the fingerprint + dedupe fold — see
+    /// `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`'s usability backlog),
+    /// so a render-loop error storm never leaves a scaffolded app. Assert the shipped
+    /// template actually carries that logic rather than just the bare listeners.
+    #[test]
+    fn error_reporter_computes_fingerprint_and_rate_limits() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        scaffold_skeleton(&sample_reqs(), tmp.path()).expect("scaffold");
+        let reporter = fs::read_to_string(tmp.path().join("assets/error-reporter.js")).unwrap();
+
+        assert!(
+            reporter.contains("fingerprintOf"),
+            "reporter must compute a client-side fingerprint"
+        );
+        assert!(
+            reporter.contains("allowedByRateLimit"),
+            "reporter must rate-limit per fingerprint"
+        );
+        assert!(
+            reporter.contains("fingerprint:"),
+            "the posted report must carry a fingerprint field"
+        );
+        assert!(
+            reporter.contains("count:"),
+            "the posted report must carry a count field"
+        );
+    }
+
     #[test]
     fn blank_name_and_description_fall_back_to_defaults() {
         let tmp = tempfile::tempdir().expect("tempdir");

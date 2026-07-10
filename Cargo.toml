@@ -4,6 +4,11 @@ members = [
     "crates/api-types",   # pure-serde wire-contract leaf crate (Phase A of the DTO extraction); no camerata deps
     "crates/liveness",    # leaf crate: LivenessTracker + mtime probe + HeartbeatFn (no camerata deps)
     "crates/core",        # orchestrator brain: roles, tasks, DAG, coordination (zero model calls)
+    "crates/orchestrator", # package `camerata-orchestrator-core`: the confidence-dial engine —
+                            # effect-signature decision-CLASS classifier (pure, no model self-report).
+                            # Named -core to avoid colliding with the repo/binary name
+                            # "camerata-orchestrator". See docs/plans/2026-07-09_product-owner-head-vibe-mode.md,
+                            # "Architect-orchestrator design (decided 2026-07-10)".
     "crates/app-core",    # framework-agnostic backend app-orchestration (RUST-HEADLESS-CORE-1); no axum dep
     "crates/intake",      # PO-mode: intake form schema + LeadEngineer (architect-abstracted second level)
     "crates/gateway",     # layer-1 real-time governance gate: Rust MCP server (VERIFIED)

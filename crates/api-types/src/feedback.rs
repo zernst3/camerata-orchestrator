@@ -244,6 +244,23 @@ pub struct DefectReport {
     /// RFC3339 UTC timestamp, stamped at construction.
     #[serde(default = "now_rfc3339")]
     pub ts: String,
+    /// A stable dedupe key for "the same underlying defect" (the cheapest-now /
+    /// most-expensive-later fold — see the plan doc's "Usability backlog" section,
+    /// "fold-in-now" items). `None` when not yet computed: a client MAY compute and
+    /// send its own (the scaffolded app's auto-capture reporter does, for its own
+    /// client-side rate limiting — see `crates/scaffold`'s `error-reporter.js`); when
+    /// absent, the ingest server computes one from `kind` + the top stack frame +
+    /// `context.route`. `#[serde(default)]` so older/minimal payloads still deserialize.
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    /// How many times a report with this fingerprint has been seen for this project.
+    /// Starts at 1 on first insert; the ingest server increments it in place instead
+    /// of inserting a new row when a recent OPEN report with the same fingerprint
+    /// already exists (see `camerata_persistence::feedback::FeedbackStore::bump_fingerprint`).
+    /// `#[serde(default = "default_count")]` so an older/minimal payload without this
+    /// field still deserializes to the sensible default of 1.
+    #[serde(default = "default_count")]
+    pub count: i64,
 }
 
 /// `serde(default = ...)` helper for [`DefectReport::ts`] — a deserialized report that
@@ -251,6 +268,12 @@ pub struct DefectReport {
 /// will re-stamp anyway) gets "now" rather than an empty string.
 fn now_rfc3339() -> String {
     Utc::now().to_rfc3339()
+}
+
+/// `serde(default = ...)` helper for [`DefectReport::count`] — a deserialized report
+/// that omits `count` gets the sensible default of 1 occurrence, not 0.
+fn default_count() -> i64 {
+    1
 }
 
 impl DefectReport {
@@ -274,6 +297,8 @@ impl DefectReport {
             severity: DefectSeverity::default(),
             status: DefectStatus::default(),
             ts: now_rfc3339(),
+            fingerprint: None,
+            count: 1,
         }
     }
 
@@ -326,6 +351,15 @@ impl DefectReport {
     /// Attach one structured extra key/value (builder-style, chainable, repeatable).
     pub fn with_extra(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.context.extra.insert(key.into(), value.into());
+        self
+    }
+
+    /// Set a client-computed fingerprint (builder-style, chainable). Used by callers
+    /// that already know their own stable dedupe key (e.g. the scaffolded app's
+    /// auto-capture reporter) — the ingest server honors a client-provided
+    /// fingerprint instead of computing its own.
+    pub fn with_fingerprint(mut self, fingerprint: impl Into<String>) -> Self {
+        self.fingerprint = Some(fingerprint.into());
         self
     }
 }
@@ -400,6 +434,8 @@ mod tests {
         assert_eq!(r.severity, DefectSeverity::Info);
         assert!(r.description.is_empty());
         assert!(!r.ts.is_empty());
+        assert!(r.fingerprint.is_none());
+        assert_eq!(r.count, 1);
     }
 
     #[test]
@@ -418,7 +454,8 @@ mod tests {
             .with_element("button.save")
             .with_stack("at foo (app.js:1:1)")
             .with_console("warn: deprecated API")
-            .with_extra("viewport", "375x812");
+            .with_extra("viewport", "375x812")
+            .with_fingerprint("fp-abc123");
 
         assert_eq!(r.description, "The sidebar overlaps the content on mobile");
         assert_eq!(r.severity, DefectSeverity::Warning);
@@ -430,6 +467,7 @@ mod tests {
             r.context.extra.get("viewport").map(String::as_str),
             Some("375x812")
         );
+        assert_eq!(r.fingerprint.as_deref(), Some("fp-abc123"));
     }
 
     // ── serde round-trip ─────────────────────────────────────────────────────
@@ -482,5 +520,34 @@ mod tests {
         assert_eq!(r.status, DefectStatus::Open);
         assert!(r.id.is_none());
         assert!(!r.ts.is_empty());
+        assert!(r.fingerprint.is_none());
+        assert_eq!(r.count, 1);
+    }
+
+    // ── fingerprint + count (PART C: fingerprint + dedupe) ──────────────────
+
+    #[test]
+    fn fingerprint_and_count_default_and_round_trip() {
+        let r = DefectReport::auto("proj-6", DefectKind::RuntimeError, "boom");
+        assert!(r.fingerprint.is_none());
+        assert_eq!(r.count, 1);
+
+        let r = r.with_fingerprint("fp-xyz");
+        assert_eq!(r.fingerprint.as_deref(), Some("fp-xyz"));
+
+        let json = serde_json::to_string(&r).expect("serialize");
+        let back: DefectReport = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, r);
+        assert_eq!(back.fingerprint.as_deref(), Some("fp-xyz"));
+        assert_eq!(back.count, 1);
+    }
+
+    #[test]
+    fn count_greater_than_one_round_trips() {
+        let mut r = DefectReport::auto("proj-7", DefectKind::RuntimeError, "boom");
+        r.count = 3;
+        let json = serde_json::to_string(&r).expect("serialize");
+        let back: DefectReport = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.count, 3);
     }
 }
