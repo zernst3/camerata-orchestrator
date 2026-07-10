@@ -8,8 +8,9 @@ mod app_shell;
 mod button;
 mod card;
 mod field;
-
+{{ACCESS_GATE_MOD}}
 pub use app_shell::AppShell;
 pub use button::{Button, ButtonVariant};
 pub use card::Card;
 pub use field::Field;
+{{ACCESS_GATE_EXPORT}}

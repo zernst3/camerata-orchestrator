@@ -99,6 +99,11 @@ camerata-scaffold = { path = "../scaffold" }
 # investigation notes are persisted here (ROUTE-A) for queryable, provenance-tracked
 # history instead of living inline on the UoW JSON.
 camerata-persistence = { path = "../persistence" }
+# `secrets::scrub` (FOLD E, chat secret-interceptor): `submit_feedback` scrubs
+# `DefectContext.console`/`.stack` before storing a `DefectReport`, so a deployed
+# app's captured logs can't leak a secret into the feedback store or the
+# governance trail.
+camerata-orchestrator-core = { path = "../orchestrator" }
 # RAII temp-dir cleanup for per-run scaffold dirs and session dirs (ARCH-RESOURCE-LIFECYCLE-1).
 tempfile = "3"
 # OS-keychain credential storage for app-wide secrets (OpenRouter key, GitHub token).

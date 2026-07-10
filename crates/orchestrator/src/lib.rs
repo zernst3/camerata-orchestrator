@@ -36,6 +36,11 @@
 
 use camerata_gateway::lookup_arm;
 
+/// Secret detector + scrubber (FOLD E — the chat secret-interceptor). See the
+/// module doc for the full design; applied today at `camerata_server`'s
+/// `submit_feedback` ingest path.
+pub mod secrets;
+
 // ─── decision class + confidence ──────────────────────────────────────────────
 
 /// The confidence-dial's decision class: WHAT catches an autonomously-decided action if

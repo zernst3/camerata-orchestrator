@@ -110,6 +110,40 @@ const TEMPLATE_FILES: &[(&str, &str)] = &[
     ),
 ];
 
+/// The default-private access-lock component (FOLD D) — conditionally written
+/// ONLY when `reqs.visibility` is [`crate::Visibility::Private`] (the default);
+/// omitted entirely for [`crate::Visibility::Public`]. Kept out of
+/// [`TEMPLATE_FILES`] (which is always written unconditionally) for exactly that
+/// reason. Its content is still embedded at compile time like every other
+/// template file — only whether it gets WRITTEN to `target_dir` is conditional.
+const ACCESS_GATE_FILE: (&str, &str) = (
+    "src/components/access_gate.rs",
+    include_str!("../templates/skeleton/src/components/access_gate.rs"),
+);
+
+/// The `{{ACCESS_GATE_SERVER_FN}}` substitution value for `src/server_fns.rs` when
+/// `reqs.visibility` is Private — see [`ACCESS_GATE_FILE`]'s sibling component.
+/// Verifies a submitted passcode against `APP_ACCESS_CODE`, failing CLOSED (an
+/// unset env var denies every attempt rather than silently acting like there is
+/// no lock at all).
+const ACCESS_GATE_SERVER_FN_BLOCK: &str = r#"
+/// Checks a submitted passcode against the `APP_ACCESS_CODE` environment
+/// variable — the minimal single-shared-passcode gate behind `AccessGate`
+/// (`src/components/access_gate.rs`). Not a user system: no accounts, no
+/// per-user credentials (see `CONVENTIONS.md`). Fails CLOSED: if
+/// `APP_ACCESS_CODE` is unset server-side, every attempt is denied rather
+/// than silently treating "no configured passcode" as "no lock" — an unset
+/// env var must never make a Private app effectively public.
+#[server]
+pub async fn verify_access_code(code: String) -> Result<bool, ServerFnError> {
+    let expected = std::env::var("APP_ACCESS_CODE").unwrap_or_default();
+    if expected.is_empty() {
+        return Ok(false);
+    }
+    Ok(code == expected)
+}
+"#;
+
 /// The default auto-capture reporter target when `AppRequirements::capture_url` is
 /// `None`: a relative path, resolved against whatever origin serves the app.
 const DEFAULT_CAPTURE_URL: &str = "/api/feedback";
@@ -154,6 +188,30 @@ pub fn scaffold_skeleton(
     let year = Utc::now().format("%Y").to_string();
     let initial = app_initial(&display_name);
 
+    // FOLD D: the default-private skeleton lock. `is_private` drives BOTH which
+    // files get written (the access-gate component is entirely omitted for
+    // Public, see below) and the four `{{ACCESS_GATE_*}}` substitutions that
+    // wire (or don't wire) the gate into `app.rs` / `components/mod.rs` /
+    // `server_fns.rs`. Empty-string values for the Public branch are a real
+    // substitution (not an omitted key), so `leftover_placeholders` never flags
+    // them — see `substitution::substitute`'s doc comment.
+    let is_private = matches!(reqs.visibility, crate::Visibility::Private);
+    let (access_gate_import, access_gate_open, access_gate_close) = if is_private {
+        ("use crate::components::AccessGate;\n", "AccessGate {\n            ", "\n        }")
+    } else {
+        ("", "", "")
+    };
+    let (access_gate_mod, access_gate_export) = if is_private {
+        ("mod access_gate;", "pub use access_gate::AccessGate;")
+    } else {
+        ("", "")
+    };
+    let access_gate_server_fn = if is_private {
+        ACCESS_GATE_SERVER_FN_BLOCK
+    } else {
+        ""
+    };
+
     let subs: Vec<(&str, &str)> = vec![
         ("APP_NAME", display_name.as_str()),
         ("APP_NAME_SNAKE", package_name.as_str()),
@@ -161,6 +219,12 @@ pub fn scaffold_skeleton(
         ("CAPTURE_URL", capture_url.as_str()),
         ("YEAR", year.as_str()),
         ("APP_INITIAL", initial.as_str()),
+        ("ACCESS_GATE_IMPORT", access_gate_import),
+        ("ACCESS_GATE_OPEN", access_gate_open),
+        ("ACCESS_GATE_CLOSE", access_gate_close),
+        ("ACCESS_GATE_MOD", access_gate_mod),
+        ("ACCESS_GATE_EXPORT", access_gate_export),
+        ("ACCESS_GATE_SERVER_FN", access_gate_server_fn),
     ];
 
     fs::create_dir_all(target_dir).map_err(|source| ScaffoldError::CreateDir {
@@ -168,8 +232,13 @@ pub fn scaffold_skeleton(
         source,
     })?;
 
-    let mut files_written = Vec::with_capacity(TEMPLATE_FILES.len());
-    for (relative_path, raw_contents) in TEMPLATE_FILES {
+    let mut files_to_write: Vec<(&str, &str)> = TEMPLATE_FILES.to_vec();
+    if is_private {
+        files_to_write.push(ACCESS_GATE_FILE);
+    }
+
+    let mut files_written = Vec::with_capacity(files_to_write.len());
+    for (relative_path, raw_contents) in files_to_write {
         let dest = target_dir.join(relative_path);
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent).map_err(|source| ScaffoldError::CreateDir {
@@ -193,6 +262,15 @@ pub fn scaffold_skeleton(
         ),
         "Run `dx serve --platform web` from the target directory to preview.".to_string(),
     ];
+    if is_private {
+        notes.push(
+            "AppRequirements.visibility is Private (the default): the app ships behind a minimal shared-passcode gate (src/components/access_gate.rs + server_fns.rs's verify_access_code) until APP_ACCESS_CODE is set and entered — set that env var at deploy time.".to_string(),
+        );
+    } else {
+        notes.push(
+            "AppRequirements.visibility is Public — no access lock was included; the app renders directly. Public is an explicit opt-in, never the default.".to_string(),
+        );
+    }
     if reqs.needs_persistence {
         notes.push(
             "AppRequirements.needs_persistence is set, but this skeleton never adds a database itself — a later phase layers persistence on top.".to_string(),
@@ -225,6 +303,12 @@ mod tests {
             needs_auth: false,
             summary: "an app that tracks my flights and shows them on a timeline".to_string(),
             capture_url: None,
+            // FOLD D default: Private. Matches `AppRequirements::default()`, so this
+            // fixture stays representative of what a caller gets with no explicit
+            // `visibility` set, and keeps the (slow, `#[ignore]`d)
+            // `generated_skeleton_compiles` test below exercising the default,
+            // access-gate-included path.
+            visibility: crate::Visibility::Private,
         }
     }
 
@@ -233,11 +317,14 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let outcome = scaffold_skeleton(&sample_reqs(), tmp.path()).expect("scaffold");
 
-        assert_eq!(outcome.files_written.len(), TEMPLATE_FILES.len());
+        // sample_reqs() is Private (the default), so the access-gate file is
+        // written IN ADDITION to every TEMPLATE_FILES entry.
+        assert_eq!(outcome.files_written.len(), TEMPLATE_FILES.len() + 1);
         for (relative_path, _) in TEMPLATE_FILES {
             let path = tmp.path().join(relative_path);
             assert!(path.is_file(), "expected {relative_path} to exist at {path:?}");
         }
+        assert!(tmp.path().join("src/components/access_gate.rs").is_file());
         assert_eq!(outcome.package_name, "trip_planner");
     }
 
@@ -245,6 +332,98 @@ mod tests {
     fn no_leftover_placeholders_in_any_written_file() {
         let tmp = tempfile::tempdir().expect("tempdir");
         scaffold_skeleton(&sample_reqs(), tmp.path()).expect("scaffold");
+
+        for (relative_path, _) in TEMPLATE_FILES {
+            let path = tmp.path().join(relative_path);
+            let contents = fs::read_to_string(&path).expect("read written file");
+            let leftover = leftover_placeholders(&contents);
+            assert!(
+                leftover.is_empty(),
+                "{relative_path} still has unfilled placeholders: {leftover:?}"
+            );
+        }
+        let access_gate = fs::read_to_string(tmp.path().join("src/components/access_gate.rs")).unwrap();
+        assert!(leftover_placeholders(&access_gate).is_empty());
+    }
+
+    // ── FOLD D: default-private skeleton lock ────────────────────────────────
+
+    #[test]
+    fn private_visibility_includes_the_access_gate_file_and_server_fn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut reqs = sample_reqs();
+        reqs.visibility = crate::Visibility::Private;
+        scaffold_skeleton(&reqs, tmp.path()).expect("scaffold");
+
+        assert!(tmp.path().join("src/components/access_gate.rs").is_file());
+
+        let server_fns = fs::read_to_string(tmp.path().join("src/server_fns.rs")).unwrap();
+        assert!(server_fns.contains("verify_access_code"));
+        assert!(server_fns.contains("APP_ACCESS_CODE"));
+
+        let app_rs = fs::read_to_string(tmp.path().join("src/app.rs")).unwrap();
+        assert!(app_rs.contains("AccessGate"));
+        assert!(app_rs.contains("use crate::components::AccessGate;"));
+
+        let mod_rs = fs::read_to_string(tmp.path().join("src/components/mod.rs")).unwrap();
+        assert!(mod_rs.contains("mod access_gate;"));
+        assert!(mod_rs.contains("pub use access_gate::AccessGate;"));
+    }
+
+    #[test]
+    fn public_visibility_omits_the_access_gate_file_and_server_fn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut reqs = sample_reqs();
+        reqs.visibility = crate::Visibility::Public;
+        let outcome = scaffold_skeleton(&reqs, tmp.path()).expect("scaffold");
+
+        assert!(!tmp.path().join("src/components/access_gate.rs").exists());
+        assert_eq!(outcome.files_written.len(), TEMPLATE_FILES.len());
+
+        let server_fns = fs::read_to_string(tmp.path().join("src/server_fns.rs")).unwrap();
+        assert!(!server_fns.contains("verify_access_code"));
+        assert!(!server_fns.contains("APP_ACCESS_CODE"));
+
+        let app_rs = fs::read_to_string(tmp.path().join("src/app.rs")).unwrap();
+        // The module doc's prose explaining the FEATURE always mentions "AccessGate"
+        // by name (it's static documentation of the general behavior, not
+        // substituted code) — assert the absence of the actual wiring instead: no
+        // import, and the router is not wrapped in the component.
+        assert!(!app_rs.contains("use crate::components::AccessGate;"));
+        assert!(!app_rs.contains("AccessGate {"));
+        // The router still renders — just not wrapped in anything.
+        assert!(app_rs.contains("Router::<Route> {}"));
+
+        let mod_rs = fs::read_to_string(tmp.path().join("src/components/mod.rs")).unwrap();
+        assert!(!mod_rs.contains("access_gate"));
+
+        assert!(
+            outcome
+                .notes
+                .iter()
+                .any(|n| n.contains("Public") && n.contains("opt-in")),
+            "notes: {:?}",
+            outcome.notes
+        );
+    }
+
+    #[test]
+    fn private_visibility_notes_mention_the_access_code_env_var() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let outcome = scaffold_skeleton(&sample_reqs(), tmp.path()).expect("scaffold");
+        assert!(
+            outcome.notes.iter().any(|n| n.contains("APP_ACCESS_CODE")),
+            "notes: {:?}",
+            outcome.notes
+        );
+    }
+
+    #[test]
+    fn public_visibility_still_has_no_leftover_placeholders() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let mut reqs = sample_reqs();
+        reqs.visibility = crate::Visibility::Public;
+        scaffold_skeleton(&reqs, tmp.path()).expect("scaffold");
 
         for (relative_path, _) in TEMPLATE_FILES {
             let path = tmp.path().join(relative_path);

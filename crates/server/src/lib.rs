@@ -2620,6 +2620,22 @@ async fn submit_feedback(
     report.ts = chrono::Utc::now().to_rfc3339();
     report.status = DefectStatus::Open;
     report.count = 1;
+
+    // FOLD E (chat secret-interceptor, applied at the one live free-text ingest
+    // path today): a deployed scaffolded app's auto-capture reporter or a human's
+    // click-to-report can carry a secret straight out of the running app's own
+    // logs (a leaked API key printed to the console, a stack frame that embeds a
+    // connection string). Scrub BEFORE this report is stored or mirrored into the
+    // governance trail — every other free-text context field (`route`, `element`)
+    // is either a URL path or a UI selector, not a place a raw secret realistically
+    // lands, so only `console`/`stack` are scrubbed.
+    if let Some(console) = report.context.console.take() {
+        report.context.console = Some(camerata_orchestrator_core::secrets::scrub(&console).scrubbed);
+    }
+    if let Some(stack) = report.context.stack.take() {
+        report.context.stack = Some(camerata_orchestrator_core::secrets::scrub(&stack).scrubbed);
+    }
+
     if report.fingerprint.as_deref().unwrap_or("").is_empty() {
         report.fingerprint = Some(compute_feedback_fingerprint(&report));
     }
@@ -15571,6 +15587,103 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["ok"], false);
         assert!(json["message"].is_string());
+    }
+
+    /// FOLD E (chat secret-interceptor, applied at ingest): a report whose
+    /// `context.console`/`context.stack` contains a fake Stripe live key must come
+    /// back scrubbed — the raw secret must never reach the feedback store OR the
+    /// paired governance-audit row's `detail` JSON. Exercises the real
+    /// `submit_feedback` handler end to end (not just `camerata_orchestrator_core::
+    /// secrets::scrub` in isolation, which already has its own unit tests).
+    #[tokio::test]
+    async fn submit_feedback_scrubs_a_secret_in_console_and_stack_before_storing() {
+        let feedback = camerata_persistence::FeedbackStore::open_in_memory()
+            .await
+            .expect("open in-memory feedback store");
+        let governance = camerata_persistence::GovernanceLog::open_in_memory()
+            .await
+            .expect("open in-memory governance log");
+
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.feedback_store = Some(std::sync::Arc::new(feedback));
+        state.governance_log = Some(std::sync::Arc::new(governance));
+        let app = router(state);
+
+        let leaked_key = "sk_live_51H8xyzABCDEFGHIJKLMNOP";
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feedback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": "proj-secret",
+                            "source": "auto",
+                            "kind": "runtime_error",
+                            "title": "Failed request: /api/charge (500)",
+                            "context": {
+                                "route": "/checkout",
+                                "console": format!("Stripe init failed with key {leaked_key}"),
+                                "stack": format!("Error: bad key {leaked_key}\n    at charge (app.js:1:1)"),
+                            },
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let submit_json = body_json(resp).await;
+        assert_eq!(submit_json["ok"], true);
+        let id = submit_json["id"].as_i64().expect("id must be an integer");
+
+        // The stored report (read back via the list route) never carries the raw key.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/projects/proj-secret/feedback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["id"], id);
+        let console = json[0]["context"]["console"].as_str().unwrap();
+        let stack = json[0]["context"]["stack"].as_str().unwrap();
+        assert!(!console.contains(leaked_key), "console still carries the raw key: {console}");
+        assert!(!stack.contains(leaked_key), "stack still carries the raw key: {stack}");
+        assert!(console.contains("{{SECRET:stripe_key_1}}"));
+        assert!(stack.contains("{{SECRET:stripe_key_1}}"));
+        // Untouched context fields (route) still come through unscrubbed.
+        assert_eq!(json[0]["context"]["route"], "/checkout");
+
+        // The paired governance-audit row's `detail` (the full stamped report as
+        // JSON) is likewise scrubbed — the raw key must not land in the audit trail
+        // either.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/runs/proj-secret/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        let detail = json[0]["detail"].as_str().expect("detail must be a string");
+        assert!(!detail.contains(leaked_key), "governance detail still carries the raw key: {detail}");
+        assert!(detail.contains("{{SECRET:stripe_key_1}}"));
     }
 
     /// The full ingest round trip with a REAL (in-memory) feedback store attached:

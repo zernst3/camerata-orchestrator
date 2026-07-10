@@ -23,3 +23,6 @@ chrono = { version = "0.4", features = ["clock"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Only for tests: `Visibility`/`AppRequirements` serde round-trip + missing-field
+# default assertions (FOLD D). Not a runtime dependency of this crate.
+serde_json = { workspace = true }

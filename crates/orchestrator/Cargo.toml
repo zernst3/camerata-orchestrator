@@ -21,3 +21,9 @@ workspace = true
 # re-implementing overlapping regexes that could silently drift apart. See the module
 # doc in src/lib.rs.
 camerata-gateway = { path = "../gateway" }
+# `secrets::detect_secrets`/`scrub` (FOLD E, chat secret-interceptor): pure
+# pattern-matching over free text, same crate + `OnceLock`-cached-compiled-pattern
+# style `camerata-gateway`'s own SEC-* arms already use (same version, so the two
+# never drift on which `regex` release they compile against). Still no tokio, no
+# serde — this module stays synchronous and side-effect-free like `classify`.
+regex = "1"

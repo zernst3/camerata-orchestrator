@@ -7,6 +7,12 @@ pub struct FieldProps {
     pub value: String,
     #[props(default)]
     pub placeholder: String,
+    /// When `true`, renders as `type="password"` (masked input) instead of plain
+    /// text. Defaults to `false` — existing callers are unaffected. Added for the
+    /// default-private access-lock's passcode prompt (`access_gate.rs`), which is
+    /// the one place in the skeleton a `Field` value is a secret being typed.
+    #[props(default)]
+    pub password: bool,
     pub oninput: EventHandler<String>,
 }
 
@@ -28,7 +34,7 @@ pub fn Field(props: FieldProps) -> Element {
             input {
                 id: "{input_id}",
                 class: "field__input",
-                r#type: "text",
+                r#type: if props.password { "password" } else { "text" },
                 value: "{props.value}",
                 placeholder: "{props.placeholder}",
                 oninput: move |evt| props.oninput.call(evt.value()),

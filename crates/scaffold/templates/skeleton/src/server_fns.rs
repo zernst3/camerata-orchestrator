@@ -15,3 +15,4 @@ pub async fn greet(name: String) -> Result<String, ServerFnError> {
     let name = if name.trim().is_empty() { "there" } else { name.trim() };
     Ok(format!("Hello, {name} — the server said hi back."))
 }
+{{ACCESS_GATE_SERVER_FN}}

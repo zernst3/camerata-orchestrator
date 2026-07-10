@@ -24,6 +24,31 @@ pub enum AppTarget {
     Cli,
 }
 
+/// Whether a scaffolded app is reachable by anyone who has the URL, or hidden
+/// behind a minimal shared-passcode lock by default (FOLD D — default-private
+/// skeleton lock, `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`'s
+/// usability backlog: "default-private deploy (single-user lock unless opted
+/// public)").
+///
+/// The thesis: deploying your budget app should not put your finances on a public
+/// URL. `Private` is the default for that reason — `Public` is always an explicit
+/// opt-in the caller has to set, never the fallback of an unset/malformed field
+/// (`#[serde(default)]` below resolves a missing `visibility` key to `Private`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Visibility {
+    /// The default: the scaffolded skeleton ships with a minimal, dependency-free
+    /// single-shared-passcode gate (`src/components/access_gate.rs` +
+    /// `src/server_fns.rs`'s `verify_access_code`) wrapping the app's content, so
+    /// nothing renders until the passcode configured in `APP_ACCESS_CODE` is
+    /// entered. See [`crate::scaffold_skeleton`].
+    #[default]
+    Private,
+    /// Explicit opt-in: the access-lock files are omitted entirely and the app
+    /// renders directly. Never the default — a caller must set this deliberately.
+    Public,
+}
+
 /// What the (future) orchestrator fills in to describe the app it wants built. This
 /// is intentionally small: a display name, a description, a target platform, a
 /// couple of coarse capability flags, and a free-text summary the human actually
@@ -71,6 +96,10 @@ pub struct AppRequirements {
     /// up front.
     #[serde(default)]
     pub capture_url: Option<String>,
+    /// Whether the scaffolded app ships behind the default-private access lock, or
+    /// is opted into being publicly reachable. Defaults to [`Visibility::Private`].
+    #[serde(default)]
+    pub visibility: Visibility,
 }
 
 impl AppRequirements {
@@ -149,5 +178,36 @@ mod tests {
     #[test]
     fn already_snake_case_is_unchanged() {
         assert_eq!(reqs("already_snake_case").package_name(), "already_snake_case");
+    }
+
+    // ── Visibility (FOLD D: default-private skeleton lock) ──────────────────────
+
+    #[test]
+    fn default_visibility_is_private() {
+        assert_eq!(Visibility::default(), Visibility::Private);
+        assert_eq!(AppRequirements::default().visibility, Visibility::Private);
+    }
+
+    #[test]
+    fn visibility_serde_round_trips_as_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&Visibility::Private).unwrap(),
+            "\"private\""
+        );
+        assert_eq!(
+            serde_json::to_string(&Visibility::Public).unwrap(),
+            "\"public\""
+        );
+        let parsed: Visibility = serde_json::from_str("\"public\"").unwrap();
+        assert_eq!(parsed, Visibility::Public);
+    }
+
+    #[test]
+    fn missing_visibility_field_deserializes_to_private() {
+        // A minimal/older JSON payload that omits `visibility` entirely must default
+        // to Private (never silently Public) — the whole point of FOLD D.
+        let reqs: AppRequirements =
+            serde_json::from_str(r#"{"name":"Budget","description":"Track spending."}"#).unwrap();
+        assert_eq!(reqs.visibility, Visibility::Private);
     }
 }

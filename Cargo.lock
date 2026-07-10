@@ -873,6 +873,7 @@ name = "camerata-orchestrator-core"
 version = "0.0.0"
 dependencies = [
  "camerata-gateway",
+ "regex",
 ]
 
 [[package]]
@@ -926,6 +927,7 @@ version = "0.0.0"
 dependencies = [
  "chrono",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
 ]
@@ -948,6 +950,7 @@ dependencies = [
  "camerata-intake",
  "camerata-liveness",
  "camerata-llm",
+ "camerata-orchestrator-core",
  "camerata-persistence",
  "camerata-rules",
  "camerata-scaffold",
