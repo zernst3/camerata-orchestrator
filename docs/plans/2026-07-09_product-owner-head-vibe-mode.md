@@ -365,6 +365,41 @@ Beyond deployment, the open product/architecture decisions, roughly in priority 
   decision the orchestrator should raise (Class D, clarify).
 - **Rollback strategy:** last-good-artifact redeploy, exposed as a one-word "roll back".
 
+## Decisions resolved 2026-07-10
+
+- **Built apps are web-only, delivered as an adaptable PWA.** The default Rust-fullstack
+  template produces a responsive, installable Progressive Web App (manifest + service worker +
+  responsive shell) so one codebase adapts to desktop and mobile. Preview targets are
+  web-only. This keeps the preview + eventual cloud tunnel simple (one web surface) and gives
+  "works on my phone and my laptop" for free.
+- **Auto-capture defects before the user reports them (see feedback-loop section).**
+- **A built app's own end-user auth is derived + clarified per app** (Class D): the
+  orchestrator asks "does this app need end-user logins?" rather than guessing; if yes, the
+  scaffold includes an auth module. Confirmed.
+- **The design + spike + preview adapter foundation ships as its own PR** (this branch).
+
+## Feedback loop: auto-capture + click-to-report
+
+The loop's input side. Both sources produce ONE structured report that feeds the governed dev
+loop (a report becomes a work item the fleet picks up, decompose -> gated implementation ->
+hot-reloaded preview).
+
+- **Auto-capture (catch bugs before the user notices).** The scaffolded PWA ships a built-in
+  error reporter baked into the template: a wasm panic hook + `window.onerror` +
+  `unhandledrejection` + a failed-request interceptor, posting a structured report to Camerata
+  (locally in preview; to a per-app capture endpoint once deployed). So runtime errors surface
+  to the orchestrator proactively. Auto-capture is a Class-A-adjacent backstop: it catches a
+  class of defect mechanically, before it needs a human.
+- **Click-to-report (user-initiated).** In the preview, the user clicks an element and
+  describes the issue; the report carries the element selector + the current route/state.
+  (Depends on the chat head's preview surface, so it lands after the head; the ingest model +
+  endpoint are built first and shared with auto-capture.)
+- **Shared model:** `DefectReport { app/project id, source: auto|user, kind:
+  runtime_error|user_report|..., title, description, context (route, element, stack, console),
+  severity, ts }`, in the api-types contract. Ingest endpoint stores it + opens a governed
+  work item. Recorded in the governance trail so "what was reported, and what the fleet did
+  about it" is auditable.
+
 ## Open questions (for Zach)
 - Dial UX: a literal slider, an inferred level, or a per-request "how sure should you be
   before asking me" phrasing? (Recommend: inferred + overridable.)
