@@ -595,6 +595,8 @@ mod tests {
                 "severity": "info",
                 "status": "open",
                 "ts": "2026-07-08T00:00:00Z",
+                "fingerprint": null,
+                "count": 1,
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
