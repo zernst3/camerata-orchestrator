@@ -24,8 +24,14 @@ members = [
     "crates/maintenance", # Tier-2 standing post-publish ops agent (upgrades, security, rotation)
     "crates/deploy",          # Tier-2 BYO-infra publish: DeployTarget seam + local + Azure adapter
     "crates/linter-registry", # citation validator: canonical linter rule-id lists + corpus scan report
+    "crates/scaffold",        # Rust-fullstack PWA scaffolder (Part 1): vetted Dioxus-fullstack skeleton + ScaffoldStrategy fit-check seam (docs/plans/2026-07-09_product-owner-head-vibe-mode.md)
     "tools/corpus-verifier",  # MAINTAINER-ONLY repo-governance tool: promote rules grounded -> verified via branch + PR. NOT part of the shipped app; never a dependency of any app crate.
 ]
+# `crates/scaffold/templates/skeleton` is an embedded template tree (its Cargo.toml
+# contains `{{PLACEHOLDER}}` tokens and is `include_str!`'d as data by
+# `crates/scaffold/src/skeleton.rs`, never invoked as a real package) — excluded so
+# it's never mistaken for a workspace member.
+exclude = ["crates/scaffold/templates/skeleton"]
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

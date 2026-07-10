@@ -1,0 +1,65 @@
+[package]
+name = "{{APP_NAME_SNAKE}}"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+description = "{{APP_DESCRIPTION}}"
+publish = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+
+# `web` and `server` are dioxus platform-toggle features (Dioxus 0.7's `#[server]`
+# macro checks `cfg(feature = "server")` to decide whether it is compiling a real
+# server-side body or a wasm client stub — see the wasm-only dependency comment
+# below for why the two must never both be active on the wasm32 target). Both are
+# default so a bare `cargo check`/`cargo test`/rust-analyzer (no special flags) just
+# works; `dx serve`/`dx bundle` and CI (.github/workflows/ci.yml) instead build each
+# platform explicitly with `--no-default-features --features <platform>`, which is
+# what actually keeps the two targets' feature sets from overlapping.
+[features]
+default = ["web", "server"]
+web = ["dioxus/web"]
+server = ["dioxus/server"]
+
+[[bin]]
+name = "{{APP_NAME_SNAKE}}"
+path = "src/main.rs"
+
+[dependencies]
+# Always compiled (both native and wasm32). `fullstack` is the feature that unlocks
+# `#[server]`'s codegen machinery on BOTH sides of the split (the client-stub half
+# on wasm32, the real-body half natively) — it must be active on both targets, so
+# it lives here rather than in either per-target block below. Which SIDE actually
+# gets compiled is controlled separately, by this crate's own `web`/`server`
+# features (see [features] below) toggling `dioxus/web` vs `dioxus/server`.
+dioxus = { version = "0.7", features = ["router", "fullstack"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Client-only (Wasm) target dependencies. Deliberately minimal: per RUST-DIOXUS-9, all
+# I/O (network, third-party calls) goes through Dioxus server functions, never a
+# direct HTTP client in frontend code — `reqwest` (or any HTTP client) has no place in
+# this target block. `wasm-bindgen` is here only for the auto-capture panic-hook
+# bridge (`src/wasm_bridge.rs`).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+dioxus = { version = "0.7", features = ["web"] }
+wasm-bindgen = "0.2"
+
+# Server-only (native) target dependencies.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+dioxus = { version = "0.7", features = ["server"] }
+axum = "0.8.9"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs", "compression-gzip", "compression-br"] }
+dioxus-cli-config = "0.7"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

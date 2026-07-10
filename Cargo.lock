@@ -914,6 +914,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "camerata-scaffold"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "camerata-server"
 version = "0.0.0"
 dependencies = [
