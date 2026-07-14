@@ -41,6 +41,14 @@ use camerata_gateway::lookup_arm;
 /// `submit_feedback` ingest path.
 pub mod secrets;
 
+/// The living spec (`SPEC.md`): pure parse/render + a thin filesystem edge.
+pub mod spec;
+
+/// The orchestrator TURN (`handle_turn`): the LOOP promised by this module's own
+/// doc comment — interpret a change request, classify it, record the decision,
+/// and route to execution / human approval / clarification.
+pub mod turn;
+
 // ─── decision class + confidence ──────────────────────────────────────────────
 
 /// The confidence-dial's decision class: WHAT catches an autonomously-decided action if

@@ -27,3 +27,23 @@ camerata-gateway = { path = "../gateway" }
 # never drift on which `regex` release they compile against). Still no tokio, no
 # serde — this module stays synchronous and side-effect-free like `classify`.
 regex = "1"
+# `turn::handle_turn` (the orchestrator LOOP this crate's module doc calls "a
+# later phase" — it drives the LLM + execution seams and records decisions).
+# `classify`/`secrets` stay exactly as pure/sync as before; these deps are
+# additive and used only by the new `turn`/`spec` modules. Object-safe traits
+# (`#[async_trait]`) let production wire the REAL LLM/executor while tests
+# inject fakes; `anyhow` gives the honest-error plumbing the no-placeholder
+# rule depends on.
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+# `spec::LivingSpec` stamps change-log/assumption entries with CALLER-supplied
+# timestamps (RUST-PURE-STATE-TRANSITIONS-1 — deterministic, testable), the
+# same `chrono` version `camerata-worktracker`/`camerata-persistence` use.
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+tempfile = "3"
+# `#[tokio::test]` for `turn`'s async `handle_turn` tests. Production `handle_turn`
+# is a plain `async fn` with no tokio calls of its own (the crate stays free of a
+# tokio dependency in `[dependencies]`); only the test harness needs a runtime.
+tokio = { workspace = true, features = ["rt", "macros"] }

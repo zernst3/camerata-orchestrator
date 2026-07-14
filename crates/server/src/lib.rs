@@ -46,6 +46,9 @@ pub mod live_fleet;
 pub mod llm;
 pub mod notify;
 pub mod onboard;
+/// `POST /api/orchestrator/message` — the architect-orchestrator's first
+/// functional turn (real LLM + real governed execution seam). See the module doc.
+pub mod orchestrator_message;
 pub mod pr;
 pub mod dev_implement_run;
 pub mod pr_resolve_run;
@@ -106,6 +109,7 @@ use camerata_worktracker::{CanonicalStory, ExternalRef, InMemoryStoryStore, Stor
 
 use crate::clarify::{AnswerReq, Clarification, ClarificationStore, PostClarifyReq};
 use crate::decompose::{to_story, DecompositionStore, Practice, ProposedChild};
+use crate::orchestrator_message::orchestrator_message;
 use crate::provider::ProviderHandle;
 use crate::routine::{CreateRoutineReq, Routine, RoutineStore, SetEnabledReq};
 use crate::run::{execute_run, live_mode_enabled, run_provenance, Run, RunProvenance, RunStore};
@@ -1053,6 +1057,10 @@ pub fn router(state: AppState) -> Router {
         // AI: the model provider seam (CLI locally, Anthropic API in production). The
         // research chat and every AI step call models through this.
         .route("/api/chat", post(chat))
+        // The architect-orchestrator's first functional turn: a change request
+        // against an EXISTING scaffolded project, driven end-to-end (real LLM +
+        // real governed execution seam). See `crate::orchestrator_message`.
+        .route("/api/orchestrator/message", post(orchestrator_message))
         .route("/api/usage", get(usage))
         .route("/api/models", get(list_models))
         .route("/api/models/registry", get(get_model_registry))

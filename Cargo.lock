@@ -872,8 +872,13 @@ dependencies = [
 name = "camerata-orchestrator-core"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
+ "async-trait",
  "camerata-gateway",
+ "chrono",
  "regex",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

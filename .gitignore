@@ -19,6 +19,14 @@ build/
 !.env.example
 *.local
 secrets.*
+# `secrets.*` above is meant for actual secret dumps (secrets.json/.yaml/.env-ish
+# files), but as an unanchored glob it ALSO matched Rust source modules named
+# `secrets.rs` (e.g. `crates/orchestrator/src/secrets.rs`, a real detector/scrubber
+# module, not a secret). That silently dropped the file from a real commit
+# (fa37fb0) — `git add` skipped it with no error, the commit landed missing the
+# file, and `cargo check` broke for the next checkout. Un-ignore Rust source
+# specifically so this class of silent data loss can't recur.
+!**/secrets.rs
 
 # Persistence store (local SQLite / flat-file Story spine)
 *.sqlite
