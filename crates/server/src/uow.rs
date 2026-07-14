@@ -1280,7 +1280,16 @@ impl UowStore {
                     updated = self.get_or_create(story_id);
                 }
                 Ok(_) => {
-                    // No-op convention (e.g. living-central-docs): nothing to record.
+                    // Empty result: either an INTENTIONAL no-op (mechanical-minimum) or a
+                    // RECOGNIZED-BUT-UNIMPLEMENTED convention (living-central-docs /
+                    // adr-per-change). For the latter, record an honest history line so
+                    // sign-off never silently claims documentation was handled when the hook
+                    // emitted nothing (PROC-STORY-DOCS-1). Intentional no-ops record nothing.
+                    if let Some(notice) = hook.unimplemented_notice() {
+                        self.append_history(story_id, "story_docs", &notice);
+                        // Re-read so the returned UoW reflects the honest history entry.
+                        updated = self.get_or_create(story_id);
+                    }
                 }
                 Err(e) => {
                     // Hook failure is non-fatal: the sign-off is already persisted.
@@ -2854,6 +2863,50 @@ mod post_story_hook_tests {
         assert!(
             !uow.history.iter().any(|h| h.kind == "story_docs"),
             "no story_docs history without a hook"
+        );
+    }
+
+    #[test]
+    fn sign_off_under_unimplemented_convention_records_honest_history() {
+        let dir = tempfile::tempdir().unwrap();
+        // living-central-docs is recognized but NOT yet implemented — the hook no-ops.
+        let emitter = Arc::new(StoryDocEmitter::new(DocConvention::LivingCentralDocs));
+        let store = UowStore::new()
+            .with_story_doc_hook(emitter)
+            .with_workspace_root(dir.path().to_path_buf());
+
+        store.set_decisions("CAM-H3", vec![approved_decision("CAM-H3", "auth")]);
+        let uow = store.sign_off("CAM-H3", "zach", "run-1", None);
+
+        // No files were emitted (the convention is unimplemented).
+        assert!(
+            !StoryDocEmitter::technical_path(dir.path(), "CAM-H3").exists(),
+            "an unimplemented convention must not write files"
+        );
+        // But the sign-off records an HONEST history line saying so — never silent.
+        assert!(
+            uow.history.iter().any(|h| h.kind == "story_docs"
+                && h.text.contains("not yet implemented")
+                && h.text.contains("living-central-docs")),
+            "an unimplemented convention must record an honest 'not yet implemented' note"
+        );
+    }
+
+    #[test]
+    fn sign_off_under_mechanical_minimum_records_no_docs_history() {
+        let dir = tempfile::tempdir().unwrap();
+        // mechanical-minimum is an INTENTIONAL no-op — it must NOT claim it was unimplemented.
+        let emitter = Arc::new(StoryDocEmitter::new(DocConvention::MechanicalMinimum));
+        let store = UowStore::new()
+            .with_story_doc_hook(emitter)
+            .with_workspace_root(dir.path().to_path_buf());
+
+        store.set_decisions("CAM-H4", vec![approved_decision("CAM-H4", "auth")]);
+        let uow = store.sign_off("CAM-H4", "zach", "run-1", None);
+
+        assert!(
+            !uow.history.iter().any(|h| h.kind == "story_docs"),
+            "an intentional no-op convention records no story_docs history"
         );
     }
 

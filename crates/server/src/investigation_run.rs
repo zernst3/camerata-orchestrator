@@ -51,11 +51,12 @@
 //! # Token-free fallback
 //!
 //! When live mode is off (the default; `CAMERATA_LIVE_BUILD != 1`), no `claude` process
-//! is spawned: the runner records an honest "investigation pending (live mode off)" note
-//! and marks the run AwaitingQa. This keeps CI token-free while the real path is the
-//! operator's, exactly mirroring the development run's scripted/live split. Nothing is
-//! faked: the token-free path emits a clearly-labelled placeholder note, never invented
-//! findings.
+//! can be spawned, so there is no analysis to record. The runner REFUSES honestly: it
+//! records a clearly-labelled `error` event, fails the run, and leaves the UoW
+//! investigation note UNTOUCHED (it never writes a synthetic "pending" note that could be
+//! mistaken for a real artifact). This mirrors the token-free refusals in
+//! `dev_implement_run` / `pr_resolve_run` / `update_branch_run`: nothing is faked and no
+//! real domain state is advanced on a non-live run.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -215,35 +216,35 @@ pub async fn execute_investigation_run(
     let next_seq = || seq.fetch_add(1, Ordering::SeqCst) + 1;
 
     if !live_mode_enabled() {
-        // Token-free default: no agent spawned. Record an honest, clearly-labelled
-        // placeholder so the timeline reflects that investigation was started but the
-        // live agent did not run. No invented findings.
+        // HONESTY GATE (NO placeholders): without a live agent there is no analysis to record, so
+        // we REFUSE rather than write a synthetic "pending" note that masquerades as a real
+        // investigation artifact. Fail the run loudly and leave the UoW investigation note
+        // UNTOUCHED. Mirrors the token-free refusals in dev_implement_run / pr_resolve_run /
+        // update_branch_run.
         runs.push_event(
             &run_id,
             GateEvent {
                 seq: next_seq(),
                 layer: "investigation".to_string(),
-                verdict: "info".to_string(),
+                verdict: "error".to_string(),
                 rule: None,
-                detail: "Investigation started (live mode off): no agent spawned. \
+                detail: "Investigation requires the AI agent, but live mode is off. \
                          Set CAMERATA_LIVE_BUILD=1 to run the real single-agent analysis."
                     .to_string(),
                 content_hash: None,
             },
         );
-        let note = InvestigationArtifact::ai_authored(
-            &story_id,
-            "Investigation pending — live mode is off, so no analysis agent ran. \
-             Enable CAMERATA_LIVE_BUILD=1 and re-run to produce a real investigation note.",
-            chrono::Utc::now(),
-        );
-        uow.set_investigation_note(&note);
         uow.append_history(
             &story_id,
             "note",
-            "Investigation run started (live mode off; placeholder note recorded).",
+            "Investigation run refused: live mode is off (set CAMERATA_LIVE_BUILD=1). No analysis \
+             agent ran and no investigation note was recorded.",
         );
-        runs.set_status(&run_id, RunStatus::AwaitingQa, true);
+        runs.fail_with_reason(
+            &run_id,
+            "Investigation requires the AI agent. Set CAMERATA_LIVE_BUILD=1 to run this analysis."
+                .to_string(),
+        );
         return;
     }
 
@@ -931,9 +932,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn investigation_run_token_free_records_placeholder_note_and_completes() {
-        // Live mode off (default in tests): no agent spawned, honest placeholder note,
-        // run completes to AwaitingQa. This is the CI-safe path.
+    async fn investigation_run_without_live_refuses_and_leaves_note_untouched() {
+        // Live mode off (default in tests): no agent spawned. The run now REFUSES honestly
+        // (Failed) rather than writing a synthetic "pending" note. The UoW investigation note
+        // stays UNTOUCHED. This is the CI-safe path.
         std::env::remove_var("CAMERATA_LIVE_BUILD");
         let runs = RunStore::new();
         let uow = UowStore::new();
@@ -957,13 +959,38 @@ mod tests {
         .await;
 
         let run = runs.get(&run_id).expect("run exists");
-        assert_eq!(run.status, RunStatus::AwaitingQa);
+        // The run FAILS loudly — it does NOT fabricate a completed investigation.
+        assert!(
+            matches!(run.status, RunStatus::Failed { .. }),
+            "a token-free investigation must fail, not complete with a placeholder"
+        );
         assert!(run.done);
-        // The placeholder event is present and clearly labelled as live-mode-off.
+        // An honest error event is present and clearly labelled as live-mode-off.
         assert!(run
             .events
             .iter()
-            .any(|e| e.detail.contains("live mode off")));
+            .any(|e| e.verdict == "error" && e.detail.contains("live mode is off")));
+        // The UoW investigation note was NOT written (no synthetic content).
+        assert!(
+            uow.investigation_note_for("CAM-INV-1").is_none(),
+            "a refused investigation must leave the note untouched"
+        );
+        // The history records the refusal, not a fabricated "note recorded" entry.
+        let uow_state = uow.get_or_create("CAM-INV-1");
+        assert!(
+            uow_state
+                .history
+                .iter()
+                .any(|h| h.text.contains("Investigation run refused")),
+            "the refusal must be recorded honestly in the UoW history"
+        );
+        assert!(
+            !uow_state
+                .history
+                .iter()
+                .any(|h| h.text.contains("placeholder note")),
+            "no placeholder-note history line may be written"
+        );
         // Token-free path posts no clarification.
         assert!(clarifications.for_story("CAM-INV-1").is_empty());
     }
