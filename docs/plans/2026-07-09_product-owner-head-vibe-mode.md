@@ -1,6 +1,69 @@
 # Design: The Product-Owner Head + Confidence-Calibrated Vibe Mode
 
-Status: DESIGN (pre-implementation). Author: Zach + Claude, 2026-07-09.
+Status: SUBSTRATE BUILT, HEAD NOT BUILT. **PAUSED 2026-07-16.** Author: Zach + Claude, 2026-07-09.
+
+---
+
+## STATUS / HANDOFF — paused 2026-07-16
+
+The engines behind the loop are built; the user-facing chat HEAD is not, so this is not yet a
+usable/QA-able experience. Detail:
+
+### Built (the substrate) — on PR #144 (`feat/orchestrator-foundation`)
+- **`crates/preview`** — local `dx serve` live-preview adapter (status parsing + `verify_after_edit`
+  silent-ignore fallback). Spike-proven: RSX hot-patch ~1s, logic rebuild ~4-5s.
+- **Feedback ingestion** — `DefectReport` contract + store + `POST /api/feedback` + list/status +
+  client/CLI/MCP verbs, with fingerprint + client-side dedupe.
+- **`crates/scaffold`** — vetted Dioxus-fullstack **PWA** skeleton that COMPILES (native + wasm);
+  `POST /api/apps` (fit-check -> scaffold -> create+push a private GitHub repo -> register a
+  governed project); default-private single-user access lock; DB-on-demand; auto-capture reporter.
+- **`crates/orchestrator` (camerata-orchestrator-core)**:
+  - **Confidence engine** — effect-signature classifier (A/B/C from what an action touches, NEVER
+    LLM self-report) + calibration store (decisions + outcomes + override-rate query).
+  - **Secret detector/scrubber** — applied at feedback ingest.
+  - **Orchestrator loop, FIRST INCREMENT** — `LivingSpec` (SPEC.md per app) + the change-request
+    turn: interpret via real LLM -> classify -> record decision -> route (A/B drive the real
+    `start_governed_run` unforked; C -> NeedsApproval, never executes; D -> NeedsClarification);
+    honest error on no live LLM (no placeholder). `POST /api/orchestrator/message`.
+- **Hardening (PR #145, `fix/remove-placeholders`)** — removed all production fabrication (the
+  "Run this story" fake dev-cycle + fake SOC-2 evidence, the investigation placeholder, the doc
+  no-ops, scripted resume, silent CI). Everything now functional-or-honest-refusal.
+
+### NOT built (remaining work, priority order)
+1. **The chat HEAD** — the thin, simplified, Bombe-machine-aesthetic chat UI (voice optional) over
+   the endpoints. THE biggest missing piece: it is what turns the substrate into something usable,
+   and it doubles as the general Camerata chatbot (low dial = drive all verbs).
+2. **Deploy Rung-1** — make Azure actually execute (today `AzureWebAppTarget::deploy()` only builds a
+   plan, never runs it). Needed to close the loop's far end.
+3. **Orchestrator loop completion** — new-app-from-a-sentence conversation path; watcher-dependent
+   auto-defect handling; the micro-change lane (skip story/L3 ceremony for Class-B edits); the
+   clarification UX; the delta-triggered design-approval checkpoint (PO language); keep-point undo.
+4. **Usability backlog** (see "Usability backlog" section) — first-5-minute skeleton-first render +
+   narration, the user STOP verb, deploy cost visibility + app gallery, the out-of-band secret-entry
+   field, feedback loop-closure to the user.
+5. **Per-project/tenant secrets** — the credential store is a fixed allowlist today; the vault gap
+   must be filled for app runtime secrets (Azure/Stripe keys) referenced by name.
+6. **Verb-coverage expansion** for the head to drive ALL of Camerata (project create, repo add,
+   scan-with-models) — the "general chatbot" scope.
+
+### To resume
+Build the chat HEAD first (a thin Dioxus surface over `/api/orchestrator/message`, `/api/apps`,
+`/api/feedback`, and the preview), and turn on live mode (`CAMERATA_LIVE_BUILD=1` + an LLM key) so
+the orchestrator turn and the governed fleet actually run. Everything below the head is ready for it.
+
+### Open decisions (carried)
+- Doc-conventions `living-central-docs`/`adr-per-change`: remove from the selectable list (rec) vs
+  implement.
+- `routine.rs::run_now` scripted summary: sweep for consistency vs leave (it fabricates nothing).
+
+### Note: this head IS the general Camerata chatbot
+Not only for simple apps. One chat surface with an abstraction dial: **low dial** = drive all of
+Camerata's existing verbs conversationally ("create this project, add these repos, scan them with
+these models"); **high dial** = vibe mode ("build me an app that does X"). The verbose cockpit stays
+for dashboards; the head is the conversational way to drive the same machinery. Verb coverage
+expands per item 6 above.
+
+---
 
 ## Context and vision
 
