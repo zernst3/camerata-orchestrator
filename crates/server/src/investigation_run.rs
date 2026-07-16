@@ -444,6 +444,12 @@ async fn run_one_investigation_pass(
     let gateway_bin = match locate_gateway_bin() {
         Ok(bin) => bin,
         Err(e) => {
+            // BUG B: a setup failure is a genuine Failed terminal (with the reason attached
+            // to the run AND the UoW history), not a silent AwaitingQa with no note recorded.
+            let reason = format!(
+                "Investigation needs the gateway binary: {e}. Build it with \
+                 `cargo build -p camerata-gateway`, then retry."
+            );
             runs.push_event(
                 &run_id,
                 GateEvent {
@@ -451,14 +457,12 @@ async fn run_one_investigation_pass(
                     layer: "setup".to_string(),
                     verdict: "error".to_string(),
                     rule: None,
-                    detail: format!(
-                        "Investigation needs the gateway binary: {e}. Build it with \
-                         `cargo build -p camerata-gateway`, then retry."
-                    ),
+                    detail: reason.clone(),
                     content_hash: None,
                 },
             );
-            runs.set_status(&run_id, RunStatus::AwaitingQa, true);
+            uow.append_history(&story_id, "note", &format!("Investigation run failed: {reason}"));
+            runs.fail_with_reason(&run_id, reason);
             return;
         }
     };
@@ -469,6 +473,7 @@ async fn run_one_investigation_pass(
     let role = match governed_role("Investigator").await {
         Ok(r) => r,
         Err(e) => {
+            let reason = format!("Could not build the governed investigator role: {e}");
             runs.push_event(
                 &run_id,
                 GateEvent {
@@ -476,11 +481,12 @@ async fn run_one_investigation_pass(
                     layer: "setup".to_string(),
                     verdict: "error".to_string(),
                     rule: None,
-                    detail: format!("Could not build the governed investigator role: {e}"),
+                    detail: reason.clone(),
                     content_hash: None,
                 },
             );
-            runs.set_status(&run_id, RunStatus::AwaitingQa, true);
+            uow.append_history(&story_id, "note", &format!("Investigation run failed: {reason}"));
+            runs.fail_with_reason(&run_id, reason);
             return;
         }
     };
@@ -502,6 +508,7 @@ async fn run_one_investigation_pass(
     let spawn = match prepare_session(&gateway_bin, &role, repo_dir.as_deref(), &read_dirs, None) {
         Ok(s) => s,
         Err(e) => {
+            let reason = format!("Could not prepare the investigation session: {e}");
             runs.push_event(
                 &run_id,
                 GateEvent {
@@ -509,11 +516,12 @@ async fn run_one_investigation_pass(
                     layer: "setup".to_string(),
                     verdict: "error".to_string(),
                     rule: None,
-                    detail: format!("Could not prepare the investigation session: {e}"),
+                    detail: reason.clone(),
                     content_hash: None,
                 },
             );
-            runs.set_status(&run_id, RunStatus::AwaitingQa, true);
+            uow.append_history(&story_id, "note", &format!("Investigation run failed: {reason}"));
+            runs.fail_with_reason(&run_id, reason);
             return;
         }
     };
@@ -568,28 +576,77 @@ async fn run_one_investigation_pass(
         return;
     }
 
+    // Phase 3b: did the agent raise a clarifying question this pass? If so, PAUSE — post
+    // the question into the 3a store (auto-saved), persist the resume context, and park the
+    // run at AwaitingClarification. The agent already STOPped (the question was its last
+    // act), so there is no hung process to long-poll. Only reachable on `Ok` (an error has
+    // no session output to read the question back out of).
+    if agent_result.is_ok() {
+        if let Some(req) = read_first_clarify_request(_session_dir.path()) {
+            pause_run_on_clarification(
+                &runs,
+                &uow,
+                &clarifications,
+                &resume,
+                &run_id,
+                &story_id,
+                &story_title,
+                &story_desc,
+                &model,
+                &task,
+                req,
+                next_seq(),
+            );
+            // spawn is dropped here; _dir (TempDir) removes the session dir automatically.
+            return;
+        }
+    }
+    // _session_dir (TempDir) removes the session dir automatically on drop here — nothing
+    // below this point needs it (the clarify-sink read above was the last use).
+    drop(_session_dir);
+    record_investigation_outcome(&runs, &uow, &run_id, &story_id, agent_result, &next_seq);
+}
+
+/// Record the investigation agent's raw result onto the run + UoW: either a real note +
+/// AwaitingQa, or (BUG B) a genuine `Failed` terminal with a reason — never a silent
+/// AwaitingQa with an empty/missing note. Extracted from [`run_one_investigation_pass`] so
+/// this decision is unit-testable without spawning a real agent (the full pass needs a
+/// working `camerata-gateway` binary + a real `claude` subprocess; this function needs
+/// neither).
+fn record_investigation_outcome(
+    runs: &RunStore,
+    uow: &UowStore,
+    run_id: &str,
+    story_id: &str,
+    agent_result: anyhow::Result<camerata_core::AgentOutcome>,
+    next_seq: &impl Fn() -> usize,
+) {
     match agent_result {
         Ok(outcome) => {
-            // Phase 3b: did the agent raise a clarifying question this pass? If so, PAUSE
-            // — post the question into the 3a store (auto-saved), persist the resume
-            // context, and park the run at AwaitingClarification. The agent already STOPped
-            // (the question was its last act), so there is no hung process to long-poll.
-            if let Some(req) = read_first_clarify_request(_session_dir.path()) {
-                pause_run_on_clarification(
-                    &runs,
-                    &uow,
-                    &clarifications,
-                    &resume,
-                    &run_id,
-                    &story_id,
-                    &story_title,
-                    &story_desc,
-                    &model,
-                    &task,
-                    req,
-                    next_seq(),
+            // BUG B: an agent pass that produced no usable text is NOT a silent success —
+            // recording an empty note and walking to AwaitingQa left the architect staring
+            // at "no note recorded" with no idea whether the run ever actually happened.
+            // Treat "no output" as a genuine failure (LIFECYCLE-2: a failure is not a
+            // success) so the reason surfaces on the empty-state UI and the run is
+            // re-runnable.
+            if outcome.result.trim().is_empty() {
+                let reason =
+                    "The investigation agent completed but produced no analysis note (empty \
+                     output)."
+                        .to_string();
+                runs.push_event(
+                    run_id,
+                    GateEvent {
+                        seq: next_seq(),
+                        layer: "investigation".to_string(),
+                        verdict: "error".to_string(),
+                        rule: None,
+                        detail: format!("Investigation failed: {reason}"),
+                        content_hash: None,
+                    },
                 );
-                // spawn is dropped here; _dir (TempDir) removes the session dir automatically.
+                uow.append_history(story_id, "note", &format!("Investigation run failed: {reason}"));
+                runs.fail_with_reason(run_id, reason);
                 return;
             }
 
@@ -597,18 +654,18 @@ async fn run_one_investigation_pass(
             // This is honest: the note IS the model's output, attributed to the AI,
             // awaiting the architect's review (note.reviewed = false). No synthetic content.
             let note = InvestigationArtifact::ai_authored(
-                &story_id,
+                story_id,
                 outcome.result.clone(),
                 chrono::Utc::now(),
             );
             uow.set_investigation_note(&note);
             uow.append_history(
-                &story_id,
+                story_id,
                 "note",
                 "Investigation agent produced an analysis note (awaiting architect review).",
             );
             runs.push_event(
-                &run_id,
+                run_id,
                 GateEvent {
                     seq: next_seq(),
                     layer: "investigation".to_string(),
@@ -621,30 +678,143 @@ async fn run_one_investigation_pass(
                     content_hash: None,
                 },
             );
+            runs.set_status(run_id, RunStatus::AwaitingQa, true);
         }
         Err(e) => {
+            // BUG B: an agent-run error must be a genuine `Failed` terminal (with the
+            // reason attached) rather than a silent AwaitingQa — previously the error was
+            // only visible as a gate EVENT (buried in a stream the architect may never open)
+            // while the run itself looked like it completed normally with an empty note.
+            let reason = format!("Investigation agent failed: {e}");
             runs.push_event(
-                &run_id,
+                run_id,
                 GateEvent {
                     seq: next_seq(),
                     layer: "investigation".to_string(),
                     verdict: "error".to_string(),
                     rule: None,
-                    detail: format!("Investigation agent failed: {e}"),
+                    detail: reason.clone(),
                     content_hash: None,
                 },
             );
+            uow.append_history(story_id, "note", &format!("Investigation run failed: {reason}"));
+            runs.fail_with_reason(run_id, reason);
         }
     }
-
-    // _session_dir (TempDir) removes the session dir automatically on drop here.
-    drop(_session_dir);
-    runs.set_status(&run_id, RunStatus::AwaitingQa, true);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BUG B: an agent pass that comes back `Ok` but with EMPTY output must be a genuine
+    /// `Failed` terminal (reason attached), never a silent `AwaitingQa` with an empty note.
+    /// Exercises [`record_investigation_outcome`] directly (no real agent/gateway binary
+    /// needed — that would spend real tokens and take real wall-clock time in an
+    /// environment where `camerata-gateway` happens to already be built).
+    #[test]
+    fn record_investigation_outcome_fails_honestly_on_empty_output() {
+        let runs = RunStore::new();
+        let uow = UowStore::new();
+        let run_id = runs.create("CAM-INV-EMPTY", "live", crate::run::RunKind::Watched);
+        let seq = std::sync::atomic::AtomicUsize::new(0);
+        let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+
+        let outcome = camerata_core::AgentOutcome {
+            session_id: "sess-1".to_string(),
+            result: "   \n\t  ".to_string(), // whitespace-only: not a usable note
+            cost_usd: None,
+            denials: Vec::new(),
+        };
+        record_investigation_outcome(&runs, &uow, &run_id, "CAM-INV-EMPTY", Ok(outcome), &next_seq);
+
+        let run = runs.get(&run_id).expect("run exists");
+        assert!(run.done, "a failed run is terminal");
+        match &run.status {
+            RunStatus::Failed { reason } => {
+                assert!(
+                    reason.to_lowercase().contains("no analysis note")
+                        || reason.to_lowercase().contains("empty"),
+                    "reason must explain there was no usable output: {reason}"
+                );
+                assert_eq!(run.failure_reason.as_deref(), Some(reason.as_str()));
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        // No "note recorded" allow-verdict event was pushed — only the failure event.
+        assert!(
+            !run.events.iter().any(|e| e.verdict == "allow"),
+            "empty output must not be recorded as a successful note"
+        );
+        let history = uow.get_or_create("CAM-INV-EMPTY").history;
+        assert!(
+            history.iter().any(|h| h.text.contains("Investigation run failed")),
+            "the failure must be recorded on the UoW history, not just the run's events"
+        );
+    }
+
+    /// BUG B: an agent-run ERROR (the driver itself failed) must ALSO land on a genuine
+    /// `Failed` terminal with the underlying error in the reason — not a silent AwaitingQa.
+    #[test]
+    fn record_investigation_outcome_fails_honestly_on_agent_error() {
+        let runs = RunStore::new();
+        let uow = UowStore::new();
+        let run_id = runs.create("CAM-INV-ERR", "live", crate::run::RunKind::Watched);
+        let seq = std::sync::atomic::AtomicUsize::new(0);
+        let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+
+        let err: anyhow::Result<camerata_core::AgentOutcome> =
+            Err(anyhow::anyhow!("subprocess exited non-zero"));
+        record_investigation_outcome(&runs, &uow, &run_id, "CAM-INV-ERR", err, &next_seq);
+
+        let run = runs.get(&run_id).expect("run exists");
+        assert!(run.done, "a failed run is terminal");
+        match &run.status {
+            RunStatus::Failed { reason } => {
+                assert!(
+                    reason.contains("subprocess exited non-zero"),
+                    "reason must carry the underlying error: {reason}"
+                );
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+        assert!(
+            !run.events.iter().any(|e| e.verdict == "allow"),
+            "an agent error must not be recorded as a successful note"
+        );
+    }
+
+    /// Regression: a real, non-empty note still records normally and completes to
+    /// AwaitingQa (BUG B only changes the empty/error paths).
+    #[test]
+    fn record_investigation_outcome_records_a_real_note_and_completes() {
+        let runs = RunStore::new();
+        let uow = UowStore::new();
+        let run_id = runs.create("CAM-INV-OK", "live", crate::run::RunKind::Watched);
+        let seq = std::sync::atomic::AtomicUsize::new(0);
+        let next_seq = || seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+
+        let outcome = camerata_core::AgentOutcome {
+            session_id: "sess-2".to_string(),
+            result: "A real investigation note with actual findings.".to_string(),
+            cost_usd: Some(0.01),
+            denials: Vec::new(),
+        };
+        record_investigation_outcome(&runs, &uow, &run_id, "CAM-INV-OK", Ok(outcome), &next_seq);
+
+        let run = runs.get(&run_id).expect("run exists");
+        assert_eq!(run.status, RunStatus::AwaitingQa);
+        assert!(run.done);
+        // `UowStore::new()` has no attached artifact store (in-memory tests), so
+        // `investigation_note_for` no-ops either way — assert on the recorded gate event
+        // instead, matching `investigation_run_token_free_records_placeholder_note_and_completes`.
+        assert!(
+            run.events
+                .iter()
+                .any(|e| e.verdict == "allow" && e.detail.contains("Investigation note recorded")),
+            "a real note must be recorded as a successful event"
+        );
+    }
 
     #[test]
     fn investigation_prompt_is_read_oriented_and_names_the_story() {

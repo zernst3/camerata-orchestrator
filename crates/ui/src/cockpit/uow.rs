@@ -2000,6 +2000,16 @@ pub(super) struct InvestigationReviewView {
     pub note: Option<InvestigationNoteView>,
     #[serde(default)]
     pub decisions: Vec<DecisionRecordView>,
+    /// BUG B: set when the MOST RECENT investigation run ended `Failed` — the reason, so
+    /// the empty-state UI can show "Investigation failed: {reason}" instead of a generic
+    /// "no note recorded" message that hides a real error.
+    #[serde(default)]
+    pub last_run_failed_reason: Option<String>,
+    /// BUG B: whether live mode is currently enabled, so the empty state can say precisely
+    /// why there's no real note yet (defaults `false` so an old/stale server response reads
+    /// as "off" rather than silently implying live mode is on).
+    #[serde(default)]
+    pub live_mode_enabled: bool,
 }
 
 /// Fetch the investigation note + decisions for the decisions-review surface.
@@ -2272,7 +2282,7 @@ pub(super) fn GovernedDevPage() -> Element {
                             Some(u) if u.authoring => rsx! {
                                 StoryAuthoringPanel { key: "{u.id}", uow_id: u.id.clone(), uows_refresh, sel }
                             },
-                            Some(u) => rsx! { UowDevControls { key: "{u.id}", uow: u } },
+                            Some(u) => rsx! { UowDevControls { key: "{u.id}", uow: u, uows_refresh } },
                             // The UoW vanished from the list (e.g. between refreshes): fall back.
                             None => rsx! {
                                 p { class: "section-hint", "That Unit of Work is no longer available." }
@@ -3259,7 +3269,14 @@ pub(super) fn StoryAuthoringPanel(
 /// The `GateSelfCheck {}` UI box has been removed from this component (the gateway
 /// enforcement code in cockpit.rs is preserved; only the UI invocation is removed).
 #[component]
-pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
+pub(super) fn UowDevControls(
+    uow: UowListEntry,
+    /// BUG C: the LEFT-NAV UoW list's refresh tick (owned by `GovernedDevPage`). Every
+    /// lifecycle transition + assign action in here also bumps this (in addition to the
+    /// existing detail-only `uow_refresh` below) so the sidebar's status badge + assignee
+    /// label update immediately instead of staying stale until a UoW is next added.
+    uows_refresh: Signal<u32>,
+) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     // The UoW id keys every reused governed-dev endpoint (run, sign-off, UoW panel).
     let uow_key = uow.id.clone();
@@ -3544,6 +3561,7 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                                     let wid = item.read().id.clone();
                                     let login = login.clone();
                                     let toasts = toasts;
+                                    let mut uows_refresh = uows_refresh;
                                     assigning.set(true);
                                     spawn(async move {
                                         match assign_work_item(&wid, &login).await {
@@ -3559,6 +3577,10 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                                                         updated_at: result.updated_at,
                                                     });
                                                 }
+                                                // BUG C: the left-nav card's assignee label
+                                                // reads off the LIST fetch, not this local
+                                                // `item` signal — bump it so it updates too.
+                                                uows_refresh += 1;
                                             }
                                             None => crate::toast::push_toast(
                                                 toasts,
@@ -3711,6 +3733,7 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                         story_id: uow_key.clone(),
                         story_work_item_id: item.read().id.clone(),
                         uow_refresh,
+                        uows_refresh,
                         active_run,
                         models: run_models_snap.clone(),
                         invest_model,
@@ -3722,6 +3745,7 @@ pub(super) fn UowDevControls(uow: UowListEntry) -> Element {
                     DevelopmentPhaseView {
                         story_id: uow_key.clone(),
                         uow_refresh,
+                        uows_refresh,
                         active_run,
                         models: run_models_snap.clone(),
                         dev_strongest,
@@ -3884,11 +3908,16 @@ pub(super) fn IntakePhaseView(
     let mut commenting = use_signal(|| false);
     let mut mention_open = use_signal(|| false);
 
-    // Fetch comments for the story inline display.
+    // Fetch comments for the story inline display. `comments_refresh` (BUG A) is bumped
+    // after a successful "Post comment" below so a newly-added comment (and, on first
+    // pull, any comments already on the issue) actually shows up here instead of only
+    // appearing after an unrelated refresh.
+    let mut comments_refresh = use_signal(|| 0u32);
     let comments_res = {
         let wid = item.read().id.clone();
         use_resource(move || {
             let wid = wid.clone();
+            let _dep = comments_refresh();
             async move { fetch_work_item_comments(&wid).await }
         })
     };
@@ -4324,6 +4353,8 @@ pub(super) fn IntakePhaseView(
                                         crate::toast::ToastKind::Info,
                                         "Comment posted to the issue.".to_string(),
                                     );
+                                    // BUG A: re-fetch so the new comment shows immediately.
+                                    comments_refresh += 1;
                                 }
                                 None => {
                                     crate::toast::push_toast(
@@ -4369,6 +4400,9 @@ pub(super) fn InvestigationPhaseView(
     /// The work item id for board-visible comment posting and comments fetch.
     story_work_item_id: String,
     uow_refresh: Signal<u32>,
+    /// BUG C: the left-nav UoW list's refresh tick — bumped alongside `uow_refresh` after
+    /// "Begin investigation" so the sidebar's status badge updates immediately too.
+    uows_refresh: Signal<u32>,
     active_run: Signal<Option<RunView>>,
     models: Option<AuditModelsResp>,
     invest_model: Signal<String>,
@@ -4426,6 +4460,22 @@ pub(super) fn InvestigationPhaseView(
     let mut invest_comment_body = use_signal(String::new);
     let mut invest_commenting = use_signal(|| false);
     let mut invest_mention_open = use_signal(|| false);
+
+    // BUG A: the Investigation & Refinement phase had NO comments section at all — only
+    // the composer above existed. Fetch + display the work item's comments here (same
+    // `fetch_work_item_comments` + `wi-comments` markup `IntakePhaseView`/`WorkItemDetail`
+    // already use), keyed on the work-item id so it's fetched on mount/pull, and bumped by
+    // `invest_comments_refresh` after a successful post so a NEW comment (and a pulled
+    // story's EXISTING comments) actually show up without a manual page reload.
+    let invest_comments_refresh = use_signal(|| 0u32);
+    let invest_comments_res = {
+        let wid = story_work_item_id.clone();
+        use_resource(move || {
+            let wid = wid.clone();
+            let _dep = invest_comments_refresh();
+            async move { fetch_work_item_comments(&wid).await }
+        })
+    };
 
     // Contract section.
     let mut show_contract = use_signal(|| false);
@@ -4486,6 +4536,7 @@ pub(super) fn InvestigationPhaseView(
                 story_id: story_id.clone(),
                 stage,
                 uow_refresh,
+                uows_refresh,
                 active_run,
                 models: models.clone(),
                 invest_model,
@@ -4502,7 +4553,13 @@ pub(super) fn InvestigationPhaseView(
 
             // Decisions-review surface (Investigating stage)
             if stage == Some(UowStage::Investigating) || stage == Some(UowStage::DecisionsApproved) {
-                DecisionsReviewPanel { story_id: story_id.clone(), uow_refresh }
+                DecisionsReviewPanel {
+                    story_id: story_id.clone(),
+                    uow_refresh,
+                    active_run,
+                    models: models.clone(),
+                    invest_model,
+                }
             }
 
             // ── Clarifications ────────────────────────────────────────────────────
@@ -4627,6 +4684,43 @@ pub(super) fn InvestigationPhaseView(
                 }
             }
 
+            // ── Comments thread (BUG A) ─────────────────────────────────────────────
+            // Same fetch + markup as `IntakePhaseView`/`WorkItemDetail` (`wi-comments`),
+            // so a comment added from Intake OR from here — and a comment already on a
+            // pulled issue — actually shows up in this UoW surface.
+            div { class: "wi-comments",
+                p { class: "wi-comments-h", "Comments" }
+                {
+                    let comments = invest_comments_res.read().clone();
+                    match comments {
+                        None => rsx! { p { class: "section-hint", "Loading comments…" } },
+                        Some(list) if list.is_empty() => rsx! {
+                            p { class: "wi-comments-empty section-hint", "No comments." }
+                        },
+                        Some(list) => rsx! {
+                            for (i , c) in list.into_iter().enumerate() {
+                                div { key: "{i}", class: "wi-comment",
+                                    div { class: "wi-comment-meta",
+                                        span { class: "wi-comment-author", "{c.author}" }
+                                        if !c.created_at.is_empty() {
+                                            span { class: "wi-comment-date", "{c.created_at}" }
+                                        }
+                                    }
+                                    if c.body.is_empty() {
+                                        p { class: "wi-comment-body empty", "(empty comment)" }
+                                    } else {
+                                        div {
+                                            class: "wi-comment-body md chat-turn-text",
+                                            dangerous_inner_html: crate::md::md_to_html(&c.body),
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+            }
+
             // ── Board-visible story comments ───────────────────────────────────────
             div { class: "uow-comment",
                 p { class: "clarify-h", "Add comment to issue" }
@@ -4685,6 +4779,7 @@ pub(super) fn InvestigationPhaseView(
                             let body = invest_comment_body();
                             if body.trim().is_empty() { return; }
                             let toasts = toasts_inv;
+                            let mut invest_comments_refresh = invest_comments_refresh;
                             invest_commenting.set(true);
                             spawn(async move {
                                 match comment_on_work_item(&wid, &body).await {
@@ -4695,6 +4790,9 @@ pub(super) fn InvestigationPhaseView(
                                             crate::toast::ToastKind::Info,
                                             "Comment posted to the issue.".to_string(),
                                         );
+                                        // BUG A: re-fetch so the new comment shows immediately
+                                        // instead of only appearing after an unrelated refresh.
+                                        invest_comments_refresh += 1;
                                     }
                                     None => {
                                         crate::toast::push_toast(
@@ -4813,6 +4911,10 @@ pub(super) fn InvestigationPhaseView(
 pub(super) fn DevelopmentPhaseView(
     story_id: String,
     uow_refresh: Signal<u32>,
+    /// BUG C: the left-nav UoW list's refresh tick — bumped alongside `uow_refresh` when
+    /// Begin Development starts (DecisionsApproved → Development) so the sidebar's status
+    /// badge updates immediately instead of staying stale until a UoW is next added.
+    uows_refresh: Signal<u32>,
     active_run: Signal<Option<RunView>>,
     models: Option<AuditModelsResp>,
     dev_strongest: Signal<String>,
@@ -5118,11 +5220,17 @@ pub(super) fn DevelopmentPhaseView(
                                 };
                                 let skip_l2 = bootstrap_skip_layer2();
                                 let toasts = toasts;
+                                let mut uows_refresh = uows_refresh;
                                 dev_starting.set(true);
                                 spawn(async move {
                                     let _guard = crate::loading::LoadingGuard::new();
                                     match start_dev_run(&sid, &tm, skip_l2).await {
                                         StartRunOutcome::Started(rid) => {
+                                            // BUG C: the server transitions DecisionsApproved →
+                                            // Development immediately, so bump the LEFT-NAV list
+                                            // refresh right away too (mirrors the detail-view
+                                            // `uow_refresh` this run already drives via the poll).
+                                            uows_refresh += 1;
                                             poll_run_to_done(rid, active_run, uow_refresh, Some(toasts)).await
                                         }
                                         StartRunOutcome::Blocked(reason) => crate::toast::push_toast(
@@ -6520,7 +6628,15 @@ pub(super) fn UowPrControl(
 /// to DecisionsApproved. This panel keeps the data model consistent: it always POSTs the
 /// complete decision set the server stores.
 #[component]
-pub(super) fn DecisionsReviewPanel(story_id: String, uow_refresh: Signal<u32>) -> Element {
+pub(super) fn DecisionsReviewPanel(
+    story_id: String,
+    uow_refresh: Signal<u32>,
+    /// BUG B: shared with the parent [`InvestigationPhaseView`] so a re-run started from
+    /// this panel streams into the SAME `AgentActivity` display already shown above it.
+    active_run: Signal<Option<RunView>>,
+    models: Option<AuditModelsResp>,
+    invest_model: Signal<String>,
+) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
 
     // Local refresh tick so an approve/reject/add re-reads without bouncing the whole UoW.
@@ -6548,11 +6664,22 @@ pub(super) fn DecisionsReviewPanel(story_id: String, uow_refresh: Signal<u32>) -
     let all_approved =
         !decisions.is_empty() && decisions.iter().all(|d| d.outcome.is_approved());
 
+    // BUG B: the reason the LAST investigation run failed (if it did) + whether live mode
+    // is on — both come straight off the `/investigation` fetch so this panel can surface
+    // "Investigation failed: {reason}" instead of a silent "no note recorded" gap.
+    let last_run_failed_reason = review.last_run_failed_reason.clone();
+    let live_mode_on = review.live_mode_enabled;
+
     // New-decision composer state.
     let mut new_label = use_signal(String::new);
     let mut new_question = use_signal(String::new);
     let mut new_rationale = use_signal(String::new);
     let mut busy = use_signal(|| false);
+
+    // BUG B: "Re-run investigation" — busy flag for the re-run request, mirroring the
+    // `starting` guard on `UowStepRunControls`' "Begin investigation" (disables the button
+    // + prevents a double-click firing a second overlapping run).
+    let mut rerunning = use_signal(|| false);
 
     rsx! {
         div { class: "uow-decisions-review",
@@ -6561,9 +6688,23 @@ pub(super) fn DecisionsReviewPanel(story_id: String, uow_refresh: Signal<u32>) -
             // ── Investigation note ─────────────────────────────────────────────
             if no_real_output {
                 div { class: "uow-investigation-empty",
-                    p { class: "uow-investigation-empty-h", "Investigation produced no output" }
+                    p { class: "uow-investigation-empty-h",
+                        if let Some(reason) = &last_run_failed_reason {
+                            "Investigation failed: {reason}"
+                        } else {
+                            "Investigation produced no output"
+                        }
+                    }
                     p { class: "section-hint",
-                        "No investigation note has been recorded. Without a live agent (CAMERATA_LIVE_BUILD is off) the run refuses rather than fabricating an analysis — enable CAMERATA_LIVE_BUILD=1 and re-run Begin investigation for a real note. If the run just finished, give it a moment and refresh; otherwise record the decisions below manually to proceed."
+                        if last_run_failed_reason.is_some() {
+                            "The last investigation run did not complete successfully (see the reason above). Use \"Re-run investigation\" below to try again, or record the decisions below manually to proceed."
+                        } else if !live_mode_on {
+                            "Live mode is off, so investigation only records a placeholder instead of a real analysis. Set CAMERATA_LIVE_BUILD=1, then use \"Re-run investigation\" below for a real note — or record the decisions below manually to proceed."
+                        } else if review.note_present {
+                            "The investigation recorded a placeholder instead of a real analysis. Use \"Re-run investigation\" below for a real note — or record the decisions below manually to proceed."
+                        } else {
+                            "No investigation note has been recorded yet. If the run just finished, give it a moment and refresh; otherwise use \"Re-run investigation\" below, or record the decisions below manually to proceed."
+                        }
                     }
                 }
             } else {
@@ -6605,6 +6746,72 @@ pub(super) fn DecisionsReviewPanel(story_id: String, uow_refresh: Signal<u32>) -
                             "Mark investigation reviewed"
                         }
                     }
+                }
+            }
+
+            // ── Re-run investigation (BUG B) ────────────────────────────────────
+            // Always available in this phase — NOT gated on `no_real_output` — so the
+            // architect can re-run any time (a stale/placeholder note, a run that just
+            // failed, or simply wanting a fresh pass), not only when the note is empty.
+            // This is the fix for "the Begin investigation button disappears after the
+            // stage advances past Intake, with no way to re-run."
+            div { class: "uow-step-control uow-rerun-investigation",
+                div { class: "run-control-row",
+                    button {
+                        class: "btn-run",
+                        disabled: rerunning(),
+                        onclick: {
+                            let sid = story_id.clone();
+                            move |_| {
+                                if rerunning() {
+                                    return;
+                                }
+                                rerunning.set(true);
+                                let sid = sid.clone();
+                                let md = invest_model();
+                                let uow_refresh = uow_refresh;
+                                let mut rerunning = rerunning;
+                                let toasts = toasts;
+                                spawn(async move {
+                                    let _guard = crate::loading::LoadingGuard::new();
+                                    match rerun_investigation_run(&sid, &md).await {
+                                        crate::cockpit::BeginInvestigationOutcome::Started(rid) => {
+                                            // `poll_run_to_done` bumps `uow_refresh` itself once the
+                                            // run reaches a terminal state, which re-triggers this
+                                            // panel's `review_res` fetch — no manual bump needed here
+                                            // (unlike Begin investigation, this never changes the
+                                            // UoW's stage, so there's no stale-button risk to guard).
+                                            poll_run_to_done(rid, active_run, uow_refresh, Some(toasts)).await;
+                                        }
+                                        crate::cockpit::BeginInvestigationOutcome::Blocked(reason) => {
+                                            crate::toast::push_toast(
+                                                toasts,
+                                                crate::toast::ToastKind::Warning,
+                                                reason,
+                                            );
+                                        }
+                                        crate::cockpit::BeginInvestigationOutcome::Failed => {
+                                            crate::toast::push_toast(
+                                                toasts,
+                                                crate::toast::ToastKind::Warning,
+                                                "Could not re-run the investigation.".to_string(),
+                                            );
+                                        }
+                                    }
+                                    rerunning.set(false);
+                                });
+                            }
+                        },
+                        if rerunning() {
+                            span { "Re-running\u{2026}" }
+                        } else {
+                            "\u{25b6} Re-run investigation"
+                        }
+                    }
+                    ModelSelect { models: models.clone(), selected: invest_model }
+                }
+                p { class: "section-hint",
+                    "Runs another investigation pass without changing the UoW's stage. Requires live mode (CAMERATA_LIVE_BUILD=1)."
                 }
             }
 
@@ -6869,6 +7076,10 @@ pub(super) fn UowStepRunControls(
     /// spurious "Could not begin the investigation run." 409 toast).
     stage: Option<UowStage>,
     uow_refresh: Signal<u32>,
+    /// BUG C: the left-nav UoW list's refresh tick — bumped alongside `uow_refresh` here so
+    /// the sidebar's status badge (Intake → Investigating) updates immediately instead of
+    /// staying stale until a UoW is next added.
+    uows_refresh: Signal<u32>,
     active_run: Signal<Option<RunView>>,
     models: Option<AuditModelsResp>,
     invest_model: Signal<String>,
@@ -6908,6 +7119,7 @@ pub(super) fn UowStepRunControls(
                                 let sid = sid_begin.clone();
                                 let md = invest_model();
                                 let mut uow_refresh = uow_refresh;
+                                let mut uows_refresh = uows_refresh;
                                 let mut starting = starting;
                                 spawn(async move {
                                     // Loading guard: Bombe machine runs while the investigation is in flight.
@@ -6922,6 +7134,10 @@ pub(super) fn UowStepRunControls(
                                             // this immediate bump the stale Intake button stayed up
                                             // and a second click 409'd. Then stream the run.
                                             uow_refresh += 1;
+                                            // BUG C: also bump the LEFT-NAV list refresh so the
+                                            // sidebar's status badge flips to Investigating now too,
+                                            // not only once a UoW is next added.
+                                            uows_refresh += 1;
                                             poll_run_to_done(rid, active_run, uow_refresh, None).await;
                                         }
                                         // The UoW was not at Intake (e.g. a prior begin already
@@ -6930,6 +7146,7 @@ pub(super) fn UowStepRunControls(
                                         // control replaces the stale "Begin investigation" button.
                                         crate::cockpit::BeginInvestigationOutcome::Blocked(reason) => {
                                             uow_refresh += 1;
+                                            uows_refresh += 1;
                                             crate::toast::push_toast(
                                                 toasts,
                                                 crate::toast::ToastKind::Warning,
@@ -7511,6 +7728,8 @@ mod bff_tests {
                 ),
                 mk("Add index", "", DecisionOutcomeView::Approved),
             ],
+            last_run_failed_reason: None,
+            live_mode_enabled: false,
         };
         let lines = super::approved_decision_lines(&review);
         assert_eq!(lines.len(), 2, "only Approved decisions included");
