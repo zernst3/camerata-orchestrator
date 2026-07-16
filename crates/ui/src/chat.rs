@@ -979,14 +979,15 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
     let catalog_kd = rules_catalog.clone();
     let catalog_btn = rules_catalog;
 
+    // The number of rows the "see more" toggle reveals (uow state, pulled issues, scan
+    // results, selected rules, ruleset) — named so the toggle label can't silently drift
+    // from the actual row count if a row is added/removed below.
+    const CTX_EXTRA_ROWS: usize = 5;
+
     rsx! {
-        // Floating launcher.
+        // Floating launcher — reuses the same amber square FAB as the rest of the app.
         button {
-            style: "position:fixed;bottom:1.5rem;right:1.5rem;z-index:1000;\
-                    width:3rem;height:3rem;border-radius:50%;border:none;\
-                    background:#2563eb;color:#fff;font-size:1.25rem;\
-                    cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.25);\
-                    display:flex;align-items:center;justify-content:center;",
+            class: "chat-fab",
             title: "Camerata assistant (AI)",
             onclick: move |_| open.toggle(),
             if open() { "✕" } else { "💬" }
@@ -994,93 +995,66 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
 
         if open() {
             div {
-                // Background + translucency live in GLOBAL_CSS (.research-chat-panel) — inline
-                // backdrop-filter rendered opaque in the wry webview, and a global rule reliably
-                // applies (it is the same path the terminal's .term-panel uses).
-                class: "research-chat-panel",
-                // Translucency is INLINE rgba (NO backdrop-filter — that rendered opaque in wry and
-                // also masked earlier alpha changes). Inline styles demonstrably apply here (the
-                // panel is positioned/sized/clipped exactly per this string); the class is a backup.
-                style: "position:fixed;bottom:5rem;right:1.5rem;z-index:999;\
-                        width:28rem;max-height:80vh;display:flex;flex-direction:column;\
-                        background:rgba(255,255,255,0.62);\
-                        border:1px solid rgba(226,232,240,0.7);border-radius:.75rem;\
-                        box-shadow:0 8px 32px rgba(0,0,0,.18);overflow:hidden;",
+                // .chat-panel already carries position/size/dark-surface (var(--surface))/
+                // border/shadow — the fixed height (not just max-height) means .chat-log's
+                // flex:1 below resolves against a definite height, so it scrolls reliably
+                // with no inline max-height/!important hack needed.
+                class: "chat-panel",
 
                 // ── header ──────────────────────────────────────────────────
                 div {
-                    style: "display:flex;align-items:center;justify-content:space-between;\
-                            padding:.75rem 1rem;border-bottom:1px solid rgba(226,232,240,0.6);\
-                            background:rgba(248,250,252,0.9);",
-                    span {
-                        style: "font-weight:600;font-size:.95rem;color:#1e293b;",
-                        "Camerata assistant"
-                    }
-                    div {
-                        style: "display:flex;align-items:center;gap:.5rem;",
-                        select {
-                            style: "font-size:.8rem;padding:.2rem .4rem;border:1px solid #cbd5e1;\
-                                    border-radius:.25rem;background:#fff;color:#334155;",
-                            value: "{model}",
-                            onchange: move |e| {
-                                let chosen = e.value();
-                                model.set(chosen.clone());
-                                // Mark a manual choice so the seeding effect stops re-applying
-                                // the app-level value over the user's selection this session.
-                                user_override.set(true);
-                                // Persist the choice as the app-level (cross-project) chat model.
-                                spawn(async move {
-                                    save_app_chat_model(&chosen).await;
-                                });
-                            },
-                            // Resilient: chat_model_groups ALWAYS yields at least the current
-                            // model, so this selector can never render empty/invisible (the
-                            // recurring "model selector disappeared" bug). Guarded by the
-                            // chat_model_groups_* unit tests.
-                            for (group_label , opts) in chat_model_groups(&models, &model()).into_iter() {
-                                optgroup { label: "{group_label}",
-                                    for opt in opts.into_iter() {
-                                        option { key: "{opt.id}", value: "{opt.id}", "{opt.label}" }
-                                    }
+                    class: "chat-head",
+                    span { class: "chat-title", "Camerata assistant" }
+                    select {
+                        class: "chat-model",
+                        value: "{model}",
+                        onchange: move |e| {
+                            let chosen = e.value();
+                            model.set(chosen.clone());
+                            // Mark a manual choice so the seeding effect stops re-applying
+                            // the app-level value over the user's selection this session.
+                            user_override.set(true);
+                            // Persist the choice as the app-level (cross-project) chat model.
+                            spawn(async move {
+                                save_app_chat_model(&chosen).await;
+                            });
+                        },
+                        // Resilient: chat_model_groups ALWAYS yields at least the current
+                        // model, so this selector can never render empty/invisible (the
+                        // recurring "model selector disappeared" bug). Guarded by the
+                        // chat_model_groups_* unit tests.
+                        for (group_label , opts) in chat_model_groups(&models, &model()).into_iter() {
+                            optgroup { label: "{group_label}",
+                                for opt in opts.into_iter() {
+                                    option { key: "{opt.id}", value: "{opt.id}", "{opt.label}" }
                                 }
                             }
                         }
-                        if !backend.is_empty() {
-                            span {
-                                style: "font-size:.7rem;color:#64748b;background:#f1f5f9;\
-                                        padding:.1rem .4rem;border-radius:.2rem;",
-                                "{backend}"
-                            }
-                        }
+                    }
+                    if !backend.is_empty() {
+                        span { class: "chat-backend", "{backend}" }
                     }
                 }
 
                 // ── "what this assistant can see" affordance ─────────────
                 div {
-                    style: "padding:.5rem 1rem;border-bottom:1px solid #e2e8f0;\
-                            background:rgba(240,249,255,0.9);font-size:.75rem;color:#0369a1;",
-                    div {
-                        style: "font-weight:600;margin-bottom:.2rem;",
-                        "What this assistant can see:"
-                    }
-                    div { style: "display:flex;flex-direction:column;gap:.1rem;",
-                        div {
-                            style: "display:flex;align-items:center;gap:.4rem;",
-                            span { style: "color:#0284c7;", "●" }
+                    class: "chat-context",
+                    div { class: "chat-context-title", "What this assistant can see:" }
+                    div { class: "chat-context-list",
+                        div { class: "chat-context-row",
+                            span { class: "chat-context-dot on", "●" }
                             span { "Technical reference (docs/TECHNICAL.md)" }
                         }
-                        div {
-                            style: "display:flex;align-items:center;gap:.4rem;",
-                            span { style: "color:#0284c7;", "●" }
+                        div { class: "chat-context-row",
+                            span { class: "chat-context-dot on", "●" }
                             span { "User guide (docs/USER_GUIDE.md)" }
                         }
-                        div {
-                            style: "display:flex;align-items:center;gap:.4rem;",
+                        div { class: "chat-context-row",
                             span {
-                                style: if rules_catalog_loaded(&static_prefix_catalog) {
-                                    "color:#16a34a;"
+                                class: if rules_catalog_loaded(&static_prefix_catalog) {
+                                    "chat-context-dot on"
                                 } else {
-                                    "color:#94a3b8;"
+                                    "chat-context-dot"
                                 },
                                 "●"
                             }
@@ -1092,7 +1066,9 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                 }
                             }
                         }
-                        // The rest of the context items collapse behind "see more".
+                        // The rest of the context items collapse behind "see more". Always
+                        // exactly CTX_EXTRA_ROWS rows (uow/pulled-issues/scan/selected-rules/
+                        // ruleset), so the toggle label below can't drift out of sync with them.
                         if ctx_expanded() {
                         {
                             let uow_label = if !uow_snaps.is_empty() {
@@ -1102,12 +1078,11 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                             } else {
                                 "Development state (loading\u{2026})".to_string()
                             };
-                            // Green once resolved (even if empty); grey only while pending.
-                            let uow_dot_style = if uow_resolved { "color:#16a34a;" } else { "color:#94a3b8;" };
+                            // Lit once resolved (even if empty); dim only while pending.
+                            let uow_dot_cls = if uow_resolved { "chat-context-dot on" } else { "chat-context-dot" };
                             rsx! {
-                                div {
-                                    style: "display:flex;align-items:center;gap:.4rem;",
-                                    span { style: "{uow_dot_style}", "\u{25cf}" }
+                                div { class: "chat-context-row",
+                                    span { class: "{uow_dot_cls}", "\u{25cf}" }
                                     span { "{uow_label}" }
                                 }
                             }
@@ -1116,7 +1091,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                         // have been pulled into the session and handed to the assistant.
                         {
                             let pis = props.pulled_issues_section.as_deref().filter(|s| !s.trim().is_empty());
-                            let pis_dot_style = if pis.is_some() { "color:#16a34a;" } else { "color:#94a3b8;" };
+                            let pis_dot_cls = if pis.is_some() { "chat-context-dot on" } else { "chat-context-dot" };
                             let pis_label = if let Some(sec) = pis {
                                 // Count issue lines: an issue spine renders each item on a line
                                 // starting with "#" (e.g. "#42 …") or "- " (Epic/child bullets).
@@ -1134,32 +1109,30 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                 "Pulled issues (none pulled yet)".to_string()
                             };
                             rsx! {
-                                div {
-                                    style: "display:flex;align-items:center;gap:.4rem;",
-                                    span { style: "{pis_dot_style}", "\u{25cf}" }
+                                div { class: "chat-context-row",
+                                    span { class: "{pis_dot_cls}", "\u{25cf}" }
                                     span { "{pis_label}" }
                                 }
                             }
                         }
                         // Layer 3c: scan results indicator — shown when a scan has been run.
                         {
-                            let scan_dot_style = if scan_section.is_some() { "color:#16a34a;" } else { "color:#94a3b8;" };
+                            let scan_dot_cls = if scan_section.is_some() { "chat-context-dot on" } else { "chat-context-dot" };
                             let scan_label = if scan_section.is_some() {
                                 "Scan results (active project, live)"
                             } else {
                                 "Scan results (none yet — run a scan to populate)"
                             };
                             rsx! {
-                                div {
-                                    style: "display:flex;align-items:center;gap:.4rem;",
-                                    span { style: "{scan_dot_style}", "\u{25cf}" }
+                                div { class: "chat-context-row",
+                                    span { class: "{scan_dot_cls}", "\u{25cf}" }
                                     span { "{scan_label}" }
                                 }
                             }
                         }
                         // Layer 3d: selected rules — available pre-scan, from the onboarding draft.
                         {
-                            let sel_dot_style = if selected_rules_section.is_some() { "color:#16a34a;" } else { "color:#94a3b8;" };
+                            let sel_dot_cls = if selected_rules_section.is_some() { "chat-context-dot on" } else { "chat-context-dot" };
                             let sel_label = if let Some(ref sec) = selected_rules_section {
                                 // Extract the count from the first line "Total selected: N rule(s)".
                                 let n = sec
@@ -1174,9 +1147,8 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                 "Selected rules (none yet)".to_string()
                             };
                             rsx! {
-                                div {
-                                    style: "display:flex;align-items:center;gap:.4rem;",
-                                    span { style: "{sel_dot_style}", "\u{25cf}" }
+                                div { class: "chat-context-row",
+                                    span { class: "{sel_dot_cls}", "\u{25cf}" }
                                     span { "{sel_label}" }
                                 }
                             }
@@ -1184,16 +1156,15 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                         // Layer 3e: committed ruleset indicator — present post-onboard,
                         // once the project's governing rules have been applied.
                         {
-                            let rs_dot_style = if ruleset_summary.is_some() { "color:#16a34a;" } else { "color:#94a3b8;" };
+                            let rs_dot_cls = if ruleset_summary.is_some() { "chat-context-dot on" } else { "chat-context-dot" };
                             let rs_label = if ruleset_summary.is_some() {
                                 "Project ruleset (committed)"
                             } else {
                                 "Project ruleset (none yet)"
                             };
                             rsx! {
-                                div {
-                                    style: "display:flex;align-items:center;gap:.4rem;",
-                                    span { style: "{rs_dot_style}", "\u{25cf}" }
+                                div { class: "chat-context-row",
+                                    span { class: "{rs_dot_cls}", "\u{25cf}" }
                                     span { "{rs_label}" }
                                 }
                             }
@@ -1203,46 +1174,28 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                         if let Some(ref f) = *active_finding.read() {
                             if !f.rule_id.is_empty() {
                                 div {
-                                    style: "display:flex;align-items:center;gap:.4rem;\
-                                            margin-top:.2rem;padding:.2rem .4rem;\
-                                            background:#fefce8;border-radius:.25rem;\
-                                            border:1px solid #fbbf24;",
-                                    span { style: "color:#d97706;", "◆" }
-                                    span {
-                                        style: "font-weight:500;",
-                                        "Focused finding: "
-                                    }
-                                    span { style: "font-family:monospace;", "{f.rule_id}" }
-                                    span { style: "color:#64748b;", " {f.path}:{f.line}" }
+                                    class: "chat-context-finding",
+                                    span { class: "chat-context-finding-icon", "◆" }
+                                    span { "Focused finding: " }
+                                    span { class: "mono", "{f.rule_id}" }
+                                    span { " {f.path}:{f.line}" }
                                 }
                             }
                         }
                         button {
-                            style: "align-self:flex-start;margin-top:.3rem;background:none;border:none;\
-                                    color:#0369a1;font-size:.72rem;font-weight:600;cursor:pointer;\
-                                    padding:0;text-decoration:underline;",
+                            class: "chat-context-toggle",
                             onclick: move |_| ctx_expanded.toggle(),
-                            if ctx_expanded() { "see less" } else { "see more (5 more)" }
+                            if ctx_expanded() { "see less" } else { "see more ({CTX_EXTRA_ROWS} more)" }
                         }
                     }
                 }
 
                 // ── transcript ──────────────────────────────────────────────
                 div {
-                    // flex/min-height/overflow-y are owned by .research-chat-log (GLOBAL_CSS) — the
-                    // inline style here is LAYOUT ONLY. A leftover inline `min-height:8rem` used to
-                    // win over the class and pin the pane open, which is why it never scrolled.
-                    class: "research-chat-log",
-                    // Scroll is INLINE (max-height + overflow) — the class apparently is not
-                    // applying in the running build, but inline styles on this same element DO
-                    // (the messages lay out per the inline flex/gap/padding here). max-height caps
-                    // the pane so overflow-y engages; the panel still grows to fit short chats.
-                    style: "max-height:55vh;overflow-y:auto;overflow-x:hidden;\
-                            padding:.75rem 1rem;display:flex;flex-direction:column;gap:.5rem;",
+                    class: "chat-log",
                     if turns().is_empty() {
                         p {
-                            style: "color:#94a3b8;font-size:.85rem;text-align:center;\
-                                    margin:auto;",
+                            class: "chat-empty",
                             if active_finding.read().as_ref().map(|f| !f.rule_id.is_empty()).unwrap_or(false) {
                                 "Ask why this finding was flagged, how to fix it, or what the rule means…"
                             } else {
@@ -1253,25 +1206,10 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                     for (i, t) in turns().iter().enumerate() {
                         div {
                             key: "{i}",
-                            // flex:none (flex-shrink:0) is critical: these bubbles are flex items in
-                            // the column transcript, so by default they SHRINK to fit the pane —
-                            // squishing each reply down to a sliver and clipping the body — which is
-                            // why the text vanished and there was "nothing to scroll". Keeping full
-                            // height makes the transcript overflow so overflow-y can actually scroll.
-                            style: if t.role == "you" {
-                                "align-self:flex-end;flex:none;max-width:80%;background:#2563eb;\
-                                 color:#fff;border-radius:.5rem .5rem 0 .5rem;\
-                                 padding:.5rem .75rem;font-size:.875rem;"
-                            } else {
-                                "align-self:flex-start;flex:none;max-width:90%;min-width:0;overflow-x:hidden;\
-                                 background:rgba(241,245,249,0.9);\
-                                 color:#1e293b;border-radius:.5rem .5rem .5rem 0;\
-                                 padding:.5rem .75rem;font-size:.875rem;"
-                            },
+                            class: if t.role == "you" { "chat-turn you" } else { "chat-turn ai" },
                             if t.role == "ai" {
                                 div {
-                                    class: "chat-ai-md",
-                                    style: "line-height:1.55;min-width:0;",
+                                    class: "chat-turn-text md chat-ai-md",
                                     dangerous_inner_html: md_to_html(&t.text)
                                 }
                                 button {
@@ -1294,27 +1232,22 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                                     "+ Add to learnings"
                                 }
                             } else {
-                                "{t.text}"
+                                div { class: "chat-turn-text", "{t.text}" }
                             }
                         }
                     }
                     if sending() {
-                        div {
-                            style: "align-self:flex-start;flex:none;background:rgba(241,245,249,0.9);color:#94a3b8;\
-                                    border-radius:.5rem;padding:.5rem .75rem;font-size:.875rem;",
-                            "thinking…"
+                        div { class: "chat-turn ai",
+                            div { class: "chat-turn-text dim", "thinking…" }
                         }
                     }
                 }
 
                 // ── compose bar ─────────────────────────────────────────────
                 div {
-                    style: "display:flex;gap:.5rem;padding:.75rem 1rem;\
-                            border-top:1px solid rgba(226,232,240,0.6);background:rgba(248,250,252,0.9);",
+                    class: "chat-compose",
                     textarea {
-                        style: "flex:1;resize:none;border:1px solid #cbd5e1;border-radius:.375rem;\
-                                padding:.5rem .75rem;font-size:.875rem;font-family:inherit;\
-                                line-height:1.4;outline:none;background:#fff;color:#1e293b;",
+                        class: "chat-input",
                         rows: "2",
                         placeholder: "Ask anything about Camerata… (Enter to send, Shift+Enter for newline)",
                         value: "{draft}",
@@ -1373,12 +1306,13 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                         oninput: move |e| draft.set(e.value()),
                     }
                     div {
-                        style: "display:flex;flex-direction:column;gap:.25rem;",
+                        class: "chat-send-col",
                         button {
-                            style: "padding:.5rem .875rem;background:#2563eb;color:#fff;\
-                                    border:none;border-radius:.375rem;font-size:.875rem;\
-                                    cursor:pointer;white-space:nowrap;\
-                                    opacity: if sending() || draft().trim().is_empty() { \"0.5\" } else { \"1\" };",
+                            // .chat-send:disabled already dims (opacity .5) + sets cursor:not-allowed —
+                            // the old inline `opacity: if sending() {"0.5"}...` baked the literal Rust
+                            // `if {} else {}` text into the CSS string (no `{}` interpolation), so it
+                            // was never valid CSS and the button never visibly dimmed.
+                            class: "chat-send",
                             disabled: sending() || draft().trim().is_empty(),
                             onclick: {
                                 let catalog_btn2 = catalog_btn.clone();
@@ -1432,9 +1366,7 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                             "Send"
                         }
                         button {
-                            style: "padding:.25rem .5rem;font-size:.75rem;color:#64748b;\
-                                    background:none;border:1px solid #e2e8f0;border-radius:.25rem;\
-                                    cursor:pointer;",
+                            class: "chat-clear-btn",
                             title: "Clear conversation",
                             onclick: move |_| {
                                 turns.write().clear();

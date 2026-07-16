@@ -197,28 +197,30 @@ pub(super) fn CustomRulesTable(
         // Group by domain so custom rules cluster by where they apply; the wrapper
         // collapses every group on mount (consistent with the rest of the rules tables).
         CamerataTable { handle, sort_enabled: true, selection_enabled: true, group_by: vec![ColumnId("domain")] }
-        button {
-            class: "btn-restart",
-            onclick: move |_| {
-                let sel = handle.selected_ids();
-                let names: Vec<String> = sel.iter().filter_map(|id| id_map.get(id).map(|c| c.name.clone())).collect();
-                if names.is_empty() { return; }
-                let pid = project_id.clone();
-                let mut refresh = refresh;
-                spawn(async move {
-                    let mut n = 0;
-                    for name in &names {
-                        if delete_custom_rule(&pid, name).await { n += 1; }
-                    }
-                    if n > 0 {
-                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Deleted {n} custom rule(s)."));
-                        refresh += 1;
-                    } else {
-                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not delete the selected custom rule(s).");
-                    }
-                });
-            },
-            "Delete selected custom rules"
+        div { class: "findings-toolbar",
+            button {
+                class: "btn-restart",
+                onclick: move |_| {
+                    let sel = handle.selected_ids();
+                    let names: Vec<String> = sel.iter().filter_map(|id| id_map.get(id).map(|c| c.name.clone())).collect();
+                    if names.is_empty() { return; }
+                    let pid = project_id.clone();
+                    let mut refresh = refresh;
+                    spawn(async move {
+                        let mut n = 0;
+                        for name in &names {
+                            if delete_custom_rule(&pid, name).await { n += 1; }
+                        }
+                        if n > 0 {
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Deleted {n} custom rule(s)."));
+                            refresh += 1;
+                        } else {
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not delete the selected custom rule(s).");
+                        }
+                    });
+                },
+                "Delete selected custom rules"
+            }
         }
         // Type modality legend: custom rules are always "prose / structured" (free-text
         // directives). The four modalities are defined here so the architect understands
@@ -1630,16 +1632,16 @@ pub(super) fn RulesDetailModalHost(on_option_picked: EventHandler<(String, Strin
                     div { class: "rule-modal-section",
                         span { class: "rule-modal-label", "Sources" }
                         for s in r.sources.iter() {
-                            div { style: "margin:4px 0 8px;",
+                            div { class: "rule-modal-source-row",
                                 a {
                                     href: "{s.url}",
-                                    style: "color:#2563eb; text-decoration:underline; word-break:break-all;",
+                                    class: "rule-modal-source-link",
                                     "{s.title}"
                                 }
                                 if let Some(linter) = s.linter.as_ref().filter(|l| !l.is_empty()) {
-                                    span { style: "color:#666; margin-left:6px;", "[{linter}]" }
+                                    span { class: "rule-modal-source-linter", "[{linter}]" }
                                 }
-                                div { style: "color:#888; font-size:0.85em; word-break:break-all;", "{s.url}" }
+                                div { class: "rule-modal-source-url", "{s.url}" }
                             }
                         }
                     }
@@ -2010,11 +2012,6 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                     span {
                         class: "tier-map-band-desc",
                         "High-throughput work: tests, simple edits."
-                        span {
-                            class: "info-icon",
-                            "\u{24d8}"
-                            span { class: "info-tip", "High-throughput work: tests, simple edits." }
-                        }
                     }
                     div { class: "tier-chain-list",
                         for (i, _model) in fast().iter().enumerate() {
@@ -2110,11 +2107,6 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                     span {
                         class: "tier-map-band-desc",
                         "Most engineering tasks."
-                        span {
-                            class: "info-icon",
-                            "\u{24d8}"
-                            span { class: "info-tip", "Most engineering tasks." }
-                        }
                     }
                     div { class: "tier-chain-list",
                         for (i, _model) in balanced().iter().enumerate() {
@@ -2209,11 +2201,6 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                     span {
                         class: "tier-map-band-desc",
                         "Plans, delegates, reconciles, does the hardest engineering, and is the escalation target when workers get stuck."
-                        span {
-                            class: "info-icon",
-                            "\u{24d8}"
-                            span { class: "info-tip", "Plans, delegates, reconciles, does the hardest engineering, and is the escalation target when workers get stuck." }
-                        }
                     }
                     if let Some(ref m) = models {
                         select {
@@ -3164,64 +3151,69 @@ pub(super) fn RulesView() -> Element {
                             let project_id_cr = p_owned.id.clone();
                             let cr_repo_opts = p_owned.repos.clone();
                             rsx! {
-                                div { class: "routine-create-row",
+                                // Adopts the same .custom-rule-editor/-actions structure the
+                                // scan-side editor uses (rules.rs ~4596), instead of the
+                                // ad-hoc routine-* classes this form used before.
+                                div { class: "custom-rule-editor",
                                     input { class: "addressee-input", placeholder: "name", value: "{cr_name}", oninput: move |e| cr_name.set(e.value()) }
-                                }
-                                // Repo scoping: which repos this custom rule applies to. None checked = all repos.
-                                div { class: "repo-multiselect",
-                                    span { class: "repo-multiselect-label", "Applies to:" }
-                                    if cr_repo_opts.is_empty() {
-                                        span { class: "section-hint", "no repos in this project yet" }
-                                    }
-                                    for repo in cr_repo_opts.iter() {
-                                        {
-                                            let repo = repo.clone();
-                                            let checked = cr_repos().contains(&repo);
-                                            rsx! {
-                                                label { class: "emit-toggle",
-                                                    input {
-                                                        r#type: "checkbox",
-                                                        checked,
-                                                        onchange: move |e| {
-                                                            let mut v = cr_repos();
-                                                            if e.checked() {
-                                                                if !v.contains(&repo) { v.push(repo.clone()); }
-                                                            } else {
-                                                                v.retain(|r| r != &repo);
-                                                            }
-                                                            cr_repos.set(v);
-                                                        },
+                                    // Repo scoping: which repos this custom rule applies to. None checked = all repos.
+                                    div { class: "repo-multiselect",
+                                        span { class: "repo-multiselect-label", "Applies to:" }
+                                        if cr_repo_opts.is_empty() {
+                                            span { class: "section-hint", "no repos in this project yet" }
+                                        }
+                                        for repo in cr_repo_opts.iter() {
+                                            {
+                                                let repo = repo.clone();
+                                                let checked = cr_repos().contains(&repo);
+                                                rsx! {
+                                                    label { class: "emit-toggle",
+                                                        input {
+                                                            r#type: "checkbox",
+                                                            checked,
+                                                            onchange: move |e| {
+                                                                let mut v = cr_repos();
+                                                                if e.checked() {
+                                                                    if !v.contains(&repo) { v.push(repo.clone()); }
+                                                                } else {
+                                                                    v.retain(|r| r != &repo);
+                                                                }
+                                                                cr_repos.set(v);
+                                                            },
+                                                        }
+                                                        "{repo}"
                                                     }
-                                                    "{repo}"
                                                 }
                                             }
                                         }
+                                        if cr_repos().is_empty() {
+                                            span { class: "repo-multiselect-hint", "(all repos)" }
+                                        }
                                     }
-                                    if cr_repos().is_empty() {
-                                        span { class: "repo-multiselect-hint", "(all repos)" }
+                                    textarea { class: "routine-intent-input", rows: "3", placeholder: "the directive the agent should follow…", value: "{cr_body}", oninput: move |e| cr_body.set(e.value()) }
+                                    div { class: "custom-rule-editor-actions",
+                                        button {
+                                            class: "btn-run",
+                                            onclick: move |_| {
+                                                let (name, body, repos) = (cr_name(), cr_body(), cr_repos());
+                                                if name.trim().is_empty() || body.trim().is_empty() { return; }
+                                                let pid = pid_add.clone();
+                                                // Clear the inputs only after a confirmed save so a
+                                                // failed request doesn't silently discard the typed rule.
+                                                spawn(async move {
+                                                    if add_custom_rule(&pid, &name, &body, &repos).await {
+                                                        refresh += 1;
+                                                        cr_name.set(String::new());
+                                                        cr_body.set(String::new());
+                                                        cr_repos.set(Vec::new());
+                                                    } else {
+                                                        crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not save the custom rule.");
+                                                    }
+                                                });
+                                            },
+                                            "Save custom rule"
+                                        }
                                     }
-                                }
-                                textarea { class: "routine-intent-input", rows: "3", placeholder: "the directive the agent should follow…", value: "{cr_body}", oninput: move |e| cr_body.set(e.value()) }
-                                button {
-                                    class: "btn-run",
-                                    onclick: move |_| {
-                                        let (name, body, repos) = (cr_name(), cr_body(), cr_repos());
-                                        if name.trim().is_empty() || body.trim().is_empty() { return; }
-                                        let pid = pid_add.clone();
-                                        // Clear the inputs only after a confirmed save so a
-                                        // failed request doesn't silently discard the typed rule.
-                                        spawn(async move {
-                                            if add_custom_rule(&pid, &name, &body, &repos).await {
-                                                refresh += 1;
-                                                cr_name.set(String::new());
-                                                cr_body.set(String::new());
-                                                cr_repos.set(Vec::new());
-                                            } else {
-                                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, "Could not save the custom rule.");
-                                            }
-                                        });
-                                    },
-                                    "Save custom rule"
                                 }
                                 if !custom_rules.is_empty() {
                                     CustomRulesTable { key: "cr-{refresh()}-{custom_rules.len()}", custom: custom_rules, project_id: project_id_cr, refresh }
@@ -4178,14 +4170,6 @@ pub(super) fn ProposedRulesTable(
                 }
             }
             button {
-                class: "btn-edit-sm",
-                onclick: move |_| {
-                    let csv = rules_csv(&csv_rules);
-                    spawn(async move { let _ = save_csv("camerata-proposed-rules.csv", csv).await; });
-                },
-                "Export CSV"
-            }
-            button {
                 class: "btn-run",
                 disabled: arming() || has_unresolved,
                 title: unresolved_hint.clone(),
@@ -4339,6 +4323,15 @@ pub(super) fn ProposedRulesTable(
                     });
                 },
                 if opening_pr() { "Opening PR…" } else { "Open governance PR" }
+            }
+            // Export CSV goes last, consistently with the FindingsTable toolbar.
+            button {
+                class: "btn-edit-sm",
+                onclick: move |_| {
+                    let csv = rules_csv(&csv_rules);
+                    spawn(async move { let _ = save_csv("camerata-proposed-rules.csv", csv).await; });
+                },
+                "Export CSV"
             }
         }
         p { class: "arm-note",
