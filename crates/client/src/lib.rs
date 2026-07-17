@@ -42,7 +42,17 @@
 //! |---|---|---|
 //! | GET | [`Client::run_events`] | `/api/runs/:id/events` |
 //! | GET | [`Client::recent_events`] | `/api/governance/events` |
+//!
+//! # Product-Owner feedback-loop verbs
+//!
+//! Two verbs over the defect-report ingest surface (auto-capture + click-to-report):
+//!
+//! | Method | [`Client`] fn | Route |
+//! |---|---|---|
+//! | POST | [`Client::report_defect`] | `/api/feedback` |
+//! | GET | [`Client::project_feedback`] | `/api/projects/:id/feedback` |
 
+use camerata_api_types::feedback::DefectReport;
 use camerata_api_types::governance::GovernanceEventDto;
 use camerata_api_types::run::{RunStatusResponse, StartRunRequest, StartRunResponse};
 use camerata_api_types::stories::CanonicalStory;
@@ -232,6 +242,50 @@ impl Client {
     pub async fn recent_events(&self, limit: u32) -> Result<Vec<GovernanceEventDto>, ClientError> {
         self.get_json(&format!("/api/governance/events?limit={limit}"))
             .await
+    }
+
+    /// `POST /api/feedback` — ingest one defect report (Product-Owner feedback loop:
+    /// auto-capture or click-to-report). Returns the assigned row id on success. See
+    /// `crates/server/src/lib.rs::submit_feedback`.
+    ///
+    /// The BFF always answers 200 here (a fail-soft ingest endpoint — see the
+    /// handler's doc comment), so a logical failure (`{"ok": false, "message": "..."}`,
+    /// e.g. no feedback store open server-side) is NOT distinguishable from a
+    /// successful 2xx by status code alone. This maps that case to
+    /// `ClientError::Api { status: 200, body: message }` so callers still get an `Err`
+    /// rather than silently receiving a bogus id.
+    pub async fn report_defect(&self, report: DefectReport) -> Result<i64, ClientError> {
+        #[derive(serde::Deserialize)]
+        struct SubmitFeedbackResponse {
+            ok: bool,
+            id: Option<i64>,
+            message: Option<String>,
+        }
+        let resp: SubmitFeedbackResponse = self.post_json("/api/feedback", &report).await?;
+        if resp.ok {
+            resp.id.ok_or_else(|| ClientError::Api {
+                status: reqwest::StatusCode::OK,
+                body: "server reported ok but omitted the assigned id".to_string(),
+            })
+        } else {
+            Err(ClientError::Api {
+                status: reqwest::StatusCode::OK,
+                body: resp
+                    .message
+                    .unwrap_or_else(|| "feedback ingest failed".to_string()),
+            })
+        }
+    }
+
+    /// `GET /api/projects/:id/feedback` — one project's defect reports, newest first.
+    /// Empty when no feedback store is open server-side. See
+    /// `crates/server/src/lib.rs::project_feedback`.
+    pub async fn project_feedback(&self, project_id: &str) -> Result<Vec<DefectReport>, ClientError> {
+        self.get_json(&format!(
+            "/api/projects/{}/feedback",
+            Self::enc_seg(project_id)
+        ))
+        .await
     }
 }
 
@@ -520,6 +574,141 @@ mod tests {
                     body.contains("run not found"),
                     "body must be preserved verbatim; got: {body}"
                 );
+            }
+            other => panic!("expected ClientError::Api, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn report_defect_posts_the_report_and_decodes_the_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/feedback"))
+            .and(body_json(serde_json::json!({
+                "id": null,
+                "project_id": "proj-1",
+                "source": "auto",
+                "kind": "runtime_error",
+                "title": "TypeError: x is undefined",
+                "description": "",
+                "context": { "route": null, "element": null, "stack": null, "console": null, "extra": {} },
+                "severity": "info",
+                "status": "open",
+                "ts": "2026-07-08T00:00:00Z",
+                "fingerprint": null,
+                "count": 1,
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "id": 7,
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = Client::with_base(server.uri());
+        let mut report = DefectReport::auto(
+            "proj-1",
+            camerata_api_types::feedback::DefectKind::RuntimeError,
+            "TypeError: x is undefined",
+        );
+        // Pin the timestamp so the wiremock body_json matcher is exact.
+        report.ts = "2026-07-08T00:00:00Z".to_string();
+
+        let id = client.report_defect(report).await.expect("must decode 200");
+        assert_eq!(id, 7);
+    }
+
+    #[tokio::test]
+    async fn report_defect_ok_false_maps_to_client_error_api() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/feedback"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": false,
+                "message": "feedback store is not available this session",
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = Client::with_base(server.uri());
+        let report = DefectReport::user(
+            "proj-2",
+            camerata_api_types::feedback::DefectKind::UserReport,
+            "button does nothing",
+        );
+        let err = client
+            .report_defect(report)
+            .await
+            .expect_err("ok:false must surface as an Err, not a fabricated id");
+
+        match err {
+            ClientError::Api { status, body } => {
+                assert_eq!(status, reqwest::StatusCode::OK);
+                assert!(body.contains("feedback store is not available"));
+            }
+            other => panic!("expected ClientError::Api, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn project_feedback_hits_the_id_scoped_path_and_decodes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-1/feedback"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 3,
+                    "project_id": "proj-1",
+                    "source": "user",
+                    "kind": "user_report",
+                    "title": "button does nothing",
+                    "description": "",
+                    "context": { "route": null, "element": null, "stack": null, "console": null, "extra": {} },
+                    "severity": "info",
+                    "status": "open",
+                    "ts": "2026-07-08T00:00:00Z",
+                }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = Client::with_base(server.uri());
+        let reports = client
+            .project_feedback("proj-1")
+            .await
+            .expect("must decode 200");
+
+        assert_eq!(reports.len(), 1);
+        assert_eq!(reports[0].project_id, "proj-1");
+        assert_eq!(reports[0].title, "button does nothing");
+    }
+
+    #[tokio::test]
+    async fn project_feedback_non_2xx_maps_to_client_error_api() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-x/feedback"))
+            .respond_with(
+                ResponseTemplate::new(500)
+                    .set_body_json(serde_json::json!({ "error": "boom" })),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = Client::with_base(server.uri());
+        let err = client
+            .project_feedback("proj-x")
+            .await
+            .expect_err("a 500 must be an Err, not a panic");
+
+        match err {
+            ClientError::Api { status, body } => {
+                assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+                assert!(body.contains("boom"));
             }
             other => panic!("expected ClientError::Api, got {other:?}"),
         }

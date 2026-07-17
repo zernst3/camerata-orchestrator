@@ -1,0 +1,27 @@
+[package]
+name = "camerata-preview"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+version = "0.0.0"
+
+# Local-first `dx serve` live-preview adapter (docs/spikes/2026-07-09_dioxus-live-preview-spike.md).
+# A leaf-ish crate: no camerata-crate deps today, so it can be reused by the server, cli, or
+# a future MCP verb without dragging in the rest of the workspace. Cloud tunneling is a later
+# phase per the design doc; this crate only manages a local subprocess.
+[lints]
+workspace = true
+
+[dependencies]
+# `process` to spawn `dx serve`, `io-util` for the stdout/stderr line readers, `sync` for the
+# watch/broadcast channels PreviewServer exposes, `time` for the inactivity/verify timeouts.
+tokio = { workspace = true, features = ["io-util", "sync", "time"] }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+# Env-var mutation in the dx_bin() resolver tests races under cargo's parallel test threads;
+# serialize them the same way crates/ui/src/server_process.rs does for CAMERATA_SERVER_BIN.
+serial_test = "3"

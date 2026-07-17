@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="{{APP_NAME}} icon">
+  <rect width="128" height="128" rx="28" fill="#0b1220" />
+  <rect x="4" y="4" width="120" height="120" rx="24" fill="none" stroke="#3ba7e6" stroke-width="4" />
+  <text
+    x="64"
+    y="80"
+    text-anchor="middle"
+    font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif"
+    font-size="56"
+    font-weight="700"
+    fill="#e8f1fb"
+  >{{APP_INITIAL}}</text>
+</svg>

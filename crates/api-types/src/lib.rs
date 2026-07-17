@@ -31,11 +31,17 @@
 //! - [`governance`] — Phase H3: a pure-serde mirror of
 //!   `camerata_persistence::GovernanceEvent`'s wire shape, for `GET /api/runs/:id/events`
 //!   and `GET /api/governance/events` (added for `camerata-client`).
+//! - [`feedback`] — the Product-Owner feedback loop's ingest contract: `DefectReport`
+//!   (and its `DefectSource`/`DefectKind`/`DefectSeverity`/`DefectStatus`/`DefectContext`
+//!   sub-shapes), for `POST /api/feedback`, `GET /api/projects/:id/feedback`, and
+//!   `GET /api/feedback/recent`. Unlike `governance`, this is NOT a hand-mirrored DTO —
+//!   `camerata-persistence` depends on this crate and stores `DefectReport` directly.
 //!
 //! Every relocated module's origin re-exports everything below so existing call sites
 //! (`camerata_app_core::uow::X`, `crate::llm::LlmResponse`, etc.) resolve unchanged.
 
 pub mod credentials;
+pub mod feedback;
 pub mod governance;
 pub mod lifecycle;
 pub mod llm;

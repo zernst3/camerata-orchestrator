@@ -1,0 +1,58 @@
+/*
+ * Base stylesheet: design tokens + component styles, plus a reset and the
+ * responsive base layout. This is the ONE file `App` links via
+ * `document::Stylesheet` (src/app.rs) — it pulls in the rest via @import so the
+ * design system stays split into legible, single-purpose files (tokens vs.
+ * components) without the app needing more than one <link>.
+ */
+
+@import url("/static/design/tokens.css");
+@import url("/static/design/components.css");
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+}
+
+#main {
+  min-height: 100vh;
+}
+
+h1,
+h2,
+h3,
+p {
+  font-family: inherit;
+}
+
+a {
+  color: var(--color-accent);
+}
+
+/* Responsive base: the app shell's main column already caps at
+   --content-max-width and centers itself, so mobile just needs tighter edge
+   padding — see .app-shell__main in components.css for the desktop values. */
+@media (max-width: 480px) {
+  .app-shell__header,
+  .app-shell__main {
+    padding-left: var(--space-3);
+    padding-right: var(--space-3);
+  }
+}

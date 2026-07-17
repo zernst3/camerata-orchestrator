@@ -869,17 +869,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "camerata-orchestrator-core"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "camerata-gateway",
+ "chrono",
+ "regex",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "camerata-persistence"
 version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "camerata-api-types",
  "camerata-core",
  "chrono",
  "serde",
  "serde_json",
  "sha2",
  "sqlx",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "camerata-preview"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serial_test",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -901,6 +927,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "camerata-scaffold"
+version = "0.0.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "camerata-server"
 version = "0.0.0"
 dependencies = [
@@ -918,8 +955,10 @@ dependencies = [
  "camerata-intake",
  "camerata-liveness",
  "camerata-llm",
+ "camerata-orchestrator-core",
  "camerata-persistence",
  "camerata-rules",
+ "camerata-scaffold",
  "camerata-worktracker",
  "chrono",
  "dirs",

@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      Left empty deliberately: `dx` appends Dioxus.toml's `web.app.title` into
+      whatever this tag already contains rather than replacing it (verified
+      empirically — a non-empty tag here renders as a visible duplicate, e.g.
+      "{{APP_NAME}}{{APP_NAME}}"). Dioxus.toml is the single source of truth for
+      the title; see its `[web.app]` comment.
+    -->
+    <title></title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="description" content="{{APP_DESCRIPTION}}" />
+    <meta name="theme-color" content="#0b1220" />
+    <link rel="manifest" href="/static/manifest.json" />
+
+    <!-- Mobile PWA meta tags -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="{{APP_NAME}}" />
+    <link rel="apple-touch-icon" href="/static/icon.svg" />
+    <link rel="icon" href="/static/icon.svg" type="image/svg+xml" />
+
+    <!--
+      Auto-capture error reporter (Camerata feedback loop, DefectSource::Auto).
+      Loaded in <head>, before the wasm bundle, so it is listening for
+      window.onerror / unhandledrejection / failed-fetch from the very first tick of
+      hydration. CAMERATA_CAPTURE_URL is a relative path by default (see
+      AppRequirements::capture_url) so it resolves against whatever origin actually
+      serves the app.
+    -->
+    <script>
+      window.CAMERATA_CAPTURE_URL = "{{CAPTURE_URL}}";
+      window.CAMERATA_PROJECT_ID = "{{APP_NAME_SNAKE}}";
+    </script>
+    <script src="/static/error-reporter.js"></script>
+  </head>
+  <body>
+    <div id="main"></div>
+
+    <!-- Register the PWA service worker (offline caching + install prompt). -->
+    <script>
+      if ("serviceWorker" in navigator) {
+        window.addEventListener("load", () => {
+          navigator.serviceWorker
+            .register("/static/service-worker.js")
+            .then((reg) => console.log("ServiceWorker registered:", reg.scope))
+            .catch((err) => console.warn("ServiceWorker registration failed:", err));
+        });
+      }
+    </script>
+  </body>
+</html>

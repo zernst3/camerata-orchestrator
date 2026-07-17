@@ -1,0 +1,190 @@
+/*
+ * Component styles for the design system's primitives (src/components/). Each
+ * component's Rust file wires the markup + class names; every visual decision
+ * (color, radius, spacing) lives here, sourced from tokens.css, so a palette
+ * change propagates everywhere at once.
+ */
+
+/* ---- App shell ------------------------------------------------------------ */
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-shell__header {
+  padding: var(--space-6) var(--space-4) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.app-shell__title {
+  font-size: var(--font-size-xl);
+  font-weight: 700;
+  margin: 0;
+}
+
+.app-shell__subtitle {
+  margin: var(--space-1) 0 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.app-shell__main {
+  flex: 1;
+  width: 100%;
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+  padding: var(--space-6) var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+/* ---- Card ------------------------------------------------------------------- */
+
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.card h2 {
+  margin: 0;
+  font-size: var(--font-size-lg);
+}
+
+.text-muted {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  margin: 0;
+}
+
+.greeting-result {
+  margin: 0;
+  padding: var(--space-3);
+  background: var(--color-surface-raised);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+}
+
+/* ---- Button ------------------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-4);
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  font-size: var(--font-size-base);
+  font-family: var(--font-sans);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color var(--transition-fast), border-color var(--transition-fast),
+    opacity var(--transition-fast);
+}
+
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+.btn--primary {
+  background: var(--color-accent);
+  color: var(--color-accent-contrast);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--color-accent-strong);
+}
+
+.btn--secondary {
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  border-color: var(--color-border);
+}
+
+.btn--secondary:hover:not(:disabled) {
+  border-color: var(--color-accent);
+}
+
+.btn--ghost {
+  background: transparent;
+  color: var(--color-text-muted);
+}
+
+.btn--ghost:hover:not(:disabled) {
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+}
+
+/* ---- Field (label + input) ------------------------------------------------------ */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.field__label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.field__input {
+  font-family: var(--font-sans);
+  font-size: var(--font-size-base);
+  color: var(--color-text);
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  transition: border-color var(--transition-fast);
+}
+
+.field__input::placeholder {
+  color: var(--color-text-faint);
+}
+
+.field__input:focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+/* ---- Access gate (FOLD D: default-private skeleton lock) ----------------------- */
+/* Only rendered when AppRequirements::visibility is Private (the default) — see
+   src/components/access_gate.rs. Harmless, unreferenced CSS in a Public scaffold
+   (that file is omitted entirely, so nothing ever applies the `.access-gate*`
+   classes), kept here unconditionally rather than template-substituted since a
+   few unused selectors cost nothing and this way the stylesheet never drifts out
+   of sync with which visibility was chosen. */
+
+.access-gate {
+  display: flex;
+  min-height: 100vh;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+}
+
+.access-gate .card {
+  width: 100%;
+  max-width: 360px;
+}
+
+.access-gate__error {
+  margin: 0;
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+}

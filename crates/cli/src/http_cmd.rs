@@ -97,6 +97,13 @@ pub async fn handle_recent_events(client: &Client, limit: u32) -> Result<String,
     Ok(to_json_string(&events))
 }
 
+/// `feedback <PROJECT_ID>` — `GET /api/projects/:id/feedback` via
+/// [`Client::project_feedback`].
+pub async fn handle_feedback(client: &Client, project_id: &str) -> Result<String, ClientError> {
+    let reports = client.project_feedback(project_id).await?;
+    Ok(to_json_string(&reports))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -299,6 +306,38 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be JSON");
         assert_eq!(parsed[0]["run_id"], "run-2");
         assert_eq!(parsed[0]["kind"], "gate_deny");
+    }
+
+    #[tokio::test]
+    async fn handle_feedback_hits_the_id_scoped_route() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/projects/proj-1/feedback"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 1,
+                    "project_id": "proj-1",
+                    "source": "user",
+                    "kind": "user_report",
+                    "title": "button does nothing",
+                    "description": "",
+                    "context": { "route": null, "element": null, "stack": null, "console": null, "extra": {} },
+                    "severity": "info",
+                    "status": "open",
+                    "ts": "2026-07-08T00:00:00Z",
+                }
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = Client::with_base(server.uri());
+        let json = handle_feedback(&client, "proj-1")
+            .await
+            .expect("must succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("must be JSON");
+        assert_eq!(parsed[0]["project_id"], "proj-1");
+        assert_eq!(parsed[0]["title"], "button does nothing");
     }
 
     /// A `ClientError` (here: BFF 404) must propagate as `Err`, never a panic and never

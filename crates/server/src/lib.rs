@@ -21,6 +21,10 @@ pub mod dep_audit;
 pub mod clarify;
 pub mod clarify_resume;
 pub mod connections;
+/// `POST /api/apps` (Part 2 of the Rust-fullstack scaffolder): drives
+/// `camerata-scaffold`, creates + pushes the GitHub repo, and registers the
+/// resulting Camerata project. See the module doc comment for the full flow.
+pub mod create_app;
 pub mod decompose;
 pub mod draft;
 pub mod enforcement_ledger;
@@ -42,6 +46,9 @@ pub mod live_fleet;
 pub mod llm;
 pub mod notify;
 pub mod onboard;
+/// `POST /api/orchestrator/message` — the architect-orchestrator's first
+/// functional turn (real LLM + real governed execution seam). See the module doc.
+pub mod orchestrator_message;
 pub mod pr;
 pub mod dev_implement_run;
 pub mod pr_resolve_run;
@@ -102,6 +109,7 @@ use camerata_worktracker::{CanonicalStory, ExternalRef, InMemoryStoryStore, Stor
 
 use crate::clarify::{AnswerReq, Clarification, ClarificationStore, PostClarifyReq};
 use crate::decompose::{to_story, DecompositionStore, Practice, ProposedChild};
+use crate::orchestrator_message::orchestrator_message;
 use crate::provider::ProviderHandle;
 use crate::routine::{CreateRoutineReq, Routine, RoutineStore, SetEnabledReq};
 use crate::run::{execute_run, live_mode_enabled, run_provenance, Run, RunProvenance, RunStore};
@@ -183,6 +191,24 @@ pub struct AppState {
     /// any lifecycle site as of Phase H1 — that instrumentation is a later phase. Use
     /// [`AppState::record_governance`] as the single call-site helper when it lands.
     pub governance_log: Option<Arc<camerata_persistence::GovernanceLog>>,
+    /// The Product-Owner feedback loop's defect-report store (SQLite). Backs
+    /// `POST /api/feedback`, `GET /api/projects/:id/feedback`, and
+    /// `GET /api/feedback/recent`. Opened best-effort in [`AppState::from_env`], same
+    /// fail-soft pattern as `governance_log`: `None` in tests and on open failure — the
+    /// endpoints return `{ ok: false, ... }` / an empty list rather than a 500. Use
+    /// [`AppState::record_defect`] as the single call-site helper.
+    pub feedback_store: Option<Arc<camerata_persistence::FeedbackStore>>,
+    /// The confidence engine's decision + outcome + calibration store (SQLite). Backs
+    /// the Architect orchestrator's `orchestrator_decision` recording (the "measured
+    /// override rate at max dial" moat metric — see
+    /// `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`,
+    /// "Architect-orchestrator design"). Opened best-effort in [`AppState::from_env`],
+    /// same fail-soft pattern as `governance_log`/`feedback_store`: `None` in tests and
+    /// on open failure. NOT YET instrumented at any lifecycle site as of this phase —
+    /// that is the orchestrator LOOP, a later phase; this wires the recording
+    /// substrate. Use [`AppState::record_orchestrator_decision`] as the single
+    /// call-site helper when it lands.
+    pub orchestrator_decisions: Option<Arc<camerata_persistence::OrchestratorDecisionLog>>,
     /// App-wide credential store backed by the OS keychain in production and an
     /// in-memory map in tests.  Never exposes full values over HTTP; handlers call
     /// `.masked()`.  Service code (e.g. [`github_token`]) reads the full value
@@ -238,6 +264,10 @@ impl AppState {
             enforcement_ledger: crate::enforcement_ledger::EnforcementLedger::none(),
             // Tests and in-process runs start without a governance log (no-op; fail-soft).
             governance_log: None,
+            // Tests and in-process runs start without a feedback store (no-op; fail-soft).
+            feedback_store: None,
+            // Tests and in-process runs start without an orchestrator-decision store (no-op; fail-soft).
+            orchestrator_decisions: None,
             // Tests use an in-memory credential store; production uses the OS keychain.
             credential_store: Arc::new(crate::credentials::MemoryCredentialStore::new()),
             // The registry always has the static Claude entries; OpenRouter is empty until
@@ -276,6 +306,77 @@ impl AppState {
         };
         if let Err(e) = log.record(event).await {
             tracing::warn!(error = %e, "failed to record governance event");
+        }
+    }
+
+    /// Record one defect report to the feedback store (Product-Owner feedback loop).
+    /// Fail-soft: `None` when no feedback store is open this session (tests, or an
+    /// open failure at startup) — mirrors [`Self::record_governance`]'s contract.
+    /// Returns the assigned row id on success, logging (and swallowing) a write error.
+    ///
+    /// Does NOT also write a governance-audit row — [`submit_feedback`] does that
+    /// itself (kind `"defect_reported"`) so the pairing stays visible at the one call
+    /// site that owns both writes, rather than being hidden inside this helper.
+    pub async fn record_defect(
+        &self,
+        report: camerata_api_types::feedback::DefectReport,
+    ) -> Option<i64> {
+        let store = self.feedback_store.as_ref()?;
+        match store.record(report).await {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to record defect report");
+                None
+            }
+        }
+    }
+
+    /// Record one autonomous decision to the confidence engine's decision store, AND
+    /// write a matching `governance_events` row (kind `"orchestrator_decision"`) so
+    /// the unified audit trail carries it alongside every other governed-run event.
+    /// Unlike [`Self::record_defect`] (whose paired governance write lives at the
+    /// `submit_feedback` call site), this helper owns BOTH writes itself — there is no
+    /// separate HTTP ingest endpoint for decisions yet; the orchestrator loop that
+    /// will call this directly is a later phase.
+    ///
+    /// Fail-soft: `None` when no decision store is open this session (tests, or an
+    /// open failure at startup) — mirrors [`Self::record_defect`]'s contract. The
+    /// governance-event write is best-effort on top (via [`Self::record_governance`]),
+    /// so a governance-log outage never blocks the decision itself from being
+    /// recorded.
+    pub async fn record_orchestrator_decision(
+        &self,
+        decision: camerata_persistence::OrchestratorDecision,
+    ) -> Option<i64> {
+        let store = self.orchestrator_decisions.as_ref()?;
+        match store.record_decision(decision.clone()).await {
+            Ok(id) => {
+                // Class C (irreversible) decisions are ALWAYS supposed to be
+                // human-gated before they execute (the dial can never override this —
+                // see the plan doc), so one showing up here at all is notable; every
+                // other class is routine.
+                let severity = if decision.class == "irreversible" { "warn" } else { "info" };
+                let detail = serde_json::to_string(&decision).unwrap_or_default();
+                self.record_governance(
+                    camerata_persistence::GovernanceEvent::new(
+                        decision.run_id.clone(),
+                        "orchestrator_decision",
+                        severity,
+                        "system",
+                    )
+                    .with_reason(format!(
+                        "{} (class {}, confidence {})",
+                        decision.chosen, decision.class, decision.confidence
+                    ))
+                    .with_detail(detail),
+                )
+                .await;
+                Some(id)
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to record orchestrator decision");
+                None
+            }
         }
     }
 
@@ -686,6 +787,64 @@ impl AppState {
                         None
                     }
                 };
+
+                // Product-Owner feedback loop: the defect-report store (auto-capture +
+                // click-to-report ingest). Opened best-effort, same fail-soft pattern as
+                // the governance log above: on open failure, log a warning and leave
+                // `feedback_store` as `None` so startup and every request path is
+                // unaffected (the endpoints degrade to `{ ok: false, ... }` / empty
+                // lists rather than a 500).
+                let feedback_path = dir.join("feedback.db");
+                state.feedback_store = match tokio::task::block_in_place(|| {
+                    handle.block_on(camerata_persistence::FeedbackStore::open(&feedback_path))
+                }) {
+                    Ok(store) => {
+                        tracing::info!(
+                            path = %feedback_path.display(),
+                            "feedback store opened"
+                        );
+                        Some(Arc::new(store))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %feedback_path.display(),
+                            error = %e,
+                            "feedback store could not open; defect reports will not be \
+                             recorded this session"
+                        );
+                        None
+                    }
+                };
+
+                // The confidence engine's decision + calibration store. Opened
+                // best-effort, same fail-soft pattern as the stores above: on open
+                // failure, log a warning and leave `orchestrator_decisions` as `None`
+                // so startup is unaffected (no lifecycle site calls
+                // `record_orchestrator_decision` yet — that instrumentation is the
+                // orchestrator-loop phase; this just wires the plumbing).
+                let orchestrator_decisions_path = dir.join("orchestrator_decisions.db");
+                state.orchestrator_decisions = match tokio::task::block_in_place(|| {
+                    handle.block_on(camerata_persistence::OrchestratorDecisionLog::open(
+                        &orchestrator_decisions_path,
+                    ))
+                }) {
+                    Ok(log) => {
+                        tracing::info!(
+                            path = %orchestrator_decisions_path.display(),
+                            "orchestrator-decision log opened"
+                        );
+                        Some(Arc::new(log))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %orchestrator_decisions_path.display(),
+                            error = %e,
+                            "orchestrator-decision log could not open; decisions will not \
+                             be recorded this session"
+                        );
+                        None
+                    }
+                };
             }
             // Routines persist too, so a scheduled governed run an architect set up
             // survives a restart instead of being lost on every launch.
@@ -759,6 +918,11 @@ pub fn router(state: AppState) -> Router {
         // Governance-event audit trail read path (Phase H3): per-run + cross-run recent.
         .route("/api/runs/:id/events", get(get_run_events))
         .route("/api/governance/events", get(recent_governance_events))
+        // Product-Owner feedback loop: defect-report ingest + read + status update.
+        .route("/api/feedback", post(submit_feedback))
+        .route("/api/projects/:id/feedback", get(project_feedback))
+        .route("/api/feedback/recent", get(recent_feedback))
+        .route("/api/feedback/:id/status", post(update_feedback_status))
         .route(
             "/api/stories/:id/clarifications",
             get(list_clarifications).post(post_clarification),
@@ -769,6 +933,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/clarifications", get(list_open_clarifications))
         .route("/api/projects", get(list_projects).post(create_project))
+        .route("/api/apps", post(create_app))
         .route("/api/projects/import", post(import_project))
         .route(
             "/api/projects/active",
@@ -892,6 +1057,10 @@ pub fn router(state: AppState) -> Router {
         // AI: the model provider seam (CLI locally, Anthropic API in production). The
         // research chat and every AI step call models through this.
         .route("/api/chat", post(chat))
+        // The architect-orchestrator's first functional turn: a change request
+        // against an EXISTING scaffolded project, driven end-to-end (real LLM +
+        // real governed execution seam). See `crate::orchestrator_message`.
+        .route("/api/orchestrator/message", post(orchestrator_message))
         .route("/api/usage", get(usage))
         .route("/api/models", get(list_models))
         .route("/api/models/registry", get(get_model_registry))
@@ -2394,6 +2563,226 @@ async fn recent_governance_events(
     Ok(Json(events))
 }
 
+// ── Product-Owner feedback loop: defect-report ingest + read + status update ───────
+
+/// `POST /api/feedback` — ingest one [`camerata_api_types::feedback::DefectReport`]
+/// (Product-Owner feedback loop: a scaffolded app's auto-capture reporter, or a human's
+/// click-to-report). The server stamps `id`/`ts`/`status` fresh regardless of what the
+/// caller sent (never trust a client to assign its own row id, backdate its own
+/// timestamp, or submit a report already `Resolved`), stores it via
+/// [`AppState::record_defect`], AND records a paired governance-audit row (kind
+/// `"defect_reported"`, `severity` derived from the defect's severity, `actor`
+/// `"system"` for [`DefectSource::Auto`] / `"human"` for [`DefectSource::User`], `reason`
+/// the report's title, `detail` the full stored report as JSON) so the audit trail shows
+/// what was reported and by what/whom — the governance event's `run_id` is the report's
+/// `project_id` (there is no run backing a raw defect report; grouping by project is the
+/// natural browse key here, mirroring how `run_id` groups a run's own events).
+///
+/// Fail-soft: when no feedback store is open this session, responds `{ ok: false,
+/// message }` (200, never a 500) — an ingest endpoint going down must not take the
+/// reporting app down with it. On a genuine write failure (store open, insert failed),
+/// same `{ ok: false, message }` shape.
+/// Compute the ingest-time dedupe fingerprint for a report: a stable hash of `kind` +
+/// the top stack frame (the FIRST line of `context.stack`, trimmed) + `context.route`.
+/// Reuses [`camerata_persistence::content_hash`] (SHA-256, already a dependency of this
+/// crate via `camerata-persistence`) rather than adding a new hashing dependency —
+/// this fingerprint does not need to be cryptographically strong, only stable, and
+/// `content_hash` already is.
+fn compute_feedback_fingerprint(report: &camerata_api_types::feedback::DefectReport) -> String {
+    let top_frame = report
+        .context
+        .stack
+        .as_deref()
+        .and_then(|s| s.lines().next())
+        .unwrap_or("")
+        .trim();
+    let route = report.context.route.as_deref().unwrap_or("");
+    let raw = format!("{}|{}|{}", report.kind.as_str(), top_frame, route);
+    camerata_persistence::content_hash(&raw)
+}
+
+/// `POST /api/feedback` — ingest one defect report (auto-capture or click-to-report).
+///
+/// Fail-soft: when no feedback store is open this session, responds `{ ok: false,
+/// message }` (200, never a 500) — an ingest endpoint going down must not take the
+/// reporting app down with it. On a genuine write failure (store open, insert failed),
+/// same `{ ok: false, message }` shape.
+///
+/// Fingerprint + dedupe fold (the "cheapest-now / most-expensive-later" fold — see
+/// `docs/plans/2026-07-09_product-owner-head-vibe-mode.md`'s usability backlog): when
+/// the client did not already send a `fingerprint`, one is computed here
+/// ([`compute_feedback_fingerprint`]). If a recent OPEN report with the SAME
+/// fingerprint already exists for this project, this occurrence is folded into that
+/// row (`count` incremented) instead of inserting a new one, and NO new
+/// `defect_reported` governance row is written (the governance trail records the
+/// first sighting of a defect, not every repeat of it) — the response still carries
+/// the (existing) `id` and a `deduped: true` flag so a caller can tell the two cases
+/// apart.
+async fn submit_feedback(
+    State(state): State<AppState>,
+    Json(mut report): Json<camerata_api_types::feedback::DefectReport>,
+) -> Json<serde_json::Value> {
+    use camerata_api_types::feedback::{DefectSeverity, DefectSource, DefectStatus};
+
+    report.id = None;
+    report.ts = chrono::Utc::now().to_rfc3339();
+    report.status = DefectStatus::Open;
+    report.count = 1;
+
+    // FOLD E (chat secret-interceptor, applied at the one live free-text ingest
+    // path today): a deployed scaffolded app's auto-capture reporter or a human's
+    // click-to-report can carry a secret straight out of the running app's own
+    // logs (a leaked API key printed to the console, a stack frame that embeds a
+    // connection string). Scrub BEFORE this report is stored or mirrored into the
+    // governance trail — every other free-text context field (`route`, `element`)
+    // is either a URL path or a UI selector, not a place a raw secret realistically
+    // lands, so only `console`/`stack` are scrubbed.
+    if let Some(console) = report.context.console.take() {
+        report.context.console = Some(camerata_orchestrator_core::secrets::scrub(&console).scrubbed);
+    }
+    if let Some(stack) = report.context.stack.take() {
+        report.context.stack = Some(camerata_orchestrator_core::secrets::scrub(&stack).scrubbed);
+    }
+
+    if report.fingerprint.as_deref().unwrap_or("").is_empty() {
+        report.fingerprint = Some(compute_feedback_fingerprint(&report));
+    }
+    // Safe to unwrap: the branch above guarantees `Some` by this point.
+    let fingerprint = report.fingerprint.clone().unwrap_or_default();
+
+    let Some(store) = state.feedback_store.as_ref() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": "feedback store is not available this session",
+        }));
+    };
+
+    match store.bump_fingerprint(&report.project_id, &fingerprint).await {
+        Ok(Some(existing_id)) => {
+            return Json(serde_json::json!({
+                "ok": true,
+                "id": existing_id,
+                "deduped": true,
+            }));
+        }
+        Ok(None) => {
+            // No matching open report — fall through to insert a genuinely new one.
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to check defect-report fingerprint for dedupe");
+            // Fail open on the DEDUPE check specifically: still attempt the insert
+            // below rather than losing the report entirely over a dedupe-lookup error.
+        }
+    }
+
+    match store.record(report.clone()).await {
+        Ok(id) => {
+            let actor = match report.source {
+                DefectSource::Auto => "system",
+                DefectSource::User => "human",
+            };
+            let severity = match report.severity {
+                DefectSeverity::Info => "info",
+                DefectSeverity::Warning => "warn",
+                DefectSeverity::Error | DefectSeverity::Critical => "error",
+            };
+            let mut stamped = report;
+            stamped.id = Some(id);
+            let detail = serde_json::to_string(&stamped).unwrap_or_default();
+            state
+                .record_governance(
+                    camerata_persistence::GovernanceEvent::new(
+                        stamped.project_id.clone(),
+                        "defect_reported",
+                        severity,
+                        actor,
+                    )
+                    .with_reason(stamped.title.clone())
+                    .with_detail(detail),
+                )
+                .await;
+            Json(serde_json::json!({ "ok": true, "id": id }))
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to record defect report");
+            Json(serde_json::json!({
+                "ok": false,
+                "message": format!("failed to record defect report: {e}"),
+            }))
+        }
+    }
+}
+
+/// `GET /api/projects/:id/feedback` — one project's defect reports, newest first.
+/// Returns an empty array — never an error — when no feedback store is open this
+/// session (fail-soft, same contract as [`get_run_events`]).
+async fn project_feedback(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<camerata_api_types::feedback::DefectReport>>, AppError> {
+    let Some(store) = state.feedback_store.as_ref() else {
+        return Ok(Json(Vec::new()));
+    };
+    let reports = store.by_project(&id).await.map_err(|e| AppError(e.into()))?;
+    Ok(Json(reports))
+}
+
+/// Query for `GET /api/feedback/recent`: `?limit=N` caps the page. Defaults to 100,
+/// capped at 1000 (mirrors [`RecentGovernanceEventsQuery`]).
+#[derive(serde::Deserialize)]
+struct RecentFeedbackQuery {
+    limit: Option<u32>,
+}
+
+/// `GET /api/feedback/recent?limit=N` — the `N` most recently recorded defect reports
+/// across ALL projects, newest first. Default `N=100`, capped at 1000. Returns an empty
+/// array — never an error — when no feedback store is open this session (same
+/// fail-soft contract as [`recent_governance_events`]).
+async fn recent_feedback(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<RecentFeedbackQuery>,
+) -> Result<Json<Vec<camerata_api_types::feedback::DefectReport>>, AppError> {
+    let Some(store) = state.feedback_store.as_ref() else {
+        return Ok(Json(Vec::new()));
+    };
+    let limit = i64::from(q.limit.unwrap_or(100).min(1000));
+    let reports = store.recent(limit).await.map_err(|e| AppError(e.into()))?;
+    Ok(Json(reports))
+}
+
+/// Body for `POST /api/feedback/:id/status`.
+#[derive(serde::Deserialize)]
+struct UpdateFeedbackStatusReq {
+    status: camerata_api_types::feedback::DefectStatus,
+}
+
+/// `POST /api/feedback/:id/status` — update one defect report's status (Open ->
+/// Acknowledged -> Resolved, or any direct transition; no state-machine enforcement
+/// here). Fail-soft: `{ ok: false, message }` (200, never a 500) when no feedback store
+/// is open this session, or on a genuine write failure.
+async fn update_feedback_status(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<UpdateFeedbackStatusReq>,
+) -> Json<serde_json::Value> {
+    let Some(store) = state.feedback_store.as_ref() else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": "feedback store is not available this session",
+        }));
+    };
+    match store.set_status(id, req.status).await {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to update defect report status");
+            Json(serde_json::json!({
+                "ok": false,
+                "message": format!("failed to update status: {e}"),
+            }))
+        }
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct SignOffReq {
     /// Who is signing off (the architect's handle/name). Defaults to "architect".
@@ -2741,6 +3130,42 @@ async fn create_project(
     match state.projects.create(&req.name, req.repos) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "could not create project" })),
+    }
+}
+
+/// `POST /api/apps` — Part 2 of the Rust-fullstack scaffolder
+/// (`crate::create_app::run_create_app`). Body is an `AppRequirements`-shaped JSON
+/// document. `FromScratch` returns `{ ok:true, strategy:"from_scratch", reason }`
+/// without touching disk or GitHub; `Skeleton` scaffolds the app, creates + pushes a
+/// private GitHub repo, and registers an already-onboarded Camerata project (with the
+/// two invented rules seeded as CUSTOM rules), returning `{ ok:true,
+/// strategy:"skeleton", path, repo_url, project_id }`. Fail-soft on any error (missing
+/// workspace root, missing GitHub token, a GitHub API failure): `{ ok:false, message
+/// }`, never a 500 — mirrors this crate's other best-effort endpoints.
+///
+/// Builds a REAL `ReqwestTransport` (using whatever GitHub token is configured — an
+/// empty placeholder is harmless when the request turns out to be `FromScratch`,
+/// since that path never calls it) and the real [`crate::create_app::LiveRepoPusher`];
+/// this is a deliberate, explicitly user-invoked side effect (creating a repo), never
+/// triggered implicitly.
+async fn create_app(
+    State(state): State<AppState>,
+    Json(reqs): Json<camerata_scaffold::AppRequirements>,
+) -> Json<serde_json::Value> {
+    let token = state.github_token().unwrap_or_default();
+    let transport = match camerata_worktracker::ReqwestTransport::new(format!("Bearer {token}")) {
+        Ok(t) => t,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "message": format!("failed to build GitHub HTTP client: {e}"),
+            }))
+        }
+    };
+    let pusher = crate::create_app::LiveRepoPusher;
+    match crate::create_app::run_create_app(&state, reqs, &transport, &pusher).await {
+        Ok(body) => Json(body),
+        Err(message) => Json(serde_json::json!({ "ok": false, "message": message })),
     }
 }
 
@@ -15102,6 +15527,711 @@ mod tests {
         assert_eq!(json[1]["run_id"], "run-a");
     }
 
+    // ── Product-Owner feedback loop: defect-report ingest + read + status update ───
+
+    /// Fail-soft: `GET /api/projects/:id/feedback` returns an empty array (200), never
+    /// an error, when no feedback store is open this session.
+    #[tokio::test]
+    async fn project_feedback_returns_empty_array_when_no_feedback_store() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/projects/proj-1/feedback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    /// Fail-soft: `GET /api/feedback/recent` also returns an empty array (200) with no
+    /// feedback store open, same contract as the per-project route.
+    #[tokio::test]
+    async fn recent_feedback_returns_empty_array_when_no_feedback_store() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/feedback/recent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json, serde_json::json!([]));
+    }
+
+    /// Fail-soft: `POST /api/feedback` responds `{ ok: false, message }` (200, never a
+    /// 500) when no feedback store is open this session.
+    #[tokio::test]
+    async fn submit_feedback_reports_ok_false_when_no_feedback_store() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feedback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": "proj-1",
+                            "title": "it broke",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+        assert!(json["message"].is_string());
+    }
+
+    /// FOLD E (chat secret-interceptor, applied at ingest): a report whose
+    /// `context.console`/`context.stack` contains a fake Stripe live key must come
+    /// back scrubbed — the raw secret must never reach the feedback store OR the
+    /// paired governance-audit row's `detail` JSON. Exercises the real
+    /// `submit_feedback` handler end to end (not just `camerata_orchestrator_core::
+    /// secrets::scrub` in isolation, which already has its own unit tests).
+    #[tokio::test]
+    async fn submit_feedback_scrubs_a_secret_in_console_and_stack_before_storing() {
+        let feedback = camerata_persistence::FeedbackStore::open_in_memory()
+            .await
+            .expect("open in-memory feedback store");
+        let governance = camerata_persistence::GovernanceLog::open_in_memory()
+            .await
+            .expect("open in-memory governance log");
+
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.feedback_store = Some(std::sync::Arc::new(feedback));
+        state.governance_log = Some(std::sync::Arc::new(governance));
+        let app = router(state);
+
+        let leaked_key = "sk_live_51H8xyzABCDEFGHIJKLMNOP";
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feedback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": "proj-secret",
+                            "source": "auto",
+                            "kind": "runtime_error",
+                            "title": "Failed request: /api/charge (500)",
+                            "context": {
+                                "route": "/checkout",
+                                "console": format!("Stripe init failed with key {leaked_key}"),
+                                "stack": format!("Error: bad key {leaked_key}\n    at charge (app.js:1:1)"),
+                            },
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let submit_json = body_json(resp).await;
+        assert_eq!(submit_json["ok"], true);
+        let id = submit_json["id"].as_i64().expect("id must be an integer");
+
+        // The stored report (read back via the list route) never carries the raw key.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/projects/proj-secret/feedback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["id"], id);
+        let console = json[0]["context"]["console"].as_str().unwrap();
+        let stack = json[0]["context"]["stack"].as_str().unwrap();
+        assert!(!console.contains(leaked_key), "console still carries the raw key: {console}");
+        assert!(!stack.contains(leaked_key), "stack still carries the raw key: {stack}");
+        assert!(console.contains("{{SECRET:stripe_key_1}}"));
+        assert!(stack.contains("{{SECRET:stripe_key_1}}"));
+        // Untouched context fields (route) still come through unscrubbed.
+        assert_eq!(json[0]["context"]["route"], "/checkout");
+
+        // The paired governance-audit row's `detail` (the full stamped report as
+        // JSON) is likewise scrubbed — the raw key must not land in the audit trail
+        // either.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/runs/proj-secret/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        let detail = json[0]["detail"].as_str().expect("detail must be a string");
+        assert!(!detail.contains(leaked_key), "governance detail still carries the raw key: {detail}");
+        assert!(detail.contains("{{SECRET:stripe_key_1}}"));
+    }
+
+    /// The full ingest round trip with a REAL (in-memory) feedback store attached:
+    /// `POST /api/feedback` stores the report AND writes a paired `defect_reported`
+    /// governance row, `GET /api/projects/:id/feedback` lists it back, `GET
+    /// /api/feedback/recent` surfaces it cross-project, and `POST
+    /// /api/feedback/:id/status` updates its status.
+    #[tokio::test]
+    async fn feedback_routes_submit_store_and_list_with_paired_governance_row() {
+        let feedback = camerata_persistence::FeedbackStore::open_in_memory()
+            .await
+            .expect("open in-memory feedback store");
+        let governance = camerata_persistence::GovernanceLog::open_in_memory()
+            .await
+            .expect("open in-memory governance log");
+
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.feedback_store = Some(std::sync::Arc::new(feedback));
+        state.governance_log = Some(std::sync::Arc::new(governance));
+        let app = router(state);
+
+        // Submit an auto-captured report. Client-supplied id/status are ignored (the
+        // server stamps its own); severity "critical" -> governance "error" severity;
+        // source "auto" -> governance actor "system".
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feedback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "id": 999,
+                            "project_id": "proj-a",
+                            "source": "auto",
+                            "kind": "runtime_error",
+                            "title": "TypeError: x is undefined",
+                            "description": "thrown in render()",
+                            "severity": "critical",
+                            "status": "resolved",
+                            "context": { "route": "/dashboard", "stack": "at foo (app.js:1:1)" },
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let submit_json = body_json(resp).await;
+        assert_eq!(submit_json["ok"], true);
+        let id = submit_json["id"].as_i64().expect("id must be an integer");
+
+        // A second report for a different project, so cross-project `recent` has
+        // something to distinguish from the per-project list.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feedback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({
+                            "project_id": "proj-b",
+                            "source": "user",
+                            "kind": "user_report",
+                            "title": "button does nothing",
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["ok"], true);
+
+        // Per-project list: only proj-a's report, server-stamped id/status (NOT the
+        // client-supplied 999 / "resolved").
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/projects/proj-a/feedback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["id"], id);
+        assert_eq!(json[0]["title"], "TypeError: x is undefined");
+        assert_eq!(json[0]["status"], "open", "server stamps status Open regardless of client input");
+        assert_eq!(json[0]["context"]["route"], "/dashboard");
+
+        // Cross-project recent: both reports, newest (proj-b) first.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/feedback/recent?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 2);
+        assert_eq!(json[0]["project_id"], "proj-b");
+        assert_eq!(json[1]["project_id"], "proj-a");
+
+        // The paired governance row landed: kind defect_reported, actor system
+        // (source=auto), severity error (from "critical"), reason = title, run_id =
+        // project_id, detail decodes back to the stamped report.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/runs/proj-a/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json.as_array().unwrap().len(), 1);
+        assert_eq!(json[0]["kind"], "defect_reported");
+        assert_eq!(json[0]["actor"], "system");
+        assert_eq!(json[0]["severity"], "error");
+        assert_eq!(json[0]["reason"], "TypeError: x is undefined");
+        let detail: serde_json::Value =
+            serde_json::from_str(json[0]["detail"].as_str().expect("detail must be a string"))
+                .expect("detail must decode as JSON");
+        assert_eq!(detail["id"], id);
+        assert_eq!(detail["status"], "open");
+
+        // Status update: Open -> Acknowledged.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/feedback/{id}/status"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "status": "acknowledged" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["ok"], true);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/projects/proj-a/feedback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(json[0]["status"], "acknowledged");
+    }
+
+    // ── fingerprint + dedupe fold (PART C) ──────────────────────────────────
+
+    /// Two reports that share the SAME logical error (same kind, same top stack
+    /// frame, same route) fold into ONE row with `count` incremented, and only the
+    /// FIRST occurrence writes a `defect_reported` governance row — the second is a
+    /// silent dedupe, not a second audit-trail entry.
+    #[tokio::test]
+    async fn submit_feedback_dedupes_same_fingerprint_reports_by_incrementing_count() {
+        let feedback = camerata_persistence::FeedbackStore::open_in_memory()
+            .await
+            .expect("open in-memory feedback store");
+        let governance = camerata_persistence::GovernanceLog::open_in_memory()
+            .await
+            .expect("open in-memory governance log");
+
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.feedback_store = Some(std::sync::Arc::new(feedback));
+        state.governance_log = Some(std::sync::Arc::new(governance));
+        let app = router(state);
+
+        let body = serde_json::json!({
+            "project_id": "proj-storm",
+            "source": "auto",
+            "kind": "runtime_error",
+            "title": "TypeError: x is undefined",
+            "context": { "route": "/dashboard", "stack": "at render (app.js:42:7)\nat foo (app.js:1:1)" },
+        })
+        .to_string();
+
+        // First occurrence: inserted fresh.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feedback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.clone()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let first_json = body_json(resp).await;
+        assert_eq!(first_json["ok"], true);
+        assert!(
+            first_json.get("deduped").is_none(),
+            "first occurrence must not be flagged as deduped"
+        );
+        let id = first_json["id"].as_i64().expect("id must be an integer");
+
+        // Second occurrence: SAME kind/stack-top-frame/route (the render loop repeats
+        // the error). Must fold into the SAME row, not insert a second one.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feedback")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let second_json = body_json(resp).await;
+        assert_eq!(second_json["ok"], true);
+        assert_eq!(second_json["id"], id, "dedupe returns the SAME row id");
+        assert_eq!(second_json["deduped"], true);
+
+        // Exactly one row for this project, with count folded to 2.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/projects/proj-storm/feedback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let reports = json.as_array().unwrap();
+        assert_eq!(reports.len(), 1, "the second occurrence must NOT insert a new row");
+        assert_eq!(reports[0]["id"], id);
+        assert_eq!(reports[0]["count"], 2);
+
+        // Exactly ONE governance row — the duplicate did not write a second one.
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/runs/proj-storm/events")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let events = json.as_array().unwrap();
+        assert_eq!(
+            events.len(),
+            1,
+            "only the FIRST occurrence writes a defect_reported governance row"
+        );
+        assert_eq!(events[0]["kind"], "defect_reported");
+    }
+
+    /// Reports with DIFFERENT fingerprints (different route) do NOT fold together —
+    /// each gets its own row.
+    #[tokio::test]
+    async fn submit_feedback_does_not_dedupe_across_different_routes() {
+        let feedback = camerata_persistence::FeedbackStore::open_in_memory()
+            .await
+            .expect("open in-memory feedback store");
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.feedback_store = Some(std::sync::Arc::new(feedback));
+        let app = router(state);
+
+        for route in ["/dashboard", "/settings"] {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/feedback")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "project_id": "proj-multi",
+                                "source": "auto",
+                                "kind": "runtime_error",
+                                "title": "TypeError: x is undefined",
+                                "context": { "route": route },
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(body_json(resp).await["ok"], true);
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/projects/proj-multi/feedback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        assert_eq!(
+            json.as_array().unwrap().len(),
+            2,
+            "different routes must not fold into one row"
+        );
+    }
+
+    /// A client-supplied `fingerprint` is honored as-is (the server does not
+    /// recompute it), so a client with its OWN dedupe key still folds correctly.
+    #[tokio::test]
+    async fn submit_feedback_honors_client_provided_fingerprint() {
+        let feedback = camerata_persistence::FeedbackStore::open_in_memory()
+            .await
+            .expect("open in-memory feedback store");
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.feedback_store = Some(std::sync::Arc::new(feedback));
+        let app = router(state);
+
+        for _ in 0..2 {
+            let resp = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/feedback")
+                        .header("content-type", "application/json")
+                        .body(Body::from(
+                            serde_json::json!({
+                                "project_id": "proj-client-fp",
+                                "source": "auto",
+                                "kind": "runtime_error",
+                                "title": "boom",
+                                "fingerprint": "client-computed-fp",
+                            })
+                            .to_string(),
+                        ))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            assert_eq!(body_json(resp).await["ok"], true);
+        }
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/projects/proj-client-fp/feedback")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let json = body_json(resp).await;
+        let reports = json.as_array().unwrap();
+        assert_eq!(reports.len(), 1, "client-provided fingerprint must dedupe too");
+        assert_eq!(reports[0]["fingerprint"], "client-computed-fp");
+        assert_eq!(reports[0]["count"], 2);
+    }
+
+    // ── record_orchestrator_decision: the confidence engine's recording substrate ──
+
+    /// `record_orchestrator_decision` records the decision AND a paired
+    /// `orchestrator_decision` governance row, readable back via the existing
+    /// `/api/runs/:id/events` endpoint. Severity is "info" for a routine class.
+    #[tokio::test]
+    async fn record_orchestrator_decision_stores_decision_and_paired_governance_row() {
+        let decisions = camerata_persistence::OrchestratorDecisionLog::open_in_memory()
+            .await
+            .expect("open in-memory decision store");
+        let governance = camerata_persistence::GovernanceLog::open_in_memory()
+            .await
+            .expect("open in-memory governance log");
+
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.orchestrator_decisions = Some(std::sync::Arc::new(decisions));
+        state.governance_log = Some(std::sync::Arc::new(governance));
+
+        let decision = camerata_persistence::OrchestratorDecision::new(
+            "run-1",
+            "mechanically_verified",
+            "high",
+            "picked the vetted default",
+        )
+        .with_alternatives(vec!["ask the human".to_string()])
+        .with_assumption("assumed the default rule option applies");
+
+        let id = state
+            .record_orchestrator_decision(decision)
+            .await
+            .expect("decision store is open, so an id must come back");
+        assert!(id > 0);
+
+        let events = state
+            .governance_log
+            .as_ref()
+            .unwrap()
+            .by_run("run-1")
+            .await
+            .expect("by_run");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, "orchestrator_decision");
+        assert_eq!(events[0].severity, "info");
+        assert_eq!(events[0].actor, "system");
+        assert!(events[0]
+            .reason
+            .as_deref()
+            .unwrap()
+            .contains("picked the vetted default"));
+
+        let calibration = state
+            .orchestrator_decisions
+            .as_ref()
+            .unwrap()
+            .calibration()
+            .await
+            .expect("calibration");
+        assert_eq!(calibration.len(), 1);
+        assert_eq!(calibration[0].class, "mechanically_verified");
+        assert_eq!(calibration[0].total, 1);
+    }
+
+    /// An Irreversible-class decision is notable (Class C is supposed to always be
+    /// human-gated before it executes), so its paired governance row is "warn", not
+    /// "info" — the one severity-mapping branch that differs from the routine case.
+    #[tokio::test]
+    async fn record_orchestrator_decision_uses_warn_severity_for_irreversible_class() {
+        let decisions = camerata_persistence::OrchestratorDecisionLog::open_in_memory()
+            .await
+            .expect("open in-memory decision store");
+        let governance = camerata_persistence::GovernanceLog::open_in_memory()
+            .await
+            .expect("open in-memory governance log");
+
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.orchestrator_decisions = Some(std::sync::Arc::new(decisions));
+        state.governance_log = Some(std::sync::Arc::new(governance));
+
+        let decision =
+            camerata_persistence::OrchestratorDecision::new("run-2", "irreversible", "low", "z");
+        state
+            .record_orchestrator_decision(decision)
+            .await
+            .expect("decision store is open");
+
+        let events = state
+            .governance_log
+            .as_ref()
+            .unwrap()
+            .by_run("run-2")
+            .await
+            .expect("by_run");
+        assert_eq!(events[0].severity, "warn");
+    }
+
+    /// Fail-soft: `None` when no decision store is open this session (mirrors
+    /// `record_defect`'s contract) — no governance row is written either.
+    #[tokio::test]
+    async fn record_orchestrator_decision_returns_none_when_no_decision_store() {
+        let governance = camerata_persistence::GovernanceLog::open_in_memory()
+            .await
+            .expect("open in-memory governance log");
+        let mut state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.governance_log = Some(std::sync::Arc::new(governance));
+
+        let decision =
+            camerata_persistence::OrchestratorDecision::new("run-3", "preview_reversible", "high", "x");
+        let result = state.record_orchestrator_decision(decision).await;
+        assert!(result.is_none());
+
+        let events = state
+            .governance_log
+            .as_ref()
+            .unwrap()
+            .by_run("run-3")
+            .await
+            .expect("by_run");
+        assert!(events.is_empty());
+    }
+
+    /// Fail-soft: `POST /api/feedback/:id/status` responds `{ ok: false, message }`
+    /// (200, never a 500) when no feedback store is open this session.
+    #[tokio::test]
+    async fn update_feedback_status_reports_ok_false_when_no_feedback_store() {
+        let app = router(AppState::new(std::sync::Arc::new(InMemoryStoryStore::new())));
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/feedback/1/status")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::json!({ "status": "resolved" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+        assert!(json["message"].is_string());
+    }
+
     /// ROUTES-7: the AppError constructors carry the right status while keeping the
     /// `{error}` body — the single source of truth all handlers route through.
     #[tokio::test]
@@ -19240,6 +20370,95 @@ mod tests {
         assert!(
             err.contains("GitHub token") || err.contains("no GitHub"),
             "error must mention missing GitHub token, got: {body:?}"
+        );
+    }
+
+    // ── POST /api/apps (create_app, Part 2 of the scaffolder) ──────────────────
+    //
+    // The happy Skeleton path (GitHub mocked, project registered with the two
+    // seeded custom rules, governance event recorded) is covered directly against
+    // `crate::create_app::run_create_app` in `create_app.rs`'s own test module —
+    // this handler is a thin wrapper (build a real transport/pusher, delegate) with
+    // no branching of its own worth re-testing through the HTTP layer. These router
+    // tests cover what IS specific to the HTTP wrapper: the FromScratch short-circuit
+    // and the two fail-soft error paths.
+
+    /// A `FromScratch` target returns the reason immediately, at 200 with `ok:true`
+    /// — never a scaffold, never a GitHub call, even with no workspace root or token
+    /// configured at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_app_from_scratch_target_returns_reason_without_scaffolding() {
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let state = AppState::seeded();
+        let app = router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/apps")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "name": "Music Library",
+                    "description": "",
+                    "target": "desktop",
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["strategy"], "from_scratch");
+        assert!(body["reason"].as_str().unwrap_or("").contains("Desktop"));
+    }
+
+    /// A `Skeleton` (default target) request with no workspace root configured fails
+    /// soft: `ok:false` with a message naming the workspace, never a 500.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_app_skeleton_without_workspace_root_fails_soft() {
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let state = AppState::seeded();
+        let app = router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/apps")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({ "name": "Trip Planner", "description": "" }).to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK, "fail-soft: never a 500");
+        let body = body_json(resp).await;
+        assert_eq!(body["ok"], false);
+        assert!(
+            body["message"].as_str().unwrap_or("").contains("workspace"),
+            "message must name the missing workspace root, got: {body:?}"
+        );
+    }
+
+    /// A `Skeleton` request with a workspace root but no GitHub token fails soft:
+    /// `ok:false` with a message naming the missing token.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn create_app_skeleton_without_github_token_fails_soft() {
+        std::env::remove_var("CAMERATA_GITHUB_TOKEN");
+        let state = AppState::seeded();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        state
+            .settings()
+            .set_workspace_root(Some(tmp.path().to_string_lossy().into_owned()));
+        let app = router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/apps")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({ "name": "Trip Planner", "description": "" }).to_string()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK, "fail-soft: never a 500");
+        let body = body_json(resp).await;
+        assert_eq!(body["ok"], false);
+        assert!(
+            body["message"].as_str().unwrap_or("").contains("GitHub token"),
+            "message must name the missing GitHub token, got: {body:?}"
         );
     }
 

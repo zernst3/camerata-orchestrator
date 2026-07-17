@@ -4,6 +4,11 @@ members = [
     "crates/api-types",   # pure-serde wire-contract leaf crate (Phase A of the DTO extraction); no camerata deps
     "crates/liveness",    # leaf crate: LivenessTracker + mtime probe + HeartbeatFn (no camerata deps)
     "crates/core",        # orchestrator brain: roles, tasks, DAG, coordination (zero model calls)
+    "crates/orchestrator", # package `camerata-orchestrator-core`: the confidence-dial engine —
+                            # effect-signature decision-CLASS classifier (pure, no model self-report).
+                            # Named -core to avoid colliding with the repo/binary name
+                            # "camerata-orchestrator". See docs/plans/2026-07-09_product-owner-head-vibe-mode.md,
+                            # "Architect-orchestrator design (decided 2026-07-10)".
     "crates/app-core",    # framework-agnostic backend app-orchestration (RUST-HEADLESS-CORE-1); no axum dep
     "crates/intake",      # PO-mode: intake form schema + LeadEngineer (architect-abstracted second level)
     "crates/gateway",     # layer-1 real-time governance gate: Rust MCP server (VERIFIED)
@@ -19,12 +24,19 @@ members = [
     "crates/cli",         # binary entrypoint wiring it all together
     "crates/ui",          # Dioxus cockpit (separate process) — the thin rendering ADAPTER
     "crates/ui-core",     # framework-agnostic UI logic/state (RUST-HEADLESS-CORE-1); no dioxus dep
+    "crates/preview",     # local-first `dx serve` live-preview adapter: status parser + process manager + edit-verify fallback (docs/spikes/2026-07-09_dioxus-live-preview-spike.md)
     "crates/worktracker", # WorkItemProvider port: canonical shapes, sync policy, native provider
     "crates/maintenance", # Tier-2 standing post-publish ops agent (upgrades, security, rotation)
     "crates/deploy",          # Tier-2 BYO-infra publish: DeployTarget seam + local + Azure adapter
     "crates/linter-registry", # citation validator: canonical linter rule-id lists + corpus scan report
+    "crates/scaffold",        # Rust-fullstack PWA scaffolder (Part 1): vetted Dioxus-fullstack skeleton + ScaffoldStrategy fit-check seam (docs/plans/2026-07-09_product-owner-head-vibe-mode.md)
     "tools/corpus-verifier",  # MAINTAINER-ONLY repo-governance tool: promote rules grounded -> verified via branch + PR. NOT part of the shipped app; never a dependency of any app crate.
 ]
+# `crates/scaffold/templates/skeleton` is an embedded template tree (its Cargo.toml
+# contains `{{PLACEHOLDER}}` tokens and is `include_str!`'d as data by
+# `crates/scaffold/src/skeleton.rs`, never invoked as a real package) — excluded so
+# it's never mistaken for a workspace member.
+exclude = ["crates/scaffold/templates/skeleton"]
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

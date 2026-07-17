@@ -1,0 +1,51 @@
+[application]
+
+# App (Project) Name
+name = "{{APP_NAME_SNAKE}}"
+
+# Dioxus App Default Platform: this is a fullstack app, served via the `web`
+# platform (the native server binary hosts SSR + the wasm client + server
+# functions — see src/server.rs).
+default_platform = "web"
+
+# `build` & `serve` dist path
+out_dir = "dist"
+
+# resource (assets) file folder
+asset_dir = "assets"
+
+[web.app]
+
+# HTML title tag content. Verified empirically: `dx` unconditionally APPENDS this
+# value into index.html's existing `<title>` element rather than replacing it (with
+# no title configured here, it appends its own fallback, "dioxus | ⛺" — also
+# verified). Since index.html already ships a `<title>` for the real PWA meta tags
+# (manifest link, viewport, theme-color, apple-mobile-web-app-* — see index.html),
+# that tag is left EMPTY (`<title></title>`) and this value is the one that
+# actually ends up on the page.
+title = "{{APP_NAME}}"
+
+[web.watcher]
+
+# when watcher trigger, regenerate the `index.html`
+reload_html = true
+
+# which files or dirs will be watcher monitoring
+watch_path = ["src", "assets"]
+
+# include `assets` in web platform
+[web.resource]
+
+# CSS is loaded at runtime via `document::Stylesheet` in `src/app.rs` (so the design
+# tokens/components stylesheet is part of the SSR'd head, not a static index.html
+# link), so this stays empty.
+style = []
+
+# Javascript code file
+script = []
+
+[web.resource.dev]
+
+# Javascript code file
+# serve: [dev-server] only
+script = []
