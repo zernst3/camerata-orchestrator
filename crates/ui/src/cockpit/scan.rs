@@ -1216,7 +1216,7 @@ pub(super) fn FindingsTable(
             std::sync::Arc::new(
                 move |f: &FindingView, _val: &CellValue| {
                     if f.in_test {
-                        rsx! { span { class: "badge badge-yellow", "Test" } }
+                        rsx! { span { class: "test-flag", "Test" } }
                     } else {
                         match split_needs_review(&f.detail).1 {
                             Some(reason) => {
@@ -1274,8 +1274,11 @@ pub(super) fn FindingsTable(
             // table on the next switch. Backend commit happens later, at Process.
             match triage_view {
                 TriageState::Unresolved => rsx! {
-                    input {
+                    // A small labeled textarea (not a single-line input) — this is a recorded
+                    // justification, same as the waiver reason, so it deserves the same room.
+                    textarea {
                         class: "addressee-input ignore-reason",
+                        rows: "2",
                         placeholder: "reason to ignore (required)",
                         value: "{ignore_reason}",
                         oninput: move |e| ignore_reason.set(e.value()),

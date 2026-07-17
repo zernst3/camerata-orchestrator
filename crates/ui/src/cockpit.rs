@@ -2334,8 +2334,10 @@ fn LoopGuardControl() -> Element {
     let Some(project) = proj else {
         return rsx! {
             div { class: "loop-guard",
-                span { class: "loop-guard-title", "Loop guard" }
-                span { class: "loop-guard-sub", "Create or select a project to configure the bounce-and-revise ceiling." }
+                div { class: "loop-guard-head",
+                    span { class: "loop-guard-title", "Loop guard" }
+                    span { class: "loop-guard-sub", "Create or select a project to configure the bounce-and-revise ceiling." }
+                }
             }
         };
     };
@@ -3087,7 +3089,7 @@ fn DocsView() -> Element {
 
     rsx! {
         div { class: "docs-view",
-            div { class: "docs-tabs",
+            div { class: "chat-mode-toggle",
                 button {
                     class: if tab() == DocsTab::UserGuide { "chat-mode-btn active" } else { "chat-mode-btn" },
                     onclick: move |_| tab.set(DocsTab::UserGuide),

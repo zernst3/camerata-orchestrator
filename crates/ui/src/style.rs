@@ -11,6 +11,9 @@ pub const GLOBAL_CSS: &str = r#"
   --ink:        #f1ede9;   /* --text-main  : warm near-white on dark ground */
   --ink-soft:   #c2b7ad;   /* --text-muted : secondary / labels */
   --ink-faint:  #8c8075;   /* --text-faint : tertiary / hints */
+  /* Alias used by several "muted hint" rules (SOC-2 lens, tier-map hints, info-icon).
+     Without this every one of those renders full --ink (illegible on the dark ground). */
+  --ink-2:      var(--ink-soft);
 
   /* Ground surfaces — dark, slightly warm */
   --paper:      #1a1816;   /* deepest background layer */
@@ -1101,7 +1104,7 @@ html, body {
 .scan-stack { display: flex; gap: 10px; align-items: baseline; font-size: 12px; }
 .scan-stack-repo { font-weight: 700; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .scan-stack-tech { color: var(--ink-soft); }
-.findings-toolbar { display: flex; gap: 8px; margin-bottom: 8px; }
+.findings-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 
 /* Critical (security) row highlight: applied to the whole <tr> via chorale 0.2.3's
    row_class hook (replaces the old per-cell stripe). A red left border + faint red tint
@@ -1341,22 +1344,25 @@ html, body {
 .uow-review-input {
   width: 100%; box-sizing: border-box; resize: vertical; border-radius: 8px;
   border: 1px solid var(--line); padding: 7px 9px; font-size: 12.5px; color: var(--ink);
-  background: rgba(255,255,255,0.7); font-family: inherit;
+  /* Dark field treatment (matches the global textarea/input rule ~4697) — the previous
+     near-white background rendered near-white text on a near-white field (illegible). */
+  background: #11100f; font-family: inherit;
 }
 .uow-review-actions { display: flex; gap: 7px; flex-wrap: wrap; }
 .uow-review-actions button { font-size: 12px; }
 .uow-review-status { font-size: 11.5px; color: var(--ink-faint); font-style: italic; margin: 0; }
 .uow-review-chat-log {
   display: flex; flex-direction: column; gap: 5px; max-height: 180px; overflow-y: auto;
-  padding: 6px; border-radius: 8px; background: rgba(255,255,255,0.5);
+  padding: 6px; border-radius: 8px; background: var(--paper);
 }
 .uow-review-msg { font-size: 12px; line-height: 1.4; padding: 5px 8px; border-radius: 7px; white-space: pre-wrap; }
 .uow-review-msg.user { background: rgba(202,138,4,0.14); color: var(--ink); align-self: flex-end; max-width: 88%; }
-.uow-review-msg.ai { background: rgba(255,255,255,0.85); color: var(--ink); align-self: flex-start; max-width: 88%; }
+/* AI bubble: a subtle amber-wash dark surface (NOT white) so it stays legible on the dark ground. */
+.uow-review-msg.ai { background: var(--surface); border: 1px solid var(--line); color: var(--ink); align-self: flex-start; max-width: 88%; }
 .uow-review-chat { display: flex; gap: 6px; align-items: flex-end; }
 .uow-review-chat-input {
   flex: 1; box-sizing: border-box; resize: vertical; border-radius: 8px; border: 1px solid var(--line);
-  padding: 6px 8px; font-size: 12px; color: var(--ink); background: rgba(255,255,255,0.7); font-family: inherit;
+  padding: 6px 8px; font-size: 12px; color: var(--ink); background: #11100f; font-family: inherit;
 }
 .uow-review-ask { flex: none; font-size: 12px; }
 
@@ -1450,6 +1456,9 @@ html, body {
   flex: none; border-radius: 6px; border: 1px solid var(--line); padding: 6px 8px;
   font-size: 12px; color: var(--ink); background: #11100f;
 }
+/* Inside .mem-edit-modal (a column flex), a bare <select> stretches to the full modal
+   width by default (align-items:stretch); it should size to content like the button row. */
+.mem-edit-modal select { align-self: flex-start; }
 /* Project-memory view/edit modal (reuses .rule-modal-overlay + .rule-modal). */
 .mem-edit-modal { max-width: 520px; display: flex; flex-direction: column; gap: 10px; }
 .mem-edit-text {
@@ -1578,8 +1587,9 @@ html, body {
   padding: 40px; background: transparent;
 }
 
-/* Cockpit internal nav: control surface vs routines (both architect tools). */
-.cockpit-nav { display: flex; gap: 4px; padding: 7px 16px; background: var(--paper); border-bottom: 1px solid var(--line); }
+/* Cockpit internal nav: control surface vs routines (both architect tools). Nine tabs +
+   the usage meter don't fit ~1000px; scroll horizontally rather than overflow/clip. */
+.cockpit-nav { display: flex; gap: 4px; padding: 7px 16px; background: var(--paper); border-bottom: 1px solid var(--line); overflow-x: auto; }
 .cockpit-nav-tab {
   border: none; background: transparent; color: var(--ink-soft);
   font-size: 12.5px; font-weight: 700; padding: 5px 13px; border-radius: 7px; cursor: pointer;
@@ -1651,6 +1661,9 @@ html, body {
    secondary buttons beside it (the margin is for standalone primary buttons). */
 .findings-toolbar { align-items: center; }
 .findings-toolbar .btn-run { margin-bottom: 0; }
+/* Normalize control heights: .btn-restart/.btn-edit-sm are a size smaller everywhere else,
+   which reads as mismatched next to .btn-run in this toolbar specifically. */
+.findings-toolbar .btn-restart, .findings-toolbar .btn-edit-sm { padding: 9px 16px; font-size: 13px; }
 /* The "Open" primary in a project card sits in a center-aligned action row beside the
    Export/Delete secondaries. Drop the standalone bottom margin and match their padding
    so all three buttons share the same baseline/height. */
@@ -1742,6 +1755,9 @@ html, body {
   font: inherit; font-size: 12.5px; padding: 5px 10px; border-radius: 8px; min-width: 160px;
 }
 .addressee-input:focus { outline: none; border-color: var(--accent); }
+/* The findings-table "reason to ignore" box is a recorded justification — same treatment
+   as .uow-waive-reason (a small labeled textarea), not a cramped single-line input. */
+textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-family: inherit; }
 .clarify-thread { display: flex; flex-direction: column; gap: 9px; margin-top: 14px; }
 .clar-card { border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px; background: var(--surface); }
 .clar-card.open { border-left: 3px solid #d9a441; }
@@ -1935,16 +1951,10 @@ html, body {
 /* The floating ChatBubble's rendered-markdown AI reply (inline-styled bubble; this class targets
    the injected HTML so long lines + fenced code blocks WRAP instead of forcing a horizontal
    scroll out of the chat box). */
-/* The floating research chat panel. Translucency + scroll live HERE (a global rule, the same path
-   the terminal's .term-panel uses and which provably applies) because an inline backdrop-filter
-   rendered opaque in the wry/WebKit webview. !important so nothing inline/legacy overrides them. */
-.research-chat-panel { background: rgba(255,255,255,0.6) !important; }
-/* Scroll on the message pane directly via max-height + overflow, NOT flex:1. A flex child inside a
-   max-height (not fixed-height) flex column resolves against an INDEFINITE height in WebKit, so it
-   grows to content instead of scrolling — which is exactly what was happening (panel kept getting
-   taller, no scrollbar). A concrete max-height makes overflow-y engage reliably; the panel still
-   grows to fit small chats and the pane scrolls once it passes the cap. */
-.research-chat-log { max-height: 420px !important; overflow-y: auto !important; min-height: 0 !important; }
+/* NOTE: the floating research chat bubble now reuses .chat-panel/.chat-log directly (a
+   fixed-height flex column, so flex:1 on .chat-log resolves reliably without needing a
+   max-height + !important hack) — the old .research-chat-panel/.research-chat-log
+   !important overrides they used are retired; ChatBubble no longer references them. */
 
 .chat-ai-md { overflow-wrap: anywhere; word-break: break-word; min-width: 0; }
 .chat-ai-md pre {
@@ -1984,7 +1994,9 @@ html, body {
 .chat-compose { display: flex; gap: 8px; padding: 10px 12px; border-top: 1px solid var(--line); align-items: flex-end; }
 .chat-input { flex: 1; resize: none; font: inherit; font-size: 13px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; }
 .chat-send { border: none; background: var(--accent); color: #fff; font-size: 13px; font-weight: 600; padding: 8px 14px; border-radius: 8px; cursor: pointer; }
-.chat-send:disabled { opacity: .5; cursor: default; }
+.chat-send:disabled { opacity: .5; cursor: not-allowed; }
+/* Wraps the Send button + "New chat" link stacked beside the composer textarea. */
+.chat-send-col { display: flex; flex-direction: column; gap: 4px; }
 .chat-mode-toggle { display: flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; flex-shrink: 0; }
 .chat-mode-btn { border: none; background: transparent; color: var(--ink-soft); font-size: 11.5px; font-weight: 700; padding: 4px 10px; cursor: pointer; transition: background .12s var(--ease), color .12s var(--ease); }
 .chat-mode-btn:not(:last-child) { border-right: 1px solid var(--line); }
@@ -2185,11 +2197,15 @@ html, body {
 .pg-inner { width: 100%; max-width: 720px; padding: 56px 28px 80px; }
 .pg-empty { font-size: 14px; color: var(--ink-soft); margin: 18px 0; }
 .pg-list { display: flex; flex-direction: column; gap: 10px; margin: 24px 0; }
-.pg-card { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-card); }
-.pg-card-main { display: flex; flex-direction: column; gap: 4px; }
-.pg-card-name { font-size: 16px; font-weight: 700; color: var(--ink); }
+/* flex-wrap so the actions row drops below the name/meta column instead of overflowing
+   horizontally below ~1000px (page-wide is 90% width, so this triggers well before the
+   viewport itself is narrow). */
+.pg-card { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); box-shadow: var(--shadow-card); }
+.pg-card-main { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 260px; }
+/* Long project names ellipsize instead of forcing the card wider / pushing actions off. */
+.pg-card-name { font-size: 16px; font-weight: 700; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .pg-card-meta { font-size: 12.5px; color: var(--ink-soft); }
-.pg-card-actions { display: flex; gap: 8px; align-items: center; }
+.pg-card-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 /* One consistent button style/size across the card actions (Export / Delete / Open). */
 .pg-card-actions button { font-size: 13px; font-weight: 600; padding: 8px 16px; border-radius: 8px; cursor: pointer; border: 1px solid transparent; transition: all .15s var(--ease); }
 .pg-btn-secondary { border-color: var(--line); background: var(--surface); color: var(--ink); }
@@ -2197,6 +2213,10 @@ html, body {
 .pg-btn-danger { border-color: var(--line); background: var(--surface); color: var(--ink-soft); }
 .pg-btn-danger:hover { border-color: #c0392b; color: #c0392b; }
 .pg-btn-danger.confirm { background: #c0392b; border-color: #c0392b; color: #fff; }
+/* These two buttons relabel on the first click ("Delete" -> "Confirm delete", "Reset
+   onboarding" -> "Confirm reset"); a min-width keeps the row from jumping width when the
+   label changes. */
+.pg-btn-secondary, .pg-btn-danger { min-width: 108px; text-align: center; }
 .onboard-browse { margin: 8px 0 0; }
 
 /* ── Greenfield scaffold form ──────────────────────────────────────────────── */
@@ -2283,7 +2303,7 @@ html, body {
   text-transform: uppercase; border-radius: 999px; padding: 1px 8px; margin-left: 8px;
   color: var(--ink-soft); background: var(--surface); border: 1px solid var(--line);
 }
-.pg-onboard-badge.done { color: #166534; background: #dcfce7; border-color: #bbf7d0; }
+.pg-onboard-badge.done { color: #4ade80; background: rgba(22,163,74,0.18); border-color: rgba(22,163,74,0.35); }
 
 .nr-flag {
   display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
@@ -2382,8 +2402,20 @@ html, body {
   font-size: 12.5px; font-weight: 600; color: var(--ink-soft);
   letter-spacing: .02em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-/* Audit model picker (user owns speed/thoroughness). */
-.audit-model-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
+/* Audit model picker (user owns speed/thoroughness). A 2-col grid (label | value) so the
+   7 audit-option rows (model pickers, toggles, scan-mode select, etc.) align their controls
+   into one consistent left column instead of each row's flex-wrap settling differently
+   depending on label length. */
+.audit-model-row {
+  display: grid;
+  grid-template-columns: 170px 1fr;
+  align-items: start;
+  column-gap: 10px;
+  row-gap: 4px;
+  margin: 10px 0;
+}
+.audit-model-row > .audit-model-label { padding-top: 5px; }
+.audit-model-row > *:not(.audit-model-label) { grid-column: 2; }
 .audit-model-label { font-size: 12.5px; font-weight: 700; color: var(--ink); }
 .audit-model-select {
   border: 1px solid var(--line); background: var(--surface); color: var(--ink);
@@ -2564,7 +2596,7 @@ html, body {
 .rule-opt-why { font-size: 12px; color: var(--ink-faint); line-height: 1.5; font-style: italic; margin-top: 2px; }
 .pg-create { margin-top: 32px; padding-top: 22px; border-top: 1px solid var(--line); }
 .pg-create-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
-.pg-create-row .addressee-input { flex: 1; min-width: 180px; }
+.pg-create-row .addressee-input { flex: 1; min-width: 180px; padding: 9px 12px; font-size: 13px; }
 /* Drop btn-run's standalone bottom margin so it centers against the name input. */
 .pg-create-row .btn-run { margin-bottom: 0; }
 .pg-import { margin-top: 6px; }
@@ -2727,7 +2759,6 @@ html, body {
 .docs-view {
   display: flex; flex-direction: column; height: 100%; padding: 24px 28px; gap: 16px;
 }
-.docs-tabs { display: flex; gap: 8px; flex-shrink: 0; }
 .docs-body {
   flex: 1; overflow-y: auto; max-width: 860px;
   /* Inherit the chat markdown styling; add comfortable reading padding */
@@ -3492,6 +3523,15 @@ html, body {
   padding-left: 8px;
 }
 
+/* Settings view section headings ("Cross-project…" / "This project") — a plain <h2> with
+   no class rule fell back to the browser default (unstyled, oversized serif). */
+.settings-section-heading {
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+  margin: 26px 0 2px;
+}
+
 /* ── pw/cockpit-ui product wave ─────────────────────────────────────── */
 /*
  * Feature 2: App-update banner + rule-drift notice
@@ -3500,32 +3540,34 @@ html, body {
  * Feature 5: Feature-flag gated affordances
  */
 
-/* App-update banner (Feature 2) */
+/* App-update banner (Feature 2) — dark amber wash (mirrors .usage-meter-rl), NOT the
+   light-blue-on-white Tailwind default this used to render as. */
 .app-update-banner {
   display: flex;
   align-items: center;
   gap: 10px;
   padding: 8px 16px;
-  background: #eff6ff;
-  border-bottom: 1px solid #bfdbfe;
+  background: var(--accent-wash);
+  border-bottom: 1px solid rgba(202,138,4,0.35);
   font-size: 13px;
-  color: #1d4ed8;
+  color: var(--ink);
   flex-shrink: 0;
 }
 .app-update-icon {
   font-size: 16px;
   line-height: 1;
+  color: #fbbf24;
 }
 .app-update-text {
   flex: 1;
 }
 .app-update-notes {
   font-style: italic;
-  color: #2563eb;
+  color: var(--ink-soft);
   margin-left: 6px;
 }
 .app-update-link {
-  color: #1d4ed8;
+  color: #fbbf24;
   text-decoration: underline;
   white-space: nowrap;
 }
@@ -3534,7 +3576,7 @@ html, body {
   border: none;
   cursor: pointer;
   font-size: 16px;
-  color: #6b7280;
+  color: var(--ink-faint);
   padding: 0 4px;
   line-height: 1;
 }
@@ -5648,5 +5690,302 @@ select:focus {
 .mockup-right { flex: 1; display: flex; flex-direction: column; background: var(--paper); }
 .mockup-iframe { width: 100%; height: 100%; border: none; display: block; }
 .mockup-placeholder { display: flex; align-items: center; justify-content: center; height: 100%; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   UI-polish pass: previously-undefined class families (whole panels referenced
+   in rsx! with no CSS at all) + systemic margin-footgun + alignment fixes.
+   Grouped by area; SOC-2 (soc2-*) is explicitly untouched (deferred for MVP).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ── Part 3: margin-footgun per-container fixes (base .btn-run/.btn-restart keep
+   their standalone margins; these containers zero them so buttons align with
+   the controls beside them, same pattern as the existing .findings-toolbar fix). ── */
+.rules-emit .btn-run { margin-bottom: 0; }
+.triage-process .btn-run { margin-bottom: 0; }
+.drift-update-btn { margin-bottom: 0; }
+.soft-ctx-card .btn-run { margin-bottom: 0; }
+/* Covers the three .tier-map-editor-based Save buttons (fleet model bands, stall
+   thresholds, L3 review) — each renders its Save button as a direct child. */
+.tier-map-editor > .btn-run { align-self: flex-start; margin-bottom: 0; }
+.findings-toolbar .btn-restart { margin-right: 0; }
+.proj-bar .btn-restart { margin-right: 0; }
+.uow-review-ask { margin-right: 0; }
+
+/* ── C1: stall-thresholds + L3-review model rows misuse the 3-col .tier-map-row
+   grid (90px label column truncates their longer labels). ── */
+.stall-thresholds-editor .tier-map-row, .l3-review-model-row {
+  grid-template-columns: 200px 1fr;
+}
+/* ── C2: the L3-review toggle row should read as a flex toggle (mirrors
+   .vision-toggle-row), not inherit .tier-map-row's grid. ── */
+.l3-review-toggle-row { display: flex; align-items: center; gap: 10px; }
+.l3-review-checkbox { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
+.l3-review-toggle-hint { font-size: 13px; color: var(--ink); }
+
+/* ── C7: audit-model-row is redefined above (Audit model picker section) to a
+   170px/1fr grid so all 7 audit-option rows share one label column. ── */
+
+/* ── C11: rule-modal Sources block — replace inline light-theme hex colors with
+   theme-token classes. ── */
+.rule-modal-source-row { margin: 4px 0 8px; }
+.rule-modal-source-link { color: var(--accent-ink); text-decoration: underline; word-break: break-all; }
+.rule-modal-source-linter { color: var(--ink-soft); margin-left: 6px; }
+.rule-modal-source-url { color: var(--ink-faint); font-size: 0.85em; word-break: break-all; }
+
+/* ── Part 2: UoW decision row + cards (uow.rs DecisionsReviewPanel) ── */
+.uow-decisions-review { display: flex; flex-direction: column; gap: 12px; }
+.uow-investigation-empty {
+  border: 1px solid rgba(202,138,4,0.35); background: rgba(202,138,4,0.08);
+  border-radius: 10px; padding: 11px 12px;
+}
+.uow-investigation-empty-h { font-size: 13px; font-weight: 700; color: var(--ink); margin: 0 0 4px; }
+.uow-investigation-note {
+  border: 1px solid var(--line); background: var(--surface); border-radius: 10px;
+  padding: 11px 12px; display: flex; flex-direction: column; gap: 8px;
+}
+.uow-investigation-note-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.uow-decisions { display: flex; flex-direction: column; gap: 8px; }
+.uow-decision-card {
+  border: 1px solid var(--line); background: var(--surface); border-radius: 9px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 5px;
+}
+.uow-decision-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.uow-decision-label { font-size: 13px; font-weight: 700; color: var(--ink); }
+.uow-decision-q { font-size: 12.5px; color: var(--ink-soft); margin: 0; line-height: 1.4; }
+.uow-decision-rationale { font-size: 12.5px; color: var(--ink); margin: 0; line-height: 1.4; }
+.uow-decision-reject-reason { font-size: 12px; color: #f87171; margin: 0; }
+.uow-decision-actions { display: flex; gap: 8px; margin-top: 2px; }
+.uow-decision-add { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.uow-decision-input {
+  width: 100%; box-sizing: border-box; border: 1px solid var(--line); border-radius: 8px;
+  padding: 7px 10px; font-size: 12.5px; color: var(--ink); background: #11100f; font-family: inherit;
+}
+textarea.uow-decision-input { resize: vertical; min-height: 60px; }
+.uow-decision-add .btn-run { align-self: flex-start; margin-bottom: 0; }
+.uow-decisions-ready { font-size: 12.5px; color: #4ade80; font-weight: 600; margin: 4px 0 0; }
+
+/* ── Part 2: agent chat composers (uow.rs investigation + development scopes) ──
+   Mirrors the .authoring-input-row pattern. The turn classes (.uow-agent-chat-turn/
+   -text) already exist; this is only the container + input row. ── */
+.uow-agent-chat { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.uow-agent-chat-input-row { display: flex; gap: 10px; align-items: flex-end; }
+.uow-agent-chat-input-row textarea {
+  flex: 1; min-width: 0; resize: vertical; min-height: 64px;
+}
+.uow-agent-chat-input-row .btn-run { margin-bottom: 0; flex: none; }
+
+/* ── Part 2: run provenance + sign-off (live_run.rs RunProvenancePanel) ──
+   A distinct (but visually-consistent) family from .uow-provenance*/.uow-signoff-row —
+   this panel shows the fuller allow/deny/bounce tally breakdown. ── */
+.run-provenance { margin-top: 14px; border-top: 1px solid var(--line); padding-top: 12px; }
+.run-provenance-h { font-size: 10px; font-weight: 800; letter-spacing: .07em; text-transform: uppercase; color: var(--ink-faint); margin: 0 0 8px; }
+.provenance-tallies { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 6px; }
+.provenance-tally { font-size: 12.5px; color: var(--ink-soft); }
+.provenance-tally.deny { color: #f87171; }
+.provenance-tally.bounce { color: #fbbf24; }
+.provenance-num { font-size: 15px; font-weight: 700; color: var(--ink); margin-right: 3px; }
+.provenance-fired { font-size: 12px; color: var(--ink-soft); margin: 4px 0; line-height: 1.4; }
+.provenance-inforce { font-size: 11.5px; color: var(--ink-faint); margin: 4px 0; line-height: 1.4; }
+.provenance-empty { font-size: 12.5px; color: var(--ink-faint); font-style: italic; margin: 0; }
+.run-signoff-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.run-signoff-done { font-size: 13px; font-weight: 700; color: #4ade80; }
+.uow-waive-reason {
+  width: 100%; box-sizing: border-box; min-height: 60px; resize: vertical;
+  border: 1px solid rgba(202,138,4,0.4); border-radius: 8px; padding: 8px 10px;
+  font-size: 12.5px; color: var(--ink); background: #11100f; font-family: inherit;
+}
+
+/* ── Part 2: stall-warning banner (live_run.rs + scan.rs) — amber, mirrors
+   .uow-review-card's treatment. ── */
+.run-stall-warning {
+  border: 1px solid rgba(202,138,4,0.45); background: rgba(202,138,4,0.10);
+  border-radius: 10px; padding: 10px 12px; margin: 10px 0;
+}
+/* scan.rs applies this alongside .run-stall-warning (same amber banner, no visual
+   difference needed) — kept as its own selector so it's not left undefined. */
+.scan-stall-warning { margin: 10px 0; }
+.run-stall-warning-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.run-stall-icon { font-size: 14px; color: #fbbf24; }
+.run-stall-title { font-size: 12.5px; font-weight: 700; color: var(--ink); flex: 1; }
+.btn-stop-stall { flex: none; }
+
+/* ── Part 2: run terminal states (live_run.rs) ── */
+.run-terminal-failed, .run-terminal-cancelled {
+  display: flex; align-items: center; gap: 8px; border-radius: 9px;
+  padding: 9px 12px; margin: 10px 0; font-size: 12.5px;
+}
+.run-terminal-failed { border: 1px solid rgba(220,38,38,0.4); background: rgba(220,38,38,0.10); }
+.run-terminal-cancelled { border: 1px solid var(--line); background: var(--paper); color: var(--ink-soft); }
+.run-terminal-label { font-weight: 700; color: var(--ink); }
+.run-terminal-failed .run-terminal-label { color: #f87171; }
+.run-terminal-reason { color: var(--ink-soft); }
+
+/* ── Part 2: waiting-on-you clarify callout (live_run.rs) — amber .uow-review-card
+   treatment. ── */
+.run-awaiting-clarify {
+  border: 1px solid rgba(202,138,4,0.45); background: rgba(202,138,4,0.10);
+  border-radius: 10px; padding: 11px 12px; margin: 10px 0;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.run-awaiting-clarify-h { font-size: 12.5px; font-weight: 700; color: var(--ink); margin: 0; line-height: 1.4; }
+
+/* ── Part 2: ModelProfile confirm modal (rules.rs) — reuses the .rule-modal-overlay/
+   .rule-modal pattern for a real centered overlay. ── */
+.profile-confirm-overlay {
+  position: fixed; inset: 0; z-index: 1100; background: rgba(27,26,24,.34);
+  display: flex; align-items: center; justify-content: center; padding: 24px;
+}
+.profile-confirm-modal {
+  width: 100%; max-width: 520px; max-height: 84vh; overflow-y: auto;
+  background: #16130f; color: var(--ink); border-radius: var(--r-md);
+  box-shadow: var(--shadow-pop); padding: 22px 24px;
+}
+.profile-confirm-title { font-size: 17px; font-weight: 700; color: var(--ink); margin: 0 0 6px; }
+.profile-confirm-count { font-size: 12.5px; color: var(--ink-soft); margin: 0 0 12px; }
+.profile-confirm-changes { max-height: 240px; overflow-y: auto; border-top: 1px solid var(--line); padding-top: 8px; }
+.profile-confirm-change-row { font-size: 12.5px; color: var(--ink-soft); margin: 4px 0; line-height: 1.4; }
+.profile-confirm-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
+
+/* ── Part 2: governance events table (live_run.rs) — styled like .sups-table/.sups-scroll. ── */
+.governance-events { margin-top: 14px; }
+.governance-events-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.governance-events-table thead th {
+  text-align: left; padding: 6px 9px; font-size: 10.5px; font-weight: 800;
+  text-transform: uppercase; letter-spacing: .03em; color: var(--ink-faint);
+  border-bottom: 1px solid var(--line); background: var(--surface); position: sticky; top: 0;
+}
+.governance-events-table tbody td { padding: 6px 9px; border-top: 1px solid var(--line-soft); vertical-align: top; color: var(--ink-soft); }
+.governance-event-row.severity-warn > td:first-child { box-shadow: inset 3px 0 0 0 #d9a441; }
+.governance-event-row.severity-warn { background: rgba(202,138,4,0.06); }
+.governance-event-row.severity-critical > td:first-child { box-shadow: inset 3px 0 0 0 #d4332b; }
+.governance-event-row.severity-critical { background: rgba(212,51,43,0.08); }
+
+/* ── Part 2: run terminal / phase-finished states + intake repo checkboxes (uow.rs) ── */
+.uow-phase-body { display: flex; flex-direction: column; gap: 14px; }
+.uow-phase-finished-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.uow-phase-finished-label { font-size: 13px; font-weight: 700; color: var(--ink); }
+.uow-phase-finish-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.intake-repo-row { display: flex; flex-direction: column; gap: 6px; padding: 7px 0; border-bottom: 1px solid var(--line-soft); }
+.intake-repo-check { cursor: pointer; }
+.intake-branch-mode { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-left: 22px; font-size: 12.5px; color: var(--ink-soft); }
+.intake-context-input {
+  width: 100%; box-sizing: border-box; resize: vertical; padding: 8px 10px;
+  font-size: 13px; line-height: 1.5; border-radius: 8px; border: 1px solid var(--line);
+  background: #11100f; color: var(--ink); font-family: inherit;
+}
+
+/* ── Part 2: rule-modal repo scoping checkboxes (rules.rs) — mirrors .emit-toggle. ── */
+.rule-modal-repo-scope { display: flex; flex-direction: column; gap: 6px; }
+.rule-modal-repo-check { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-soft); cursor: pointer; }
+
+/* ── Part 2: modality legend (rules.rs) — mirrors .add-to-repo-details/-summary. ── */
+.modality-legend { margin: 10px 0 4px; }
+.modality-legend-summary {
+  font-size: 12.5px; font-weight: 700; color: var(--ink-soft); cursor: pointer;
+  padding: 7px 10px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); list-style: none; user-select: none;
+}
+.modality-legend-summary:hover { color: var(--ink); border-color: var(--accent); }
+.modality-legend-list { margin: 8px 0 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.modality-legend-list dt { font-size: 12px; font-weight: 700; color: var(--ink); margin-top: 8px; }
+.modality-legend-list dt:first-child { margin-top: 0; }
+.modality-legend-list dd { font-size: 12px; color: var(--ink-soft); margin: 2px 0 0; line-height: 1.4; }
+
+/* ── Part 2: Ship / PR / phase / intake / parent-issue / contract / investigation-note
+   families (uow.rs) — dark-theme layout: flex rows, --line borders, --surface fills. ── */
+.uow-ship-row { border: 1px solid var(--line); background: var(--surface); border-radius: 9px; padding: 10px 12px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 8px; }
+.uow-ship-repo { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; font-weight: 700; color: var(--ink); }
+.uow-ship-status { display: flex; gap: 10px; flex-wrap: wrap; }
+.uow-ship-step { font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+.uow-ship-step.done { background: rgba(22,163,74,0.18); color: #4ade80; }
+.uow-ship-all-row { margin-top: 10px; }
+
+.uow-pr-panel { display: flex; flex-direction: column; gap: 10px; }
+.uow-pr-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.uow-pr-num { font-size: 13px; font-weight: 700; color: var(--ink); }
+.uow-pr-state { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: var(--accent-ink); background: var(--accent-wash); padding: 2px 7px; border-radius: 5px; }
+.uow-pr-checks { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.uow-pr-check { font-size: 12.5px; font-weight: 600; }
+.uow-pr-check.pass { color: #4ade80; }
+.uow-pr-check.fail { color: #f87171; }
+.uow-pr-check.pending { color: #fbbf24; }
+.uow-pr-comments { display: flex; flex-direction: column; gap: 6px; }
+
+.uow-dev-section { margin-top: 16px; border-top: 1px solid var(--line-soft); padding-top: 12px; }
+.uow-contract-section { margin-top: 16px; border-top: 1px solid var(--line-soft); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+/* Modifier: the "contract required before Development" guard reads as an attention block. */
+.uow-contract-block { border-left: 3px solid var(--accent); background: var(--accent-wash); border-radius: 0 9px 9px 0; }
+.uow-contract-boundary { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-soft); cursor: pointer; }
+.uow-contract-actions { display: flex; gap: 8px; align-items: center; }
+
+.wi-set-parent { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line-soft); display: flex; flex-direction: column; gap: 6px; }
+.wi-set-parent-h { font-size: 12px; font-weight: 700; color: var(--ink); margin: 0; }
+.wi-set-parent-row { display: flex; gap: 8px; align-items: center; }
+.wi-set-parent-row .govdev-parent-id-input { flex: 1; min-width: 0; }
+
+.govdev-parent-id-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.govdev-parent-id-label { font-size: 12px; font-weight: 600; color: var(--ink-soft); }
+.govdev-parent-id-input { min-width: 140px; padding: 6px 9px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); font-size: 12.5px; }
+
+.authoring-parent { margin-top: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); padding: 14px 16px; }
+.govdev-new-uow-area { margin-bottom: 6px; }
+
+/* ── Part 2: sign-off read-out val/none (uow.rs UowPanel) ── */
+.uow-signoff-val { font-size: 12px; color: #4ade80; font-weight: 600; }
+.uow-signoff-none { font-size: 12px; color: var(--ink-faint); font-style: italic; }
+
+/* ── Part 2: rendered-markdown panels (uow.rs draft preview + investigation note) —
+   mirrors .chat-turn-text.md's block styling. ── */
+.chat-md { font-size: 13px; line-height: 1.55; color: var(--ink); }
+.chat-md p { margin: 6px 0; }
+.chat-md p:first-child { margin-top: 0; }
+.chat-md p:last-child { margin-bottom: 0; }
+.chat-md ul, .chat-md ol { margin: 6px 0; padding-left: 20px; }
+.chat-md li { margin: 2px 0; }
+.chat-md code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11.5px; background: var(--accent-wash); padding: 1px 5px; border-radius: 4px; }
+.chat-md pre { background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; overflow-x: auto; margin: 6px 0; }
+.chat-md pre code { background: none; padding: 0; }
+
+/* ── Part 2: scan coverage notes (scan.rs) — a card matching .scan-stacks. ── */
+.scan-coverage-notes { display: flex; flex-direction: column; gap: 4px; margin: 12px 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.scan-coverage-notes-title { font-size: 12px; font-weight: 700; color: var(--ink); margin: 0 0 2px; }
+.scan-coverage-note { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
+.scan-coverage-note-tool { font-weight: 700; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.scan-coverage-note-msg { color: var(--ink-soft); }
+
+/* ── Part 2: "Test" badge (scan.rs) — reuses the dark amber chip pattern (like the
+   chorale-badge-yellow / .nr-flag family) instead of the undefined .badge/.badge-yellow. ── */
+.test-flag {
+  display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em;
+  text-transform: uppercase; color: #fbbf24; background: rgba(202,138,4,0.20);
+  border-radius: 999px; padding: 1px 8px; white-space: nowrap;
+}
+
+/* ── Part 1.5: research chat context-visibility strip (ChatBubble "what this
+   assistant can see" panel) + the small "New chat" affordance — new since the
+   panel had no dark-themed precedent to reuse verbatim. ── */
+.chat-context { padding: 8px 12px; border-bottom: 1px solid var(--line); background: var(--paper); font-size: 11px; }
+.chat-context-title { font-weight: 700; color: var(--ink-soft); margin-bottom: 4px; }
+.chat-context-list { display: flex; flex-direction: column; gap: 2px; }
+.chat-context-row { display: flex; align-items: center; gap: 6px; color: var(--ink-soft); }
+.chat-context-dot { color: var(--ink-faint); }
+.chat-context-dot.on { color: #4ade80; }
+.chat-context-finding {
+  display: flex; align-items: center; gap: 6px; margin-top: 4px; padding: 4px 8px;
+  background: var(--accent-wash); border-radius: 6px; border: 1px solid rgba(202,138,4,0.35);
+  color: var(--ink); flex-wrap: wrap;
+}
+.chat-context-finding-icon { color: #fbbf24; }
+.chat-context-toggle {
+  align-self: flex-start; margin-top: 4px; background: none; border: none;
+  color: var(--accent-ink); font-size: 11px; font-weight: 600; cursor: pointer;
+  padding: 0; text-decoration: underline;
+}
+.chat-clear-btn {
+  font-size: 11px; color: var(--ink-faint); background: none;
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 9px; cursor: pointer;
+  transition: color .15s var(--ease), border-color .15s var(--ease);
+}
+.chat-clear-btn:hover { color: var(--ink-soft); border-color: var(--ink-faint); }
 
 "#;
