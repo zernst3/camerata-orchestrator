@@ -2051,17 +2051,6 @@ pub(super) async fn mark_investigation_reviewed(story_id: &str) -> bool {
     v.get("ok").and_then(|b| b.as_bool()).unwrap_or(false)
 }
 
-/// Whether an investigation note's text is the token-free placeholder (live mode off /
-/// no real agent output). Used to surface an explicit "no output" state instead of a
-/// silent Investigating with a meaningless note. Pure.
-pub(super) fn is_placeholder_note(note: &str) -> bool {
-    let n = note.to_ascii_lowercase();
-    n.contains("live mode is off")
-        || n.contains("live mode off")
-        || n.contains("investigation pending")
-        || note.trim().is_empty()
-}
-
 /// App-scoped clarification-refresh signal, shared via context so the NEEDS-YOU queue and
 /// the per-phase clarification dialogs stay in lock-step: answering a question in either
 /// surface bumps this, and both fetch resources depend on it. Newtype so it is a distinct
@@ -6517,9 +6506,9 @@ pub(super) fn UowPrControl(
 /// The decisions-review surface, shown at the Investigating stage. It makes the
 /// otherwise-invisible investigation output actionable:
 ///
-/// - Renders the investigation NOTE (Markdown). When the note is the token-free
-///   placeholder (live mode off) or absent, it shows an EXPLICIT "no output" state with
-///   the reason — never a silent Investigating.
+/// - Renders the investigation NOTE (Markdown). When no note has been recorded (e.g. the
+///   run refused because live mode is off, or it has not finished yet), it shows an
+///   EXPLICIT "no output" state with the reason — never a silent Investigating.
 /// - Lists the proposed DECISION records with per-decision Approve / Reject controls
 ///   (each POSTs the full updated set to `/decisions`, matching the server's shape).
 /// - Lets the architect ADD a decision manually (needed when the agent surfaced none, so
@@ -6551,7 +6540,9 @@ pub(super) fn DecisionsReviewPanel(story_id: String, uow_refresh: Signal<u32>) -
     let note = review.note.clone();
     let note_text = note.as_ref().map(|n| n.note.clone()).unwrap_or_default();
     let reviewed = note.as_ref().map(|n| n.reviewed).unwrap_or(false);
-    let no_real_output = !review.note_present || is_placeholder_note(&note_text);
+    // A refused (live-mode-off) investigation writes NO note, and a run that has not finished
+    // yet has none either — in both cases there is no real analysis to review.
+    let no_real_output = !review.note_present;
     let note_html = crate::md::md_to_html(&note_text);
     let decisions = review.decisions.clone();
     let all_approved =
@@ -6572,11 +6563,7 @@ pub(super) fn DecisionsReviewPanel(story_id: String, uow_refresh: Signal<u32>) -
                 div { class: "uow-investigation-empty",
                     p { class: "uow-investigation-empty-h", "Investigation produced no output" }
                     p { class: "section-hint",
-                        if review.note_present {
-                            "The investigation ran without a live agent (live mode is off), so it recorded a placeholder instead of a real analysis. Enable CAMERATA_LIVE_BUILD=1 and re-run Begin investigation for a real note — or record the decisions below manually to proceed."
-                        } else {
-                            "No investigation note has been recorded yet. If the run just finished, give it a moment and refresh; otherwise record the decisions below manually to proceed."
-                        }
+                        "No investigation note has been recorded. Without a live agent (CAMERATA_LIVE_BUILD is off) the run refuses rather than fabricating an analysis — enable CAMERATA_LIVE_BUILD=1 and re-run Begin investigation for a real note. If the run just finished, give it a moment and refresh; otherwise record the decisions below manually to proceed."
                     }
                 }
             } else {
@@ -6845,9 +6832,10 @@ pub(super) fn slugify_decision_label(label: &str) -> String {
 }
 
 /// Whether the note-review requirement is satisfied for the readiness hint. When the
-/// investigation produced no real output (placeholder / absent), there is no meaningful
-/// note to review, so the note-review requirement is treated as satisfied and only the
-/// decision gate governs readiness. Pure.
+/// investigation produced no real output (no note was recorded — e.g. a live-mode-off
+/// refusal, or the run has not finished), there is no meaningful note to review, so the
+/// note-review requirement is treated as satisfied and only the decision gate governs
+/// readiness. Pure.
 pub(super) fn reviewed_for_placeholder(reviewed: bool, no_real_output: bool) -> bool {
     reviewed || no_real_output
 }

@@ -112,7 +112,7 @@ use crate::decompose::{to_story, DecompositionStore, Practice, ProposedChild};
 use crate::orchestrator_message::orchestrator_message;
 use crate::provider::ProviderHandle;
 use crate::routine::{CreateRoutineReq, Routine, RoutineStore, SetEnabledReq};
-use crate::run::{execute_run, live_mode_enabled, run_provenance, Run, RunProvenance, RunStore};
+use crate::run::{live_mode_enabled, run_provenance, Run, RunProvenance, RunStore};
 
 /// Shared server state. Holds the backend contracts behind trait objects so the
 /// in-memory impls used now can be swapped for persistent / cloud impls later
@@ -1672,17 +1672,25 @@ async fn resume_governed_run(
         .await;
 
     if !live {
-        // Scripted mode has no live agent to re-spawn; record the decision honestly and stop.
-        // LIFECYCLE-4: spawn the provenance watcher BEFORE the terminal transition so the
-        // resumed run gets provenance + stage advance on success, mirroring a fresh run.
+        // HONESTY GATE (NO placeholders): a resume cannot CONTINUE the paused work without a live
+        // agent. Marking a non-continued run `AwaitingQa` (success) would fabricate a completed
+        // cycle, so we REFUSE — fail the run loudly (mirrors start_governed_run + the three
+        // token-free refusals). LIFECYCLE-4: the provenance watcher is still spawned FIRST so it
+        // observes the terminal transition and freezes this run's (empty) gate provenance; because
+        // the terminal status is `Failed` it will NOT advance the UoW stage or attach evidence.
         spawn_provenance_watcher(state, &run_id, &story_id);
-        state
-            .runs
-            .set_status(&run_id, crate::run::RunStatus::AwaitingQa, true);
+        state.runs.fail_with_reason(
+            &run_id,
+            "Resuming this run requires the AI agent. Set CAMERATA_LIVE_BUILD=1 to continue."
+                .to_string(),
+        );
         state.uow.append_history(
             &story_id,
             "dev_implement",
-            &format!("Resume requested (scripted mode — no live agent to continue): {directive}"),
+            &format!(
+                "Resume refused: live mode is off (set CAMERATA_LIVE_BUILD=1). The run was not \
+                 continued and no state advanced. Requested directive: {directive}"
+            ),
         );
         return Ok((run_id, mode));
     }
@@ -2166,11 +2174,27 @@ async fn start_governed_run(
             }
         }
     } else {
-        // Token-free scripted path: real gate verdicts over planted calls, with the
-        // per-agent transcripts (generated prompt + actions + verdicts) populated.
-        // `model` is not relevant here — no agent process is spawned.
-        let transcripts = state.transcripts.clone();
-        tokio::spawn(async move { execute_run(store, transcripts, rid).await });
+        // HONESTY GATE (NO placeholders): without a live agent no code can be written, so the
+        // production run button must REFUSE rather than run a scripted demo that would fabricate
+        // a completed dev cycle + SOC-2 evidence over fictional file paths. This mirrors the
+        // token-free refusals in update_branch_run / dev_implement_run / pr_resolve_run: fail the
+        // run loudly and write NOTHING fake. The provenance watcher below still runs and freezes
+        // this run's (empty) gate provenance, but because the terminal status is `Failed` it will
+        // NOT advance the UoW stage and NOT attach QA evidence (see `stamp_provenance_when_done`).
+        //
+        // The deterministic scripted executor (`crate::run::execute_run`) is retained for its own
+        // unit test only; it is no longer reachable from any path a real user can click.
+        state.runs.fail_with_reason(
+            &rid,
+            "Development requires the AI agent. Set CAMERATA_LIVE_BUILD=1 to run this story."
+                .to_string(),
+        );
+        state.uow.append_history(
+            story_id,
+            "dev_implement",
+            "Development run refused: live mode is off (set CAMERATA_LIVE_BUILD=1). No code was \
+             written and no evidence was produced.",
+        );
     }
 
     // Provenance-stamping watcher (Pillar 2), shared by fresh + resume runs (LIFECYCLE-4).
@@ -14905,11 +14929,13 @@ mod tests {
             "approve resumes -> checkpoint consumed"
         );
         assert_eq!(state.escalations.list_open_uow().len(), 0, "resolved -> off NEEDS YOU");
-        // The decision is recorded on the UoW's durable history.
+        // The decision is recorded on the UoW's durable history. Without a live agent the resume
+        // REFUSES honestly (it never fabricates a continued cycle), so the trail records the
+        // refusal rather than a fake success.
         let uow = state.uow.get_or_create("me/api#7");
         assert!(
-            uow.history.iter().any(|h| h.text.contains("Resume requested")),
-            "approve records the resume on the UoW trail"
+            uow.history.iter().any(|h| h.text.contains("Resume refused")),
+            "approve records the honest resume refusal on the UoW trail"
         );
     }
 
@@ -16358,6 +16384,73 @@ mod tests {
         );
     }
 
+    /// HONESTY (FIX #1): without a live agent, the production run button must REFUSE — the run
+    /// lands `Failed`, the UoW stage does NOT advance to AwaitingQa, and NO QA evidence is
+    /// attached. A user must never be able to click "Run" and watch a fabricated dev cycle
+    /// complete with real-looking compliance evidence while zero code was written.
+    #[tokio::test]
+    async fn start_run_without_live_fails_and_does_not_advance_or_attach() {
+        std::env::remove_var("CAMERATA_LIVE_BUILD"); // ensure live mode is OFF
+        let state = AppState::seeded();
+        let story = "HONEST-1";
+
+        // Approve a decision so the no-code-first gate is satisfied and the run can start.
+        let app = router(state.clone());
+        app.oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/api/uow/{story}/decisions"))
+                .header("content-type", "application/json")
+                .body(Body::from(approved_decision_json(story).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        // Start the run (scripted / token-free path).
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/stories/{story}/run"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let run_id = json["run_id"].as_str().unwrap().to_string();
+
+        // The run FAILS immediately (refusal is synchronous) — never a fabricated success.
+        let run = state.runs.get(&run_id).expect("run exists");
+        assert!(
+            matches!(run.status, crate::run::RunStatus::Failed { .. }),
+            "a token-free production run must FAIL, not fabricate a completed cycle"
+        );
+        assert!(run.done);
+
+        // Give the provenance watcher a moment; it must freeze provenance but NEVER advance the
+        // stage to AwaitingQa or attach QA evidence.
+        for _ in 0..50 {
+            if state.uow.get_or_create(story).gate_provenance.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let uow = state.uow.get_or_create(story);
+        assert_ne!(
+            uow.stage,
+            lifecycle::UowStage::AwaitingQa,
+            "a refused run must NOT advance the UoW to AwaitingQa"
+        );
+        assert!(
+            uow.evidence.is_none(),
+            "a refused run must NOT attach fabricated QA evidence"
+        );
+    }
+
     // ── LIFECYCLE-9: single-flight guard per story ───────────────────────────────
 
     /// A second start on a story that already has an active (non-done) run returns 409,
@@ -17323,13 +17416,15 @@ mod tests {
         assert!(stamped.evidence.is_some());
     }
 
-    /// LIFECYCLE-4: a RESUMED governed run gets the SAME completion-driven, success-gated
-    /// provenance watcher a fresh run does. Previously the resume path spawned none, so a
-    /// resumed run never got provenance / a stage advance. Exercised through the real
-    /// `resume_governed_run` in scripted mode (CI default): it completes the resumed run to
-    /// AwaitingQa and the watcher must then freeze provenance + advance the UoW stage.
+    /// LIFECYCLE-4 (honesty): a RESUMED governed run gets the SAME completion-driven provenance
+    /// watcher a fresh run does — proving the resume path wires the watcher (previously it spawned
+    /// none). Exercised through the real `resume_governed_run` WITHOUT a live agent (CI default):
+    /// the resume now REFUSES rather than fabricating a completed cycle, so the run lands `Failed`;
+    /// the watcher must still freeze provenance but must NOT advance the UoW stage. The
+    /// success-branch of the watcher is covered separately by
+    /// `stamp_on_success_advances_stage_and_attaches_evidence`.
     #[tokio::test]
-    async fn resumed_run_gets_provenance_and_stage_advance_on_success() {
+    async fn resumed_run_without_live_refuses_and_freezes_provenance_without_advancing() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let story = "me/api#7";
         uow_at_development(&state.uow, story);
@@ -17364,26 +17459,36 @@ mod tests {
 
         let (run_id, _mode) = resume_governed_run(&state, &ckpt, "Approved: proceed.")
             .await
-            .expect("resume succeeds");
+            .expect("resume call returns Ok even when it refuses to continue");
 
-        // The resumed run completes to AwaitingQa (scripted mode); wait for the spawned
-        // watcher to observe the completion signal and stamp.
+        // The resumed run REFUSES without a live agent: it is terminal and Failed (never a
+        // fabricated success).
         let stamped = state.runs.get(&run_id).expect("resumed run exists");
-        assert!(stamped.done, "resumed scripted run is terminal");
+        assert!(stamped.done, "refused resume run is terminal");
+        assert!(
+            matches!(stamped.status, crate::run::RunStatus::Failed { .. }),
+            "a resume with no live agent must FAIL, not fabricate a completed cycle"
+        );
 
-        // Poll briefly for the watcher's stamp (it runs on its own task).
-        let mut advanced = false;
+        // Poll briefly for the watcher's provenance freeze (it runs on its own task).
+        let mut frozen = false;
         for _ in 0..50 {
-            if state.uow.get_or_create(story).stage == lifecycle::UowStage::AwaitingQa {
-                advanced = true;
+            if state.uow.get_or_create(story).gate_provenance.is_some() {
+                frozen = true;
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        assert!(advanced, "LIFECYCLE-4: resumed run's watcher advanced the stage");
+        assert!(frozen, "LIFECYCLE-4: resumed run's watcher froze provenance");
+        // Honesty: the stage did NOT advance — the work never continued.
+        assert_eq!(
+            state.uow.get_or_create(story).stage,
+            lifecycle::UowStage::Development,
+            "a refused resume must not advance the UoW stage"
+        );
         assert!(
-            state.uow.get_or_create(story).gate_provenance.is_some(),
-            "LIFECYCLE-4: resumed run's watcher froze provenance"
+            state.uow.get_or_create(story).evidence.is_none(),
+            "a refused resume must not attach QA evidence"
         );
     }
 

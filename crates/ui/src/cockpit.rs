@@ -4100,20 +4100,6 @@ mod tests {
     // ── Decisions-review surface helpers (pure) ───────────────────────────────────
 
     #[test]
-    fn is_placeholder_note_detects_live_mode_off_and_empty() {
-        use super::uow::is_placeholder_note;
-        assert!(is_placeholder_note(
-            "Investigation pending — live mode is off, so no analysis agent ran."
-        ));
-        assert!(is_placeholder_note("  "));
-        assert!(is_placeholder_note(""));
-        // A real note is NOT a placeholder.
-        assert!(!is_placeholder_note(
-            "The export must exclude archived members; chose cursor pagination."
-        ));
-    }
-
-    #[test]
     fn slugify_decision_label_is_kebab_and_safe() {
         use super::uow::slugify_decision_label;
         assert_eq!(

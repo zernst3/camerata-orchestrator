@@ -232,8 +232,8 @@ pub fn arm_files_for_repo(
 /// emitted with:
 /// - `id` = the rule's stable id
 /// - `name` = the rule's title
-/// - `command` = derived from `conformance` when present (linter hint), else a clearly
-///   marked TODO placeholder the team fills in
+/// - `command` = derived from `conformance` when present (linter hint), else a
+///   self-failing `exit 1` sentinel (NOT a silent-passing comment) the team replaces
 /// - `severity` = `"high"` (CI-tier rules are always enforcement-level high)
 /// - `in_loop` = `true` (fast deterministic checks; the team may flip to `false` for
 ///   checks that need secrets or long run-times)
@@ -255,8 +255,11 @@ pub fn arm_files_for_repo(
 fn emit_checks_toml_and_workflow(ci_tier: &[&ArmRule]) -> (String, String) {
     // Build the CheckManifest from the CI-tier arm rules. Each rule becomes one
     // ManifestCheck entry; the command is derived from the conformance hint when
-    // available, or emitted as a TODO placeholder (clearly marked so the architect
-    // knows to wire the real command before relying on the check).
+    // available. When a rule has NO runnable hint (typical of an architectural rule
+    // that needs a bespoke checker), we DO NOT emit a bare `# TODO` comment: as a
+    // shell command a comment is a silent no-op that would let an un-wired check pass
+    // green. Instead we emit a command that FAILS LOUDLY (`exit 1` with an explanation
+    // on stderr), so the gate stays red until the architect wires the real command.
     let checks: Vec<ManifestCheck> = ci_tier
         .iter()
         .map(|r| {
@@ -264,12 +267,14 @@ fn emit_checks_toml_and_workflow(ci_tier: &[&ArmRule]) -> (String, String) {
                 .conformance
                 .as_deref()
                 .filter(|c| !c.trim().is_empty())
-                // Use the conformance text as a linter hint for the command when it looks
-                // like a runnable command (non-empty). Otherwise emit a clear placeholder.
+                // Use the conformance text as the command when it is a runnable hint.
+                // Otherwise emit a self-failing sentinel (never a silently-passing comment).
                 .map(|c| c.trim().to_string())
                 .unwrap_or_else(|| {
                     format!(
-                        "# TODO: wire {} enforcement command here (see CONVENTIONS.md)",
+                        "echo 'Camerata gate {} has no enforcement command wired yet; set its \
+                         command in .camerata/checks.toml (see CONVENTIONS.md) before relying on \
+                         this check.' >&2; exit 1",
                         r.id
                     )
                 });
@@ -306,7 +311,9 @@ fn emit_checks_toml_and_workflow(ci_tier: &[&ArmRule]) -> (String, String) {
         "#\n",
         "# For architectural rules (AST / structural checks), register your custom\n",
         "# checker per the CI-gate story HOW-TO (docs/decisions/\n",
-        "# 2026-06-23_ci_gate_story_howto_enrichment.md) and replace the TODO command.\n",
+        "# 2026-06-23_ci_gate_story_howto_enrichment.md). Un-wired checks ship with a\n",
+        "# self-failing `exit 1` command (NOT a silent no-op) — replace it with the real\n",
+        "# enforcement command so the gate can pass honestly.\n",
         "#\n",
         "# Re-generate this file with Camerata's Apply flow; do not edit by hand.\n\n",
     );
@@ -739,6 +746,48 @@ mod tests {
         assert!(
             wf.contains("A-1"),
             "architectural rule surfaces in camerata-gates.yml"
+        );
+    }
+
+    #[test]
+    fn ci_check_without_conformance_hint_fails_loudly_not_silently() {
+        // An architectural rule with NO runnable conformance hint must NOT emit a bare
+        // `# TODO` comment (a silent-passing no-op as a shell command). It must emit a
+        // self-failing `exit 1` sentinel so an un-wired check stays red.
+        let arch = ArmRule {
+            id: "ARCH-NO-HINT-1".to_string(),
+            title: "Layering boundary".to_string(),
+            directive: "Repositories own data access.".to_string(),
+            option: None,
+            enforcement: "architectural".to_string(),
+            scope: "repo-local".to_string(),
+            conformance: None,
+            repos: vec!["me/api".to_string()],
+        };
+        let files = arm_files_for_repo(&[&arch], &[]);
+
+        let toml = &files
+            .iter()
+            .find(|(n, _)| n == ".camerata/checks.toml")
+            .unwrap()
+            .1;
+        assert!(
+            toml.contains("exit 1"),
+            "an un-wired check must ship a self-failing command, got: {toml}"
+        );
+        assert!(
+            !toml.contains("# TODO: wire"),
+            "the silently-passing TODO-comment placeholder must be gone, got: {toml}"
+        );
+
+        let wf = &files
+            .iter()
+            .find(|(n, _)| n == ".github/workflows/camerata-gates.yml")
+            .unwrap()
+            .1;
+        assert!(
+            wf.contains("exit 1"),
+            "the generated workflow must run a failing command for an un-wired check, got: {wf}"
         );
     }
 

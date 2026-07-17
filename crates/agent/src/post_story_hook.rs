@@ -17,7 +17,13 @@
 //! | Convention            | Behaviour                                        |
 //! |-----------------------|--------------------------------------------------|
 //! | `PerStoryDocs`        | Emit two DRAFT files per story (default).        |
-//! | Any other variant     | No-op (return empty vec).                        |
+//! | `MechanicalMinimum`   | Intentional no-op (commit/PR record is durable). |
+//! | `LivingCentralDocs`   | Not yet implemented — no-op + honest sign-off note. |
+//! | `AdrPerChange`        | Not yet implemented — no-op + honest sign-off note. |
+//!
+//! For the two unimplemented conventions, [`PostStoryHook::unimplemented_notice`] returns a
+//! message the sign-off path records to the UoW history, so a project that chose one is never
+//! silently told documentation was handled when nothing was emitted.
 //!
 //! The emitted files are:
 //!
@@ -148,6 +154,16 @@ pub trait PostStoryHook: Send + Sync {
     /// Emit documentation (or perform any other post-story action) for the
     /// completed story. Returns the list of files written (empty for a no-op).
     fn emit(&self, completion: &StoryCompletion) -> anyhow::Result<Vec<PathBuf>>;
+
+    /// A human-readable notice when the configured convention is RECOGNIZED but NOT yet
+    /// implemented, so its sign-off no-op can be recorded honestly instead of silently
+    /// swallowed (PROC-STORY-DOCS-1 promises uniform enforcement; until these options are
+    /// built, sign-off must say so out loud). Returns `None` when the convention genuinely
+    /// emits (e.g. per-story-docs) or is an INTENTIONAL no-op (e.g. mechanical-minimum).
+    /// Default: `None`.
+    fn unimplemented_notice(&self) -> Option<String> {
+        None
+    }
 }
 
 // ── StoryDocEmitter ───────────────────────────────────────────────────────────
@@ -410,6 +426,21 @@ impl PostStoryHook for StoryDocEmitter {
         })?;
 
         Ok(vec![tech_path, user_path])
+    }
+
+    /// `living-central-docs` and `adr-per-change` are recognized options that this emitter
+    /// does not yet implement — they no-op. Surface that honestly so sign-off can record it
+    /// rather than silently claiming documentation was handled. `per-story-docs` emits and
+    /// `mechanical-minimum` is an intentional no-op, so both return `None`.
+    fn unimplemented_notice(&self) -> Option<String> {
+        match self.convention {
+            DocConvention::LivingCentralDocs | DocConvention::AdrPerChange => Some(format!(
+                "Documentation convention '{}' is not yet implemented; no docs were emitted \
+                 for this story.",
+                self.convention.as_option_id()
+            )),
+            DocConvention::PerStoryDocs | DocConvention::MechanicalMinimum => None,
+        }
     }
 }
 
@@ -692,6 +723,40 @@ mod tests {
         let c = completion_in(dir.path(), "CAM-42");
         let written = emitter.emit(&c).unwrap();
         assert!(written.is_empty(), "mechanical-minimum must be a no-op");
+    }
+
+    // ── unimplemented_notice — honest sign-off record for unbuilt conventions ──
+
+    #[test]
+    fn unimplemented_notice_flags_only_the_unbuilt_conventions() {
+        // The two RECOGNIZED-BUT-UNIMPLEMENTED conventions surface an honest notice.
+        let living = StoryDocEmitter::new(DocConvention::LivingCentralDocs);
+        let notice = living
+            .unimplemented_notice()
+            .expect("living-central-docs must surface an unimplemented notice");
+        assert!(notice.contains("living-central-docs"));
+        assert!(notice.contains("not yet implemented"));
+
+        let adr = StoryDocEmitter::new(DocConvention::AdrPerChange);
+        let notice = adr
+            .unimplemented_notice()
+            .expect("adr-per-change must surface an unimplemented notice");
+        assert!(notice.contains("adr-per-change"));
+        assert!(notice.contains("not yet implemented"));
+
+        // The implemented default and the INTENTIONAL no-op surface nothing.
+        assert!(
+            StoryDocEmitter::new(DocConvention::PerStoryDocs)
+                .unimplemented_notice()
+                .is_none(),
+            "per-story-docs emits, so it is not 'unimplemented'"
+        );
+        assert!(
+            StoryDocEmitter::new(DocConvention::MechanicalMinimum)
+                .unimplemented_notice()
+                .is_none(),
+            "mechanical-minimum is an intentional no-op, not 'unimplemented'"
+        );
     }
 
     // ── Default-convention shortcut ───────────────────────────────────────────
