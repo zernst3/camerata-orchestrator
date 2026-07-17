@@ -4386,8 +4386,9 @@ pub(super) fn IntakePhaseView(
 /// Investigation & Refinement phase view.
 ///
 /// Contains:
-/// - Lifecycle strip + Begin investigation / Approve decisions controls (via `UowStepRunControls`)
-/// - Decisions review panel when stage is Investigating / DecisionsApproved
+/// - Lifecycle strip + Begin investigation control (via `UowStepRunControls`)
+/// - Decisions review panel when stage is Investigating / DecisionsApproved, including
+///   the **Approve decisions** transition button while stage is Investigating
 /// - Agent activity for the active run
 /// - Clarification dialogs
 /// - Agent chat (investigation scope)
@@ -4555,7 +4556,9 @@ pub(super) fn InvestigationPhaseView(
             if stage == Some(UowStage::Investigating) || stage == Some(UowStage::DecisionsApproved) {
                 DecisionsReviewPanel {
                     story_id: story_id.clone(),
+                    stage,
                     uow_refresh,
+                    uows_refresh,
                     active_run,
                     models: models.clone(),
                     invest_model,
@@ -6624,13 +6627,23 @@ pub(super) fn UowPrControl(
 /// - A "Mark investigation reviewed" control (ROUTE-B).
 ///
 /// Once the note is reviewed AND every decision is approved, the architect uses the
-/// existing "Approve decisions" transition (rendered by [`UowStepRunControls`]) to advance
-/// to DecisionsApproved. This panel keeps the data model consistent: it always POSTs the
-/// complete decision set the server stores.
+/// **"Approve decisions"** button rendered by this panel (below the readiness hint) to
+/// advance Investigating → DecisionsApproved via `post_uow_transition`. This panel keeps
+/// the data model consistent: it always POSTs the complete decision set the server stores.
 #[component]
 pub(super) fn DecisionsReviewPanel(
     story_id: String,
+    /// The KNOWN lifecycle stage. The "Approve decisions" button only renders while the
+    /// stage is `Investigating` — once the server has already advanced to
+    /// `DecisionsApproved` (or beyond), re-showing it would be confusing (and a stale click
+    /// would just 409).
+    stage: Option<UowStage>,
     uow_refresh: Signal<u32>,
+    /// BUG C pattern: the left-nav UoW list's refresh tick — bumped alongside `uow_refresh`
+    /// on a successful transition so the sidebar's status badge (Investigating →
+    /// Decisions Approved) updates immediately, matching Begin investigation / Begin
+    /// Development.
+    uows_refresh: Signal<u32>,
     /// BUG B: shared with the parent [`InvestigationPhaseView`] so a re-run started from
     /// this panel streams into the SAME `AgentActivity` display already shown above it.
     active_run: Signal<Option<RunView>>,
@@ -6680,6 +6693,10 @@ pub(super) fn DecisionsReviewPanel(
     // `starting` guard on `UowStepRunControls`' "Begin investigation" (disables the button
     // + prevents a double-click firing a second overlapping run).
     let mut rerunning = use_signal(|| false);
+
+    // Busy flag for "Approve decisions" — disables the button + prevents a double-click
+    // firing a second overlapping transition request (mirrors `starting` / `rerunning`).
+    let mut approving = use_signal(|| false);
 
     rsx! {
         div { class: "uow-decisions-review",
@@ -6991,22 +7008,80 @@ pub(super) fn DecisionsReviewPanel(
                     }
                 }
 
-                // ── Readiness hint for the Approve-decisions transition ─────────
-                {
-                    let ready = reviewed && all_approved && !no_real_output;
-                    let ready_placeholder = reviewed_for_placeholder(reviewed, no_real_output) && all_approved;
-                    if ready || ready_placeholder {
+                // ── Approve-decisions transition (Investigating → DecisionsApproved) ──
+                // Only rendered while the stage is still Investigating: once the server
+                // has advanced to DecisionsApproved the transition is done, so the button
+                // disappears rather than inviting a stale re-click (which would just 409).
+                if stage == Some(UowStage::Investigating) {
+                    {
+                        let ready = reviewed && all_approved && !no_real_output;
+                        let ready_placeholder = reviewed_for_placeholder(reviewed, no_real_output) && all_approved;
+                        let can_approve = ready || ready_placeholder;
                         rsx! {
-                            p { class: "uow-decisions-ready",
-                                "Ready — use \"Approve decisions\" below to advance to Decisions approved."
+                            if can_approve {
+                                p { class: "uow-decisions-ready",
+                                    "Ready — use \"Approve decisions\" below to advance to Decisions approved."
+                                }
+                            } else {
+                                p { class: "section-hint",
+                                    "To advance: every decision must be Approved"
+                                    if !no_real_output { " and the investigation note marked reviewed" }
+                                    "."
+                                }
                             }
-                        }
-                    } else {
-                        rsx! {
-                            p { class: "section-hint",
-                                "To advance: every decision must be Approved"
-                                if !no_real_output { " and the investigation note marked reviewed" }
-                                "."
+                            div { class: "uow-step-control uow-approve-decisions",
+                                button {
+                                    class: "btn-run",
+                                    disabled: !can_approve || approving(),
+                                    onclick: {
+                                        let sid = story_id.clone();
+                                        move |_| {
+                                            if approving() {
+                                                return;
+                                            }
+                                            approving.set(true);
+                                            let sid = sid.clone();
+                                            let mut uow_refresh = uow_refresh;
+                                            let mut uows_refresh = uows_refresh;
+                                            let toasts = toasts;
+                                            spawn(async move {
+                                                match post_uow_transition(&sid, "approve-decisions").await {
+                                                    TransitionOutcome::Ok => {
+                                                        // Bump BOTH ticks: the detail view
+                                                        // re-fetches the UoW (stage flips to
+                                                        // DecisionsApproved, hiding this button),
+                                                        // and the left-nav list's status badge
+                                                        // updates immediately too (same BUG C
+                                                        // pattern as Begin investigation / Begin
+                                                        // Development).
+                                                        uow_refresh += 1;
+                                                        uows_refresh += 1;
+                                                    }
+                                                    TransitionOutcome::Blocked(reason) => {
+                                                        crate::toast::push_toast(
+                                                            toasts,
+                                                            crate::toast::ToastKind::Warning,
+                                                            reason,
+                                                        );
+                                                    }
+                                                    TransitionOutcome::Failed => {
+                                                        crate::toast::push_toast(
+                                                            toasts,
+                                                            crate::toast::ToastKind::Warning,
+                                                            "Could not approve the decisions.".to_string(),
+                                                        );
+                                                    }
+                                                }
+                                                approving.set(false);
+                                            });
+                                        }
+                                    },
+                                    if approving() {
+                                        span { "Approving\u{2026}" }
+                                    } else {
+                                        "\u{25b6} Approve decisions"
+                                    }
+                                }
                             }
                         }
                     }
@@ -7051,17 +7126,23 @@ pub(super) fn reviewed_for_placeholder(reviewed: bool, no_real_output: bool) -> 
 /// the steps (Increment 1). Runs live ON THE STEPS: the control shown is the one for
 /// the active stage and it REPLACES the prior phase's control rather than stacking.
 ///
+/// This component itself renders a control ONLY for `Intake`:
 /// - **Intake** → a single model `<select>` (default = project strongest, editable)
 ///   beside a **Begin investigation** button that calls `begin_investigation_run` and
 ///   then drives the live agent activity on the returned run. The server transitions
 ///   the stage Intake → Investigating.
-/// - **Investigating** → the architect's **Approve decisions** transition
-///   (Investigating → DecisionsApproved), which the server gates on the story's
-///   decision records and 409s (with a precise reason) if not all are approved.
-/// - **DecisionsApproved** → three per-tier model `<select>`s (Strongest / Balanced /
-///   Fast, defaulted from the project tier map, editable for this run) beside a
-///   **Run development (governed)** button that calls `start_dev_run` with the tier
-///   map. The strongest tier leads and delegates simpler work to the others.
+///
+/// The remaining lifecycle transitions have their own dedicated controls elsewhere in
+/// the Investigation & Development phase views (not here, so each sits next to the
+/// data that gates it):
+/// - **Investigating → DecisionsApproved** (`approve-decisions`) — the **Approve
+///   decisions** button in [`DecisionsReviewPanel`], enabled once every decision is
+///   Approved and the note is reviewed; the server 409s with a precise reason if the
+///   gate isn't satisfied.
+/// - **DecisionsApproved → Development** — the **Begin Development** button in
+///   [`DevelopmentPhaseView`], which calls `start_dev_run` with the per-tier model map.
+/// - **AwaitingQa → SignedOff** — the explicit **Sign off** button in
+///   `RunProvenancePanel` (`live_run.rs`), which calls `sign_off_run`.
 ///
 /// Later stages (`Development`, `AwaitingQa`, `SignedOff`) are engine-driven — set by
 /// the gated run, its provenance watcher, and the explicit sign-off — so no run
@@ -8971,8 +9052,8 @@ mod bff_tests {
 #[cfg(test)]
 mod render_tests {
     use super::{
-        CiRuleItem, CiRulesPanel, CreateOrOpenUow, GovDevSel, NewAuthoredUowButton, UowListEntry,
-        UowStage, WorkItem,
+        CiRuleItem, CiRulesPanel, CreateOrOpenUow, DecisionsReviewPanel, GovDevSel,
+        NewAuthoredUowButton, RunView, UowListEntry, UowStage, WorkItem,
     };
     use dioxus::prelude::*;
 
@@ -9184,6 +9265,90 @@ mod render_tests {
         assert!(
             !html.contains("disabled"),
             "button is not disabled in the idle state"
+        );
+    }
+
+    // DecisionsReviewPanel consumes the toasts context and a `use_resource` fetch
+    // (`fetch_investigation_review`). On first SSR render the resource is pending, so the
+    // panel falls back to `InvestigationReviewView::default()` (no decisions, unreviewed,
+    // no note) — matching the credentials.rs / design.rs convention of asserting on the
+    // pending-resource default state rather than driving the future to completion.
+    fn decisions_review_investigating_harness() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        let uow_refresh = use_signal(|| 0u32);
+        let uows_refresh = use_signal(|| 0u32);
+        let active_run = use_signal(|| Option::<RunView>::None);
+        let invest_model = use_signal(String::new);
+        rsx! {
+            DecisionsReviewPanel {
+                story_id: "CAM-1".to_string(),
+                stage: Some(UowStage::Investigating),
+                uow_refresh,
+                uows_refresh,
+                active_run,
+                models: None,
+                invest_model,
+            }
+        }
+    }
+
+    fn decisions_review_decisions_approved_harness() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        let uow_refresh = use_signal(|| 0u32);
+        let uows_refresh = use_signal(|| 0u32);
+        let active_run = use_signal(|| Option::<RunView>::None);
+        let invest_model = use_signal(String::new);
+        rsx! {
+            DecisionsReviewPanel {
+                story_id: "CAM-1".to_string(),
+                stage: Some(UowStage::DecisionsApproved),
+                uow_refresh,
+                uows_refresh,
+                active_run,
+                models: None,
+                invest_model,
+            }
+        }
+    }
+
+    #[test]
+    fn decisions_review_panel_shows_disabled_approve_button_while_investigating() {
+        // Fix for the "Approve decisions has no UI call site" bug: while stage is
+        // Investigating, the panel must render the button (disabled, since the default
+        // pre-load state has zero decisions so the gate isn't satisfied) plus the
+        // not-ready hint — never the stale "Ready" copy against unloaded data.
+        let mut vdom = VirtualDom::new(decisions_review_investigating_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("Approve decisions"),
+            "the Approve decisions button renders while Investigating; html=\n{html}"
+        );
+        assert!(
+            html.contains("uow-approve-decisions"),
+            "the approve-decisions control wrapper renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("disabled"),
+            "the button starts disabled (no decisions loaded yet); html=\n{html}"
+        );
+        assert!(
+            !html.contains("uow-decisions-ready"),
+            "the stale-data 'Ready' hint must not render before the gate is satisfied; html=\n{html}"
+        );
+    }
+
+    #[test]
+    fn decisions_review_panel_hides_approve_button_once_decisions_approved() {
+        // Once the server has already advanced the stage past Investigating, the
+        // transition is done — re-showing "Approve decisions" would just invite a stale
+        // click that 409s, so the button must not render.
+        let mut vdom = VirtualDom::new(decisions_review_decisions_approved_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            !html.contains("Approve decisions"),
+            "the Approve decisions button must not render once past Investigating; html=\n{html}"
         );
     }
 }
