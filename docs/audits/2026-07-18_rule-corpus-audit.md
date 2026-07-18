@@ -1,0 +1,115 @@
+# Rule-Corpus Audit — Design Quality + Grounding Sweep (2026-07-18)
+
+Source: Fable audit of all 356 rules under `crates/rules/principles/`. This doc is the
+work-spec for the remediation. Paths below are relative to `crates/rules/principles/` unless noted.
+
+## Part 0 — Corpus state
+| State | Count | Notes |
+|---|---|---|
+| `verification = "grounded"` w/ external sources | 271 | genuinely grounded |
+| `verification = "grounded"` w/ INTERNAL-repo sources only | 50 | cite only AGENTS.md/CONVENTIONS.md/docs — draft-equivalent by ladder semantics |
+| no `verification` field (loads as `draft`) | 35 | api-layer 15, rust 8, go 5, ui 4, sql 1, ci-cd 1, angular 1 |
+
+Grounding definition (`crates/rules/src/lib.rs:228-232`): a source must point at a published
+standard or a real linter rule. A Camerata doc citing Camerata is provenance, not grounding.
+
+## Part 1b — HIGH correctness fixes (wrong API / wrong fact — an agent following these writes broken code)
+- `go/gorm/go-gorm-transactions-multi-write-1.toml` — nonexistent GORM APIs (`db.WithTxn`, chained `BeginTx().Create().Commit()`). Real: `db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {...})`.
+- `go/grpc/go-grpc-status-codes-correct-1.toml` — inverts retry semantics. `UNAVAILABLE` is the retryable code; `INTERNAL` is serious/non-retryable. Fix per grpc.io.
+- `python/django/python-django-migrations-checked-in-1.toml` — wrong CI command: `migrate --check` detects UNAPPLIED migrations; the rule wants `makemigrations --check --dry-run`. Also "(Django 4.2+)" wrong (3.1).
+- `rust/tokio/rust-tokio-no-std-mutex-across-await-1.toml` — decision.why falsely claims tokio Mutex "yields the lock when awaited". Guard is held across awaits; only acquisition is async. Fix the invariant.
+- `rust/axum/rust-axum-timeout-limits-1.toml` — inverted sentence in default rationale ("When timeouts and limits are not configured, the application degrades gracefully"); add missing negation. Also mention axum's built-in 2 MB `DefaultBodyLimit` (since 0.6).
+- `rust/seaorm/rust-entities-7-composite-unique-at-db.toml` — outdated: SeaORM supports composite uniques via `#[sea_orm(unique_key = "...")]` (on the cited page). Rescope to partial/conditional/deferrable uniques.
+- `rust/sqlx/rust-sqlx-connection-pool-sized-1.toml` — harmful sizing ("100 concurrent → pool of 100"); pool ≥ concurrency is an anti-pattern (queue at acquire). Add a "use defaults" option.
+- `csharp/csharp-ienumerable-collections-1.toml` — false: `ICollection<T>` allows Add/Remove/Clear; means `IReadOnlyCollection<T>`. Add deferred-execution/multiple-enumeration rebuttal.
+- `csharp/aspnet/csharp-ef-core-parameterized-1.toml` — confused ("C# 2.1"; option label vs directive describe opposite semantics) and contradicts `csharp/efcore/csharp-efcore-parameterized-linq-1.toml`. DELETE (efcore version is accurate superset).
+- `javascript/testing/javascript-testing-no-disabled-tests-1.toml` — prescribes `jest.skip()` (does not exist) and any `.skip` fails the same lint gate. Internally contradictory — fix the escape hatch.
+- `go/web/go-web-graceful-shutdown-1.toml` — `server.Shutdown(context.WithTimeout(...))` doesn't compile (drops `cancel`).
+- `go/web/go-web-request-binding-validation-1.toml` — fabricated Echo APIs (`c.BindJSON`, `c.QueryParamMap`). Use real Gin/Echo binding APIs.
+- `go/web/go-web-context-propagation-1.toml` — fabricated `http.DoWithContext` (real: `http.NewRequestWithContext`); near-duplicate of `go/go-context-propagation-1.toml` (see 1c).
+- `go/gorm/go-gorm-migrations-managed-1.toml` — "AutoMigration" (real: `AutoMigrate`) + internal contradiction (default endorses version-controlled migrations yet accepts AutoMigrate).
+- `javascript/vue/javascript-vue-no-direct-dom-1.toml` — cites nonexistent `v-class`/`v-style` (Vue 1.x). Use `:class`/`:style` bindings.
+- Design HIGHs: `ui/ui-utc-dates-1.toml` (draft) conflates "centralize formatting" with "display in UTC" (usually wrong; store-UTC/render-local is standard) — REWORK before grounding; `ci-cd/arch-trunk-sync-1.toml` missing the dominant "fix trunk-first, cherry-pick to release" position (Release Flow/Chromium) — it's Agora policy presented as best practice; `java/spring/java-constructor-injection-1.toml` true duplicate of `java-spring-constructor-injection-1.toml` (DELETE, keep `java-spring-`); `java/spring/java-layering-controller-service-repo-1.toml` near-dup of `java-spring-layered-architecture-1.toml` (merge, carry `no-formal-layering` option, demote the `service-to-service-orchestration` pseudo-option).
+
+## Part 1b — Agora-doctrine leakage (violates stack-generalized principle — strip project specifics)
+- `javascript/next/javascript-next-route-placement-1.toml` — hardcodes Agora paths (`app/(gated)/(main)/...`); also route-group layout ≠ auth guarantee (enforce in middleware/data layer). Generalize.
+- `javascript/next/javascript-next-dual-api-helpers-1.toml` — forbids direct `fetch` everywhere; contradicts App Router canon (direct `fetch` in Server Components is documented). Add `qualifies` scoping + the RSC-fetch option.
+- `csharp/aspnetcore/csharp-aspnetcore-thin-controllers-1.toml` — strip "...same principle that governs the Express and Rust layers of the Agora stack" from decision.why.
+- `javascript/express/javascript-express-thin-controllers-1.toml` — strip "the Rust side of the stack" from decision.why. (Also its cited expressjs.com section doesn't exist → Node.js Best Practices §1.2 "Layer your components".)
+- `javascript/react/javascript-react-keyed-lists-1.toml` — remove "Same hazard as the Dioxus iterated-key rule". Generalize.
+- `rust/seaorm/rust-entities-12-pgenum-as-typed-enum.toml` — remove project `_enums/` placement doctrine from the universal default.
+
+## Part 1c — Delete / merge duplicates (~15 files; keep the better of each pair)
+- ruby/rails: keep `ruby-rails-eager-load-1` (delete `ruby-eager-load-associations-1` — false "no perf downside"); keep `ruby-rails-scopes-1` (delete `ruby-activerecord-scopes-1` — syntax error in why); keep `ruby-rails-skinny-controllers-1` (delete `ruby-thin-controllers-1`); keep `ruby-rails-no-string-sql-1` (delete `ruby-rails-parameterized-queries-1` — garbled); merge `ruby-validation-layer-1` into `ruby-rails-model-validations-1`; `ruby/ruby-no-hardcoded-secrets-1` duplicates `ruby/rails/ruby-rails-no-secrets-in-code-1` (keep rails).
+- csharp/aspnet dir should not survive: `csharp-ef-core-parameterized-1` DELETE (per 1b); `csharp-async-no-blocking-1` merge into `aspnetcore/csharp-aspnetcore-async-actions-1` (fix: starvation, not legacy SynchronizationContext-deadlock, is the Core rationale); `csharp-controller-service-repo-1` rescope/delete vs `aspnetcore-thin-controllers` (add the no-repository-over-EF-Core option); `csharp-dependency-injection-constructor-1` relocate to `csharp/` top level (carve out Blazor `[Inject]`, C# 12 primary constructors).
+- java: the two pairs above; `java/java-jpa-eager-load-1` vs `java/spring/java-spring-no-nplus1-fetch-join-1` — keep spring (notes `@ManyToOne` defaults EAGER; the java one wrongly implies LAZY-by-default).
+- go: `go/web/go-web-thin-handlers-delegation-1` vs `go/go-handler-service-repository-1` (nothing distinct — merge); `go/web/go-web-context-propagation-1` vs `go/go-context-propagation-1` (merge; the web one adds nothing).
+- api-layer: `arch-handler-no-db-1` ⊂ `arch-strict-layering-1`, `arch-no-cross-boundary-imports-1` enforces same boundary via imports — if the detector-tier split is deliberate (docs/decisions/2026-06-19_ast_architectural_rule_tier.md), cross-reference all three explicitly; `arch-typed-path-params-1` subsumed by `arch-boundary-validation-1`.
+- Cross-reference-only (keep both, add a note): `rust/rust-domain-4` ↔ `rust-domain-6`; `sql/sql-db-index-1` ↔ `sql-db-index-2`; `csharp/efcore/csharp-efcore-no-nplus1-1` restates `no-lazy-loading-1`.
+
+Live contradictions to reconcile: `python/python-service-layer-1.toml` (all rules in services) vs `python/django/python-django-fat-model-service-1.toml` (model methods) — and service-layer-1's only source argues for fat models; `agentic/orch-precision-recall-1` vs `orch-tiered-escalation-1` (route detections per tiered-escalation); `rust/axum/rust-axum-extractors-validate-1` vs `rust/dioxus/rust-dioxus-13-forms-newtype-validation` ("domain is the ONLY place for validation") — reconcile: extractors do wire-shape then invoke domain constructors; `agentic/orch-no-natural-break-1` make-work incentive — add "stop at last verified-green checkpoint when remaining budget can't finish the next atomic unit".
+
+## Part 1d — Option-design fixes (default right, alternatives strawmanned/incomplete — add the missing legitimate position)
+- `api-layer/arch-structured-errors-1.toml` + `go/web/go-web-structured-error-responses-1.toml` — add RFC 9457 Problem Details (should be default or an option).
+- `api-layer/arch-strict-layering-1` — add vertical-slice architecture; `arch-repo-per-aggregate-1` — add CQRS read/write split; `arch-api-versioning-1` — options 2/4 blur; add query-param + date-pinned (`Stripe-Version`); `arch-exact-decimals-1` — integer-minor-units rebuttal overstated (conflates in-code arithmetic with wire representation).
+- `go/go-handler-service-repository-1.toml` (draft) — add the Go-community anti-layer-package alternative (Ben Johnson standard-package-layout / Mat Ryer); `go/testing/go-testing-colocated-test-files-1` — false "tests/ tree breaks go test ./..."; `go/testing/go-testing-integration-build-tags-1` — add `testing.Short()`.
+- `testing/testing-pyramid-1` — add honeycomb/testing-trophy; misattributes pyramid (it's Mike Cohn, not xUnit Patterns); `testing/testing-arrange-act-assert-1` — "shared setup in before-each" contradicts Google DAMP-over-DRY.
+- `sql/sql-db-index-2-where-indexes` — "index every WHERE column" over-absolute; "most-selective first" is a composite-index oversimplification; `sql/proc-ci-migration-hygiene-1` — blanket IF-NOT-EXISTS masks drift; cited SQLFluff PG01 is lock-safety (directive never mentions locks).
+- `permissions/proc-hide-dead-end-1` — add render-disabled-with-reason; `iac/arch-iac-1` — lone alternative bundles click-ops + secrets-in-repo (strawman; separate them); `ci-cd/proc-auto-merge-1` — decision.why rebuts a position with no `[[option]]`; `concurrency/proc-pr-concurrency-1` — add automated race-detection-in-CI.
+- rust: `rust-domain-5-async` add sync-first option; tokio rules add `TaskTracker`/`block_in_place`/std-Mutex-when-not-held; `rust-axum-state-shared-deps-1` add `Extension`; seaorm relation rules add `Linked` trait, stop conflating entity declarations with DB FK enforcement; pin SeaORM version (2.0 changes relation mechanics).
+- angular: `javascript-angular-di-constructor-or-inject-1` — both sources prefer `inject()`; `no-direct-dom-manipulation-1` — Renderer2-as-mandatory dated (use `afterRender`/`afterNextRender`); dir has v15-16 center of gravity (no signals, `@if`/`@for`, typed forms; `standalone:true` stale for v19+).
+- `javascript/nest/javascript-nest-guards-for-auth-1` — add global `APP_GUARD` + `@Public()`; `nest-interceptors-cross-cutting-1` — exception handling belongs to filters, not interceptors.
+- `javascript/express/javascript-express-central-error-handler-1` — "async rejections NOT caught" false for Express 5 (host runs Express 5).
+- `python/fastapi/python-fastapi-pydantic-models-1` — "never return ORM objects" stricter than its source (ORM under `response_model` is idiomatic); `python/django/python-django-csrf-auth-1` — add Django 5.1+ `LoginRequiredMiddleware`; `python-django-orm-parameterized-1` — `.extra()` is discouraged, not "deprecated since 3.2".
+- `java/java-small-interfaces-1` — drop hard 1-3-method cap + false "cannot mock concrete classes"; `java-optional-over-null-1` — add JSpecify/NullAway; `java-spring-method-security-1` — add URL-pattern `authorizeHttpRequests`.
+- Enforcement over-claims (rules labeled `mechanical` whose linter enforces a fraction): `python/testing/python-testing-parametrize-1` (PT006/7 is lint style), `ruby/testing/ruby-testing-mock-at-boundary-1`, `javascript/testing/javascript-testing-deterministic-1` (`jest/no-done-callback` unrelated to clocks), `javascript/typescript/typescript-no-floating-promises-1` (`ignoreVoid:true` default), `vue-computed-over-methods-1` — soften enforcement claim to match the linter.
+
+## Part 1a — Mechanical (schema clean overall; two systemic issues)
+- 0 parse errors, 0 dup ids, 0 missing fields, 0 default-not-first. GOOD.
+- SYSTEMIC: 232 of 621 alternative-option `label`s are machine-truncated with a trailing `…` across 112 files (rust 89, api-layer 32, agentic 31, javascript 30, universal 13, ui 12, sql 10, permissions 7, others). Default-option labels are never truncated; go/python/java/csharp/ruby have zero. Fix: regenerate each truncated label as a SHORT human phrase (do NOT touch option `id`s — ids are forever, even the ugly truncated ones).
+- SYSTEMIC: thin default-option `why`s in the older-style files (default option's standalone `why` is a contentless first sentence). Backfill a real one-sentence rationale for the default option in those ~112 files.
+- LOW: taxonomy drift (`tag="process"` once in `agentic/proc-story-docs-1`; `layer="testing"` only in go/testing; `enforcement="architectural"` in 16 files incl. one anomaly `python/testing/python-testing-file-naming-1`); naming (`ruby-rails-strong-parameters-1` id/slug mismatch; RUST-ENTITIES-8 / RUST-DIOXUS-10 sequence gaps — confirm nothing lost); `rust/rust-domain-2-newtype-ids` is the only file with `[[emits]]`.
+
+## Part 2a — Citation repairs on already-"grounded" rules
+Dead URLs (HTTP-verified 404):
+- `testing/testing-arrange-act-assert-1` → `xunitpatterns.com/Four%20Phase%20Test.html`; replace the hallucinated 2008 Google URL with Google TotT "Tests Too DRY? Make Them DAMP" (2019).
+- `testing/testing-one-assertion-per-test-1` → `xunitpatterns.com/Principles%20of%20Test%20Automation.html`; same Google-URL fix.
+- `testing/testing-pyramid-1` → Mike Cohn *Succeeding with Agile* (2009) + keep Fowler practical-test-pyramid (drop the 404 xUnit URL).
+- `testing/testing-as-documentation-1` → `xunitpatterns.com/Goals%20of%20Test%20Automation.html`.
+- `python/python-no-bare-except-1` → `docs.astral.sh/ruff/rules/blind-except/` (BLE001); PEP 8 anchor `#programming-recommendations`.
+- `python/fastapi/python-fastapi-pydantic-models-1` → `fastapi.tiangolo.com/tutorial/body/`.
+- `csharp/csharp-no-hardcoded-secrets-1` → verify `https://rules.sonarsource.com/csharp/RSPEC-2068/`.
+- `javascript/angular/javascript-angular-lazy-loading-routes-1` → `angular.dev/guide/routing/define-routes`.
+Real URL, wrong claim / wrong analyzer (swap source):
+- `python/python-service-layer-1` → cosmicpython.com/book/chapter_04_service_layer.html (its current source argues the opposite).
+- `java/testing/java-testing-naming-1` → PMD anchor `#unittestshouldusetestannotation`.
+- `java/java-optional-over-null-1` → `java.util.Optional` javadoc API note (Error Prone `NullOptional` is about null-as-arg).
+- `java/spring/*constructor-injection*` (both) → Checkstyle `VisibilityModifier` doesn't detect `@Autowired` fields; cite Spring docs constructor-injection section instead.
+- `java/testing/java-testing-deterministic-1` → drop `SIC_INNER_SHOULD_BE_STATIC_ANON`/PMD-GC (unrelated); cite a real clock/flakiness source.
+- `csharp/csharp-idisposable-using-1` → IDE0063/CA2000 (not IDE0090); reconcile blanket no-manual-Dispose vs its own CA1001.
+- `csharp/csharp-no-swallowed-exceptions-1` → Sonar S108/S2486 (CA1068 is CancellationToken ordering).
+- `javascript/angular/javascript-angular-subscription-cleanup-1` → the `no-implicit-take-until-destroyed` rule enforces explicit `DestroyRef`, not cleanup; fix the claim.
+- `rust/seaorm/` invented source titles: `rust-entities-9`, `rust-entities-11`, `rust-seaorm-intra-aggregate-tx-1` → cite sea-ql.org transaction + custom-join/Linked pages; `rust-entities-6`/`13` titles editorialize — fix to match page content.
+- `ruby/rails/ruby-concerns-judiciously-1` → `api.rubyonrails.org/classes/ActiveSupport/Concern.html`.
+- Weak-authority hygiene: qualify betterspecs.org as "community guideline" in the 4 ruby/testing files; drop the users.rust-lang.org forum cite in `rust/testing/rust-testing-5`; unpin the rubocop URL in `ruby/ruby-small-methods-1`; drop the uncited "77% of tests follow AAA" claim in `javascript/testing/javascript-testing-aaa-structure-1`.
+
+## Part 2b — Ground the 35 draft rules (attach source, set verification="grounded")
+api-layer (all 15 groundable): `arch-api-dtos-1`→Fowler PoEAA "Data Transfer Object"+"LocalDTO"; `arch-api-versioning-1`→Microsoft REST API Guidelines Versioning+Stripe versioning; `arch-boundary-validation-1`→OWASP Input Validation CS+"Parse, don't validate"; `arch-cursor-pagination-1`→Google AIP-158+GitHub REST pagination; `arch-exact-decimals-1`→Python `decimal` docs+Fowler "Money"; `arch-explicit-tx-1`→PoEAA "Unit of Work" (med); `arch-hot-read-cache-1`→Azure "Cache-Aside"; `arch-idempotency-keys-1`→IETF draft-ietf-httpapi-idempotency-key-header+Stripe idempotency; `arch-middleware-first-1`→ASP.NET Core+Express middleware (LOW — mechanism only, the mandate is doctrine → consider "policy"); `arch-repo-per-aggregate-1`→Vernon IDDD ch.12+Evans; `arch-repo-returns-domain-1`→PoEAA "Repository"; `arch-service-di-1`→Fowler IoC Containers+Seemann DI (composition root); `arch-structured-errors-1`→RFC 9457 (also reshape directive); `arch-typed-path-params-1`→FastAPI+axum extract (med); `arch-utc-timestamps-1`→RFC 3339+PostgreSQL datetime (med).
+rust (8): `RUST-DOMAIN-7`→PoEAA "Unit of Work" (the Option<&dyn UoW>+Any concretion is project-specific — note it); `RUST-MAPPER-1`→PoEAA "Data Mapper" (med; own-crate placement has no authority); `RUST-HEADLESS-CORE-1`→Fowler "Presentation Model"+TanStack headless intro (med); `RUST-PURE-STATE-TRANSITIONS-1`→Elm Architecture guide+Redux three principles (fix purity-vs-`&mut self` conflation first); `RUST-DIOXUS-12`→GitHub "Delivering Octicons with SVG" (med); `RUST-DIOXUS-13`→"Parse, don't validate"+Rust Newtype pattern; `RUST-DIOXUS-14`→Brad Frost Atomic Design ch.2 (low-med); `RUST-DIOXUS-1` (file structure)→NO citable authority → keep draft OR mark "policy".
+go (5): `go-web-request-binding-validation-1`→Gin binding docs+go-playground/validator v10 (after fixing fabricated APIs); `go-web-structured-error-responses-1`→RFC 9457; `go-web-middleware-cross-cutting-1`→net/http Handler+Gin middleware (med); `go-web-thin-handlers-delegation-1`→Mat Ryer "How I write HTTP services in Go" (low-med — consider merging per 1c); `go-handler-service-repository-1`→NO Go authority mandates this → REWORK, keep draft.
+others: `ci-cd/proc-feature-flags-1`→Hodgson "Feature Toggles"+trunkbaseddevelopment.com; `sql/sql-audit-columns-1`→OWASP Logging CS only (low; tri-strategy split is convention → likely "policy"); `ui/ui-consent-gated-1`→EDPB Guidelines 05/2020 (add jurisdiction qualifier); `ui/ui-image-component-1`→web.dev "Optimize CLS" (fix qualifies-vs-linter self-contradiction); `ui/ui-query-library-1`→TanStack Query overview (resolve missing decision.default first); `ui/ui-utc-dates-1`→Next.js hydration-error ref grounds "centralize" only — REWORK display-UTC half; `javascript/angular/javascript-angular-smart-presentational-pattern-1`→Abramov container/presentational (React-specific, author-disavowed → LOW; keep draft or reframe as community convention).
+
+## Part 2c — The 50 internal-only "grounded" rules
+Groundable with real external authority (attach source, keep `grounded`):
+- `universal/sec-no-disabled-tls-1`→CWE-295+OWASP TLS CS; `sec-no-private-key-1`→GitHub "Removing sensitive data"; `sec-no-secret-file-1`→OWASP Secrets Mgmt CS; `sec-no-vendor-token-1`→CWE-798+GitHub secret-scanning; `arch-no-secrets-in-url-1`→CWE-598+RFC 9110 §17.9; `arch-resource-lifecycle-1`→CWE-459+tokio `kill_on_drop`; `proc-regression-test-1`→LLVM Developer Policy; `spirit-document-decisions-1`→Nygard ADR (the "immediately" strengthening stays project-specific).
+- `permissions/arch-server-authz-1`→OWASP ASVS V4; `arch-fetch-then-authorize-1`→OWASP Authorization CS+"Parse don't validate"; `proc-hide-dead-end-1`→Smashing "Hidden vs Disabled In UX" (2024).
+- `integration/integration-api-contract-1`→Fowler "Consumer-Driven Contracts"; `integration-auth-seam-1`→OWASP Top 10 A01:2021.
+- `iac/arch-iac-1`→Morris *Infrastructure as Code*+OWASP Secrets Mgmt.
+- `fullstack/arch-monolith-first-1`→Fowler "MonolithFirst"; `arch-parallel-independent-1`→MDN async-function (sequential-await warning).
+- `ci-cd/arch-trigger-env-1`→Microsoft "Release Flow".
+- `api-layer/arch-handler-no-db-1`→PoEAA "Service Layer"; `arch-no-cross-boundary-imports-1`→Martin "The Clean Architecture" (Dependency Rule); `arch-strict-layering-1`→PoEAA "Layering"+POSA vol.1 Layers.
+- `agentic/agentic-no-test-tamper-1`→DeepMind "Specification gaming"; `orch-conformance-1`→Ford/Parsons/Kua *Building Evolutionary Architectures*; `orch-env-gated-quality-1`→Humble&Farley *Continuous Delivery*+DORA; `orch-new-path-tests-1`→Google "Code Coverage Best Practices" (2020); `orch-one-way-door-1`→Bezos 2015 shareholder letter; `orch-reviewer-split-1`→Panickssery et al. arXiv 2404.13076; `orch-tiered-escalation-1`/`orch-output-digest-1`→Google SRE Book "Monitoring Distributed Systems"; `orch-model-tiering-1`→Anthropic "Choosing the right model"; `orch-context-override-1`→Nygard ADR; `orch-prereview-1`→Sadowski et al. "Modern Code Review at Google" (low); `orch-training-cutoff-1`→OWASP Top 10 for LLM Apps LLM09 (low); `proc-story-docs-1`→Diátaxis (low).
+Honestly ungroundable — pure project policy → mark `verification = "policy"` (the new provenance value): `universal/proc-cite-convention-id-1`, `spirit-file-size-1`, `spirit-optimize-1`, `spirit-robustness-1`, `permissions/proc-permission-config-1`, `permissions/proc-migration-role-grants-1`, `integration/integration-event-wiring-1`, `ci-cd/proc-auto-merge-1`, `ci-cd/arch-trunk-sync-1`, `agentic/orch-autocalls-ledger-1`, `orch-budget-monitor-1`, `orch-clear-winner-1`, `orch-conflicting-robustness-1`, `orch-no-natural-break-1`, `orch-novelty-1`, `orch-precision-recall-1`. (`concurrency/proc-pr-concurrency-1` also policy-ish; ground its content via Go race-detector/TSan if the CI option is added.)
+
+## Fix order (priority)
+1. The 14 wrong-API/wrong-fact HIGHs (surgical). 2. Strip Agora leakage (6). 3. Delete/merge ~15 duplicates. 4. Repair 8 dead + ~15 mismatched citations. 5. Resolve the 50 internal-only (external source where it exists per 2c, else `verification="policy"`). 6. Ground the ~30 groundable drafts (2b). 7. Regenerate the 232 truncated labels + backfill thin default whys. 8. Redesign the flagged decision rules (default/option-set wrong): `ui-utc-dates-1`, `arch-trunk-sync-1`, `arch-structured-errors-1` (RFC 9457), `orch-no-natural-break-1`, `sql-db-index-2`, `go-handler-service-repository-1`, `nest-guards-for-auth-1`, `angular-di-constructor-or-inject-1`. 9. The MED option-set additions (1d) + per-domain gaps.
