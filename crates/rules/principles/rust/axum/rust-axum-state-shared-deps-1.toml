@@ -24,6 +24,12 @@ label = "Use global static variables for application dependencies"
 directive = "Application dependencies are initialized in global static variables (using lazy_static, once_cell, or manual initialization on startup) and handlers access them directly from the global scope."
 why = "Global state is invisible to the type system: a handler that depends on a database pool does not declare that dependency anywhere a linter or reviewer can see; testing becomes complex because tests must initialize and reset the global without interfering with each other; and initialization-order bugs produce failures that are hard to attribute because there is no structured way to handle initialization errors."
 
+[[option]]
+id = "use-extension-for-shared-dependencies"
+label = "Share application dependencies via Axum's Extension extractor/layer instead of typed State"
+directive = "Application dependencies are inserted into the request via .layer(Extension(dep)) (typically Extension(Arc<T>) for a shared, cloneable handle) and retrieved in handlers by taking Extension<T> as an extractor argument, rather than being placed into a single typed State<T> struct passed to the router."
+why = "Extension is Axum's older, more loosely-typed mechanism: it stores values in a per-request type-map keyed by TypeId and looks them up at runtime, so a missing Extension of the expected type is a runtime 500 (extractor rejection) rather than a compile error, and there's no single struct enumerating everything a handler depends on the way a State<AppState> field list does. Its advantage shows up with middleware-inserted values that don't fit cleanly into the root State type — e.g. a value a layer computes per-request (a resolved tenant, a request-scoped trace context) and inserts via Extension for downstream handlers to pick up, without having to thread it through the State type that was defined at router-construction time. For dependencies known and fixed at startup (DB pool, cache client, config), typed State remains the better default: it is compile-time checked and self-documenting in a way Extension's runtime type-map lookup is not."
+
 [[sources]]
 url = "https://docs.rs/axum/latest/axum/extract/struct.State.html"
 title = "axum::extract::State — Shared application state extractor"

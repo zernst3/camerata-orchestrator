@@ -3,9 +3,11 @@ title = "Use computed properties for derived state, not methods with side effect
 tag = "stack"
 domain = "javascript:vue"
 layer = "framework"
-enforcement = "structured"
+enforcement = "prose"
 default = true
 verification = "grounded"
+
+qualifies = "vue/no-side-effects-in-computed-properties checks a narrower, different thing than 'prefer computed over methods': it flags a computed property whose getter itself performs a side effect (assigning to a different reactive property, mutating external state), which is a smell inside a computed property that already exists. It says nothing about whether a given template expression should have been a computed property instead of a method in the first place — that judgment call (is this method call pure and cacheable, or does calling it repeatedly matter, e.g. because it has a side effect or its cost is negligible) is not something a linter can generally determine by inspection, since it requires knowing whether the method is actually pure and whether re-computation cost matters for that specific case. So the core of this rule (prefer computed for derived state, not methods) is enforced by code review and convention, not by CI lint; the cited rule only catches one specific downstream mistake (a side effect leaking into a computed getter) after the computed-vs-method choice has already been made correctly."
 
 [[sources]]
 url = "https://vuejs.org/guide/essentials/computed.html"

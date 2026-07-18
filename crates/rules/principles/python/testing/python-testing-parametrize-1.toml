@@ -3,9 +3,9 @@ title = "Multiple input/output variants use @pytest.mark.parametrize, not copy-p
 tag = "stack"
 domain = "python:testing"
 layer = "language"
-enforcement = "mechanical"
+enforcement = "structured"
 default = true
-qualifies = "Enforced by Ruff PT006 (wrong argnames type) and PT007 (wrong values type in parametrize). Conformance holds when a test function that validates the same logic with N different inputs is expressed as a single test function decorated with @pytest.mark.parametrize, with each case as a tuple in the values list; it fails when the same assertion logic is copy-pasted into N distinct test functions differing only in their inputs."
+qualifies = "Ruff PT006 and PT007 are style checks on parametrize calls already in the code — PT006 flags a wrong argnames type (a tuple used where a plain string is expected for a single parameter) and PT007 flags a wrong values-list element type. Neither rule detects whether parametrize was used AT ALL in preference to copy-pasted test functions, or whether the parametrization is complete; a suite of N copy-pasted, non-parametrized test functions triggers no PT006/PT007 finding, because there is no parametrize call for the rule to check the style of. So the linter enforces idiomatic style once a team has already adopted parametrize, not the underlying discipline of using it instead of duplicating test functions — that part of the rule is enforced by code review, not by CI lint. Conformance for the style layer holds when PT006/PT007 pass on every parametrize call in the codebase; it fails when either rule reports an offense on an existing parametrize call."
 verification = "grounded"
 
 [decision]

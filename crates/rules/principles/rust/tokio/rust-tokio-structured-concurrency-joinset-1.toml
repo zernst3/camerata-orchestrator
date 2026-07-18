@@ -24,6 +24,12 @@ label = "Use unstructured tokio::spawn"
 directive = "Tasks are spawned via tokio::spawn without a JoinSet. Tasks may run past the scope where they are spawned, and the application relies on explicit cancellation or task-local cleanup."
 why = "A spawned task can run past the scope where it was created, producing orphaned tasks, resource leaks, and subtle bugs where a task outlives its dependencies; if a task panics, the panic is silently lost rather than being propagated and handled at a well-defined join point."
 
+[[option]]
+id = "use-tasktracker-for-dynamic-graceful-shutdown"
+label = "Use tokio::task::TaskTracker for a dynamic, long-lived set of tasks with graceful-shutdown semantics"
+directive = "For a task set whose membership grows and shrinks over the process's lifetime (e.g. one task spawned per incoming connection or per job), track spawned tasks with a TaskTracker instead of a single JoinSet scoped to one block. Call `tracker.spawn(...)` for each task, `tracker.close()` once no more tasks will be spawned, and `tracker.wait().await` (typically paired with a CancellationToken for signaling shutdown to the tasks) to await completion of every tracked task before the process exits."
+why = "JoinSet is the right fit when a fixed batch of tasks is spawned and joined within one well-defined scope; TaskTracker is the right fit when tasks are spawned continuously from different call sites over the life of the program and there's no single scope that owns them all, but a graceful shutdown still needs to wait for all in-flight tasks to finish before exiting. The trade-off: TaskTracker doesn't give you each individual task's return value or panic back at a join point the way JoinSet's join_next() does — it's oriented around 'has everything finished,' not 'what did each task return,' so pick JoinSet when you need per-task results and TaskTracker when you need graceful-shutdown accounting for a dynamic task population."
+
 [[sources]]
 url = "https://docs.rs/tokio/latest/tokio/task/struct.JoinSet.html"
 title = "tokio::task::JoinSet — Structured task collection; aborts on drop"

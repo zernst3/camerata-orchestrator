@@ -30,6 +30,12 @@ label = "use DRF IsAuthenticated permission class on DRF viewsets"
 directive = "Django REST Framework viewsets declare `permission_classes = [IsAuthenticated]` (or set it globally in DEFAULT_PERMISSION_CLASSES) rather than using `@login_required` or `LoginRequiredMixin`."
 why = "The correct pattern for DRF API viewsets; equivalent protection for API endpoints that do not render HTML. Complementary to (not a replacement for) CSRF middleware when the API uses session-cookie auth."
 
+[[option]]
+id = "login-required-middleware-django-5-1"
+label = "Django 5.1+ LoginRequiredMiddleware: authentication required by default, opt out per view"
+directive = "Add `django.contrib.auth.middleware.LoginRequiredMiddleware` (Django 5.1+) to `MIDDLEWARE`, which requires an authenticated session for every view by default and redirects anonymous users to the login page, inverting the default from 'public unless decorated' to 'private unless opted out.' Views that should be public are marked explicitly with the `login_not_required` decorator (or its class-based-view equivalent). CsrfViewMiddleware remains enabled globally regardless of which authentication-enforcement approach is used."
+why = "Flips the failure mode: with per-view `@login_required` / `LoginRequiredMixin`, forgetting to decorate a view silently makes it public; with `LoginRequiredMiddleware`, forgetting to mark a view `login_not_required` silently makes it private (a fail-closed default), which is the safer direction for most protected applications. The cost is that every genuinely public view (login page, health check, public marketing pages, webhooks authenticated by other means) must now be explicitly opted out, and existing projects need an audit pass to add `login_not_required` everywhere it's needed before adopting this middleware, so it suits new projects or CBV-mixin-heavy codebases better than a large existing app with many already-public views."
+
 [[sources]]
 url = "https://docs.djangoproject.com/en/6.0/ref/csrf/"
 title = "Django docs — Cross Site Request Forgery protection (CsrfViewMiddleware, csrf_exempt)"

@@ -7,7 +7,7 @@ enforcement = "mechanical"
 default = true
 verification = "grounded"
 
-qualifies = "Every Go source file foo.go has its unit tests in foo_test.go in the same directory. The _test.go suffix is the signal to the go tool: those files are excluded from production builds and included only when go test runs. Tests placed in a separate sibling directory or named without the suffix are not picked up by go test."
+qualifies = "Every Go source file foo.go has its unit tests in foo_test.go in the same directory. The _test.go suffix is the signal to the go tool: those files are excluded from production builds and included only when go test runs. Tests named without the suffix are not picked up by go test at all; tests placed in a separate sibling directory (with the correct suffix) are still discovered and run by go test ./..., but as an external package that cannot see the original package's unexported identifiers."
 
 [[sources]]
 url = "https://pkg.go.dev/testing"
