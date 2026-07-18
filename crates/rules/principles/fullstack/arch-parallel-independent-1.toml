@@ -28,18 +28,18 @@ why = "Sequential awaits sum the latency of each call (three 50ms calls take 150
 
 [[option]]
 id = "independent-concurrent-calls-in-any-code-path-ar"
-label = "independent concurrent calls in any code path are awaited …"
+label = "Sequential awaits by default"
 directive = "independent concurrent calls in any code path are awaited sequentially by default; the parallel-await primitive is used only when an author explicitly reaches for it on a case-by-case basis"
 why = "Sequentially awaiting independent calls sums latencies needlessly; the slowdown shows up as a percentile-tail bump in service code and as visible lag in UI code, both hard to attribute back to the specific site that mis-shaped the awaits."
 
 [[option]]
 id = "concurrency-strategy-is-decided-case-by-case-at"
-label = "concurrency strategy is decided case by case at each …"
+label = "No project-wide concurrency default"
 directive = "concurrency strategy is decided case by case at each call site with no project-wide default, so each author chooses sequential or parallel based on their own judgment in the moment"
 why = "Case-by-case concurrency decisions work while someone is actively thinking about performance and silently regress when they are not, so throughput drifts down between performance focus periods."
 
 [[option]]
 id = "the-slower-independent-calls-are-fired-in-the-ba"
-label = "the slower independent calls are fired in the background …"
+label = "Background fire-and-return"
 directive = "the slower independent calls are fired in the background and the response returns before they complete, treating the work as eventually consistent rather than awaiting all calls synchronously"
 why = "Background fire-and-return is the right answer for write-side fan-out, telemetry, or cache warming, but it changes the contract from synchronous to eventually consistent and is not a substitute for parallel awaits on calls whose results the caller actually needs in the response."

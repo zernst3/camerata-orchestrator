@@ -29,6 +29,6 @@ why = "A handler's job is request/response shaping; collapsing data access into 
 
 [[option]]
 id = "handlers-may-query-the-database-directly"
-label = "handlers may query the database directly when convenient …"
+label = "Direct handler database queries"
 directive = "handlers may query the database directly when convenient, with no AST boundary preventing a controller from holding and using a DB handle"
 why = "A defensible alternative the project considered: it is faster to write a one-off endpoint, but it erodes the layering and the erosion is invisible until the transport layer is full of business logic."

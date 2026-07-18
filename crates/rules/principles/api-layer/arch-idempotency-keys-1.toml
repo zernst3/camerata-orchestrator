@@ -28,18 +28,18 @@ why = "Network retries are inevitable."
 
 [[option]]
 id = "the-api-accepts-retries-without-any-idempotency"
-label = "the API accepts retries without any idempotency-key contract; the …"
+label = "No idempotency contract"
 directive = "the API accepts retries without any idempotency-key contract; the client is expected to detect prior success out of band before retrying"
 why = "No idempotency contract means the client risks double-charging or sending duplicates on every timeout, because the network cannot tell the client whether the original request reached the server."
 
 [[option]]
 id = "the-api-deduplicates-requests-by-inspecting-natu"
-label = "the API deduplicates requests by inspecting natural keys in …"
+label = "Deduplicate by natural keys"
 directive = "the API deduplicates requests by inspecting natural keys in the payload (such as an email address or invoice number) rather than by requiring an explicit Idempotency-Key header"
 why = "Natural-key deduplication works only when natural keys exist, are stable, and uniquely identify the intended effect; many real operations have no such key (a payment intent, an outbound email, an external job enqueue)."
 
 [[option]]
 id = "the-api-does-no-server-side-deduplication-at-all"
-label = "the API does no server-side deduplication at all; each …"
+label = "No deduplication"
 directive = "the API does no server-side deduplication at all; each consumer is responsible for not retrying after a timeout, and the server treats every request as new"
 why = "Pushing correctness onto every consumer means one careless caller produces duplicates and the server has no way to defend against it."

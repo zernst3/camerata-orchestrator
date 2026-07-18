@@ -39,6 +39,6 @@ why = "Constructor injection ensures the same singleton behavior, initialization
 
 [[option]]
 id = "services-are-manually-instantiated-with-new-where"
-label = "services are manually instantiated with 'new' where …"
+label = "Manual instantiation with new"
 directive = "services are instantiated manually using the 'new' keyword where needed, rather than relying on dependency injection"
 why = "Manually instantiating services with new bypasses Angular's DI container entirely: the constructor runs outside the container, any initialization or lifecycle hooks are skipped, the service is not a singleton (a new instance is created every time), and swapping the implementation for testing requires modifying source code rather than providing a different token. Each manually instantiated service is also invisible to the DI system, so it cannot have its own dependencies injected by Angular."

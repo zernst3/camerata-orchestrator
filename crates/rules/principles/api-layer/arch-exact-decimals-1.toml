@@ -29,18 +29,18 @@ why = "Binary floating-point cannot represent most decimal fractions exactly."
 
 [[option]]
 id = "monetary-and-quantity-values-are-represented-in"
-label = "monetary and quantity values are represented in code as …"
+label = "Use binary floating-point"
 directive = "monetary and quantity values are represented in code as binary floating-point (f64, double, Number) and stored as REAL or DOUBLE in the database"
 why = "Using floating-point everywhere silently loses precision: the failure mode is wrong numbers that look right and only surface at reconciliation time, which is far more expensive than catching the type error up front."
 
 [[option]]
 id = "monetary-values-are-represented-in-code-as-integ"
-label = "monetary values are represented in code as integer-cents (or …"
+label = "Use integer minor-units"
 directive = "monetary values are represented in code as integer-cents (or minor-unit integers) rather than as the language's exact-decimal type"
 why = "Integer minor-units avoid floating-point imprecision just as well as a decimal type does — integer arithmetic is exact by construction — and are simpler and more wire-compact, at the cost of less readable arithmetic (percentage/division operations need care to avoid re-introducing rounding bugs), no native currency-math support, and friction with multiple minor-unit conventions or sub-cent intermediate calculations. It's a legitimate, currency-specific choice, distinct from (not a violation of) the broader 'use exact decimal types for anything requiring precision' principle, which still applies to non-monetary exact-precision values."
 
 [[option]]
 id = "monetary-and-quantity-values-are-represented-as"
-label = "monetary and quantity values are represented as strings throughout, …"
+label = "Represent as strings"
 directive = "monetary and quantity values are represented as strings throughout, and consumers parse and re-format them at each compute step"
 why = "String representation gives up arithmetic at the type level and pushes the precision problem into every consumer who has to remember to parse and round consistently."

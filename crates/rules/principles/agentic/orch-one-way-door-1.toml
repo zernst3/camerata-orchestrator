@@ -32,12 +32,12 @@ why = "A wrong 'clear' call on a one-way door costs a migration; on a two-way do
 
 [[option]]
 id = "the-agent-auto-decides-whenever-the-winner-feels"
-label = "the agent auto-decides whenever the winner feels obvious, regardless …"
+label = "Confidence gates autonomy"
 directive = "the agent auto-decides whenever the winner feels obvious, regardless of whether the call is hard to reverse"
 why = "Confidence-gated autonomy misses exactly the irreversible calls the rule exists to catch: high confidence on a structural change is still wrong when the change is hard to reverse."
 
 [[option]]
 id = "the-agent-gates-autonomy-on-the-size-of-the-chan"
-label = "the agent gates autonomy on the size of the …"
+label = "File count gates autonomy"
 directive = "the agent gates autonomy on the size of the change in files rather than on its reversibility, auto-deciding small changes and pausing for large ones"
 why = "File count tracks the wrong axis: a 99-file mechanical move can be safer than a 3-file data migration, so the pause fires on the wrong changes."

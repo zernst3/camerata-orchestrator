@@ -24,12 +24,12 @@ why = "Most language/framework choices have a canonical answer; stopping on thos
 
 [[option]]
 id = "the-agent-stops-and-escalates-to-a-human-reviewe"
-label = "the agent stops and escalates to a human reviewer …"
+label = "Stop on every choice"
 directive = "the agent stops and escalates to a human reviewer on every multi-option choice, regardless of whether a documented convention or a guiding principle would resolve it"
 why = "Stopping on every multi-option choice blocks the routine constantly on textbook decisions that have a single defensible answer, draining the human attention the rule exists to conserve."
 
 [[option]]
 id = "the-agent-auto-decides-on-every-multi-option-cho"
-label = "the agent auto-decides on every multi-option choice, regardless of …"
+label = "Auto-decide on every choice"
 directive = "the agent auto-decides on every multi-option choice, regardless of whether the call is reversible or how far it travels in the architecture"
 why = "Auto-deciding everything removes the human gate on structural changes; a confident agent can produce a bad one-way-door call whose calculus does not carry across to reversible textbook choices."

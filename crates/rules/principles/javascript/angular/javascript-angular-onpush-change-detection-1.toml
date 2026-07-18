@@ -29,6 +29,6 @@ why = "OnPush drastically reduces change-detection cost in large trees and makes
 
 [[option]]
 id = "components-use-default-change-detection-for-simpli"
-label = "components use Default change detection for simplicity …"
+label = "Default change detection"
 directive = "components use Angular's Default change detection strategy, re-rendering whenever any change is detected in the component tree. OnPush is used only in rare cases where performance measurement shows it is necessary."
 why = "Default change detection re-runs a check on every component in the tree whenever any asynchronous event fires, so every timer, network request, and user input anywhere in the app triggers checks across the entire tree. This is simple to reason about for small applications but does not scale: as the component tree grows, the cost of these checks compounds and the application becomes sluggish under load. Switching to OnPush later requires retroactively enforcing immutability across all components rather than making it the default from the start."

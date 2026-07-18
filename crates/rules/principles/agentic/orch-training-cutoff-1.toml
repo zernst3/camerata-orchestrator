@@ -28,18 +28,18 @@ why = "An agent that decides on training-cutoff-sensitive surfaces with high con
 
 [[option]]
 id = "the-agent-auto-decides-on-dependency-api-or-late"
-label = "the agent auto-decides on dependency, API, or 'latest X' …"
+label = "Confidence gates external decisions"
 directive = "the agent auto-decides on dependency, API, or 'latest X' questions when its own confidence in the answer feels high, without routing to human review"
 why = "Confidence-gated routing loses exactly the cases that matter: high confidence calibrated against a stale training snapshot is the failure mode the rule exists to prevent, because the agent cannot self-assess whether its knowledge of an external surface is current."
 
 [[option]]
 id = "the-agent-routes-every-version-sensitive-questio"
-label = "the agent routes every version-sensitive question to a human …"
+label = "Route all version-sensitive questions"
 directive = "the agent routes every version-sensitive question to a human reviewer, including questions about the project's own declared compiler edition and other surfaces the project itself anchors"
 why = "Routing self-stabilizing surfaces such as the project's declared compiler edition over-pauses without reducing real risk, since the project's own declared version anchors those answers."
 
 [[option]]
 id = "the-agent-fetches-the-current-state-through-what"
-label = "the agent fetches the current state through whatever web …"
+label = "Fetch and auto-decide"
 directive = "the agent fetches the current state through whatever web or registry tool it has available and then auto-decides from the fetched answer, treating human review as unnecessary once a fetch is possible"
 why = "Fetch-then-decide is closer to correct than acting on training memory alone, but it still trusts the agent's interpretation of the fetched content and depends on the agent having a fetch capability at all; the rule treats it as a fallback step inside human review, not a replacement for it."

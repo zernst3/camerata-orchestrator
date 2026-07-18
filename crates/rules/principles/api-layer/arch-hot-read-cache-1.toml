@@ -23,18 +23,18 @@ why = "Cache hits are typically sub-millisecond while a database round trip is t
 
 [[option]]
 id = "hot-reads-run-directly-against-the-database-with"
-label = "hot reads run directly against the database with no …"
+label = "No cache layer"
 directive = "hot reads run directly against the database with no cache layer; every read request pays the full database round trip"
 why = "No cache layer makes every request pay the full database round trip; it works fine at low volume but accumulates latency cost as the system grows, and there is no graceful migration once hot reads become a bottleneck."
 
 [[option]]
 id = "hot-reads-sit-behind-a-ttl-cache-with-no-write-s"
-label = "hot reads sit behind a TTL cache with no …"
+label = "TTL only, no invalidation"
 directive = "hot reads sit behind a TTL cache with no write-side invalidation; the TTL is the only mechanism that controls staleness"
 why = "A TTL-only cache produces longer stale-read windows, and a request that just made a change cannot reflect it until the TTL expires, which surfaces as 'why did my update not stick' UX bugs."
 
 [[option]]
 id = "hot-reads-sit-behind-a-cache-with-explicit-write"
-label = "hot reads sit behind a cache with explicit write-side …"
+label = "Invalidation only, no TTL"
 directive = "hot reads sit behind a cache with explicit write-side invalidation but no TTL; the cache trusts the invalidation paths to cover every change"
 why = "Invalidation-only caching is unsafe when something changes outside the invalidation paths (backfill scripts, manual DB edits, third-party data ingest), because the cache then carries indefinitely stale data with no backstop."

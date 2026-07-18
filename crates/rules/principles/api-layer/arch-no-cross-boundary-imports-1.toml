@@ -29,6 +29,6 @@ why = "Dependency direction is the architecture; enforcing it by AST keeps the d
 
 [[option]]
 id = "modules-may-import-any-other-module"
-label = "modules may import any other module freely …"
+label = "Unrestricted module imports"
 directive = "modules may import any other module freely, with no import-boundary check and no declared dependency direction"
 why = "A defensible alternative the project considered: it removes friction for small codebases, but offers no mechanism to stop architectural erosion as the codebase grows."

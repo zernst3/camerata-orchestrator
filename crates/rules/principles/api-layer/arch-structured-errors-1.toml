@@ -25,19 +25,19 @@ why = "Stringly-typed error messages are a leading source of brittle client code
 
 [[option]]
 id = "error-responses-are-plain-strings-or-contain-onl"
-label = "error responses are plain strings (or contain only a …"
+label = "Plain string error responses"
 directive = "error responses are plain strings (or contain only a free-form message field) and clients are expected to pattern-match on the human-readable wording"
 why = "Plain string errors force clients to pattern-match on text; one copy edit silently breaks every consumer that pattern-matched the old wording."
 
 [[option]]
 id = "error-responses-use-only-the-http-status-code-wi"
-label = "error responses use only the HTTP status code with …"
+label = "Status code only, no body"
 directive = "error responses use only the HTTP status code with an empty body, and clients distinguish failure modes by status code alone"
 why = "Status-code-only errors do not carry enough resolution to distinguish between different validation failures that share the same status code, so clients cannot react appropriately."
 
 [[option]]
 id = "each-endpoint-defines-its-own-custom-error-respo"
-label = "each endpoint defines its own custom error response shape, …"
+label = "Per-endpoint custom shapes"
 directive = "each endpoint defines its own custom error response shape, and clients implement per-endpoint error parsing rather than a single shared parser"
 why = "Per-endpoint custom shapes force clients to write per-endpoint parsing; the surface area grows with every new endpoint instead of shrinking to a single shared parser."
 

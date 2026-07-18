@@ -24,7 +24,7 @@ why = "For long-running work, the budget cap is the ceiling, not the target; qui
 
 [[option]]
 id = "the-routine-treats-milestones-completed-chunks-o"
-label = "the routine treats milestones, completed chunks, or other natural …"
+label = "Stop at milestone seams"
 directive = "the routine treats milestones, completed chunks, or other natural seams as valid stops, even when budget and queue still permit continuing"
 why = "Stopping at natural seams feels disciplined but under-uses the available budget; the routine treats a completed-chunk feeling as a stop signal rather than as a self-check that confirms forward progress and then continues."
 

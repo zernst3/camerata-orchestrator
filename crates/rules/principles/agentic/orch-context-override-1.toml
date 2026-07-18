@@ -28,12 +28,12 @@ why = "Pausing preserves rule authority while still allowing rules to evolve; th
 
 [[option]]
 id = "when-the-agent-identifies-that-applying-a-docume"
-label = "When the agent identifies that applying a documented rule …"
+label = "Override autonomously, review later"
 directive = "When the agent identifies that applying a documented rule would produce wrong-shaped output for the project (context-fit failures such as the rule's stance conflicting with the project's positioning, a downstream constraint defeating the rule's rationale, an ecosystem convention diverging from the rule's stance, or similar misalignments), the agent applies the override autonomously, updates the rule's text in the same change, and records the override for asynchronous human review later."
 why = "Overriding then reviewing later trades pause cost for review-cadence cost, but lets architectural shifts ship before the architect sees them; subsequent work may build on a divergence that the eventual review would have caught."
 
 [[option]]
 id = "documented-rules-are-absolute-the-agent-never-ov"
-label = "Documented rules are absolute; the agent never overrides them …"
+label = "Absolute rules, no overrides"
 directive = "Documented rules are absolute; the agent never overrides them based on local context, and a poor-fit rule is filed to the decisions log for human revision without the agent producing any artifact in the meantime."
 why = "Absolute rules buy stability and can be right in regulated or safety-critical contexts, but they strand the agent on any rule whose context has genuinely shifted, since there is no path from 'this rule no longer fits' to a deviating artifact at all."

@@ -27,18 +27,18 @@ why = "Long-lived feature branches drift from main and the merge cost grows supe
 
 [[option]]
 id = "incomplete-features-live-on-long-lived-feature-b"
-label = "incomplete features live on long-lived feature branches that merge …"
+label = "Long-lived feature branches"
 directive = "incomplete features live on long-lived feature branches that merge to main only when the feature is complete, rather than landing incrementally behind a gate"
 why = "Long-lived feature branches drift from main and the merge cost grows with branch age; integration bugs surface all at once at merge time rather than incrementally during development."
 
 [[option]]
 id = "features-ship-behind-a-flag-but-the-flag-default"
-label = "features ship behind a flag but the flag defaults …"
+label = "Flag defaults to on"
 directive = "features ship behind a flag but the flag defaults to on, with a kill switch available to disable the feature if a problem appears"
 why = "Flag-defaults-on flips the failure mode: a regression is on for everyone until someone notices and trips the switch, which defeats the safety property the flag is supposed to provide."
 
 [[option]]
 id = "features-ship-conditionally-based-on-the-deploy"
-label = "features ship conditionally based on the deploy environment rather …"
+label = "Conditional based on environment"
 directive = "features ship conditionally based on the deploy environment rather than behind a runtime gate, so staging and prod have different code paths active by default"
 why = "Environment-conditional code couples release shape to environment topology; staging and prod diverge in ways that are hard to test and hard to roll back."

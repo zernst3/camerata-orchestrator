@@ -24,6 +24,6 @@ why = "Lazy loading reduces the initial bundle and improves time-to-interactive,
 
 [[option]]
 id = "all-routes-are-eagerly-loaded-in-the-main-bundle"
-label = "all routes are eagerly loaded in the main bundle for …"
+label = "Eager loading all routes"
 directive = "all routes are imported and bundled with the main application, and lazy loading is not used"
 why = "Bundling all routes eagerly into the main bundle means every user pays the full download and parse cost of every feature on every page load, including features they never visit. This is acceptable for small applications with very few routes, but in any application with more than a handful of features it inflates the initial bundle, increases time-to-interactive, and penalizes all users for the code paths of a minority of them."

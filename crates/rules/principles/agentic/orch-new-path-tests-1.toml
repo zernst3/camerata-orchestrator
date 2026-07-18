@@ -33,18 +33,18 @@ why = "Green existing tests prove the new code did not break old paths; they do 
 
 [[option]]
 id = "the-change-pipeline-requires-only-that-the-exist"
-label = "the change pipeline requires only that the existing test …"
+label = "Existing suite passes only"
 directive = "the change pipeline requires only that the existing test suite passes on a diff; no check verifies that the new code path introduced by the diff is actually exercised by any test"
 why = "Requiring only that the existing suite passes is the common industry default and misses every new branch the existing suite cannot reach, which on an AI-authored diff can be most of the new code."
 
 [[option]]
 id = "the-change-pipeline-requires-the-project-to-stay"
-label = "the change pipeline requires the project to stay above …"
+label = "Project-wide coverage percentage"
 directive = "the change pipeline requires the project to stay above a fixed coverage percentage on the full project, with no per-diff check that the introduced lines specifically are covered"
 why = "A project-wide percentage offers statistical comfort but masks targeted gaps in specific new paths: a single uncovered new branch barely moves the project-wide number."
 
 [[option]]
 id = "the-change-pipeline-ships-ai-authored-changes-on"
-label = "the change pipeline ships AI-authored changes on the strength …"
+label = "Post-merge environment feedback"
 directive = "the change pipeline ships AI-authored changes on the strength of a passing existing suite, and post-merge canary or staging environments are relied on to surface coverage gaps after the fact"
 why = "Post-merge environments do catch some gaps, but they arrive late and are expensive to act on once human reviewer attention has moved on to the next change."

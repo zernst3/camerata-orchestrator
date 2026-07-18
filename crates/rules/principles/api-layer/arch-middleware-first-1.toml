@@ -28,18 +28,18 @@ why = "Cross-cutting logic that lives inside individual handlers drifts."
 
 [[option]]
 id = "cross-cutting-concerns-are-inlined-in-each-handl"
-label = "cross-cutting concerns are inlined in each handler that needs …"
+label = "Inline in each handler"
 directive = "cross-cutting concerns are inlined in each handler that needs them, with no shared middleware layer responsible for any of them"
 why = "Inlining is the duplicated-logic failure mode: handlers slowly diverge into subtly different implementations of the same concern, and new handlers omit the logic entirely by accident."
 
 [[option]]
 id = "cross-cutting-concerns-are-extracted-into-helper"
-label = "cross-cutting concerns are extracted into helper functions that each …"
+label = "Helper functions per handler"
 directive = "cross-cutting concerns are extracted into helper functions that each handler explicitly calls at the top of its body, rather than being mounted as middleware"
 why = "Helper functions require every handler to remember to call them; one new handler that skips the call creates a gap invisible to the type system and to most code review."
 
 [[option]]
 id = "middleware-is-used-only-for-universally-recogniz"
-label = "middleware is used only for universally-recognized cross-cutting cases (CORS, …"
+label = "Middleware for obvious cases only"
 directive = "middleware is used only for universally-recognized cross-cutting cases (CORS, body parsing) and other concerns live inside individual handlers regardless of how many handlers share them"
 why = "Restricting middleware to only obvious cases leaves the line between 'obvious middleware case' and 'leave it in the handler' arbitrary, drifting per reviewer, and accumulating exceptions over time."
