@@ -30,6 +30,6 @@ why = "The dependency array declares what the effect depends on; omitting a valu
 
 [[option]]
 id = "dependency-arrays-are-trimmed-to-control-when-ef"
-label = "dependency arrays are trimmed to control when effects …"
+label = "Trim effect dependency arrays manually"
 directive = "dependency arrays are trimmed to control when effects re-run, omitting values the body reads (or suppressing the exhaustive-deps lint) when listing them would cause unwanted re-execution, rather than keeping every read reactive value in the array"
 why = "Trimming dependency arrays to control when effects re-run treats the symptom by lying about what the effect reads: an effect that closes over a prop or state value not in the array operates on a stale copy of that value indefinitely, producing a UI that shows one value while the effect acts on an older one. This is the hardest class of React bug, invisible in local testing where async work happens to finish fast, with no error and no obvious cause. The correct fixes keep the array complete and control re-runs structurally instead of hiding a real dependency."

@@ -28,13 +28,13 @@ why = "The Rust I/O ecosystem (SeaORM, Axum, tokio) is async-first; mixing sync 
 
 [[option]]
 id = "the-project-s-i-o-functions-repo-traits-service"
-label = "the project's I/O functions, repo traits, service methods, and …"
+label = "Sync I/O wrapped in block_on at boundaries"
 directive = "the project's I/O functions, repo traits, service methods, and handlers are sync, and async runtime use is wrapped in block_on at the layer boundaries"
 why = "Fights the ecosystem at every layer: block_on inside an async context produces the runtime-pinning bugs the rule exists to prevent, and the sync wrappers add measurable perf regressions while providing no structural benefit over the async-native shape the I/O libraries already offer."
 
 [[option]]
 id = "the-project-exposes-both-sync-and-async-variants"
-label = "the project exposes both sync and async variants of …"
+label = "Parallel sync and async API variants"
 directive = "the project exposes both sync and async variants of its I/O functions, repo traits, service methods, and handlers as parallel public APIs"
 why = "Doubles the public surface and forces every consumer to choose which variant to call, which is a recurring point of confusion and a maintenance burden for very little gain in the Rust ecosystem where the async path is already the first-class shape."
 

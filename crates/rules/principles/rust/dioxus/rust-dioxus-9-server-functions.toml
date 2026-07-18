@@ -25,13 +25,13 @@ why = "The right shape when the server is a standalone product surface rather th
 
 [[option]]
 id = "server-to-client-calls-go-through-a-typed-rpc-la"
-label = "server-to-client calls go through a typed RPC layer added …"
+label = "Typed RPC layer as separate dependency"
 directive = "server-to-client calls go through a typed RPC layer added as a separate dependency (gRPC, tarpc, or similar), rather than through the framework's server-function macro"
 why = "Equivalent in shape to server functions but adds an extra dependency to maintain for what the framework already provides natively: the generated stub types must stay in sync with the service definition, codegen adds a build step, and the project takes on the full surface of the RPC library's maintenance and upgrade cycle. Reasonable when an RPC ecosystem (shared contracts, polyglot services) is already in use across the system."
 
 [[option]]
 id = "the-server-exposes-a-graph-query-endpoint-with-c"
-label = "the server exposes a graph-query endpoint with client-side code …"
+label = "Graph-query endpoint with client-side codegen"
 directive = "the server exposes a graph-query endpoint with client-side code generation, and the UI fetches everything through generated query types rather than through per-operation server functions"
 why = "Premature complexity for the common case: the project's data graph rarely warrants a graph-query layer from day one, and the upfront cost (schema definition, codegen tooling, query planning) rarely pays back until the UI has dozens of distinct read shapes that benefit from client-driven field selection."
 

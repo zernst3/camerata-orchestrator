@@ -20,13 +20,13 @@ why = "The vast majority of entities need no hooks; stubbing concrete hook bodie
 
 [[option]]
 id = "every-entity-carries-stub-concrete-hook-bodies-o"
-label = "every entity carries stub concrete hook bodies on its …"
+label = "Stub hook bodies on every ActiveModelBehavior"
 directive = "every entity carries stub concrete hook bodies on its ActiveModelBehavior impl, regardless of whether the entity actually needs a hook"
 why = "Trades the empty-by-default rule's silence for visual uniformity but spends reviewer attention on placeholder hooks that never run: contributors scanning for hook logic must read through stub bodies on every entity to determine that none of them actually do anything."
 
 [[option]]
 id = "entities-without-hooks-omit-the-activemodelbehav"
-label = "entities without hooks omit the ActiveModelBehavior impl block on …"
+label = "Omit ActiveModelBehavior impl for hookless entities"
 directive = "entities without hooks omit the ActiveModelBehavior impl block on their ActiveModel entirely instead of keeping an empty one"
 why = "Contradicts SeaORM's official entity-format guidance, which explicitly directs entity authors not to delete the impl block even when it is empty: omitting it may cause compilation issues on future framework versions that expect the impl to be present."
 

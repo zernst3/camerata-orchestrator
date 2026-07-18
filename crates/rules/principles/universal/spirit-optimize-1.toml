@@ -24,6 +24,6 @@ why = "When AI carries the cost of writing the performant version, the Knuth-era
 
 [[option]]
 id = "performant-patterns-are-added-reactively-after-p"
-label = "performant patterns are added reactively after problems surface, with …"
+label = "Add performant patterns reactively after profiling"
 directive = "performant patterns are added reactively after problems surface, with code written in whatever shape is convenient first and tuned later when profiling identifies the hot path"
 why = "Reactive optimization is the known-expensive case: by the time a perf problem is observable to users, the bad pattern has typically been copied across the codebase and the cleanup has to follow it everywhere, at far higher cost than baking the performant pattern in from day one."

@@ -27,18 +27,18 @@ why = "Makes the type itself proof that validation ran, so a value of the type c
 
 [[option]]
 id = "every-call-site-that-needs-a-validated-string-ru"
-label = "every call site that needs a validated string runs …"
+label = "Inline validation at each call site"
 directive = "every call site that needs a validated string runs the validation inline at the call site, and the type system carries no distinction between validated and raw text"
 why = "The lightest representation: every value stays a plain String and validation runs only where it is actually needed, with no types or constructors to define. The fit when constrained values are few and their validation is centralized; its trade-off is that correctness becomes a discipline check at each consumer, so a forgotten check at any one call site is a silent invalid-state bug rather than a build failure."
 
 [[option]]
 id = "validation-status-is-recorded-as-a-metadata-tag"
-label = "validation status is recorded as a metadata tag attached …"
+label = "Runtime metadata tag on plain String"
 directive = "validation status is recorded as a metadata tag attached to a plain String value at runtime, rather than as a distinct compile-time type"
 why = "Lets validation status travel with a value without introducing a distinct type per constrained kind, so a single String-plus-tag shape can represent checked and unchecked text. The fit when the project wants the status available at runtime but does not want a newtype taxonomy; its trade-off is that the status lives at runtime only, so the compiler does not enforce it and a forgotten check still produces an invalid-state bug rather than a build failure."
 
 [[option]]
 id = "the-codebase-makes-no-distinction-between-valida"
-label = "the codebase makes no distinction between validated and raw …"
+label = "No type distinction between validated and raw text"
 directive = "the codebase makes no distinction between validated and raw text; all string-shaped values use the same String type regardless of whether they have been checked"
 why = "The simplest possible representation: one String type for all text, with no types, tags, or constructors to define and no conversions anywhere. The fit when constraints are weak or are enforced entirely at the system boundary so internal code can trust its inputs; its trade-off is that the type carries no signal that a value was ever validated, so downstream code must re-check or trust, which is the widest surface for invalid-data bugs."

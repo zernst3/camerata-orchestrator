@@ -24,6 +24,6 @@ why = "Reducers are re-run during replay and time-travel, so a side effect insid
 
 [[option]]
 id = "reducers-perform-side-effects-such-as-api-calls"
-label = "reducers perform side effects such as API calls …"
+label = "Side effects performed directly in reducers"
 directive = "reducers perform side effects such as API calls, dispatching, or id generation directly when the triggering action arrives there, rather than confining all effects to thunks and middleware and keeping reducers pure"
 why = "Performing side effects such as API calls or id generation directly inside a reducer couples the state transition to the effect and makes both untestable in isolation: a reducer with an API call fires again on every time-travel replay, producing duplicate requests and non-reproducible state. An async reducer also cannot return the result synchronously, so it tends to return stale or undefined state and wire the real update through a back channel, defeating the single-source-of-truth model."

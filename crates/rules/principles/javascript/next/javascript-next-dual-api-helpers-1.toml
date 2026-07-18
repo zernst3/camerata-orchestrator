@@ -30,12 +30,12 @@ why = "Client-side code doesn't get Next's automatic fetch memoization/caching, 
 
 [[option]]
 id = "a-single-isomorphic-api-helper-covers-both-brows"
-label = "a single isomorphic API helper covers both browser and …"
+label = "Single isomorphic API helper for both runtimes"
 directive = "a single isomorphic API helper covers both browser and server contexts, with the same code path handling cookies, hostname resolution, and secret access across both runtimes"
 why = "A single isomorphic helper must compromise on cookies, hostname resolution, and secret handling because no one shape satisfies both contexts at once: any compromise the helper makes leaks a failure mode into one side or the other, either exposing server-only secrets to the client bundle or silently breaking SSR for routes that depend on server-only cookies or private-network hostnames."
 
 [[option]]
 id = "api-calls-are-made-via-raw-fetch-at-each-call-si"
-label = "API calls are made via raw fetch at each …"
+label = "Raw fetch calls at each call site"
 directive = "API calls are made via raw fetch at each call site, with each call site responsible for attaching its own credentials, choosing its own hostnames, and handling its own context-specific concerns"
 why = "Raw fetch at each call site pushes cookie attachment, hostname resolution, and credential handling out to every individual call, so each one must independently re-derive the context rules: one slip leaks a server-only secret into the client bundle, or breaks SSR for a route that worked locally, with no build-time enforcement to catch the mistake."

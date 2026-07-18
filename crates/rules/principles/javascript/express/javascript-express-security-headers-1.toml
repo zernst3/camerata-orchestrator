@@ -24,6 +24,6 @@ why = "Express sends no protective headers by default and advertises X-Powered-B
 
 [[option]]
 id = "protective-response-headers-are-set-ad-hoc-or-le"
-label = "protective response headers are set ad hoc, or left …"
+label = "Ad hoc or default security headers"
 directive = "protective response headers are set ad hoc on individual responses, or left at Express's defaults, rather than mounting an app-wide security-headers middleware that covers every response by default"
 why = "Setting protective headers ad hoc on individual responses, or relying on Express's defaults, means coverage is partial: the newest route is most likely uncovered, the X-Powered-By fingerprint is still broadcast, and the absence of headers like Content-Security-Policy and Strict-Transport-Security is invisible in normal operation and only matters under attack, which is exactly when the omission is discovered."

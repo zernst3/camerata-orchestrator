@@ -20,19 +20,19 @@ why = "Conflating data fetching with side effects is the largest single source o
 
 [[option]]
 id = "ui-data-fetching-is-expressed-as-a-manual-effect"
-label = "UI data fetching is expressed as a manual effect …"
+label = "Manual effect writing loading state to signals"
 directive = "UI data fetching is expressed as a manual effect that spawns an async task and writes the loading, success, and error states into separate signals by hand, rather than going through the resource hook"
 why = "Forces every component to re-implement the loading-state plumbing: bugs hide in the boilerplate, the pattern diverges across components as each re-implementation makes slightly different choices, and the result is more code for the same three-state value the resource hook gives back directly."
 
 [[option]]
 id = "ui-data-fetching-runs-directly-in-the-component"
-label = "UI data fetching runs directly in the component body …"
+label = "Data fetching runs directly in component body"
 directive = "UI data fetching runs directly in the component body outside any hook, with no automatic loading-state plumbing"
 why = "Produces request storms and inconsistent in-flight state: a fetch that runs on every render fires a new network request whenever any signal the component reads changes, including signals that have nothing to do with the fetch, and concurrent in-flight requests produce unpredictable race conditions on the result signal."
 
 [[option]]
 id = "the-project-adopts-a-global-request-cache-librar"
-label = "the project adopts a global request-cache library on top …"
+label = "Global request-cache library adopted from day one"
 directive = "the project adopts a global request-cache library on top of resource hooks from day one, regardless of whether a specific caching need has surfaced"
 why = "Premature complexity: the resource hook is sufficient for the common data-fetching shapes, and a cache layer adds a dependency, a new mental model, and a new failure surface before any specific caching need has been demonstrated, increasing onboarding cost with no concrete payoff at this scale."
 

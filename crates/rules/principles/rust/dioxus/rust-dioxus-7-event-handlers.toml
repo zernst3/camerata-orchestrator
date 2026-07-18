@@ -20,19 +20,19 @@ why = "Bare closure types in props break the equality derive that the framework 
 
 [[option]]
 id = "callback-props-are-typed-as-a-boxed-function-tra"
-label = "callback props are typed as a boxed function-trait object …"
+label = "Callback props typed as boxed function-trait objects"
 directive = "callback props are typed as a boxed function-trait object (Box-of-dyn-Fn) rather than as the framework's EventHandler type"
 why = "Breaks the equality derive on the props struct: closures behind a Box of dyn Fn are not comparable, so component diffing degrades to always-re-render every time the parent updates regardless of whether the callback actually changed, producing a hidden performance regression."
 
 [[option]]
 id = "callbacks-are-passed-indirectly-the-prop-carries"
-label = "callbacks are passed indirectly: the prop carries an ID …"
+label = "Callbacks passed indirectly via handler-registration table"
 directive = "callbacks are passed indirectly: the prop carries an ID that the child looks up in a central handler-registration table at call time, rather than carrying the handler value itself"
 why = "Drastically more complex than the framework-native event handler type and loses type-safety on the call site: the table erases the value type the handler delivers, so wrong-type errors become runtime failures rather than compile-time ones, and the table itself becomes a global coupling point."
 
 [[option]]
 id = "callback-props-are-typed-as-synchronous-function"
-label = "callback props are typed as synchronous function pointers (fn) …"
+label = "Callback props typed as function pointers (fn)"
 directive = "callback props are typed as synchronous function pointers (fn) that do not capture state, rather than as the framework's EventHandler type"
 why = "Works only for stateless callbacks and does not compose with closures that capture signals or other state, which covers most real callbacks in a reactive UI; the limitation becomes apparent as soon as a callback needs to read or write any component or app state."
 

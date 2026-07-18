@@ -26,6 +26,6 @@ why = "any disables type checking transitively along every assignment, call, and
 
 [[option]]
 id = "any-is-permitted-as-an-escape-hatch-wherever-a-t"
-label = "any is permitted as an escape hatch wherever a …"
+label = "Allow any as an escape hatch"
 directive = "any is permitted as an escape hatch wherever a type is inconvenient to express, accepting that values so typed disable checking transitively, rather than requiring unknown plus explicit narrowing at boundaries"
 why = "Using any as an escape hatch wherever a type is inconvenient to express makes the compiler stop checking at that point: any propagates through every assignment, call, and property access it touches, disabling type checking transitively along the way, so one any near a boundary can silently void the guarantees of a large region of otherwise-typed code. The failure surfaces as a runtime TypeError far from the cast rather than a lint error at commit time."

@@ -29,6 +29,6 @@ why = "React reconciles a list by key; an index key reassigns existing component
 
 [[option]]
 id = "rendered-lists-use-the-array-index-as-the-key-re"
-label = "rendered lists use the array index as the key …"
+label = "Use array index as list key"
 directive = "rendered lists use the array index as the key regardless of whether the list reorders or has items inserted and removed, rather than requiring a key derived from a stable identity in the data"
 why = "Using the array index as the key causes React to reassign existing component state and DOM to the wrong rows on the first reorder or front-insertion, because every following item's index shifts. Position-bound state such as a focused input, a checkbox, in-progress text, or scroll position silently jumps to the wrong row while the list still renders, producing a baffling mismatch between data and view that passes casual review because the content appears to change correctly."

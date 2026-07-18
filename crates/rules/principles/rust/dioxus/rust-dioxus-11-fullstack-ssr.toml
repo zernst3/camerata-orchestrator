@@ -20,19 +20,19 @@ why = "Public-content pages need server-rendered HTML for indexability: search-e
 
 [[option]]
 id = "the-ui-is-a-client-only-single-page-application"
-label = "the UI is a client-only single-page application with no …"
+label = "Client-only SPA with no server rendering"
 directive = "the UI is a client-only single-page application with no server-rendered initial paint, with the application rendering entirely on the client after the bundle loads"
 why = "Wins on architectural simplicity but loses indexability on every public route: search-engine rendering of JavaScript-only pages has improved but server-rendered HTML remains the dominant signal, and the cost of being wrong is silent loss of organic traffic that is hard to diagnose and recover from after launch."
 
 [[option]]
 id = "the-frontend-runs-as-a-separate-process-under-a"
-label = "the frontend runs as a separate process under a …"
+label = "Frontend as a separate JS-framework process"
 directive = "the frontend runs as a separate process under a JavaScript framework, with the Rust API binary serving only the server-function and HTTP endpoints over the wire"
 why = "Reintroduces the dual-deploy and inter-service latency that the single-binary approach exists to delete, and doubles the languages and runtimes the team has to maintain: every deployment requires coordinating two separate processes and every cross-boundary call adds a network round-trip."
 
 [[option]]
 id = "html-rendering-is-handled-by-a-separate-rust-bin"
-label = "HTML rendering is handled by a separate Rust binary …"
+label = "Separate Rust binary for HTML rendering"
 directive = "HTML rendering is handled by a separate Rust binary distinct from the API binary, with the two binaries deployed independently rather than as a single process"
 why = "Splits the runtime for no operational gain: it doubles deploy units without a corresponding boundary benefit, since both binaries share the same domain logic and the rendering binary still needs to call the API binary for its data, adding a network hop where an in-process call would have been free."
 

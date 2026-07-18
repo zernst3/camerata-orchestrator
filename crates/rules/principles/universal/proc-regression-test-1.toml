@@ -28,24 +28,24 @@ why = "Without a regression test, the bug is gone today and free to recur tomorr
 
 [[option]]
 id = "the-bug-fix-lands-without-any-accompanying-test"
-label = "the bug fix lands without any accompanying test; the …"
+label = "Bug fix lands without any accompanying test"
 directive = "the bug fix lands without any accompanying test; the project relies on the surrounding test suite staying green to catch any related regression in the future"
 why = "No accompanying test removes the immediate defect but leaves zero regression guard; the same failure can be reintroduced by the next refactor, dependency upgrade, or AI-authored change with no signal from CI."
 
 [[option]]
 id = "the-bug-fix-lands-with-a-regression-test-only-wh"
-label = "the bug fix lands with a regression test only …"
+label = "Regression test only for hot code paths"
 directive = "the bug fix lands with a regression test only when the bug occurred in a load-bearing or hot code path; bugs in less critical areas are fixed without a test"
 why = "A criticality-gated test policy produces a two-tier system where 'minor' bugs have no regression guard at all, and the judgment of which bugs are minor is exactly the kind of call that drifts over time."
 
 [[option]]
 id = "the-bug-fix-lands-without-a-regression-test-but"
-label = "the bug fix lands without a regression test, but …"
+label = "No regression test, but repro steps documented"
 directive = "the bug fix lands without a regression test, but the PR description documents the reproduction steps so a future investigator can re-run them manually if the bug appears to recur"
 why = "Reproduction steps in a PR description produce a record no automated system reads; they do not protect against recurrence and decay as the PR scrolls off the recent list."
 
 [[option]]
 id = "the-bug-fix-lands-without-a-regression-test-the"
-label = "the bug fix lands without a regression test; the …"
+label = "Rely on canary/staging to catch recurrence"
 directive = "the bug fix lands without a regression test; the project relies on canary or staging environments to surface any recurrence after the fix has shipped"
 why = "Staging environments catch some recurrences but only after the fix has shipped; by that point the cost of acting on the recurrence is higher and the link back to the original fix has often been lost."
