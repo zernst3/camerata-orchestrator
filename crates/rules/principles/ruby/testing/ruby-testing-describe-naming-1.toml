@@ -27,7 +27,7 @@ why = "Flexible but loses readable failure messages and breaks rubocop-rspec nam
 
 [[sources]]
 url = "https://www.betterspecs.org/"
-title = "Better Specs — Testing Guidelines (describe naming, context wording, it descriptions)"
+title = "Better Specs (community guideline, not an official RSpec/Rails standard) — Testing Guidelines (describe naming, context wording, it descriptions)"
 
 [[sources]]
 url = "https://rspec.rubystyle.guide/"

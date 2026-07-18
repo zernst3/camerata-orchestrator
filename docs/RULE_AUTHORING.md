@@ -43,7 +43,7 @@ domain = "agentic"             # also derived from the folder; keep them agreed
 ```toml
 default = true                 # ships an adopted default option (else the architect MUST choose)
 qualifies = "…"                # the summary / when-it-applies prose (falls back to decision.why, then title)
-verification = "draft" | "grounded" | "verified"   # the provenance ladder (absent -> draft)
+verification = "draft" | "policy" | "grounded" | "verified"   # the provenance ladder (absent -> draft)
 opt_in_only = true             # never auto-recommended / pre-checked at onboarding
 layer3_only = true             # CI-tier only; never run at layer-2 or scan time
 
@@ -71,8 +71,13 @@ linter = "…"                   # optional, the tool that enforces it externall
 
 Notes:
 - **Option ids are forever too** (same reason as rule ids).
-- **`verification`**: a `draft` rule is grounded-but-unproven. `grounded` rules are eligible for
-  auto-recommend at onboarding (unless `opt_in_only`). `verified` carries human provenance.
+- **`verification`**: a `draft` rule is grounded-but-unproven. `policy` is the honest label for a rule
+  that encodes deliberate project/team policy with NO external authority — any cited source is
+  internal (a Camerata doc citing Camerata, e.g.), not a published standard or real linter rule.
+  `policy` is NOT grounded: like `draft`, it is kept out of the armed ruleset, but it is labeled
+  honestly instead of being mismarked `grounded` just because it cites *something*. Use `policy`
+  instead of `grounded` whenever you can't point at a real external authority. `grounded` rules are
+  eligible for auto-recommend at onboarding (unless `opt_in_only`). `verified` carries human provenance.
 
 ---
 

@@ -7,10 +7,15 @@ enforcement = "architectural"
 default = true
 qualifies = "Deterministic (a feature file either routes images through the single project-level component or reaches for a primitive directly), but there is NO universal off-the-shelf linter across frameworks. Next.js offers eslint-plugin-next/@next/next/no-img-element for the raw-<img> case, but enforcing 'every image flows through the one project component' for an arbitrary stack (Dioxus, Flutter, Vue, native, etc.) requires a project-specific AST/static-analysis checker the team builds — there is no single shippable mechanical rule. So this is architectural, not mechanical: it must NOT be tagged to a preview linter (doing so fires eslint on non-JS repos), and is enforced via the AI review plus a custom CI checker per framework (the Next.js eslint rule being one such instantiation)."
 
+verification = "grounded"
+
 [[sources]]
 url = "https://nextjs.org/docs/messages/no-img-element"
-title = "Next.js — no-img-element ESLint rule"
-linter = "eslint-plugin-next: @next/next/no-img-element"
+title = "Next.js — no-img-element ESLint rule (cited as a real, Next.js-specific instantiation of the check; the qualifies text above is explicit that no universal off-the-shelf linter enforces this rule across stacks, so this source is NOT wired as this rule's `linter` field)"
+
+[[sources]]
+url = "https://web.dev/articles/optimize-cls"
+title = "web.dev — Optimize Cumulative Layout Shift"
 
 [decision]
 question = "What position does the project take on: Images render through a single project-level component, not framework primitives directly?"

@@ -16,8 +16,8 @@ url = "https://martinfowler.com/bliki/TestPyramid.html"
 title = "Martin Fowler — TestPyramid (bliki)"
 
 [[sources]]
-url = "http://xunitpatterns.com/Test%20Pyramid.html"
-title = "xUnit Test Patterns (Meszaros) — Test Pyramid"
+url = "https://www.mountaingoatsoftware.com/blog/the-forgotten-layer-of-the-test-automation-pyramid"
+title = "Mike Cohn (Mountain Goat Software) — The Forgotten Layer of the Test Automation Pyramid (the pyramid originates in Cohn's 'Succeeding with Agile', 2009, not xUnit Test Patterns)"
 
 [decision]
 question = "How should test effort be distributed across the unit / integration / end-to-end spectrum?"

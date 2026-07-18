@@ -5,6 +5,11 @@ domain = "go:web"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://www.rfc-editor.org/rfc/rfc9457.html"
+title = "RFC 9457 — Problem Details for HTTP APIs"
 
 [decision]
 question = "How should API errors be formatted in HTTP responses?"

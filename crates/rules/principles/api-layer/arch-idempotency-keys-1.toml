@@ -5,6 +5,15 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://datatracker.ietf.org/doc/draft-ietf-httpapi-idempotency-key-header/"
+title = "IETF — The Idempotency-Key HTTP Header Field (draft-ietf-httpapi-idempotency-key-header)"
+
+[[sources]]
+url = "https://docs.stripe.com/api/idempotent_requests"
+title = "Stripe — Idempotent Requests"
 
 [decision]
 question = "What position does the project take on: Non-GET writes that trigger external side effects require an idempotency key?"

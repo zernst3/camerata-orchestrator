@@ -5,6 +5,11 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://martinfowler.com/eaaCatalog/unitOfWork.html"
+title = "Martin Fowler — Patterns of Enterprise Application Architecture: Unit of Work (medium authority — PoEAA grounds an explicit transaction/unit-of-work boundary in general; the specific 'repository receives the handle as a parameter' shape is this project's chosen implementation of that boundary)"
 
 [decision]
 question = "What position does the project take on: Services own the transaction lifecycle; repositories receive the handle as a parameter?"

@@ -5,6 +5,15 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 default = false
+verification = "grounded"
+
+[[sources]]
+url = "https://github.com/microsoft/api-guidelines/blob/master/Guidelines.md"
+title = "Microsoft REST API Guidelines — Versioning"
+
+[[sources]]
+url = "https://docs.stripe.com/api/versioning"
+title = "Stripe — API Versioning"
 
 [decision]
 question = "What versioning scheme does the project's API adopt: a version in the URL prefix, a version selected by request header, in-place evolution with no version segment, or content negotiation across representations?"

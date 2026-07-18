@@ -11,6 +11,14 @@ verification = "grounded"
 url = "docs/ENFORCEMENT.md"
 title = "docs/ENFORCEMENT.md — RULE_REGISTRY §SEC-NO-DISABLED-TLS-1 (enforced gate rule)"
 
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/295.html"
+title = "CWE-295: Improper Certificate Validation"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Transport_Layer_Security_Cheat_Sheet.html"
+title = "OWASP Transport Layer Security Cheat Sheet"
+
 [decision]
 question = "When is it acceptable to disable TLS certificate verification?"
 default = "never-in-production"

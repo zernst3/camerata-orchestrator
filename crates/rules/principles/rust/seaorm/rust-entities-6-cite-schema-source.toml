@@ -38,4 +38,4 @@ why = "Works for shallow histories but breaks down after a few migrations and st
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"
-title = "SeaORM docs: Entity Format — module-level structure and documentation conventions"
+title = "SeaORM docs: Entity Structure (attribute-based entity file shape; the module-doc-comment-cites-schema-source convention itself is project policy, not prescribed by SeaORM)"

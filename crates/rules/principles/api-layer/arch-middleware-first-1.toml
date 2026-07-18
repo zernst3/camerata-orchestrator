@@ -5,6 +5,15 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/aspnet/core/fundamentals/middleware/"
+title = "ASP.NET Core — Middleware (low authority — the pages establish the middleware mechanism itself, not a 'must extract every cross-cutting concern to middleware' mandate, which is this project's own policy)"
+
+[[sources]]
+url = "https://expressjs.com/en/5x/guide/using-middleware/"
+title = "Express.js — Using middleware (low authority — same caveat: documents the mechanism, not the mandate)"
 
 [decision]
 question = "What position does the project take on: If a cross-cutting concern can be expressed as middleware, it must be?"

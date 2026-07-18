@@ -14,6 +14,10 @@ url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
 title = "Cross-agent rules: the integration gate — cross-cutting policy holds end to end"
 
 [[sources]]
+url = "https://owasp.org/Top10/A01_2021-Broken_Access_Control/"
+title = "OWASP Top 10:2021 — A01 Broken Access Control"
+
+[[sources]]
 url = "docs/decisions/2026-07-05_integration-gate-generic-engine.md"
 title = "Integration gate: the generic reconciliation engine + per-stack extractors"
 

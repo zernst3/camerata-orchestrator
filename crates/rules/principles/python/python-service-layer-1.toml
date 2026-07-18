@@ -7,6 +7,10 @@ enforcement = "structured"
 default = true
 verification = "grounded"
 
+[[sources]]
+url = "https://www.cosmicpython.com/book/chapter_04_service_layer.html"
+title = "Cosmic Python (Percival & Gregory) — Chapter 4: Our First Use Case: Flask API and Service Layer"
+
 [decision]
 question = "Where does business logic live relative to web views and route handlers?"
 default = "service-layer"

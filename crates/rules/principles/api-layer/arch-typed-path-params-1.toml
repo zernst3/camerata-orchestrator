@@ -5,6 +5,15 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://fastapi.tiangolo.com/tutorial/path-params/"
+title = "FastAPI — Path Parameters (typed extraction and validation at the framework boundary; medium authority — grounds the mechanism, not this project's specific naming)"
+
+[[sources]]
+url = "https://docs.rs/axum/latest/axum/extract/struct.Path.html"
+title = "axum — extract::Path (deserializes and rejects malformed path captures before the handler runs)"
 
 [decision]
 question = "How are route path and query parameters turned into values the handler uses?"

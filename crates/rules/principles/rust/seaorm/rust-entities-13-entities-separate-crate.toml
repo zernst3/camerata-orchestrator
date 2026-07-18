@@ -31,4 +31,4 @@ why = "Keeps data access and the translation it depends on in a single crate, wh
 
 [[sources]]
 url = "https://docs.rs/sea-orm/latest/sea_orm/derive.DeriveEntityModel.html"
-title = "sea_orm::DeriveEntityModel — entities are pure data; no DB pool or driver"
+title = "sea_orm::DeriveEntityModel — generates Entity, Column, and PrimaryKey from a Model (the entities-own-crate placement is a project convention this macro does not itself mandate)"

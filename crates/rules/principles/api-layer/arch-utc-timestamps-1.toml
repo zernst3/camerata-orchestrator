@@ -5,6 +5,15 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://www.rfc-editor.org/rfc/rfc3339.html"
+title = "RFC 3339 — Date and Time on the Internet: Timestamps"
+
+[[sources]]
+url = "https://www.postgresql.org/docs/current/datatype-datetime.html"
+title = "PostgreSQL — 8.5. Date/Time Types (timestamptz stores UTC; the wire offset is session-determined, medium authority for the 'normalize at the persistence boundary' half specifically)"
 
 [decision]
 question = "What position does the project take on: Domain timestamps are anchored to UTC; mappers normalize at the persistence boundary?"

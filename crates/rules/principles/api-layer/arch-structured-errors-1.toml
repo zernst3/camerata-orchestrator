@@ -6,6 +6,11 @@ layer = "universal"
 enforcement = "architectural"
 default = true
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: it requires a custom CI gate — a contract test that hits representative failure paths and validates each error body against the project's envelope schema (a top-level error object with a stable code, a human message, and optional details), optionally paired with a project-configured static check that handlers throw typed errors and route through the single error-rendering middleware rather than writing ad hoc bodies. No generic linter knows the project's envelope shape. Conformance holds when such a gate runs in CI and a handler that returns a bare string or an empty body fails it; it fails when error shapes vary per endpoint with no shared renderer."
+verification = "grounded"
+
+[[sources]]
+url = "https://www.rfc-editor.org/rfc/rfc9457.html"
+title = "RFC 9457 — Problem Details for HTTP APIs"
 
 [decision]
 question = "What position does the project take on: Error responses use a structured envelope with stable machine-readable codes?"

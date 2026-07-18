@@ -5,7 +5,7 @@ domain = "permissions"
 layer = "universal"
 enforcement = "structured"
 default = true
-verification = "grounded"
+verification = "policy"
 
 [[sources]]
 url = "CONVENTIONS.md"

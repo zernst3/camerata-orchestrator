@@ -15,12 +15,7 @@ why = "Constructor injection makes every dependency explicit in the class's publ
 
 [[sources]]
 url = "https://docs.spring.io/spring-framework/reference/core/beans/dependencies/factory-collaborators.html"
-title = "Spring Framework Reference — Constructor-based Dependency Injection (team recommendation)"
-
-[[sources]]
-url = "https://checkstyle.org/checks/design/visibilitymodifier.html"
-title = "Checkstyle — VisibilityModifier: enforces private/final field visibility"
-linter = "Checkstyle: VisibilityModifier"
+title = "Spring Framework Reference — Constructor-based Dependency Injection (the Spring team's own recommended approach; Checkstyle's VisibilityModifier enforces private/final fields generally but does not detect @Autowired field injection specifically, so it is not cited as the enforcement mechanism here)"
 
 [[option]]
 id = "constructor-injection-final-fields"

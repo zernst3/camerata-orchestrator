@@ -8,8 +8,8 @@ default = true
 verification = "grounded"
 
 [[sources]]
-url = "https://angular.dev/guide/routing/lazy-loading"
-title = "Angular — Lazy loading feature modules"
+url = "https://angular.dev/guide/routing/define-routes"
+title = "Angular — Define routes (loadComponent / loadChildren for lazy-loaded routes)"
 
 [decision]
 question = "What position does the project take on: Feature routes are lazy-loaded to reduce the initial bundle?"

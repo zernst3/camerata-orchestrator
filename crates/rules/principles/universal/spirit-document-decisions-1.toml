@@ -11,6 +11,10 @@ verification = "grounded"
 url = "CONVENTIONS.md"
 title = "CONVENTIONS.md — §SPIRIT-DOC-DECISIONS-1 (document decisions immediately)"
 
+[[sources]]
+url = "https://www.cognitect.com/blog/2011/11/15/documenting-architecture-decisions"
+title = "Michael Nygard — Documenting Architecture Decisions (the source of the ADR pattern; the 'immediately' strengthening beyond ADR-on-drift is project-specific)"
+
 [decision]
 question = "What position does the project take on: Document decisions immediately?"
 default = "document-decisions-immediately"

@@ -11,6 +11,10 @@ verification = "grounded"
 url = "CONVENTIONS.md"
 title = "CONVENTIONS.md — §PROC-REGRESSION-TEST-1 (every bug fix ships with a regression test)"
 
+[[sources]]
+url = "https://llvm.org/docs/DeveloperPolicy.html"
+title = "LLVM Developer Policy — Test Cases (every bug fix/feature ships with a regression test)"
+
 [decision]
 question = "What position does the project take on: Every bug fix ships with a regression test that fails before the fix and passes after?"
 default = "every-bug-fix-ships-with-a-regression-test-that"

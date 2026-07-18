@@ -16,6 +16,10 @@ title = "AGENTS.md — ORCH-CONFORMANCE-1 (codified architectural commitments ar
 url = "docs/RATIONALE.md"
 title = "docs/RATIONALE.md — §2 The approach: two deterministic layers (the enforcement thesis)"
 
+[[sources]]
+url = "https://www.oreilly.com/library/view/building-evolutionary-architectures/9781491986356/"
+title = "Ford, Parsons, Kua — Building Evolutionary Architectures (fitness functions as enforced, executable governance)"
+
 [decision]
 question = "What position does the project take on: Codified architectural commitments are enforced gates, not advisory documents?"
 default = "codified-architectural-commitments-are-enforced"

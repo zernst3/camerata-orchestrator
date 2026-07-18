@@ -40,4 +40,4 @@ title = "FactoryBot — GETTING_STARTED.md (factory definition, build/create/bui
 
 [[sources]]
 url = "https://www.betterspecs.org/"
-title = "Better Specs — Use factories instead of fixtures"
+title = "Better Specs (community guideline, not an official RSpec/Rails standard) — Use factories instead of fixtures"

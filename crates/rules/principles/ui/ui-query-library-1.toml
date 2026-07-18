@@ -5,6 +5,11 @@ domain = "ui"
 layer = "universal"
 enforcement = "structured"
 default = false
+verification = "grounded"
+
+[[sources]]
+url = "https://tanstack.com/query/latest/docs/framework/react/overview"
+title = "TanStack Query — Overview (de-duplication, caching, stale-while-revalidate, and invalidation as the query library's job)"
 
 [decision]
 question = "What position does the project take on: All UI data fetches go through a query library, never ad-hoc fetch and store?"

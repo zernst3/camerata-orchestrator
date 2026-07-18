@@ -5,6 +5,11 @@ domain = "rust"
 layer = "language"
 enforcement = "structured"
 default = false
+verification = "grounded"
+
+[[sources]]
+url = "https://martinfowler.com/eaaCatalog/dataMapper.html"
+title = "Martin Fowler — Patterns of Enterprise Application Architecture: Data Mapper (medium authority — grounds a translation layer between domain and persistence in general; PoEAA does not itself mandate that layer live in its own crate)"
 
 [decision]
 question = "Where does the translation between domain types and persistence entities live: in a dedicated mapper crate that depends on both sides, alongside the entities, or alongside the domain types?"

@@ -12,6 +12,10 @@ verification = "grounded"
 url = "CONVENTIONS.md"
 title = "CONVENTIONS.md — §ARCH-SERVER-AUTHZ-1 (authorization on the server; UI renders permission hints)"
 
+[[sources]]
+url = "https://owasp.org/www-project-application-security-verification-standard/"
+title = "OWASP Application Security Verification Standard (ASVS) — V4 Access Control"
+
 [decision]
 question = "What position does the project take on: Authorization on the server; UI renders permission hints?"
 default = "authorization-on-the-server-ui-renders-permissio"

@@ -7,7 +7,7 @@ enforcement = "mechanical"
 default = false
 opt_in_only = true
 layer3_only = false
-verification = "grounded"
+verification = "policy"
 
 [[sources]]
 url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"

@@ -5,6 +5,11 @@ domain = "sql"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "policy"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
+title = "OWASP Logging Cheat Sheet (low authority — supports capturing who-did-what generally; the specific three-strategy split by table semantics is this project's own convention, not something the cheat sheet itself prescribes)"
 
 [decision]
 question = "What position does the project take on: Three audit-column strategies; pick by table semantics?"

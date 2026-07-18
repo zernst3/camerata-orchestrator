@@ -5,6 +5,15 @@ domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/"
+title = "Alexis King — Parse, Don't Validate"
+
+[[sources]]
+url = "https://rust-lang.github.io/api-guidelines/type-safety.html"
+title = "Rust API Guidelines — Type Safety: the newtype pattern (fallible constructors encode validation in the type)"
 
 [decision]
 question = "What position does the project take on: Forms display errors from the domain newtype constructors; the UI never re-implements validation rules?"

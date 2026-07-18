@@ -11,6 +11,10 @@ verification = "grounded"
 url = "CONVENTIONS.md"
 title = "CONVENTIONS.md — §PROC-HIDE-DEAD-END-1 (hide dead-end affordances)"
 
+[[sources]]
+url = "https://www.smashingmagazine.com/2024/05/hidden-vs-disabled-ux/"
+title = "Smashing Magazine — Hidden vs. Disabled In UX (2024)"
+
 [decision]
 question = "What position does the project take on: Hide dead-end affordances?"
 default = "hide-dead-end-affordances"
@@ -27,3 +31,9 @@ id = "the-ui-renders-every-action-regardless-of-the-cu"
 label = "the UI renders every action regardless of the current …"
 directive = "the UI renders every action regardless of the current user's permissions, and unauthorized clicks are caught at the endpoint with a 403 response that drives the user to an error page"
 why = "Rendering every action and relying on the endpoint to reject unauthorized attempts produces a 403 then error-page redirect on click; that redirect is a poor user experience and reveals which capabilities exist without granting them."
+
+[[option]]
+id = "render-disabled-with-a-reason-instead-of-hiding"
+label = "render the affordance disabled with a reason, instead of hiding it entirely"
+directive = "For permission-gated UIs: render the action but disable it (greyed out, non-interactive) when the current user's permissions don't allow it, paired with a visible reason (tooltip or inline text) naming the permission or role they'd need, e.g. 'You need Organization Admin to do this.' The endpoint still enforces the permission independently; the disabled affordance is purely a UI signal, not the security boundary."
+why = "Trades a small cost (a harmless, non-actionable element stays visible) for real discoverability: users learn a capability exists and what they'd need to unlock it, rather than the feature disappearing from the UI entirely as if it didn't exist. This matters most for capabilities users might reasonably want to request access to (an upgrade, a role change) — full hiding gives them no signal to act on. The trade-off against hide-dead-end-affordances is real: a disabled control still surfaces the existence of the feature to users who can't use it, which is exactly the exposure hiding avoids, and a disabled-with-reason implementation has to keep its reason text in sync with the actual permission check or it misleads the user about what they need."

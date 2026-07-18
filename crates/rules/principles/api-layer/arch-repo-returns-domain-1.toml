@@ -5,6 +5,11 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://martinfowler.com/eaaCatalog/repository.html"
+title = "Martin Fowler — Patterns of Enterprise Application Architecture: Repository"
 
 [decision]
 question = "What position does the project take on: Repositories return domain types, never persistence representations?"

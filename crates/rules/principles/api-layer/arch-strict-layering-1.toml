@@ -12,6 +12,14 @@ verification = "grounded"
 url = "docs/decisions/2026-06-19_ast_architectural_rule_tier.md"
 title = "Decision: An AST-checkable architectural enforcement tier — ARCH-HANDLER-NO-DB-1 described as AST-checkable companion to ARCH-STRICT-LAYERING-1"
 
+[[sources]]
+url = "https://martinfowler.com/eaaCatalog/"
+title = "Martin Fowler — Patterns of Enterprise Application Architecture (Layering, ch. 1)"
+
+[[sources]]
+url = "https://www.wiley.com/en-us/Pattern+Oriented+Software+Architecture,+Volume+1,+A+System+of+Patterns-p-9780471958697"
+title = "Buschmann et al. — Pattern-Oriented Software Architecture, Volume 1: A System of Patterns (the Layers pattern)"
+
 [decision]
 question = "What position does the project take on: Strict layering — services orchestrate, repositories own data access?"
 default = "strict-layering-services-orchestrate-repositorie"

@@ -15,6 +15,10 @@ title = "AGENTS.md — ORCH-REVIEWER-SPLIT-1 (reviewer agent distinct from autho
 url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
 title = "Decision: Cross-agent rules — the integration gate (reviewer-author separation principle)"
 
+[[sources]]
+url = "https://arxiv.org/abs/2404.13076"
+title = "Panickssery, Bowman, Feng — LLM Evaluators Recognize and Favor Their Own Generations (arXiv:2404.13076)"
+
 [decision]
 question = "What position does the project take on: The reviewer agent for any change is distinct from the author agent?"
 default = "the-reviewer-agent-for-any-change-is-distinct-fr"

@@ -12,6 +12,10 @@ verification = "grounded"
 url = "docs/decisions/2026-06-19_ast_architectural_rule_tier.md"
 title = "Decision: An AST-checkable architectural enforcement tier — worked example §ARCH-HANDLER-NO-DB-1"
 
+[[sources]]
+url = "https://martinfowler.com/eaaCatalog/serviceLayer.html"
+title = "Martin Fowler — Patterns of Enterprise Application Architecture: Service Layer"
+
 [decision]
 question = "What position does the project take on: Handlers never touch the database directly?"
 default = "handlers-delegate-all-data-access-to-services-or-repositories"

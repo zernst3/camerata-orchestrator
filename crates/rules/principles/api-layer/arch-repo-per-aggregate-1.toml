@@ -5,6 +5,15 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://www.amazon.com/Implementing-Domain-Driven-Design-Vaughn-Vernon/dp/0321834577"
+title = "Vaughn Vernon — Implementing Domain-Driven Design, Chapter 12: Repositories (per-aggregate collection-oriented repository)"
+
+[[sources]]
+url = "https://martinfowler.com/eaaCatalog/repository.html"
+title = "Martin Fowler / Eric Evans — Repository (mediates between the domain and data mapping layers with a collection-like interface)"
 
 [decision]
 question = "What position does the project take on: One repository abstraction per aggregate, declared in the domain layer?"

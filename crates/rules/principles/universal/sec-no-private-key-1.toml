@@ -11,6 +11,10 @@ verification = "grounded"
 url = "docs/ENFORCEMENT.md"
 title = "docs/ENFORCEMENT.md — RULE_REGISTRY §SEC-NO-PRIVATE-KEY-1 (enforced gate rule)"
 
+[[sources]]
+url = "https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository"
+title = "GitHub Docs — Removing sensitive data from a repository"
+
 [decision]
 question = "Where do private key materials live, and how are they supplied to tests?"
 default = "secrets-manager-or-generated"

@@ -5,6 +5,11 @@ domain = "ui"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://www.edpb.europa.eu/our-work-tools/our-documents/guidelines/guidelines-052020-consent-under-regulation-2016679_en"
+title = "European Data Protection Board — Guidelines 05/2020 on consent under Regulation 2016/679 (GDPR; jurisdiction-specific to the EU/EEA — projects operating under other consent regimes, e.g. US state privacy laws, should verify their own applicable standard, but the equal-weight opt-in principle generalizes)"
 
 [decision]
 question = "What position does the project take on: No client-side storage or third-party trackers initialize without explicit consent?"

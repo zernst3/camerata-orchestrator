@@ -6,6 +6,15 @@ layer = "universal"
 enforcement = "architectural"
 default = true
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: deciding which type/field/column 'requires exact arithmetic' (money, regulated quantity) is project-specific domain knowledge no generic linter carries. It requires a custom AST/static-analysis CI gate that bans binary floating-point types (f64, double, Number, REAL/DOUBLE columns) on the exactness-sensitive surface the project annotates, paired with a property test asserting a long chain of additions and roundings loses zero precision against an exact-decimal oracle. Conformance holds when the float ban runs in CI over the exactness-sensitive surface and the precision property test passes; it fails when float types reach those values or no precision oracle exists."
+verification = "grounded"
+
+[[sources]]
+url = "https://docs.python.org/3/library/decimal.html"
+title = "Python — decimal: Decimal fixed-point and floating-point arithmetic"
+
+[[sources]]
+url = "https://martinfowler.com/eaaCatalog/money.html"
+title = "Martin Fowler — Patterns of Enterprise Application Architecture: Money"
 
 [decision]
 question = "What position does the project take on: Monetary and quantity values use exact decimal types in code; never floats?"

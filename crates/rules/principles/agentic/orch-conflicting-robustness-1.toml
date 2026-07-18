@@ -5,7 +5,7 @@ domain = "agentic"
 layer = "universal"
 enforcement = "prose"
 default = true
-verification = "grounded"
+verification = "policy"
 
 [[sources]]
 url = "AGENTS.md"

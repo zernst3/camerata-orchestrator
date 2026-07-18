@@ -16,6 +16,10 @@ title = "AGENTS.md — ORCH-PREREVIEW-1 (every change carries an AI reviewer's v
 url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
 title = "Decision: Cross-agent rules — the integration gate (pipeline: execute → integrate → cross-agent gate → push/PR → human QA)"
 
+[[sources]]
+url = "https://research.google/pubs/modern-code-review-a-case-study-at-google/"
+title = "Sadowski et al. — Modern Code Review: A Case Study at Google (low — supports pre-merge review generally, not an AI-reviewer-specific mandate)"
+
 [decision]
 question = "How should AI-authored changes flow toward the human review gate?"
 default = "ai-pre-review-then-human-review"

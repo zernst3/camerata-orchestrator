@@ -11,6 +11,10 @@ verification = "grounded"
 url = "AGENTS.md"
 title = "AGENTS.md — ORCH-TRAINING-CUTOFF-1 (training-data-limited decisions route by category)"
 
+[[sources]]
+url = "https://genai.owasp.org/llm-top-10/"
+title = "OWASP Top 10 for LLM Applications — LLM09:2025 Misinformation (low — supports the general training-data-limitation risk, not the category-routing mechanism)"
+
 [decision]
 question = "What position does the project take on: Training-data-limited decisions route to human review by category, not by confidence?"
 default = "training-data-limited-decisions-route-to-human-r"

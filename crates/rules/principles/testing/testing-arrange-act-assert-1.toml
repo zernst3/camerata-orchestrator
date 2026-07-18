@@ -8,12 +8,12 @@ default = true
 verification = "grounded"
 
 [[sources]]
-url = "http://xunitpatterns.com/Four-Phase%20Test.html"
+url = "http://xunitpatterns.com/Four%20Phase%20Test.html"
 title = "xUnit Test Patterns (Meszaros) — Four-Phase Test (Setup / Exercise / Verify / Teardown)"
 
 [[sources]]
-url = "https://testing.googleblog.com/2008/12/as-always-dont-repeat-yourself-dry.html"
-title = "Google Testing Blog — DRY and test clarity (AAA framing)"
+url = "https://testing.googleblog.com/2019/12/testing-on-toilet-tests-too-dry-make.html"
+title = "Google Testing on the Toilet — Tests Too DRY? Make Them DAMP! (2019)"
 
 [[sources]]
 url = "https://martinfowler.com/bliki/GivenWhenThen.html"

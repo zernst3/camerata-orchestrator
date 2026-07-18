@@ -12,6 +12,14 @@ verification = "grounded"
 url = "docs/decisions/2026-06-24_runtime_resource_hygiene.md"
 title = "Decision: runtime resource hygiene is required app behavior (52 orphaned osv-scanner processes + leaked temp scratch from un-reaped dep-audits)"
 
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/459.html"
+title = "CWE-459: Incomplete Cleanup"
+
+[[sources]]
+url = "https://docs.rs/tokio/latest/tokio/process/struct.Command.html#method.kill_on_drop"
+title = "tokio::process::Command::kill_on_drop"
+
 [decision]
 question = "What position does the project take on: the app reaps every subprocess it spawns and cleans every temp artifact it writes?"
 default = "the-app-owns-the-lifecycle-of-its-subprocesses-a"

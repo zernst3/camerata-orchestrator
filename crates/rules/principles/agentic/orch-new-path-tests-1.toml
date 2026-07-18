@@ -16,6 +16,10 @@ title = "AGENTS.md — ORCH-NEW-PATH-TESTS-1 (AI-authored code paths carry tests
 url = "docs/decisions/2026-06-20_uow_governed_dev_loop.md"
 title = "Decision: Wire the governed development loop over the Unit of Work — cites ORCH-NEW-PATH-TESTS-1"
 
+[[sources]]
+url = "https://testing.googleblog.com/2020/08/code-coverage-best-practices.html"
+title = "Google Testing Blog — Code Coverage Best Practices (2020)"
+
 [decision]
 question = "What position does the project take on: AI-authored code paths carry tests, not just a passing existing suite?"
 default = "ai-authored-code-paths-carry-tests-not-just-a-pa"

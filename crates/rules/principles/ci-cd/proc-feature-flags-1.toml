@@ -5,6 +5,15 @@ domain = "ci-cd"
 layer = "universal"
 enforcement = "structured"
 default = false
+verification = "grounded"
+
+[[sources]]
+url = "https://martinfowler.com/articles/feature-toggles.html"
+title = "Pete Hodgson (martinfowler.com) — Feature Toggles (aka Feature Flags)"
+
+[[sources]]
+url = "https://trunkbaseddevelopment.com/feature-flags/"
+title = "Trunk Based Development — Feature Flags"
 
 [decision]
 question = "What position does the project take on: Feature flags via env var or runtime config; no long-lived feature branches?"

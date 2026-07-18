@@ -11,6 +11,10 @@ verification = "grounded"
 url = "AGENTS.md"
 title = "AGENTS.md — ORCH-TIERED-ESCALATION-1 (tiered escalation)"
 
+[[sources]]
+url = "https://sre.google/sre-book/monitoring-distributed-systems/"
+title = "Google SRE Book — Monitoring Distributed Systems (page vs. ticket vs. log, by severity)"
+
 [decision]
 question = "How should flagged items gate the routine?"
 default = "soft-flag-by-default-hard-pause-only-for-guard-a"

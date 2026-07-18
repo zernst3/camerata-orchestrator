@@ -8,8 +8,8 @@ default = true
 verification = "grounded"
 
 [[sources]]
-url = "http://xunitpatterns.com/Tests%20as%20Documentation.html"
-title = "xUnit Test Patterns (Meszaros) — Tests as Documentation"
+url = "http://xunitpatterns.com/Goals%20of%20Test%20Automation.html"
+title = "xUnit Test Patterns (Meszaros) — Goals of Test Automation (tests as a specification/documentation of intent)"
 
 [[sources]]
 url = "https://testing.googleblog.com/2014/10/testing-on-toilet-writing-descriptive.html"

@@ -5,7 +5,7 @@ domain = "ci-cd"
 layer = "universal"
 enforcement = "prose"
 default = true
-verification = "grounded"
+verification = "policy"
 
 [[sources]]
 url = "CONVENTIONS.md"

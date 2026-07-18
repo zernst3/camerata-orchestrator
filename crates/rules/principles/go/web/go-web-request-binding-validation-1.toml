@@ -5,6 +5,15 @@ domain = "go:web"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://gin-gonic.com/en/docs/binding/binding-and-validation/"
+title = "Gin Web Framework — Model binding and validation"
+
+[[sources]]
+url = "https://github.com/go-playground/validator"
+title = "go-playground/validator v10 — struct and field validation via tags (the library Gin's binding uses)"
 
 [decision]
 question = "How should incoming request payloads (JSON, form, query params) be parsed into handler arguments?"

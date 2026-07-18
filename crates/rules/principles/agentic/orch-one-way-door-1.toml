@@ -15,6 +15,10 @@ title = "AGENTS.md — ORCH-ONE-WAY-DOOR-1 (one-way-door routing)"
 url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
 title = "Decision: Cross-agent rules — the integration gate (a third enforcement tier)"
 
+[[sources]]
+url = "https://s2.q4cdn.com/299287126/files/doc_financials/annual/2015-Letter-to-Shareholders.PDF"
+title = "Jeff Bezos — 2015 Letter to Amazon Shareholders (Type 1 / one-way-door vs. Type 2 / two-way-door decisions)"
+
 [decision]
 question = "What position does the project take on: One-way-door routing — blast radius gates autonomy?"
 default = "one-way-door-routing-blast-radius-gates-autonomy"

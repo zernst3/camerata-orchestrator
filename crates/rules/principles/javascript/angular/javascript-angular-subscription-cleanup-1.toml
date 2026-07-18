@@ -13,7 +13,7 @@ title = "Angular — Unsubscribing with takeUntilDestroyed"
 
 [[sources]]
 url = "https://github.com/angular-eslint/angular-eslint/blob/main/packages/eslint-plugin/README.md"
-title = "angular-eslint — no-implicit-take-until-destroyed"
+title = "angular-eslint — no-implicit-take-until-destroyed (requires an explicit DestroyRef when takeUntilDestroyed() is called outside an injection context; it does not itself enforce that a subscription is cleaned up at all)"
 linter = "@angular-eslint/no-implicit-take-until-destroyed"
 
 [decision]

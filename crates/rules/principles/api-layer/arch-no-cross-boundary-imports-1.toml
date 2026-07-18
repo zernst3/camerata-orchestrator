@@ -12,6 +12,10 @@ verification = "grounded"
 url = "docs/decisions/2026-06-19_ast_architectural_rule_tier.md"
 title = "Decision: An AST-checkable architectural enforcement tier — §ARCH-NO-CROSS-BOUNDARY-IMPORTS-1 named as production rule"
 
+[[sources]]
+url = "https://blog.cleancoder.com/uncle-bob/2012/08/13/the-clean-architecture.html"
+title = "Robert C. Martin — The Clean Architecture (the Dependency Rule)"
+
 [decision]
 question = "What position does the project take on: No cross-boundary imports — modules import only their declared dependencies?"
 default = "modules-import-only-across-declared-allowed-boundaries"

@@ -5,7 +5,7 @@ domain = "ci-cd"
 layer = "universal"
 enforcement = "prose"
 default = false
-verification = "grounded"
+verification = "policy"
 
 [[sources]]
 url = "AGENTS.md"
@@ -26,3 +26,9 @@ id = "require-human-review-on-everything"
 label = "require human review on everything"
 directive = "every pull request including tight bot-authored ones requires explicit human review of the diff before it can merge, with no auto-merge path"
 why = "Requiring human review on everything is safer but loses the throughput benefit of letting cheap mechanical changes through; reviewer attention gets consumed by changes whose correctness is already guaranteed by conventions and CI."
+
+[[option]]
+id = "auto-merge-any-bot-pr-on-green-ci-unconditionally"
+label = "auto-merge any bot-authored PR once CI passes, regardless of scope or hard-guard areas"
+directive = "Any bot-authored pull request auto-merges as soon as CI passes, with no distinction by scope, size, whether it touches a hard-guard area, or whether it introduces a new convention."
+why = "Maximizes throughput and requires no per-PR scope judgment, but widens the blast radius: a single bad routine can ship a damaging change before anyone notices, because CI passing is not the same guarantee as 'this change is tight, single-purpose, and touches nothing sensitive.' The hard-guard areas exist precisely because the cost of a wrong autonomous call there is high, and green CI alone does not certify that a change stays out of them."

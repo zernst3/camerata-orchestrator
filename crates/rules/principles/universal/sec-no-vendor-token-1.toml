@@ -11,6 +11,14 @@ verification = "grounded"
 url = "docs/ENFORCEMENT.md"
 title = "docs/ENFORCEMENT.md — RULE_REGISTRY §SEC-NO-VENDOR-TOKEN-1 (enforced gate rule)"
 
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/798.html"
+title = "CWE-798: Use of Hard-coded Credentials"
+
+[[sources]]
+url = "https://docs.github.com/en/code-security/secret-scanning/about-secret-scanning"
+title = "GitHub Docs — About secret scanning"
+
 [decision]
 question = "Where do vendor API tokens and credentials live?"
 default = "env-or-secrets-manager"

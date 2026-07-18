@@ -5,6 +5,15 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html"
+title = "OWASP Input Validation Cheat Sheet"
+
+[[sources]]
+url = "https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/"
+title = "Alexis King — Parse, Don't Validate"
 
 [decision]
 question = "What position does the project take on: Validate every request at the boundary; downstream code trusts only validated values?"

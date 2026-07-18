@@ -11,6 +11,10 @@ verification = "grounded"
 url = "AGENTS.md"
 title = "AGENTS.md — ORCH-CONTEXT-OVERRIDE-1 (rule overrides require explicit human sign-off)"
 
+[[sources]]
+url = "https://www.cognitect.com/blog/2011/11/15/documenting-architecture-decisions"
+title = "Michael Nygard — Documenting Architecture Decisions (an override is itself a decision that needs a durable, attributed record)"
+
 [decision]
 question = "What position does the project take on: Rule overrides driven by project context require explicit human sign-off?"
 default = "rule-overrides-driven-by-project-context-require"

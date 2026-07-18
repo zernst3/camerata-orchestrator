@@ -5,6 +5,15 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://martinfowler.com/articles/injection.html"
+title = "Martin Fowler — Inversion of Control Containers and the Dependency Injection pattern"
+
+[[sources]]
+url = "https://www.manning.com/books/dependency-injection-principles-practices-patterns"
+title = "Seemann & van Deursen — Dependency Injection Principles, Practices, and Patterns (Composition Root)"
 
 [decision]
 question = "How do services obtain the repositories they use?"

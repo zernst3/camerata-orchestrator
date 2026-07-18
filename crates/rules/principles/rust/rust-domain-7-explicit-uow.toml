@@ -5,6 +5,11 @@ domain = "rust"
 layer = "language"
 enforcement = "structured"
 default = false
+verification = "grounded"
+
+[[sources]]
+url = "https://martinfowler.com/eaaCatalog/unitOfWork.html"
+title = "Martin Fowler — Patterns of Enterprise Application Architecture: Unit of Work (grounds the general pattern of tracking and coordinating a transaction's writes; the specific Option<&dyn UnitOfWork> + Any-downcast concretion is this project's own Rust encoding of it, not something PoEAA itself specifies)"
 
 [decision]
 question = "How does a repository method participate in a multi-write transaction: an explicit domain-defined UnitOfWork parameter, a generic Tx type parameter, an ambient closure-based context, or the concrete ORM transaction type in the signature?"

@@ -18,7 +18,7 @@ url = "https://docs.junit.org/6.0.2/writing-tests/display-names.html"
 title = "JUnit User Guide — Display Names (@DisplayName and DisplayNameGenerator.ReplaceUnderscores)"
 
 [[sources]]
-url = "https://pmd.github.io/pmd/pmd_rules_java_bestpractices.html#unittestsshouldincludeassert"
+url = "https://pmd.github.io/pmd/pmd_rules_java_bestpractices.html#unittestshouldusetestannotation"
 title = "PMD Best Practices — UnitTestShouldUseTestAnnotation (catches legacy 'test' prefix naming without @Test)"
 linter = "PMD: UnitTestShouldUseTestAnnotation"
 

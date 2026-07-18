@@ -11,6 +11,10 @@ verification = "grounded"
 url = "CONVENTIONS.md"
 title = "CONVENTIONS.md — Deployment section (Trigger→environment mapping table: push to main → dev; release branch → staging; semver tag → prod)"
 
+[[sources]]
+url = "https://devblogs.microsoft.com/devops/release-flow-how-we-do-branching-on-the-vsts-team/"
+title = "Microsoft — Release Flow: How We Do Branching on the VSTS Team"
+
 [decision]
 question = "How do changes map to deploy environments?"
 default = "git-ref-environment-immutable-prod-tags"
