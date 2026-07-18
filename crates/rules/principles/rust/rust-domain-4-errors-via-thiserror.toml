@@ -22,7 +22,7 @@ title = "The Rust Book — Ch 9.2: Recoverable Errors with Result"
 [decision]
 question = "What position does the project take on: Errors via thiserror enums per crate?"
 default = "errors-via-thiserror-enums-per-crate"
-why = "Typed errors give callers compile-time knowledge of failure modes and keep each layer's failure vocabulary self-contained. A single global error enum couples every layer to the same vocabulary, removes boundary discipline, and pushes every layer's failure modes into a shared namespace where they accumulate forever. Using anyhow everywhere loses typed failure information at boundaries; callers cannot match on specific failure modes and the type system stops helping with error handling, which is exactly the guarantee thiserror-per-layer gives back."
+why = "Typed errors give callers compile-time knowledge of failure modes and keep each layer's failure vocabulary self-contained. A single global error enum couples every layer to the same vocabulary, removes boundary discipline, and pushes every layer's failure modes into a shared namespace where they accumulate forever. Using anyhow everywhere loses typed failure information at boundaries; callers cannot match on specific failure modes and the type system stops helping with error handling, which is exactly the guarantee thiserror-per-layer gives back. This rule establishes THAT each crate boundary exposes a typed thiserror enum; `rust-domain-6-shared-repository-error` addresses the separate, narrower question of HOW the variants within that enum are organized (by failure category vs. by module/aggregate) once this rule's default is in place."
 
 [[option]]
 id = "errors-via-thiserror-enums-per-crate"

@@ -14,7 +14,7 @@ title = "AGENTS.md — ORCH-TIERED-ESCALATION-1 (tiered escalation)"
 [decision]
 question = "How should flagged items gate the routine?"
 default = "soft-flag-by-default-hard-pause-only-for-guard-a"
-why = "Routine work should flow; reserve the halt for decisions that truly block forward progress or that accumulate into a backlog. Hard-pausing on everything produces constant halts that drain the forward-progress value the routine exists to create, and trains the human reviewer to glance and dismiss rather than read carefully. Never pausing accepts dangerous drift, because items that should have blocked the routine accumulate silently and the absence of any halt signal removes the rule's relief valve entirely."
+why = "Routine work should flow; reserve the halt for decisions that truly block forward progress or that accumulate into a backlog. Hard-pausing on everything produces constant halts that drain the forward-progress value the routine exists to create, and trains the human reviewer to glance and dismiss rather than read carefully. Never pausing accepts dangerous drift, because items that should have blocked the routine accumulate silently and the absence of any halt signal removes the rule's relief valve entirely. This rule governs what happens once a signal has fired — whether the routine halts or just logs and continues. `orch-precision-recall-1` governs the separate, upstream question of how liberally a signal fires in the first place; a high-recall detector that flags a wide net of borderline cases still routes through this rule's soft-flag-by-default gating, so wide detection nets do not translate into constant hard pauses."
 
 [[option]]
 id = "soft-flag-by-default-hard-pause-only-for-guard-a"

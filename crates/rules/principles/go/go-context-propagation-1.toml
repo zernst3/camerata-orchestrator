@@ -33,3 +33,9 @@ id = "context-optional"
 label = "treat context as optional; spawn goroutines without context"
 directive = "Goroutines are spawned without context, or context is created locally but not threaded through layers. Database queries use the non-context variants (db.Query instead of db.QueryContext)."
 why = "Omits propagation and risks goroutine leaks and wasted work when requests are cancelled or deadlines are exceeded."
+
+[[option]]
+id = "background-context-in-services"
+label = "handlers pass context, but services deliberately use context.Background() for fire-and-forget work"
+directive = "Handlers accept and thread the request context as usual, but a specific service method deliberately calls context.Background() (or context.WithoutCancel() on Go 1.21+) instead of the inbound request context when the work it starts must outlive the request — for example, an audit-log write or an async notification that should complete even if the client disconnects. This is a narrow, explicitly-documented exception, not a default: the service still manages its own timeout (context.WithTimeout(context.Background(), ...)) rather than running unbounded."
+why = "Deliberately detaching from the request context trades request-scoped cancellation for guaranteed completion of specific fire-and-forget work; useful in narrow cases but must not become the default way services obtain a context, or timeouts and cancellation stop working everywhere else."

@@ -1,11 +1,11 @@
 id = "JAVASCRIPT-NEXT-DUAL-API-1"
-title = "Two sanctioned API helpers: client vs server-only"
+title = "Client-side code goes through sanctioned API helpers; Server Components may fetch directly"
 tag = "stack"
 domain = "javascript:next"
 layer = "framework"
 enforcement = "mechanical"
 default = true
-qualifies = "Enforced by an ESLint no-restricted-imports / no-restricted-globals rule that forbids the raw fetch global (and direct fetch usage) in components and route handlers, routing all calls through the two sanctioned helpers; the server-only helper additionally imports the server-only package so any client-bundle import of it is a build-time error. Conformance holds when the lint rule and the server-only guard are configured and a raw fetch call or a client import of the server helper fails the build; it fails when neither guard is present and call sites can fetch directly."
+qualifies = "Enforced by an ESLint no-restricted-imports / no-restricted-globals rule that forbids the raw fetch global (and direct fetch usage) in client components, routing client-side calls through the two sanctioned helpers; the server-only helper additionally imports the server-only package so any client-bundle import of it is a build-time error. The lint rule is scoped to client-side files (client components, hooks, event handlers) and does not flag direct fetch in Server Components, route handlers, or other server-side rendering paths, where direct fetch is the documented pattern. Conformance holds when the client-scoped lint rule and the server-only guard are configured and a raw fetch call in a client component, or a client import of the server helper, fails the build; it fails when neither guard is present and client call sites can fetch directly."
 verification = "grounded"
 
 [[sources]]
@@ -18,15 +18,15 @@ title = "ESLint — no-restricted-imports (enforces import restrictions)"
 linter = "eslint: no-restricted-imports"
 
 [decision]
-question = "What position does the project take on: Two sanctioned API helpers: client vs server-only?"
+question = "What position does the project take on: Client-side code goes through sanctioned API helpers; Server Components may fetch directly?"
 default = "two-sanctioned-api-helpers-client-vs-server-only"
-why = "Browser fetches and server-side fetches (RSC, metadata, route handlers) have different requirements: cookies, hostnames, auth flow, secret access. Mixing them silently breaks SSR or leaks secrets. A 'server-only' marker on the server helper enforces the split at compile time. A single isomorphic helper has to compromise on cookies, hostname resolution, and secret handling because no single shape satisfies both contexts at once; any compromise the helper makes leaks a failure mode into one side or the other. Raw fetch at each call site pushes the context handling out to every site and forces each one to re-derive cookies, hostnames, and credential rules; one slip leaks a server-only secret into the client bundle or breaks SSR for a route that worked locally."
+why = "Browser fetches and server-side fetches (RSC, metadata, route handlers) have different requirements: cookies, hostnames, auth flow, secret access. On the client, there is no framework-level fetch deduplication or caching, so a raw fetch call re-derives credentials, base URLs, and error handling at every call site; centralizing those concerns in a shared client helper is what avoids the drift and the leaked-secret/broken-auth failure modes. On the server, this tradeoff does not hold: Next.js extends fetch itself with automatic request memoization and caching for Server Components, route handlers, and other server-side rendering paths, so direct fetch() there is the documented, idiomatic default rather than an anti-pattern. Forcing every server-side fetch through a shared helper fights the framework's built-in deduplication for no corresponding benefit. A 'server-only' marker on the server helper (used when a server-side call needs private-network access or centralized secret handling) enforces that split at compile time. Mixing browser and server fetch concerns in one isomorphic helper has to compromise on cookies, hostname resolution, and secret handling because no single shape satisfies both contexts at once; any compromise the helper makes leaks a failure mode into one side or the other."
 
 [[option]]
 id = "two-sanctioned-api-helpers-client-vs-server-only"
-label = "Two sanctioned API helpers: client vs server-only"
-directive = "All API calls go through one of two helpers: a client-side helper (browser context, attaches credentials, handles auth redirects) or a server-only helper marked 'server-only' (can reach private-network hostnames, never bundled to the client). Direct fetch calls in components and route handlers are forbidden."
-why = "Browser fetches and server-side fetches (RSC, metadata, route handlers) have different requirements: cookies, hostnames, auth flow, secret access."
+label = "Client-side calls go through a shared client helper; Server Components fetch directly"
+directive = "Client-side code (client components, hooks, event handlers) makes API calls through a shared client-side helper (browser context, attaches credentials, handles auth redirects). Direct fetch calls in client components are forbidden; call the shared helper instead. Server Components, route handlers, and other server-side rendering paths may call fetch directly — this is the documented App Router pattern and does not need to route through a shared helper. A separate server-only helper marked 'server-only' remains available (and is used) for server-side calls that need private-network hostnames or centralized secret handling, and is never bundled to the client."
+why = "Client-side code doesn't get Next's automatic fetch memoization/caching, so centralizing credentials, base URLs, and error handling in one client helper avoids re-deriving those rules at every call site. Server Components get equivalent caching and dedup for free from Next's extended fetch, so forcing every server-side fetch through a shared helper adds indirection without the benefit that justifies it on the client."
 
 [[option]]
 id = "a-single-isomorphic-api-helper-covers-both-brows"

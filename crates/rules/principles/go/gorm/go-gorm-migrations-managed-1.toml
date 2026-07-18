@@ -14,12 +14,12 @@ title = "GORM — Migration"
 [decision]
 question = "How should schema changes (add column, create table, rename field) be applied to the database?"
 default = "migrations-all-changes"
-why = "A migration is a versioned SQL script or code that transforms the schema from one state to another, and is tracked in version control. Running migrations in order (migration 001, 002, 003) builds the current schema deterministically. A production database that has manual SQL ALTER statements applied outside the migration system becomes impossible to reproduce: deploying the same code to a new database does not result in the same schema, because the manual alters are not in version control. Rollbacks become guesswork. A migration system (e.g., GORM AutoMigration for development, or SQL migrations managed by a tool like golang-migrate for production) ensures the schema is reproducible and versioned. Database-first design (manual DDL in a tool, then code-generation) is an alternative; either way, the schema evolution is tracked and repeatable."
+why = "A migration is a versioned SQL script or code that transforms the schema from one state to another, and is tracked in version control. Running migrations in order (migration 001, 002, 003) builds the current schema deterministically. A production database that has manual SQL ALTER statements applied outside the migration system becomes impossible to reproduce: deploying the same code to a new database does not result in the same schema, because the manual alters are not in version control. Rollbacks become guesswork. GORM's db.AutoMigrate(&Model{}) is a distinct thing from versioned migrations: it inspects the current schema and additively creates missing tables, columns, and indexes to match the Go structs, but it never drops or alters columns destructively, produces no ordered migration files, and leaves no audit trail or rollback path. That makes AutoMigrate acceptable for early prototyping or as a dev-convenience supplement, but not a substitute for production schema management. A migration system based on version-controlled, reviewed migration files (a tool like golang-migrate, goose, or atlas) is what production schema changes rely on, since it is reproducible, ordered, and reviewable. Database-first design (manual DDL in a tool, then code-generation) is an alternative; either way, the schema evolution is tracked and repeatable."
 
 [[option]]
 id = "migrations-all-changes"
 label = "All schema changes go through version-controlled migrations"
-directive = "Schema changes (create table, add column, add index, drop constraint) are written as migrations (GORM's AutoMigration or SQL migration files managed by a tool like golang-migrate). Migrations are committed to version control, reviewed, and applied in order. Production deployments run migrations as part of the deployment process. No manual SQL ALTER statements are executed in production; any schema change not tracked in a migration is a deviation that must be rolled back or documented."
+directive = "Production schema changes (create table, add column, add index, drop constraint) are written as versioned SQL migration files managed by a tool like golang-migrate, goose, or atlas. Migrations are committed to version control, reviewed, and applied in order. Production deployments run migrations as part of the deployment process. GORM's db.AutoMigrate(&Model{}) is reserved for local development or prototyping, or as an additive dev-convenience supplement; it is not used to manage production schema, since it only adds columns/tables/indexes, never drops or alters destructively, and produces no version history or rollback path. No manual SQL ALTER statements are executed in production; any schema change not tracked in a migration is a deviation that must be rolled back or documented."
 why = "Migrations are the source of truth for schema evolution; the database is reproducible from migrations."
 
 [[option]]
@@ -30,6 +30,6 @@ why = "Quick for one-off changes; becomes untrackable and unreproducible at scal
 
 [[option]]
 id = "autoversion-only"
-label = "Only AutoMigration is used; no explicit migration versioning"
-directive = "GORM's AutoMigration(User{}, Profile{}) is called at startup; the schema is derived from Go structs."
-why = "Convenient for rapid development; lacks version history and explicit control. Cannot roll back to a previous schema state if needed."
+label = "Only AutoMigrate is used; no explicit migration versioning"
+directive = "GORM's db.AutoMigrate(&User{}, &Profile{}) is called at startup; the schema is derived from and additively synced to the Go structs, with no separate migration files."
+why = "Convenient for rapid development; lacks version history and explicit control. Cannot roll back to a previous schema state if needed, and cannot express destructive changes (dropping or renaming a column) since AutoMigrate only adds."

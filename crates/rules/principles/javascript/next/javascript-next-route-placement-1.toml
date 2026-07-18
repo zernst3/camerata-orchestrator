@@ -1,5 +1,5 @@
 id = "JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1"
-title = "App Router pages live under the gated route group, not at the top level"
+title = "App Router pages are organized into route groups by access tier, but auth is enforced in middleware/data layer, not by folder placement"
 tag = "stack"
 domain = "javascript:next"
 layer = "framework"
@@ -16,18 +16,18 @@ url = "https://nextjs.org/docs/app/getting-started/project-structure#route-group
 title = "Next.js — Project Structure: route groups for layout sharing"
 
 [decision]
-question = "What position does the project take on: App Router pages live under the gated route group, not at the top level?"
+question = "What position does the project take on: App Router pages are organized into route groups by access tier, but auth is enforced in middleware/data layer, not by folder placement?"
 default = "app-router-pages-live-under-the-gated-route-grou"
-why = "Route groups in App Router are how layout composition is opt-in. Placing pages outside the gated group silently skips the auth checks and layout chrome the rest of the app assumes. The error is invisible until a user reaches the page. Allowing pages to live anywhere under app/ that is convenient trades the structural guarantee for short-term ergonomics; the page that ends up outside (gated) bypasses auth and layout wiring entirely, the build still succeeds, and the bug surfaces in production on whichever page slipped through rather than at compile time."
+why = "Route groups in App Router are how layout composition is opt-in: pages nested under a group like (authenticated) share that group's layout.tsx (auth-aware chrome, headers, sidebars), while pages under a sibling group like (public) do not. Organizing routes this way keeps access-tier intent visible in the file tree and avoids repeating the same layout wiring on every page. But route-group placement is an organizational convenience, not a security boundary: a layout can be skipped for a request in edge cases (parallel/intercepted routes, direct navigation to a nested segment, a future refactor that moves a page across groups), and file placement alone gives no compile-time or runtime guarantee that a request was actually authorized. Treating 'this page lives under the authenticated group' as equivalent to 'this page is protected' is the trap: the moment a page is misfiled, or a layout is bypassed, the page renders unauthenticated with no error, because the build only checks that the file exists somewhere under app/, not which layout wrapped it or whether that layout's auth check actually ran. The structural guarantee has to come from enforcement that runs on every matching request regardless of file placement: middleware.ts matching the relevant path patterns, and/or an explicit session/auth check in the page's data-fetching layer (the server component or loader itself). Route groups organize; middleware and data-layer checks enforce."
 
 [[option]]
 id = "app-router-pages-live-under-the-gated-route-grou"
-label = "App Router pages live under the gated route group, not at the top level"
-directive = "Pages live under app/(gated)/(main)/... (for the main chrome) or app/(gated)/admin/... (for admin chrome). Pages placed directly under app/(main)/, app/admin/, or outside (gated)/ render with only the root layout and miss their intended auth wrapper, header, and sidebar."
-why = "Route groups in App Router are how layout composition is opt-in."
+label = "App Router pages are grouped by access tier, with auth enforced in middleware/data layer"
+directive = "Pages are organized into route groups by access tier, for example app/(authenticated)/dashboard/page.tsx for pages that share authenticated chrome, versus app/(public)/... for pages that don't. This is illustrative, not a mandated path: the specific group names and nesting are a per-project convention. Whatever the grouping, actual authorization is enforced independently of file placement: via middleware.ts matching the relevant route patterns, and/or an explicit session/auth check inside the page's server component or data-loading function. A page placed in the wrong group is a layout/UX bug (missing chrome), not a security hole, because the auth check does not depend on which group the file sits in."
+why = "Route groups in App Router are how layout composition is opt-in, but only middleware and explicit data-layer checks that run on every matching request give an actual authorization guarantee; folder placement alone is bypassable and gives no compile-time or runtime signal that a page is protected."
 
 [[option]]
 id = "pages-live-anywhere-under-app-that-is-convenient"
-label = "pages live anywhere under app/ that is convenient at …"
-directive = "pages live anywhere under app/ that is convenient at the time, with no required (gated) route group housing all authenticated pages"
-why = "Allowing pages to live anywhere under app/ that is convenient at the time means a page placed outside the (gated) route group bypasses auth checks and layout wiring entirely, the build still succeeds, and the error is invisible until a user reaches the page in production. Convenience at the time of creation trades the structural guarantee that every page has the correct auth wrapper for a bug that surfaces in production rather than at the file-placement step."
+label = "pages live anywhere under app/ with no access-tier grouping, and auth is asserted only by folder placement"
+directive = "pages live anywhere under app/ that is convenient at the time, with no route-group convention signaling access tier, and with folder placement (rather than middleware or an explicit data-layer check) treated as the mechanism that keeps a page from rendering unauthenticated"
+why = "Two failure modes compound here. First, with no access-tier grouping convention, a page's intended auth/chrome requirements aren't visible from the file tree, so a new page is easy to place inconsistently. Second, and more importantly, treating file placement itself as the auth enforcement mechanism is unsound regardless of grouping: a layout can be bypassed for a given request, and even a well-organized route group gives no compile-time or runtime guarantee that its layout's auth check ran. Without middleware or an explicit session check in the data-fetching layer, a misplaced or bypassed page renders unauthenticated with no error, and the bug surfaces in production on whichever page slipped through rather than at compile time or in code review."

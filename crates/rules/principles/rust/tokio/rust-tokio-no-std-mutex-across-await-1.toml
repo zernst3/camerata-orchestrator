@@ -10,19 +10,19 @@ verification = "grounded"
 [decision]
 question = "What position does the project take on: Holding locks across await points?"
 default = "use-tokio-mutex-for-async-code"
-why = "std::sync::Mutex is designed for synchronous code. When a task holds a std::sync::Mutex lock and then awaits (waiting for I/O or another task), the lock is held while the Tokio runtime deschedules the task. If another task tries to acquire the same lock, it will block, starving the runtime and potentially causing a deadlock. The lock may be held indefinitely if the task is awaiting a resource. tokio::sync::Mutex is async-aware; it yields the lock when awaited, allowing other tasks to run. When the awaited operation completes and the task is rescheduled, the lock is re-acquired. If std::sync::Mutex is necessary (e.g., for a critical section that must not yield), the lock should be released before any await point. The rule is: if a lock is held and an await follows, use tokio::sync::Mutex instead."
+why = "std::sync::Mutex is designed for synchronous code. Its lock() call is a blocking OS-level primitive: if the lock is contended, the calling thread blocks until it is free. On a Tokio worker thread, that block stalls the entire thread, which means every other task multiplexed onto that thread stops making progress too, not just the caller. Holding a std::sync::Mutex guard across an await point compounds this: the guard is not released by the await (a std guard is a plain RAII value with no awareness of async at all), so if the awaited operation takes a long time, or if the task that would release the lock never gets scheduled because the thread is blocked, the result is starvation or deadlock. tokio::sync::Mutex does not change this fundamental fact about holding guards: once `lock().await` returns a guard, that guard is held across any subsequent await points in its scope exactly like a std guard would be, until it is dropped. What tokio::sync::Mutex changes is the *acquisition*: `lock().await` integrates with the async scheduler, so a task waiting to acquire a contended tokio Mutex yields the thread to other tasks instead of blocking it outright, and is woken up when the lock becomes available. If std::sync::Mutex is necessary (e.g., for a short, synchronous critical section that must not yield), the lock should be released before any await point. The rule is: if a lock must be held across an await, use tokio::sync::Mutex so that waiting to *acquire* it does not block the executor thread; the guard itself, from either mutex type, is still held for as long as it is in scope."
 
 [[option]]
 id = "use-tokio-mutex-for-async-code"
 label = "Use tokio::sync::Mutex in async code"
 directive = "Any lock held across an await point uses tokio::sync::Mutex (or tokio::sync::RwLock), not std::sync::Mutex. std::sync::Mutex is only used in synchronous code that does not await. If a critical section must use std::sync::Mutex, all await points are moved outside the locked region."
-why = "tokio::sync::Mutex prevents lock starvation and deadlocks in async code."
+why = "tokio::sync::Mutex's lock().await yields the executor thread while waiting to acquire a contended lock instead of blocking it, which prevents lock starvation and deadlocks in async code. The guard it returns is still held across await points exactly like a std guard; only the wait-to-acquire step is async-aware."
 
 [[option]]
 id = "use-std-mutex-in-async-code"
 label = "Use std::sync::Mutex in async code"
 directive = "std::sync::Mutex is used even if locks may be held across await points, relying on task scheduling and careful programming to avoid deadlocks."
-why = "When a task holds a std::sync::Mutex lock across an await, it keeps the lock while the runtime deschedules the task: any other task trying to acquire the same lock will block the worker thread, potentially producing a deadlock if the awaited work can only complete by running on that blocked thread."
+why = "When a task holds a std::sync::Mutex lock across an await, it keeps the lock while the runtime deschedules the task: any other task trying to acquire the same lock calls a blocking lock() that stalls the worker thread, potentially producing a deadlock if the awaited work can only complete by running on that blocked thread."
 
 [[sources]]
 url = "https://docs.rs/tokio/latest/tokio/sync/struct.Mutex.html"

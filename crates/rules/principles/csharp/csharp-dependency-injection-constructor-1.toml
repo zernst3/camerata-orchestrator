@@ -1,0 +1,36 @@
+id = "CSHARP-DEPENDENCY-INJECTION-CONSTRUCTOR-1"
+title = "Dependencies are injected via constructor parameters (including C# 12 primary constructors), not [Inject]/[Service] property injection or a service locator"
+tag = "stack"
+domain = "csharp"
+layer = "language"
+enforcement = "prose"
+default = true
+
+verification = "grounded"
+[decision]
+question = "How are dependencies injected into classes?"
+default = "constructor-injection"
+why = "Constructor injection makes dependencies explicit in the type's public contract (visible in the constructor signature), enforces immutability (fields are private readonly and cannot be reassigned), and makes testing trivial (pass mock objects to the constructor without reflection). Property injection via [Inject] or [Service] attributes hides dependencies (they are invisible until runtime reflection), allows reassignment, and can lead to NullReferenceException if the container fails to inject. Constructor injection also makes circular dependencies obvious at compile time (circular constructor parameters cause compiler errors) rather than hidden at runtime. ASP.NET Core's IServiceProvider uses constructor injection by default and automatically wires all registered dependencies to the single public constructor. C# 12's primary constructor syntax (public class OrderService(IOrderRepository repository, IEmailSender emailSender) : IOrderService { ... }) is an accepted, more concise way to express the same constructor-injection pattern; the captured parameters behave like private readonly fields as long as they are referenced somewhere in the class body. The one documented exception is Blazor: a razor component's constructor runs before the framework has a chance to supply parameters and cascading values the way a normal DI-resolved class does, so Blazor's own component model uses [Inject] property injection ([Inject] public IMyService MyService { get; set; } or the @inject directive) as its idiomatic mechanism, not a deprecated one — that carve-out is scoped to Component/@code blocks, not to ordinary services, handlers, or any other class the DI container constructs directly."
+
+[[option]]
+id = "constructor-injection"
+label = "inject dependencies via constructor parameters (traditional or C# 12 primary constructor), marked private readonly"
+directive = "All dependencies are declared as constructor parameters — either a traditional constructor assigning to private readonly instance fields, or a C# 12 primary constructor whose captured parameters are used directly in the class body — rather than as settable properties or fields. The constructor (or primary constructor parameter list) is the complete list of what the class requires. For ASP.NET Core, the container automatically wires all registered service dependencies to the constructor. No [Inject] or [Service] attributes on properties or fields, EXCEPT inside a Blazor @code block / component class, where [Inject] property injection is the framework's own idiomatic mechanism and is not a violation of this rule."
+why = "Constructor injection (traditional or primary-constructor form) is explicit, immutable, testable, and makes circular dependencies obvious; Blazor components are the one place the framework itself requires property injection instead."
+
+[[option]]
+id = "property-injection"
+label = "inject dependencies via [Inject] attributes on properties (outside Blazor components)"
+directive = "Dependencies of an ordinary service, handler, controller, or other DI-constructed class are declared as public properties annotated with [Inject] or [Service] rather than passed via the constructor. The container uses reflection to set values at runtime after instantiation."
+why = "Outside the Blazor component model, this hides dependencies (invisible until runtime), allows reassignment, makes testing awkward (must mock the container), and can lead to NullReferenceException if the container fails to inject."
+
+[[option]]
+id = "service-locator"
+label = "use a service locator or manual resolution from IServiceProvider"
+directive = "Dependencies are resolved on-demand from IServiceProvider.GetRequiredService<T>() within the method or constructor."
+why = "Obscures dependencies, makes testing harder (must mock IServiceProvider), and is generally considered an anti-pattern in dependency-injection frameworks."
+
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/core/extensions/dependency-injection/guidelines"
+title = "Dependency injection guidelines — .NET | Microsoft Learn"

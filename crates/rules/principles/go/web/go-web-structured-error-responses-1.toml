@@ -28,3 +28,9 @@ id = "ad-hoc-error-format"
 label = "Each handler defines its own error response format"
 directive = "Handlers return errors in their own format: some as {error: string}, others as {message: string}, others as raw strings, inconsistently."
 why = "Trades client-side consistency and error handling for freedom to tailor each response; creates parsing difficulties and logging inconsistency."
+
+[[option]]
+id = "go-rfc9457-problem-details"
+label = "RFC 9457 Problem Details for HTTP APIs"
+directive = "The API's error envelope follows the IETF RFC 9457 'application/problem+json' shape instead of (or as a superset of) a bespoke {code, message, statusCode} schema: type (a URI reference identifying the problem type, or 'about:blank'), title (a short summary constant for a given problem type), status (the HTTP status code, duplicated in the body), detail (an occurrence-specific human-readable explanation), and instance (a URI reference identifying this occurrence). A project-specific machine-readable code can ride as an extension member alongside the required RFC 9457 members. Handlers set Content-Type: application/problem+json on error responses."
+why = "RFC 9457 is the IETF standard for structured HTTP error bodies. Adopting it (instead of a one-off {code, message, statusCode} shape) buys interoperability for free with any HTTP client, gateway, or API tool that already understands application/problem+json, and the type URI gives a stable, documentable identifier per error category. Go's standard library and most Go web frameworks have no opinion on error body shape, so there is no idiomatic-Go reason to prefer a bespoke schema over the IETF standard when both require the same amount of code to implement."

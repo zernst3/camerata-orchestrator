@@ -15,12 +15,12 @@ title = "Decision: An AST-checkable architectural enforcement tier — ARCH-HAND
 [decision]
 question = "What position does the project take on: Strict layering — services orchestrate, repositories own data access?"
 default = "strict-layering-services-orchestrate-repositorie"
-why = "Prevents business logic hiding inside the query layer; keeps each layer testable and swappable. Mixing layers and allowing DB access anywhere leaks business logic into the query layer, where it becomes harder to test in isolation and harder to surface during review, because reviewers naturally focus on the layer the change appears to belong to."
+why = "Prevents business logic hiding inside the query layer; keeps each layer testable and swappable. Mixing layers and allowing DB access anywhere leaks business logic into the query layer, where it becomes harder to test in isolation and harder to surface during review, because reviewers naturally focus on the layer the change appears to belong to. This is the umbrella architectural principle; `arch-handler-no-db-1` (call-site AST check on handler bodies) and `arch-no-cross-boundary-imports-1` (import-graph AST check) are two narrower, mechanically-precise checks that each enforce one facet of it. The three-way split is deliberate, not redundant — see `docs/decisions/2026-06-19_ast_architectural_rule_tier.md`."
 
 [[option]]
 id = "strict-layering-services-orchestrate-repositorie"
 label = "Strict layering — services orchestrate, repositories own data access"
-directive = "Controllers handle HTTP only; services hold framework-agnostic business logic; repositories own all DB query calls. Enforce the boundary with lint (block direct DB access outside the data layer). Exception: transaction flow control belongs in services."
+directive = "Controllers handle HTTP only; services hold framework-agnostic business logic; repositories own all DB query calls. Enforce the boundary with lint (block direct DB access outside the data layer), with the AST checks in `arch-handler-no-db-1` and `arch-no-cross-boundary-imports-1` as the concrete enforcement mechanisms. Exception: transaction flow control belongs in services."
 why = "Prevents business logic hiding inside the query layer; keeps each layer testable and swappable."
 
 [[option]]
@@ -28,3 +28,9 @@ id = "controllers-services-and-repositories-are-not-se"
 label = "controllers, services, and repositories are not separated by lint …"
 directive = "controllers, services, and repositories are not separated by lint enforcement, and DB access can happen from any layer regardless of role"
 why = "Mixing layers leaks business logic into the query layer, where it becomes harder to test in isolation and harder to surface during review, because reviewers naturally focus on the layer the change appears to belong to."
+
+[[option]]
+id = "vertical-slice-architecture-organize-by-feature"
+label = "vertical-slice architecture — organize by feature/use-case, not by horizontal layer"
+directive = "Organize code by feature or use-case rather than by horizontal layer: each slice (e.g. 'create-order', 'invite-member') owns its own handler, logic, and data-access code end to end, instead of routing every feature through a project-wide controllers/services/repositories split. Cross-cutting infrastructure (DB client setup, auth middleware) may still be shared, but business logic and query calls for a given feature live together in that feature's slice."
+why = "Keeps everything needed to understand or change one feature in a small number of co-located files, so there is less cross-file navigation per change and a whole feature can be deleted cleanly by deleting its slice. The trade-off is real: infrastructure code (query builders, validation helpers, mapping logic) tends to be duplicated across slices instead of centralized in one repository layer, and the horizontal-layering benefit of swapping an entire layer's implementation in one place (e.g. replacing the persistence library for every aggregate at once) is lost because persistence logic is scattered across slices rather than concentrated in a repository tier."
