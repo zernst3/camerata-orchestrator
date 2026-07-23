@@ -15,10 +15,48 @@ additions + a deliberately TINY serializer+template. Paths under repo root.
 1. **`ScanProvenance` stamp** on `ScanReport` (server) — the biggest credibility gap. **DONE.**
 2. **`FalsePositive` disposition** (the explicit ask) — 4th triage state. **DONE.**
 3. **Structured `confidence` + `effort`** on `Finding` (via calibration). **DONE.**
-4. **`report_export.rs`** serializer (`AuditReportJson` + pure `build_report_json`).
-5. **Typst template + `compile_pdf` + route + UI button.**
-6. (optional) dep-audit fixed-in version + CWE refs on SEC-family corpus TOMLs.
+4. **`report_export.rs`** serializer (`AuditReportJson` + pure `build_report_json`). **DONE.**
+5. **Typst template + `compile_pdf` + route + UI button.** **DONE.**
+6. (optional) dep-audit fixed-in version + CWE refs on SEC-family corpus TOMLs. Deferred —
+   not trivial (touches `dep_audit.rs`'s OSV parser + corpus TOMLs), out of Pass B's scope-guard.
 Steps 1-3 = pass A; 4-5 = pass B.
+
+### Pass B landed (2026-07-23)
+
+Steps 4-5 + the §4.4 citation join are built, tested, and committed:
+
+- `crates/server/src/report_export.rs` (~700 lines incl. tests): `AuditReportJson` + pure
+  `build_report_json` (partitions on `DispositionWire`/`Finding.status`, joins `rule_id` →
+  `camerata_rules::RuleSet` for citations, derives what's-healthy from `audited_rule_ids`
+  minus rule ids with any non-FP finding) + async `compile_pdf` (temp dir, `include_str!`-
+  embedded template, 30s-timeout `typst compile`, fail-soft "Install Typst: brew install
+  typst" when the binary isn't on PATH). `finding_key` is a byte-for-byte mirror of
+  `camerata_ui_core::triage::finding_key`'s wire format (server doesn't depend on
+  ui-core), pinned by a round-trip test.
+- `crates/server/templates/audit_report.typ`: one Typst 0.15 file, all 9 §4 sections,
+  Typst-native tables/grids + default fonts only. Validated by directly compiling it
+  (`typst compile`) against hand-built full and empty-edge-case `data.json` fixtures before
+  wiring it into `compile_pdf` via `include_str!`.
+- Route: `POST /api/projects/:id/audit-report` (`lib.rs`, next to `export_deep_report`) —
+  404 on no project / no `last_scan`; loads the corpus best-effort (same fallback as
+  `split_scannable_rules`); responds `application/pdf` with
+  `Content-Disposition: attachment; filename="camerata-audit-{repo}-{shortsha}.pdf"`.
+- UI: `AuditReportExportPanel` (`crates/ui/src/cockpit/scan.rs`, right after the triage
+  Process step) — client-name/project-title/prepared-by/exec-summary-override fields (all
+  optional) + one button. POSTs `dispositions.read()` verbatim (`Disposition`'s derived
+  `Serialize` already matches `DispositionWire`'s wire shape) and saves the returned bytes
+  via a new `save_bytes` (byte-based sibling of `save_csv`).
+- DEP-AUDIT-1 findings are carved out of the scorecard/matrix/curated-findings sections
+  entirely and shown ONLY in §7 (dependency snapshot) — mixing "fix this SQL-concat bug"
+  and "bump this package version" into one table would blur two different remediation
+  types; they also aren't part of `audited_rule_ids` (dep-audit is a separate always-on
+  pass, not an architect-selected content rule).
+- Tests: 20 new `report_export` unit tests (FP exclusion/counting, Ignored→accepted,
+  TechDebt Now/Later→do-now/plan, suppressed-baseline reconciliation, citation join
+  incl. a real corpus rule id, what's-healthy derivation, dependency carve-out, exec-
+  summary override) + 1 real end-to-end `compile_pdf` test gated on `typst` being on PATH
+  (skips with a stderr note, never hard-fails, when absent). `cargo check --workspace` and
+  `cargo test -p camerata-server -p camerata-ui` are green (1160 + 580 passing).
 
 ### Pass A landed (2026-07-23)
 

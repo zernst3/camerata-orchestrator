@@ -55,6 +55,10 @@ pub mod pr_resolve_run;
 pub mod project;
 pub mod provider;
 pub mod reconcile;
+/// PDF audit-report export (brownfield audit hardening Pass B): `AuditReportJson` +
+/// `build_report_json` (pure serializer) + `compile_pdf` (Typst compile). See the
+/// module doc comment and `docs/design/2026-07-23_brownfield-audit-report.md`.
+pub mod report_export;
 pub mod review_agent;
 pub mod routine;
 pub mod run;
@@ -1220,6 +1224,8 @@ pub fn router(state: AppState) -> Router {
         )
         // ── Deep-report export ────────────────────────────────────────────────
         .route("/api/projects/:id/deep-report", get(export_deep_report))
+        // ── Audit-report (PDF) export ─────────────────────────────────────────
+        .route("/api/projects/:id/audit-report", post(export_audit_report))
         // ── App-wide credential manager ───────────────────────────────────────
         // POST /api/credentials/:name  — store a credential (body: { "value": "…" })
         // GET  /api/credentials        — list all known credentials with masked values
@@ -13763,6 +13769,111 @@ fn render_deep_report_markdown(deep: &crate::ai_audit::DeepReport, soc2_enabled:
         }
     }
     md
+}
+
+// ── Audit-report (PDF) export ────────────────────────────────────────────────
+
+/// Request body for `POST /api/projects/:id/audit-report`. Dispositions are POSTed by the
+/// client because triage state is client-local until Process (see `crate::report_export`'s
+/// module doc) — there is no server-side disposition store.
+#[derive(serde::Deserialize)]
+struct AuditReportReq {
+    #[serde(default)]
+    dispositions: std::collections::HashMap<String, crate::report_export::DispositionWire>,
+    #[serde(default)]
+    options: crate::report_export::ReportOptions,
+}
+
+/// `POST /api/projects/:id/audit-report` — export the project's last scan as a
+/// client-facing/board-forwardable PDF. Body: `{ dispositions, options }` (see
+/// [`AuditReportReq`]). Re-derives the report from `last_scan` + the POSTed dispositions on
+/// every call; nothing is persisted server-side (re-export = re-run this handler).
+///
+/// 404s when the project doesn't exist or has no completed scan yet. 500s (with a plain-
+/// text-ish JSON message) when `typst` isn't installed or the compile otherwise fails —
+/// see `report_export::compile_pdf`'s fail-soft contract.
+async fn export_audit_report(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AuditReportReq>,
+) -> Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    if state.projects.get(&id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+        )
+            .into_response();
+    }
+
+    let Some(report) = state.get_last_scan(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": "No scan results available for this project. Run an audit first."
+            })),
+        )
+            .into_response();
+    };
+
+    // Best-effort corpus load for the citation join (§4.4) — mirrors `split_scannable_rules`'
+    // own fallback: a missing/unreadable corpus degrades every citation to "AI-advisory,
+    // model-inferred." rather than failing the export.
+    let corpus_path = camerata_rules::corpus_path();
+    let corpus = if corpus_path.exists() {
+        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+    } else {
+        None
+    };
+
+    let json = crate::report_export::build_report_json(
+        &report,
+        &req.dispositions,
+        corpus.as_ref(),
+        &req.options,
+    );
+
+    let pdf_bytes = match crate::report_export::compile_pdf(&json).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let repo_slug = report
+        .repos
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "repo".to_string())
+        .replace('/', "-");
+    let short_sha = report
+        .provenance
+        .audited_refs
+        .first()
+        .and_then(|r| r.sha.as_deref())
+        .map(|s| s.chars().take(7).collect::<String>())
+        .unwrap_or_else(|| "nosha".to_string());
+    let filename = format!("camerata-audit-{repo_slug}-{short_sha}.pdf");
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/pdf".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        pdf_bytes,
+    )
+        .into_response()
 }
 
 // ── error type ──────────────────────────────────────────────────────────────

@@ -126,6 +126,20 @@ pub(super) async fn save_csv(default_name: &str, content: String) -> bool {
     }
 }
 
+/// Byte-based sibling of `save_csv` — same native-save-dialog idiom, but for raw bytes
+/// (the audit-report PDF export; `save_csv`'s `String` param can't carry PDF bytes, which
+/// aren't valid UTF-8 in general).
+pub(super) async fn save_bytes(default_name: &str, content: Vec<u8>) -> bool {
+    match rfd::AsyncFileDialog::new()
+        .set_file_name(default_name)
+        .save_file()
+        .await
+    {
+        Some(file) => file.write(&content).await.is_ok(),
+        None => false,
+    }
+}
+
 /// Build CSV for the audit findings table.
 pub(super) fn findings_csv(findings: &[FindingView]) -> String {
     // Flat + lossless: one row per finding, every column. NOT grouped/merged — a machine
@@ -3353,6 +3367,21 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                     }
                 }
 
+                // ── PDF audit-report export (brownfield audit hardening, Pass B) ──────
+                // Board-forwardable export of the CURRENT triage state (including any
+                // still-Unresolved findings — a draft mid-engagement report is legitimate;
+                // this is never gated on n_unresolved == 0). Project id + the lifted
+                // dispositions map come from this component's own state.
+                {
+                    let pid_report = project_id.clone();
+                    rsx! {
+                        AuditReportExportPanel {
+                            project_id: pid_report,
+                            dispositions,
+                        }
+                    }
+                }
+
                 // ── Deep compliance & security tier output (#55) ──────────────────────
                 // Shown only when the audit ran with deep:true and the server returned the
                 // three-lens report. Everything here is ADVISORY — never a SOC-2 report or
@@ -3590,6 +3619,150 @@ pub(super) fn DeepReportExportPanel(project_id: String, soc2_enabled: bool) -> E
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// POST the audit-report export request (dispositions + options) and, on success, return
+/// `(pdf_bytes, suggested_filename)` — the filename is read off the server's
+/// `Content-Disposition` header (`camerata-audit-{repo}-{shortsha}.pdf`) so the save dialog
+/// defaults to something meaningful; falls back to a generic name if the header is missing
+/// or unparsable. On a non-2xx response, returns the server's `{ "message": "…" }` text
+/// (or a generic fallback) as `Err` for the caller to toast.
+pub(super) async fn export_audit_report_pdf(
+    project_id: &str,
+    dispositions: &std::collections::HashMap<String, Disposition>,
+    client_name: &str,
+    project_title: &str,
+    prepared_by: &str,
+    executive_summary_override: Option<String>,
+) -> Result<(Vec<u8>, String), String> {
+    let url = format!(
+        "{}/api/projects/{}/audit-report",
+        crate::bff_base(),
+        project_id,
+    );
+    let resp = reqwest::Client::new()
+        .post(url)
+        .json(&serde_json::json!({
+            "dispositions": dispositions,
+            "options": {
+                "client_name": client_name,
+                "project_title": project_title,
+                "prepared_by": prepared_by,
+                "executive_summary_override": executive_summary_override,
+            },
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        let msg = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+            .unwrap_or_else(|| "Audit report export failed.".to_string());
+        return Err(msg);
+    }
+
+    let filename = resp
+        .headers()
+        .get(reqwest::header::CONTENT_DISPOSITION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split("filename=\"").nth(1))
+        .map(|s| s.trim_end_matches('"').to_string())
+        .unwrap_or_else(|| "camerata-audit-report.pdf".to_string());
+
+    let bytes = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
+    Ok((bytes, filename))
+}
+
+/// The PDF audit-report export panel: client-editable report framing (all optional) + a
+/// single export button. POSTs the CURRENT triage state (`dispositions.read()`, whatever
+/// it is right now — including any still-Unresolved findings; a draft mid-engagement
+/// report is legitimate, so this is never gated on triage completeness) and saves the
+/// returned PDF via the same native-save-dialog idiom `save_csv`/the deep-report panel use.
+///
+/// Placed in the Onboard view right after the triage Process step, above the deep-tier
+/// panel — see `ScanResults`.
+#[component]
+pub(super) fn AuditReportExportPanel(
+    project_id: String,
+    dispositions: Signal<std::collections::HashMap<String, Disposition>>,
+) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut loading = use_signal(|| false);
+    let mut client_name = use_signal(String::new);
+    let mut project_title = use_signal(String::new);
+    let mut prepared_by = use_signal(String::new);
+    let mut summary_override = use_signal(String::new);
+
+    rsx! {
+        div { class: "audit-export-panel",
+            p { class: "section-label", "Export audit report (PDF)" }
+            p { class: "section-hint",
+                "Board-forwardable PDF: cover, executive summary, category scorecard, \
+                 severity\u{00d7}effort matrix, curated findings with citations, what's \
+                 healthy, dependency/CVE snapshot, and methodology. Uses your CURRENT \
+                 triage — a draft mid-engagement report (some findings still Unresolved) \
+                 is fine."
+            }
+            div { class: "audit-export-fields",
+                input {
+                    class: "addressee-input",
+                    placeholder: "Client name (optional)",
+                    value: "{client_name}",
+                    oninput: move |e| client_name.set(e.value()),
+                }
+                input {
+                    class: "addressee-input",
+                    placeholder: "Project title (optional)",
+                    value: "{project_title}",
+                    oninput: move |e| project_title.set(e.value()),
+                }
+                input {
+                    class: "addressee-input",
+                    placeholder: "Prepared by (optional)",
+                    value: "{prepared_by}",
+                    oninput: move |e| prepared_by.set(e.value()),
+                }
+                textarea {
+                    class: "addressee-input",
+                    rows: "2",
+                    placeholder: "Executive summary override (optional — leave blank for the auto-generated summary)",
+                    value: "{summary_override}",
+                    oninput: move |e| summary_override.set(e.value()),
+                }
+            }
+            button {
+                class: "btn-run",
+                disabled: loading(),
+                onclick: move |_| {
+                    let pid = project_id.clone();
+                    let disp_snapshot = dispositions.read().clone();
+                    let cn = client_name();
+                    let pt = project_title();
+                    let pb = prepared_by();
+                    let so = summary_override();
+                    loading.set(true);
+                    spawn(async move {
+                        let _guard = crate::loading::LoadingGuard::new();
+                        let override_opt = if so.trim().is_empty() { None } else { Some(so) };
+                        match export_audit_report_pdf(&pid, &disp_snapshot, &cn, &pt, &pb, override_opt).await {
+                            Ok((bytes, filename)) => {
+                                if save_bytes(&filename, bytes).await {
+                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Audit report saved.");
+                                }
+                            }
+                            Err(msg) => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, msg),
+                        }
+                        loading.set(false);
+                    });
+                },
+                if loading() { "Exporting\u{2026}" } else { "Export audit report (PDF)" }
             }
         }
     }
