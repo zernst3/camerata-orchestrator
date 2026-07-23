@@ -5,6 +5,15 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 default = false
+verification = "grounded"
+
+[[sources]]
+url = "https://github.com/microsoft/api-guidelines/blob/master/Guidelines.md"
+title = "Microsoft REST API Guidelines — Versioning"
+
+[[sources]]
+url = "https://docs.stripe.com/api/versioning"
+title = "Stripe — API Versioning"
 
 [decision]
 question = "What versioning scheme does the project's API adopt: a version in the URL prefix, a version selected by request header, in-place evolution with no version segment, or content negotiation across representations?"
@@ -19,8 +28,20 @@ why = "Makes the version the most discoverable and toolable part of every reques
 [[option]]
 id = "the-api-version-is-selected-by-a-request-header"
 label = "the API version is selected by a request header"
-directive = "The API version is selected by a request header (such as Accept: application/vnd.api.v2+json) rather than appearing in the URL path; a resource keeps one canonical URL across versions and the server resolves the requested version from the header."
-why = "Keeps URLs clean and gives each resource a single stable address across versions, which suits content-type-driven APIs and clients that already negotiate behaviour through headers. The trade-off is reduced visibility: the active version is not apparent from the URL in a log or a trace, so a client that forgets or mis-sets the header lands on a default version — worth managing with a clear default and good observability when header negotiation fits the consumers."
+directive = "The API version is selected by a single request header whose value is a plain version identifier (such as a custom Api-Version: 2 header, or a version parameter folded into a vendor media type like Accept: application/vnd.api.v2+json used purely to carry the version number) rather than appearing in the URL path; a resource keeps one canonical URL across versions and the server resolves the requested version from the header."
+why = "Keeps URLs clean and gives each resource a single stable address across versions, which suits content-type-driven APIs and clients that already negotiate behaviour through headers. The trade-off is reduced visibility: the active version is not apparent from the URL in a log or a trace, so a client that forgets or mis-sets the header lands on a default version — worth managing with a clear default and good observability when header negotiation fits the consumers. This is narrower than full content negotiation (below): the header carries a version number and nothing else selects between representations — the resource's shape and format are otherwise fixed. It differs from date-pinned versioning (below) in that the client names a version number directly rather than a calendar date, and every version boundary requires the server to define and ship an explicit new version value."
+
+[[option]]
+id = "the-api-version-is-selected-by-a-query-parameter"
+label = "the API version is selected by a query parameter"
+directive = "The API version is selected by a query parameter on the request URL, such as ?version=2 or ?api-version=2024-01, rather than a URL path segment or a header."
+why = "Cheap to implement and debug: the version is visible in a browser address bar, a server access log, and a shared link without needing to inspect headers or restructure routes, and it can be added to an existing unversioned API without moving endpoints. The trade-offs: query parameters are easy for clients to omit or drop when following a link or building a request by hand (there's no path segment forcing the issue), they get mixed in with other query parameters used for filtering/pagination/sorting, and they don't compose as cleanly with HTTP caching keyed on the path. It suits internal or lower-traffic APIs more than a public API with many independent client teams."
+
+[[option]]
+id = "clients-pin-to-a-release-date-via-a-version-head"
+label = "clients pin to a release date via a version header (date-pinned versioning)"
+directive = "Clients pin to a specific release date via a version header (Stripe's model: a Stripe-Version: 2024-06-20 header), and the API applies whatever behavior was current as of that date for that account/client. The server maintains a changelog of dated behavior changes and can apply per-request date-based shims to serve older-dated clients the older behavior on the same endpoints, without a version number ever appearing in the URL or route tree."
+why = "Avoids the discrete-major-version problem entirely: instead of clients jumping between a handful of published versions (v1, v2, v3), each client is pinned to the exact date it integrated, and small breaking changes ship continuously with no need to bundle them into a big-bang major version or maintain parallel route trees. New accounts default to the latest date, so the API's default behavior keeps moving forward without action. The cost is real: the server must carry a growing table of per-date behavioral differences and apply the right shim per request indefinitely (or until a deprecation/migration policy retires old dates), which is meaningfully more runtime bookkeeping than a small, fixed set of URL-versioned route trees. It fits an API with a large number of independent client integrations and a team disciplined enough to maintain the changelog-of-shims machinery; it's overkill for a small number of coordinated clients."
 
 [[option]]
 id = "the-api-has-no-version-segment-at-all-and-evolve"
@@ -32,4 +53,4 @@ why = "The lightest scheme, and the right fit when the server and its only clien
 id = "the-api-exposes-multiple-representations-of-each"
 label = "the API exposes multiple representations of each resource and clients negotiate via content negotiation"
 directive = "The API exposes multiple representations of each resource and clients negotiate version (and format) through a content-negotiation handshake over the standard Accept/Content-Type mechanism."
-why = "The most expressive scheme: it lets clients select among genuinely different representations and formats per request through standard HTTP content negotiation, which earns its weight where that flexibility is a real requirement (varied client formats, hypermedia APIs). The cost is the machinery, which every client and the server must implement correctly, so it pays off when representation choice is a first-class need rather than a stand-in for plain version isolation."
+why = "The most expressive scheme: it lets clients select among genuinely different representations and formats per request through standard HTTP content negotiation, which earns its weight where that flexibility is a real requirement (varied client formats, hypermedia APIs). The cost is the machinery, which every client and the server must implement correctly, so it pays off when representation choice is a first-class need rather than a stand-in for plain version isolation. This is broader than header-based versioning (above): header-based versioning uses one header purely to pick a version number of an otherwise-fixed representation, whereas content negotiation uses the standard Accept/Content-Type mechanism to select among genuinely different representations or media types, of which 'which API version' may be only one axis alongside format (JSON vs. XML vs. HAL+JSON) and schema variant."

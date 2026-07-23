@@ -26,6 +26,6 @@ why = "The non-null assertion erases the check strictNullChecks exists to enforc
 
 [[option]]
 id = "the-non-null-assertion-operator-is-permitted-to"
-label = "the non-null assertion operator (!) is permitted to …"
+label = "Allow the non-null assertion operator (!)"
 directive = "the non-null assertion operator (!) is permitted to suppress possibly-null and possibly-undefined errors at the author's discretion, rather than requiring the value to be narrowed so the compiler verifies the non-null claim"
 why = "Using the non-null assertion operator at the author's discretion suppresses possibly-null errors without verifying the claim: the ! is a runtime no-op, so if the assumption is wrong and the value is null, the program continues to the dereference and throws a TypeError detached from the bad assumption. Sprinkling ! to silence 'possibly undefined' errors works until the one input that actually is null arrives, at which point the assertion that suppressed the warning is exactly what lets the null through."

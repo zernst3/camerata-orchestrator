@@ -5,6 +5,11 @@ domain = "rust"
 layer = "language"
 enforcement = "structured"
 default = false
+verification = "grounded"
+
+[[sources]]
+url = "https://martinfowler.com/eaaCatalog/unitOfWork.html"
+title = "Martin Fowler — Patterns of Enterprise Application Architecture: Unit of Work (grounds the general pattern of tracking and coordinating a transaction's writes; the specific Option<&dyn UnitOfWork> + Any-downcast concretion is this project's own Rust encoding of it, not something PoEAA itself specifies)"
 
 [decision]
 question = "How does a repository method participate in a multi-write transaction: an explicit domain-defined UnitOfWork parameter, a generic Tx type parameter, an ambient closure-based context, or the concrete ORM transaction type in the signature?"
@@ -20,18 +25,18 @@ why = "Makes transactional posture visible at every call site — save(item, Non
 
 [[option]]
 id = "repository-write-methods-take-a-generic-tx-param"
-label = "Repository write methods take a generic Tx parameter, and …"
+label = "Generic Tx parameter threaded through consumers"
 directive = "Repository write methods take a generic Tx parameter, and every consumer of the repository must carry that generic through its type graph"
 why = "Fully compile-time-correct with no runtime downcast: the transaction type stays abstract and the compiler proves every participant uses the same one. The right fit when a project wants maximal static guarantees and is willing to pay for them in signatures; its trade-off is that every consumer must carry the generic through its type graph, so the ceremony compounds across each layer of service composition."
 
 [[option]]
 id = "transactional-context-is-provided-as-a-closure-b"
-label = "Transactional context is provided as a closure-based ambient via …"
+label = "Ambient transaction via task-local storage"
 directive = "Transactional context is provided as a closure-based ambient via task-local storage, so the repository trait carries no transaction parameter and the transaction is read from task-local state at call time"
 why = "Keeps the repository trait signatures clean — no transaction parameter to thread anywhere — and reads naturally for teams coming from ecosystems where ambient request/transaction context is idiomatic. Its trade-off is that posture is invisible at the call site and a service that forgets to establish the context produces a silent partial commit rather than a loud error; in Rust it also contends with the owned, non-Clone transaction, which the task-local design must work around."
 
 [[option]]
 id = "repository-write-methods-take-a-parameter-typed"
-label = "Repository write methods take a parameter typed as the …"
+label = "Concrete ORM transaction type in domain trait"
 directive = "Repository write methods take a parameter typed as the concrete ORM transaction type directly, with the ORM type appearing in the domain trait surface"
 why = "The simplest to write: no marker trait, no generic, no downcast — the method just takes the transaction type it actually uses, and the type is visible at the call site. The right fit when the project does not separate domain from persistence (no hexagonal boundary to protect) and is committed to one ORM; its trade-off is that the domain trait then carries a framework type, so the domain depends on the ORM and a driver swap becomes a domain-signature change rather than an infrastructure-only one."

@@ -5,6 +5,15 @@ domain = "rust"
 layer = "library"
 enforcement = "structured"
 default = false
+verification = "grounded"
+
+[[sources]]
+url = "https://martinfowler.com/eaaDev/PresentationModel.html"
+title = "Martin Fowler — Presentation Model (state and behavior fully separated from the view/renderer; now widely known as MVVM)"
+
+[[sources]]
+url = "https://tanstack.com/table/latest/docs/introduction"
+title = "TanStack Table — Introduction (medium authority — a concrete, widely-used instance of the headless-core-plus-thin-adapter shape for UI logic)"
 
 [decision]
 question = "How is a UI's logic and state structured with respect to its rendering framework — a framework-agnostic core plus a thin per-framework adapter, a single-framework build, or a full reimplementation per framework — for BOTH a reusable component/UI library AND a first-party application UI?"

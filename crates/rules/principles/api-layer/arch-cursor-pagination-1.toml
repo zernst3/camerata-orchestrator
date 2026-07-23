@@ -5,6 +5,15 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 default = false
+verification = "grounded"
+
+[[sources]]
+url = "https://google.aip.dev/158"
+title = "Google API Improvement Proposals — AIP-158: Pagination"
+
+[[sources]]
+url = "https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api"
+title = "GitHub REST API — Using pagination in the REST API"
 
 [decision]
 question = "How do list endpoints paginate: by opaque cursor, by offset (page/page_size), no pagination at all, or by exposing both cursor and offset shapes?"

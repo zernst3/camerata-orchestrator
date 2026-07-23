@@ -24,6 +24,6 @@ why = "Redux Toolkit is the official recommended way to write Redux; the legacy 
 
 [[option]]
 id = "state-is-built-with-hand-written-action-type-con"
-label = "state is built with hand-written action-type constants and …"
+label = "Hand-written action types and switch reducers"
 directive = "state is built with hand-written action-type constants, separate action creators, and switch-statement reducers wired into a manually configured store, rather than using Redux Toolkit's createSlice and configureStore"
 why = "Hand-written action-type string constants, separate action creators, and switch-statement reducers reintroduce specific failure modes that Redux Toolkit was created to close: a typo in an action-type string silently produces a no-op action rather than an error, manual immutable-update spreads get subtly wrong in deeply nested state, and the store must be assembled with middleware and devtools wiring by hand, which is commonly misconfigured. Choosing the hand-rolled style reintroduces all of that boilerplate for no capability gain, since Toolkit is a superset of what the core library offers."

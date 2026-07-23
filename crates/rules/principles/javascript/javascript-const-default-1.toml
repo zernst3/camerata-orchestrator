@@ -26,6 +26,6 @@ why = "A const binding tells the reader at the declaration site that the name wi
 
 [[option]]
 id = "let-is-used-as-the-default-binding-keyword-for-u"
-label = "let is used as the default binding keyword for …"
+label = "Default to let, const only when needed"
 directive = "let is used as the default binding keyword for uniformity, with const reserved for a narrower set of cases, rather than defaulting to const and using let only where reassignment actually occurs"
 why = "Using let uniformly means every binding looks mutable whether it is or not, erasing the cheap local guarantee that const provides at the declaration site: a reader can no longer skim the top of a scope to know what is stable and must instead scan for later assignments everywhere. This choice trades reader-visible mutation signals for stylistic uniformity."

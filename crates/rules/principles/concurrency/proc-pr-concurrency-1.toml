@@ -24,6 +24,12 @@ why = "Forcing authors to make the concurrency analysis visible and required cat
 
 [[option]]
 id = "prs-touching-shared-mutable-state-are-reviewed-w"
-label = "PRs touching shared mutable state are reviewed without a …"
+label = "No required concurrency template"
 directive = "PRs touching shared mutable state are reviewed without a required template section calling out the locking strategy or concurrency testing; the concurrency story is left to whatever the author chooses to include in the description"
 why = "Without a required template section, the concurrency story depends on whatever discipline the author and reviewer happen to bring to the diff that day; races slip through review by default precisely because nothing on the PR surface forces the analysis to be written down."
+
+[[option]]
+id = "automated-race-detection-in-ci"
+label = "automated race-detection in CI, as a complement or alternative to a required written concurrency story"
+directive = "Run automated race/concurrency detection as part of CI on code touching shared mutable state: Go's `go test -race` (data-race detector), Rust's loom (exhaustive interleaving exploration for lock-free/unsafe concurrent code) or Miri (undefined-behavior and data-race detection under the Rust abstract machine), or ThreadSanitizer/TSan for C/C++. Treat a race-detector failure as a CI gate, the same way a failing test would be."
+why = "Catches actual races by exercising real interleavings mechanically, rather than relying on a human reviewer to reason correctly about a locking strategy described in prose — reviewers are good at checking that a story was written down, not at proving an absence of races by inspection. The trade-offs: race detectors only catch races on code paths actually exercised by the test suite (an untested interleaving is invisible to them), tools like loom/Miri require restructuring code to run under their model and add real CI time, and a race detector doesn't replace the design conversation a written concurrency story forces — it complements it by giving the design a mechanical check rather than only a documentation requirement. Best used alongside the PR-template requirement, not as a silent replacement for making the locking strategy explicit."

@@ -5,6 +5,11 @@ domain = "rust"
 layer = "language"
 enforcement = "structured"
 default = false
+verification = "grounded"
+
+[[sources]]
+url = "https://martinfowler.com/eaaCatalog/dataMapper.html"
+title = "Martin Fowler — Patterns of Enterprise Application Architecture: Data Mapper (medium authority — grounds a translation layer between domain and persistence in general; PoEAA does not itself mandate that layer live in its own crate)"
 
 [decision]
 question = "Where does the translation between domain types and persistence entities live: in a dedicated mapper crate that depends on both sides, alongside the entities, or alongside the domain types?"
@@ -18,12 +23,12 @@ why = "Keeps the domain and entity crates ignorant of each other: only the mappe
 
 [[option]]
 id = "the-project-s-mappers-live-in-the-persistence-en"
-label = "the project's mappers live in the persistence-entities crate alongside …"
+label = "Mappers live in the persistence-entities crate"
 directive = "the project's mappers live in the persistence-entities crate alongside the entity types, rather than in a dedicated mappers crate"
 why = "Keeps translation next to the data it maps and avoids a separate mapper crate, which is a reasonable simplification when the persistence layer is already permitted to know the domain. Its trade-off is that the entity crate then depends on the domain and recompiles whenever the domain evolves, so the two are coupled rather than independent."
 
 [[option]]
 id = "the-project-s-mappers-live-in-the-domain-crate-a"
-label = "the project's mappers live in the domain crate alongside …"
+label = "Mappers live in the domain crate"
 directive = "the project's mappers live in the domain crate alongside the domain types, rather than in a dedicated mappers crate"
 why = "Co-locates translation with the domain types and avoids a separate mapper crate, which suits a project that does not enforce a domain-has-no-persistence-dependencies boundary. Its trade-off is that the domain crate then knows the entity shapes and gains a transitive dependency on the persistence layer, so the domain is no longer framework-free."

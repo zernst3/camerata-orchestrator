@@ -30,7 +30,7 @@ title = "FastRuby.io — The AAA Pattern: Writing Robust Tests"
 
 [[sources]]
 url = "https://www.betterspecs.org/"
-title = "Better Specs — let, before, subject structure"
+title = "Better Specs (community guideline, not an official RSpec/Rails standard) — let, before, subject structure"
 
 [[sources]]
 url = "https://rspec.rubystyle.guide/"

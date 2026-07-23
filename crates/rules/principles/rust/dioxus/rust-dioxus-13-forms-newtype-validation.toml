@@ -5,11 +5,20 @@ domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/"
+title = "Alexis King — Parse, Don't Validate"
+
+[[sources]]
+url = "https://rust-lang.github.io/api-guidelines/type-safety.html"
+title = "Rust API Guidelines — Type Safety: the newtype pattern (fallible constructors encode validation in the type)"
 
 [decision]
 question = "What position does the project take on: Forms display errors from the domain newtype constructors; the UI never re-implements validation rules?"
 default = "forms-display-errors-from-the-domain-newtype-con"
-why = "Duplicating validation rules between the domain layer and the UI is the largest single source of bugs of the shape 'the form let me submit but the backend rejected it.' The domain layer is the only correct place for validation rules; the UI presents them and never re-states them. The Rust newtype pattern makes this not just possible but ergonomic: the fallible constructor returns a typed error and the UI renders the error's display impl. The cost of getting this wrong compounds over time as more fields are added; the cost of doing it right is roughly the same as the wrong way at any single field. A declarative validation library used in the UI alongside domain newtypes is useful at a certain scale but adds a runtime validation layer that competes with the domain newtypes, and the two sources of truth can drift if both are authoritative. Duplicating the validation logic in the component (regex, length checks, format helpers) is the exact failure mode this rule exists to prevent, since the duplicated rule and the domain rule will eventually diverge. Validating only on the server and leaving the client unchecked is correctness-equivalent but loses inline-error UX and, if naively implemented, produces a server round-trip per keystroke."
+why = "Duplicating validation rules between the domain layer and the UI is the largest single source of bugs of the shape 'the form let me submit but the backend rejected it.' The domain layer is the only correct place for validation rules; the UI presents them and never re-states them. The Rust newtype pattern makes this not just possible but ergonomic: the fallible constructor returns a typed error and the UI renders the error's display impl. The cost of getting this wrong compounds over time as more fields are added; the cost of doing it right is roughly the same as the wrong way at any single field. A declarative validation library used in the UI alongside domain newtypes is useful at a certain scale but adds a runtime validation layer that competes with the domain newtypes, and the two sources of truth can drift if both are authoritative. Duplicating the validation logic in the component (regex, length checks, format helpers) is the exact failure mode this rule exists to prevent, since the duplicated rule and the domain rule will eventually diverge. Validating only on the server and leaving the client unchecked is correctness-equivalent but loses inline-error UX and, if naively implemented, produces a server round-trip per keystroke. The same discipline applies server-side to axum request handling (see `rust-axum-extractors-validate-1`): an axum extractor's job is wire-shape parsing followed by invoking the domain newtype's fallible constructor, exactly as a Dioxus form invokes it here — neither the HTTP boundary nor the UI boundary re-implements the validation rule itself."
 
 [[option]]
 id = "forms-display-errors-from-the-domain-newtype-con"
@@ -19,18 +28,18 @@ why = "Duplicating validation rules between the domain layer and the UI is the l
 
 [[option]]
 id = "form-validation-runs-through-a-declarative-valid"
-label = "form validation runs through a declarative validation library used …"
+label = "Declarative validation library alongside domain newtypes"
 directive = "form validation runs through a declarative validation library used in the UI alongside the domain newtypes, with the library carrying its own rule definitions for each field"
 why = "Adds a runtime validation layer that competes with the domain newtypes: the two sources of truth can drift if both are authoritative, and the library's rule definitions are a second place to update whenever the domain constructor changes, reintroducing the synchronization risk the newtype approach was supposed to eliminate."
 
 [[option]]
 id = "each-form-component-re-implements-its-own-valida"
-label = "each form component re-implements its own validation logic inline …"
+label = "Re-implement validation logic inline per form"
 directive = "each form component re-implements its own validation logic inline (regex, length checks, format helpers) rather than delegating to the domain newtype constructors"
 why = "The exact failure mode this rule exists to prevent: the duplicated rule and the domain rule will eventually diverge, producing bugs of the shape 'the form let me submit but the backend rejected it,' which are frustrating to users and hard to trace because both sides look correct in isolation."
 
 [[option]]
 id = "form-fields-are-validated-only-on-the-server-the"
-label = "form fields are validated only on the server; the …"
+label = "Server-only validation, no client-side checks"
 directive = "form fields are validated only on the server; the client submits whatever the user types and shows whatever error the server returns, with no client-side validation step"
 why = "Correctness-equivalent but loses inline-error UX: users receive no feedback until they submit, and if naively implemented produces a server round-trip per field interaction that degrades perceived responsiveness compared to inline validation against the domain constructor."

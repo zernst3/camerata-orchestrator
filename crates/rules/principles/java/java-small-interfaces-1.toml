@@ -1,17 +1,17 @@
 id = "JAVA-SMALL-INTERFACES-1"
-title = "Interfaces are small and focused; each interface has a single responsibility and 1-3 methods, not a god-interface"
+title = "Interfaces are small and focused; each interface has a single responsibility, not a god-interface"
 tag = "stack"
 domain = "java"
 layer = "architecture"
 enforcement = "prose"
 default = true
-qualifies = "Enforced by code review and architectural guidelines. Small interfaces are easier to implement, test, and mock. Static analysis can flag interfaces with >5 methods and recommend splitting."
+qualifies = "Enforced by code review and architectural guidelines, judged by cohesion (does the interface represent one capability/role?) rather than a fixed method count. Small interfaces are easier to implement and reason about. Static analysis can flag interfaces with an unusually large method count (e.g. PMD's ExcessivePublicCount) as a signal worth a cohesion review, not as a hard violation on its own."
 verification = "grounded"
 
 [decision]
 question = "How large should interfaces be?"
 default = "small-focused-interfaces"
-why = "A small, focused interface is easier to implement, mock, and reason about. An interface that defines many methods (e.g., DatabaseService with 50 methods, or UserService with every operation a user might need) forces implementers to implement all 50 even if they only use 5, creates excessive surface area for testing and mocking, and couples callers to a large, brittle contract. Small interfaces also compose: two focused interfaces can be used together or embedded into a larger one as needed. The Interface Segregation Principle (SOLID) teaches that clients should not depend on interfaces they do not use. Splitting a large interface into small ones also makes partial implementations easier (some clients implement Readable but not Writable)."
+why = "A small, focused interface is easier to implement and reason about. An interface that defines many methods (e.g., DatabaseService with 50 methods, or UserService with every operation a user might need) forces implementers to implement all 50 even if they only use 5, and couples callers to a large, brittle contract. The right size follows from cohesion, not a fixed method count: an interface should represent one capability or role, and some legitimate single-purpose interfaces (e.g. a well-defined SPI with several related callback methods) have more than 3 methods without being a god-interface — the count is a symptom to notice, not the rule itself. Small interfaces also compose: two focused interfaces can be used together or embedded into a larger one as needed. The Interface Segregation Principle (SOLID) teaches that clients should not depend on interfaces they do not use. Splitting a large interface into small ones also makes partial implementations easier (some clients implement Readable but not Writable). The primary benefit is decoupling callers from a concrete implementation and enabling multiple implementations of the same role — not mockability: modern mocking frameworks (Mockito 1.10+, and by default since Mockito 2) can mock concrete, non-final, non-static classes directly via subclassing, so 'you can't mock a concrete class' is not a valid reason on its own to prefer an interface."
 
 [[sources]]
 url = "https://pmd.github.io/pmd/pmd_rules_java_design.html#excessivepubliccount"
@@ -20,18 +20,18 @@ linter = "PMD: ExcessivePublicCount"
 
 [[option]]
 id = "small-focused-interfaces"
-label = "define small, focused interfaces with 1-3 methods"
-directive = "Each interface has a single responsibility and the minimal set of methods a caller needs. If a service needs to read from a data store and also write metrics, it takes (DataStore, MetricsWriter), not a monolithic Service interface with every method. Larger abstractions are built by composing small interfaces. Common patterns: Reader, Writer, Validator, Listener, Factory (each 1-3 methods)."
-why = "Small interfaces are easy to implement, test, and mock; they compose well and follow the Interface Segregation Principle."
+label = "define small, focused interfaces sized by cohesion, not a fixed method count"
+directive = "Each interface has a single responsibility and the set of methods that responsibility actually requires — judge size by cohesion (does every method belong to the same capability/role?), not by a fixed cap. If a service needs to read from a data store and also write metrics, it takes (DataStore, MetricsWriter), not a monolithic Service interface with every method. Larger abstractions are built by composing small interfaces. Common patterns: Reader, Writer, Validator, Listener, Factory — typically small, but a cohesive single-purpose interface (e.g. a callback SPI) is fine with more methods when they all belong to the one role it represents."
+why = "Small, cohesive interfaces are easy to implement and reason about; they compose well and follow the Interface Segregation Principle. Sizing by cohesion rather than a numeric cap avoids splitting a genuinely single-purpose interface just to hit a method count, and avoids treating an artificially small interface as correct when its methods don't actually belong together."
 
 [[option]]
 id = "god-interfaces"
 label = "define large interfaces with many methods"
 directive = "Large interfaces (e.g., Database, UserService, Repository) that expose every method a package might need are defined, and callers take the full interface."
-why = "Increases implementation burden and testing complexity; couples callers to a large contract. Partial implementations are forced to stub out unused methods."
+why = "Increases implementation burden; couples callers to a large contract that mixes unrelated responsibilities. Partial implementations are forced to stub out unused methods."
 
 [[option]]
 id = "no-interfaces"
 label = "use concrete classes directly instead of interfaces"
 directive = "Callers depend on concrete classes rather than abstract interfaces."
-why = "Tightly couples code to specific implementations; makes testing difficult (cannot mock) and makes swapping implementations impossible."
+why = "Tightly couples code to a specific implementation and makes swapping implementations impossible (no seam for a second implementation, e.g. a different persistence backend or a test double with real substitutable behavior). This is the real cost, not mockability: modern mocking frameworks can mock concrete classes directly (Mockito has been able to mock non-final, non-static concrete classes via subclassing since 1.10+, and does so by default since Mockito 2), so 'cannot mock' is not an accurate reason to require an interface — decoupling from a concrete implementation is."

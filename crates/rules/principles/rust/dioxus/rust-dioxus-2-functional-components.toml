@@ -20,19 +20,19 @@ why = "Functional components with derived Props are the canonical shape the fram
 
 [[option]]
 id = "every-component-is-defined-as-a-struct-implement"
-label = "every component is defined as a struct implementing a …"
+label = "Components as structs implementing a trait"
 directive = "every component is defined as a struct implementing a Component trait, rather than as a free function annotated with the component attribute"
 why = "Blocks the component-attribute macro, kills compile-time prop checking, and defeats the reason to use a typed language for the UI: the framework does not actively maintain this shape, so tooling error messages become cryptic and upgrades may break the pattern without warning."
 
 [[option]]
 id = "props-are-passed-to-components-as-untyped-value"
-label = "props are passed to components as untyped value bags …"
+label = "Untyped value bags for component props"
 directive = "props are passed to components as untyped value bags (a HashMap-shaped or map-like container) rather than as a typed Props struct with derived Props, Clone, and PartialEq"
 why = "Loses compile-time prop checking entirely: missing or wrongly typed props are runtime errors rather than build failures, and the component's call site carries no machine-readable documentation of what it expects, making refactors across many call sites purely manual."
 
 [[option]]
 id = "every-component-declares-its-props-inline-as-fun"
-label = "every component declares its props inline as function arguments …"
+label = "Props declared inline as function arguments"
 directive = "every component declares its props inline as function arguments regardless of count, with no dedicated Props struct even when the component has three or more props"
 why = "Functionally equivalent — the component-attribute macro generates the same Props struct and derives behind the scenes. The only cost is a longer function signature past a few props, so this differs from the default on readability alone, not correctness."
 

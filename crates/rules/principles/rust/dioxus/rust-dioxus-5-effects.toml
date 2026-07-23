@@ -20,19 +20,19 @@ why = "Auto-tracking from signal reads is more correct than the manual dependenc
 
 [[option]]
 id = "side-effects-use-the-framework-s-effect-hook-wit"
-label = "side effects use the framework's effect hook with a …"
+label = "Effect hook with manual dependency array"
 directive = "side effects use the framework's effect hook with a manually maintained dependency array, rather than relying on auto-tracking from signal reads inside the closure"
 why = "Reintroduces the forget-a-dependency bug the framework's auto-tracking was specifically designed to eliminate: a contributor who adds a new signal read inside the closure but forgets to list it in the array gets an effect that does not re-run when that value changes, producing stale-effect bugs that are hard to attribute."
 
 [[option]]
 id = "data-fetching-for-the-ui-runs-inside-an-effect-h"
-label = "data fetching for the UI runs inside an effect …"
+label = "Data fetching inside effect hook manually"
 directive = "data fetching for the UI runs inside an effect hook with manual loading/error/refresh state, rather than going through the resource hook"
 why = "Forces every component to re-implement the loading-and-error-and-refresh plumbing the resource hook already provides: bugs hide in the boilerplate, the pattern diverges across components, and the resulting code is more verbose for the same outcome the resource hook gives in a few lines."
 
 [[option]]
 id = "side-effects-run-directly-in-the-component-body"
-label = "side effects run directly in the component body outside …"
+label = "Side effects run directly in component body"
 directive = "side effects run directly in the component body outside any effect hook, executing on every render"
 why = "Produces double-fires and state desync: a side effect that fires on every render triggers every time any signal the component reads changes, not only when the specific dependency the effect cares about changes, leading to redundant calls and potential infinite render loops."
 

@@ -5,6 +5,11 @@ domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
 default = false
+verification = "grounded"
+
+[[sources]]
+url = "https://atomicdesign.bradfrost.com/chapter-2/"
+title = "Brad Frost — Atomic Design, Chapter 2: Atomic Design Methodology (low-medium authority — a widely-adopted design methodology, not a formal standard; grounds the shared-primitives-composed-upward shape generally, not this project's specific option set)"
 
 [decision]
 question = "Where do common UI elements (buttons, modals, toasts, inputs) come from: a shared primitives layer that views compose, bespoke elements owned per feature, a wholesale third-party component library, or inline markup in each view?"
@@ -18,18 +23,18 @@ why = "Gives each common element one canonical implementation that every view co
 
 [[option]]
 id = "the-ui-is-organized-into-feature-folders-where-e"
-label = "the UI is organized into feature folders where each …"
+label = "Each feature owns bespoke UI elements"
 directive = "the UI is organized into feature folders where each feature owns its own bespoke buttons, modals, toasts, and other UI elements, rather than sharing a single primitives layer"
 why = "Keeps a feature's UI elements co-located with the feature, so a feature can be built, changed, or owned by a team without coordinating on a shared layer. The fit for a large UI with strong feature-team ownership boundaries; its trade-off is visual drift across features as each independently implements its own button or modal, and design-system changes that become a feature-by-feature edit rather than a single change."
 
 [[option]]
 id = "the-ui-adopts-a-pre-existing-third-party-compone"
-label = "the UI adopts a pre-existing third-party component library wholesale …"
+label = "Adopt a third-party component library wholesale"
 directive = "the UI adopts a pre-existing third-party component library wholesale and composes views directly from that library's components, rather than maintaining its own primitives"
 why = "Gives a complete, maintained, accessible element set immediately, with no primitives to build and upstream improvements arriving for free. The fastest path when a standard look is acceptable and design identity is not a differentiator; its trade-off is that visual identity is constrained to what the library exposes, and any decision outside its surface means fighting its styles or forking its components."
 
 [[option]]
 id = "the-ui-has-no-primitives-layer-views-inline-util"
-label = "the UI has no primitives layer; views inline utility …"
+label = "No primitives layer; inline utility classes"
 directive = "the UI has no primitives layer; views inline utility classes and raw element markup for common UI elements rather than composing shared primitive components"
 why = "The most direct approach: a view writes the markup it needs with no primitives layer to build or indirection to follow. The fit for a small UI with no design-system ambitions, where the overhead of shared primitives would not pay back; its trade-off is that visual consistency degrades as each view interprets the design tokens independently and a design change becomes a codebase-wide search-and-replace as the UI grows."

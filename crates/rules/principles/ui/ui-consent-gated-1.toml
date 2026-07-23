@@ -5,6 +5,11 @@ domain = "ui"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://www.edpb.europa.eu/our-work-tools/our-documents/guidelines/guidelines-052020-consent-under-regulation-2016679_en"
+title = "European Data Protection Board — Guidelines 05/2020 on consent under Regulation 2016/679 (GDPR; jurisdiction-specific to the EU/EEA — projects operating under other consent regimes, e.g. US state privacy laws, should verify their own applicable standard, but the equal-weight opt-in principle generalizes)"
 
 [decision]
 question = "What position does the project take on: No client-side storage or third-party trackers initialize without explicit consent?"
@@ -19,18 +24,18 @@ why = "GDPR and the ICO's equal-weight consent rules require opt-in for non-esse
 
 [[option]]
 id = "third-party-analytics-and-tracking-scripts-initi"
-label = "third-party analytics and tracking scripts initialize on every page …"
+label = "Trackers initialize by default with opt-out"
 directive = "third-party analytics and tracking scripts initialize on every page by default, and the user is offered an opt-out control rather than an opt-in consent gate"
 why = "Opt-out is a compliance violation under GDPR and the ICO's equal-weight consent rules; regulators do not accept 'we let users turn it off' as a substitute for opt-in."
 
 [[option]]
 id = "consent-is-checked-once-at-the-page-or-route-lev"
-label = "consent is checked once at the page or route …"
+label = "Consent checked once at page/route level"
 directive = "consent is checked once at the page or route level, and any tracker mounted inside a component or shared layout under that page initializes without further check"
 why = "Page-level consent checks force every page to re-implement the check, and trackers loaded in shared components, layouts, or third-party widgets silently bypass the check."
 
 [[option]]
 id = "consent-checks-run-inside-a-load-event-handler-t"
-label = "consent checks run inside a load-event handler that fires …"
+label = "Consent check fires after tracker already loaded"
 directive = "consent checks run inside a load-event handler that fires after the tracker's script has already been fetched and made its first beacon"
 why = "A load-event handler fires after the tracker has already fetched its script and made its first beacon, so the compliance violation has already occurred by the time the check runs."

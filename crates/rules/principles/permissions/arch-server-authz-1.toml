@@ -12,6 +12,10 @@ verification = "grounded"
 url = "CONVENTIONS.md"
 title = "CONVENTIONS.md — §ARCH-SERVER-AUTHZ-1 (authorization on the server; UI renders permission hints)"
 
+[[sources]]
+url = "https://owasp.org/www-project-application-security-verification-standard/"
+title = "OWASP Application Security Verification Standard (ASVS) — V4 Access Control"
+
 [decision]
 question = "What position does the project take on: Authorization on the server; UI renders permission hints?"
 default = "authorization-on-the-server-ui-renders-permissio"
@@ -25,6 +29,6 @@ why = "UI can't drift from server enforcement when both read the same server-com
 
 [[option]]
 id = "the-ui-inspects-raw-permission-codes-or-role-mem"
-label = "the UI inspects raw permission codes or role membership …"
+label = "Client-side permission/role inspection for authz"
 directive = "the UI inspects raw permission codes or role membership on the client and re-implements the authorization decision in browser code, rather than gating on server-computed permission flags carried by each resource response"
 why = "Client-side permission introspection lets the UI drift from server enforcement because the two evolve independently and eventually disagree; it also leaks the project's RBAC internals to the browser, where they become part of the public attack surface."

@@ -24,6 +24,10 @@ title = "Cross-agent rules: the integration gate (a third enforcement tier)"
 url = "docs/decisions/2026-07-05_integration-gate-generic-engine.md"
 title = "Integration gate: the generic reconciliation engine + per-stack extractors"
 
+[[sources]]
+url = "https://martinfowler.com/articles/consumerDrivenContracts.html"
+title = "Martin Fowler — Consumer-Driven Contracts: A Service Evolution Pattern"
+
 [decision]
 question = "How does the project verify that a consumer's endpoint calls match what the producer actually exposes across the agent seam?"
 why = "A single story decomposed across agents (an API agent and a UI agent) can ship two individually-clean diffs that disagree at the seam: the API exposes POST /members/export, the UI calls POST /members/csv, and no per-agent gate can see the mismatch because each only sees its own worktree. In a Rust monorepo a shared compiled type makes drift impossible; a JavaScript fullstack app has no shared compiler holding the seam. The integration gate reconciles the consumer's calls against the producer's routes deterministically on the assembled tree — a comparison of neutral records, never a model judging consistency."

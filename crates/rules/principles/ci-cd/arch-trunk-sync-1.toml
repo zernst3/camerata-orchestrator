@@ -5,7 +5,7 @@ domain = "ci-cd"
 layer = "universal"
 enforcement = "prose"
 default = true
-verification = "grounded"
+verification = "policy"
 
 [[sources]]
 url = "CONVENTIONS.md"
@@ -14,7 +14,7 @@ title = "CONVENTIONS.md — Branching & Release Flow section (release-branch cha
 [decision]
 question = "How do release-line fixes get back to trunk?"
 default = "one-merge-commit-after-the-release-ships"
-why = "Per-fix mirroring creates hidden divergence (a fix lands on release, the cherry-pick to main is forgotten, trunk silently lacks it). Continuously cherry-picking each fix to trunk depends on every cherry-pick happening in lockstep with the release-branch fix; one missed cherry-pick produces a silent divergence that surfaces months later when trunk fails to reproduce a fix that everyone assumed had landed. A trunk-only model with no release branches avoids the divergence entirely but loses the stabilization surface release branches provide, so any bug found late in the release cycle has to be fixed against an actively-moving trunk."
+why = "Per-fix mirroring creates hidden divergence (a fix lands on release, the cherry-pick to main is forgotten, trunk silently lacks it). Continuously cherry-picking each fix to trunk depends on every cherry-pick happening in lockstep with the release-branch fix; one missed cherry-pick produces a silent divergence that surfaces months later when trunk fails to reproduce a fix that everyone assumed had landed. A trunk-only model with no release branches avoids the divergence entirely but loses the stabilization surface release branches provide, so any bug found late in the release cycle has to be fixed against an actively-moving trunk. This project's convention is a single post-ship merge synced from the release branch back to trunk, which is a reasonable choice for a project with a small number of concurrent release lines and infrequent hotfix pressure; it is a project-specific policy choice, not the only reasonable position. Projects that ship hotfixes often, or that maintain several release branches concurrently, more commonly invert the direction entirely and fix trunk first, then cherry-pick forward onto the release branch(es) that need it (see the fix-trunk-first option) — this is the direction recommended by Microsoft's internal 'Release Flow' model and by Chromium's branch-and-merge workflow, precisely because it keeps trunk authoritative at all times rather than depending on a discrete end-of-release sync step to catch up."
 
 [[option]]
 id = "one-merge-commit-after-the-release-ships"
@@ -33,3 +33,9 @@ id = "trunk-only-no-release-branch"
 label = "trunk-only (no release branch)"
 directive = "the project has no release branches at all; trunk is the only line and every change ships from it"
 why = "Trunk-only avoids the divergence entirely but loses the stabilization surface release branches provide; any bug found late in the release cycle has to be fixed against an actively-moving trunk."
+
+[[option]]
+id = "fix-trunk-first-cherry-pick-to-release"
+label = "fix trunk first, then cherry-pick the fix onto the release branch"
+directive = "When a fix is needed for code that exists on both trunk and an active release branch, the fix is authored and merged to trunk first. It is then cherry-picked onto the release branch (or each active release branch that needs it). The release branch does not originate a fix that trunk lacks, except for the narrow case of a change specific to the release cut itself (e.g. release-only configuration) with no analogue on trunk."
+why = "This is the direction of flow recommended by Microsoft's internal 'Release Flow' model and by Chromium's branch-and-merge workflow: trunk is always the ground truth, so a fix exists there before it exists anywhere else, and moving it onto a release branch is a small, well-understood mechanical cherry-pick. Because trunk had the fix first, there is never a question of whether the fix 'made it back' — the open question is only whether it was forward-ported to each release branch that needs it, which is a narrower, more visible surface to track than an end-of-release reconciliation, and it scales better when a project maintains several concurrent release branches or ships hotfixes frequently."

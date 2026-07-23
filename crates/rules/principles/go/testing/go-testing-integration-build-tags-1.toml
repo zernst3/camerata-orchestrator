@@ -37,6 +37,12 @@ directive = "A TestMain function reads a -integration command-line flag; integra
 why = "Avoids build tag syntax but requires every integration test to call t.Skip() manually; forgetting one skips it in the wrong direction."
 
 [[option]]
+id = "testing-short-skip"
+label = "testing.Short() gate: run everything by default, skip slow tests under -short"
+directive = "Integration and other slow tests live in the same _test.go files as unit tests (no separate file naming or build tag required) but begin with an explicit gate: if testing.Short() { t.Skip(\"skipping integration test in short mode\") }. Fast local/CI runs use go test -short ./... to skip the gated tests; the full suite (including infrastructure-dependent tests) runs with plain go test ./... where the infrastructure is available."
+why = "Complements build tags rather than replacing them for most projects: testing.Short() is a per-test runtime skip, not a compile-time exclusion, so a slow test still gets compiled (and its imports still get pulled in) even when skipped, and a developer must remember to add the guard to every slow test rather than getting file-level separation for free. It's a reasonable lighter-weight choice when the number of integration tests is small and they live comfortably alongside unit tests in the same files, or as a second guard layered on top of build-tag separation (e.g. gating a subset of tests within an already-tagged file by expected duration). It does not need the *_integration_test.go naming convention or a -tags flag, which lowers the barrier to writing an occasional slow test, at the cost of the stronger, compile-time separation build tags provide."
+
+[[option]]
 id = "no-separation"
 label = "no separation: all tests run together"
 directive = "Unit and integration tests are interleaved in the same _test.go files with no tagging or skipping."

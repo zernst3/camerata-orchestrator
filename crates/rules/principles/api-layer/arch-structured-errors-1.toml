@@ -6,6 +6,11 @@ layer = "universal"
 enforcement = "architectural"
 default = true
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: it requires a custom CI gate — a contract test that hits representative failure paths and validates each error body against the project's envelope schema (a top-level error object with a stable code, a human message, and optional details), optionally paired with a project-configured static check that handlers throw typed errors and route through the single error-rendering middleware rather than writing ad hoc bodies. No generic linter knows the project's envelope shape. Conformance holds when such a gate runs in CI and a handler that returns a bare string or an empty body fails it; it fails when error shapes vary per endpoint with no shared renderer."
+verification = "grounded"
+
+[[sources]]
+url = "https://www.rfc-editor.org/rfc/rfc9457.html"
+title = "RFC 9457 — Problem Details for HTTP APIs"
 
 [decision]
 question = "What position does the project take on: Error responses use a structured envelope with stable machine-readable codes?"
@@ -20,18 +25,24 @@ why = "Stringly-typed error messages are a leading source of brittle client code
 
 [[option]]
 id = "error-responses-are-plain-strings-or-contain-onl"
-label = "error responses are plain strings (or contain only a …"
+label = "Plain string error responses"
 directive = "error responses are plain strings (or contain only a free-form message field) and clients are expected to pattern-match on the human-readable wording"
 why = "Plain string errors force clients to pattern-match on text; one copy edit silently breaks every consumer that pattern-matched the old wording."
 
 [[option]]
 id = "error-responses-use-only-the-http-status-code-wi"
-label = "error responses use only the HTTP status code with …"
+label = "Status code only, no body"
 directive = "error responses use only the HTTP status code with an empty body, and clients distinguish failure modes by status code alone"
 why = "Status-code-only errors do not carry enough resolution to distinguish between different validation failures that share the same status code, so clients cannot react appropriately."
 
 [[option]]
 id = "each-endpoint-defines-its-own-custom-error-respo"
-label = "each endpoint defines its own custom error response shape, …"
+label = "Per-endpoint custom shapes"
 directive = "each endpoint defines its own custom error response shape, and clients implement per-endpoint error parsing rather than a single shared parser"
 why = "Per-endpoint custom shapes force clients to write per-endpoint parsing; the surface area grows with every new endpoint instead of shrinking to a single shared parser."
+
+[[option]]
+id = "rfc9457-problem-details"
+label = "RFC 9457 Problem Details for HTTP APIs"
+directive = "Error responses use the IETF RFC 9457 'application/problem+json' shape: a JSON object with type (a URI reference identifying the problem type, or the literal string 'about:blank'), title (a short, human-readable summary that is the same for every occurrence of this problem type), status (the HTTP status code, duplicated in the body for convenience), detail (a human-readable explanation specific to this occurrence), and instance (a URI reference identifying this specific occurrence). Project-specific extension members (a stable machine-readable code, field-level validation errors, etc.) are added alongside the required members rather than replacing them. Responses are served with Content-Type: application/problem+json."
+why = "RFC 9457 is the IETF standard for structured HTTP error bodies, so adopting it is a client-agnostic, spec-conformant shape: off-the-shelf HTTP clients, API gateways, and tooling that already understand application/problem+json can parse the error without any project-specific documentation, and the type URI gives a natural place to publish machine-readable per-error-type documentation. It is effectively a strict superset of a plain code/message/details envelope (the project's stable code can ride as an extension member or as the type URI, and message maps to detail), so adopting it costs little for a project already using a structured envelope, while buying interoperability with any client or gateway that already speaks the standard."

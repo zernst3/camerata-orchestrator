@@ -8,12 +8,12 @@ default = true
 verification = "grounded"
 
 [[sources]]
-url = "http://xunitpatterns.com/Principle%20of%20Single%20Condition%20per%20Test.html"
-title = "xUnit Test Patterns (Meszaros) — Principle of Single Condition per Test"
+url = "http://xunitpatterns.com/Principles%20of%20Test%20Automation.html"
+title = "xUnit Test Patterns (Meszaros) — Principles of Test Automation (Verify One Condition per Test)"
 
 [[sources]]
-url = "https://testing.googleblog.com/2008/12/as-always-dont-repeat-yourself-dry.html"
-title = "Google Testing Blog — DRY in tests: each test verifies one logical condition"
+url = "https://testing.googleblog.com/2019/12/testing-on-toilet-tests-too-dry-make.html"
+title = "Google Testing on the Toilet — Tests Too DRY? Make Them DAMP! (2019)"
 
 [[sources]]
 url = "https://martinfowler.com/articles/practical-test-pyramid.html#WriteTests"

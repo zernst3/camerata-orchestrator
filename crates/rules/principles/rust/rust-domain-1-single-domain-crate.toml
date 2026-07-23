@@ -27,12 +27,12 @@ why = "Keeps the whole domain in one compilation unit while giving each context 
 
 [[option]]
 id = "the-project-starts-with-a-separate-crate-per-bou"
-label = "the project starts with a separate crate per bounded …"
+label = "Separate crate per bounded context"
 directive = "the project starts with a separate crate per bounded context, and bounded contexts live as sibling crates rather than as modules in a shared domain crate"
 why = "Enforces the bounded-context seams at the compiler level: a context cannot reach into another's internals, each crate can carry its own dependency set and compile independently, and the architecture is legible from the crate graph. The right shape once the domain is large enough that real seams exist and isolating them is worth the cost — inter-crate dependencies must be kept acyclic, and a refactor that crosses a seam is a crate-boundary change rather than a free module move."
 
 [[option]]
 id = "the-project-keeps-a-single-domain-crate-but-does"
-label = "the project keeps a single domain crate but does …"
+label = "Single domain crate with no module subdivision"
 directive = "the project keeps a single domain crate but does not subdivide it into modules by bounded context; all domain code lives in one flat module structure regardless of context"
 why = "The most direct shape for a very small domain: with only a handful of entities, any context partitioning would be ceremony, and a flat layout keeps everything one hop away. Its trade-off is that it becomes a god-module as the entity count grows — the absence of internal structure makes 'where does this go' a judgment call at every addition and the flat mass is hard to navigate past a few dozen entities."

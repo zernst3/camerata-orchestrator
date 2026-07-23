@@ -12,6 +12,10 @@ verification = "grounded"
 url = "AGENTS.md"
 title = "AGENTS.md — AGENTIC-NO-TEST-TAMPER-1 (do not modify existing tests without human review)"
 
+[[sources]]
+url = "https://deepmind.google/discover/blog/specification-gaming-the-flip-side-of-ai-ingenuity/"
+title = "DeepMind — Specification gaming: the flip side of AI ingenuity"
+
 [decision]
 question = "What position does the project take on: an agent modifying or deleting existing tests as part of its own change?"
 default = "escalate-before-modifying-or-deleting-an-existin"

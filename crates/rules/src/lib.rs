@@ -141,6 +141,15 @@ impl std::fmt::Display for EnforcementKind {
 /// - `draft`    — AI-generated / designed, NOT yet checked against any external
 ///   authority. There may be no [`RuleSource`] at all. **Not shippable** —
 ///   draft rules are kept out of the demo'd / armed ruleset.
+/// - `policy`   — honest project policy, with NO external authority: the rule
+///   encodes a deliberate project/team decision (e.g. an internal convention
+///   or process), and any cited [`RuleSource`]s are internal docs, not a
+///   published standard or real linter rule. `policy` is NOT grounded — it is
+///   kept out of the armed ruleset the same as `draft`, but it is labeled
+///   honestly as policy rather than being mislabeled `grounded` by virtue of
+///   merely having a source citation. Use this instead of `grounded` whenever
+///   the only "source" is a Camerata doc citing Camerata (or another purely
+///   internal document) rather than a real external authority.
 /// - `grounded` — mapped to a cited authoritative source or a real, established
 ///   linter rule: a URL + identifier is present in [`Rule::sources`].
 ///   Machine-grounded; an automated grounding pass may emit this.
@@ -163,6 +172,11 @@ pub enum Verification {
     /// AI-generated / designed; not yet checked against any external authority.
     #[default]
     Draft,
+    /// Honest project policy: a deliberate project/team decision with NO
+    /// external authority. Any cited source is internal, not a published
+    /// standard or real linter rule. Not grounded; kept out of the armed
+    /// ruleset like `draft`, but labeled honestly rather than as `grounded`.
+    Policy,
     /// Mapped to a cited authoritative source or real linter rule (sources present).
     Grounded,
     /// A human maintainer has confirmed the grounding. Human-only; never automated.
@@ -178,6 +192,7 @@ impl Verification {
     pub fn as_str(&self) -> &'static str {
         match self {
             Verification::Draft => "draft",
+            Verification::Policy => "policy",
             Verification::Grounded => "grounded",
             Verification::Verified => "verified",
             Verification::NeedsRecheck => "needs_recheck",
@@ -188,6 +203,7 @@ impl Verification {
     pub fn from_tag(s: &str) -> Option<Self> {
         match s {
             "draft" => Some(Verification::Draft),
+            "policy" => Some(Verification::Policy),
             "grounded" => Some(Verification::Grounded),
             "verified" => Some(Verification::Verified),
             "needs_recheck" => Some(Verification::NeedsRecheck),
@@ -203,8 +219,9 @@ impl Verification {
     }
 
     /// Whether this status is at-least-grounded — i.e. `grounded`, `verified`, or
-    /// `needs_recheck`. All three are backed by a cited source and are usable;
-    /// only `draft` is not.
+    /// `needs_recheck`. All three are backed by a cited EXTERNAL source and are
+    /// usable; `draft` and `policy` are not — `policy` is honest project policy
+    /// with no external authority, so it is excluded here just like `draft`.
     pub fn is_grounded(&self) -> bool {
         matches!(
             self,
@@ -213,7 +230,7 @@ impl Verification {
     }
 
     /// Whether a rule at this status is shippable — true for every at-least-grounded
-    /// status (`grounded`, `verified`, `needs_recheck`), false for `draft`.
+    /// status (`grounded`, `verified`, `needs_recheck`), false for `draft` and `policy`.
     pub fn is_shippable(&self) -> bool {
         self.is_grounded()
     }
@@ -1235,9 +1252,25 @@ mod tests {
     }
 
     #[test]
+    fn policy_round_trips_and_is_not_grounded() {
+        // Wire round-trip.
+        assert_eq!(Verification::from_tag("policy"), Some(Verification::Policy));
+        assert_eq!(Verification::Policy.as_str(), "policy");
+        assert_eq!(Verification::Policy.to_string(), "policy");
+
+        // Policy is honest project policy, NOT grounded — same as draft, it is
+        // kept out of the armed ruleset, but it is labeled honestly rather than
+        // pretending to be grounded.
+        assert!(!Verification::Policy.is_grounded());
+        assert!(!Verification::Policy.is_shippable());
+        assert!(!Verification::Policy.is_verified());
+    }
+
+    #[test]
     fn verification_str_round_trip() {
         for v in [
             Verification::Draft,
+            Verification::Policy,
             Verification::Grounded,
             Verification::Verified,
         ] {

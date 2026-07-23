@@ -29,6 +29,6 @@ url = "https://rubystyle.guide/#short-methods"
 title = "Ruby Style Guide — Short Methods"
 
 [[sources]]
-url = "https://docs.rubocop.org/rubocop/1.75/cops_metrics.html#metricsmethodlength"
+url = "https://docs.rubocop.org/rubocop/cops_metrics.html#metricsmethodlength"
 title = "RuboCop — Metrics/MethodLength cop"
 linter = "RuboCop: Metrics/MethodLength"

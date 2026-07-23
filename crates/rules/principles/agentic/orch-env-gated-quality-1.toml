@@ -16,6 +16,14 @@ title = "AGENTS.md — ORCH-ENV-GATED-QUALITY-1 (environment-gated quality)"
 url = "docs/decisions/2026-06-16_enforcement_tiers_gate_vs_ci.md"
 title = "Decision: Enforcement tiers — write-time gate (security) vs CI checks (consistency)"
 
+[[sources]]
+url = "https://continuousdelivery.com/"
+title = "Humble & Farley — Continuous Delivery (automated promotion through pre-production environments)"
+
+[[sources]]
+url = "https://dora.dev/"
+title = "DORA — research on deployment pipelines and software delivery performance"
+
 [decision]
 question = "What position does the project take on: Environment-gated quality — nothing ships unverified?"
 default = "environment-gated-quality-nothing-ships-unverifi"
@@ -29,18 +37,18 @@ why = "Preventive gatekeeping catches issues before they compound downstream, wh
 
 [[option]]
 id = "autonomously-generated-code-ships-directly-from"
-label = "autonomously-generated code ships directly from the author's machine to …"
+label = "Ship directly to production"
 directive = "autonomously-generated code ships directly from the author's machine to the user-facing environment without passing a local quality bar or progressing through any pre-production environment; issues are caught by post-hoc monitoring in production"
 why = "Skipping pre-merge gates and pre-production environments entirely shifts the discovery surface to live users, where each issue costs more to triage, more to roll back, and consumes user trust in the process."
 
 [[option]]
 id = "autonomously-generated-code-passes-a-local-quali"
-label = "autonomously-generated code passes a local quality bar before merge …"
+label = "Quality bar only, no pre-prod"
 directive = "autonomously-generated code passes a local quality bar before merge but goes directly from merge to the user-facing environment, with no pre-production environment between them"
 why = "CI catches what it can catch, but anything that depends on real data, real config, or real load is discovered by users rather than in a pre-production environment shaped like the real one."
 
 [[option]]
 id = "autonomously-generated-code-progresses-through-o"
-label = "autonomously-generated code progresses through one or more pre-production environments, …"
+label = "Pre-prod with manual gating"
 directive = "autonomously-generated code progresses through one or more pre-production environments, but advancement through each one is gated by manual reviewer approval rather than by automated checks"
 why = "Manual approval gates reintroduce the human bottleneck the rule exists to remove, and the gating decision drifts as reviewer attention waxes and wanes."

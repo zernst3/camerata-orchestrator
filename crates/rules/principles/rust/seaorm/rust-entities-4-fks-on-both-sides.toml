@@ -10,7 +10,7 @@ verification = "grounded"
 [decision]
 question = "What position does the project take on: FK relations declared on BOTH sides?"
 default = "fk-relations-declared-on-both-sides"
-why = "Compile-time validation of the full FK graph, plus find_related working in both directions. The result is self-documenting. Declaring relations only on one side (belongs_to on the child without the reverse on the parent) loses compile-time FK-graph validation in the reverse direction and disables find_related traversal from parent to child, so every parent-to-child read has to be hand-built. Relying on database-level FK enforcement and skipping ORM relation declarations entirely means the DB still rejects bad writes, but find_related ergonomics are gone and every read that needs joined data has to be hand-built, which is exactly the cost the bidirectional declarations were paying down. Declaring relations only as needed for the current code leaves the FK graph perpetually incomplete: each new feature that wants the missing direction triggers a new annotation, and the graph stays partial until every read shape is exercised in code."
+why = "Compile-time validation of the full FK graph, plus find_related working in both directions. The result is self-documenting. Declaring relations only on one side (belongs_to on the child without the reverse on the parent) loses compile-time FK-graph validation in the reverse direction and disables find_related traversal from parent to child, so every parent-to-child read has to be hand-built. Relying on database-level FK enforcement and skipping ORM relation declarations entirely means the DB still rejects bad writes, but find_related ergonomics are gone and every read that needs joined data has to be hand-built, which is exactly the cost the bidirectional declarations were paying down. Declaring relations only as needed for the current code leaves the FK graph perpetually incomplete: each new feature that wants the missing direction triggers a new annotation, and the graph stays partial until every read shape is exercised in code. A note on what these declarations are and are not: belongs_to/has_one/has_many (and Related/DeriveRelation) are Rust-side, compile-time navigation helpers — they let find_related and the query builder traverse a relation with type-checked joins. Declaring them does not itself create or enforce a database-level foreign-key constraint; that enforcement comes only from a REFERENCES constraint defined in the migration/schema. An entity can declare a belongs_to relation with no corresponding DB constraint (the ORM will happily build the join), and a column can be DB-constrained with REFERENCES while carrying no ORM relation at all (queries just can't use find_related for it). The two are complementary, not the same mechanism, and both are normally wanted together: the DB constraint for actual referential-integrity enforcement, the entity relation for ergonomic, type-checked traversal in code. For relations that need an intermediate/junction entity to express — many-to-many, or any multi-hop relation that a direct belongs_to/has_many pair can't reach in one step — SeaORM's Linked trait (impl Linked for a struct describing the hop sequence through the intermediate entity) is the mechanism, distinct from the direct Related derive this rule otherwise describes."
 
 [[option]]
 id = "fk-relations-declared-on-both-sides"
@@ -20,19 +20,19 @@ why = "Compile-time validation of the full FK graph, plus find_related working i
 
 [[option]]
 id = "foreign-key-relations-are-declared-only-on-the-c"
-label = "foreign-key relations are declared only on the child side …"
+label = "FK relations declared only on the child side"
 directive = "foreign-key relations are declared only on the child side (belongs_to) and not on the parent side, so the FK graph in the entities crate is one-directional"
 why = "Loses compile-time FK-graph validation in the reverse direction and disables find_related traversal from parent to child, so every parent-to-child read has to be hand-built with an inline join rather than going through the framework's ergonomic traversal."
 
 [[option]]
 id = "the-entities-crate-declares-no-foreign-key-relat"
-label = "the entities crate declares no foreign-key relations at all …"
+label = "No foreign-key relations declared at all"
 directive = "the entities crate declares no foreign-key relations at all and relies entirely on database-level FK enforcement, so all joined reads are hand-built rather than going through find_related"
 why = "The database still rejects bad writes, but find_related ergonomics are entirely gone: every read that needs joined data has to be hand-built with explicit joins, which is verbose, error-prone, and bypasses the compile-time relation checks the ORM provides."
 
 [[option]]
 id = "foreign-key-relations-are-added-on-each-side-onl"
-label = "foreign-key relations are added on each side only when …"
+label = "FK relations added reactively as features need them"
 directive = "foreign-key relations are added on each side only when the current code path needs them, so the FK graph in the entities crate grows only as features exercise specific traversal directions"
 why = "Leaves the FK graph perpetually incomplete: each new feature that wants a missing traversal direction triggers a new annotation, and the graph stays partial until every read shape has been exercised in code, which means the first time a direction is needed is also the first time anyone notices it was missing."
 

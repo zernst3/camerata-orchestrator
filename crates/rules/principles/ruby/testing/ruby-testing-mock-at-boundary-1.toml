@@ -3,9 +3,9 @@ title = "Mock only at architectural boundaries (external services, I/O); use ins
 tag = "stack"
 domain = "ruby:testing"
 layer = "language"
-enforcement = "mechanical"
+enforcement = "structured"
 default = true
-qualifies = "Enforced by rubocop-rspec cop RSpec/VerifiedDoubles, which flags plain double('ClassName') in favor of instance_double/class_double/object_double. Conformance holds when RSpec/VerifiedDoubles reports no offenses and mocks appear only at the outermost layer of the unit under test."
+qualifies = "The rule has two parts, and only one is mechanically checked. rubocop-rspec's RSpec/VerifiedDoubles cop enforces the HOW: it flags plain double('ClassName') and requires the verifying forms (instance_double/class_double/object_double), which is a real, deterministic lint check. It does not, and cannot, enforce the WHERE: whether a given double sits at an architectural boundary (an external service, I/O, a cross-layer seam) versus mocking an internal collaborator within the same layer is a design judgment the cop has no way to evaluate — it will happily pass an instance_double used to mock an in-process model method with no seam justification at all. So conformance for the verified-doubles half holds mechanically when RSpec/VerifiedDoubles reports no offenses; conformance for the mock-only-at-boundaries half is a code-review judgment call, not a lint gate."
 verification = "grounded"
 
 [decision]
@@ -36,7 +36,7 @@ linter = "rubocop-rspec: RSpec/VerifiedDoubles"
 
 [[sources]]
 url = "https://www.betterspecs.org/"
-title = "Better Specs — mock judiciously; test real behavior when possible"
+title = "Better Specs (community guideline, not an official RSpec/Rails standard) — mock judiciously; test real behavior when possible"
 
 [[sources]]
 url = "https://github.com/rspec/rspec-mocks"

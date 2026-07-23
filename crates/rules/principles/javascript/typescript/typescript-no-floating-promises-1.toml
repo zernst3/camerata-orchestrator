@@ -3,9 +3,9 @@ title = "Every Promise is awaited, returned, or explicitly handled"
 tag = "stack"
 domain = "javascript:typescript"
 layer = "language"
-enforcement = "mechanical"
+enforcement = "structured"
 default = true
-qualifies = "Enforced by the type-aware @typescript-eslint/no-floating-promises rule (which requires parserOptions.project so the linter has type information), failing the lint step on any Promise-returning expression whose result is neither awaited, returned, nor passed to a handler. Conformance holds when the rule is at error severity with type information available and a floating promise fails the build; it fails when the rule is absent, type-aware linting is not configured, or the rule only warns."
+qualifies = "Enforced by the type-aware @typescript-eslint/no-floating-promises rule (which requires parserOptions.project so the linter has type information), failing the lint step on any Promise-returning expression whose result is neither awaited, returned, nor passed to a handler. Conformance holds when the rule is at error severity with type information available and a floating promise fails the build; it fails when the rule is absent, type-aware linting is not configured, or the rule only warns. One default-behavior caveat: the rule's ignoreVoid option defaults to true, so an expression explicitly marked with the void operator (void somePromise()) satisfies the linter and is never flagged, even though the promise is still, in the meaningful sense, unhandled — a rejection inside it is still an unhandled rejection unless the code also attaches its own .catch or try/catch, which void-prefixing alone does not add. In other words, the rule as commonly configured checks that a floating promise was marked as an intentional discard, not that its errors are actually handled; the 'AND attaches its own rejection handler' half of this rule's directive is a project convention on top of the linter's default behavior, not something ignoreVoid: true verifies by itself."
 verification = "grounded"
 
 [[sources]]
@@ -26,6 +26,6 @@ why = "A floating promise still runs but nothing waits for it and nothing observ
 
 [[option]]
 id = "promise-returning-calls-may-be-left-floating-whe"
-label = "Promise-returning calls may be left floating when the …"
+label = "Leave promises floating when unneeded"
 directive = "Promise-returning calls may be left floating when the result is not needed, relying on the author to await only where a value is consumed, rather than requiring every promise to be awaited, returned, or explicitly voided-and-handled"
 why = "Leaving a Promise-returning call floating when the result is not needed conflates not needing the value with not needing the completion or the error: a rejection in a floating promise becomes an unhandled rejection that no try/catch can reach, and the surrounding function continues past the un-awaited call as though the work were done, silently violating ordering guarantees (write completes before read, transaction commits before response) in ways that surface as flaky, timing-dependent production failures rather than local errors."

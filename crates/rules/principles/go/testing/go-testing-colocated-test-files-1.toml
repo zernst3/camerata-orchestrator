@@ -7,7 +7,7 @@ enforcement = "mechanical"
 default = true
 verification = "grounded"
 
-qualifies = "Every Go source file foo.go has its unit tests in foo_test.go in the same directory. The _test.go suffix is the signal to the go tool: those files are excluded from production builds and included only when go test runs. Tests placed in a separate sibling directory or named without the suffix are not picked up by go test."
+qualifies = "Every Go source file foo.go has its unit tests in foo_test.go in the same directory. The _test.go suffix is the signal to the go tool: those files are excluded from production builds and included only when go test runs. Tests named without the suffix are not picked up by go test at all; tests placed in a separate sibling directory (with the correct suffix) are still discovered and run by go test ./..., but as an external package that cannot see the original package's unexported identifiers."
 
 [[sources]]
 url = "https://pkg.go.dev/testing"
@@ -27,7 +27,7 @@ qualifies = "go test documentation: 'Files whose names begin with _ or . (includ
 [decision]
 question = "Where do unit test files live relative to the code they test?"
 default = "colocated"
-why = "Placing _test.go files in the same directory as the code they test is the universal Go convention enforced by the go tool itself. The _test.go suffix is not just a naming suggestion — it is the mechanism by which go build excludes test code from production binaries and by which go test finds tests. Any other placement (e.g., a separate tests/ directory) requires build tags or manual linkage, breaking the go test ./... idiom. Co-location also keeps tests close to the code they test, making them easy to find and maintain."
+why = "Placing _test.go files in the same directory as the code they test is the universal Go convention enforced by the go tool itself. The _test.go suffix is not just a naming suggestion — it is the mechanism by which go build excludes test code from production binaries and by which go test finds tests. go test ./... does still discover and run tests placed in any valid directory structure (it is not broken by a separate tests/ tree); the real cost of moving tests out of the package directory is that an internal test file (package foo, same package as the code) can reach unexported identifiers directly, which is the mechanism Go relies on for testing internals without exposing them — a test moved to an external directory can only exercise the package through its exported API (an external package foo_test import), forcing either broader exports than the design calls for or duplicated coverage. Co-location also keeps tests close to the code they test, making them easy to find and maintain by convention."
 
 [[option]]
 id = "colocated"
@@ -39,4 +39,4 @@ why = "Required by the go tool for automatic test discovery. Keeps tests adjacen
 id = "separate-test-directory"
 label = "tests in a separate tests/ or test/ sibling directory"
 directive = "Test files live in a separate directory (e.g., tests/, test/, or a mirrored package structure) rather than alongside the source they test."
-why = "Not idiomatic Go. Breaks go test ./... discovery. Requires manual coordination to keep tests aligned with their source."
+why = "Not idiomatic Go, and requires manual coordination to keep tests aligned with their source. It does not break go test ./... discovery itself (the go tool will still find and run valid *_test.go files anywhere under the module), but it forecloses package-internal tests: a test outside the package directory can only exercise code through the package's exported API, so testing an unexported function or field either requires exporting it just for testability or leaving it uncovered."

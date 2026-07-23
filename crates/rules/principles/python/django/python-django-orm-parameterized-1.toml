@@ -11,12 +11,12 @@ verification = "grounded"
 [decision]
 question = "How are dynamic values placed into Django database queries, including raw and extra queries?"
 default = "orm-or-parameterized-raw"
-why = "Django's ORM (`.filter(name=value)`, `.annotate(...)`, `Q(...)`) constructs parameterized queries automatically; user-supplied values never touch the SQL grammar. When the ORM's query API cannot express a query and `.raw()` or `cursor.execute()` must be used, the same parameterization contract must hold: values are passed as the second argument (`cursor.execute('SELECT * FROM t WHERE name = %s', [name])`) and never interpolated into the SQL string. The `extra()` method's `where` argument is especially dangerous because it accepts raw SQL strings and is deprecated since Django 3.2 precisely because it is a common injection vector. An f-string inside `.raw()` or `.extra()` is indistinguishable from direct cursor interpolation and carries the same risk."
+why = "Django's ORM (`.filter(name=value)`, `.annotate(...)`, `Q(...)`) constructs parameterized queries automatically; user-supplied values never touch the SQL grammar. When the ORM's query API cannot express a query and `.raw()` or `cursor.execute()` must be used, the same parameterization contract must hold: values are passed as the second argument (`cursor.execute('SELECT * FROM t WHERE name = %s', [name])`) and never interpolated into the SQL string. The `extra()` method's `where` argument is especially dangerous because it accepts raw SQL strings; Django's own documentation discourages `extra()` in favor of other QuerySet methods (`annotate()`, `Func` expressions, `RawSQL`) or a properly parameterized raw query, precisely because it is a common injection vector — but it has not been formally deprecated or scheduled for removal as of the versions in question, so 'discouraged legacy API' is the accurate characterization, not 'deprecated.' An f-string inside `.raw()` or `.extra()` is indistinguishable from direct cursor interpolation and carries the same risk."
 
 [[option]]
 id = "orm-or-parameterized-raw"
 label = "ORM query API for all queries; parameterized args for unavoidable raw SQL"
-directive = "All database queries use the Django ORM query API (`.filter()`, `.exclude()`, `.annotate()`, `.aggregate()`, `Q(...)`, `F(...)`). When a query cannot be expressed through the ORM, `QuerySet.raw(sql, params=[...])` or `cursor.execute(sql, params=[...])` is used with values passed as the `params` list, never interpolated into the SQL string. `.extra()` is forbidden (deprecated and injection-prone). f-strings, `%`-formatting, `.format()`, and string concatenation inside any raw SQL string are forbidden. Column or table names that must be dynamic come from a fixed allow-list, never from request data."
+directive = "All database queries use the Django ORM query API (`.filter()`, `.exclude()`, `.annotate()`, `.aggregate()`, `Q(...)`, `F(...)`). When a query cannot be expressed through the ORM, `QuerySet.raw(sql, params=[...])` or `cursor.execute(sql, params=[...])` is used with values passed as the `params` list, never interpolated into the SQL string. `.extra()` is forbidden (discouraged by Django's own docs in favor of other QuerySet methods, and injection-prone via its raw-SQL `where` argument). f-strings, `%`-formatting, `.format()`, and string concatenation inside any raw SQL string are forbidden. Column or table names that must be dynamic come from a fixed allow-list, never from request data."
 why = "The ORM parameterizes automatically; raw queries with explicit `params=` bind values separately from the SQL grammar, eliminating injection."
 
 [[option]]
@@ -29,7 +29,7 @@ why = "The canonical Django SQL injection antipattern; every such site is a late
 id = "extra-method"
 label = "use .extra() for complex filtering"
 directive = "Complex queries use `.extra(where=[...])` with values interpolated into the where strings."
-why = "Deprecated since Django 3.2 and injection-prone; replaced by `RawSQL`, `Window`, and other ORM constructs for complex cases."
+why = "Discouraged in Django's own documentation in favor of other QuerySet methods, though not formally deprecated; its `where` argument accepts raw SQL and is injection-prone, and `RawSQL`, `Window`, and other ORM constructs cover most cases it was historically used for."
 
 [[sources]]
 url = "https://docs.djangoproject.com/en/6.0/topics/db/sql/"

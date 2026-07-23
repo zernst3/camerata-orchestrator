@@ -5,11 +5,20 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://fastapi.tiangolo.com/tutorial/path-params/"
+title = "FastAPI — Path Parameters (typed extraction and validation at the framework boundary; medium authority — grounds the mechanism, not this project's specific naming)"
+
+[[sources]]
+url = "https://docs.rs/axum/latest/axum/extract/struct.Path.html"
+title = "axum — extract::Path (deserializes and rejects malformed path captures before the handler runs)"
 
 [decision]
 question = "How are route path and query parameters turned into values the handler uses?"
 default = "typed-extraction"
-why = "A path parameter arrives as text. If each handler parses that text itself, the parsing and its error handling are duplicated across every route, and a handler that forgets to validate operates on a malformed value. Extracting parameters into typed values at the framework boundary, with a parse failure producing a uniform error response before the handler runs, means the handler receives values it can trust and the parse-error path is written once. Parsing inside each handler is flexible but scatters the same logic and invites inconsistent error shapes. Passing raw strings deep into the application defers the failure to wherever the value is finally used, far from the request."
+why = "A path parameter arrives as text. If each handler parses that text itself, the parsing and its error handling are duplicated across every route, and a handler that forgets to validate operates on a malformed value. Extracting parameters into typed values at the framework boundary, with a parse failure producing a uniform error response before the handler runs, means the handler receives values it can trust and the parse-error path is written once. Parsing inside each handler is flexible but scatters the same logic and invites inconsistent error shapes. Passing raw strings deep into the application defers the failure to wherever the value is finally used, far from the request. This rule is a specific instance of the broader `arch-boundary-validation-1` principle (validate every request at the boundary; downstream code trusts only validated values), scoped specifically to path and query parameters rather than the full request (body, headers, etc.)."
 
 [[option]]
 id = "typed-extraction"

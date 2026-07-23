@@ -33,12 +33,12 @@ why = "Makes each identifier kind its own type, so the compiler rejects passing 
 
 [[option]]
 id = "every-id-in-the-codebase-is-a-bare-uuid-with-no"
-label = "every ID in the codebase is a bare Uuid, …"
+label = "Every ID is a bare Uuid"
 directive = "every ID in the codebase is a bare Uuid, with no distinction between a UserId, an OrganizationId, or any other identifier at the type level"
 why = "The simplest, most direct representation: no wrapper types to define, no conversions at any boundary, and trivial interop with databases, serialization, and logging where Uuid is already the native shape. The fit when ID mix-ups are a small risk (a small entity set, or IDs that rarely cross between kinds); its trade-off is that every ID is the same type, so the compiler cannot catch a UserId used where an OrganizationId was meant."
 
 [[option]]
 id = "all-ids-use-a-single-generic-entityid-of-t-type"
-label = "all IDs use a single generic EntityId-of-T type parameterized …"
+label = "Generic EntityId-of-T type for all IDs"
 directive = "all IDs use a single generic EntityId-of-T type parameterized on a phantom marker, rather than each ID being its own concrete newtype"
 why = "Gives one ID definition that still distinguishes kinds at compile time, so the type machinery is written once and every entity reuses it while retaining the compiler's mix-up protection. The fit when the project wants typed IDs without a wrapper per entity; its trade-off is that the phantom parameter has no runtime presence, so any path that converts through a representation that drops it (a JSON payload, a SQL row, a log line) collapses the distinction at that boundary."

@@ -10,19 +10,25 @@ verification = "grounded"
 [decision]
 question = "Where are data integrity rules (required fields, format constraints, uniqueness) enforced?"
 default = "model-validations"
-why = "A Rails controller receives one HTTP request. A background job, a rake task, a Rails console command, and a data migration each bypass the controller entirely and call the model directly. Validating only in the controller means every non-HTTP write path is unguarded. Model-level validations (`validates :email, presence: true, format: { with: URI::MailTo::EMAIL_REGEXP }, uniqueness: true`) run before every `save` regardless of the caller, so the rule is enforced consistently across all write paths. Controller-level checks (checking `params[:email].present?` before building the object) are appropriate for HTTP-specific error messages but not as the sole guard on the data. Database-level constraints (NOT NULL, UNIQUE) are the deepest layer and should mirror the model validations for defense in depth, but are not sufficient alone because they fire after the application tries to write, returning a raw database error."
+why = "A Rails controller receives one HTTP request. A background job, a rake task, a Rails console command, and a data migration each bypass the controller entirely and call the model directly. Validating only in the controller means every non-HTTP write path is unguarded. Model-level validations (`validates :email, presence: true, format: { with: URI::MailTo::EMAIL_REGEXP }, uniqueness: true`) run before every `save` regardless of the caller, so the rule is enforced consistently across all write paths. Controller-level checks (checking `params[:email].present?` before building the object, or whitelisting permitted fields with strong_parameters) are appropriate for HTTP-specific error messages and for rejecting unexpected fields early, but are not a substitute for model validation: they guard only the HTTP entry point, and a background job, rake task, or console write bypasses them entirely. Client-side (JavaScript) validation is a convenience for the user and provides no security guarantee whatsoever, since a forged request bypasses it completely; it must never be treated as an enforcement layer. Database-level constraints (NOT NULL, UNIQUE) are the deepest layer and should mirror the model validations for defense in depth, but are not sufficient alone because they fire after the application tries to write, returning a raw database error."
 
 [[option]]
 id = "model-validations"
 label = "validations declared on the model; database constraints mirror them"
-directive = "Data integrity rules (presence, length, format, numericality, inclusion, uniqueness, custom business rules) are declared as `validates` or `validate` calls on the ActiveRecord model class. Database constraints (NOT NULL, UNIQUE indexes, CHECK) mirror the model validations for defense in depth. Controller-level checks address HTTP-specific concerns (early 400 responses) but are not the sole or primary enforcement point. Writing data without model validations — using `.update_columns`, `update_all`, or `save(validate: false)` — requires an explicit comment justifying the bypass."
+directive = "Data integrity rules (presence, length, format, numericality, inclusion, uniqueness, custom business rules) are declared as `validates` or `validate` calls on the ActiveRecord model class. The controller uses strong_parameters to whitelist which request fields are even accepted before they reach the model, but this is a first line of defense, not the primary guard. Database constraints (NOT NULL, UNIQUE indexes, CHECK) mirror the model validations for defense in depth. Writing data without model validations — using `.update_columns`, `update_all`, or `save(validate: false)` — requires an explicit comment justifying the bypass."
 why = "Model validations fire on every `save` call regardless of the entry point, so background jobs, rake tasks, and console writes all share the same guard."
 
 [[option]]
 id = "controller-validation-only"
-label = "validate input in the controller before passing to the model"
-directive = "Input rules are checked in the controller action (presence checks, format checks) rather than in `validates` declarations on the model."
+label = "validate input in the controller (strong_parameters or ad-hoc checks) before passing to the model"
+directive = "Input rules are checked in the controller action (strong_parameters whitelisting, presence checks, format checks) rather than in `validates` declarations on the model."
 why = "Guards only the HTTP entry point; background jobs, rake tasks, migrations, and console commands bypass the controller entirely and write invalid data silently."
+
+[[option]]
+id = "client-side-validation-only"
+label = "rely on client-side (JavaScript) validation with no server-side guard"
+directive = "Validation is implemented primarily in JavaScript in the browser; the server trusts the client to send valid, well-formed data and performs little or no validation of its own."
+why = "Convenient for the happy path but offers zero protection against a forged or replayed request; an attacker who bypasses the client entirely writes unvalidated data straight to the model."
 
 [[option]]
 id = "database-constraints-only"
@@ -33,3 +39,7 @@ why = "Catches violations at the deepest layer but returns raw database errors r
 [[sources]]
 url = "https://guides.rubyonrails.org/active_record_validations.html"
 title = "Rails Guides — Active Record Validations"
+
+[[sources]]
+url = "https://guides.rubyonrails.org/action_controller_overview.html#strong-parameters"
+title = "Rails Guides — Action Controller Overview: Strong Parameters"

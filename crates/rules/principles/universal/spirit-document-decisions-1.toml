@@ -11,6 +11,10 @@ verification = "grounded"
 url = "CONVENTIONS.md"
 title = "CONVENTIONS.md — §SPIRIT-DOC-DECISIONS-1 (document decisions immediately)"
 
+[[sources]]
+url = "https://www.cognitect.com/blog/2011/11/15/documenting-architecture-decisions"
+title = "Michael Nygard — Documenting Architecture Decisions (the source of the ADR pattern; the 'immediately' strengthening beyond ADR-on-drift is project-specific)"
+
 [decision]
 question = "What position does the project take on: Document decisions immediately?"
 default = "document-decisions-immediately"
@@ -24,6 +28,6 @@ why = "Decisions made only in conversation evaporate; agents cannot cite them an
 
 [[option]]
 id = "decisions-accumulate-in-conversation-as-they-are"
-label = "decisions accumulate in conversation as they are made and …"
+label = "Document decisions later in a batched pass"
 directive = "decisions accumulate in conversation as they are made and are written to durable artifacts in a documentation pass later, batched by week, sprint, or feature shipment"
 why = "Batching documentation into a later pass reliably causes drift and re-litigation: memory fades faster than the documentation pass arrives, so subsequent work silently re-derives or contradicts decisions before the batch is ever written."

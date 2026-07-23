@@ -19,19 +19,19 @@ why = "Matches SeaORM's generator output, which emits one file per table, so gen
 
 [[option]]
 id = "entities-are-grouped-by-domain-concept-inside-th"
-label = "entities are grouped by domain concept inside the entities …"
+label = "Group entities by domain concept in subdirectories"
 directive = "entities are grouped by domain concept inside the entities crate, so each domain concept has its own subdirectory or module containing the entities related to it"
 why = "Mirrors how a reader who thinks in domain concepts reasons about the data, so related entities are gathered and the crate's structure carries meaning. The fit when navigation is concept-driven rather than table-driven; its trade-off is that finding an entity by table name requires knowing the project's grouping, and the grouping diverges from generator output, making a single-table regeneration a merge rather than a file replacement."
 
 [[option]]
 id = "the-entities-crate-exposes-a-prelude-module-that"
-label = "the entities crate exposes a prelude module that re-exports …"
+label = "Prelude module re-exporting entities under short paths"
 directive = "the entities crate exposes a prelude module that re-exports many entities under shorter paths, and consumers import from the prelude rather than from per-entity modules"
 why = "Gives consumers concise, stable import paths and a curated public surface, which is worth it for a crate whose API is meant to be presented as more than a raw entity list. Its trade-off is the indirection of the prelude and the need to keep it in sync as entities are added or removed, which is maintenance an internal entities crate may not earn back."
 
 [[option]]
 id = "multiple-small-related-entities-are-inlined-into"
-label = "multiple small related entities are inlined into a single …"
+label = "Inline multiple small entities into one file"
 directive = "multiple small related entities are inlined into a single file rather than each entity living in its own file under entities/"
 why = "Reduces file count and keeps closely-related definitions side by side, so a small cluster of entities that are always read together lives in one place. Its trade-off is that the table-name-to-file-name lookup no longer holds, so navigating to an entity requires knowing which multi-entity file it lives in rather than opening the file named for the table."
 

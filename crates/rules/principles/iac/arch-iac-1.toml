@@ -11,10 +11,18 @@ verification = "grounded"
 url = "docs/decisions/2026-06-15_credential_delegated_scope_and_build_targets.md"
 title = "Decision: Credential-delegated scope + story-source/build-target separation (per-environment isolation pattern)"
 
+[[sources]]
+url = "https://www.oreilly.com/library/view/infrastructure-as-code/9781098114664/"
+title = "Kief Morris — Infrastructure as Code, 2nd Edition (O'Reilly)"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html"
+title = "OWASP Secrets Management Cheat Sheet"
+
 [decision]
 question = "What position does the project take on: Infrastructure as code, per-environment isolation?"
 default = "infrastructure-as-code-per-environment-isolation"
-why = "Reproducible environments, centralized rotation, no credential sprawl. Provisioning infrastructure manually through a cloud console and storing secrets in the repository or CI configuration produces silent drift between environments, sprawls credentials across artifacts the team cannot fully enumerate, and removes any centralized path for rotation; the next 'who has this key' question has no good answer."
+why = "Reproducible environments, centralized rotation, no credential sprawl. Provisioning infrastructure manually through a cloud console produces silent drift between environments with no audit trail or reproducibility, and storing secrets directly in the repository or CI configuration sprawls credentials across artifacts the team cannot fully enumerate and persists them in git history even after rotation; the next 'who has this key' question has no good answer either way. These are two distinct failure modes — one about how infrastructure changes are made, the other about where credentials live — and a project can have either without the other."
 
 [[option]]
 id = "infrastructure-as-code-per-environment-isolation"
@@ -24,6 +32,12 @@ why = "Reproducible environments, centralized rotation, no credential sprawl."
 
 [[option]]
 id = "infrastructure-is-provisioned-manually-through-a"
-label = "infrastructure is provisioned manually through a cloud console (click-ops) …"
-directive = "infrastructure is provisioned manually through a cloud console (click-ops) and secrets are stored in the repository or CI configuration rather than in a per-environment vault"
-why = "Manual console provisioning produces silent drift between environments and sprawls credentials across artifacts the team cannot fully enumerate; the next 'who has this key' question has no good answer and centralized rotation has no path."
+label = "infrastructure is provisioned manually through a cloud console (click-ops), with no IaC"
+directive = "Infrastructure is provisioned and changed manually through a cloud console (click-ops) rather than through IaC definitions checked into source control."
+why = "Manual console provisioning leaves no audit trail of what changed, when, or why; it produces silent drift between environments that are supposed to be identical (dev/staging/prod diverge one manual click at a time); and it isn't reproducible — recreating the environment from scratch (disaster recovery, a new region, a new environment) requires someone to remember or reverse-engineer every manual step rather than replaying a plan."
+
+[[option]]
+id = "secrets-committed-directly-into-iac-source-files"
+label = "secrets/credentials are committed directly into IaC source files"
+directive = "Secrets or credentials (API keys, connection strings, private keys) are written directly into IaC source files (e.g. hardcoded in a Terraform .tf file or a tfvars file checked into the repo) rather than sourced from a per-environment vault or secret manager at apply time."
+why = "Committing secrets into IaC source exposes them to everyone with repo read access, not just those who should hold the credential, and git history makes exposure durable — rotating the credential doesn't remove it from history, and a leaked repo (or an overly broad CI token) means every historical secret is compromised too. This is an orthogonal failure mode to click-ops: a project can be fully IaC-driven with excellent change tracking and still leak credentials this way if secrets aren't routed through a vault."

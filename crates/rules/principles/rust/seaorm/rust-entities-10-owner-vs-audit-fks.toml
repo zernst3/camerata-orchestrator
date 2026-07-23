@@ -10,7 +10,7 @@ verification = "grounded"
 [decision]
 question = "What position does the project take on: Owner + audit FKs to the same parent: belongs_to on child only; no reverse has_many for audit FKs?"
 default = "owner-audit-fks-to-the-same-parent-belongs-to-on"
-why = "Audit-direction reverse traversal is rare in practice and would balloon the parent entity file with near-identical variants. The macro's coherence rule caps find_related at one variant per pair anyway. Declaring every reverse has_many variant for audit FKs bloats the parent entity file with near-identical declarations for traversal directions the project rarely needs, and the bloat compounds as new audit columns are added across entities. Dropping audit FKs to plain Uuid columns gives the file diet but loses compile-time FK validation entirely for those columns, so referential bugs in audit data go from build-time errors to silent runtime mismatches."
+why = "Audit-direction reverse traversal is rare in practice and would balloon the parent entity file with near-identical variants. The macro's coherence rule caps find_related at one variant per pair anyway. Declaring every reverse has_many variant for audit FKs bloats the parent entity file with near-identical declarations for traversal directions the project rarely needs, and the bloat compounds as new audit columns are added across entities. Dropping audit FKs to plain Uuid columns loses the belongs_to relation for those columns — SeaORM's compile-time-checked traversal (find_related, joins expressed through the relation) stops working for them and any join has to be hand-written. Actual referential-integrity enforcement (rejecting a write that references a nonexistent parent row) is a separate, DB-level property that comes from a REFERENCES constraint on the column in the migration/schema, independent of whether the entity declares a belongs_to relation for it — a plain Uuid column can still be DB-constrained (and should be, for audit FKs) even without an ORM relation annotation; what's actually lost by dropping the relation is ergonomic, type-checked navigation in Rust code, not the underlying database enforcement."
 
 [[option]]
 id = "owner-audit-fks-to-the-same-parent-belongs-to-on"
@@ -20,15 +20,15 @@ why = "Audit-direction reverse traversal is rare in practice and would balloon t
 
 [[option]]
 id = "the-parent-entity-declares-a-reverse-has-many-va"
-label = "the parent entity declares a reverse has_many variant for …"
+label = "Reverse has_many variant for every audit FK"
 directive = "the parent entity declares a reverse has_many variant for every audit FK pointing at it, alongside the variant for the owner FK"
 why = "Bloats the parent entity file with near-identical declarations for traversal directions the project rarely needs, and the bloat compounds as new audit columns are added across entities; the macro's coherence rule also caps find_related at one variant per pair, so additional variants require via_rel disambiguation that adds complexity without proportional benefit."
 
 [[option]]
 id = "the-entity-stores-its-audit-relationships-create"
-label = "the entity stores its audit relationships (created_by, modified_by) as …"
+label = "Audit relationships stored as plain Uuid columns"
 directive = "the entity stores its audit relationships (created_by, modified_by) as plain Uuid columns rather than as foreign keys to the parent entity"
-why = "Gives the file a diet but loses compile-time FK validation entirely for those columns: referential bugs in audit data go from build-time errors to silent runtime mismatches where a deleted user leaves a dangling Uuid with no ORM-level enforcement."
+why = "Gives the file a diet but loses SeaORM's type-checked relation traversal (find_related, relation-driven joins) for those columns — that is a Rust-side navigation loss, not a database-enforcement loss: whether a deleted user can leave a dangling Uuid behind depends on the REFERENCES constraint (or lack of one) on that column in the migration, which is independent of whether an ORM relation is declared for it. Audit columns should still carry a real DB-level FK constraint even when the project chooses not to declare the corresponding ORM relation."
 
 [[sources]]
 url = "https://www.sea-ql.org/SeaORM/docs/relation/one-to-many/"

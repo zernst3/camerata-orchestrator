@@ -11,6 +11,10 @@ verification = "grounded"
 url = "docs/decisions/2026-06-14_persistence_sqlite_event_sourced_versioning.md"
 title = "Decision: Persistence — SQLite now, event-sourced versioning, Postgres later (single-process Tokio monolith was the chosen topology for THIS project)"
 
+[[sources]]
+url = "https://martinfowler.com/bliki/MonolithFirst.html"
+title = "Martin Fowler — MonolithFirst"
+
 [decision]
 question = "What deployment topology does the project adopt: a single service, a message broker for inter-component work, or independent services?"
 why = "All three are legitimate topologies and the right one follows from the project's actual boundaries — team structure, deployment and failure-isolation needs, and the shape of the load — not from a presumed winner. A single service keeps everything in one process: in-process calls, one thing to deploy and operate, no cross-service consistency to design, which fits a product whose components ship and scale together. A message broker decouples producers from consumers and absorbs bursts and fan-out: the right shape when work is genuinely asynchronous (slow third-party calls, fan-out workloads, spikes that must be buffered) or an event backbone is already part of the architecture. Independent services give each part its own deploy cadence, scaling profile, failure isolation, and (optionally) language — the right shape when separate teams own separate surfaces, parts scale very differently, or strong isolation between them is a requirement. Each buys its benefit at a real cost (a broker and a service split add operational surface and delivery/consistency concerns; a single service couples deploy and scaling), so choose by which boundaries the project actually has, and revisit when they change."

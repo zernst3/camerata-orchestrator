@@ -11,6 +11,10 @@ verification = "grounded"
 url = "AGENTS.md"
 title = "AGENTS.md — ORCH-OUTPUT-DIGEST-1 (output discipline — local-mostly + single consolidated digest)"
 
+[[sources]]
+url = "https://sre.google/sre-book/monitoring-distributed-systems/"
+title = "Google SRE Book — Monitoring Distributed Systems (alert on symptoms, keep noise out of paging channels)"
+
 [decision]
 question = "How should routines report their output?"
 default = "local-artifacts-a-single-consolidated-daily-dige"

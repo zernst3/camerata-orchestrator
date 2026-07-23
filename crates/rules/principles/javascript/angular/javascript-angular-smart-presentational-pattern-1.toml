@@ -19,6 +19,6 @@ why = "The pattern makes presentational components reusable and testable without
 
 [[option]]
 id = "components-mix-business-logic-state-and-presentat"
-label = "components mix business logic, state, and presentation …"
+label = "Mix all concerns in components"
 directive = "components mix business logic, service calls, state management, and presentation together, without a consistent separation between smart and dumb layers"
 why = "When all logic lives in a single component, the component becomes a monolith that is difficult to test (every test needs a full setup of services and state), difficult to reuse (it can only render in the context where that state is available), and difficult to understand at a glance. Mixing service calls, state management, and rendering in the same component means a change to any layer touches code that handles all of them."

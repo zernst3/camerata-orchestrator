@@ -24,6 +24,6 @@ why = "React-Redux uses a shallow reference check to decide on re-renders, so an
 
 [[option]]
 id = "reducers-mutate-the-existing-state-object-in-pla"
-label = "reducers mutate the existing state object in place …"
+label = "Mutate state in place within reducers"
 directive = "reducers mutate the existing state object in place and return it, relying on the mutated reference to carry the change, rather than returning a new state value with the changed parts replaced"
 why = "Mutating the existing state object in place and returning it keeps the same object reference, so React-Redux's shallow === check reports the state as unchanged and the UI silently fails to update even though the data changed. The same in-place mutation also corrupts time-travel debugging and undo/redo history, which assume past states are preserved; this produces a 'my state changed but nothing rendered' bug rather than an error."

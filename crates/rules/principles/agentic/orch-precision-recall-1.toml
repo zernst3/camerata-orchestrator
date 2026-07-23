@@ -5,7 +5,7 @@ domain = "agentic"
 layer = "universal"
 enforcement = "prose"
 default = true
-verification = "grounded"
+verification = "policy"
 
 [[sources]]
 url = "AGENTS.md"
@@ -14,12 +14,12 @@ title = "AGENTS.md — ORCH-PRECISION-RECALL-1 (autonomous detection defaults to
 [decision]
 question = "How should autonomous detection signals balance false positives against false negatives?"
 default = "default-to-recall-opt-specific-signals-into-prec"
-why = "False positives are recoverable. The routine pauses, a human takes a minute to investigate, the false positive gets dismissed, the routine resumes. Annoying but cheap. False negatives are silent: the issue slips through, compounds across subsequent runs, and the team never learns it was missed. Cheap upfront, expensive forever. Defaulting to recall keeps the cost of being wrong in the recoverable lane. Defaulting to precision puts it in the silent lane. Tuning detection for strong-tier signals only and accepting missed issues to avoid false-positive halts is defensible when the routine has very high opportunity cost from pauses, but is risky when missed issues compound silently across subsequent runs — exactly the dynamic the recall-default protects against. Accepting whatever recall and precision the detection naturally produces works at small scale but becomes unworkable as routine volume grows and detection signals proliferate, because the un-tuned mix produces neither catching power nor predictable noise floors."
+why = "False positives are recoverable. A false positive is flagged, a human eventually reviews it, dismisses it, and the routine's other work was never blocked. Annoying but cheap. False negatives are silent: the issue slips through, compounds across subsequent runs, and the team never learns it was missed. Cheap upfront, expensive forever. Defaulting to recall keeps the cost of being wrong in the recoverable lane. Defaulting to precision puts it in the silent lane. Tuning detection for strong-tier signals only and accepting missed issues to avoid noise is defensible when the routine has very high opportunity cost from review load, but is risky when missed issues compound silently across subsequent runs — exactly the dynamic the recall-default protects against. Accepting whatever recall and precision the detection naturally produces works at small scale but becomes unworkable as routine volume grows and detection signals proliferate, because the un-tuned mix produces neither catching power nor predictable noise floors. This rule governs detection sensitivity only — how liberally a signal fires; it does not by itself decide whether a firing signal hard-pauses the routine or merely soft-flags and lets other work continue. That gating decision is `orch-tiered-escalation-1`'s job: a broadly-tuned, high-recall signal routes through the same soft-flag-by-default/hard-pause-only-for-guard-areas escalation as any other flagged item, so casting a wide detection net does not itself mean the routine halts constantly."
 
 [[option]]
 id = "default-to-recall-opt-specific-signals-into-prec"
 label = "default to recall, opt specific signals into precision-tuning"
-directive = "Detection signals in autonomous routines (tech-debt sniffers, anomaly flags, drift detectors, anything that gates the routine on a judgment call) are tuned broadly. Anything that could plausibly be a real issue triggers a pause, including borderline cases that turn out to be false positives. The cost of stopping to investigate a false positive is small and recoverable. The cost of letting a real issue slip through silently is unbounded. Default posture: catch too much, not too little."
+directive = "Detection signals in autonomous routines (tech-debt sniffers, anomaly flags, drift detectors, anything that gates the routine on a judgment call) are tuned broadly. Anything that could plausibly be a real issue is flagged, including borderline cases that turn out to be false positives; per `orch-tiered-escalation-1`, most of those flags soft-flag (logged, routine continues) and only hard-guard-area or overflow cases hard-pause. The cost of a reviewer later dismissing a false positive is small and recoverable. The cost of letting a real issue slip through silently is unbounded. Default posture: catch too much, not too little, and let the escalation tier — not detection sensitivity — decide what actually halts the routine."
 why = "False positives are recoverable."
 
 [[option]]

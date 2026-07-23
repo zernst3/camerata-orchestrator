@@ -5,7 +5,7 @@ domain = "java:testing"
 layer = "language"
 enforcement = "mechanical"
 default = true
-qualifies = "Enforced by SpotBugs (SIC_INNER_SHOULD_BE_STATIC_ANON, IJU_ASSERT_METHOD_INVOKED_FROM_RUN_METHOD) and PMD (DoNotCallGarbageCollectionExplicitly). Thread.sleep in tests can be caught by Checkstyle or Semgrep regex patterns. JUnit 5's @TestMethodOrder(MethodOrderer.Random.class) can reveal hidden ordering dependencies. Conformance holds when: no Thread.sleep() appears in test code; time-dependent logic uses an injected Clock mock; random inputs use a fixed seed; each @Test method is independent of every other @Test method in the class."
+qualifies = "Enforced by SpotBugs (IJU_ASSERT_METHOD_INVOKED_FROM_RUN_METHOD, the one SpotBugs pattern that actually targets JUnit threading anti-patterns — SIC_INNER_SHOULD_BE_STATIC_ANON and PMD's DoNotCallGarbageCollectionExplicitly are unrelated to test determinism and are not cited as enforcement here). Thread.sleep in tests can be caught by Checkstyle or Semgrep regex patterns. JUnit 5's @TestMethodOrder(MethodOrderer.Random.class) can reveal hidden ordering dependencies. Conformance holds when: no Thread.sleep() appears in test code; time-dependent logic uses an injected Clock mock; random inputs use a fixed seed; each @Test method is independent of every other @Test method in the class."
 verification = "grounded"
 
 [decision]
@@ -21,6 +21,10 @@ linter = "SpotBugs: IJU_ASSERT_METHOD_INVOKED_FROM_RUN_METHOD"
 [[sources]]
 url = "https://docs.junit.org/5.14.1/writing-tests/annotations.html"
 title = "JUnit 5 User Guide — Annotations (@BeforeEach resets per-test state; @AfterEach cleans up)"
+
+[[sources]]
+url = "https://martinfowler.com/articles/nonDeterminism.html"
+title = "Martin Fowler — Eradicating Non-Determinism in Tests (time, ordering, and randomness as the classic sources of flakiness)"
 
 [[option]]
 id = "no-sleep-no-clock-no-random"

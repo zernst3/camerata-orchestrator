@@ -16,6 +16,10 @@ title = "AGENTS.md — ORCH-CONFORMANCE-1 (codified architectural commitments ar
 url = "docs/RATIONALE.md"
 title = "docs/RATIONALE.md — §2 The approach: two deterministic layers (the enforcement thesis)"
 
+[[sources]]
+url = "https://www.oreilly.com/library/view/building-evolutionary-architectures/9781491986356/"
+title = "Ford, Parsons, Kua — Building Evolutionary Architectures (fitness functions as enforced, executable governance)"
+
 [decision]
 question = "What position does the project take on: Codified architectural commitments are enforced gates, not advisory documents?"
 default = "codified-architectural-commitments-are-enforced"
@@ -29,18 +33,18 @@ why = "A commitment that nobody checks degrades into a commitment nobody respect
 
 [[option]]
 id = "architectural-commitments-are-held-as-advisory-d"
-label = "architectural commitments are held as advisory documents that reviewers …"
+label = "Advisory documents (ad hoc citations)"
 directive = "architectural commitments are held as advisory documents that reviewers cite ad hoc when they happen to notice violations during code review, with no mechanical or systematic enforcement step"
 why = "Advisory-only commitments work at small human-review scale but degrade at AI throughput, because ad hoc citations become inconsistent and selective across hundreds of changes."
 
 [[option]]
 id = "architectural-commitments-are-mechanically-enfor"
-label = "architectural commitments are mechanically enforced on every change with …"
+label = "Enforce without waivers"
 directive = "architectural commitments are mechanically enforced on every change with no waiver mechanism; a violation either rewrites the rule upstream or is rejected outright"
 why = "Enforcement without a waiver mechanism is overrigid; it pushes legitimate edge cases into rule-rewriting cycles or silent bypasses outside the recorded path, defeating the durability the enforcement step was meant to create."
 
 [[option]]
 id = "architectural-commitments-live-only-in-the-agent"
-label = "architectural commitments live only in the agent's prompt context …"
+label = "Prompt-only (no verification)"
 directive = "architectural commitments live only in the agent's prompt context for each run, with no separate verification step on the agent's output"
 why = "Prompt-only commitments drift between runs because nothing verifies adherence after the agent's turn ends; the next session may simply forget or selectively recall them."

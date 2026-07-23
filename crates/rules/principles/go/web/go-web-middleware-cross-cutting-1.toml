@@ -5,6 +5,15 @@ domain = "go:web"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://pkg.go.dev/net/http#Handler"
+title = "net/http — Handler (the interface middleware wraps to compose cross-cutting behavior around a handler chain; medium authority — grounds the mechanism, not the mandate)"
+
+[[sources]]
+url = "https://gin-gonic.com/en/docs/middleware/using-middleware/"
+title = "Gin Web Framework — Using middleware"
 
 [decision]
 question = "How should cross-cutting concerns like logging, authentication, timeouts, and panic recovery be handled across handlers?"

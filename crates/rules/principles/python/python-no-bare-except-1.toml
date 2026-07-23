@@ -8,6 +8,14 @@ default = true
 qualifies = "Enforced by a linter rule (Ruff E722 / flake8 bare-except, plus BLE001 for blind `except Exception`) at error severity. Conformance holds when the rule runs in CI and a `except:` or unjustified `except Exception:` fails the build; it fails when the rule is absent or only warns."
 verification = "grounded"
 
+[[sources]]
+url = "https://docs.astral.sh/ruff/rules/blind-except/"
+title = "Ruff — blind-except (BLE001)"
+
+[[sources]]
+url = "https://peps.python.org/pep-0008/#programming-recommendations"
+title = "PEP 8 — Programming Recommendations (bare except discouraged)"
+
 [decision]
 question = "What may an exception handler catch?"
 default = "catch-specific"

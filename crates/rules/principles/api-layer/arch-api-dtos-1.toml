@@ -6,6 +6,15 @@ layer = "universal"
 enforcement = "architectural"
 default = false
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: the predicate is 'controller/route-handler files must not import domain types' (which modules count as 'domain' and which as 'controller' is project-specific), so it requires a custom AST/static-analysis CI gate — a project-configured import-boundary rule (ESLint no-restricted-imports / import/no-restricted-paths with the project's domain and controller paths wired in, dependency-cruiser, a Rust module-visibility constraint, or the stack equivalent). The off-the-shelf rule-ids exist but carry no DTO/domain semantics until the project configures the zones, so this is a custom check, not a citable off-the-shelf rule. Conformance holds when that custom gate runs in CI and a controller referencing a domain type fails the build; it fails when no rule blocks the import and a controller can return a domain type directly."
+verification = "grounded"
+
+[[sources]]
+url = "https://martinfowler.com/eaaCatalog/dataTransferObject.html"
+title = "Martin Fowler — Patterns of Enterprise Application Architecture: Data Transfer Object"
+
+[[sources]]
+url = "https://martinfowler.com/bliki/LocalDTO.html"
+title = "Martin Fowler — LocalDTO"
 
 [decision]
 question = "What types cross the API boundary: dedicated DTOs mapped to and from domain types, the domain types directly, or a single model shared between the wire and the domain?"

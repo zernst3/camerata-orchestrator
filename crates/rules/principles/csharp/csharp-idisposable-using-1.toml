@@ -5,9 +5,17 @@ domain = "csharp"
 layer = "language"
 enforcement = "mechanical"
 default = true
-qualifies = "Enforced by Roslyn analyzer rules (CA1001, CA1816, IDE0090) that flag IDisposable objects created without using and missing explicit Dispose calls. Conformance holds when the rule runs in CI and resources not wrapped in using fail the build."
+qualifies = "Enforced by Roslyn analyzer rules CA2000 (Dispose objects before losing scope) and IDE0063 (Use simple 'using' statement — prefer the C# 8+ using declaration over a using-statement block; not IDE0090, which is an unrelated 'new' expression simplification rule). CA1001 (Types that own disposable fields should be disposable) is a related but distinct rule about a type's own Dispose implementation, not about wrapping local IDisposable usage in using; it does not conflict with a blanket 'no manual Dispose() calls' directive for LOCAL resource usage, since CA1001 is about a class exposing Dispose for resources it owns as fields, not about how a method-local IDisposable is released. Conformance holds when these rules run in CI and a disposable resource created without a using declaration/statement, or not eventually disposed, fails the build."
 
 verification = "grounded"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/fundamentals/code-analysis/quality-rules/ca2000"
+title = "CA2000: Dispose objects before losing scope"
+
+[[sources]]
+url = "https://learn.microsoft.com/en-us/dotnet/fundamentals/code-analysis/style-rules/ide0063"
+title = "IDE0063: Use simple 'using' statement"
 [decision]
 question = "How are IDisposable resources managed?"
 default = "using-declarations"

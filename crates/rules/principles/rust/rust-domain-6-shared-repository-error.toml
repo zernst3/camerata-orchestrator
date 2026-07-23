@@ -17,7 +17,7 @@ title = "The Rust Book — Ch 9.2: Recoverable Errors with Result"
 
 [decision]
 question = "How does the project organize the typed error enums a crate exposes at its public boundary?"
-why = "A crate's public boundary should expose typed, crate-owned error enums that callers can exhaustive-match on, with framework or driver errors mapped into them at the boundary rather than leaked through. Within that, how the enums are grouped is a genuine organizational choice. One shared enum per failure CATEGORY (persistence, validation, business rule, parsing, and so on) keeps callers matching a small, stable set and is a natural fit for larger crates whose failure surfaces recur across many operations. One enum per MODULE or AGGREGATE keeps each error type next to the code it describes and is a natural fit for crates organized around independent aggregates, where co-locating the error with its owner aids cohesion. The choice follows from the crate's size and how its failures cluster, not from a presumed winner. Two shapes are not organizational choices but boundary failures, and are called out as the options to avoid regardless of which organization is chosen: collapsing every category into one grab-bag enum, and erasing types through Box of dyn Error / anyhow or re-exporting a framework's error type — both defeat exhaustive matching and a stable public surface."
+why = "This rule assumes `rust-domain-4-errors-via-thiserror`'s default (a typed thiserror enum per crate boundary) and addresses the narrower, separate question of how the variants within that enum are organized — it is not an alternative to rust-domain-4, it is the follow-on organizational choice once rust-domain-4's default applies. A crate's public boundary should expose typed, crate-owned error enums that callers can exhaustive-match on, with framework or driver errors mapped into them at the boundary rather than leaked through. Within that, how the enums are grouped is a genuine organizational choice. One shared enum per failure CATEGORY (persistence, validation, business rule, parsing, and so on) keeps callers matching a small, stable set and is a natural fit for larger crates whose failure surfaces recur across many operations. One enum per MODULE or AGGREGATE keeps each error type next to the code it describes and is a natural fit for crates organized around independent aggregates, where co-locating the error with its owner aids cohesion. The choice follows from the crate's size and how its failures cluster, not from a presumed winner. Two shapes are not organizational choices but boundary failures, and are called out as the options to avoid regardless of which organization is chosen: collapsing every category into one grab-bag enum, and erasing types through Box of dyn Error / anyhow or re-exporting a framework's error type — both defeat exhaustive matching and a stable public surface."
 
 [[option]]
 id = "errors-are-category-scoped-one-shared-enum-per-f"
@@ -33,18 +33,18 @@ why = "Keeps each error type local to its aggregate: the failures of one bounded
 
 [[option]]
 id = "the-crate-exposes-a-single-error-enum-that-mixes"
-label = "the crate exposes a single error enum that mixes …"
+label = "Single error enum mixing every failure category"
 directive = "the crate exposes a single error enum that mixes every failure category (persistence, validation, business rule, parsing, networking) into one type, rather than splitting failures into category enums or per-aggregate enums"
 why = "Collapses orthogonal concerns regardless of how the rest of the crate is organized: callers cannot distinguish a validation failure from a persistence failure without inspecting the variant, the single enum's arms accumulate without bound as the crate grows, and a match that handles only one failure surface must either wildcard or exhaustively name unrelated variants."
 
 [[option]]
 id = "the-crate-re-exports-the-underlying-framework-s"
-label = "the crate re-exports the underlying framework's or driver's error …"
+label = "Re-export the underlying driver's error type"
 directive = "the crate re-exports the underlying framework's or driver's error type from its public API directly, rather than mapping framework errors into a crate-owned enum at the boundary"
 why = "Breaks the boundary entirely: the crate's public surface inherits the framework's error semantics and breaks every caller every time the framework upgrades, defeating the purpose of having a crate boundary between them — a problem under any error organization."
 
 [[option]]
 id = "the-crate-s-public-functions-return-box-of-dyn-e"
-label = "the crate's public functions return Box of dyn Error …"
+label = "Public functions return Box-dyn-Error or anyhow"
 directive = "the crate's public functions return Box of dyn Error or anyhow Error as their error type, rather than typed enums callers can match on"
 why = "Eliminates exhaustive matching: consumers cannot recover specific failure modes and the type system stops helping with error handling, which is the entire reason a typed error enum exists at the boundary — independent of whether errors are grouped by category or by aggregate."

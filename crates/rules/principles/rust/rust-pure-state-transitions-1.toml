@@ -5,6 +5,15 @@ domain = "rust"
 layer = "library"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://guide.elm-lang.org/architecture/"
+title = "The Elm Architecture — model/update/view: update is a pure function from (msg, model) to a new model"
+
+[[sources]]
+url = "https://redux.js.org/understanding/thinking-in-redux/three-principles"
+title = "Redux — Three Principles (state changes are described by pure reducer functions)"
 
 [decision]
 question = "How does the core of a library compute a state change in response to an event?"

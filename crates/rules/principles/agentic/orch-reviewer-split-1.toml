@@ -15,6 +15,10 @@ title = "AGENTS.md — ORCH-REVIEWER-SPLIT-1 (reviewer agent distinct from autho
 url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
 title = "Decision: Cross-agent rules — the integration gate (reviewer-author separation principle)"
 
+[[sources]]
+url = "https://arxiv.org/abs/2404.13076"
+title = "Panickssery, Bowman, Feng — LLM Evaluators Recognize and Favor Their Own Generations (arXiv:2404.13076)"
+
 [decision]
 question = "What position does the project take on: The reviewer agent for any change is distinct from the author agent?"
 default = "the-reviewer-agent-for-any-change-is-distinct-fr"
@@ -28,18 +32,18 @@ why = "An agent that reviews its own output inherits its own blindspots: the arc
 
 [[option]]
 id = "the-same-agent-that-authored-a-change-also-revie"
-label = "the same agent that authored a change also reviews …"
+label = "Same agent authors and reviews"
 directive = "the same agent that authored a change also reviews it, with no separation between author and reviewer agent"
 why = "Self-review is the failure mode this rule exists to prevent: the author's blindspots transfer directly to the review, so architectural drift the author missed at write time is the same drift the same agent will miss at review time."
 
 [[option]]
 id = "a-different-instance-of-the-same-model-with-the"
-label = "a different instance of the same model with the …"
+label = "Different instance, same model and prompt"
 directive = "a different instance of the same model with the same prompt and the same principles set reviews the change"
 why = "Using a different instance with the same prompt and principles set catches some blindspots but shares model-level priors, so subtle drift that both instances generate from shared training will survive both passes anyway."
 
 [[option]]
 id = "the-reviewer-agent-reads-the-author-agent-s-reas"
-label = "the reviewer agent reads the author agent's reasoning trace …"
+label = "Read author's reasoning trace"
 directive = "the reviewer agent reads the author agent's reasoning trace alongside the diff when evaluating the change"
 why = "Letting the reviewer read the author's reasoning trace allows the author's framing to color the reviewer's evaluation, weakening the independence the separate-reviewer rule exists to preserve."

@@ -28,6 +28,6 @@ why = "With live users, a single deploy can't be paired with a breaking schema c
 
 [[option]]
 id = "breaking-schema-changes-drop-rename-not-null-add"
-label = "breaking schema changes (drop, rename, NOT-NULL additions) ship in …"
+label = "Breaking schema changes ship in a single deploy"
 directive = "breaking schema changes (drop, rename, NOT-NULL additions) ship in a single deploy without an expand-then-contract split, applying the destructive change in the same release as the application code that depends on the new shape"
 why = "Simpler to execute (one deploy, one migration) but opens an incompatibility window where running application code expects one schema shape and the database has another. Any request that lands during that window fails in a way the application cannot catch or retry."

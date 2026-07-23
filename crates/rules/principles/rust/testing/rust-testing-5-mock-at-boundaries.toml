@@ -15,10 +15,6 @@ title = "The Rust Book — Ch 10.2: Traits as Parameters (trait-based dependency
 url = "https://docs.rs/mockall/latest/mockall/"
 title = "mockall — Automock attribute for generating mock implementations of traits"
 
-[[sources]]
-url = "https://users.rust-lang.org/t/idiomatic-rust-way-of-testing-mocking/128024"
-title = "Rust Users Forum — Idiomatic Rust way of testing/mocking (trait injection discussion)"
-
 [decision]
 question = "What position does the project take on: how are external dependencies replaced in Rust unit tests?"
 default = "mock-at-trait-boundaries-inject-via-generic-or-dyn"

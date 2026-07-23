@@ -13,7 +13,7 @@ title = "Angular — Unsubscribing with takeUntilDestroyed"
 
 [[sources]]
 url = "https://github.com/angular-eslint/angular-eslint/blob/main/packages/eslint-plugin/README.md"
-title = "angular-eslint — no-implicit-take-until-destroyed"
+title = "angular-eslint — no-implicit-take-until-destroyed (requires an explicit DestroyRef when takeUntilDestroyed() is called outside an injection context; it does not itself enforce that a subscription is cleaned up at all)"
 linter = "@angular-eslint/no-implicit-take-until-destroyed"
 
 [decision]
@@ -29,6 +29,6 @@ why = "takeUntilDestroyed and the async pipe guarantee cleanup and prevent memor
 
 [[option]]
 id = "manual-subscribe-calls-are-tracked-and-unsubscrib"
-label = "manual subscribe calls are tracked and unsubscribed …"
+label = "Manual subscription tracking"
 directive = "Observable subscriptions are handled manually using .subscribe() calls, tracked in fields, and cleaned up by calling .unsubscribe() in ngOnDestroy()"
 why = "Manually tracking subscriptions in fields and unsubscribing in ngOnDestroy is error-prone: the cleanup hook is easy to forget when adding a new subscription, and a subscription that is active longer than needed fires handlers on a destroyed component, producing 'ExpressionChangedAfterItHasBeenChecked' errors, memory leaks, and duplicate event listeners. The manual pattern is also more verbose and requires the developer to remember the cleanup obligation at every new subscribe call."

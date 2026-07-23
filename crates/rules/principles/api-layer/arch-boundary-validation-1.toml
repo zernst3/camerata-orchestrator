@@ -5,11 +5,20 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html"
+title = "OWASP Input Validation Cheat Sheet"
+
+[[sources]]
+url = "https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/"
+title = "Alexis King — Parse, Don't Validate"
 
 [decision]
 question = "What position does the project take on: Validate every request at the boundary; downstream code trusts only validated values?"
 default = "validate-every-request-at-the-boundary-downstrea"
-why = "Centralizing validation at one tier eliminates the defensive re-validation that otherwise creeps into every service method. Downstream code becomes simpler and faster because every value it receives is, by construction, valid. Validating everywhere (each layer re-checks) hurts performance because the same checks run multiple times, and different layers eventually disagree on what counts as valid, since each layer's checks evolve independently. Trusting incoming data and failing late at the database or external service produces vague errors far from the source, and the request may have already partially succeeded before the failure surfaces, leaving inconsistent state behind."
+why = "Centralizing validation at one tier eliminates the defensive re-validation that otherwise creeps into every service method. Downstream code becomes simpler and faster because every value it receives is, by construction, valid. Validating everywhere (each layer re-checks) hurts performance because the same checks run multiple times, and different layers eventually disagree on what counts as valid, since each layer's checks evolve independently. Trusting incoming data and failing late at the database or external service produces vague errors far from the source, and the request may have already partially succeeded before the failure surfaces, leaving inconsistent state behind. `arch-typed-path-params-1` is a specific instance of this rule, scoped to path/query parameters rather than the full request."
 
 [[option]]
 id = "validate-every-request-at-the-boundary-downstrea"
@@ -19,12 +28,12 @@ why = "Centralizing validation at one tier eliminates the defensive re-validatio
 
 [[option]]
 id = "every-layer-controller-service-repository-re-val"
-label = "every layer (controller, service, repository) re-validates every input it …"
+label = "Every layer re-validates"
 directive = "every layer (controller, service, repository) re-validates every input it receives, with no canonical boundary that owns the validation pass"
 why = "Re-validating at every layer hurts performance and lets layers diverge: each layer's checks evolve independently, so they eventually disagree on what counts as valid."
 
 [[option]]
 id = "no-validation-step-runs-at-the-controller-bounda"
-label = "no validation step runs at the controller boundary; the …"
+label = "No boundary validation"
 directive = "no validation step runs at the controller boundary; the request is parsed into typed values minimally and bad data is detected when the database or external service rejects it"
 why = "Trusting incoming data and failing late produces vague errors far from the source; the request may have already partially succeeded before the failure surfaces, leaving inconsistent state behind."

@@ -7,6 +7,10 @@ enforcement = "structured"
 default = true
 verification = "grounded"
 
+[[sources]]
+url = "https://api.rubyonrails.org/classes/ActiveSupport/Concern.html"
+title = "Rails API — ActiveSupport::Concern"
+
 [decision]
 question = "When is a concern (Rails mixin module) the right abstraction?"
 default = "concerns-for-true-cross-cutting"

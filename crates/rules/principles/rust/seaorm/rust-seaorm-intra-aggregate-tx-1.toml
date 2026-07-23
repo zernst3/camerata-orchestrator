@@ -30,5 +30,5 @@ directive = "Repository methods do not provide transaction boundaries at all; in
 why = "Keeps repositories entirely free of transaction concerns, with no transaction parameter or internal boundary anywhere — the simplest repository surface. The fit when operations can be redesigned as single writes, or when the system is already built to observe and reconcile intermediate states; its trade-off is that partial-write states become a normal mode the rest of the system has to defend against."
 
 [[sources]]
-url = "https://www.sea-ql.org/SeaORM/docs/generate-entity/entity-format/"
-title = "SeaORM docs: Entity Format — ActiveModelBehavior and repository transaction patterns"
+url = "https://www.sea-ql.org/SeaORM/docs/advanced-query/transaction/"
+title = "SeaORM docs: Transaction — closure-based and explicit begin()/commit() transaction APIs"

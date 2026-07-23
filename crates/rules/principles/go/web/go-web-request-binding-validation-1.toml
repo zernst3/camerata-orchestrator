@@ -5,16 +5,25 @@ domain = "go:web"
 layer = "framework"
 enforcement = "structured"
 default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://gin-gonic.com/en/docs/binding/binding-and-validation/"
+title = "Gin Web Framework — Model binding and validation"
+
+[[sources]]
+url = "https://github.com/go-playground/validator"
+title = "go-playground/validator v10 — struct and field validation via tags (the library Gin's binding uses)"
 
 [decision]
 question = "How should incoming request payloads (JSON, form, query params) be parsed into handler arguments?"
 default = "typed-struct-with-validation"
-why = "Go's json and http packages provide low-level unmarshaling that requires explicit error handling and manual validation, and access to unparsed field names makes it easy to silently ignore an invalid field (a query param typed wrong, a required field missing). Web frameworks (Gin, Echo, std net/http with a helper) provide binders that parse into typed structs and validate them using struct tags: the binding tag specifies the source (json, form, query), and the validate tag (via the validate library in Gin/Echo or custom logic) specifies constraints. A handler that receives an already-validated *Request struct with typed fields is type-safe and guaranteed to hold valid data. Handlers that parse raw maps or call json.Unmarshal directly and then validate in ad-hoc code scatter validation logic across handlers and make it easy to miss a case. The type system becomes the validation system: required fields are not-pointer, optional fields are *T, enums are typed strings or ints with an iota list, not raw strings."
+why = "Go's json and http packages provide low-level unmarshaling that requires explicit error handling and manual validation, and access to unparsed field names makes it easy to silently ignore an invalid field (a query param typed wrong, a required field missing). Web frameworks (Gin, Echo, std net/http with a helper) provide binders that parse into typed structs and validate them using struct tags: the binding tag specifies the source (json, form, query, uri), and the validate tag (via the validator library in Gin, Echo's built-in Validator interface, or custom logic) specifies constraints. Gin's *gin.Context exposes ShouldBindJSON, ShouldBindQuery, and ShouldBindUri for binding without aborting the request on error (BindJSON also exists but aborts with a 400 automatically on failure). Echo's *echo.Context exposes a single Bind method that binds path params, query params, and body based on Content-Type and struct tags in one call, plus QueryParams() (returning url.Values) and QueryParamsBinder(c) for finer-grained query-param binding; Echo has no BindJSON or QueryParamMap method. A handler that receives an already-validated *Request struct with typed fields is type-safe and guaranteed to hold valid data. Handlers that parse raw maps or call json.Unmarshal directly and then validate in ad-hoc code scatter validation logic across handlers and make it easy to miss a case. The type system becomes the validation system: required fields are not-pointer, optional fields are *T, enums are typed strings or ints with an iota list, not raw strings."
 
 [[option]]
 id = "typed-struct-with-validation"
 label = "Typed request structs with framework binding + struct tags for validation"
-directive = "Request payloads are bound to typed structs using the framework's binder (Gin's c.ShouldBindJSON / c.ShouldBindQuery, Echo's c.BindJSON / c.QueryParamMap with a bind helper, or std net/http with encoding/json + manual validation applied consistently). Each struct field has a binding tag (json/form/query) specifying its source and a validate tag (required/min/max/email/etc. via the validate library or framework built-ins) specifying its constraints. Handlers receive the bound and validated struct, or an error if binding or validation failed; no raw map access or manual parsing occurs in the handler."
+directive = "Request payloads are bound to typed structs using the framework's binder (Gin's c.ShouldBindJSON / c.ShouldBindQuery / c.ShouldBindUri, Echo's c.Bind which binds body, query, and path params together using json/query/param struct tags, or std net/http with encoding/json + manual validation applied consistently). Each struct field has a binding tag (json/form/query/param, depending on framework and source) specifying its source and a validate tag (required/min/max/email/etc. via the validator library or framework built-ins) specifying its constraints. Handlers receive the bound and validated struct, or an error if binding or validation failed; no raw map access or manual parsing occurs in the handler."
 why = "Type-safe, validation-consistent, and leverages the framework's or the language's standard validation tools to catch invalid input before business logic runs."
 
 [[option]]

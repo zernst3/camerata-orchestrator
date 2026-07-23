@@ -1,37 +1,43 @@
 id = "UI-UTC-DATES-1"
-title = "Render dates through a project-level helper that pins UTC; never format inline"
+title = "Store timestamps in UTC, centralize rendering in one helper, and display in the user's local timezone"
 tag = "stack"
 domain = "ui"
 layer = "universal"
 enforcement = "architectural"
 default = true
-qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: it requires a custom AST/static-analysis CI gate — a project-configured ESLint no-restricted-syntax / no-restricted-properties rule (or stack equivalent) that forbids platform locale-aware date formatting in feature code (toLocaleString, toLocaleDateString, Intl.DateTimeFormat without a timeZone option, strftime with no timezone) and routes all date rendering through the single project-level helper. no-restricted-syntax is a generic AST-matcher with no built-in rule-id for this; the patterns and the helper exemption are hand-written per project, so it is a bespoke check rather than a citable off-the-shelf rule. Conformance holds when that gate runs in CI and a feature file formatting a date inline without the helper fails the build; it fails when no rule blocks inline formatting and call sites can format dates with an implicit timezone."
+qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: it requires a custom AST/static-analysis CI gate — a project-configured ESLint no-restricted-syntax / no-restricted-properties rule (or stack equivalent) that forbids platform locale-aware date formatting in feature code (toLocaleString, toLocaleDateString, Intl.DateTimeFormat without an explicit timeZone resolution, strftime with no timezone) and routes all date rendering through the single project-level helper. no-restricted-syntax is a generic AST-matcher with no built-in rule-id for this; the patterns and the helper exemption are hand-written per project, so it is a bespoke check rather than a citable off-the-shelf rule. Conformance holds when that gate runs in CI and a feature file formatting a date inline without the helper fails the build; it fails when no rule blocks inline formatting and call sites can format dates with an implicit timezone."
 
 [decision]
-question = "What position does the project take on: Render dates through a project-level helper that pins UTC; never format inline?"
-default = "render-dates-through-a-project-level-helper-that"
-why = "When the timezone is left implicit, the server renders the date in the host's timezone and the client renders it in the browser's. The mismatch causes hydration warnings or crashes under server-side rendering, and produces silent visible-time inconsistencies even without SSR. Pinning the timezone at the rendering boundary makes both sides agree by construction, and centralizing the call site means a future timezone or locale policy change is one edit, not many. Formatting dates inline at each call site lets every site drift on timezone handling, and the mismatch is invisible until SSR fires a hydration warning or a user notices a wrong displayed time. Rendering dates client-only via a post-mount effect loses SSR for that content and shifts the rendering cost to client paint; layout shift becomes the new failure mode. Relying on the platform to pick a timezone means the default-locale behavior varies by browser, OS, region, and even browser version, so the rule's outcome becomes 'whatever the platform happened to decide today'."
+question = "What position does the project take on: how are dates stored, formatted, and displayed?"
+default = "store-utc-render-local-centralized-formatting"
+why = "Two separate decisions are easy to conflate here: (1) where formatting logic lives, and (2) what timezone is shown to the user. On (1), centralizing all date rendering behind one project-level helper is unambiguously good regardless of the timezone policy: it means a future timezone or locale policy change is one edit, not many, and it is the mechanism that makes (2) enforceable at all. On (2), the standard, well-established pattern is to STORE timestamps in UTC (in the database and over the API) as the one unambiguous source of truth, but RENDER them converted to the viewing user's local timezone in the UI — a consumer expects to see '3:00 PM', not '19:00 UTC'. Storing in UTC while always displaying in UTC conflates the storage guarantee with the display policy and produces a UI that reads wrong to ordinary users; UTC-only display is a legitimate, narrower choice for admin/ops tooling and log viewers where the audience spans timezones and unambiguous absolute time matters more than local readability, but it is the wrong default for consumer-facing product surfaces. Formatting dates inline at each call site lets every site drift on timezone handling, and the mismatch is invisible until SSR fires a hydration warning or a user notices a wrong displayed time. Rendering dates client-only via a post-mount effect loses SSR for that content and shifts the rendering cost to client paint; layout shift becomes the new failure mode. Relying on the platform to pick a timezone means the default-locale behavior varies by browser, OS, region, and even browser version, so the rule's outcome becomes 'whatever the platform happened to decide today' rather than a deliberate choice."
 
 [[option]]
-id = "render-dates-through-a-project-level-helper-that"
-label = "Render dates through a project-level helper that pins UTC; never format inline"
-directive = "All date and time rendering in the UI goes through a single project-level helper that pins the timezone explicitly (commonly UTC, sometimes a known display-tz). Direct calls to the platform's locale-aware formatting (toLocaleString, strftime with no tz, Intl.DateTimeFormat with no timeZone option) in feature code are forbidden and lint-enforced. The helper is the one place timezone decisions live."
-why = "When the timezone is left implicit, the server renders the date in the host's timezone and the client renders it in the browser's."
+id = "store-utc-render-local-centralized-formatting"
+label = "Store timestamps in UTC; centralize rendering in one helper; display in the user's local timezone"
+directive = "Timestamps are stored and transmitted in UTC everywhere (database columns, API payloads) as the single unambiguous source of truth. All date and time rendering in the UI goes through one project-level helper/module; that helper is the only place timezone conversion happens. The helper converts the stored UTC value to the viewing user's local timezone (the browser's resolved timezone, or an explicit user preference) before display, so users see times in their own clock (e.g. '3:00 PM'), not the raw stored UTC value. Direct calls to the platform's locale-aware formatting (toLocaleString, strftime with no tz, Intl.DateTimeFormat with no timeZone resolution) in feature code are forbidden and lint-enforced; every call site goes through the helper."
+why = "Storing in UTC keeps the source of truth unambiguous across services and regions, while rendering in the user's local timezone matches what a consumer-facing user actually expects to see. Centralizing the conversion in one helper means the storage format and the display policy can each evolve independently without touching call sites, and gives SSR/CSR a single place to agree on timezone resolution instead of drifting per call site."
+
+[[option]]
+id = "display-everything-in-utc"
+label = "Display all dates in UTC, with no local-timezone conversion (admin/ops tooling, logs)"
+directive = "All date and time rendering, routed through the same centralized helper, displays the raw stored UTC value with no conversion to the viewer's local timezone. Every user, regardless of location, sees the same absolute timestamp string."
+why = "For internal admin dashboards, ops tooling, and log viewers used by teams spread across timezones, always-UTC display avoids the 'whose timezone is this?' ambiguity that local-time display would introduce when multiple people compare the same event. This is a legitimate, narrower choice for that audience, but it is the wrong default for consumer-facing product surfaces, where users think in their own local clock and a raw UTC timestamp reads as a foreign, unfamiliar time."
 
 [[option]]
 id = "feature-code-formats-dates-inline-at-each-call-s"
-label = "feature code formats dates inline at each call site …"
+label = "Format dates inline with locale-aware APIs"
 directive = "feature code formats dates inline at each call site using the platform's locale-aware formatting (toLocaleString, strftime, Intl.DateTimeFormat) without going through a project-level helper that pins the timezone"
 why = "Inline formatting lets every site drift on timezone handling; the mismatch is invisible until SSR fires a hydration warning or a user notices a wrong displayed time."
 
 [[option]]
 id = "feature-code-renders-dates-only-on-the-client-vi"
-label = "feature code renders dates only on the client via …"
+label = "Render dates client-side via post-mount effect"
 directive = "feature code renders dates only on the client via a post-mount effect, with the server rendering a placeholder until the client picks up the value"
 why = "Client-only rendering via a post-mount effect loses SSR for that content and shifts the rendering cost to client paint; layout shift becomes the new failure mode."
 
 [[option]]
 id = "feature-code-calls-the-platform-s-date-formattin"
-label = "feature code calls the platform's date-formatting APIs without specifying …"
+label = "Call date-formatting APIs without a timezone"
 directive = "feature code calls the platform's date-formatting APIs without specifying a timezone, letting the platform's default locale and timezone control the result at each site"
 why = "Platform-default timezone varies by browser, OS, region, and browser version; the rule's outcome becomes 'whatever the platform happened to decide today'."

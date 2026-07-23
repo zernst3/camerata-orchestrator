@@ -15,6 +15,10 @@ title = "AGENTS.md — ORCH-ONE-WAY-DOOR-1 (one-way-door routing)"
 url = "docs/decisions/2026-06-15_cross_agent_integration_gate.md"
 title = "Decision: Cross-agent rules — the integration gate (a third enforcement tier)"
 
+[[sources]]
+url = "https://s2.q4cdn.com/299287126/files/doc_financials/annual/2015-Letter-to-Shareholders.PDF"
+title = "Jeff Bezos — 2015 Letter to Amazon Shareholders (Type 1 / one-way-door vs. Type 2 / two-way-door decisions)"
+
 [decision]
 question = "What position does the project take on: One-way-door routing — blast radius gates autonomy?"
 default = "one-way-door-routing-blast-radius-gates-autonomy"
@@ -28,12 +32,12 @@ why = "A wrong 'clear' call on a one-way door costs a migration; on a two-way do
 
 [[option]]
 id = "the-agent-auto-decides-whenever-the-winner-feels"
-label = "the agent auto-decides whenever the winner feels obvious, regardless …"
+label = "Confidence gates autonomy"
 directive = "the agent auto-decides whenever the winner feels obvious, regardless of whether the call is hard to reverse"
 why = "Confidence-gated autonomy misses exactly the irreversible calls the rule exists to catch: high confidence on a structural change is still wrong when the change is hard to reverse."
 
 [[option]]
 id = "the-agent-gates-autonomy-on-the-size-of-the-chan"
-label = "the agent gates autonomy on the size of the …"
+label = "File count gates autonomy"
 directive = "the agent gates autonomy on the size of the change in files rather than on its reversibility, auto-deciding small changes and pausing for large ones"
 why = "File count tracks the wrong axis: a 99-file mechanical move can be safer than a 3-file data migration, so the pause fires on the wrong changes."

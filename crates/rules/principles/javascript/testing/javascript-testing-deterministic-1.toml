@@ -3,9 +3,9 @@ title = "Tests are deterministic: clocks, timers, and random values are controll
 tag = "stack"
 domain = "javascript:testing"
 layer = "language"
-enforcement = "mechanical"
+enforcement = "structured"
 default = true
-qualifies = "Enforced by a combination of jest/no-done-callback (recommended config in eslint-plugin-jest, catches the callback-based async anti-pattern that silently swallows failures) and jest/expect-expect (recommended config, catches a test with zero assertions that always passes). The determinism contract for clock and timer control is enforced by jest.useFakeTimers() API discipline backed by jest/no-done-callback. No single linter rule bans real I/O in unit tests; the boundary is enforced at PR review via the mock-at-boundaries rule (JAVASCRIPT-TESTING-MOCK-AT-BOUNDARIES-1). Flaky-test detection is a CI-level check: repeated runs or quarantine labels, not a lint gate."
+qualifies = "No cited linter rule actually detects non-determinism. jest/no-done-callback targets a different problem entirely: it discourages Jest's legacy callback-based async style (test('...', (done) => { ... done(); })) in favor of returning a promise or using async/await, because the callback style can silently swallow a failed assertion if done() is called before the assertion runs. That is a correctness hazard in how a test signals completion, not a check for real clocks, unseeded randomness, or network calls — a fully deterministic, fake-timers-driven test and a flaky, real-clock-dependent test both pass or fail this rule identically based only on whether they use done() or async/await. jest/expect-expect (catches a test with zero assertions) is real but unrelated to determinism too. The actual determinism contract — fake timers via jest.useFakeTimers(), seeded/mocked Math.random(), no real I/O — is enforced by code review and by the jest.useFakeTimers() API itself being present in the test (there being no lint rule that flags a *missing* fake-timer call or a live network request in a unit test). Flaky-test detection is a CI-level check (repeated runs or quarantine labels), not a lint gate."
 verification = "grounded"
 
 [[sources]]

@@ -18,18 +18,18 @@ why = "Gives a predictable file-path-to-role mapping that every other UI convent
 
 [[option]]
 id = "the-ui-crate-is-organized-into-feature-folders-w"
-label = "the UI crate is organized into feature folders where …"
+label = "Feature folders group everything by feature"
 directive = "the UI crate is organized into feature folders where everything related to feature X (views, components, hooks, services, helpers) lives under a single feature-X folder, rather than being split by file role across views, components, hooks, contexts, services, and lib"
 why = "Co-locates everything a feature needs in one place, so a feature can be understood, changed, or owned by a team without touching the rest of the tree. The natural fit for a large UI with strong feature-team ownership boundaries; its trade-off is that shared primitives are harder to discover and tend to be duplicated across features or hidden inside whichever feature first authored them, so cross-feature reuse needs deliberate attention."
 
 [[option]]
 id = "the-ui-crate-uses-a-flat-module-structure-with-e"
-label = "the UI crate uses a flat module structure with …"
+label = "Flat module structure at crate root"
 directive = "the UI crate uses a flat module structure with every file directly at the crate root, with no folder-level partitioning by role or feature"
 why = "The simplest possible layout: no folder taxonomy to learn or maintain, and every file is one hop from the crate root. The right fit for a small UI that is not expected to grow much, where the overhead of a folder structure would outweigh its benefit; its trade-off is that past roughly fifty files file role has to be inferred from naming and 'where does this go' becomes a judgment call rather than a rule."
 
 [[option]]
 id = "the-ui-crate-adopts-a-file-based-routing-convent"
-label = "the UI crate adopts a file-based routing convention under …"
+label = "File-based routing with custom build scripts"
 directive = "the UI crate adopts a file-based routing convention under a single src tree, with custom build scripts wiring the routes from the file layout rather than declaring routes through a central Routable enum"
 why = "Makes the route tree a direct reflection of the file layout, so route-equals-path and adding a page is adding a file, with no central enum to keep in sync. Worth it for teams that prefer that directness and value convention over explicit declaration; its trade-off is that a framework which does not provide file-based routing natively requires custom build tooling to wire it, and a framework upgrade that touches routing can break that tooling."

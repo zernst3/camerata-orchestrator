@@ -26,6 +26,6 @@ why = "Abstract equality (==) coerces operands across types before comparing, pr
 
 [[option]]
 id = "loose-equality-is-used-relying-on-javascripts-ty"
-label = "loose equality (== / !=) is used, relying on …"
+label = "Use loose equality (==/!=) throughout"
 directive = "loose equality (== / !=) is used throughout, relying on JavaScript's type coercion rules to compare values across types, rather than requiring strict === / !== comparisons"
 why = "Allowing loose equality (==) requires every reader to mentally run the Abstract Equality Comparison algorithm to know what any given == comparison actually checks, and reviewers cannot distinguish a deliberate coercion from a typo for ===. The non-obvious, non-transitive coercions (0 == '' == false, [] == ![]) mean a comparison that appears correct silently misfires the first time an operand's runtime type differs from what the author assumed, with the failure surfacing as a wrong branch taken rather than a lint error."

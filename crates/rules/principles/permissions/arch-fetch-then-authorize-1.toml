@@ -11,6 +11,14 @@ verification = "grounded"
 url = "CONVENTIONS.md"
 title = "CONVENTIONS.md — §ARCH-FETCH-THEN-AUTHORIZE-1 (authorization reads the fetched resource)"
 
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html"
+title = "OWASP Authorization Cheat Sheet"
+
+[[sources]]
+url = "https://lexi-lambda.github.io/blog/2019/11/05/parse-don-t-validate/"
+title = "Alexis King — Parse, Don't Validate"
+
 [decision]
 question = "Where does per-resource authorization happen relative to fetching the resource and running business logic?"
 default = "fetch-then-authorize"
