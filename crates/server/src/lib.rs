@@ -20146,6 +20146,8 @@ mod tests {
                 preview_tool: None,
                 in_test: false,
                 needs_review: false,
+                confidence: None,
+                effort: None,
             }],
             proposed_rules: Vec::new(),
             gated: false,
@@ -20153,6 +20155,7 @@ mod tests {
             actual_usage: None,
             deep: None,
             coverage_notes: Vec::new(),
+            provenance: crate::onboard::ScanProvenance::default(),
         }
     }
 

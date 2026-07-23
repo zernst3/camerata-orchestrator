@@ -130,6 +130,23 @@ pub struct Finding {
     /// flagged it with `[needs review]`. False for clear-cut production findings.
     #[serde(default)]
     pub needs_review: bool,
+    /// Structured calibration confidence: `"high"` (clear, concrete violation) or
+    /// `"needs-review"` (the calibration pass flagged it as debatable / theoretical /
+    /// under-evidenced). `None` for findings calibration never saw (the deterministic
+    /// floor, preview findings) — those have no calibrated opinion to report.
+    /// Promoted out of the string-embedded `[needs review: reason]` `detail` suffix
+    /// (`apply_verdicts`, ai_audit.rs) so a report can show a confidence chip without
+    /// regex-parsing prose. The `detail` tag is KEPT for one release for UI back-compat
+    /// (`split_needs_review`, ui-core/src/rules.rs).
+    #[serde(default)]
+    pub confidence: Option<String>,
+    /// Structured remediation-effort estimate: `"low"` | `"medium"` | `"high"`, emitted
+    /// by the calibration pass's verdict JSON (it already reads the finding's
+    /// path/snippet/detail). `None` for findings calibration never saw, or when the
+    /// model's verdict omitted/mis-shaped the field (fail-soft — effort is advisory,
+    /// never load-bearing).
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// Findings default to `active` (enforced) until classified against suppressions.
@@ -157,6 +174,8 @@ impl Default for Finding {
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
         }
     }
 }
@@ -281,6 +300,67 @@ pub struct CoverageNote {
     pub message: String,
 }
 
+/// The git identity of ONE audited source dir at the moment it was scanned: exactly
+/// what code was read, so a report can state without ambiguity what state the
+/// audited tree was in. Captured via `git rev-parse HEAD` + `git status --porcelain`
+/// (mirrors `workspace::checkout_status`'s pattern). A dirty tree never blocks the
+/// scan — it is only disclosed, here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AuditedRef {
+    /// `owner/repo` (matches `ScanReport::repos` / `Finding::repo`).
+    pub repo: String,
+    /// Full commit SHA (`git rev-parse HEAD`). `None` when the source dir is not a
+    /// git repo or the command failed — fail-soft, never blocks the scan.
+    #[serde(default)]
+    pub sha: Option<String>,
+    /// Current branch name (`git rev-parse --abbrev-ref HEAD`). `None` on detached
+    /// HEAD or when the command failed.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// True when `git status --porcelain` reported uncommitted changes at scan time.
+    #[serde(default)]
+    pub dirty: bool,
+}
+
+/// Provenance stamp on a `ScanReport`: exactly what was audited, with what
+/// models/config, so the report can be forwarded to a client or board without an
+/// asterisk. Additive — see `ScanReport::provenance`'s `#[serde(default)]` — so
+/// previously-persisted reports still deserialize (with an empty/default stamp).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ScanProvenance {
+    /// Git identity of every source dir audited (see [`AuditedRef`]).
+    pub audited_refs: Vec<AuditedRef>,
+    /// The model resolved for the Phase-2 AI audit (`onboard_audit_start`). `None`
+    /// on a floor-only / Phase-1 scan that never resolved an audit model.
+    pub audit_model: Option<String>,
+    /// The model resolved for the calibration pass. `None` when calibration never ran.
+    pub calibration_model: Option<String>,
+    /// The execution mode (`parallel` | `sequential`).
+    pub mode: String,
+    /// Whether thorough (multi-pass consensus) calibration was requested (#51).
+    pub thorough: bool,
+    /// Whether the opt-in deep compliance & security tier ran (#55).
+    pub deep: bool,
+    /// Fingerprint of the rule selection actually audited (already computed for the
+    /// incremental-scan cache; stamped here so the report states exactly which rule
+    /// SET produced these findings).
+    pub rules_fingerprint: String,
+    /// The rule ids ACTUALLY audited this run (the `selected` set passed to
+    /// `audit_repos` — NOT `proposed_rules`, which is only the starter-set proposal).
+    /// Powers "what's healthy" (audited rules with zero findings).
+    pub audited_rule_ids: Vec<String>,
+    /// Camerata's own version (`env!("CARGO_PKG_VERSION")`) at scan time.
+    pub camerata_version: String,
+    /// The osv-scanner version used for the dependency-vulnerability pass, when the
+    /// deterministic floor (and therefore dep-audit) ran. `None` when
+    /// `run_deterministic` was false (dep-audit never ran).
+    pub osv_scanner_version: Option<String>,
+    /// RFC3339 timestamp when this audit run started.
+    pub started_at: String,
+    /// RFC3339 timestamp when this audit run finished.
+    pub finished_at: String,
+}
+
 /// The full scan result across one or more repos. Brownfield onboarding treats a
 /// SET of inter-related repos (e.g. a .NET API + a Python worker + a React app) as
 /// one unit: findings and the proposed ruleset aggregate across all of them, each
@@ -332,6 +412,13 @@ pub struct ScanReport {
     /// not appear in the findings/violations table. Use [`CoverageNote`] entries.
     #[serde(default)]
     pub coverage_notes: Vec<CoverageNote>,
+    /// What was actually audited: git refs (sha/branch/dirty) per repo, the
+    /// models/mode/rule-selection used, and the tool versions involved. The
+    /// board-forwardable report's credibility backbone — see [`ScanProvenance`].
+    /// Additive (`#[serde(default)]`) so previously-persisted reports still load,
+    /// with an empty/default stamp.
+    #[serde(default)]
+    pub provenance: ScanProvenance,
 }
 
 impl ScanReport {
@@ -354,6 +441,7 @@ impl ScanReport {
                     .to_string(),
             ),
             coverage_notes: Vec::new(),
+            provenance: ScanProvenance::default(),
         }
     }
 }
@@ -519,20 +607,32 @@ pub async fn audit_repos(
     // tests / non-cockpit callers — recording is then simply skipped. Observability only.
     ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
+    // Provenance (P1): stamp the start time now, before any I/O, so `finished_at -
+    // started_at` reflects the whole run including the git-ref capture below.
+    let started_at = chrono::Utc::now().to_rfc3339();
     // Fingerprint the rule selection so a change to it invalidates the incremental cache
     // (carried findings must always reflect the CURRENT rules). A prior manifest is only usable
-    // if its rule fingerprint matches.
+    // if its rule fingerprint matches. Also stamped onto the report's provenance below (P1) so
+    // the report states exactly which rule SET produced these findings.
     let rules_fp = crate::scan_cache::rules_fingerprint(
         selected.iter().map(|r| (r.id.as_str(), r.repos.as_slice())),
     );
+    // The set ACTUALLY audited this run (NOT `proposed_rules`, which is only the starter-set
+    // proposal) — powers the "what's healthy" (audited rules with zero findings) derivation.
+    let audited_rule_ids: Vec<String> = selected.iter().map(|r| r.id.clone()).collect();
     let effective_prior = incremental_prior.filter(|m| m.matches_rules(&rules_fp));
     let mut manifest_builder =
-        crate::scan_cache::ManifestBuilder::new().with_rules_fingerprint(rules_fp);
+        crate::scan_cache::ManifestBuilder::new().with_rules_fingerprint(rules_fp.clone());
     let mut all_findings = Vec::new();
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
     let mut repos_ok = Vec::new();
     let mut notes = extra_notes;
+    // Provenance (P1): the git identity of every source dir this run touched (sha/branch/
+    // dirty), captured unconditionally per source — even a repo whose file-read later fails
+    // still gets its ref recorded, since the dir is what was attempted. A dirty tree never
+    // blocks the scan; it is only disclosed here.
+    let mut audited_refs: Vec<AuditedRef> = Vec::new();
     // When the deep tier is on, the WHOLE file set per repo is captured here (the deep lenses
     // read the full repo, not just the incrementally-changed files) and run after the standard
     // audit completes. Empty / unused when `deep` is false.
@@ -575,6 +675,10 @@ pub async fn audit_repos(
         if spec.is_empty() {
             continue;
         }
+        // Provenance (P1): capture THIS source dir's git identity before anything else —
+        // unconditional, so even a repo whose subsequent file-read fails still gets its ref
+        // recorded (the dir is what was attempted).
+        audited_refs.push(capture_audited_ref(spec, dir).await);
         // The SEMANTIC (LLM-audited) rule set for THIS repo: rules bound to it (or
         // project-level), minus the deterministic-arm and governance/process families.
         let semantic: Vec<(String, String)> = selected
@@ -753,7 +857,64 @@ pub async fn audit_repos(
     if !notes.is_empty() {
         report.message = Some(notes.join(" · "));
     }
+    // Provenance (P1): stamp exactly what was audited, so the report is board-forwardable
+    // without an asterisk. `osv_scanner_version` is the PINNED version Camerata provisions
+    // (`tool_provisioning::OSV_SCANNER_VERSION`) — the dep-audit pass itself runs AFTER this
+    // function returns (in the caller), gated on the same `run_deterministic` flag.
+    report.provenance = ScanProvenance {
+        audited_refs,
+        audit_model: model.map(str::to_string),
+        calibration_model: calibration_model.map(str::to_string),
+        mode: match mode {
+            crate::ai_audit::ScanMode::Sequential => "sequential",
+            crate::ai_audit::ScanMode::Parallel => "parallel",
+            crate::ai_audit::ScanMode::Batch => "batch",
+        }
+        .to_string(),
+        thorough,
+        deep,
+        rules_fingerprint: rules_fp,
+        audited_rule_ids,
+        camerata_version: env!("CARGO_PKG_VERSION").to_string(),
+        osv_scanner_version: run_deterministic
+            .then(|| crate::tool_provisioning::OSV_SCANNER_VERSION.to_string()),
+        started_at,
+        finished_at: chrono::Utc::now().to_rfc3339(),
+    };
     (report, manifest_builder.finish())
+}
+
+/// Capture ONE source dir's git identity for the `ScanProvenance` stamp: full commit SHA
+/// (`git rev-parse HEAD`), current branch (`git rev-parse --abbrev-ref HEAD`), and a dirty
+/// flag (`git status --porcelain`). Mirrors `workspace::checkout_status`'s git-shelling
+/// pattern. Fail-soft: a non-git dir or a `git` invocation failure yields `None` fields
+/// rather than blocking the scan — a dirty or ref-less tree is disclosed, never blocking.
+async fn capture_audited_ref(spec: &str, dir: &std::path::Path) -> AuditedRef {
+    async fn run(dir: &std::path::Path, args: &[&str]) -> Option<std::process::Output> {
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.args(args).current_dir(dir).kill_on_drop(true);
+        cmd.output().await.ok()
+    }
+    let sha = run(dir, &["rev-parse", "HEAD"])
+        .await
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    let branch = run(dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    let dirty = run(dir, &["status", "--porcelain"])
+        .await
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+    AuditedRef {
+        repo: spec.to_string(),
+        sha,
+        branch,
+        dirty,
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -1285,6 +1446,8 @@ mod tests {
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
         };
         let mut findings = vec![
             mk("a.rs", 5, "SEC-NO-HARDCODED-SECRETS-1", snippet), // baselined
@@ -1316,6 +1479,8 @@ mod tests {
                 preview_tool: None,
                 in_test: false,
                 needs_review: false,
+                confidence: None,
+                effort: None,
             },
             Finding {
                 repo: "me/web".into(),
@@ -1331,6 +1496,8 @@ mod tests {
                 preview_tool: None,
                 in_test: false,
                 needs_review: false,
+                confidence: None,
+                effort: None,
             },
         ];
         let body = tech_debt_issue_body(&findings);
@@ -1367,6 +1534,8 @@ mod tests {
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
         }
     }
 
@@ -1506,6 +1675,8 @@ mod tests {
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
         };
         let csv = tech_debt_csv(&[f]);
         let data_row = csv.lines().nth(1).expect("expected data row");
@@ -2252,6 +2423,87 @@ mod tests {
         let f2: Finding = serde_json::from_str(legacy).unwrap();
         assert!(!f2.in_test);
         assert!(!f2.needs_review);
+    }
+
+    // ── Structured confidence + effort (Part 1 §3) ────────────────────────────
+    // Wire-contract sync: this pins the JSON SHAPE `apply_verdicts` (ai_audit.rs) emits onto
+    // `Finding`, which `crates/ui/src/cockpit/scan.rs`'s `FindingView` mirror must also accept
+    // (see `finding_view_mirrors_server_confidence_and_effort_shape` there).
+    #[test]
+    fn finding_confidence_and_effort_serialize_and_round_trip() {
+        let f = Finding {
+            repo: "me/repo".to_string(),
+            path: "src/main.rs".to_string(),
+            line: 5,
+            rule_id: "AI-LAYERING".to_string(),
+            severity: "medium".to_string(),
+            snippet: "s".to_string(),
+            detail: "d".to_string(),
+            confidence: Some("needs-review".to_string()),
+            effort: Some("high".to_string()),
+            ..Finding::default()
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        assert!(json.contains(r#""confidence":"needs-review""#), "json={json}");
+        assert!(json.contains(r#""effort":"high""#), "json={json}");
+        let back: Finding = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.confidence.as_deref(), Some("needs-review"));
+        assert_eq!(back.effort.as_deref(), Some("high"));
+
+        // Back-compat: a pre-P3 persisted finding (no confidence/effort keys) still loads,
+        // defaulting both to None.
+        let legacy = r#"{"repo":"r","path":"p","line":1,"rule_id":"X","severity":"high","snippet":"s","detail":"d","status":"active"}"#;
+        let legacy_f: Finding = serde_json::from_str(legacy).unwrap();
+        assert_eq!(legacy_f.confidence, None);
+        assert_eq!(legacy_f.effort, None);
+    }
+
+    // ── ScanProvenance (Part 1 §1) ─────────────────────────────────────────────
+
+    #[test]
+    fn scan_provenance_round_trip_including_dirty_flag() {
+        let prov = ScanProvenance {
+            audited_refs: vec![
+                AuditedRef {
+                    repo: "me/api".to_string(),
+                    sha: Some("a".repeat(40)),
+                    branch: Some("main".to_string()),
+                    dirty: true,
+                },
+                AuditedRef {
+                    repo: "me/web".to_string(),
+                    sha: None,
+                    branch: None,
+                    dirty: false,
+                },
+            ],
+            audit_model: Some("claude-sonnet-4-6".to_string()),
+            calibration_model: Some("claude-haiku-4-5".to_string()),
+            mode: "parallel".to_string(),
+            thorough: true,
+            deep: false,
+            rules_fingerprint: "fp-abc123".to_string(),
+            audited_rule_ids: vec!["SEC-NO-HARDCODED-SECRETS-1".to_string(), "ARCH-1".to_string()],
+            camerata_version: env!("CARGO_PKG_VERSION").to_string(),
+            osv_scanner_version: Some("v1.9.2".to_string()),
+            started_at: "2026-07-23T00:00:00+00:00".to_string(),
+            finished_at: "2026-07-23T00:05:00+00:00".to_string(),
+        };
+        let json = serde_json::to_string(&prov).unwrap();
+        let back: ScanProvenance = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, prov, "ScanProvenance must round-trip byte-for-byte via serde");
+        // The dirty flag specifically — the doc's explicit callout ("a dirty tree does NOT
+        // block the scan, only disclosed") depends on this surviving the wire.
+        assert!(back.audited_refs[0].dirty);
+        assert!(!back.audited_refs[1].dirty);
+    }
+
+    #[test]
+    fn scan_provenance_default_is_empty_for_gated_reports() {
+        let r = ScanReport::gated(&["me/api".to_string()]);
+        assert!(r.provenance.audited_refs.is_empty());
+        assert_eq!(r.provenance.audit_model, None);
+        assert_eq!(r.provenance.rules_fingerprint, "");
     }
 
     // ── Gitignore-aware walk tests (Feature: scan-hygiene) ────────────────

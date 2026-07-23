@@ -1,7 +1,7 @@
 //! Report-building functions: assemble `ScanReport`, render CSV/issue-body output,
 //! create GitHub issues, and merge deep-tier reports.
 
-use super::{Finding, RepoStack, ScanReport};
+use super::{Finding, RepoStack, ScanProvenance, ScanReport};
 use super::propose::propose_rules;
 
 /// Build a report from already-aggregated findings + per-repo stacks. Pure.
@@ -26,6 +26,7 @@ pub fn build_report(
         actual_usage: None,
         deep: None,
         coverage_notes: Vec::new(),
+        provenance: ScanProvenance::default(),
     }
 }
 

@@ -12,13 +12,45 @@ additions + a deliberately TINY serializer+template. Paths under repo root.
 - Implementation is Sonnet (not Fable); agents do work DIRECTLY (no sub-agents); ship with tests + docs.
 
 ## Build order
-1. **`ScanProvenance` stamp** on `ScanReport` (server) — the biggest credibility gap.
-2. **`FalsePositive` disposition** (the explicit ask) — 4th triage state.
-3. **Structured `confidence` + `effort`** on `Finding` (via calibration).
+1. **`ScanProvenance` stamp** on `ScanReport` (server) — the biggest credibility gap. **DONE.**
+2. **`FalsePositive` disposition** (the explicit ask) — 4th triage state. **DONE.**
+3. **Structured `confidence` + `effort`** on `Finding` (via calibration). **DONE.**
 4. **`report_export.rs`** serializer (`AuditReportJson` + pure `build_report_json`).
 5. **Typst template + `compile_pdf` + route + UI button.**
 6. (optional) dep-audit fixed-in version + CWE refs on SEC-family corpus TOMLs.
 Steps 1-3 = pass A; 4-5 = pass B.
+
+### Pass A landed (2026-07-23)
+
+Steps 1-3 are built, tested, and committed. Notes for pass B (the PDF serializer):
+
+- `ScanProvenance`/`AuditedRef` live in `crates/server/src/onboard.rs` (next to `Finding`/
+  `ScanReport`). `ScanReport::provenance` is populated inside `audit_repos` (onboard.rs) —
+  git ref capture is a new private `capture_audited_ref` helper there (async, `tokio::process::
+  Command`, fail-soft), NOT added to `resolve_local_sources`/`greenfield.rs`/`workspace.rs` as
+  the doc's phrasing suggested; `audit_repos` already loops over every source dir, so capturing
+  there (once, per run) avoids a second traversal. `osv_scanner_version` is stamped as the
+  PINNED `tool_provisioning::OSV_SCANNER_VERSION` (dep-audit itself runs AFTER `audit_repos`
+  returns, in `lib.rs`, so the actual invocation's version isn't observable at stamp time).
+- `TriageState::FalsePositive` + `TriageModel::mark_false_positive` are in `crates/ui-core/src/
+  triage.rs`; the UI wiring (4th tab, reason textarea, Process no-op) is in `crates/ui/src/
+  cockpit/scan.rs`. The Process handler's per-finding match has an explicit `TriageState::
+  FalsePositive => {}` arm — pass B's serializer should partition on the SAME `Disposition.state`
+  (excluded + counted, never baseline/ticket) rather than re-deriving the semantics.
+- `Finding.confidence`/`Finding.effort` are set in `apply_verdicts` and threaded through
+  `consensus_verdicts` (thorough mode) in `crates/server/src/ai_audit.rs`. Effort's tie-break is
+  "medium" (neutral), unlike severity's "always break to the lower/humbler value" — see the
+  doc comment on `consensus_verdicts`. The `[needs review: reason]` detail-string tag is still
+  emitted (one-release UI back-compat); pass B's serializer should prefer the structured
+  `confidence`/`needs_review` fields and only fall back to `split_needs_review` for very old
+  persisted reports that predate this stamp.
+- Both `Finding` and `ScanReport` are mirrored on the UI side (`FindingView` in `ui-core`,
+  `ScanReportView`/`ScanProvenanceView`/`AuditedRefView` in `crates/ui/src/cockpit/scan.rs`) —
+  serde silently drops unmirrored fields, so any FUTURE server-side field for the PDF export
+  must get a matching mirror field too, or the cockpit will silently stop seeing it. Each side
+  has round-trip / JSON-shape tests pinning the wire contract (see
+  `scan_provenance_round_trip_including_dirty_flag` in onboard.rs and
+  `scan_report_view_mirrors_server_provenance_shape` in scan.rs).
 
 ---
 

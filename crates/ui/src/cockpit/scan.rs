@@ -273,6 +273,52 @@ pub(super) struct CoverageNoteView {
     pub message: String,
 }
 
+/// One audited repo's git identity, mirroring `camerata_server::onboard::AuditedRef` on the
+/// wire. Not yet rendered (that's the PDF-export pass); the fields are mirrored now so a
+/// server-side addition is never silently dropped by serde here (see the round-trip contract
+/// tests at the bottom of this module).
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
+pub(super) struct AuditedRefView {
+    pub repo: String,
+    #[serde(default)]
+    pub sha: Option<String>,
+    #[serde(default)]
+    pub branch: Option<String>,
+    #[serde(default)]
+    pub dirty: bool,
+}
+
+/// The scan's provenance stamp, mirroring `camerata_server::onboard::ScanProvenance` on the
+/// wire. Not yet rendered in the cockpit (Pass B / the PDF export reads it); mirrored here so
+/// the wire contract stays in sync.
+#[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize, Default)]
+pub(super) struct ScanProvenanceView {
+    #[serde(default)]
+    pub audited_refs: Vec<AuditedRefView>,
+    #[serde(default)]
+    pub audit_model: Option<String>,
+    #[serde(default)]
+    pub calibration_model: Option<String>,
+    #[serde(default)]
+    pub mode: String,
+    #[serde(default)]
+    pub thorough: bool,
+    #[serde(default)]
+    pub deep: bool,
+    #[serde(default)]
+    pub rules_fingerprint: String,
+    #[serde(default)]
+    pub audited_rule_ids: Vec<String>,
+    #[serde(default)]
+    pub camerata_version: String,
+    #[serde(default)]
+    pub osv_scanner_version: Option<String>,
+    #[serde(default)]
+    pub started_at: String,
+    #[serde(default)]
+    pub finished_at: String,
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct ScanReportView {
     #[serde(default)]
@@ -301,6 +347,12 @@ pub(super) struct ScanReportView {
     /// Coverage notes from the scan preview (tools skipped or unavailable).
     #[serde(default)]
     pub coverage_notes: Vec<CoverageNoteView>,
+    /// What was actually audited: git refs, models/mode/rule-selection, tool versions.
+    /// Mirrors `camerata_server::onboard::ScanReport::provenance`. Additive
+    /// (`#[serde(default)]`) so a report from before this field existed still
+    /// deserializes, with an empty/default stamp.
+    #[serde(default)]
+    pub provenance: ScanProvenanceView,
 }
 
 pub(super) async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {
@@ -1167,6 +1219,9 @@ pub(super) fn FindingsTable(
     // A durable ignore requires a reason (the require-reason invariant), captured here and
     // stored on the disposition; it's committed to the baseline at Process.
     let mut ignore_reason = use_signal(String::new);
+    // A false-positive disposition ALSO requires a reason (mirrors the ignore invariant) — it
+    // is the audit trail for "the tool was wrong" and feeds the report's methodology count.
+    let mut fp_reason = use_signal(String::new);
     // Two id_map clones: each triage table renders two move buttons, and the two closures in
     // an arm each move a clone. Match arms are mutually exclusive, so the same two clones
     // serve every arm.
@@ -1175,6 +1230,9 @@ pub(super) fn FindingsTable(
     // Two more clones for the tech-debt bucket buttons (resolve later / now).
     let id_map_c = id_map.clone();
     let id_map_d = id_map.clone();
+    // One more clone for the Unresolved view's "mark false positive" button + the
+    // FalsePositive view's "move back to Unresolved" button.
+    let id_map_e = id_map.clone();
     // The (sorted) rows for CSV export.
     let csv_rows = findings.clone();
 
@@ -1316,6 +1374,36 @@ pub(super) fn FindingsTable(
                         },
                         "Save as tech debt"
                     }
+                    // False positive: "the tool was wrong" — distinct from Ignore ("real but
+                    // accepted risk"). Requires its own reason (the audit trail); at Process
+                    // this disposition is a server-side no-op (excluded from the report,
+                    // never baselined, never ticketed).
+                    textarea {
+                        class: "addressee-input ignore-reason",
+                        rows: "2",
+                        placeholder: "reason it's a false positive (required)",
+                        value: "{fp_reason}",
+                        oninput: move |e| fp_reason.set(e.value()),
+                    }
+                    button {
+                        class: "btn-restart",
+                        onclick: move |_| {
+                            let sel = handle.selected_ids();
+                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_e.get(id).cloned()).collect();
+                            if picked.is_empty() { return; }
+                            let reason = fp_reason();
+                            if reason.trim().is_empty() {
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Warning, "A reason is required to mark a false positive (it's excluded + counted in the report's methodology section).");
+                                return;
+                            }
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.mark_false_positive(&picked, &reason);
+                            dispositions.set(model.dispositions);
+                            handle.remove_rows(&sel);
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Marked {} as false positive.", picked.len()));
+                        },
+                        "Mark false positive \u{2192}"
+                    }
                 },
                 TriageState::Ignored => rsx! {
                     button {
@@ -1404,6 +1492,26 @@ pub(super) fn FindingsTable(
                             crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} to Ignored.", picked.len()));
                         },
                         "Move to Ignored"
+                    }
+                },
+                TriageState::FalsePositive => rsx! {
+                    // No reason input here — the reason was already captured when the finding
+                    // was marked (Unresolved view). Moving back to Unresolved is the only
+                    // action; it clears no data (the reason stays on the disposition record
+                    // until a new one overwrites it).
+                    button {
+                        class: "btn-restart",
+                        onclick: move |_| {
+                            let sel = handle.selected_ids();
+                            let picked: Vec<FindingView> = sel.iter().filter_map(|id| id_map_e.get(id).cloned()).collect();
+                            if picked.is_empty() { return; }
+                            let mut model = TriageModel { dispositions: dispositions.peek().clone(), triage_view };
+                            model.move_to(&picked, TriageState::Unresolved);
+                            dispositions.set(model.dispositions);
+                            handle.remove_rows(&sel);
+                            crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, format!("Moved {} back to Unresolved.", picked.len()));
+                        },
+                        "Move to Unresolved"
                     }
                 },
             }
@@ -2421,19 +2529,21 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     }
 
     // Live per-table counts (recompute reactively as dispositions change).
-    let (n_unresolved, n_ignored, n_techdebt) = {
+    let (n_unresolved, n_ignored, n_techdebt, n_falsepositive) = {
         let d = dispositions.read();
         let mut u = 0usize;
         let mut i = 0usize;
         let mut t = 0usize;
+        let mut fp = 0usize;
         for f in &findings {
             match finding_state(&d, f) {
                 TriageState::Unresolved => u += 1,
                 TriageState::Ignored => i += 1,
                 TriageState::TechDebt => t += 1,
+                TriageState::FalsePositive => fp += 1,
             }
         }
-        (u, i, t)
+        (u, i, t, fp)
     };
 
     rsx! {
@@ -3121,13 +3231,13 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
             // ── Findings (after the audit runs) ────────────────────────────────
             if audited.is_some() {
                 p { class: "scan-section-h", "Findings" }
-                p { class: "scan-section-sub", "Triage every finding into one of three tables: leave it Unresolved, Ignore it (with a reason), or save it as Tech debt. Switch tables below; selected findings move between tables. When nothing is Unresolved, Process the ignored + tech-debt buckets." }
+                p { class: "scan-section-sub", "Triage every finding into one of four tables: leave it Unresolved, Ignore it (with a reason), save it as Tech debt, or mark it a False positive (with a reason — the tool was wrong; excluded from the report, never baselined). Switch tables below; selected findings move between tables. When nothing is Unresolved, Process the ignored + tech-debt buckets." }
 
-                // Single-select over the three triage tables, each with a live count.
+                // Single-select over the four triage tables, each with a live count.
                 div { class: "triage-switch",
-                    for st in [TriageState::Unresolved, TriageState::Ignored, TriageState::TechDebt] {
+                    for st in [TriageState::Unresolved, TriageState::Ignored, TriageState::TechDebt, TriageState::FalsePositive] {
                         {
-                            let count = match st { TriageState::Unresolved => n_unresolved, TriageState::Ignored => n_ignored, TriageState::TechDebt => n_techdebt };
+                            let count = match st { TriageState::Unresolved => n_unresolved, TriageState::Ignored => n_ignored, TriageState::TechDebt => n_techdebt, TriageState::FalsePositive => n_falsepositive };
                             let active = triage_view() == st;
                             rsx! {
                                 button {
@@ -3191,6 +3301,12 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                             TechDebtBucket::Later => debt_later.entry(f.repo.clone()).or_default().push(f.clone()),
                                             TechDebtBucket::Now => debt_now.entry(f.repo.clone()).or_default().push(f.clone()),
                                         },
+                                        // FalsePositive is a Process-time NO-OP by design (CRITICAL,
+                                        // differs from Ignored): it never reaches the baseline and
+                                        // never files a ticket. Its only effects are (report export,
+                                        // separately) exclusion from the findings section + a
+                                        // methodology counter. See `TriageState::FalsePositive`'s doc.
+                                        TriageState::FalsePositive => {}
                                         TriageState::Unresolved => {}
                                     }
                                 }
@@ -3763,6 +3879,20 @@ mod tests {
         serde_json::from_value(json).expect("valid FindingView fixture")
     }
 
+    // Wire-contract sync (same rationale as `scan_report_view_mirrors_server_provenance_shape`
+    // above): the server's `Finding::confidence`/`Finding::effort` (onboard.rs) must survive
+    // deserialization into this crate's `FindingView` mirror unchanged.
+    #[test]
+    fn finding_view_mirrors_server_confidence_and_effort_shape() {
+        let f = finding(serde_json::json!({
+            "repo": "owner/repo", "path": "src/lib.rs", "line": 1,
+            "rule_id": "AI-LAYERING", "severity": "medium", "snippet": "s", "detail": "d",
+            "confidence": "needs-review", "effort": "low",
+        }));
+        assert_eq!(f.confidence.as_deref(), Some("needs-review"));
+        assert_eq!(f.effort.as_deref(), Some("low"));
+    }
+
     #[test]
     fn findings_csv_header_and_row_shape() {
         let f = finding(serde_json::json!({
@@ -3813,6 +3943,69 @@ mod tests {
 
     fn scan_report(json: serde_json::Value) -> super::ScanReportView {
         serde_json::from_value(json).expect("valid ScanReportView fixture")
+    }
+
+    // ── wire-contract sync: ScanReportView must mirror the server's ScanProvenance ──────────
+    // `camerata_server::onboard::ScanReport` and this crate's `ScanReportView` are NOT the
+    // same type — the UI is a WASM binary that never depends on the (tokio/axum) server
+    // crate, so it deserializes the server's JSON response through its own mirror struct.
+    // serde silently DROPS any JSON field the mirror doesn't declare, so a field added
+    // server-side without a matching mirror field here is invisible drift, not a compile
+    // error. This test pins the JSON SHAPE the server's `ScanProvenance` (onboard.rs) emits
+    // (mirrored by hand in that file's own serde round-trip test) and asserts every field
+    // survives deserialization into `ScanReportView` here — the two tests together are the
+    // cross-crate sync guard.
+    #[test]
+    fn scan_report_view_mirrors_server_provenance_shape() {
+        let r = scan_report(serde_json::json!({
+            "repos": ["owner/repo"], "files_scanned": 10,
+            "findings": [], "proposed_rules": [], "gated": false,
+            "provenance": {
+                "audited_refs": [
+                    { "repo": "owner/repo", "sha": "deadbeef".repeat(5), "branch": "main", "dirty": true }
+                ],
+                "audit_model": "claude-sonnet-4-6",
+                "calibration_model": "claude-haiku-4-5",
+                "mode": "parallel",
+                "thorough": true,
+                "deep": false,
+                "rules_fingerprint": "fp-123",
+                "audited_rule_ids": ["SEC-NO-HARDCODED-SECRETS-1", "ARCH-1"],
+                "camerata_version": "0.1.0",
+                "osv_scanner_version": "v1.9.2",
+                "started_at": "2026-07-23T00:00:00+00:00",
+                "finished_at": "2026-07-23T00:05:00+00:00",
+            }
+        }));
+        let p = r.provenance;
+        assert_eq!(p.audited_refs.len(), 1);
+        assert_eq!(p.audited_refs[0].repo, "owner/repo");
+        assert_eq!(p.audited_refs[0].branch.as_deref(), Some("main"));
+        assert!(p.audited_refs[0].dirty, "dirty flag must survive the round trip");
+        assert_eq!(p.audit_model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(p.calibration_model.as_deref(), Some("claude-haiku-4-5"));
+        assert_eq!(p.mode, "parallel");
+        assert!(p.thorough);
+        assert!(!p.deep);
+        assert_eq!(p.rules_fingerprint, "fp-123");
+        assert_eq!(p.audited_rule_ids, vec!["SEC-NO-HARDCODED-SECRETS-1".to_string(), "ARCH-1".to_string()]);
+        assert_eq!(p.camerata_version, "0.1.0");
+        assert_eq!(p.osv_scanner_version.as_deref(), Some("v1.9.2"));
+        assert_eq!(p.started_at, "2026-07-23T00:00:00+00:00");
+        assert_eq!(p.finished_at, "2026-07-23T00:05:00+00:00");
+    }
+
+    #[test]
+    fn scan_report_view_provenance_defaults_when_absent() {
+        // A report from before the provenance stamp existed (or a hand-built test fixture that
+        // omits it) must still deserialize — the whole point of `#[serde(default)]` here.
+        let r = scan_report(serde_json::json!({
+            "repos": ["owner/repo"], "files_scanned": 1,
+            "findings": [], "proposed_rules": [], "gated": false
+        }));
+        assert!(r.provenance.audited_refs.is_empty());
+        assert_eq!(r.provenance.audit_model, None);
+        assert_eq!(r.provenance.camerata_version, "");
     }
 
     #[test]

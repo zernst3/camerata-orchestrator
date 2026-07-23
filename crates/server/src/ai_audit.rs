@@ -360,6 +360,10 @@ pub fn parse_ai_findings(
                 preview_tool: None,
                 in_test: false,
                 needs_review: false,
+                // Calibration (apply_verdicts) sets these once the calibration pass runs;
+                // a raw pre-calibration finding has no confidence/effort opinion yet.
+                confidence: None,
+                effort: None,
             });
         }
     }
@@ -446,6 +450,11 @@ For EACH finding, do two things:
   for clear, concrete violations. Confidence "low" flags the finding for the architect's review —
   it is ADVICE, not a deletion. When in doubt between a violation and a preference, treat it as a
   preference: low confidence, capped severity.
+- Estimate remediation EFFORT for a developer to fix this ONE finding, given only what you can
+  see (the path/snippet/detail) — "low" (a one-line/local change: rename, add a check, swap a
+  call), "medium" (touches a few call sites or needs a small new helper/test), or "high" (a
+  structural change: new abstraction, cross-file rework, a migration). When you cannot tell,
+  default to "medium" rather than guessing an extreme.
 
 Do NOT deduplicate, and do NOT cross-reference other findings — no "same as [N]", "duplicate
 of [N]", "as index N", "index N", "row N", or ANY pointer to another finding by index/row.
@@ -453,7 +462,7 @@ Deduplication already happened upstream; your `reason` is one line about THIS fi
 severity/confidence only, with no reference to any other finding.
 
 Return ONLY JSON, no prose:
-{"verdicts":[{"index":0,"severity":"high|medium|low","confidence":"high|low","reason":"one line"}]}
+{"verdicts":[{"index":0,"severity":"high|medium|low","confidence":"high|low","effort":"low|medium|high","reason":"one line"}]}
 One verdict per finding, addressed by its [index]."#
         .to_string()
 }
@@ -566,6 +575,24 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
                 .to_string();
             }
             let low_conf = verdict["confidence"].as_str() == Some("low");
+            // Structured confidence (Part 1 §3): promoted out of the string-embedded
+            // `[needs review: reason]` detail suffix below. `needs_review` is also set
+            // here — previously calibration never touched it for AI findings (only
+            // `classify_repo_findings`'s in_test path did), so the UI's structured
+            // "needs review" filter silently missed every AI-flagged finding.
+            f.confidence = Some(if low_conf { "needs-review" } else { "high" }.to_string());
+            if low_conf {
+                f.needs_review = true;
+            }
+            // Structured effort (Part 1 §3): the calibration verdict schema now emits it
+            // alongside severity/confidence. Only accept the three known values — a
+            // mis-shaped or missing field leaves `effort` at its prior value (None for a
+            // fresh AI finding) rather than recording a guess.
+            if let Some(eff) = verdict["effort"].as_str() {
+                if matches!(eff, "low" | "medium" | "high") {
+                    f.effort = Some(eff.to_string());
+                }
+            }
             // Strip any cross-finding dedup pointers ("same as [6]", "duplicate of [10]") the
             // model still volunteers: the indices are batch-local and wrong, the relationship
             // is already encoded structurally (rule_id + path + line + also_matches), and a
@@ -578,6 +605,10 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
                 } else {
                     "calibrated"
                 };
+                // The `[needs review]`/`[calibrated]` detail tag is KEPT for one release for UI
+                // back-compat (`split_needs_review`, ui-core/src/rules.rs still regex-parses
+                // it) — the structured `confidence`/`needs_review` fields above are additive,
+                // not a replacement, until the UI reads them directly.
                 f.detail = if reason.is_empty() {
                     format!("{} [{tag}]", f.detail)
                 } else {
@@ -665,11 +696,14 @@ pub async fn verify_findings(
 /// mode). For each finding index: severity = the majority vote (ties break to the LOWER severity);
 /// confidence = "high" only when the passes AGREE (all "high" and a single agreed severity) —
 /// any disagreement means uncertainty, which is exactly what the architect should review, so it
-/// becomes "low" (needs review). Returns a `{"verdicts":[…]}` JSON string for `apply_verdicts`.
+/// becomes "low" (needs review). effort = the majority vote (ties break to "medium" — a neutral
+/// default when the passes disagree, since over- and under-estimating effort are equally
+/// misleading, unlike severity's asymmetric humility rule). Returns a `{"verdicts":[…]}` JSON
+/// string for `apply_verdicts`.
 fn consensus_verdicts(votes: &[String], n: usize) -> String {
     use serde_json::Value;
-    // Per index: collected (severity, confidence, reason) across passes.
-    let mut per: Vec<Vec<(String, String, String)>> = vec![Vec::new(); n];
+    // Per index: collected (severity, confidence, reason, effort) across passes.
+    let mut per: Vec<Vec<(String, String, String, String)>> = vec![Vec::new(); n];
     for raw in votes {
         let Some(json) = extract_json_object(raw) else {
             continue;
@@ -701,7 +735,13 @@ fn consensus_verdicts(votes: &[String], n: usize) -> String {
             }
             .to_string();
             let reason = verdict["reason"].as_str().unwrap_or("").trim().to_string();
-            per[idx].push((sev, conf, reason));
+            let effort = match verdict["effort"].as_str().unwrap_or("medium") {
+                "low" => "low",
+                "high" => "high",
+                _ => "medium",
+            }
+            .to_string();
+            per[idx].push((sev, conf, reason, effort));
         }
     }
     let rank = |s: &str| match s {
@@ -716,7 +756,7 @@ fn consensus_verdicts(votes: &[String], n: usize) -> String {
         }
         // Majority severity; tie breaks to the lower rank (humble).
         let mut counts = [0u32; 3]; // [low, medium, high]
-        for (s, _, _) in votes_for {
+        for (s, _, _, _) in votes_for {
             counts[rank(s)] += 1;
         }
         let max = counts.iter().copied().max().unwrap_or(0);
@@ -733,7 +773,7 @@ fn consensus_verdicts(votes: &[String], n: usize) -> String {
         };
         // Disagreement on severity, or any low-confidence vote → low confidence (needs review).
         let distinct_sevs = counts.iter().filter(|&&c| c > 0).count();
-        let any_low_conf = votes_for.iter().any(|(_, c, _)| c == "low");
+        let any_low_conf = votes_for.iter().any(|(_, c, _, _)| c == "low");
         let agreed_high = sev == "high" && distinct_sevs == 1 && !any_low_conf;
         let confidence = if agreed_high {
             "high"
@@ -742,15 +782,30 @@ fn consensus_verdicts(votes: &[String], n: usize) -> String {
         } else {
             "high"
         };
+        // Majority effort; a tie among the top vote-getters breaks to "medium" (see the
+        // function doc — effort has no humility direction the way severity does, so a
+        // single clear winner is used as-is, but ANY tie among the leaders is neutral).
+        let mut effort_counts = [0u32; 3]; // [low, medium, high]
+        for (_, _, _, e) in votes_for {
+            effort_counts[rank(e)] += 1;
+        }
+        let effort_max = effort_counts.iter().copied().max().unwrap_or(0);
+        let effort_winners: Vec<usize> =
+            (0..3).filter(|&i| effort_counts[i] == effort_max).collect();
+        let effort = match effort_winners.as_slice() {
+            [0] => "low",
+            [2] => "high",
+            _ => "medium", // a single "medium" winner, or any tie among the leaders
+        };
         // First non-empty reason, preferring a low-confidence pass's reason.
         let reason = votes_for
             .iter()
-            .find(|(_, c, r)| c == "low" && !r.is_empty())
-            .or_else(|| votes_for.iter().find(|(_, _, r)| !r.is_empty()))
-            .map(|(_, _, r)| r.clone())
+            .find(|(_, c, r, _)| c == "low" && !r.is_empty())
+            .or_else(|| votes_for.iter().find(|(_, _, r, _)| !r.is_empty()))
+            .map(|(_, _, r, _)| r.clone())
             .unwrap_or_default();
         verdicts.push(serde_json::json!({
-            "index": idx, "severity": sev, "confidence": confidence, "reason": reason
+            "index": idx, "severity": sev, "confidence": confidence, "effort": effort, "reason": reason
         }));
     }
     serde_json::json!({ "verdicts": verdicts }).to_string()
@@ -2785,6 +2840,24 @@ mod tests {
         assert_eq!(v1["confidence"], "high", "unanimous high stays confident");
     }
 
+    /// Thorough-mode consensus (#51) must thread `effort` through the same majority-vote
+    /// merge as severity/confidence: unanimous votes pass straight through, and a tie
+    /// breaks to "medium" (effort has no humility direction the way severity does).
+    #[test]
+    fn consensus_verdicts_threads_effort_with_majority_and_tie_to_medium() {
+        let votes = vec![
+            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","effort":"low","reason":""},{"index":1,"severity":"high","confidence":"high","effort":"low","reason":""}]}"#.to_string(),
+            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","effort":"low","reason":""},{"index":1,"severity":"high","confidence":"high","effort":"high","reason":""}]}"#.to_string(),
+        ];
+        let out = consensus_verdicts(&votes, 2);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let arr = v["verdicts"].as_array().unwrap();
+        let v0 = arr.iter().find(|x| x["index"] == 0).unwrap();
+        assert_eq!(v0["effort"], "low", "unanimous effort votes pass straight through");
+        let v1 = arr.iter().find(|x| x["index"] == 1).unwrap();
+        assert_eq!(v1["effort"], "medium", "a low/high tie must break to medium");
+    }
+
     #[test]
     fn parse_needs_files_reads_array_and_tolerates_absence() {
         let with =
@@ -2811,6 +2884,8 @@ mod tests {
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
         }
     }
 
@@ -3195,6 +3270,8 @@ mod tests {
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
         }
     }
 
@@ -3220,6 +3297,65 @@ mod tests {
         );
         let authz = out.iter().find(|f| f.rule_id == "AI-AUTHZ").unwrap();
         assert_eq!(authz.severity, "low", "recalibrated down");
+    }
+
+    // ── Structured confidence + effort (Part 1 §3) ────────────────────────────
+
+    /// `apply_verdicts` must set the STRUCTURED `confidence`/`needs_review` fields, not just
+    /// the string-embedded `[needs review]` detail tag — the tag stays for one release (UI
+    /// back-compat), but a report/consumer that reads the structured field must see it too.
+    #[test]
+    fn apply_verdicts_sets_structured_confidence_and_needs_review() {
+        let findings = vec![
+            finding("AI-TIMING", "medium"), // index 0 -> low confidence
+            finding("AI-REAL", "high"),     // index 1 -> high confidence
+        ];
+        let raw = r#"{"verdicts":[
+            {"index":0,"confidence":"low","effort":"low","reason":"negligible timing residual"},
+            {"index":1,"severity":"high","confidence":"high","effort":"high","reason":"concrete"}
+        ]}"#;
+        let out = apply_verdicts(raw, findings);
+        let timing = out.iter().find(|f| f.rule_id == "AI-TIMING").unwrap();
+        assert_eq!(timing.confidence.as_deref(), Some("needs-review"));
+        assert!(timing.needs_review, "low confidence must set structured needs_review");
+        assert_eq!(timing.effort.as_deref(), Some("low"));
+        // The detail tag is KEPT for one release (UI back-compat) alongside the new field.
+        assert!(timing.detail.contains("[needs review"));
+
+        let real = out.iter().find(|f| f.rule_id == "AI-REAL").unwrap();
+        assert_eq!(real.confidence.as_deref(), Some("high"));
+        assert!(!real.needs_review, "high confidence must not set needs_review");
+        assert_eq!(real.effort.as_deref(), Some("high"));
+    }
+
+    /// A verdict with a mis-shaped or missing `effort` value must leave `Finding.effort`
+    /// untouched (fail-soft — effort is advisory, never load-bearing) rather than recording a
+    /// guessed value.
+    #[test]
+    fn apply_verdicts_ignores_invalid_effort_value() {
+        let findings = vec![finding("AI-X", "medium")];
+        let raw = r#"{"verdicts":[{"index":0,"confidence":"high","effort":"extreme","reason":""}]}"#;
+        let out = apply_verdicts(raw, findings);
+        assert_eq!(out[0].effort, None, "an unrecognized effort value must not be recorded");
+
+        let findings2 = vec![finding("AI-Y", "medium")];
+        let raw2 = r#"{"verdicts":[{"index":0,"confidence":"high","reason":""}]}"#;
+        let out2 = apply_verdicts(raw2, findings2);
+        assert_eq!(out2[0].effort, None, "an absent effort field must leave effort as None");
+    }
+
+    /// The calibration verdict JSON schema (Part 1 §3) parses `effort` alongside
+    /// severity/confidence/reason — this pins the wire shape the system prompt
+    /// (`verify_system_prompt`) asks the model to emit.
+    #[test]
+    fn calibration_verdict_json_parses_effort_field() {
+        let raw = r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","effort":"medium","reason":"a clear break"}]}"#;
+        let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let verdict = &v["verdicts"][0];
+        assert_eq!(verdict["effort"], "medium");
+        // Round-trips through apply_verdicts onto the Finding.
+        let out = apply_verdicts(raw, vec![finding("SEC-X", "high")]);
+        assert_eq!(out[0].effort.as_deref(), Some("medium"));
     }
 
     #[test]
@@ -3740,6 +3876,8 @@ mod tests {
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
         };
         // Three AI- findings with equal severity — earliest (index 0) must win.
         let group = vec![

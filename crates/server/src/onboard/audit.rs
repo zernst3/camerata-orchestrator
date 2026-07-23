@@ -70,6 +70,8 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                         preview_tool: None,
                         in_test: false,
                         needs_review: false,
+                        confidence: None,
+                        effort: None,
                     });
                 }
             }
@@ -114,6 +116,8 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                 preview_tool: None,
                 in_test,
                 needs_review,
+                confidence: None,
+                effort: None,
             });
         }
     }
@@ -196,6 +200,8 @@ pub(crate) fn classify_repo_findings(
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
         });
     }
 }
