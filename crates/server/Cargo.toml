@@ -120,3 +120,7 @@ http-body-util = "0.1"
 # test-util gives start_paused so the run executor's sleeps resolve instantly in tests.
 tokio = { workspace = true, features = ["macros", "rt", "time", "test-util"] }
 tempfile = "3"
+# Serializes the handful of tests that toggle the global CAMERATA_LIVE_BUILD env var to
+# "1" (BUG B rerun-investigation coverage), mirroring `camerata-ui`'s identical
+# `#[serial(bff_env)]` use for its own global-env-var tests.
+serial_test = "3"

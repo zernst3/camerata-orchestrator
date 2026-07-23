@@ -1425,13 +1425,13 @@ pub(crate) enum BeginInvestigationOutcome {
 /// [`BeginInvestigationOutcome`] so the caller can react precisely (start / surface the
 /// block reason + refresh / report a transport failure) instead of collapsing every
 /// non-success into a single generic toast.
-async fn begin_investigation_run(story_id: &str, model: &str) -> BeginInvestigationOutcome {
+/// Shared response mapping for the begin/re-run investigation POSTs — both endpoints
+/// return the identical shape (2xx `{run_id, story_id}`; 409 `{reason}`; anything else is a
+/// transport/decode failure), so [`begin_investigation_run`] and (BUG B)
+/// [`rerun_investigation_run`] both funnel through this.
+async fn post_investigation_run(url: String, model: &str) -> BeginInvestigationOutcome {
     let resp = match reqwest::Client::new()
-        .post(format!(
-            "{}/api/uow/{}/begin-investigation",
-            crate::bff_base(),
-            enc_seg(story_id)
-        ))
+        .post(url)
         .json(&serde_json::json!({ "model": model }))
         .send()
         .await
@@ -1461,6 +1461,36 @@ async fn begin_investigation_run(story_id: &str, model: &str) -> BeginInvestigat
         Some(run_id) => BeginInvestigationOutcome::Started(run_id),
         None => BeginInvestigationOutcome::Failed,
     }
+}
+
+async fn begin_investigation_run(story_id: &str, model: &str) -> BeginInvestigationOutcome {
+    post_investigation_run(
+        format!(
+            "{}/api/uow/{}/begin-investigation",
+            crate::bff_base(),
+            enc_seg(story_id)
+        ),
+        model,
+    )
+    .await
+}
+
+/// BUG B: re-run investigation for a story ALREADY past Intake — `POST
+/// /api/uow/:story_id/rerun-investigation`. Same outcome mapping as
+/// [`begin_investigation_run`]; the server endpoint differs only in that it does NOT
+/// repeat the Intake → Investigating transition (see `uow_rerun_investigation` server-side),
+/// so this is safe to call any time the UoW is in the Investigation & Refinement phase —
+/// including right after a run that produced no output, or one that failed.
+pub(crate) async fn rerun_investigation_run(story_id: &str, model: &str) -> BeginInvestigationOutcome {
+    post_investigation_run(
+        format!(
+            "{}/api/uow/{}/rerun-investigation",
+            crate::bff_base(),
+            enc_seg(story_id)
+        ),
+        model,
+    )
+    .await
 }
 
 /// Which view the enterprise cockpit is showing. Routines live INSIDE the cockpit

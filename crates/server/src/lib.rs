@@ -1178,6 +1178,12 @@ pub fn router(state: AppState) -> Router {
             "/api/uow/:story_id/begin-investigation",
             post(uow_begin_investigation),
         )
+        // BUG B: re-run investigation for a story ALREADY past Intake, without repeating
+        // the Intake → Investigating transition (which would 409 a second call).
+        .route(
+            "/api/uow/:story_id/rerun-investigation",
+            post(uow_rerun_investigation),
+        )
         .route(
             "/api/uow/:story_id/approve-decisions",
             post(uow_approve_decisions),
@@ -12233,6 +12239,15 @@ struct InvestigationReviewResponse {
     note_present: bool,
     note: Option<camerata_worktracker::investigation::InvestigationArtifact>,
     decisions: Vec<camerata_worktracker::investigation::DecisionRecord>,
+    /// BUG B: the reason the MOST RECENT investigation run failed, when it did. `None`
+    /// covers both "no run yet" and "the last run did not fail" — the UI only needs this
+    /// to distinguish a genuine failure from the generic "no note recorded yet" empty
+    /// state, so it surfaces "Investigation failed: {reason}" instead of a silent gap.
+    last_run_failed_reason: Option<String>,
+    /// Whether live mode is currently enabled, so the empty-state UI can say precisely why
+    /// there's no real note (live mode off vs. a genuine failure vs. just not run yet) even
+    /// when no note has been recorded at all.
+    live_mode_enabled: bool,
 }
 
 /// `GET /api/uow/:story_id/investigation` — the investigation note + decision records for
@@ -12243,11 +12258,20 @@ async fn uow_get_investigation(
 ) -> Json<InvestigationReviewResponse> {
     let note = state.uow.investigation_note_for(&story_id);
     let decisions = state.uow.decisions_for(&story_id);
+    let last_run_failed_reason = state
+        .runs
+        .latest_run_for_story_and_mode(&story_id, "investigation")
+        .and_then(|r| match r.status {
+            crate::run::RunStatus::Failed { reason } => Some(reason),
+            _ => None,
+        });
     Json(InvestigationReviewResponse {
         story_id,
         note_present: note.is_some(),
         note,
         decisions,
+        last_run_failed_reason,
+        live_mode_enabled: crate::run::live_mode_enabled(),
     })
 }
 
@@ -12330,37 +12354,37 @@ async fn uow_delete(
     Json(serde_json::json!({ "ok": state.uow.delete(&story_id) }))
 }
 
-async fn uow_begin_investigation(
-    State(state): State<AppState>,
-    Path(story_id): Path<String>,
-    req: Option<Json<BeginInvestigationReq>>,
-) -> Response {
-    // Transition the stage first; if it is illegal, surface the reason and start nothing.
-    if let Err(err) = state.uow.begin_investigation(&story_id) {
-        let body = Json(serde_json::json!({
-            "error": "lifecycle transition blocked",
-            "reason": err.message(),
-            "detail": err,
-        }));
-        return (StatusCode::CONFLICT, body).into_response();
-    }
-
+/// Shared machinery for kicking ONE single gated investigation-agent run: resolve the
+/// model, pull the story context, ground the agent in the project + repo, and spawn
+/// [`crate::investigation_run::execute_investigation_run`] in the background. Returns the
+/// new run id (pollable via `GET /api/runs/:id`).
+///
+/// Used by BOTH:
+/// - [`uow_begin_investigation`] — the FRESH start, which performs the Intake →
+///   Investigating stage transition first (fails the whole request if that 409s).
+/// - [`uow_rerun_investigation`] (BUG B) — a follow-up pass for a story ALREADY past
+///   Intake, which must NOT repeat that transition (it would 409 — the stage already
+///   moved on the first begin).
+async fn spawn_investigation_agent_run(
+    state: &AppState,
+    story_id: &str,
+    requested_model: Option<String>,
+) -> String {
     // Resolve the model: the caller's choice, else the active project's strongest tier.
-    let requested = req
-        .and_then(|Json(r)| r.model)
-        .filter(|m| !m.trim().is_empty());
-    let model = requested.unwrap_or_else(|| {
-        state
-            .projects
-            .active()
-            .map(|p| p.tier_map.strongest)
-            .unwrap_or_else(crate::model_tier::default_strongest_model)
-    });
+    let model = requested_model
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| {
+            state
+                .projects
+                .active()
+                .map(|p| p.tier_map.strongest)
+                .unwrap_or_else(crate::model_tier::default_strongest_model)
+        });
 
     // Pull the story context for the agent prompt (best-effort; fall back to the id).
-    let (title, desc) = match state.stories.get(&story_id).await {
+    let (title, desc) = match state.stories.get(story_id).await {
         Ok(Some(s)) => (s.title, s.description),
-        _ => (story_id.clone(), String::new()),
+        _ => (story_id.to_string(), String::new()),
     };
 
     // GROUNDING (the invariant): hand the investigation agent the project's rule context +
@@ -12377,14 +12401,14 @@ async fn uow_begin_investigation(
     let read_dirs = state.active_repo_dirs();
 
     // Create a run the UI can poll, then kick the single gated investigation agent.
-    let run_id = state.runs.create(&story_id, "investigation", crate::run::RunKind::Watched);
+    let run_id = state.runs.create(story_id, "investigation", crate::run::RunKind::Watched);
     {
         let runs = state.runs.clone();
         let uow = state.uow.clone();
         let clarifications = state.clarifications.clone();
         let resume = state.clarify_resume.clone();
         let rid = run_id.clone();
-        let sid = story_id.clone();
+        let sid = story_id.to_string();
         // Register the abort handle so a Stop (POST /api/runs/:id/cancel) can reap a run
         // blocked inside the live agent subprocess (kill_on_drop). Cleared when it finishes.
         let runs_for_clear = state.runs.clone();
@@ -12410,6 +12434,101 @@ async fn uow_begin_investigation(
         state.runs.register_abort(&run_id, handle.abort_handle());
     }
 
+    run_id
+}
+
+async fn uow_begin_investigation(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    req: Option<Json<BeginInvestigationReq>>,
+) -> Response {
+    // Transition the stage first; if it is illegal, surface the reason and start nothing.
+    if let Err(err) = state.uow.begin_investigation(&story_id) {
+        let body = Json(serde_json::json!({
+            "error": "lifecycle transition blocked",
+            "reason": err.message(),
+            "detail": err,
+        }));
+        return (StatusCode::CONFLICT, body).into_response();
+    }
+
+    let model = req.and_then(|Json(r)| r.model);
+    let run_id = spawn_investigation_agent_run(&state, &story_id, model).await;
+    Json(serde_json::json!({ "run_id": run_id, "story_id": story_id })).into_response()
+}
+
+/// `POST /api/uow/:story_id/rerun-investigation` (BUG B) — re-run the single investigation
+/// agent for a story that is ALREADY past Intake (stage Investigating or
+/// DecisionsApproved), WITHOUT repeating the Intake → Investigating transition.
+///
+/// `begin-investigation` 409s once the stage has already moved past Intake, so before this
+/// endpoint existed there was NO way to re-run investigation after the first pass produced
+/// no usable note (or errored) — the "Begin investigation" button simply disappeared. This
+/// gives the architect an always-available re-run affordance for the whole Investigation &
+/// Refinement phase.
+///
+/// Requires live mode (`CAMERATA_LIVE_BUILD=1`) — refuses honestly with a 409 + explicit
+/// reason otherwise, exactly like the fresh run would (re-running with live mode off would
+/// just record the same "live mode is off" placeholder note again, which is not useful).
+///
+/// 409s when the stage is not Investigating/DecisionsApproved (e.g. still at Intake — use
+/// `begin-investigation` there instead — or already in/after Development, where
+/// investigation is done). 404s when the story has no UoW at all.
+async fn uow_rerun_investigation(
+    State(state): State<AppState>,
+    Path(story_id): Path<String>,
+    req: Option<Json<BeginInvestigationReq>>,
+) -> Response {
+    if !crate::run::live_mode_enabled() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "live mode required",
+                "reason": "Re-running investigation requires the live agent; set \
+                           CAMERATA_LIVE_BUILD=1 and retry.",
+            })),
+        )
+            .into_response();
+    }
+
+    match state.uow.get(&story_id) {
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "no such UoW", "reason": "Unknown story." })),
+            )
+                .into_response();
+        }
+        Some(uow)
+            if !matches!(
+                uow.stage,
+                crate::lifecycle::UowStage::Investigating | crate::lifecycle::UowStage::DecisionsApproved
+            ) =>
+        {
+            let reason = match uow.stage {
+                crate::lifecycle::UowStage::Intake => {
+                    "Investigation has not started yet — use \"Begin investigation\" instead."
+                }
+                _ => "Investigation can only be re-run while the UoW is in the Investigation & \
+                      Refinement phase.",
+            };
+            let body = Json(serde_json::json!({
+                "error": "lifecycle transition blocked",
+                "reason": reason,
+            }));
+            return (StatusCode::CONFLICT, body).into_response();
+        }
+        Some(_) => {}
+    }
+
+    state.uow.append_history(
+        &story_id,
+        "note",
+        "Investigation re-run requested by the architect (manual re-run).",
+    );
+
+    let model = req.and_then(|Json(r)| r.model);
+    let run_id = spawn_investigation_agent_run(&state, &story_id, model).await;
     Json(serde_json::json!({ "run_id": run_id, "story_id": story_id })).into_response()
 }
 
@@ -17180,6 +17299,129 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    // ── BUG B: rerun-investigation (re-run without repeating the Intake transition) ──
+
+    /// `rerun-investigation` refuses honestly (409, naming live mode) when live mode is
+    /// off — the default in tests/CI. Re-running with live mode off would just record the
+    /// same "live mode is off" placeholder note again, which isn't useful, so this must be
+    /// a real refusal, not a silent no-op success.
+    #[tokio::test]
+    #[serial_test::serial(camerata_live_build)]
+    async fn rerun_investigation_refuses_honestly_when_live_mode_off() {
+        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        let state = AppState::seeded();
+        let story = "INV-RERUN-1";
+        state.uow.begin_investigation(story).unwrap(); // now Investigating
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{story}/rerun-investigation"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let json = body_json(resp).await;
+        assert!(
+            json["reason"]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains("live agent"),
+            "must name the live agent as the blocker: {json}"
+        );
+
+        // A refused re-run must not silently transition anything.
+        assert_eq!(
+            state.uow.get_or_create(story).stage,
+            lifecycle::UowStage::Investigating
+        );
+    }
+
+    /// `rerun-investigation` 409s when the story is still at Intake — investigation has not
+    /// started, so `begin-investigation` is the right endpoint there, not a re-run.
+    #[tokio::test]
+    #[serial_test::serial(camerata_live_build)]
+    async fn rerun_investigation_409s_when_still_at_intake() {
+        std::env::set_var("CAMERATA_LIVE_BUILD", "1");
+        let state = AppState::seeded();
+        let story = "INV-RERUN-2";
+        state.uow.get_or_create(story); // stays at Intake
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{story}/rerun-investigation"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        std::env::remove_var("CAMERATA_LIVE_BUILD");
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let json = body_json(resp).await;
+        assert!(json["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Begin investigation"));
+    }
+
+    /// The core BUG B fix: a story ALREADY past Intake (Investigating) can be re-run
+    /// WITHOUT a 409 — `begin-investigation` would 409 here (the stage already moved past
+    /// Intake on the first begin); `rerun-investigation` spawns a fresh pass instead,
+    /// WITHOUT repeating that transition.
+    #[tokio::test]
+    #[serial_test::serial(camerata_live_build)]
+    async fn rerun_investigation_spawns_run_for_investigating_story_without_409() {
+        std::env::set_var("CAMERATA_LIVE_BUILD", "1");
+        let state = AppState::seeded();
+        let story = "INV-RERUN-3";
+        state.uow.begin_investigation(story).unwrap(); // now Investigating
+
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/uow/{story}/rerun-investigation"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "must NOT 409 for an already-Investigating story"
+        );
+        let json = body_json(resp).await;
+        assert!(
+            json["run_id"].as_str().is_some_and(|s| !s.is_empty()),
+            "returns a pollable run id"
+        );
+        assert_eq!(json["story_id"], story);
+        std::env::remove_var("CAMERATA_LIVE_BUILD");
+
+        // The stage is STILL Investigating IMMEDIATELY after the response — the endpoint
+        // itself must not repeat the Intake → Investigating transition (that repetition is
+        // exactly what would have 409'd on a second `begin-investigation` call). Asserted
+        // synchronously, without waiting for the spawned background agent task to finish —
+        // this environment happens to have a real `camerata-gateway` binary built, so
+        // letting that task run to completion would make a real (slow, token-spending)
+        // `claude` call; the test ending here drops the runtime and the task with it.
+        assert_eq!(
+            state.uow.get_or_create(story).stage,
+            lifecycle::UowStage::Investigating,
+            "re-run must not repeat the Intake -> Investigating transition"
+        );
     }
 
     // ── Evidence assembly (issue #53) ─────────────────────────────────────────

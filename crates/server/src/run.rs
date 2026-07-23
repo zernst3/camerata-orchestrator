@@ -27,6 +27,13 @@ pub use camerata_app_core::run::{
 
 use crate::transcript::{generated_prompt, AgentTranscript, TranscriptStore};
 
+/// Parse the monotonic sequence number out of a `run-N` id (see [`RunStore::create`]).
+/// Returns `0` for an id that doesn't match the pattern (defensive; should not happen for
+/// ids this store minted) so ordering degrades gracefully instead of panicking.
+fn run_id_seq(id: &str) -> usize {
+    id.strip_prefix("run-").and_then(|n| n.parse().ok()).unwrap_or(0)
+}
+
 /// In-memory store of runs, shared into the background executor and the handlers.
 #[derive(Clone, Default)]
 pub struct RunStore {
@@ -115,6 +122,23 @@ impl RunStore {
         guard
             .values()
             .find(|r| r.story_id == story_id && !r.done)
+            .cloned()
+    }
+
+    /// BUG B: the MOST RECENT run for `story_id` in the given `mode` (e.g.
+    /// `"investigation"`), regardless of whether it is done. Unlike
+    /// [`Self::active_run_for_story`] this DOES return a terminal (`Failed`/`AwaitingQa`)
+    /// run — it exists so a failed/empty investigation's reason can be surfaced on the
+    /// empty-state UI even after the page reloads and the session-only `active_run` signal
+    /// is gone. "Most recent" = the highest numeric suffix of the `run-N` id, which is
+    /// equivalent to insertion order since ids are minted from a monotonic counter
+    /// ([`Self::create`]). Returns a cloned snapshot so the caller holds no lock.
+    pub fn latest_run_for_story_and_mode(&self, story_id: &str, mode: &str) -> Option<Run> {
+        let guard = self.runs.lock().ok()?;
+        guard
+            .values()
+            .filter(|r| r.story_id == story_id && r.mode == mode)
+            .max_by_key(|r| run_id_seq(&r.id))
             .cloned()
     }
 
