@@ -1,0 +1,54 @@
+id = "SUPABASE-RLS-NO-POLICY-1"
+title = "A table with Row Level Security enabled but zero policies denies all anon/authenticated access"
+tag = "stack"
+domain = "supabase:rls"
+layer = "platform"
+enforcement = "architectural"
+default = true
+verification = "grounded"
+qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS-ENABLED-1: for a table whose replayed end-state has RLS enabled but has zero CREATE POLICY statements anywhere in its history, Postgres denies ALL access to anon/authenticated roles (RLS enabled with no policy is deny-by-default). Conformance holds when every RLS-enabled table has at least one policy; a zero-policy table is either a broken feature or a sign the application reads that table exclusively via the service_role key, which bypasses RLS entirely. Medium severity — this is an availability/architecture smell, not a direct exposure, so it is a lower severity than the missing-RLS and policy-disabled findings."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/postgres/row-level-security"
+title = "Supabase docs — Row Level Security guide (deny-by-default with RLS enabled and no policy)"
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/database-advisors?lint=0008_rls_enabled_no_policy"
+title = "Supabase Database Linter — 0008_rls_enabled_no_policy (\"No access rules defined\")"
+linter = "splinter: rls_enabled_no_policy"
+
+[decision]
+question = "Is a table with RLS enabled but zero policies flagged, and at what severity relative to the missing-RLS findings?"
+default = "flag-zero-policy-as-medium"
+why = """
+RLS enabled with no CREATE POLICY is deny-by-default in Postgres: anon and authenticated roles get
+zero rows and zero writes. This is Splinter's rls_enabled_no_policy lint (0008, confirmed). Unlike
+SUPABASE-RLS-ENABLED-1 and SUPABASE-RLS-POLICY-DISABLED-1, this is NOT a direct data-exposure
+finding — it is one of two things: (a) a broken feature (the table is legitimately used by the
+anon/authenticated roles and something is silently failing), or (b) a sign the application only
+ever touches the table through a service_role-backed client, which bypasses RLS entirely and
+therefore makes the table's own policies moot — in which case the REAL risk lives in whichever code
+path constructs that service_role client (see SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1), not in this
+table's RLS configuration. The finding's value is diagnostic rather than a direct vulnerability, so
+it ships at medium severity and its remediation text should point the reader at both possibilities
+rather than assuming one.
+"""
+
+[[option]]
+id = "flag-zero-policy-as-medium"
+label = "Flag zero-policy RLS-enabled tables at medium severity, naming both possible causes"
+directive = """
+When the replayed end-state shows a table with RLS enabled and zero policies anywhere in its
+history, emit a medium-severity finding: "`<table>` is locked to everyone. Either a feature is
+broken, or your app is reading it with the master key — which skips security entirely." Point the
+remediation at checking (a) whether the anon/authenticated roles need policies added, and (b)
+whether a service_role client reads this table, in which case SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1
+covers the actual risk.
+"""
+why = "The finding is a genuine repo-detectable signal (deny-by-default RLS) but its root cause is ambiguous from static analysis alone; medium severity plus a two-branch remediation is the honest framing rather than guessing which branch applies."
+
+[[option]]
+id = "treat-zero-policy-as-non-finding"
+label = "Do not flag zero-policy RLS-enabled tables at all (assume intentional lockdown)"
+directive = "Skip tables with RLS enabled and no policies; treat the deny-by-default state as an intentional, already-secure configuration requiring no report entry."
+why = "Rejected: a zero-policy table is exactly the shape a vibe-coded app produces when the developer enabled RLS (perhaps prompted by Supabase's dashboard nudge) and then gave up on writing policies, routing all access through the service_role key instead — which is a real architectural risk this report exists to surface, not a state to stay silent about. Silence here would mean the report misses the single clearest signal that a service_role bypass is in play."

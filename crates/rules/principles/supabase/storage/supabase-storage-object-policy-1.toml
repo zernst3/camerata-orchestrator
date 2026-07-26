@@ -1,0 +1,58 @@
+id = "SUPABASE-STORAGE-OBJECT-POLICY-1"
+title = "storage.objects policies must not grant unconditional or unscoped anon write/delete access"
+tag = "stack"
+domain = "supabase:storage"
+layer = "platform"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by the same policy-predicate scan machinery as SUPABASE-RLS-PERMISSIVE-TRUE-1, specialized to storage.objects: a policy on storage.objects with USING (true) / WITH CHECK (true), or with no owner/folder scoping (no predicate referencing auth.uid() = owner, or a bucket_id + folder-prefix check) targeting anon or public, is flagged — with the finding naming the specific BUCKET (extracted from the policy's bucket_id predicate) rather than a generic table. Write/delete matches are high severity; read-only matches are medium with `needs_review`, mirroring the RLS-permissive-true severity split. Conformance holds when every storage.objects policy scopes write/delete operations to the resource's owner or an equivalent folder/ownership predicate."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/storage/security/access-control"
+title = "Supabase docs — Storage access control: storage authorization IS Row Level Security on storage.objects"
+
+[[sources]]
+url = "https://owasp.org/Top10/2021/A01_2021-Broken_Access_Control/index.html"
+title = "OWASP Top 10:2021 — A01 Broken Access Control"
+
+[decision]
+question = "Are storage.objects policies granting unconditional or unscoped anon write/delete access flagged, with the finding naming the specific bucket?"
+default = "flag-unscoped-object-policies-by-bucket"
+why = """
+Supabase documents storage authorization explicitly as RLS applied to the storage.objects table:
+"By default Storage does not allow any uploads to buckets without RLS policies. You selectively
+allow certain operations by creating RLS policies on the storage.objects table." That means every
+concern that applies to a table-level policy (SUPABASE-RLS-PERMISSIVE-TRUE-1) applies identically
+here — a policy with USING (true) / WITH CHECK (true), or one that grants INSERT/UPDATE/DELETE to
+anon/public with no ownership scoping (no auth.uid() = owner check, no folder-prefix-per-user
+convention), lets anyone upload into, overwrite, or delete from the bucket, not just the object's
+own owner. This is the same OWASP A01:2021 Broken Access Control category as its table-policy
+sibling.
+
+The one thing storage.objects policies need beyond generic policy scanning is bucket
+ATTRIBUTION: a storage.objects policy typically predicates on `bucket_id = '<name>'`, and the
+report is far more actionable when it names "your `uploads` bucket" than "a storage.objects
+policy." Extracting that bucket_id literal from the policy predicate at scan time is what
+distinguishes this rule from simply re-running SUPABASE-RLS-PERMISSIVE-TRUE-1 against a table it
+already covers generically.
+"""
+
+[[option]]
+id = "flag-unscoped-object-policies-by-bucket"
+label = "Flag unscoped/unconditional storage.objects policies, naming the specific bucket from the policy's bucket_id predicate"
+directive = """
+Scan CREATE POLICY statements targeting storage.objects. Extract the bucket_id literal from the
+predicate when present. Flag policies with USING (true) / WITH CHECK (true) targeting anon/public,
+or INSERT/UPDATE/DELETE policies with no ownership/folder scoping, as high severity: "Anyone can
+upload into — or delete from — your `<bucket>` bucket, not just the file's owner." SELECT-only
+unscoped policies are medium with `needs_review`, mirroring SUPABASE-RLS-PERMISSIVE-TRUE-1's
+read/write severity split.
+"""
+why = "Storage authorization is RLS on storage.objects in every respect that matters for this check; naming the bucket from the policy's own bucket_id predicate is what turns a generic 'a policy is too permissive' finding into an actionable, buyer-legible one."
+
+[[option]]
+id = "treat-storage-policies-as-covered-by-the-generic-rls-rule"
+label = "Do not author a storage-specific rule; rely on SUPABASE-RLS-PERMISSIVE-TRUE-1 running generically against storage.objects"
+directive = "Apply only the generic table-permissive-policy scan to storage.objects, without bucket-name extraction or storage-specific framing."
+why = "Rejected: SUPABASE-RLS-PERMISSIVE-TRUE-1 would still catch the true-predicate case, but its finding text says 'your `objects` table', which is meaningless to a non-technical buyer who has no idea storage.objects is where their file uploads live. The bucket-name extraction is the entire value-add — reporting 'your `uploads` bucket accepts anonymous writes' rather than 'the storage.objects table has a permissive policy' is the difference between an actionable finding and a confusing one."

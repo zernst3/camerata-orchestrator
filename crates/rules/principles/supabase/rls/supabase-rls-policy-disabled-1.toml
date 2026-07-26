@@ -1,0 +1,58 @@
+id = "SUPABASE-RLS-POLICY-DISABLED-1"
+title = "A table with CREATE POLICY statements must have Row Level Security enabled in its replayed end-state"
+tag = "stack"
+domain = "supabase:rls"
+layer = "platform"
+enforcement = "architectural"
+default = true
+verification = "grounded"
+qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS-ENABLED-1: once a table's final RLS-enabled/disabled state and its final policy set are both known, this rule flags a table that has one or more CREATE POLICY statements in its history but whose replayed end-state has RLS disabled — the policies were authored but are silently inactive. Conformance holds when every table carrying at least one policy also has RLS enabled in the same end-state; it fails when policies exist over a table whose RLS is off. Carries the same repo-vs-production honesty caveat as SUPABASE-RLS-ENABLED-1."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/postgres/row-level-security"
+title = "Supabase docs — Row Level Security guide (CREATE POLICY semantics)"
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/database-advisors?lint=0007_policy_exists_rls_disabled"
+title = "Supabase Database Linter — 0007_policy_exists_rls_disabled (\"Security policy not enforced\")"
+linter = "splinter: policy_exists_rls_disabled"
+
+[decision]
+question = "When a table has CREATE POLICY statements in its migration history but RLS is disabled in the replayed end-state, is that flagged as a distinct, higher-signal finding than a bare missing-RLS finding?"
+default = "flag-policy-exists-rls-disabled"
+why = """
+This is a more dangerous variant of SUPABASE-RLS-ENABLED-1: the codebase LOOKS protected — a
+developer wrote CREATE POLICY statements that read as access control — but because RLS itself was
+never enabled (or was disabled after the policies were written), Postgres never evaluates those
+policies at all. The table is fully open in production while the code review and the migration
+diff both show what appears to be a security control. This exact shape is Splinter's
+policy_exists_rls_disabled lint (0007, confirmed against the live database-advisors page).
+
+Detection requires the same end-state replay as SUPABASE-RLS-ENABLED-1 (policies and the
+ENABLE/DISABLE state must both be resolved against the ordered timeline, not a single file) plus
+one additional correlation: at least one CREATE POLICY targeting the table exists anywhere in the
+replayed history. The buyer-facing framing is deliberately sharper than the bare missing-RLS case
+because the false sense of security is itself the finding: "You wrote access rules for `orders`,
+but they are switched off. The table looks protected in your code and is fully open in
+production." Same honesty caveat as SUPABASE-RLS-ENABLED-1: this is what the migration history
+shows, not a live-database assertion.
+"""
+
+[[option]]
+id = "flag-policy-exists-rls-disabled"
+label = "Flag tables with policies but RLS off as a distinct, higher-signal finding"
+directive = """
+When the replayed end-state shows a table has one or more CREATE POLICY statements anywhere in its
+migration history AND RLS is disabled (or never enabled) in that same end-state, emit a critical
+finding distinct from the bare SUPABASE-RLS-ENABLED-1 case, naming the table and citing the
+migration file(s) that defined the policy and the one that (dis)established RLS. Phrase it as:
+"You wrote access rules for `<table>`, but they are switched off. The table looks protected in your
+code and is fully open in production." Include the repo-vs-production honesty caveat.
+"""
+why = "Policies-with-RLS-off is a distinct failure mode from bare missing-RLS: it indicates a developer BELIEVES the table is protected, which changes both the remediation message (enable RLS; the policies are likely already correct) and the report's credibility (naming the exact gap between intent and reality is the paid-audit value)."
+
+[[option]]
+id = "fold-into-bare-missing-rls-finding"
+label = "Do not distinguish policy-exists-but-disabled from bare missing-RLS; report both as one finding type"
+directive = "Report any table with RLS disabled in its end-state as a single undifferentiated 'missing RLS' finding, whether or not policies exist for it."
+why = "Rejected: collapsing the two cases loses the highest-value signal in a vibe-coded audit — that the developer already wrote correct-looking policies and only needs RLS switched on, versus a table with no access-control thinking applied at all. The distinction changes the remediation instructions and materially changes how alarming the finding should read to a non-technical buyer."

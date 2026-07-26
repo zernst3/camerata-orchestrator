@@ -1,0 +1,55 @@
+id = "SUPABASE-RLS-INITPLAN-1"
+title = "RLS policy predicates should wrap auth.uid()/auth.jwt() in a scalar subselect so they evaluate once per query, not once per row"
+tag = "stack"
+domain = "supabase:rls"
+layer = "platform"
+enforcement = "structured"
+default = true
+opt_in_only = true
+verification = "grounded"
+qualifies = "Enforced by a statement-granular scan of CREATE POLICY bodies: an un-wrapped call to auth.uid() or auth.jwt() inside a USING/WITH CHECK clause is re-evaluated by the Postgres planner once PER ROW, instead of once per query when wrapped as (select auth.uid()) — a documented query-planner optimization (the `initplan` re-use), not a security property. This is a PERFORMANCE rule, not a security rule, so it is opt-in only: it must never be pre-checked at onboarding even though it is grounded, and the architect opts in deliberately. Conformance holds when policy predicates wrap auth.*() calls in a scalar subselect; it fails (functionally, not insecurely) when they are called bare."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/database-advisors?lint=0003_auth_rls_initplan"
+title = "Supabase Database Linter — 0003_auth_rls_initplan (\"Slow security policy detected\")"
+linter = "splinter: auth_rls_initplan"
+
+[decision]
+question = "Should RLS policies wrap auth.uid() / auth.jwt() calls in a scalar subselect ((select auth.uid())) to get per-query rather than per-row evaluation, and is this ever pre-checked automatically?"
+default = "wrap-auth-calls-opt-in"
+why = """
+An un-wrapped `auth.uid()` (or `auth.jwt()`) inside a policy's USING/WITH CHECK clause is
+re-evaluated by the Postgres planner for EVERY ROW the policy filters, because the planner cannot
+prove the function call is stable across rows without an explicit hint. Wrapping the same call as
+`(select auth.uid())` lets the planner treat it as an initplan — evaluated once per query and
+reused — which is Splinter's own documented fix for its auth_rls_initplan lint (0003, confirmed
+against the live database-advisors page: "Slow security policy detected... execute checks on every
+row rather than once per query"). This is purely a QUERY-PERFORMANCE finding: a table with 100 rows
+never notices; a table with 10 million rows measurably slows down on every RLS-filtered query. It
+carries zero security implication either direction — the un-wrapped and wrapped forms are
+semantically identical, only their cost differs.
+
+Because it is performance, not security, this rule is `opt_in_only = true`: even though the
+detection is grounded and the match-set (un-wrapped auth.uid()/auth.jwt() inside a policy body) is
+mechanically precise, it must never be pre-ticked in an onboarding proposal alongside genuine
+security findings — an architect opts in deliberately when performance at scale is already a
+concern, not by default alongside the security-tier RLS rules.
+"""
+
+[[option]]
+id = "wrap-auth-calls-opt-in"
+label = "Recommend the scalar-subselect wrap for auth.*() calls in policies, opt-in only"
+directive = """
+Scan CREATE POLICY statements for un-wrapped `auth.uid()` / `auth.jwt()` calls inside USING/WITH
+CHECK. When found, emit a medium-severity, opt-in-only finding: "Your security rules re-check
+identity on every single row. Works today; melts the first time a table gets large." Remediation:
+rewrite the call as `(select auth.uid())` (or `(select auth.jwt())`), which the planner then
+evaluates once per query via its initplan mechanism instead of once per row.
+"""
+why = "The rewrite is a zero-risk, purely mechanical performance win with a real (if scale-dependent) cost when skipped; opt-in-only keeps it from crowding an audit report's security findings with a non-security item the architect may not yet care about."
+
+[[option]]
+id = "bundle-as-a-standard-security-finding"
+label = "Report initplan wrapping as a standard (non-opt-in) finding alongside the security RLS rules"
+directive = "Include the un-wrapped auth.*() finding in the default, pre-checked rule set and report it at the same tier as the security-relevant RLS findings, without an opt-in gate."
+why = "Rejected: this conflates a performance optimization with a security defect in a report whose entire credibility rests on precise severity framing for a non-technical buyer. Bundling a 'melts at scale' performance note into the same list as 'anyone can read every row' findings dilutes the security findings' urgency and misrepresents the rule's actual risk category — opt-in-only is the honest placement."

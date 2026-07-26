@@ -1,0 +1,63 @@
+id = "SUPABASE-RLS-PERMISSIVE-TRUE-1"
+title = "A policy with USING (true) / WITH CHECK (true) targeting anon or public is a hole shaped like a policy"
+tag = "stack"
+domain = "supabase:rls"
+layer = "platform"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a statement-granular scan of CREATE POLICY statements (once SQL is split into statements, this is regex-grade — no timeline replay required, since a `true` predicate is a per-statement fact): a policy whose USING or WITH CHECK clause is the literal boolean `true`, targeting `anon` or `public` (an absent TO clause defaults to `public`), is flagged. Write-side matches (INSERT/UPDATE/DELETE, or WITH CHECK (true)) are high severity; read-side matches (SELECT, or USING (true) with no WITH CHECK) are medium and carry `needs_review`, since public read access to reference/lookup data is a legitimate, common pattern. Conformance holds when no exposed-schema policy grants unconditional true access without an explicit, reviewed justification."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/postgres/row-level-security"
+title = "Supabase docs — Row Level Security guide (CREATE POLICY syntax: USING, WITH CHECK, TO roles)"
+
+[[sources]]
+url = "https://owasp.org/Top10/2021/A01_2021-Broken_Access_Control/index.html"
+title = "OWASP Top 10:2021 — A01 Broken Access Control"
+
+[decision]
+question = "Is a CREATE POLICY statement with an unconditional USING (true) / WITH CHECK (true) predicate targeting anon/public flagged, and does write access get a higher severity than read access?"
+default = "flag-true-predicate-severity-split"
+why = """
+A policy is not a comment describing intended access control — it is the ACTUAL access control,
+and `USING (true)` / `WITH CHECK (true)` means "this predicate always passes." Combined with a
+missing or explicit `TO anon`/`TO public` role clause (Postgres's CREATE POLICY defaults an absent
+TO clause to `public`, per the RLS guide's policy syntax), this grants unconditional access to
+every anonymous request. The match-set is a per-statement fact once migrations are split into
+individual SQL statements: scan each CREATE POLICY, extract its USING/WITH CHECK text and its TO
+role list, and flag a literal `true` targeting anon/public.
+
+Severity split is deliberate: WITH CHECK (true) or a true predicate on an INSERT/UPDATE/DELETE
+policy means anyone can WRITE — that is unconditionally high severity, there is no legitimate
+"public write everything" pattern. A true predicate on a SELECT-only policy (no WITH CHECK) means
+anyone can READ — this is a common and often intentional pattern (public product catalogs,
+published blog posts, reference/lookup tables), so it ships at medium with `needs_review` rather
+than an automatic critical: the finding names the table and asks "should `<table>` really be
+publicly readable?" rather than asserting a vulnerability.
+
+FP carve-out: this rule is about POLICY predicates, not about the anon key's existence in client
+code — the anon key is designed to be public (see SUPABASE-KEY-SERVICE-ROLE-CLIENT-1's qualifies
+for that boundary). The risk this rule expresses is entirely about what the anon key is ALLOWED to
+do once it authenticates, which is exactly what RLS policies define.
+"""
+
+[[option]]
+id = "flag-true-predicate-severity-split"
+label = "Flag true-predicate policies targeting anon/public; high for writes, medium+needs_review for reads"
+directive = """
+Parse every CREATE POLICY statement in the (replayed, if available) migration set. For any policy
+whose USING or WITH CHECK clause is the literal boolean `true` and whose TO clause is absent (→
+public), `anon`, or `public`: if the policy covers INSERT/UPDATE/DELETE or carries WITH CHECK
+(true), emit a high-severity finding: "Your `<table>` table has a rule that literally says
+'everyone is allowed'. That is not a policy; it is a hole shaped like one." If the policy is
+SELECT-only with USING (true) and no WITH CHECK, emit a medium-severity finding with
+`needs_review`, naming the table and asking whether public read access is intentional.
+"""
+why = "Write access under an unconditional true predicate has no legitimate justification and warrants an unqualified high-severity finding; read access under the same predicate is routinely intentional (public catalogs, reference data), so it is downgraded and routed to human review rather than asserted as a vulnerability."
+
+[[option]]
+id = "flag-all-true-predicates-uniformly-critical"
+label = "Flag every true-predicate anon/public policy as critical, regardless of read vs write"
+directive = "Treat any USING (true) or WITH CHECK (true) policy targeting anon/public as an automatic critical finding with no severity distinction between read and write access."
+why = "Rejected: a uniform critical severity would flag intentional, benign patterns (a public products table, a published-posts feed) at the same alarm level as an open write path to `orders` or `payments`. That erodes the report's credibility on exactly the finding class most likely to appear in legitimate vibe-coded apps — the fix is a severity split with `needs_review` on the read side, not silence and not uniform alarm."

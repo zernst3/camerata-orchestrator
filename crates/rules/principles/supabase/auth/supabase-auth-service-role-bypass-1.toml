@@ -1,0 +1,60 @@
+id = "SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1"
+title = "A service_role-backed client used in a user-reachable request handler must re-implement authorization explicitly"
+tag = "stack"
+domain = "supabase:auth"
+layer = "platform"
+enforcement = "prose"
+default = true
+verification = "grounded"
+qualifies = "Whether a user-reachable handler that constructs a service_role client also performs an explicit authorization check is a semantic judgment — it requires reading the handler's control flow, not matching a pattern — so this rule routes to the prose tier: the handler body and the client-construction call site are fed to Claude as evidence. Conformance holds when every such handler validates that the calling user is entitled to the specific action/row being performed before delegating to the service_role client; it fails when the handler trusts the caller's request parameters directly, since service_role bypasses RLS entirely and no database-level backstop exists on that path."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/api/api-keys"
+title = "Supabase docs — API keys: the service_role (secret) key bypasses Row Level Security and must never be exposed to end users"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/862.html"
+title = "CWE-862: Missing Authorization"
+
+[decision]
+question = "Must a user-reachable request handler that uses a service_role-backed Supabase client implement its own explicit authorization check?"
+default = "require-explicit-authz-on-service-role-paths"
+why = """
+Supabase documents service_role as a role that, by design, "has full access to your project's
+data" and skips "any and all Row Level Security policies" (it carries the BYPASSRLS attribute).
+That is the correct behavior for trusted server-side jobs (migrations, admin tooling, scheduled
+tasks) — but the instant a service_role-backed client is constructed inside a handler that a
+regular end user can reach (an API route, a server action, an Edge Function invoked from the
+client), the database's entire access-control layer is switched off for that code path. Whatever
+authorization the RLS policies would have enforced must now be re-implemented BY HAND in that
+handler, because there is no other backstop. Skipping that re-implementation is CWE-862 (Missing
+Authorization): the handler performs the action without checking whether the caller is entitled to
+it.
+
+This judgment cannot be expressed as a regex: "does this handler check that the request's user id
+matches the row's owner before calling the service_role client" requires reading the handler's
+actual logic, not just detecting that a service_role client exists in the file. The rule is
+therefore prose-tier: the flag ("a user-reachable handler constructs a service_role client") is
+cheap to detect, but the judgment is routed to Claude with the handler source and the
+client-construction site as evidence, producing either "no authorization check found" (high
+severity) or a description of the check that exists.
+"""
+
+[[option]]
+id = "require-explicit-authz-on-service-role-paths"
+label = "Require an explicit authorization check in every user-reachable handler that uses a service_role client"
+directive = """
+For every user-reachable handler (API route, server action, Edge Function) that constructs or
+receives a service_role-backed Supabase client, evaluate whether the handler validates the
+caller's entitlement to the specific action/row before performing it. Report at high severity when
+no such check is found: "One of your API routes uses the master key on behalf of whoever calls it.
+Your database security does not apply on that path." When a check is found, report it as
+informational (what the check validates), not a finding.
+"""
+why = "service_role bypassing RLS means the handler itself IS the entire access-control layer for that request; a missing check there is not a lesser version of an RLS gap, it is a complete absence of authorization on that path."
+
+[[option]]
+id = "trust-service-role-usage-in-any-server-side-code"
+label = "Treat any server-side (non-client-bundle) use of service_role as inherently trusted"
+directive = "Do not evaluate handler-level authorization for service_role usage as long as the client is constructed in server-side code (not shipped to the browser)."
+why = "Rejected: 'runs on the server' answers the SUPABASE-KEY-SERVICE-ROLE-CLIENT-1 exposure question (is the secret itself reachable by the browser) but says nothing about whether the SERVER CODE checks who is calling it before acting with full privileges on their behalf. A server-side handler with no auth check still lets any authenticated (or even unauthenticated) caller trigger service_role-privileged actions against arbitrary rows; conflating 'server-side' with 'authorized' is the exact gap this rule exists to close."

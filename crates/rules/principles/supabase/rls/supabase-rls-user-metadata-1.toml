@@ -1,0 +1,58 @@
+id = "SUPABASE-RLS-USER-METADATA-1"
+title = "An RLS policy predicate must never authorize against user_metadata / raw_user_meta_data"
+tag = "stack"
+domain = "supabase:rls"
+layer = "platform"
+enforcement = "mechanical"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a match over CREATE POLICY statement bodies: the literal tokens `user_metadata` or `raw_user_meta_data` appearing inside a policy's USING or WITH CHECK clause (whether reached via auth.jwt() or a join against auth.users) are flagged. This match is near-zero false-positive — there is no legitimate reason for a policy predicate to read user-editable profile data as an authorization input — which is why this rule is a floor-port candidate (mechanical, always-block-worthy) rather than merely advisory. Conformance holds when no policy predicate anywhere in the corpus references either token."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/postgres/row-level-security"
+title = "Supabase docs — Row Level Security guide, auth.jwt() helper: user_metadata / raw_user_meta_data is user-editable and unsafe for authorization"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/269.html"
+title = "CWE-269: Improper Privilege Management"
+
+[decision]
+question = "May an RLS policy predicate ever authorize an action (e.g. an admin check) based on user_metadata or raw_user_meta_data?"
+default = "never-authorize-on-user-metadata"
+why = """
+Supabase's own Row Level Security guide explicitly warns that relying on the `user_metadata` claim
+(and its underlying `raw_user_meta_data` column on auth.users) in an RLS policy "can create
+security issues" because that field is updatable by the authenticated user themselves via the
+standard update-user-metadata API — it is profile data, not a server-issued claim. A policy that
+reads `(auth.jwt() -> 'user_metadata' ->> 'is_admin')::boolean` or joins to
+`auth.users.raw_user_meta_data` for an authorization decision lets any authenticated user grant
+themselves that privilege with a single API call: this is CWE-269 (Improper Privilege Management)
+in its most literal form — the actor sets their own privilege level.
+
+The match-set is a single token check inside a CREATE POLICY body: `user_metadata` or
+`raw_user_meta_data` appearing anywhere in USING/WITH CHECK. There is no legitimate use of either
+field as an authorization input — Supabase's correct pattern is a separate, non-user-writable table
+(e.g. a `user_roles` table only service-role or an admin policy can write) or the JWT's
+`app_metadata` claim, which ordinary users cannot edit. Because the match has no known benign use
+and requires no cross-file replay (it is a fact about a single CREATE POLICY statement), it is a
+floor-port candidate: near-zero FP and always-block-worthy, pending the statement-splitter
+infrastructure the floor requires.
+"""
+
+[[option]]
+id = "never-authorize-on-user-metadata"
+label = "Never authorize on user_metadata / raw_user_meta_data; flag every match unconditionally"
+directive = """
+Scan every CREATE POLICY statement's USING and WITH CHECK clauses for the literal tokens
+`user_metadata` or `raw_user_meta_data`. Any match is a critical finding, phrased as: "Your admin
+check reads a field any user can edit about themselves. Anyone can promote themselves to admin
+with one API call." Remediation: move the authorization-relevant claim to `app_metadata` (settable
+only by a service_role client / admin) or to a dedicated, RLS-protected roles table.
+"""
+why = "user_metadata / raw_user_meta_data are user-writable by design; using either as an authorization input is a structural privilege-escalation vector with no legitimate counter-example, so an unconditional flag is correct rather than a needs_review carve-out."
+
+[[option]]
+id = "allow-with-additional-server-side-validation"
+label = "Allow user_metadata in policies if the app also validates the claim server-side before granting privileged actions"
+directive = "Permit policies to read user_metadata / raw_user_meta_data for authorization when the application layer performs an additional server-side check before treating the user as privileged."
+why = "Rejected: RLS is the database's OWN access-control layer specifically so that no code path — including one that forgets or gets the extra check wrong — can bypass it. Requiring a compensating server-side check to make an unsafe policy predicate 'safe' reintroduces exactly the footgun RLS exists to remove, and a static scan cannot verify the compensating check exists, is complete, or survives the next refactor. The safe alternative (app_metadata or a dedicated roles table) provides the same capability with no such fragility."
