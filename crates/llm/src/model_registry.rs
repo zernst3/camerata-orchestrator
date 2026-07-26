@@ -542,6 +542,28 @@ mod tests {
         assert!(!reg.openrouter_fetched());
     }
 
+    /// `try_refresh_from_store` is the single code path all THREE OpenRouter refresh
+    /// triggers (server startup, post-credential-save, and the manual UI button) funnel
+    /// through. This locks its no-key contract directly and synchronously — no live HTTP
+    /// call, no panic, cache stays un-fetched (not "fetched-empty") — so the startup and
+    /// credential-save call sites don't each need their own network-adjacent test to prove
+    /// the same graceful behaviour.
+    #[tokio::test]
+    async fn try_refresh_from_store_is_a_graceful_noop_with_no_key_configured() {
+        let reg = ModelRegistry::new();
+        let creds = crate::credentials::MemoryCredentialStore::new();
+        // No key ever set on this store — mirrors a fresh install / no OpenRouter key saved.
+        let attempted = reg.try_refresh_from_store(&creds).await;
+        assert!(!attempted, "no key configured: must no-op, not attempt a live call");
+        assert!(
+            !reg.openrouter_fetched(),
+            "cache must stay unpopulated (None), not Some([]) — that's the fetch-attempted state"
+        );
+        let all = reg.all_entries();
+        assert!(all.iter().any(|e| e.provider == "claude"), "Claude entries unaffected");
+        assert!(!all.iter().any(|e| e.provider == "openrouter"), "no OpenRouter entries appear");
+    }
+
     #[tokio::test]
     async fn refresh_with_bad_key_stores_empty_and_marks_fetched() {
         let reg = ModelRegistry::new();

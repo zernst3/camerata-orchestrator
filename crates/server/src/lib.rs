@@ -1234,11 +1234,79 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+// ── OpenRouter model-registry refresh triggers ──────────────────────────────────
+//
+// `POST /api/models/registry/refresh` (`refresh_model_registry` below) used to have ZERO
+// callers: not startup, not credential-save, no UI. A user could save a valid OpenRouter
+// key and never see an OpenRouter model in any picker until they manually curled the
+// refresh endpoint. Three triggers now cover it:
+//   1. Startup — `spawn_startup_openrouter_refresh`, called from `serve()`.
+//   2. Credential save — `trigger_openrouter_refresh_if_needed`, called from
+//      `set_credential` below, gated on the saved credential being `openrouter_api_key`.
+//   3. Manual — the existing `POST /api/models/registry/refresh` endpoint, now also
+//      reachable from a "Refresh models" button in the UI (`crates/ui/src/credentials.rs`).
+
+/// Startup trigger (1 of 3). Fire-and-forget a best-effort OpenRouter registry refresh at
+/// boot so a previously-saved key populates the picker without a manual POST. Spawned so
+/// it never blocks server start; graceful when no key is configured because
+/// `ModelRegistry::try_refresh_from_store` itself no-ops (no HTTP call, no error) in that
+/// case — see `try_refresh_from_store_is_a_graceful_noop_with_no_key_configured` in
+/// `crates/llm/src/model_registry.rs`, which exercises that exact no-key path directly and
+/// synchronously (this function only wraps it in `tokio::spawn`, which cannot itself
+/// panic, so there is nothing further to unit-test here without racing the task).
+fn spawn_startup_openrouter_refresh(state: &AppState) {
+    let model_registry = state.model_registry.clone();
+    let credential_store = state.credential_store.clone();
+    tokio::spawn(async move {
+        model_registry.try_refresh_from_store(credential_store.as_ref()).await;
+    });
+}
+
+/// True when saving credential `name` should trigger an OpenRouter model-registry
+/// refresh. Extracted as its own pure, synchronous predicate — separate from
+/// [`trigger_openrouter_refresh_if_needed`] — so the name-matching decision is testable
+/// with a plain `assert!`, with no tokio runtime and no risk of a live network call.
+fn is_openrouter_credential(name: &str) -> bool {
+    name == crate::credentials::OPENROUTER_API_KEY
+}
+
+/// Credential-save trigger (2 of 3). Call after a credential write succeeds in
+/// `set_credential`. When `name` is `openrouter_api_key`, fire-and-forget a registry
+/// refresh so models populate immediately without a restart; any other credential name is
+/// a no-op. Returns whether a refresh was scheduled, purely so tests can assert the
+/// dispatch decision synchronously without awaiting (and thereby racing, or risking a live
+/// HTTP call from) the spawned task itself — the task is never awaited here or by callers.
+fn trigger_openrouter_refresh_if_needed(
+    name: &str,
+    model_registry: &crate::model_registry::ModelRegistry,
+    credential_store: Arc<dyn crate::credentials::CredentialStore>,
+) -> bool {
+    if !is_openrouter_credential(name) {
+        return false;
+    }
+    let registry = model_registry.clone();
+    tokio::spawn(async move {
+        registry.try_refresh_from_store(credential_store.as_ref()).await;
+    });
+    true
+}
+
 /// Bind `addr` and serve. The same entry point runs locally and in the cloud. The
 /// provider is selected from the environment, so setting the GitHub vars switches the
 /// whole BFF onto a real repo with no code change.
 pub async fn serve(addr: &str) -> anyhow::Result<()> {
     let state = AppState::from_env();
+
+    // OpenRouter model-registry refresh, trigger 1 of 3 (startup). The other two are the
+    // post-credential-save trigger in `set_credential` and the manual "Refresh models" UI
+    // button (`POST /api/models/registry/refresh`, unchanged). Before this, NOTHING ever
+    // called the refresh automatically: a previously-saved key sat unused until someone
+    // manually hit the refresh endpoint. Spawned (never blocks server start) and graceful
+    // when no key is configured — `try_refresh_from_store`'s own guard returns `false`
+    // immediately with no HTTP call in that case, so a fresh install neither errors nor
+    // spams logs. See `try_refresh_from_store_is_a_graceful_noop_with_no_key_configured`
+    // in `crates/llm/src/model_registry.rs` for the direct, non-racy test of that contract.
+    spawn_startup_openrouter_refresh(&state);
 
     // Background event-ingest pollers (tracker events -> notification feed -> UI
     // toasts). Cadences are env-configurable; see crate::notify. Spawned here, not
@@ -8560,6 +8628,10 @@ async fn set_credential(
             })),
         );
     }
+    // OpenRouter refresh trigger 2 of 3 (see the block above `serve()`): a freshly-saved
+    // OpenRouter key should populate the model picker immediately, not after a restart or
+    // a manual refresh-endpoint POST. No-op for every other credential name.
+    trigger_openrouter_refresh_if_needed(&name, &state.model_registry, state.credential_store.clone());
     // ROUTES-9: this handler used to `std::env::set_var("ANTHROPIC_API_KEY", ...)` so a
     // freshly-saved key took effect for the `api` backend without a restart. That mutated
     // process-global env from a request-handler thread while worker threads read the same var
@@ -21118,6 +21190,83 @@ mod tests {
         );
         // The prefix appears.
         assert!(masked.starts_with("ghp_"), "masked starts with first 4 chars");
+    }
+
+    // ── OpenRouter registry-refresh triggers ────────────────────────────────────
+    //
+    // `is_openrouter_credential` and `trigger_openrouter_refresh_if_needed` are the
+    // gap fix: before this, `POST /api/models/registry/refresh` had zero callers, so a
+    // saved key never populated any picker until someone curled the endpoint by hand.
+    // These tests assert the DECISION synchronously rather than awaiting (and thereby
+    // racing, or making a live OpenRouter network call from) the task the trigger
+    // spawns — see the doc comments on both functions above `serve()`.
+
+    /// Pure name-matching predicate: only the OpenRouter credential name matches.
+    #[test]
+    fn is_openrouter_credential_matches_only_the_openrouter_key_name() {
+        assert!(is_openrouter_credential(crate::credentials::OPENROUTER_API_KEY));
+        assert!(!is_openrouter_credential(crate::credentials::GITHUB_TOKEN));
+        assert!(!is_openrouter_credential("anthropic_api_key"));
+        assert!(!is_openrouter_credential(""));
+    }
+
+    /// Saving the OpenRouter credential schedules a refresh (return value `true`). The
+    /// credential store passed in has NO key set, so even if the spawned task happens to
+    /// be polled before this test function returns, `try_refresh_from_store`'s own guard
+    /// no-ops immediately — this test can never make a live HTTP call, by construction.
+    #[tokio::test]
+    async fn trigger_openrouter_refresh_if_needed_schedules_for_the_openrouter_key() {
+        let model_registry = crate::model_registry::ModelRegistry::new();
+        let credential_store: Arc<dyn crate::credentials::CredentialStore> =
+            Arc::new(crate::credentials::MemoryCredentialStore::new());
+        let scheduled = trigger_openrouter_refresh_if_needed(
+            crate::credentials::OPENROUTER_API_KEY,
+            &model_registry,
+            credential_store,
+        );
+        assert!(scheduled, "saving the OpenRouter key must schedule a refresh");
+    }
+
+    /// Saving any OTHER credential must NOT schedule a refresh.
+    #[tokio::test]
+    async fn trigger_openrouter_refresh_if_needed_ignores_other_credentials() {
+        let model_registry = crate::model_registry::ModelRegistry::new();
+        let credential_store: Arc<dyn crate::credentials::CredentialStore> =
+            Arc::new(crate::credentials::MemoryCredentialStore::new());
+        let scheduled = trigger_openrouter_refresh_if_needed(
+            crate::credentials::GITHUB_TOKEN,
+            &model_registry,
+            credential_store,
+        );
+        assert!(!scheduled, "saving a non-OpenRouter credential must not schedule a refresh");
+    }
+
+    /// End-to-end through the real HTTP handler: saving a DIFFERENT credential (github_token)
+    /// must leave the OpenRouter registry cache untouched (`openrouter_fetched` stays false).
+    /// This is the safe half of the handler-level assertion — the openrouter_api_key case is
+    /// covered at the function level above instead of here, to avoid any chance of the
+    /// request handler's spawned task making a live call to openrouter.ai mid-test.
+    #[tokio::test]
+    async fn set_credential_for_non_openrouter_name_does_not_touch_the_registry_cache() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(!state.model_registry.openrouter_fetched());
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/credentials/github_token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"value":"ghp_unrelated_token"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            !state.model_registry.openrouter_fetched(),
+            "a non-OpenRouter credential save must never trigger a registry refresh"
+        );
     }
 
     /// ROUTES-9: saving the Anthropic key via `POST /api/credentials/anthropic_api_key`
