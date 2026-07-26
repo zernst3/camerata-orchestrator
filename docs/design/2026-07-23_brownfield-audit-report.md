@@ -57,6 +57,14 @@ Steps 4-5 + the §4.4 citation join are built, tested, and committed:
   summary override) + 1 real end-to-end `compile_pdf` test gated on `typst` being on PATH
   (skips with a stderr note, never hard-fails, when absent). `cargo check --workspace` and
   `cargo test -p camerata-server -p camerata-ui` are green (1160 + 580 passing).
+- **E2E backstop** (`crates/server/tests/e2e_report_pipeline.rs`, fixture in
+  `crates/server/tests/fixtures/e2e_report_repo/`): drives the REAL deterministic-scan →
+  PDF spine end to end — `onboard::audit_repos` (zero API spend: `run_ai_review: false`)
+  over a fixture repo with 3 planted floor findings → asserts the real provenance stamp
+  (SHA, `audited_rule_ids`) → auditor dispositions (FalsePositive/Ignored/Unresolved) keyed
+  by the real `finding_key` → `build_report_json` → `compile_pdf` (gated on `typst`, skips
+  gracefully when absent). The AI tier stays covered by `ai_audit.rs`'s own mocked unit
+  tests; this test covers only the deterministic-floor half.
 
 ### Pass A landed (2026-07-23)
 
