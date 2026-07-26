@@ -16,6 +16,7 @@
 //! are re-exported here so `crate::onboard::X` paths remain stable.
 
 // ── Submodules ──────────────────────────────────────────────────────────────────
+pub mod architectural;
 pub mod audit;
 pub mod files;
 pub mod greenfield;
@@ -24,6 +25,7 @@ pub mod report;
 pub mod self_ref;
 
 // ── Re-exports (keep crate::onboard::X paths stable) ────────────────────────────
+pub use architectural::{arch_violation_to_finding, audit_architectural, ARCH_PREVIEW_TOOL};
 pub use audit::{audit_content, audit_files};
 pub use files::{read_local_repo_files, ExtractedRepo};
 pub use greenfield::{scaffold_greenfield_blocking, GreenfieldResult};
@@ -665,10 +667,17 @@ pub async fn audit_repos(
     // AI token budget"). The arm path still installs them; only the AI code-audit
     // prompt is filtered.
     //
-    // THIRD, scope by REPO. The engine/governance filters above are global, but which
+    // THIRD, drop rules a NATIVE ARCHITECTURAL CHECKER already answers deterministically
+    // (the RLS/search-path migration-replay engine, ~line 726 below) from the LLM prompt —
+    // exactly the same reasoning as the gate-arm exclusion above: fuzzing a rule the checker
+    // answers exactly is strictly worse than deterministic code answering it. Computed once
+    // (the registry is static), not per repo.
+    //
+    // FOURTH, scope by REPO. The engine/governance filters above are global, but which
     // rules reach a given repo's LLM audit is decided PER REPO inside the loop, from each
     // SelectedRule's binding — so a multi-repo scan runs each repo against its own chosen
     // rules ∪ the project-level set, never the whole selection across the board.
+    let arch_checker_rule_ids = camerata_checks::arch_checker::all_checker_rule_ids();
 
     for (spec, dir) in sources {
         let spec = spec.trim();
@@ -679,12 +688,22 @@ pub async fn audit_repos(
         // unconditional, so even a repo whose subsequent file-read fails still gets its ref
         // recorded (the dir is what was attempted).
         audited_refs.push(capture_audited_ref(spec, dir).await);
+        // The rule ids actually SELECTED for this repo (bound to it, or project-level) —
+        // reused both by the semantic (LLM) filter below and by the architectural-engine
+        // call further down, so the two engines agree on "what applies to this repo".
+        let repo_selected_ids: std::collections::HashSet<&str> = selected
+            .iter()
+            .filter(|r| r.applies_to(spec))
+            .map(|r| r.id.as_str())
+            .collect();
         // The SEMANTIC (LLM-audited) rule set for THIS repo: rules bound to it (or
-        // project-level), minus the deterministic-arm and governance/process families.
+        // project-level), minus the deterministic-arm, native-architectural-checker, and
+        // governance/process families.
         let semantic: Vec<(String, String)> = selected
             .iter()
             .filter(|r| r.applies_to(spec))
             .filter(|r| camerata_gateway::lookup_arm(&r.id).is_none())
+            .filter(|r| !arch_checker_rule_ids.contains(r.id.as_str()))
             .filter(|r| is_code_auditable_rule(&r.id))
             .map(|r| (r.id.clone(), r.directive.clone()))
             .collect();
@@ -729,6 +748,24 @@ pub async fn audit_repos(
                         jstore.add_findings(jid, floor.clone());
                     }
                     repo_findings = floor;
+
+                    // Deterministic architectural engine (Pass 1 — the scan surface only;
+                    // see `onboard::architectural`): migration-timeline replay checkers
+                    // (Supabase RLS, function search_path today) run as the THIRD
+                    // deterministic route beside the floor, gated on the SAME
+                    // `run_deterministic` flag. A checker only fires when at least one of
+                    // its rule ids is armed for THIS repo (`repo_selected_ids`, computed
+                    // above) AND at least one of its `interest_globs` files exists — never a
+                    // false "clean" on a repo with no `supabase/` directory.
+                    if let Some((jstore, jid)) = job {
+                        jstore.det_tool_running(jid, "architectural");
+                    }
+                    let arch = audit_architectural(spec, &files, &repo_selected_ids);
+                    if let Some((jstore, jid)) = job {
+                        jstore.det_tool_done(jid, "architectural", arch.len());
+                        jstore.add_findings(jid, arch.clone());
+                    }
+                    repo_findings.extend(arch);
                 }
 
                 // ── Incremental: only the AI audit (the token cost) is short-circuited. ──
@@ -2014,15 +2051,21 @@ mod tests {
         )
         .await;
         let progress = jobs.det_progress(&jid).unwrap();
-        // Only the floor tool must have been registered inside audit_repos.
+        // Only the TWO deterministic engines audit_repos itself owns — the floor and the
+        // architectural checker registry — must have been registered; dep-audit runs in the
+        // caller, never inside audit_repos.
         assert_eq!(
-            progress.total, 1,
-            "audit_repos must register exactly ONE tool (floor); dep-audit must NOT be inside it: {:?}",
+            progress.total, 2,
+            "audit_repos must register exactly the floor + architectural tools; dep-audit must NOT be inside it: {:?}",
             progress.tools
         );
         assert!(
             progress.tools.iter().any(|t| t.tool == "floor"),
             "floor tool must be registered"
+        );
+        assert!(
+            progress.tools.iter().any(|t| t.tool == "architectural"),
+            "architectural tool must be registered"
         );
         assert!(
             !progress.tools.iter().any(|t| t.tool == "dep-audit"),

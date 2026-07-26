@@ -21,6 +21,18 @@
 /// `docs/decisions/2026-06-19_ast_architectural_rule_tier.md`.
 pub mod architectural;
 
+/// The deterministic architectural-rule executor seam: the `ArchChecker` trait, `RepoView`,
+/// `ArchViolation`, and the checker registry (`all_checkers`). See
+/// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2. This GENERALIZES the
+/// proof-of-concept in [`architectural`] (which stays as-is, unwired, per that module's own
+/// doc comment) — checkers registered here are wired into the brownfield scan by
+/// `camerata_server::onboard::audit_repos`.
+pub mod arch_checker;
+
+/// Supabase-stack checkers built on the [`arch_checker`] seam: migration-timeline replay for
+/// Row Level Security and `SECURITY DEFINER` search_path hygiene. See `supabase/mod.rs`.
+pub mod supabase;
+
 /// Per-language layer-2 [`camerata_core::CheckRunner`]s (JS/TS, Python, Go,
 /// Ruby, Java, C#) plus the worktree language-detect selector
 /// ([`multilang::runner_for_worktree`]) that injects the right one. With

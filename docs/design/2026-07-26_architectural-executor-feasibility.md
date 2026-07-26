@@ -221,6 +221,83 @@ replay semantics written into their `qualifies` fields).
 
 ---
 
+## 6. Pass 1 landed (2026-07-26)
+
+Scope actually shipped: **(a) the seam + (b) the two Supabase checkers, wired into the
+brownfield SCAN only** — exactly §2.1 + §2.2 + §3, narrowed per the build order (Layer-2
+wiring from §2.3/(c), the `syn`/tree-sitter code-AST layer, and the api-layer checkers are
+explicitly deferred to Pass 2, below).
+
+**The seam** — `crates/checks/src/arch_checker.rs`: `ArchChecker` trait
+(`rule_ids`/`interest_globs`/`check`), `RepoView<'a>`, `ArchViolation` (rule_id, file, line,
+object, message, severity), a minimal segment-anchored glob matcher (`glob_match`,
+`checker_applies`, `any_file_matches_globs` — no crate dependency, three fixed literal
+patterns didn't warrant one), and the registry (`all_checkers`, `all_checker_rule_ids`).
+
+**`SupabaseRlsChecker` + `SupabaseFnSearchPathChecker`** — `crates/checks/src/supabase/`:
+- `splitter.rs`: the dollar-quote/comment-aware statement splitter. Operates on `Vec<char>`
+  (never raw bytes, so no UTF-8 boundary panics), handles `'...'`/`"..."`/`$$...$$`/`$tag$...$tag$`,
+  `--` and `/* */` comments, CRLF normalization, and degrades to a best-effort flush on
+  EOF for every unterminated construct (string, comment, dollar-quote) — never panics,
+  by construction and by a dedicated adversarial test battery (unterminated everything,
+  garbage/binary-ish input, positional `$1` vs a dollar-quote open, multi-statement lines).
+- `sql_parse.rs`: a shallow, panic-free DDL classifier over already-split statement text
+  (`CREATE/DROP TABLE`, `ALTER TABLE ... RENAME/ENABLE|DISABLE ROW LEVEL SECURITY`,
+  `CREATE/DROP POLICY`, `CREATE [OR REPLACE] FUNCTION` with a `SECURITY DEFINER`/
+  `SET search_path` scan scoped to the statement's SIGNATURE only — before the first
+  dollar-quoted body — so a string the function builds can never spoof the clause).
+- `timeline.rs`: the fold shared by both checkers — `CREATE`/`DROP`/`RENAME TABLE` and
+  `ALTER ... ROW LEVEL SECURITY` and `CREATE`/`DROP POLICY` replayed in migration-filename
+  order (then `supabase/schemas/*.sql`, folded last — the declarative shortcut falls out
+  for free from file ordering, no special-casing needed), keyed `(schema, table)` /
+  `(schema, function)` in a `BTreeMap` for deterministic finding order.
+- `config.rs`: `supabase/config.toml` `[api].schemas` parse, default `{"public"}` per this
+  build's spec (documented as a deliberate narrowing vs. Supabase's own CLI default of
+  `["public","storage","graphql_public"]`, which `SUPABASE-EXPOSURE-SCHEMAS-1` documents).
+- `rls_checker.rs` / `search_path_checker.rs`: the three RLS queries + the search-path
+  query over the folded `Timeline`, each finding carrying the table/function name, the
+  establishing `file:line`, and the honesty caveat verbatim.
+
+**Scan wiring** — `crates/server/src/onboard.rs` (`audit_repos`, inside the
+`if run_deterministic` block, right after the floor call) + the new adapter module
+`crates/server/src/onboard/architectural.rs` (`audit_architectural`,
+`arch_violation_to_finding`) — `camerata-checks` cannot depend on `camerata-server`'s
+`Finding` type, so the adapter lives on the consuming side, exactly as this memo's own
+module doc anticipated. Findings are tagged `preview: true, preview_tool:
+Some("camerata-arch")`, reusing the EXISTING preview/authority-column mechanism rather than
+adding a new field (an architectural finding is, today, precisely "deterministic but not yet
+wired into a write-time gate" — Pass 2 is what would change that). **LLM-exclusion**: a
+`HashSet` built once from `arch_checker::all_checker_rule_ids()` is subtracted from each
+repo's semantic (LLM) rule set the same way `camerata_gateway::lookup_arm`-covered rules
+already are, immediately above it in the same filter chain.
+
+**Tests**: 322 passing tests in `camerata-checks` (up from ~290) covering the splitter,
+the classifier, the timeline fold (enable-then-disable, rename-crossing-enable/disable,
+drop-then-recreate, RLS-in-a-later-migration, declarative-schema-shortcut,
+`IF NOT EXISTS` idempotency, `CREATE OR REPLACE` supersession), and both checkers
+(exposed/non-exposed severity split, config.toml multi-schema, policy-without-RLS,
+RLS-without-policy, policy-on-a-non-exposed-schema-table, empty/junk migration dirs,
+zero-file skip). `camerata-server`'s onboard suite gained the adapter's own unit tests
+plus a new end-to-end pair in `crates/server/tests/architectural_executor_e2e.rs` against a
+committed fixture (`tests/fixtures/supabase_rls_repo/`) proving the finding fires with the
+exact table/file/line through `audit_repos`, AND that it survives `report_export::
+build_report_json` → `compile_pdf` as a real `%PDF` — the full report spine, not just the
+scan. `cargo check --workspace` and both crates' full test suites are green.
+
+**What's left for Pass 2** (deliberately not built here, per this task's scope):
+- The Layer-2 `NativeArchCheckRunner` (§2.3) — composing the same registry into
+  `CombinedCheckRunner` beside `ManifestCheckRunner` so a governed-dev write gets bounced
+  in-loop on an architectural violation, not just flagged at scan time.
+- The `syn`/tree-sitter code-AST layer and the api-layer checkers (`handler-no-db`
+  promotion, `strict-layering`, `no-cross-boundary-imports`) — still routed, per §2.1's
+  own note that RLS never needed this layer.
+- Layer-3 CI parity (§2.4) — unchanged, still accepted as an asymmetry.
+- `SUPABASE-RLS-USER-METADATA-1` floor-porting and any other rule this memo flagged as a
+  floor-port *candidate* — out of scope; this pass shipped `architectural` tier only, per
+  the explicit instruction not to touch floor wiring.
+
+---
+
 ## 5. Recommendation
 
 **BUILD-NOW, narrowly: phases (a)+(b) — the seam plus the RLS checker, scan surface first —
