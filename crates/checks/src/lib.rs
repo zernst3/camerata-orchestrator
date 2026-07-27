@@ -33,6 +33,24 @@ pub mod arch_checker;
 /// Row Level Security and `SECURITY DEFINER` search_path hygiene. See `supabase/mod.rs`.
 pub mod supabase;
 
+/// Pass 4a "Group A" — cheap architectural checkers on the [`arch_checker`] seam that need
+/// no AST, no new dependencies, and no config: pure path/naming logic over the Python test
+/// tree. See `docs/design/2026-07-27_ast-extractor-layer.md` §4.
+pub mod python_testing;
+
+/// Pass 4a "Group A": lexical (comment-aware) detection of `UI-UTC-DATES-1` — direct calls
+/// to platform locale-aware date formatting outside a centralized helper. Unconfigured (no
+/// `.camerata/architecture.toml` yet), so every finding is `needs-review`. See
+/// `docs/design/2026-07-27_ast-extractor-layer.md` §4.
+pub mod ui_dates;
+
+/// Pass 4a "Group A": promotes the existing lexical proof checker
+/// ([`architectural::handler_no_direct_db`]) into the [`arch_checker::ArchChecker`] seam for
+/// `ARCH-HANDLER-NO-DB-1`. Per design decision D3, this checker stays LLM-advisory-eligible
+/// (see [`arch_checker::ArchChecker::advisory_coexisting`]) rather than being excluded from
+/// the AI-audit prompt the way a fully-deterministic checker is.
+pub mod handler_no_db_checker;
+
 /// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s
 /// checker registry — "Plug point B" in
 /// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.3. Composed into

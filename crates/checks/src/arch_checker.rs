@@ -81,6 +81,22 @@ pub trait ArchChecker: Send + Sync {
     /// Must never panic — a malformed / adversarial input file should degrade to fewer (or
     /// zero) violations, never a crash that takes the whole scan down with it.
     fn check(&self, repo: &RepoView<'_>) -> Vec<ArchViolation>;
+
+    /// Whether this checker's rule ids should STAY in the LLM-advisory prompt rather than be
+    /// subtracted from it by [`all_checker_rule_ids`] (see design doc D3,
+    /// `docs/design/2026-07-27_ast-extractor-layer.md` §0). Fully-deterministic checkers
+    /// (the default, `false`) answer their rule ids exactly, so fuzzing the same rule with an
+    /// LLM would be strictly worse — those ids ARE subtracted. A checker whose verdict is a
+    /// **name/lexical heuristic** rather than a real structural parse (today: the promoted
+    /// `handler_no_direct_db` proof checker, unconfigured) returns `true`: its findings are
+    /// `needs-review` grade, so the rule stays eligible for an independent AI read even
+    /// though a native checker also runs over it. Kept as a trait method (not a second
+    /// registry or a config flag) to keep the seam a single flat list, per the design memo's
+    /// "no shared enriched model, checker-owned models" philosophy carried over to this
+    /// smaller decision.
+    fn advisory_coexisting(&self) -> bool {
+        false
+    }
 }
 
 /// Whether `checker` has at least one file of interest in `files` — the "zero matching
@@ -102,23 +118,45 @@ pub fn matches_any_glob(globs: &[&str], path: &str) -> bool {
 }
 
 /// A minimal glob matcher: `*` matches any run of characters WITHIN a path segment (never
-/// crossing a `/`); every other character (including `/`) must match literally. This is
-/// intentionally not a general glob engine (no `**`, no `?`, no character classes) — every
-/// glob this seam ships (`supabase/migrations/*.sql`, `supabase/config.toml`, …) is a fixed,
-/// simple pattern, and a minimal matcher is easier to reason about and to keep panic-free
-/// than pulling in a crate for three literal patterns.
+/// crossing a `/`); a bare `**` SEGMENT matches zero or more whole path segments (see the
+/// Pass 4a seam-amendment note in `docs/design/2026-07-27_ast-extractor-layer.md` §1/§4);
+/// every other character (including `/`) must match literally. This is intentionally not a
+/// general glob engine (no `?`, no character classes) — every glob this seam ships is a
+/// fixed, simple pattern, and a minimal matcher is easier to reason about and to keep
+/// panic-free than pulling in a crate.
 pub fn glob_match(glob: &str, path: &str) -> bool {
     // Normalize a leading "./" some callers may carry (defensive; today's callers don't).
     let path = path.strip_prefix("./").unwrap_or(path);
     let glob_segs: Vec<&str> = glob.split('/').collect();
     let path_segs: Vec<&str> = path.split('/').collect();
-    if glob_segs.len() != path_segs.len() {
-        return false;
+    glob_match_segments(&glob_segs, &path_segs)
+}
+
+/// Recursive segment-by-segment match, the engine behind [`glob_match`]. A `**` glob
+/// segment matches zero-or-more path segments (tried both ways via backtracking); any other
+/// glob segment must match exactly one path segment via [`segment_match`]. Recursion depth
+/// is bounded by the number of path segments in a repo-relative path (at most a few dozen in
+/// practice), so this never risks a stack overflow on real input.
+fn glob_match_segments(glob_segs: &[&str], path_segs: &[&str]) -> bool {
+    match glob_segs.first() {
+        None => path_segs.is_empty(),
+        Some(&"**") => {
+            // Try consuming zero path segments (the rest of the glob must match the rest of
+            // the path from here), then try consuming one-and-recurse (the classic
+            // "**" backtrack) until the path is exhausted.
+            if glob_match_segments(&glob_segs[1..], path_segs) {
+                return true;
+            }
+            match path_segs.split_first() {
+                Some((_, rest)) => glob_match_segments(glob_segs, rest),
+                None => false,
+            }
+        }
+        Some(seg) => match path_segs.split_first() {
+            Some((p, rest)) => segment_match(seg, p) && glob_match_segments(&glob_segs[1..], rest),
+            None => false,
+        },
     }
-    glob_segs
-        .iter()
-        .zip(path_segs.iter())
-        .all(|(g, p)| segment_match(g, p))
 }
 
 /// Match one path segment against one glob segment containing zero or more `*` wildcards.
@@ -161,15 +199,22 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
     vec![
         Box::new(crate::supabase::rls_checker::SupabaseRlsChecker),
         Box::new(crate::supabase::search_path_checker::SupabaseFnSearchPathChecker),
+        Box::new(crate::python_testing::PythonTestFileNamingChecker),
+        Box::new(crate::ui_dates::UtcDatesChecker),
+        Box::new(crate::handler_no_db_checker::HandlerNoDbChecker),
     ]
 }
 
-/// Every rule id ANY registered checker answers — the set the LLM-exclusion filter (scan
-/// wiring, `crates/server/src/onboard.rs`) subtracts from the AI-audit prompt, mirroring
-/// how `camerata_gateway::lookup_arm` already excludes gate-arm-covered rules there.
+/// Every rule id a FULLY-DETERMINISTIC registered checker answers — the set the
+/// LLM-exclusion filter (scan wiring, `crates/server/src/onboard.rs`) subtracts from the
+/// AI-audit prompt, mirroring how `camerata_gateway::lookup_arm` already excludes
+/// gate-arm-covered rules there. Checkers that opt into
+/// [`ArchChecker::advisory_coexisting`] are deliberately EXCLUDED from this set — their rule
+/// ids stay in the LLM prompt alongside the native checker's `needs-review` finding (D3).
 pub fn all_checker_rule_ids() -> std::collections::HashSet<&'static str> {
     all_checkers()
         .iter()
+        .filter(|c| !c.advisory_coexisting())
         .flat_map(|c| c.rule_ids().iter().copied())
         .collect()
 }
@@ -250,8 +295,60 @@ mod tests {
             "SUPABASE-RLS-NO-POLICY-1",
             "SUPABASE-RLS-POLICY-DISABLED-1",
             "SUPABASE-FUNC-SEARCH-PATH-1",
+            "PYTHON-TESTING-FILE-NAMING-1",
+            "UI-UTC-DATES-1",
         ] {
             assert!(ids.contains(expected), "missing {expected} from registry: {ids:?}");
         }
+    }
+
+    #[test]
+    fn all_checker_rule_ids_excludes_advisory_coexisting_checkers() {
+        // ARCH-HANDLER-NO-DB-1 (D3): the promoted lexical proof checker must NOT be
+        // subtracted from the LLM-advisory prompt, even though a native checker registers
+        // and runs over it — see `handler_no_db_checker::HandlerNoDbChecker`.
+        let ids = all_checker_rule_ids();
+        assert!(
+            !ids.contains("ARCH-HANDLER-NO-DB-1"),
+            "ARCH-HANDLER-NO-DB-1 must stay LLM-advisory-eligible per D3: {ids:?}"
+        );
+        // But the checker IS registered and DOES answer the rule id (just excluded from
+        // this particular subtraction set).
+        let all_ids: std::collections::HashSet<&str> = all_checkers()
+            .iter()
+            .flat_map(|c| c.rule_ids().iter().copied())
+            .collect();
+        assert!(all_ids.contains("ARCH-HANDLER-NO-DB-1"), "checker must still be registered: {all_ids:?}");
+    }
+
+    // ── `**` glob support (Pass 4a seam amendment) ──────────────────────────────
+
+    #[test]
+    fn glob_match_double_star_matches_zero_leading_segments() {
+        assert!(glob_match("**/tests/**/*.py", "tests/test_foo.py"));
+    }
+
+    #[test]
+    fn glob_match_double_star_matches_multiple_leading_and_trailing_segments() {
+        assert!(glob_match("**/tests/**/*.py", "a/b/tests/sub/dir/test_foo.py"));
+    }
+
+    #[test]
+    fn glob_match_double_star_does_not_match_a_similarly_named_segment() {
+        // "testsuite" must NOT satisfy a literal "tests" segment — ** spans whole segments,
+        // it never does a substring match within one.
+        assert!(!glob_match("**/tests/**/*.py", "testsuite/test_foo.py"));
+    }
+
+    #[test]
+    fn glob_match_double_star_trailing_matches_everything_remaining() {
+        assert!(glob_match("src/**", "src/a/b/c.rs"));
+        assert!(glob_match("src/**", "src/top.rs"));
+    }
+
+    #[test]
+    fn glob_match_double_star_alone_matches_empty_and_nonempty() {
+        assert!(glob_match("**", "anything/at/all.rs"));
+        assert!(glob_match("**", "single.rs"));
     }
 }
