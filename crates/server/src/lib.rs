@@ -1411,6 +1411,49 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
                         repo,
                     ) {
                         crate::workspace::prune_worktrees(&clone).await;
+
+                        // Pass 3 — T3 janitor startup sweep (disk-buildup guardrail,
+                        // docs/design/2026-07-27_build-artifact-janitor.md): remove
+                        // any `.camerata-worktrees/*` subdir that ISN'T a currently
+                        // registered `git worktree` (a true orphan — e.g. leftover
+                        // from a crash between admin-record pruning and disk cleanup,
+                        // or predating per-stage teardown), then apply the same T2
+                        // shared-target cap/age/orphan policy the teardown path uses.
+                        // Best-effort + non-blocking-of-startup (this whole block
+                        // already runs in a spawned background task); honors
+                        // `CAMERATA_JANITOR` via the janitor functions themselves.
+                        let mode = camerata_checks::janitor::janitor_mode();
+                        if mode != camerata_checks::janitor::JanitorMode::Off {
+                            let dry_run = mode == camerata_checks::janitor::JanitorMode::DryRun;
+                            let worktrees_root = clone.join(".camerata-worktrees");
+                            for orphan in camerata_checks::janitor::list_orphan_worktree_dirs(&clone) {
+                                let outcome = camerata_checks::janitor::reclaim_dir(
+                                    &orphan,
+                                    &worktrees_root,
+                                    &[],
+                                    true,
+                                    "startup-sweep",
+                                    dry_run,
+                                    |entry| {
+                                        tracing::info!(
+                                            path = %entry.path.display(),
+                                            bytes = entry.bytes,
+                                            "janitor: T3 startup sweep reclaimed orphan worktree"
+                                        );
+                                    },
+                                );
+                                if let camerata_checks::janitor::ReclaimOutcome::Skipped { reason, .. } =
+                                    outcome
+                                {
+                                    tracing::debug!(
+                                        path = %orphan.display(),
+                                        %reason,
+                                        "janitor: T3 startup sweep skipped orphan candidate"
+                                    );
+                                }
+                            }
+                        }
+                        crate::workspace::maybe_prune_shared_target(&clone, "startup-sweep").await;
                     }
                 }
             }

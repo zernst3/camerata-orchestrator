@@ -167,11 +167,55 @@ pub struct ManifestCheck {
     pub install: Option<String>,
 }
 
+/// The repo-local extension seam for the build-artifact janitor
+/// (`docs/design/2026-07-27_build-artifact-janitor.md` §1/§4): an optional
+/// `[janitor]` table in `.camerata/checks.toml`. This is the SAME manifest the
+/// Layer-2/Layer-3 checks already use — no parallel config system.
+///
+/// ```toml
+/// [janitor]
+/// extra_artifact_dirs = ["my-custom-cache"]
+/// host_reclaim_opt_in = false
+/// disabled_languages  = ["Python"]
+/// ```
+///
+/// All fields default to their conservative value (`Vec::new()` / `false`) when the
+/// table is entirely absent, so a repo with no `[janitor]` section behaves exactly as
+/// before this feature existed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct JanitorConfig {
+    /// Extra directory NAMES (matched as a path segment, exactly like a registry
+    /// entry) this repo wants the janitor to recognize as reclaimable build
+    /// artifacts, beyond `camerata_checks::janitor::builtin_registry()`. Every other
+    /// safety invariant (gitignore-verified, symlink-safe, logged) still applies —
+    /// this only widens invariant 1's registry match, it does not bypass invariants
+    /// 2-5.
+    #[serde(default)]
+    pub extra_artifact_dirs: Vec<String>,
+
+    /// When `true`, a Zone-B (host repo) reclaim of this repo's own `Cheap`-tier
+    /// artifact dirs can proceed from a one-click UI/endpoint action without a
+    /// second per-invocation confirmation. `Expensive`-tier dirs (`node_modules`,
+    /// `.venv`) ALWAYS require per-invocation confirmation regardless of this flag —
+    /// Zone B is never auto-deleted by the janitor itself either way; this only
+    /// affects the confirmation UX of an explicit user-triggered reclaim action.
+    #[serde(default)]
+    pub host_reclaim_opt_in: bool,
+
+    /// Language names (matching [`crate::WorktreeLanguage`]'s `Debug` spelling,
+    /// e.g. `"Python"`, `"JavaScript"`) to exclude entirely from janitor scanning
+    /// in this repo — an escape hatch for a repo that, for its own reasons, wants
+    /// zero janitor involvement with one language's artifact dirs.
+    #[serde(default)]
+    pub disabled_languages: Vec<String>,
+}
+
 /// The parsed `.camerata/checks.toml` manifest.
 ///
 /// A flat list of [`ManifestCheck`] entries under the `check` key (TOML
 /// array-of-tables: `[[check]]`). An empty `checks` list is valid — it means
-/// no custom checks are configured.
+/// no custom checks are configured. The optional `[janitor]` table
+/// ([`JanitorConfig`]) defaults to its all-conservative value when absent.
 ///
 /// `Serialize` is derived so the arm/emit path can construct a `CheckManifest`
 /// from applied rules and `toml::to_string` it directly, guaranteeing
@@ -181,6 +225,11 @@ pub struct CheckManifest {
     /// All declared checks, in declaration order.
     #[serde(default, rename = "check")]
     pub checks: Vec<ManifestCheck>,
+
+    /// The build-artifact janitor's repo-local extension config. Absent = all
+    /// defaults (no extra dirs, no host opt-in, no disabled languages).
+    #[serde(default)]
+    pub janitor: JanitorConfig,
 }
 
 impl CheckManifest {
@@ -435,7 +484,7 @@ severity = "high"
                     version: None,
                     install: None,
                 },
-            ],
+            ], ..Default::default()
         };
 
         let loop_cmds: Vec<&str> = manifest.in_loop_checks().map(|c| c.command.as_str()).collect();

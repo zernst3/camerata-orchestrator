@@ -131,6 +131,13 @@ pub use integration::{run_gate, GateRepo, GateVerdict, GateWaiver, ReviewItem};
 pub mod parse;
 pub mod subprocess;
 
+/// The build-artifact janitor: the artifact registry, the five hard deletion-safety
+/// invariants, and the Zone-A/Zone-B reclaim primitives. See
+/// `docs/design/2026-07-27_build-artifact-janitor.md`. [`check_build_disk_headroom`]
+/// below is T4's checks-crate half: it now reclaims this worktree's clone's Zone-A
+/// scratch, RE-CHECKS headroom, and only then blocks (with a Zone-B inventory).
+pub mod janitor;
+
 /// The VCS-action gate: deterministic process rules (`PROCESS-*`) over commit /
 /// PR / branch METADATA — the fourth enforcement point. Distinct from the
 /// content-layer `CheckRunner` in this crate: it gates the metadata of the
@@ -229,23 +236,88 @@ pub fn derive_shared_target_dir(worktree: &Path) -> Option<PathBuf> {
 /// path for the space query. On insufficient space, returns an error so the run
 /// status surfaces a clear message instead of silently filling the disk.
 ///
+/// T4 (disk-buildup guardrail, `docs/design/2026-07-27_build-artifact-janitor.md`):
+/// this is no longer a pure block. When headroom is short, it RECLAIMS this
+/// worktree's clone's Zone-A scratch (orphaned `.camerata-worktrees/*` entries, and
+/// — as an emergency measure, since disk is critically low right now — the whole
+/// `.camerata-shared-target`), RE-CHECKS, and only bails if STILL short. The bail
+/// message then reports what was reclaimed and, if any were found, a sized Zone-B
+/// inventory (the worktree's OWN artifact dirs) with a named remedy — Zone B itself
+/// is NEVER auto-deleted (see `janitor` module doc).
+///
 /// Threshold: `CAMERATA_MIN_DISK_HEADROOM_GB` env var (integer GB), default 10 GB.
+/// Kill switch: `CAMERATA_JANITOR` (`on` / `dry-run` / `off`) gates the reclaim step
+/// only — `off` restores the pre-janitor pure-block behavior; Zone B is unaffected
+/// either way (it is never automatic).
 fn check_build_disk_headroom(worktree: &Path) -> anyhow::Result<()> {
     let min = disk_headroom_threshold_bytes();
-    let Some(available) = available_disk_bytes(worktree) else {
-        // Cannot query — fail-open (see workspace.rs::ensure_disk_headroom).
-        return Ok(());
-    };
-    if available >= min {
-        return Ok(());
+    let mode = janitor::janitor_mode();
+
+    // The clone that owns this worktree's Zone-A scratch, when derivable (canonical
+    // `<clone>/.camerata-worktrees/<branch>` layout). `None` for an out-of-band
+    // worktree — reclaim is simply skipped in that case, same fail-open stance as
+    // `derive_shared_target_dir`'s own doc comment.
+    let clone = worktree.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf());
+
+    let mut reclaimed_log: Vec<janitor::ReclaimLogEntry> = Vec::new();
+    let outcome = janitor::check_headroom_with_reclaim(
+        min,
+        || available_disk_bytes(worktree),
+        || {
+            if mode == janitor::JanitorMode::Off {
+                return 0;
+            }
+            let dry_run = mode == janitor::JanitorMode::DryRun;
+            match &clone {
+                Some(clone) => janitor::reclaim_zone_a_for_clone(
+                    clone,
+                    true, // emergency: prune shared-target unconditionally, disk is critically low
+                    "headroom-guard",
+                    dry_run,
+                    |entry| reclaimed_log.push(entry.clone()),
+                ),
+                None => 0,
+            }
+        },
+    );
+
+    match outcome {
+        janitor::HeadroomOutcome::CannotQuery => Ok(()), // fail-open, unchanged
+        janitor::HeadroomOutcome::Sufficient { .. } => Ok(()),
+        janitor::HeadroomOutcome::ReclaimedSufficient { reclaimed_bytes, available } => {
+            let reclaimed_gb = reclaimed_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            let available_gb = available as f64 / (1024.0 * 1024.0 * 1024.0);
+            tracing::info!(
+                reclaimed_gb,
+                available_gb,
+                "janitor: reclaimed Camerata scratch, headroom now sufficient"
+            );
+            Ok(())
+        }
+        janitor::HeadroomOutcome::StillInsufficient { available, reclaimed_bytes } => {
+            let available_gb = available as f64 / (1024.0 * 1024.0 * 1024.0);
+            let required_gb = min as f64 / (1024.0 * 1024.0 * 1024.0);
+            let reclaimed_gb = reclaimed_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            let inventory = janitor::scan_zone_b(worktree, &[]);
+            let inventory_msg = janitor::format_zone_b_inventory(&inventory, 5);
+            let reclaimed_note = if reclaimed_bytes > 0 {
+                format!(" (reclaimed {reclaimed_gb:.1} GB of Camerata scratch first)")
+            } else {
+                String::new()
+            };
+            let remedy = if inventory_msg.is_empty() {
+                "reclaim space (remove stale worktrees under .camerata-worktrees/ or \
+                 .camerata-shared-target/) before starting more work"
+                    .to_string()
+            } else {
+                inventory_msg
+            };
+            anyhow::bail!(
+                "insufficient disk headroom before cargo build: {available_gb:.1} GB free, \
+                 need >= {required_gb:.0} GB{reclaimed_note}; {remedy}"
+            )
+        }
     }
-    let available_gb = available as f64 / (1024.0 * 1024.0 * 1024.0);
-    let required_gb = min as f64 / (1024.0 * 1024.0 * 1024.0);
-    anyhow::bail!(
-        "insufficient disk headroom before cargo build: {available_gb:.1} GB free, \
-         need >= {required_gb:.0} GB; reclaim space (remove stale worktrees under \
-         .camerata-worktrees/ or .camerata-shared-target/) before starting more work"
-    )
 }
 
 /// Query available disk space at `path`. A thin wrapper so tests can verify the

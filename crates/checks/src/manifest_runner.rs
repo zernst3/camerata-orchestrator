@@ -470,7 +470,7 @@ mod tests {
     async fn exit_zero_produces_no_violation() {
         let wt = tmpdir();
         let manifest = CheckManifest {
-            checks: vec![make_check("ARCH-TEST-PASS-1", "exit 0", true)],
+            checks: vec![make_check("ARCH-TEST-PASS-1", "exit 0", true)], ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
@@ -488,7 +488,7 @@ mod tests {
     async fn exit_nonzero_maps_to_violation_under_check_id() {
         let wt = tmpdir();
         let manifest = CheckManifest {
-            checks: vec![make_check("ARCH-API-LAYERING-1", "exit 1", true)],
+            checks: vec![make_check("ARCH-API-LAYERING-1", "exit 1", true)], ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
@@ -512,7 +512,7 @@ mod tests {
                 "ARCH-API-LAYERING-1",
                 "echo 'db.select outside repositories/' >&2; exit 1",
                 true,
-            )],
+            )], ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
@@ -537,7 +537,7 @@ mod tests {
                 make_check("SEC-SECRETS-SCAN-1", "exit 1", false),
                 // This passes and is in_loop.
                 make_check("ARCH-API-LAYERING-1", "exit 0", true),
-            ],
+            ], ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
@@ -559,7 +559,7 @@ mod tests {
                 make_check("RULE-A", "exit 0", true),
                 make_check("RULE-B", "exit 1", true),
                 make_check("RULE-C", "exit 2", true),
-            ],
+            ], ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
@@ -583,7 +583,7 @@ mod tests {
                 "ARCH-MISSING-TOOL-1",
                 "this_binary_definitely_does_not_exist_xyzzy_42",
                 true,
-            )],
+            )], ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
@@ -698,7 +698,7 @@ mod tests {
                 "this_tool_definitely_does_not_exist_xyzzy_42",
                 "6.3.0",
                 "npm install -g dependency-cruiser@6.3.0",
-            )],
+            )], ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
@@ -736,7 +736,7 @@ mod tests {
                 "sh",
                 "999.999.999",
                 "install-sh-999",
-            )],
+            )], ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
@@ -790,7 +790,7 @@ mod tests {
                 "cargo",
                 &extracted,
                 "# cargo is already installed",
-            )],
+            )], ..Default::default()
         };
         let runner = ManifestCheckRunner::with_manifest(manifest);
         let role = fake_role();
