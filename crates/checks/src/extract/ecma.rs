@@ -102,6 +102,44 @@ fn preceding_decorators<'s>(node: Node, source: &'s str) -> Vec<String> {
     out
 }
 
+/// The Express/Koa/generic-router HTTP-verb method names this extractor recognizes as a route
+/// REGISTRATION call (`router.get(...)`, `app.post(...)`, ...) — deliberately excludes `use`
+/// (Express middleware registration covers far more than routes, e.g. `app.use(cors())`, and
+/// including it would flag a huge amount of non-handler code as handler-classified).
+const EXPRESS_ROUTE_VERBS: &[&str] = &["get", "post", "put", "delete", "patch", "options", "head", "all"];
+
+/// Best-effort Express-style route-REGISTRATION marker for an anonymous `arrow_function` /
+/// `function_expression`: when `node` is (syntactically) a callback ARGUMENT passed directly to
+/// a `receiver.VERB(...)` call whose `VERB` is a recognized HTTP method
+/// (`router.get('/x', (req,res) => {...})`), returns a synthetic marker string
+/// (`"<express-route:router.get>"`) that a checker can recognize as a structural route-attribute
+/// equivalent — Express has no decorator syntax, so this is the closest AST-level analogue to
+/// `#[get("/x")]` / `@app.route(...)`. Returns `None` for every other calling context (a plain
+/// callback passed to `.map`/`.then`/anything else) — never a guess, never a panic on an
+/// unmatched shape.
+fn express_route_marker(node: Node, source: &str) -> Option<String> {
+    let parent = node.parent()?;
+    if parent.kind() != "arguments" {
+        return None;
+    }
+    let call = parent.parent()?;
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let func = call.child_by_field_name("function")?;
+    if func.kind() != "member_expression" {
+        return None;
+    }
+    let object = func.child_by_field_name("object")?;
+    let property = func.child_by_field_name("property")?;
+    let verb = text(property, source).to_ascii_lowercase();
+    if !EXPRESS_ROUTE_VERBS.contains(&verb.as_str()) {
+        return None;
+    }
+    let receiver = render_member_path(object, source);
+    Some(format!("<express-route:{receiver}.{verb}>"))
+}
+
 // ─── imports ─────────────────────────────────────────────────────────────────────────────
 
 pub fn imports(dialect: EcmaDialect, source: &str) -> Vec<Import> {
@@ -283,11 +321,15 @@ fn walk_functions(node: Node, source: &str, out: &mut Vec<FunctionSpan>) {
             });
         }
         "arrow_function" | "function_expression" => {
+            let mut attrs = preceding_decorators(node, source);
+            if let Some(marker) = express_route_marker(node, source) {
+                attrs.push(marker);
+            }
             out.push(FunctionSpan {
                 name: name_from_binding_context(node, source),
                 start_line: start_line(node),
                 end_line: end_line(node),
-                attrs: preceding_decorators(node, source),
+                attrs,
             });
         }
         _ => {}
@@ -488,6 +530,39 @@ mod tests {
         let fs = functions(EcmaDialect::TypeScript, "router.get('/x', (req,res) => {});\n");
         assert_eq!(fs.len(), 1, "{fs:#?}");
         assert_eq!(fs[0].name, "<anonymous>");
+    }
+
+    #[test]
+    fn express_route_registration_callback_carries_a_synthetic_route_marker() {
+        let fs = functions(EcmaDialect::TypeScript, "router.get('/x', (req,res) => {});\n");
+        assert_eq!(fs.len(), 1, "{fs:#?}");
+        assert_eq!(fs[0].attrs, vec!["<express-route:router.get>".to_string()]);
+    }
+
+    #[test]
+    fn express_route_registration_recognizes_app_and_every_http_verb() {
+        for verb in ["get", "post", "put", "delete", "patch", "options", "head", "all"] {
+            let src = format!("app.{verb}('/x', function (req, res) {{}});\n");
+            let fs = functions(EcmaDialect::JavaScript, &src);
+            assert_eq!(fs.len(), 1, "{fs:#?}");
+            assert_eq!(fs[0].attrs, vec![format!("<express-route:app.{verb}>")], "verb {verb}");
+        }
+    }
+
+    #[test]
+    fn express_middleware_use_is_not_marked_as_a_route() {
+        // Deliberately excluded (see EXPRESS_ROUTE_VERBS doc): app.use(...) covers far more
+        // than routes and would over-classify ordinary middleware as a handler.
+        let fs = functions(EcmaDialect::JavaScript, "app.use((req,res,next) => { next(); });\n");
+        assert_eq!(fs.len(), 1, "{fs:#?}");
+        assert!(fs[0].attrs.is_empty(), "{fs:#?}");
+    }
+
+    #[test]
+    fn plain_callback_argument_to_an_unrelated_call_is_not_marked_as_a_route() {
+        let fs = functions(EcmaDialect::TypeScript, "[1, 2, 3].map((x) => x + 1);\n");
+        assert_eq!(fs.len(), 1, "{fs:#?}");
+        assert!(fs[0].attrs.is_empty(), "{fs:#?}");
     }
 
     #[test]

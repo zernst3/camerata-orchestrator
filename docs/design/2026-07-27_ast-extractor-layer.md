@@ -658,3 +658,225 @@ green throughout.
   `config_unsatisfied_for` granularity, so a repo that configures `[layers]`/`[db]` but not
   `[dtos]` doesn't have `ARCH-API-DTOS-1` coarsely excluded from the LLM prompt alongside the
   other two.
+
+---
+
+## Pass 4c "call-site AST checkers" landed
+
+The three Group D checkers named above are all built. This is the last of the architectural
+checker set — `functions()`/`method_calls()` get their first real consumers, and
+`ARCH-HANDLER-NO-DB-1` moves from a Pass 4a interim lexical promotion to a real AST checker.
+
+### 1. Production `HandlerNoDbChecker` (`ARCH-HANDLER-NO-DB-1`)
+
+`crates/checks/src/handler_no_db_checker.rs` — a full rewrite of the same struct name, built
+on `extract::functions` + `extract::method_calls` instead of the deleted
+`crate::architectural::handler_no_direct_db` lexical scanner (that module, and its 9 tests, are
+gone — `crates/checks/src/architectural.rs` no longer exists). **Exactly one checker answers
+`ARCH-HANDLER-NO-DB-1`** — proven by a dedicated registry test
+(`exactly_one_checker_owns_arch_handler_no_db_1`).
+
+Three-tier classification per function, innermost-containing-span correlation between every
+`method_calls` call site and the `functions` span it falls inside (ties broken toward the
+tightest/innermost span, so a call inside a nested closure/fn attributes to that nested scope,
+not the outer one):
+
+- **Deterministic (`high` severity)** — the file classifies into a `.camerata/architecture.toml`
+  `[layers]` entry literally named `"handlers"` (the schema's own worked-example convention).
+  Every function in that file is handler-scoped with NO attribute/name guessing; a file
+  confirmed to be some OTHER declared layer is skipped entirely (config already answered "not a
+  handler," so no fallback guess is attempted for it either).
+- **`needs-review` (attr fallback)** — no layer confirmation, but the function carries a route
+  attribute/decorator/registration marker: Rust `#[get("/x")]` / `#[actix_web::get(...)]`,
+  Python `@app.route(...)` / `@app.get(...)`, or the new synthetic Express marker (below).
+- **`needs-review` (name fallback)** — weakest tier, ported verbatim from the deleted lexical
+  checker's own marker list (`handler`/`handle_`/`controller`/`_route`/`endpoint`).
+
+A direct DB-handle call inside a handler-classified function is a violation when the call's
+receiver's LAST `.`/`::` segment EXACTLY matches a `[db].handles` marker (or the default
+`db`/`pool`/`conn`/`tx`/`executor` list absent config) — an exact-segment match, not the old
+lexical scanner's raw-text substring search, so an identifier like `database` can never
+spuriously match marker `db`
+(`ast_version_does_not_confuse_a_longer_identifier_with_an_exact_db_marker` proves this directly
+against a case that would have been genuinely ambiguous for a text-based scanner).
+
+**Express registration support (new extractor capability):** `extract::ecma`'s `functions()`
+previously only captured decorators for an anonymous arrow/function-expression callback; it now
+also recognizes the Express/Koa registration shape (`router.get('/x', (req,res) => {...})`) via
+a new `express_route_marker` helper, tagging the callback's `FunctionSpan.attrs` with a
+synthetic `<express-route:router.get>` marker. Deliberately excludes `.use(...)` (Express
+middleware registration, which would over-classify ordinary middleware as a handler) — 4 new
+`extract::ecma` tests cover this (all 8 HTTP verbs, the `use` exclusion, and a plain unrelated
+callback like `.map()` staying unmarked).
+
+**D3 (config-aware, per-repo — NOT the deleted checker's unconditional `advisory_coexisting`):**
+`config_unsatisfied_for` returns `true` unless the repo declares BOTH a `"handlers"` layer AND a
+non-empty `[db].handles` list — the same per-repo `ImportBoundaryChecker` pattern from Pass
+4b-2, not the interim checker's always-advisory mechanism. A per-FILE fallback to `needs-review`
+can still occur inside an otherwise-"configured" repo (a file the layer map doesn't classify) —
+a known, deliberate coarsening at the same granularity `ImportBoundaryChecker`'s own
+`ARCH-API-DTOS-1` note already documents.
+
+**Supersession mechanics:** the interim `handler_no_db_checker.rs` (7 tests, wrapping the
+lexical proof function, `advisory_coexisting() == true` unconditionally) is fully replaced.
+`crates/server/tests/group_a_architectural_checkers_e2e.rs` — the one existing e2e test
+asserting on the interim's behavior — is updated: the fixture (no `.camerata/architecture.toml`,
+a name-only-marked `list_orgs_handler`) still produces the identical `needs-review` finding
+(behavior-preserving for the unconfigured case), and the D3 test is rewritten from a check
+against the STATIC `all_checker_rule_ids()` (which now legitimately contains
+`ARCH-HANDLER-NO-DB-1`, since the production checker isn't unconditionally advisory anymore) to
+the PER-REPO `checker_rule_ids_for_repo`, matching how `ImportBoundaryChecker`'s own tests
+already work.
+
+22 tests in `handler_no_db_checker.rs`: deterministic Rust + TS fires (high severity, no
+needs-review marker), a config-confirmed OTHER-layer file never flagged even though it touches
+`db` and is named like a handler (the direct improvement over the deleted lexical checker, which
+had no layer awareness at all), a delegating handler staying clean, all three attr-marker
+languages (Rust attribute, Python decorator, Express registration) landing `needs-review`, the
+name-only fallback matching the deleted checker's exact behavior, the AST-vs-lexical
+false-positive-avoidance case above, Python multi-language coverage, every D3 branch, registry
+wiring (including the "exactly one owner" assertion), and malformed/truncated/binary-ish source
+across all three v1 languages plus a `LayerConflict` case (falls back to heuristic, never a
+panic and never a fabricated deterministic verdict).
+
+### 2. `ARCH-STRICT-LAYERING-1` call facet — `StrictLayeringCallChecker`
+
+`crates/checks/src/strict_layering_call_checker.rs` (new file) — the call-site half of this
+rule, alongside `ImportBoundaryChecker`'s existing import facet (Pass 4b-2). Built on
+`extract::method_calls` + the SAME `.camerata/architecture.toml` `[layers]`/`[db]` map, but
+answering a genuinely different predicate: any `[db].handles`-marked call inside a file whose
+layer isn't in `[db].allowed_in`, UNLESS the layer is in `[db].tx_flow_control_in` AND the call
+itself is a `.transaction(...)` invocation.
+
+**The `tx_flow_control_in` exemption is now call-shape-verified, not import-coarsened.** Pass
+4b-2's import facet exempted EVERY import from a `tx_flow_control_in` layer (documented there as
+a deliberate, coarser widening, since an import alone can't distinguish "wraps a repo call in a
+transaction" from "issues ad-hoc queries"). This checker is the finer-grained version that note
+anticipated: `service_calling_db_directly_without_transaction_is_still_flagged` proves a service
+in a `tx_flow_control_in` layer that calls `db.query(...)` directly (not
+`.transaction(...)`) is STILL flagged, while `service_wrapping_a_call_in_transaction_is_exempt`
+proves the actual `.transaction(...)` call is not. The two facets' exemptions now compose
+correctly at their respective granularities.
+
+**Two checkers, one rule id — by design, not a conflict.** `ARCH-STRICT-LAYERING-1` is answered
+by BOTH `ImportBoundaryChecker` (import facet) and `StrictLayeringCallChecker` (call facet);
+`all_checkers()` runs every registered checker and unions their findings, so this is legitimate
+(unlike `ARCH-HANDLER-NO-DB-1`, which this pass supersedes down to exactly one owner — a
+different rule with a different history). A registry test
+(`checker_is_registered_and_shares_the_rule_id_with_import_boundary_checker`) asserts exactly
+TWO checkers own this rule id, guarding against an accidental future duplicate or an accidental
+removal of one of the two facets.
+
+**D3:** gated on `[db]` section presence (not full layers+handlers — this facet only needs
+`[db]` to answer anything). Silent + advisory when `[db]` is absent or the config itself is
+absent/malformed; false-negative safeguards mirror `ImportBoundaryChecker`'s own (unclassified
+file, `LayerConflict`, exact-token marker matching that never substring-matches a longer
+identifier).
+
+14 tests: Rust + TS fires, a compliant repository-layer file staying clean, both transaction-
+exemption directions, every silence condition, the false-negative safeguards, malformed-source
+and empty-file-set no-panic cases, and the two-owners registry assertion.
+
+### 3. `ARCH-RESOURCE-LIFECYCLE-1` spawn facet — `ResourceLifecycleChecker`
+
+`crates/checks/src/resource_lifecycle_checker.rs` (new file) — Rust-only (v1 scope per the
+design table), a bespoke `syn::visit::Visit`-based scan (NOT built on `extract::method_calls`,
+since chain/variable correlation is specific to this one rule) for a `tokio::process::Command`
+builder chain that reaches `.spawn()`/`.output()`/`.status()` with no `.kill_on_drop(true)`
+anywhere in its chain.
+
+**Two call shapes handled:** an INLINE chain (`Command::new("x").arg("y").spawn()`, checked by
+recursively unwrapping the receiver spine of the terminal call) and a VARIABLE-TRACKED chain
+(`let mut cmd = Command::new("x"); cmd.arg("y"); cmd.kill_on_drop(true); cmd.spawn();` — this
+codebase's OWN `subprocess.rs::run_with_heartbeat` shape, proven directly by
+`variable_tracked_with_kill_on_drop_as_a_separate_statement_is_clean`). Variable tracking is
+FILE-WIDE, not per-function-scope — a documented, deliberate simplification: it can only ever
+SUPPRESS a real violation (two functions coincidentally reusing a variable name like `cmd`,
+one protected), never fabricate one, so it errs in the safe direction per the false-negative
+mandate.
+
+**`std::process::Command` is explicitly skipped** (an explicit `std::` path segment in the
+`Command::new` call) — that type has no `kill_on_drop` method at all, so flagging it would be a
+fabricated finding, not a real one (`std_process_command_is_skipped_never_flagged`).
+
+**D3: `needs-review` ALWAYS, via `advisory_coexisting`, not `config_unsatisfied_for`.** This is
+NOT a config gap — the rule's own TOML draws the line between "spawn disposition is
+mechanically greppable" and "tracked shutdown + temp-file RAII are verified by review" by
+design. `ResourceLifecycleChecker` is now the checker `arch_checker.rs`'s own
+`advisory_coexisting` doc-comment cites as the canonical example (replacing the deleted interim
+`HandlerNoDbChecker` reference, since that checker no longer uses this mechanism).
+
+15 tests: inline and variable-tracked fires, all three kill-on-drop-present shapes (inline
+chain, separate statement, chained at bind time) staying clean, `.output()`/`.status()` also
+checked, the `std::process::Command` and unrelated-`.spawn()`-method false-negative safeguards,
+`tokio::spawn(...)` (a free function, never even visited as a method call) correctly ignored,
+non-Rust glob scoping, malformed/binary-ish source no-panic, and the `advisory_coexisting`/
+registry assertions.
+
+### Registry + shared updates
+
+- `arch_checker::all_checkers()` now registers 8 checkers: the 2 Supabase checkers, the 2
+  remaining Group A checkers (`PythonTestFileNamingChecker`, `UtcDatesChecker`), the production
+  `HandlerNoDbChecker`, `ImportBoundaryChecker`, and this pass's two new checkers
+  (`StrictLayeringCallChecker`, `ResourceLifecycleChecker`).
+- `all_checkers_registry_covers_expected_rule_ids` and
+  `checker_rule_ids_for_repo_drops_the_real_config_gated_checkers_ids_when_unconfigured` both
+  extended to include `ARCH-HANDLER-NO-DB-1` in their "gated ids" lists (it now behaves like
+  `ImportBoundaryChecker`'s ids: present in the static set, config-aware per-repo).
+- `checker_rule_ids_for_repo_matches_static_set_when_every_config_gated_checker_is_satisfied`
+  (renamed from `..._when_the_config_gated_checker_is_satisfied`) now uses a fixture config that
+  satisfies EVERY config-gated checker registered as of this pass (a `"handlers"` layer + a
+  `[db]` section with non-empty `handles`), not just a bare `version = 1` — the old minimal
+  fixture stopped being sufficient once `HandlerNoDbChecker` and `StrictLayeringCallChecker`
+  both gained their own, stricter `config_unsatisfied_for` gates.
+- `all_checker_rule_ids_excludes_advisory_coexisting_checkers` now asserts against
+  `ARCH-RESOURCE-LIFECYCLE-1` (the new unconditionally-advisory checker) instead of the deleted
+  interim `ARCH-HANDLER-NO-DB-1` case.
+
+### Integration proof (scan + gov-dev)
+
+- **Scan (Plug point A).** `crates/server/tests/handler_no_db_and_strict_layering_call_e2e.rs`
+  + two fixtures: `tests/fixtures/handler_no_db_repo/` (a real `.camerata/architecture.toml`
+  with `[db]`, a Rust AND a TypeScript handler each calling `db` directly, a service wrapping a
+  repo call in `db.transaction(...)`, and a repository querying `db` directly) and
+  `tests/fixtures/handler_no_db_unconfigured_repo/` (the IDENTICAL TS handler shape, no config
+  at all). Three tests: the configured repo fires BOTH `ARCH-HANDLER-NO-DB-1` and
+  `ARCH-STRICT-LAYERING-1` exactly twice each (one per language) at `high` severity with the
+  compliant service/repository files staying silent under either rule; the unconfigured repo
+  gets ZERO findings for either rule (the handler's name carries no marker either, so this
+  proves config is doing real classification work, not just downgrading severity); and a third
+  test proves `checker_rule_ids_for_repo` diverges exactly as designed between the two fixtures,
+  mirroring `import_boundary_checker_e2e.rs`'s own convention.
+- **Gov-dev (Plug point B).**
+  `crates/checks/tests/handler_no_db_and_strict_layering_call_gov_dev_loop_e2e.rs`, mirroring
+  `import_boundary_checker_gov_dev_loop_e2e.rs`. Four tests over the real
+  `camerata_checks::runner_for_worktree` entry point: a direct-DB-call handler bounces under
+  BOTH rule ids with the exact file:line; a compliant worktree (repository DB access + a
+  tx-wrapped service) passes clean; an unarmed role never bounces; and an unconfigured worktree
+  with the identical violation shape does not bounce either (D3 holds at Layer-2 too).
+
+### Test totals + verification
+
+`cargo test -p camerata-checks --lib`: **532 passed, 0 failed** (up from 493 at the end of Pass
+4b-2 — net +39: the deleted `architectural.rs` module's 9 tests, the interim
+`handler_no_db_checker.rs`'s 7 tests replaced by the production version's 22 (net +15), the new
+`strict_layering_call_checker.rs` (+14), the new `resource_lifecycle_checker.rs` (+15), and 4
+new `extract::ecma` tests for the Express route marker). `cargo test -p camerata-server --lib`:
+**1181 passed, 0 failed** (unchanged — this pass only added integration tests, no server `lib.rs`
+changes). Every integration test file green, including the two new e2e files above (3 + 4
+tests) and the updated `group_a_architectural_checkers_e2e.rs` (2 tests, one rewritten for the
+production checker's per-repo D3 gate). `cargo check --workspace` green throughout (the only
+warnings present are pre-existing and unrelated to this pass — `camerata-ui`/`camerata-cli` dead
+code, untouched by any file this pass changed).
+
+### What's left after Pass 4c
+
+With this pass, every architectural-tier checker named in §4 Groups A-D is built and registered
+except the two Group E rules, which stay EXPLICITLY DEFERRED (not an oversight — see §4's own
+table): `ARCH-STRUCTURED-ERRORS-1` (the honest mechanism is a contract test against the
+project's envelope schema, not static analysis — correct home is AI review + a `.camerata/
+checks.toml` manifest entry) and `ARCH-EXACT-DECIMALS-1` (needs a `[decimals]` config section
+naming the exactness-sensitive surface before it's checkable at all; a name-heuristic would be
+FP-prone across three legitimate alternatives). The only remaining item on the Pass 4a-4c build
+order (§5) is **Pass 5, the CI distributable** — packaging this checker set for a client's own
+CI pipeline outside the Camerata-hosted scan/gov-dev loop, out of scope for this pass.

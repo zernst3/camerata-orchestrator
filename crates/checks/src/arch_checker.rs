@@ -86,14 +86,17 @@ pub trait ArchChecker: Send + Sync {
     /// subtracted from it by [`all_checker_rule_ids`] (see design doc D3,
     /// `docs/design/2026-07-27_ast-extractor-layer.md` §0). Fully-deterministic checkers
     /// (the default, `false`) answer their rule ids exactly, so fuzzing the same rule with an
-    /// LLM would be strictly worse — those ids ARE subtracted. A checker whose verdict is a
-    /// **name/lexical heuristic** rather than a real structural parse (today: the promoted
-    /// `handler_no_direct_db` proof checker, unconfigured) returns `true`: its findings are
-    /// `needs-review` grade, so the rule stays eligible for an independent AI read even
-    /// though a native checker also runs over it. Kept as a trait method (not a second
-    /// registry or a config flag) to keep the seam a single flat list, per the design memo's
-    /// "no shared enriched model, checker-owned models" philosophy carried over to this
-    /// smaller decision.
+    /// LLM would be strictly worse — those ids ARE subtracted. A checker whose verdict is
+    /// UNCONDITIONALLY advisory by the rule's OWN design — not because config is missing (see
+    /// [`Self::config_unsatisfied_for`] for that per-repo case), but because the corpus rule
+    /// itself draws a hard line between a greppable facet and a review-verified one (today:
+    /// `ResourceLifecycleChecker`'s spawn facet — `ARCH-RESOURCE-LIFECYCLE-1`'s own TOML stops
+    /// at "spawn disposition is mechanically checkable," leaving "tracked shutdown" and
+    /// "temp-file RAII" to review) — returns `true`: its findings are `needs-review` grade, so
+    /// the rule stays eligible for an independent AI read even though a native checker also
+    /// runs over it. Kept as a trait method (not a second registry or a config flag) to keep
+    /// the seam a single flat list, per the design memo's "no shared enriched model,
+    /// checker-owned models" philosophy carried over to this smaller decision.
     fn advisory_coexisting(&self) -> bool {
         false
     }
@@ -225,6 +228,8 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
         Box::new(crate::ui_dates::UtcDatesChecker),
         Box::new(crate::handler_no_db_checker::HandlerNoDbChecker),
         Box::new(crate::import_boundary_checker::ImportBoundaryChecker),
+        Box::new(crate::strict_layering_call_checker::StrictLayeringCallChecker),
+        Box::new(crate::resource_lifecycle_checker::ResourceLifecycleChecker),
     ]
 }
 
@@ -248,7 +253,8 @@ pub fn all_checker_rule_ids() -> std::collections::HashSet<&'static str> {
 /// `docs/design/2026-07-27_ast-extractor-layer.md` §0 D3). A checker is excluded from this
 /// set (its ids stay LLM-advisory for this repo) when EITHER:
 /// - it opts into [`ArchChecker::advisory_coexisting`] (the existing D3 exception, e.g.
-///   `HandlerNoDbChecker`'s unconfigured name-heuristic fallback), OR
+///   `ResourceLifecycleChecker`'s spawn facet, which is `needs-review` ALWAYS by the rule's
+///   own design, not just when config is missing), OR
 /// - it's config-gated and `repo` doesn't carry the config it needs
 ///   ([`ArchChecker::config_unsatisfied_for`] returns `true`).
 ///
@@ -347,26 +353,32 @@ mod tests {
             assert!(ids.contains(expected), "missing {expected} from registry: {ids:?}");
         }
         // ARCH-NO-CROSS-BOUNDARY-IMPORTS-1 / ARCH-API-DTOS-1 / ARCH-STRICT-LAYERING-1
-        // (Pass 4b-2's `ImportBoundaryChecker`) don't opt into `advisory_coexisting` (they're
-        // fully deterministic once configured, unlike the name-heuristic handler-no-db
-        // promotion), so this STATIC set — which has no per-repo config awareness — still
-        // contains them. The PER-REPO D3 gate lives in `config_unsatisfied_for` /
-        // `checker_rule_ids_for_repo` instead (see the tests further below and
-        // `import_boundary_checker`'s own registry test).
-        for gated in ["ARCH-NO-CROSS-BOUNDARY-IMPORTS-1", "ARCH-API-DTOS-1", "ARCH-STRICT-LAYERING-1"] {
+        // (`ImportBoundaryChecker` + Pass 4c's `StrictLayeringCallChecker`) and
+        // ARCH-HANDLER-NO-DB-1 (Pass 4c's production `HandlerNoDbChecker`) don't opt into
+        // `advisory_coexisting` (they're fully deterministic once configured, per-repo), so
+        // this STATIC set — which has no per-repo config awareness — still contains them. The
+        // PER-REPO D3 gate lives in `config_unsatisfied_for` / `checker_rule_ids_for_repo`
+        // instead (see the tests further below and each checker's own registry test).
+        for gated in [
+            "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1",
+            "ARCH-API-DTOS-1",
+            "ARCH-STRICT-LAYERING-1",
+            "ARCH-HANDLER-NO-DB-1",
+        ] {
             assert!(ids.contains(gated), "missing {gated} from the static registry: {ids:?}");
         }
     }
 
     #[test]
     fn all_checker_rule_ids_excludes_advisory_coexisting_checkers() {
-        // ARCH-HANDLER-NO-DB-1 (D3): the promoted lexical proof checker must NOT be
-        // subtracted from the LLM-advisory prompt, even though a native checker registers
-        // and runs over it — see `handler_no_db_checker::HandlerNoDbChecker`.
+        // ARCH-RESOURCE-LIFECYCLE-1 (D3): the spawn-facet checker is `needs-review` ALWAYS by
+        // the rule's own design (not just when config is missing), so it must NOT be
+        // subtracted from the LLM-advisory prompt, even though a native checker registers and
+        // runs over it — see `resource_lifecycle_checker::ResourceLifecycleChecker`.
         let ids = all_checker_rule_ids();
         assert!(
-            !ids.contains("ARCH-HANDLER-NO-DB-1"),
-            "ARCH-HANDLER-NO-DB-1 must stay LLM-advisory-eligible per D3: {ids:?}"
+            !ids.contains("ARCH-RESOURCE-LIFECYCLE-1"),
+            "ARCH-RESOURCE-LIFECYCLE-1 must stay LLM-advisory-eligible per D3: {ids:?}"
         );
         // But the checker IS registered and DOES answer the rule id (just excluded from
         // this particular subtraction set).
@@ -374,7 +386,7 @@ mod tests {
             .iter()
             .flat_map(|c| c.rule_ids().iter().copied())
             .collect();
-        assert!(all_ids.contains("ARCH-HANDLER-NO-DB-1"), "checker must still be registered: {all_ids:?}");
+        assert!(all_ids.contains("ARCH-RESOURCE-LIFECYCLE-1"), "checker must still be registered: {all_ids:?}");
     }
 
     // ── `**` glob support (Pass 4a seam amendment) ──────────────────────────────
@@ -462,19 +474,39 @@ mod tests {
         let repo = RepoView { spec: "test/repo", files: &files };
         let per_repo = checker_rule_ids_for_repo(&repo);
         let static_set = all_checker_rule_ids();
-        for gated in ["ARCH-NO-CROSS-BOUNDARY-IMPORTS-1", "ARCH-API-DTOS-1", "ARCH-STRICT-LAYERING-1"] {
+        for gated in [
+            "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1",
+            "ARCH-API-DTOS-1",
+            "ARCH-STRICT-LAYERING-1",
+            "ARCH-HANDLER-NO-DB-1",
+        ] {
             assert!(static_set.contains(gated), "{gated} missing from static set: {static_set:?}");
             assert!(!per_repo.contains(gated), "{gated} must be excluded per-repo when unconfigured: {per_repo:?}");
         }
     }
 
     #[test]
-    fn checker_rule_ids_for_repo_matches_static_set_when_the_config_gated_checker_is_satisfied() {
-        // The SAME repo, but WITH `.camerata/architecture.toml` present — now every
-        // registered checker (including the config-gated one) answers deterministically, so
-        // the per-repo set equals the static set again.
-        let files: Vec<(String, String)> =
-            vec![(".camerata/architecture.toml".to_string(), "version = 1\n".to_string())];
+    fn checker_rule_ids_for_repo_matches_static_set_when_every_config_gated_checker_is_satisfied() {
+        // The SAME repo, but WITH a `.camerata/architecture.toml` that satisfies every
+        // config-gated checker registered as of Pass 4c: `ImportBoundaryChecker` (presence-only),
+        // `HandlerNoDbChecker` (a "handlers" layer + non-empty `[db].handles`), and
+        // `StrictLayeringCallChecker` (a `[db]` section) — now every registered
+        // NON-advisory-coexisting checker answers deterministically, so the per-repo set
+        // equals the static set again. `ResourceLifecycleChecker` (`advisory_coexisting`) is
+        // filtered out of BOTH sets identically, so it never breaks this equality.
+        let cfg = r#"
+version = 1
+[layers]
+handlers = ["src/routes/**"]
+repositories = ["src/repositories/**"]
+[imports]
+handlers = []
+repositories = []
+[db]
+handles = ["db"]
+allowed_in = ["repositories"]
+"#;
+        let files: Vec<(String, String)> = vec![(".camerata/architecture.toml".to_string(), cfg.to_string())];
         let repo = RepoView { spec: "test/repo", files: &files };
         assert_eq!(checker_rule_ids_for_repo(&repo), all_checker_rule_ids());
     }

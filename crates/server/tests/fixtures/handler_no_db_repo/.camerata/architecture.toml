@@ -1,0 +1,16 @@
+version = 1
+
+[layers]
+handlers     = ["src/routes/**"]
+services     = ["src/services/**"]
+repositories = ["src/repositories/**"]
+
+[imports]
+handlers     = ["services"]
+services     = ["repositories"]
+repositories = []
+
+[db]
+handles = ["db"]
+allowed_in = ["repositories"]
+tx_flow_control_in = ["services"]

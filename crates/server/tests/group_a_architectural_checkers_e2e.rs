@@ -1,8 +1,9 @@
 //! END-TO-END: Pass 4a "Group A" architectural checkers (python test-file naming,
-//! UI-UTC-DATES-1, and the promoted `ARCH-HANDLER-NO-DB-1` lexical proof checker), driven
-//! through the REAL deterministic scan entry point (`onboard::audit_repos`) exactly like
+//! UI-UTC-DATES-1) plus the PRODUCTION `ARCH-HANDLER-NO-DB-1` AST checker (Pass 4c,
+//! `camerata_checks::handler_no_db_checker::HandlerNoDbChecker`), driven through the REAL
+//! deterministic scan entry point (`onboard::audit_repos`) exactly like
 //! `architectural_executor_e2e.rs` proves the Pass-1 Supabase checkers. See
-//! `docs/design/2026-07-27_ast-extractor-layer.md` §4 Group A.
+//! `docs/design/2026-07-27_ast-extractor-layer.md` §4 Group A / Group D.
 //!
 //! ZERO API SPEND: `run_ai_review: false` throughout — no model call anywhere in this file.
 //!
@@ -13,8 +14,10 @@
 //!   - `src/date_label.ts` (a direct `toLocaleString()` call — the planted `UI-UTC-DATES-1`
 //!     hole; must land `needs-review`)
 //!   - `src/handler.rs` (a handler function touching a `db` handle directly — the planted
-//!     `ARCH-HANDLER-NO-DB-1` hole; must ALSO land `needs-review`, since it's the interim
-//!     lexical promotion, not the production AST checker)
+//!     `ARCH-HANDLER-NO-DB-1` hole; this fixture carries NO `.camerata/architecture.toml`, so
+//!     the PRODUCTION checker falls back to its name-heuristic tier — same `needs-review`
+//!     grade the deleted interim lexical checker emitted, proving the supersession is
+//!     behavior-preserving for an unconfigured repo)
 
 use std::path::Path;
 
@@ -137,7 +140,8 @@ async fn deterministic_scan_fires_all_three_group_a_checkers_on_their_planted_ho
         utc.detail
     );
 
-    // ═══ ARCH-HANDLER-NO-DB-1: exactly one finding, needs-review (lexical promotion) ═══
+    // ═══ ARCH-HANDLER-NO-DB-1: exactly one finding, needs-review (no config -> attrs/name ═══
+    // ═══ fallback tier — the production checker's degradation path, per D3)            ═══
     let handler_findings: Vec<&onboard::Finding> =
         report.findings.iter().filter(|f| f.rule_id == RULE_HANDLER_NO_DB).collect();
     assert_eq!(handler_findings.len(), 1, "{:?}", report.findings);
@@ -146,7 +150,8 @@ async fn deterministic_scan_fires_all_three_group_a_checkers_on_their_planted_ho
     assert!(handler.snippet.contains("list_orgs_handler"), "{:?}", handler.snippet);
     assert!(
         handler.detail.contains("[needs review"),
-        "the interim lexical promotion must carry the needs-review marker: {:?}",
+        "no .camerata/architecture.toml in this fixture -> the production checker's name-heuristic \
+         fallback tier, same needs-review grade the deleted interim lexical checker emitted: {:?}",
         handler.detail
     );
 
@@ -157,19 +162,49 @@ async fn deterministic_scan_fires_all_three_group_a_checkers_on_their_planted_ho
 }
 
 #[tokio::test]
-async fn arch_handler_no_db_rule_id_stays_eligible_for_the_llm_prompt_per_d3() {
-    // D3: unlike the fully-deterministic Group-A checkers (which subtract their rule id from
-    // the semantic/LLM prompt), the handler-no-db lexical promotion must NOT be subtracted —
-    // it stays coexisting with an AI-advisory read. This is exactly what
-    // `camerata_checks::arch_checker::all_checker_rule_ids` (consumed at
-    // `onboard.rs`'s semantic-rule-set filter) must reflect.
-    let excluded = camerata_checks::arch_checker::all_checker_rule_ids();
+async fn arch_handler_no_db_rule_id_stays_eligible_for_the_llm_prompt_per_d3_when_unconfigured() {
+    // D3, Pass 4c version: the PRODUCTION `HandlerNoDbChecker` is no longer unconditionally
+    // advisory (`advisory_coexisting`) the way the deleted interim lexical checker was — it
+    // follows the SAME per-repo `config_unsatisfied_for` pattern `ImportBoundaryChecker`
+    // established in Pass 4b-2. For THIS fixture's repo (no `.camerata/architecture.toml` at
+    // all), the rule id must still stay LLM-advisory-eligible — checked here via the per-repo
+    // `checker_rule_ids_for_repo`, not the static `all_checker_rule_ids` (which now DOES
+    // contain ARCH-HANDLER-NO-DB-1, since the production checker only opts out per-repo, not
+    // unconditionally — see `handler_no_db_checker`'s own registry tests for that distinction).
+    let fixture_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/group_a_arch_repo");
+    let files = collect_fixture_files(&fixture_root);
+    let repo = camerata_checks::arch_checker::RepoView { spec: "e2e/group-a-arch-fixture", files: &files };
+
+    let per_repo = camerata_checks::arch_checker::checker_rule_ids_for_repo(&repo);
     assert!(
-        !excluded.contains(RULE_HANDLER_NO_DB),
-        "ARCH-HANDLER-NO-DB-1 must stay LLM-advisory-eligible: {excluded:?}"
+        !per_repo.contains(RULE_HANDLER_NO_DB),
+        "ARCH-HANDLER-NO-DB-1 must stay LLM-advisory-eligible for this unconfigured repo: {per_repo:?}"
     );
     // The other two Group-A rules in this fixture ARE fully deterministic and correctly
-    // subtracted from the LLM prompt.
-    assert!(excluded.contains(RULE_PYTHON_NAMING), "{excluded:?}");
-    assert!(excluded.contains(RULE_UTC_DATES), "{excluded:?}");
+    // subtracted from the LLM prompt, with or without config.
+    assert!(per_repo.contains(RULE_PYTHON_NAMING), "{per_repo:?}");
+    assert!(per_repo.contains(RULE_UTC_DATES), "{per_repo:?}");
+}
+
+/// Read every file under `root` into the `(repo-relative path, content)` shape `RepoView`
+/// expects — a minimal, test-local stand-in for the scan's own file walk (this test only needs
+/// the file CONTENTS, not a real git repo, unlike `run_fixture_scan` above).
+fn collect_fixture_files(root: &Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    collect_fixture_files_into(root, root, &mut out);
+    out
+}
+
+fn collect_fixture_files_into(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let entry = entry.unwrap();
+        let path = entry.path();
+        if entry.file_type().unwrap().is_dir() {
+            collect_fixture_files_into(root, &path, out);
+        } else {
+            let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+            let content = std::fs::read_to_string(&path).unwrap();
+            out.push((rel, content));
+        }
+    }
 }

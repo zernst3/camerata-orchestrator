@@ -14,19 +14,12 @@
 //! mapping layer ([`parse`]) are kept separate so the mapping logic can be
 //! unit-tested without spawning real subprocesses.
 
-/// Architectural (AST-tier) governance checks: deterministic structural rules
-/// that no regex can express and no LLM is needed to judge (e.g. "a handler does
-/// not touch the DB directly"). Ships a self-contained PROOF checker today; the
-/// `syn`-backed production design is routed in
-/// `docs/decisions/2026-06-19_ast_architectural_rule_tier.md`.
-pub mod architectural;
-
 /// The deterministic architectural-rule executor seam: the `ArchChecker` trait, `RepoView`,
 /// `ArchViolation`, and the checker registry (`all_checkers`). See
-/// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2. This GENERALIZES the
-/// proof-of-concept in [`architectural`] (which stays as-is, unwired, per that module's own
-/// doc comment) — checkers registered here are wired into the brownfield scan by
-/// `camerata_server::onboard::audit_repos`.
+/// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2 and
+/// `docs/design/2026-07-27_ast-extractor-layer.md` for the full checker set (Groups A-D) built
+/// on this seam — checkers registered here are wired into the brownfield scan by
+/// `camerata_server::onboard::audit_repos` and the Layer-2 gate by [`NativeArchCheckRunner`].
 pub mod arch_checker;
 
 /// `.camerata/architecture.toml` — the operator-authored boundary-map config (Pass 4b-1, D1).
@@ -65,12 +58,26 @@ pub mod python_testing;
 /// `docs/design/2026-07-27_ast-extractor-layer.md` §4.
 pub mod ui_dates;
 
-/// Pass 4a "Group A": promotes the existing lexical proof checker
-/// ([`architectural::handler_no_direct_db`]) into the [`arch_checker::ArchChecker`] seam for
-/// `ARCH-HANDLER-NO-DB-1`. Per design decision D3, this checker stays LLM-advisory-eligible
-/// (see [`arch_checker::ArchChecker::advisory_coexisting`]) rather than being excluded from
-/// the AI-audit prompt the way a fully-deterministic checker is.
+/// Pass 4c — the PRODUCTION AST checker for `ARCH-HANDLER-NO-DB-1`: classifies handler
+/// functions structurally (a `.camerata/architecture.toml` `"handlers"` layer, or a route
+/// attribute/decorator/registration marker, or — weakest — a name marker) and flags a direct
+/// `[db].handles` call inside one. Supersedes the Pass 4a interim lexical promotion (deleted);
+/// exactly one checker answers this rule id. See the module's own doc for the full design and
+/// `docs/design/2026-07-27_ast-extractor-layer.md` §4 Group D.
 pub mod handler_no_db_checker;
+
+/// Pass 4c — the call-site half of `ARCH-STRICT-LAYERING-1` (the import facet shipped in Pass
+/// 4b-2's `import_boundary_checker`): a `[db].handles` receiver call inside a file whose
+/// declared layer isn't in `[db].allowed_in`, with a call-site-verified (not import-level)
+/// `[db].tx_flow_control_in` exemption scoped to an actual `.transaction(...)` call. See
+/// `docs/design/2026-07-27_ast-extractor-layer.md` §4 Group D.
+pub mod strict_layering_call_checker;
+
+/// Pass 4c — the spawn facet of `ARCH-RESOURCE-LIFECYCLE-1`: a `syn`-based scan for a
+/// `tokio::process::Command` builder chain (inline or variable-tracked) that reaches
+/// `.spawn()`/`.output()`/`.status()` with no `.kill_on_drop(true)` anywhere in its chain. See
+/// `docs/design/2026-07-27_ast-extractor-layer.md` §4 Group D.
+pub mod resource_lifecycle_checker;
 
 /// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s
 /// checker registry — "Plug point B" in
