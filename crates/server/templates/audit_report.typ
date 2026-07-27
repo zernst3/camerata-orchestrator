@@ -88,11 +88,45 @@
 // Nice-to-have: effort/confidence as small neutral chips instead of plain inline text.
 #let mini_chip(label) = box(fill: rgb("#eeeeee"), inset: (x: 5pt, y: 2pt), radius: 2pt, [#text(size: 8pt, fill: rgb("#444444"))[#label]])
 
+// Item 6: the category scorecard as a compact heat-grid. Native Typst primitives only (no
+// packages) — a small, hand-picked light-to-dark palette per severity, indexed by count, so a
+// "critical" cell with 4 findings reads visibly heavier than one with 1. The owner's ruling:
+// this is the ONE approved visual addition; the severity x effort matrix stays a plain
+// bucketed list (that IS the chart), and no other decorative visual gets added here beyond
+// this heat-grid — restrained, engineer-made, not marketing.
+#let heat_bg(sev, n) = {
+  let palette = if sev == "critical" {
+    (rgb("#fdeaea"), rgb("#f8b8b0"), rgb("#f2887a"), rgb("#e2574a"), rgb("#c0392b"))
+  } else if sev == "high" {
+    (rgb("#fff0e6"), rgb("#ffd2ab"), rgb("#ffb570"), rgb("#f2953f"), rgb("#d9720d"))
+  } else if sev == "medium" {
+    (rgb("#fff9e6"), rgb("#ffedb0"), rgb("#ffe07a"), rgb("#f7cf4a"), rgb("#e0b400"))
+  } else {
+    (rgb("#f7f7f7"), rgb("#eaeaea"), rgb("#d8d8d8"), rgb("#c2c2c2"), rgb("#a8a8a8"))
+  }
+  let idx = if n == 0 { 0 } else if n == 1 { 1 } else if n <= 3 { 2 } else if n <= 6 { 3 } else { 4 }
+  palette.at(idx)
+}
+
+#let heat_cell(n, sev) = {
+  let idx = if n == 0 { 0 } else if n == 1 { 1 } else if n <= 3 { 2 } else if n <= 6 { 3 } else { 4 }
+  let fg = if idx >= 3 { white } else { rgb("#333333") }
+  align(center)[
+    #box(fill: heat_bg(sev, n), inset: (x: 6pt, y: 4pt), radius: 2pt, width: 1.7cm)[
+      #align(center)[#text(fill: fg, weight: if n > 0 { "bold" } else { "regular" })[#str(n)]]
+    ]
+  ]
+}
+
 // One curated-finding site row — factored out so the FIRST site of a group can be kept
 // together with its heading (S4) while later sites are free to break across pages.
 #let render_site(site) = {
   block(inset: (left: 8pt, top: 4pt, bottom: 4pt))[
-    *#site.repo* / #raw(breakable(site.path)):#str(site.line) #severity_chip(site.severity)
+    // Item 1: the DEFECT at this object is the primary, bold heading — never the rule's own
+    // invariant title (that reads as a clean bill of health out of context).
+    #text(size: 11pt, weight: "bold")[#site.headline]
+    #v(2pt)
+    #text(size: 8.5pt, fill: rgb("#666666"))[*#site.repo* / #raw(breakable(site.path)):#str(site.line)] #severity_chip(site.severity)
     #if site.snippet != "" [
       #block(fill: rgb("#f5f5f5"), inset: 5pt, radius: 2pt, width: 100%)[#raw(breakable(site.snippet, n: 70))]
     ]
@@ -179,6 +213,32 @@
   ]
 ]
 
+// ── Item 7: "If you only do three things this week" ───────────────────────
+// A buyer pricing remediation reads "these two criticals are about four hours of work total"
+// as the sentence that converts anxiety into a purchase order — a half-page box, not a whole
+// new page, right after the executive summary.
+= If you only do three things this week
+
+#if d.three_things.items.len() == 0 [
+  No do-now items this run.
+] else [
+  #block(stroke: 0.6pt + rgb("#c0392b"), inset: 10pt, radius: 3pt)[
+    #for item in d.three_things.items [
+      #block(above: 4pt, below: 8pt)[
+        #severity_chip(item.severity) *#item.headline*
+        #text(size: 8.5pt, fill: rgb("#666666"))[
+          #item.repo / #raw(breakable(item.path)):#str(item.line) (#item.rule_id)
+        ]
+        #v(1pt)
+        #text(size: 9pt)[Rough estimate: #item.hours_label]
+      ]
+    ]
+    #line(length: 100%, stroke: 0.4pt + rgb("#dddddd"))
+    #v(4pt)
+    #text(weight: "bold")[#d.three_things.total_hours_label]
+  ]
+]
+
 #pagebreak()
 
 // ── 3. Category scorecard ─────────────────────────────────────────────────
@@ -188,16 +248,19 @@
   No findings were produced by any audited category.
 ] else [
   #table(
-    columns: (1.6fr, auto, auto, auto, auto, auto, 1.2fr),
+    // Item 6: the critical/high/medium/low columns get a FIXED width (not "auto") because
+    // heat_cell's box is itself fixed-width — an "auto" column sized against a 100%-relative
+    // child creates a circular sizing problem that corrupts the whole table's row layout.
+    columns: (1.4fr, 2.1cm, 2.1cm, 2.1cm, 2.1cm, auto, 1.2fr),
     stroke: 0.5pt + rgb("#dddddd"),
     inset: 5pt,
     [*Category*], [*Critical*], [*High*], [*Medium*], [*Low*], [*Checked / clean*], [*Status*],
     ..d.scorecard.rows.map(row => (
       [#row.category],
-      [#str(row.critical)],
-      [#str(row.high)],
-      [#str(row.medium)],
-      [#str(row.low)],
+      heat_cell(row.critical, "critical"),
+      heat_cell(row.high, "high"),
+      heat_cell(row.medium, "medium"),
+      heat_cell(row.low, "low"),
       [#str(row.audited_rules)/#str(row.clean_rules)],
       [#chip(row.status, status_kind(row.status))],
     )).flatten()
@@ -247,15 +310,24 @@
   #for group in d.curated_findings [
     // S4: keep the group heading + citation + FIRST site together (orphan control) — later
     // sites in the same group are free to break across pages normally.
+    //
+    // Item 1: the BOLD, primary heading for each finding is now the per-site defect headline
+    // (rendered inside render_site) — the rule id + its own invariant title is demoted here to
+    // a small gray SUBTITLE line, kept for registry traceability, not as the headline.
     #block(breakable: false)[
-      #block(above: 12pt, below: 6pt)[
-        #text(size: 12.5pt, weight: "bold")[#group.rule_id: #group.title] (#str(group.sites.len()) #plural(group.sites.len(), "site", "sites"))
+      #block(above: 12pt, below: 2pt)[
+        #text(size: 8.5pt, fill: rgb("#888888"))[#group.rule_id: #group.title] #text(size: 8.5pt, fill: rgb("#888888"))[(#str(group.sites.len()) #plural(group.sites.len(), "site", "sites"))]
       ]
-      #text(size: 8.5pt, fill: rgb("#555555"))[#group.citation.label]
+      // Item 5: show the citation ONCE. When real external sources exist, the bulleted
+      // title+URL list IS the citation — the run-on `citation.label` (a redundant join of
+      // those same titles) is dropped. `label` is shown only when there are no external
+      // sources to bullet (the advisory/preview case), where it is the sole honesty note.
       #if group.citation.sources.len() > 0 [
         #for s in group.citation.sources [
-          - #s.title #if s.url != "" [(#s.url)]
+          #text(size: 8.5pt, fill: rgb("#555555"))[- #s.title #if s.url != "" [(#s.url)]]
         ]
+      ] else [
+        #text(size: 8.5pt, fill: rgb("#555555"))[#group.citation.label]
       ]
       #if group.sites.len() > 0 [
         #render_site(group.sites.at(0))

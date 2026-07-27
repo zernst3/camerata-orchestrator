@@ -66,7 +66,11 @@ async fn regenerate_sample_report() {
     rls_enabled.effort = Some("low".to_string());
     rls_enabled.confidence = Some("high".to_string());
     rls_enabled.snippet = "create table public.profiles (\n  id uuid primary key references auth.users,\n  full_name text,\n  email text,\n  phone text\n);".to_string();
-    rls_enabled.detail = "The profiles table is created in the API-exposed public schema and no migration in the timeline ever enables Row Level Security on it (verified by replaying supabase/migrations in order). Anyone holding the anon (public) API key, which ships in the frontend bundle, can read and write every row. No evidence of RLS in the repository for profiles; confirm against the live database before remediation, since dashboard changes are not visible to a repository scan.".to_string();
+    // Item 1: `detail`'s FIRST SENTENCE is the punchy, defect-first headline the report's
+    // serializer mechanically lifts out (`defect_headline`) — the owner's own target voice
+    // ("profiles table has no RLS: all member PII publicly readable and writable with the
+    // anon key.") — with the remainder of the paragraph supplying the supporting evidence.
+    rls_enabled.detail = "The profiles table has no RLS: all member PII is publicly readable and writable with the anon key. No migration in the timeline ever enables Row Level Security on it, verified by replaying supabase/migrations in order. The anon (public) API key ships in the frontend bundle, so this is exploitable by anyone on the internet with no authentication. No evidence of RLS in the repository is not the same as RLS being disabled in production; confirm against the live database before remediation, since dashboard changes are not visible to a repository scan.".to_string();
 
     let mut key_service_role = finding(
         "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
@@ -78,7 +82,7 @@ async fn regenerate_sample_report() {
     key_service_role.effort = Some("low".to_string());
     key_service_role.confidence = Some("high".to_string());
     key_service_role.snippet = "NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=sb_secret_[redacted]".to_string();
-    key_service_role.detail = "A service_role secret is assigned to a NEXT_PUBLIC_ environment variable, which Next.js inlines into the client bundle at build time. The service_role key bypasses ALL Row Level Security. Anyone who opens browser dev tools obtains full read and write access to every table. Rotate the key immediately, remove it from client-delivered code, and move privileged operations to a server-side route.".to_string();
+    key_service_role.detail = "The service_role key is shipped to every browser: it bypasses all Row Level Security and grants full read and write access to every table. A service_role secret is assigned to a NEXT_PUBLIC_ environment variable, which Next.js inlines into the client bundle at build time. Anyone who opens browser developer tools obtains this key. Rotate it immediately, remove it from client-delivered code, and move privileged operations to a server-side route.".to_string();
 
     let mut auth_edge_jwt = finding(
         "SUPABASE-AUTH-EDGE-JWT-1",
@@ -90,7 +94,7 @@ async fn regenerate_sample_report() {
     auth_edge_jwt.effort = Some("medium".to_string());
     auth_edge_jwt.confidence = Some("needs-review".to_string());
     auth_edge_jwt.snippet = "[functions.charge-membership]\nverify_jwt = false".to_string();
-    auth_edge_jwt.detail = "The charge-membership function has JWT verification disabled and its body does not perform its own authorization check. Any anonymous caller on the internet can invoke it, including the payment path. Re-enable verify_jwt, or add an explicit authenticated-user check inside the handler before any privileged work.".to_string();
+    auth_edge_jwt.detail = "The charge-membership edge function has JWT verification disabled: any anonymous caller on the internet can invoke the payment path. Its body does not perform its own authorization check either. Re-enable verify_jwt, or add an explicit authenticated-user check inside the handler before any privileged work.".to_string();
 
     let mut storage_public = finding(
         "SUPABASE-STORAGE-PUBLIC-BUCKET-1",
@@ -99,10 +103,15 @@ async fn regenerate_sample_report() {
         3,
         "high",
     );
-    storage_public.effort = Some("medium".to_string());
+    // Judgment call: effort is "low" (not "medium") here — flipping `public = true` to
+    // `false` plus adding an owner-scoped storage policy is a same-day, scoped fix. This
+    // puts all 3 do-now items (this bucket + the two RLS/key criticals) in the "If you only
+    // do three things this week" box together, matching the blast-radius sentence below,
+    // which draws on all three.
+    storage_public.effort = Some("low".to_string());
     storage_public.confidence = Some("high".to_string());
     storage_public.snippet = "insert into storage.buckets (id, name, public)\nvalues ('member-documents', 'member-documents', true);".to_string();
-    storage_public.detail = "The member-documents bucket is created public. Every object in it is downloadable by anyone with, or guessing, the URL, with no authentication and no access policy. If this bucket holds private member documents, make it private and add owner-scoped access policies.".to_string();
+    storage_public.detail = "The member-documents storage bucket is public: every uploaded document is downloadable by anyone with, or guessing, the URL. No authentication and no access policy gate object retrieval. If this bucket holds private member documents, make it private and add owner-scoped access policies.".to_string();
 
     let mut rls_permissive = finding(
         "SUPABASE-RLS-PERMISSIVE-TRUE-1",
@@ -114,7 +123,7 @@ async fn regenerate_sample_report() {
     rls_permissive.effort = Some("low".to_string());
     rls_permissive.confidence = Some("needs-review".to_string());
     rls_permissive.snippet = "create policy \"messages are readable\"\n  on public.messages for select\n  using (true);".to_string();
-    rls_permissive.detail = "This read policy on the messages table uses using (true), which grants every anon and authenticated caller read access to all rows. If messages are meant to be private between members, scope the policy to the owning user (for example, using (auth.uid() = sender_id)).".to_string();
+    rls_permissive.detail = "The messages table's read policy grants access to everyone: using (true) lets every anon and authenticated caller read every row. If messages are meant to be private between members, scope the policy to the owning user, for example using (auth.uid() = sender_id).".to_string();
 
     // Long, real-looking path (a Next.js route group directory) — exercises the M8 path-wrap
     // hardening in situ rather than just in a unit test.
@@ -128,7 +137,7 @@ async fn regenerate_sample_report() {
     auth_getsession.effort = Some("medium".to_string());
     auth_getsession.confidence = Some("high".to_string());
     auth_getsession.snippet = "const { data: { session } } = await supabase.auth.getSession()".to_string();
-    auth_getsession.detail = "Server-side code reads getSession(), which returns the client's unverified cookie JWT rather than validating it against the auth server. A forged cookie could impersonate any user at this layer.".to_string();
+    auth_getsession.detail = "The billing settings page trusts an unverified session cookie: a forged cookie could impersonate any user at this layer. Server-side code reads getSession(), which returns the client's unverified cookie JWT rather than validating it against the auth server.".to_string();
 
     // ── 3 findings dispositioned FalsePositive (excluded, counted once in methodology) ──
     let fp_sql = finding("SEC-NO-RAW-SQL-CONCAT-1", PORTAL, "scripts/report.rs", 40, "critical");
@@ -163,7 +172,12 @@ async fn regenerate_sample_report() {
     // dependency advisory make up the remaining 7. Nothing is hand-typed independently.
     assert_eq!(all_findings.len(), 10);
 
-    // ── Dispositions: one Accepted risk, rest left Unresolved (the FPs are keyed here too) ──
+    // ── Dispositions: one Ignored (NOT client-confirmed), rest left Unresolved (the FPs are ──
+    // keyed here too). Item 4 (never fabricate a client disposition): this fixture represents
+    // a realistic PRE-ENGAGEMENT external scan of an OSS-style repo — there is no client yet
+    // to have confirmed anything, so `confirmed_by_client` is `false` on every entry (the
+    // false-positive dispositions are the auditor's own triage call and don't route through
+    // this flag at all; it only shapes the `Ignored` rendering).
     let mut dispositions: HashMap<String, DispositionWire> = HashMap::new();
     dispositions.insert(
         report_export::finding_key(&fn_by_rule(&all_findings, "SEC-NO-RAW-SQL-CONCAT-1")),
@@ -171,6 +185,7 @@ async fn regenerate_sample_report() {
             state: "FalsePositive".to_string(),
             reason: "internal reporting script, not a user-facing query path".to_string(),
             bucket: String::new(),
+            confirmed_by_client: false,
         },
     );
     dispositions.insert(
@@ -179,6 +194,7 @@ async fn regenerate_sample_report() {
             state: "FalsePositive".to_string(),
             reason: "test fixture constant, not a live credential".to_string(),
             bucket: String::new(),
+            confirmed_by_client: false,
         },
     );
     dispositions.insert(
@@ -187,14 +203,23 @@ async fn regenerate_sample_report() {
             state: "FalsePositive".to_string(),
             reason: "the token in the URL is a public, non-secret analytics write-key".to_string(),
             bucket: String::new(),
+            confirmed_by_client: false,
         },
     );
     dispositions.insert(
         report_export::finding_key(&auth_getsession),
         DispositionWire {
             state: "Ignored".to_string(),
-            reason: "team confirmed this middleware is a defense-in-depth redirect only; real authorization is enforced at the data layer via RLS".to_string(),
+            // The auditor's OWN proposed rationale — never invented client dialogue ("team
+            // confirmed..."). No client conversation has happened yet, so
+            // `confirmed_by_client: false` renders this as "Needs client confirmation
+            // (auditor's proposed rationale: ...)", not as an accepted disposition.
+            reason: "this looks like a defense-in-depth redirect only; primary authorization \
+                     appears to run through RLS at the data layer, but that has not been \
+                     confirmed with the client yet"
+                .to_string(),
             bucket: String::new(),
+            confirmed_by_client: false,
         },
     );
 

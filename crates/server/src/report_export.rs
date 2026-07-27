@@ -49,6 +49,15 @@ pub struct DispositionWire {
     pub reason: String,
     #[serde(default)]
     pub bucket: String,
+    /// Whether a real client has actually confirmed this `Ignored` disposition (e.g. "yes,
+    /// this is defense-in-depth only"). Defaults to `false` — the SAFE default, since most
+    /// dispositions come from the auditor's own judgment before any client conversation has
+    /// happened. See `disposition_label`: an `Ignored` finding with this `false` NEVER
+    /// renders as if a client confirmed it, however confident `reason`'s prose sounds — it
+    /// renders "Needs client confirmation" instead. Only an explicit `true` (set once a real
+    /// client conversation happened) unlocks the "Accepted risk: {reason}" wording.
+    #[serde(default)]
+    pub confirmed_by_client: bool,
 }
 
 /// Client-authored report framing. Nothing here is inferred — the auditor types it (or
@@ -143,15 +152,37 @@ fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Disposition {
 /// apart. Only consulted for `Unresolved` (every other disposition already has its own fixed
 /// bucket by construction; see `matrix_bucket`'s doc comment).
 ///
+/// # Never fabricate a client disposition
+/// A real audit often ships before any client conversation has happened (e.g. a pre-engagement
+/// scan of an OSS repo, or the very first draft of a fresh engagement) — there is no "team" to
+/// have confirmed anything. `confirmed_by_client` (from `DispositionWire`, default `false`) is
+/// the ONLY thing that unlocks "Accepted risk: {reason}" wording for an `Ignored` finding; when
+/// it is `false` (the safe default), the reader sees "Needs client confirmation" instead, no
+/// matter how confident the auditor's own `reason` prose reads — the auditor's proposed
+/// rationale is still surfaced, but honestly attributed to the auditor, never invented as a
+/// client's words. This is a deliberate rendering constraint, not just a fixture-content fix:
+/// the serializer itself cannot produce "confirmed" language without that explicit flag.
+///
 /// No em/en dashes (house style for this client deliverable) — see `bucket_title`.
-fn disposition_label(disposition: Disposition, reason: &str, bucket: &str) -> String {
+fn disposition_label(
+    disposition: Disposition,
+    reason: &str,
+    bucket: &str,
+    confirmed_by_client: bool,
+) -> String {
     match disposition {
         Disposition::Unresolved => format!("Open (recommended: {})", bucket_title(bucket)),
         Disposition::Ignored => {
-            if reason.trim().is_empty() {
-                "Accepted risk".to_string()
+            if confirmed_by_client {
+                if reason.trim().is_empty() {
+                    "Accepted risk".to_string()
+                } else {
+                    format!("Accepted risk: {reason}")
+                }
+            } else if reason.trim().is_empty() {
+                "Needs client confirmation".to_string()
             } else {
-                format!("Accepted risk: {reason}")
+                format!("Needs client confirmation (auditor's proposed rationale: {reason})")
             }
         }
         Disposition::TechDebtNow => "Tech debt, resolve now".to_string(),
@@ -281,8 +312,34 @@ pub struct ExecutiveSummaryJson {
     pub plan: usize,
     pub accepted: usize,
     pub open: usize,
-    /// Up to 3 one-liners: `"{title}: {repo}/{path}:{line} ({rule_id})"` (S3 + S7).
+    /// Up to 3 one-liners: `"{headline} ({repo}/{path}:{line}, {rule_id})"` (S3 + S7 +
+    /// item 1: defect-first, not the rule's invariant title).
     pub top_do_now: Vec<String>,
+}
+
+/// Item 7: "If you only do three things this week" — a half-page box right after the
+/// executive summary. A buyer pricing remediation reads "these two criticals are about four
+/// hours of work total" as the sentence that converts anxiety into a purchase order; a bare
+/// finding list does not do that job.
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreeThingsItemJson {
+    pub headline: String,
+    pub repo: String,
+    pub path: String,
+    pub line: usize,
+    pub rule_id: String,
+    pub severity: String,
+    /// A rough, LABELED-as-rough hour estimate (e.g. `"2 to 4 hours"`), never a bare number
+    /// dressed up as precise — see `effort_hours_bounds`.
+    pub hours_label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ThreeThingsJson {
+    pub items: Vec<ThreeThingsItemJson>,
+    /// e.g. `"roughly 6 to 12 hours total (rough estimate)"`, or a note that some items have
+    /// no effort estimate yet and were left out of the sum (never silently guessed).
+    pub total_hours_label: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -314,6 +371,14 @@ pub struct FindingRefJson {
     pub path: String,
     pub line: usize,
     pub severity: String,
+    /// The DEFECT at this specific object ("profiles table has no RLS: all member PII
+    /// publicly readable and writable with the anon key."), never the rule's own invariant
+    /// title ("Every table... has RLS enabled") — read cold, the invariant sounds like a
+    /// clean bill of health. See `defect_headline`.
+    pub headline: String,
+    /// Carried through so item 7's "If you only do three things this week" box can map effort
+    /// to a rough hour estimate without re-joining back to the original `Finding`.
+    pub effort: Option<String>,
 }
 
 /// The severity×effort action matrix — the money page. Cell membership is driven by the
@@ -358,6 +423,10 @@ pub struct CuratedSiteJson {
     pub confidence: Option<String>,
     pub disposition: String,
     pub also_matches: Vec<String>,
+    /// The defect at THIS object (see `defect_headline`) — the template renders this as the
+    /// bold per-finding heading; the group's own rule id + invariant title (`CuratedGroupJson`)
+    /// is demoted to a smaller subtitle line for registry traceability.
+    pub headline: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -422,6 +491,7 @@ pub struct MethodologyJson {
 pub struct AuditReportJson {
     pub cover: CoverJson,
     pub executive_summary: ExecutiveSummaryJson,
+    pub three_things: ThreeThingsJson,
     pub scorecard: ScorecardJson,
     pub matrix: MatrixJson,
     pub curated_findings: Vec<CuratedGroupJson>,
@@ -452,22 +522,32 @@ pub const AUDIT_REPORT_DISCLAIMER: &str =
 /// preview finding with no corpus citation is labeled by the REAL tool that enforces it
 /// (still honest — just not corpus-documented); (3) anything else (a free-text/AI-tier
 /// rule id the corpus never saw) is "AI-advisory, model-inferred." — never dressed up.
+/// Item 3: a source counts as an external authority only when its `url` is a real, fetchable
+/// external URL (CWE / OWASP / RFC / Supabase docs / a linter's own docs...). Camerata's own
+/// internal scaffolding docs (`docs/ENFORCEMENT.md` §RULE_REGISTRY entries, which exist only in
+/// Camerata-built repos, never in an arbitrary client's) are filtered out entirely rather than
+/// rendered as if they were an authority a client could go verify.
+fn is_external_source_url(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
+}
+
 fn resolve_citation(
     rule_id: &str,
     preview_tool: Option<&str>,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> CitationJson {
     if let Some(rule) = corpus.and_then(|c| c.get_by_id(rule_id)) {
-        if !rule.sources.is_empty() {
-            let sources: Vec<CitationSourceJson> = rule
-                .sources
-                .iter()
-                .map(|s| CitationSourceJson {
-                    title: s.title.clone(),
-                    url: s.url.clone(),
-                    linter: s.linter.clone(),
-                })
-                .collect();
+        let sources: Vec<CitationSourceJson> = rule
+            .sources
+            .iter()
+            .filter(|s| is_external_source_url(&s.url))
+            .map(|s| CitationSourceJson {
+                title: s.title.clone(),
+                url: s.url.clone(),
+                linter: s.linter.clone(),
+            })
+            .collect();
+        if !sources.is_empty() {
             let label = sources
                 .iter()
                 .map(|s| s.title.clone())
@@ -583,20 +663,62 @@ fn matrix_bucket(disposition: Disposition, severity: &str, effort: Option<&str>)
     }
 }
 
-fn finding_ref(f: &Finding, severity: &str) -> FindingRefJson {
+fn finding_ref(f: &Finding, severity: &str, headline: String) -> FindingRefJson {
     FindingRefJson {
         rule_id: f.rule_id.clone(),
         repo: f.repo.clone(),
         path: f.path.clone(),
         line: f.line,
         severity: severity.to_string(),
+        headline,
+        effort: f.effort.clone(),
     }
+}
+
+/// Item 1 (the biggest ask): derive a defect-first HEADLINE for one finding, distinct from
+/// the rule's own invariant title. Mechanical, not hand-faked — every finding already carries
+/// a `detail` string (the checker's own explanation of the violation, whether it came from the
+/// deterministic floor, a preview tool, or the calibrated AI tier), and house convention is for
+/// that `detail` to LEAD with the defect statement itself ("the profiles table has no RLS...")
+/// before supporting evidence. Taking `detail`'s leading sentence as the headline therefore
+/// generalizes beyond this one report's fixture: it works for any finding whose `detail` text
+/// follows that convention, and degrades safely (falls back to the rule's own
+/// title/rule_id, never an empty string) for the rare finding with no `detail` at all.
+fn defect_headline(detail: &str, fallback: &str) -> String {
+    let trimmed = detail.trim();
+    if trimmed.is_empty() {
+        return fallback.to_string();
+    }
+    // First sentence boundary: prefer ". " (mid-paragraph), else a bare trailing '.', else the
+    // first '.' found anywhere, else the whole (short, presumably headline-shaped) string.
+    let end = if let Some(idx) = trimmed.find(". ") {
+        idx + 1
+    } else if let Some(idx) = trimmed.find('.') {
+        idx + 1
+    } else {
+        trimmed.len()
+    };
+    let mut headline = trimmed[..end].trim().to_string();
+    if !headline.ends_with('.') {
+        headline.push('.');
+    }
+    headline
 }
 
 /// Deterministic exec-summary narrative (never an LLM call). Overridden verbatim by
 /// `ReportOptions::executive_summary_override` when the client supplies one. Special-cases
 /// zero candidates (a plain "0 candidate finding(s) were reviewed..." reads as broken, not
 /// clean) and uses real pluralization throughout (`noun`) rather than the "(s)" CLI-ism.
+/// Item 2: LEAD with blast radius in plain English (composed from the top do-now findings'
+/// own defect headlines — never a separately hand-written sentence that could drift from what
+/// the report actually found), THEN the counts. The counts sentence is a single, ONE-PASS
+/// partition: `do_now + do_next + plan + accepted == curated_total` ALWAYS (every code finding
+/// lands in exactly one matrix bucket by construction — see `matrix_bucket`), so listing all
+/// four counts once is a complete, self-checking picture. The previous wording additionally
+/// tacked on "and N still open" — a SUBSET of the very counts just listed (do_now/do_next/plan
+/// are inherently the still-open ones; only `accepted` is closed out) — which forced the reader
+/// to do arithmetic to figure out whether that was new information or a restatement. Dropped
+/// entirely rather than reworded, because the four-bucket partition already says it once.
 fn default_narrative(
     candidates_reviewed: usize,
     excluded_fp: usize,
@@ -605,32 +727,86 @@ fn default_narrative(
     do_next: usize,
     plan: usize,
     accepted: usize,
-    open: usize,
+    blast_radius_headlines: &[String],
 ) -> String {
     if candidates_reviewed == 0 {
         return "The scan surfaced no candidate findings to review in this run.".to_string();
     }
-    // Deliberately ONE prose paragraph, no embedded list — `top_do_now` is a separate
-    // structured field the template renders as its own bulleted list (a Typst string value
-    // doesn't reliably turn embedded "\n"s into paragraph/list breaks, so mixing prose and
-    // list markup into one opaque string would render as a flat run-on in the PDF).
-    let mut s = format!(
+    let mut s = String::new();
+    if !blast_radius_headlines.is_empty() {
+        s.push_str("As shipped: ");
+        s.push_str(&blast_radius_headlines.join(" "));
+        s.push(' ');
+    }
+    // Deliberately ONE prose paragraph after the blast-radius lead, no embedded list —
+    // `top_do_now` / `three_things` are separate structured fields the template renders as
+    // their own bulleted lists (a Typst string value doesn't reliably turn embedded "\n"s into
+    // paragraph/list breaks, so mixing prose and list markup into one opaque string would
+    // render as a flat run-on in the PDF).
+    s.push_str(&format!(
         "{} were reviewed; {} {} dispositioned as false positives by the auditor and excluded \
          entirely from this report. Of the remaining {}: {do_now} do now, {do_next} do next, \
-         {plan} planned, {accepted} accepted as risk",
+         {plan} planned, and {accepted} accepted as risk.",
         noun(candidates_reviewed, "candidate finding", "candidate findings"),
         excluded_fp,
         if excluded_fp == 1 { "was" } else { "were" },
         noun(curated_total, "curated finding", "curated findings"),
-    );
-    if open > 0 {
-        s.push_str(&format!(
-            ", and {} still open, unresolved",
-            noun(open, "finding", "findings")
+    ));
+    s
+}
+
+/// Item 7's effort -> rough-hour mapping (a judgment call, documented here rather than buried
+/// in a magic number): the calibration pass's three qualitative tiers translate to rough,
+/// LABELED-as-rough wall-clock ranges a buyer can price against. `low` ~= a same-day, scoped
+/// fix (rotate a key, flip a migration flag); `medium` ~= about a business day (touches a few
+/// call sites or needs a short design pass); `high` ~= the better part of a week (a real
+/// refactor or a cross-cutting change). Returns `None` for the hour bounds when effort was
+/// never calibrated (a deterministic-floor/preview finding, per M3) — the label still reads
+/// honestly ("not yet estimated") rather than silently guessing a number.
+fn effort_hours_bounds(effort: Option<&str>) -> (Option<(u32, u32)>, String) {
+    match effort {
+        Some("low") => (Some((2, 4)), "2 to 4 hours".to_string()),
+        Some("medium") => (Some((8, 16)), "1 to 2 days (about 8 to 16 hours)".to_string()),
+        Some("high") => (Some((24, 40)), "3 to 5 days (about 24 to 40 hours)".to_string()),
+        _ => (None, "not yet estimated".to_string()),
+    }
+}
+
+/// Sum the rough hour ranges across item 7's (up to 3) do-now findings. Only sums items with a
+/// calibrated effort; when one or more items have none, the total says so explicitly rather
+/// than folding a guessed number into the sum.
+fn total_hours_label(items: &[&FindingRefJson]) -> String {
+    if items.is_empty() {
+        return "No do-now items this run.".to_string();
+    }
+    let mut lo_sum = 0u32;
+    let mut hi_sum = 0u32;
+    let mut uncounted = 0usize;
+    for f in items {
+        match effort_hours_bounds(f.effort.as_deref()).0 {
+            Some((lo, hi)) => {
+                lo_sum += lo;
+                hi_sum += hi;
+            }
+            None => uncounted += 1,
+        }
+    }
+    let counted = items.len() - uncounted;
+    if counted == 0 {
+        return "None of these items has a calibrated effort estimate yet; ask the auditor for \
+                a rough scoping pass before pricing remediation."
+            .to_string();
+    }
+    let mut label = format!("Roughly {lo_sum} to {hi_sum} hours total (rough estimate)");
+    if uncounted > 0 {
+        label.push_str(&format!(
+            "; {} without an effort estimate yet {} not included in this total",
+            noun(uncounted, "item", "items"),
+            if uncounted == 1 { "is" } else { "are" }
         ));
     }
-    s.push('.');
-    s
+    label.push('.');
+    label
 }
 
 /// Build the report's single output type from a completed scan + the client's triage
@@ -695,7 +871,12 @@ pub fn build_report_json(
             "plan" => &mut matrix.plan,
             _ => &mut matrix.accepted,
         };
-        target.push(finding_ref(f, severity));
+        let fallback_title = corpus
+            .and_then(|c| c.get_by_id(&f.rule_id))
+            .map(|r| r.title.clone())
+            .unwrap_or_else(|| f.rule_id.clone());
+        let headline = defect_headline(&f.detail, &fallback_title);
+        target.push(finding_ref(f, severity, headline));
     }
 
     // Curated findings: grouped by rule (sorted for deterministic output), each rule's
@@ -724,6 +905,10 @@ pub fn build_report_json(
             .iter()
             .map(|(f, disposition, reason, severity)| {
                 let bucket = matrix_bucket(*disposition, severity, f.effort.as_deref());
+                let confirmed_by_client = dispositions
+                    .get(&finding_key(f))
+                    .map(|d| d.confirmed_by_client)
+                    .unwrap_or(false);
                 CuratedSiteJson {
                     repo: f.repo.clone(),
                     path: f.path.clone(),
@@ -733,8 +918,9 @@ pub fn build_report_json(
                     severity: severity.clone(),
                     effort: f.effort.clone(),
                     confidence: f.confidence.clone(),
-                    disposition: disposition_label(*disposition, reason, bucket),
+                    disposition: disposition_label(*disposition, reason, bucket, confirmed_by_client),
                     also_matches: f.also_matches.clone(),
+                    headline: defect_headline(&f.detail, &title),
                 }
             })
             .collect();
@@ -914,19 +1100,19 @@ pub fn build_report_json(
         "medium" => 2,
         _ => 3,
     });
-    // S3 + S7: name the repo and the rule's human title, not just a bare rule id + path —
-    // ambiguous in a multi-repo audit, and a rule id alone means nothing to a board reader.
-    let top_do_now: Vec<String> = do_now_sorted
+    let top3_do_now: Vec<&FindingRefJson> = do_now_sorted.iter().take(3).collect();
+    // S3 + S7 + item 1: lead with the DEFECT headline (already computed per finding, never the
+    // rule's own invariant title), not just a bare rule id + path — ambiguous in a multi-repo
+    // audit, and a rule id alone means nothing to a board reader.
+    let top_do_now: Vec<String> = top3_do_now
         .iter()
-        .take(3)
-        .map(|f| {
-            let title = corpus
-                .and_then(|c| c.get_by_id(&f.rule_id))
-                .map(|r| r.title.clone())
-                .unwrap_or_else(|| f.rule_id.clone());
-            format!("{title}: {}/{}:{} ({})", f.repo, f.path, f.line, f.rule_id)
-        })
+        .map(|f| format!("{} ({}/{}:{}, {})", f.headline, f.repo, f.path, f.line, f.rule_id))
         .collect();
+    // Item 2: the blast-radius lead sentence(s) are composed straight from these SAME top
+    // do-now findings' own headlines — never a separately hand-written sentence that could
+    // drift from what the report actually found.
+    let blast_radius_headlines: Vec<String> =
+        top3_do_now.iter().map(|f| f.headline.clone()).collect();
     let (narrative, is_override) = match &opts.executive_summary_override {
         Some(text) if !text.trim().is_empty() => (text.clone(), true),
         _ => (
@@ -938,7 +1124,7 @@ pub fn build_report_json(
                 do_next,
                 plan,
                 accepted,
-                open,
+                &blast_radius_headlines,
             ),
             false,
         ),
@@ -955,6 +1141,30 @@ pub fn build_report_json(
         accepted,
         open,
         top_do_now,
+    };
+
+    // ── Item 7: "If you only do three things this week" ───────────────────────
+    // The same top (up to 3) do-now findings, plus a rough hour estimate per item and a total —
+    // the sentence that turns remediation anxiety into a purchase order.
+    let three_things_items: Vec<ThreeThingsItemJson> = top3_do_now
+        .iter()
+        .map(|f| {
+            let (_, hours_label) = effort_hours_bounds(f.effort.as_deref());
+            ThreeThingsItemJson {
+                headline: f.headline.clone(),
+                repo: f.repo.clone(),
+                path: f.path.clone(),
+                line: f.line,
+                rule_id: f.rule_id.clone(),
+                severity: f.severity.clone(),
+                hours_label,
+            }
+        })
+        .collect();
+    let total_hours_label = total_hours_label(&top3_do_now);
+    let three_things = ThreeThingsJson {
+        items: three_things_items,
+        total_hours_label,
     };
 
     // ── Cover ──────────────────────────────────────────────────────────────────
@@ -1035,6 +1245,7 @@ pub fn build_report_json(
     AuditReportJson {
         cover,
         executive_summary,
+        three_things,
         scorecard: ScorecardJson {
             rows: scorecard_rows,
         },
@@ -1167,6 +1378,17 @@ mod tests {
             state: state.to_string(),
             reason: reason.to_string(),
             bucket: bucket.to_string(),
+            confirmed_by_client: false,
+        }
+    }
+
+    /// Like `wire`, but for an `Ignored` disposition a REAL client has actually confirmed.
+    fn confirmed_wire(reason: &str) -> DispositionWire {
+        DispositionWire {
+            state: "Ignored".to_string(),
+            reason: reason.to_string(),
+            bucket: String::new(),
+            confirmed_by_client: true,
         }
     }
 
@@ -1214,10 +1436,10 @@ mod tests {
     // ── Ignored -> accepted risk ───────────────────────────────────────────────
 
     #[test]
-    fn ignored_finding_is_accepted_risk_with_reason() {
+    fn ignored_finding_is_accepted_risk_with_reason_when_client_confirmed() {
         let f = finding("ARCH-NO-SECRETS-IN-URL-1", "a.rs", 1, "medium");
         let mut dispositions = HashMap::new();
-        dispositions.insert(finding_key(&f), wire("Ignored", "accepted for now", ""));
+        dispositions.insert(finding_key(&f), confirmed_wire("accepted for now"));
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(&report, &dispositions, None, &empty_opts());
 
@@ -1227,6 +1449,44 @@ mod tests {
         );
         assert_eq!(json.matrix.accepted.len(), 1);
         assert_eq!(json.executive_summary.accepted, 1);
+    }
+
+    // ── Item 4 regression: never fabricate a client disposition ───────────────
+
+    #[test]
+    fn ignored_finding_without_client_confirmation_needs_client_confirmation() {
+        // The DEFAULT (confirmed_by_client absent/false) must NEVER read as if a client
+        // confirmed anything, no matter how confident the auditor's own reason sounds — a
+        // security-literate reader who spots an invented client disposition discards the
+        // whole document.
+        let f = finding("ARCH-NO-SECRETS-IN-URL-1", "a.rs", 1, "medium");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(
+            finding_key(&f),
+            wire("Ignored", "looks like defense-in-depth only", ""),
+        );
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+
+        assert_eq!(
+            json.curated_findings[0].sites[0].disposition,
+            "Needs client confirmation (auditor's proposed rationale: looks like defense-in-depth only)"
+        );
+        assert_eq!(json.matrix.accepted.len(), 1, "still an accepted-bucket disposition");
+    }
+
+    #[test]
+    fn ignored_finding_without_reason_or_confirmation_is_plain_needs_client_confirmation() {
+        let f = finding("ARCH-NO-SECRETS-IN-URL-1", "a.rs", 1, "medium");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(finding_key(&f), wire("Ignored", "", ""));
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+
+        assert_eq!(
+            json.curated_findings[0].sites[0].disposition,
+            "Needs client confirmation"
+        );
     }
 
     // ── TechDebt Now/Later -> do-now / planned ─────────────────────────────────
@@ -1350,6 +1610,169 @@ mod tests {
         assert_eq!(json.scorecard.rows[0].critical, 1);
         assert_eq!(json.scorecard.rows[0].low, 0);
         assert_eq!(json.curated_findings[0].sites[0].severity, "critical");
+    }
+
+    // ── Item 1: defect headline, not the rule's invariant title ────────────────
+
+    #[test]
+    fn defect_headline_takes_the_first_sentence_of_detail() {
+        assert_eq!(
+            defect_headline(
+                "The profiles table has no RLS. Anyone with the anon key can read and write \
+                 every row.",
+                "Every table has Row Level Security enabled"
+            ),
+            "The profiles table has no RLS."
+        );
+    }
+
+    #[test]
+    fn defect_headline_falls_back_to_the_rule_title_when_detail_is_empty() {
+        assert_eq!(
+            defect_headline("", "Every table has Row Level Security enabled"),
+            "Every table has Row Level Security enabled"
+        );
+    }
+
+    #[test]
+    fn curated_and_matrix_findings_carry_a_defect_headline_distinct_from_the_rule_title() {
+        let mut f = finding("SEC-1", "a.rs", 1, "critical");
+        f.detail = "A service_role key ships to every browser. It bypasses all Row Level \
+                    Security."
+            .to_string();
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(
+            json.curated_findings[0].sites[0].headline,
+            "A service_role key ships to every browser."
+        );
+        assert_eq!(
+            json.matrix.do_now[0].headline,
+            "A service_role key ships to every browser."
+        );
+        // The rule's own title/id is still carried separately, for registry traceability.
+        assert_eq!(json.curated_findings[0].rule_id, "SEC-1");
+        // top_do_now leads with the headline, not the rule id.
+        assert!(json.executive_summary.top_do_now[0].starts_with("A service_role key ships"));
+    }
+
+    // ── Item 2: exec-summary blast radius + one-pass counts ────────────────────
+
+    #[test]
+    fn narrative_leads_with_blast_radius_composed_from_top_do_now_headlines() {
+        let mut f = finding("SEC-1", "a.rs", 1, "critical");
+        f.detail = "The profiles table has no RLS.".to_string();
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert!(
+            json.executive_summary.narrative.starts_with("As shipped: The profiles table has no RLS."),
+            "{}",
+            json.executive_summary.narrative
+        );
+    }
+
+    #[test]
+    fn narrative_bucket_counts_are_a_one_pass_partition_with_no_subset_restatement() {
+        // Previously: "... 2 do now, 2 do next, 1 planned, 1 accepted ... and 5 still open"
+        // forced the reader to notice 5 was a SUBSET restatement of the four counts just
+        // given, not new information. The fix: state the four-bucket partition once and stop.
+        let f1 = finding("SEC-1", "a.rs", 1, "critical");
+        let f2 = finding("SEC-2", "b.rs", 2, "low");
+        let report = report_with(vec![f1, f2], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert!(
+            !json.executive_summary.narrative.contains("still open"),
+            "{}",
+            json.executive_summary.narrative
+        );
+        assert!(
+            json.executive_summary.narrative.contains("1 do now, 0 do next, 1 planned, and 0 accepted as risk"),
+            "{}",
+            json.executive_summary.narrative
+        );
+    }
+
+    // ── Item 7: "If you only do three things this week" ────────────────────────
+
+    #[test]
+    fn effort_hours_bounds_maps_each_tier_to_a_labeled_rough_range() {
+        assert_eq!(effort_hours_bounds(Some("low")).1, "2 to 4 hours");
+        assert_eq!(
+            effort_hours_bounds(Some("medium")).1,
+            "1 to 2 days (about 8 to 16 hours)"
+        );
+        assert_eq!(
+            effort_hours_bounds(Some("high")).1,
+            "3 to 5 days (about 24 to 40 hours)"
+        );
+        assert_eq!(effort_hours_bounds(None).1, "not yet estimated");
+    }
+
+    #[test]
+    fn three_things_box_lists_up_to_three_do_now_items_with_hours_and_a_total() {
+        let mut f1 = finding("SEC-1", "a.rs", 1, "critical");
+        f1.effort = Some("low".to_string());
+        f1.detail = "The profiles table has no RLS.".to_string();
+        let mut f2 = finding("SEC-2", "b.rs", 2, "critical");
+        f2.effort = Some("low".to_string());
+        f2.detail = "The service_role key ships to the browser.".to_string();
+        let report = report_with(vec![f1, f2], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(json.three_things.items.len(), 2);
+        assert_eq!(json.three_things.items[0].hours_label, "2 to 4 hours");
+        assert_eq!(
+            json.three_things.total_hours_label,
+            "Roughly 4 to 8 hours total (rough estimate)."
+        );
+    }
+
+    #[test]
+    fn three_things_box_flags_items_with_no_effort_estimate_instead_of_guessing() {
+        // A do_now item can be uncalibrated (a deterministic-floor critical never gets a
+        // calibrated effort, per M3) — the total must say so, never silently fold in a
+        // guessed number.
+        let f = finding("SEC-1", "a.rs", 1, "critical");
+        assert_eq!(f.effort, None);
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.three_things.items[0].hours_label, "not yet estimated");
+        assert!(
+            json.three_things
+                .total_hours_label
+                .contains("None of these items has a calibrated effort estimate"),
+            "{}",
+            json.three_things.total_hours_label
+        );
+    }
+
+    #[test]
+    fn three_things_box_total_notes_partial_uncalibrated_items_without_guessing() {
+        // Two items DO have effort; a third do_now item does not (a mixed run) — the total
+        // must sum the calibrated ones and flag the uncalibrated one by count, not fold a
+        // guessed number into the sum.
+        let mut f1 = finding("SEC-1", "a.rs", 1, "critical");
+        f1.effort = Some("low".to_string());
+        let mut f2 = finding("SEC-2", "b.rs", 2, "critical");
+        f2.effort = Some("low".to_string());
+        let f3 = finding("SEC-3", "c.rs", 3, "critical"); // no effort estimate
+        let report = report_with(vec![f1, f2, f3], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.three_things.items.len(), 3);
+        assert_eq!(
+            json.three_things.total_hours_label,
+            "Roughly 4 to 8 hours total (rough estimate); 1 item without an effort estimate yet \
+             is not included in this total."
+        );
+    }
+
+    #[test]
+    fn three_things_box_is_empty_when_no_do_now_items_exist() {
+        let report = report_with(vec![], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert!(json.three_things.items.is_empty());
+        assert_eq!(json.three_things.total_hours_label, "No do-now items this run.");
     }
 
     // ── S5: fallback categories are title-cased (not raw lowercase tokens) ─────
@@ -1507,6 +1930,45 @@ mod tests {
             "must cite OWASP for SEC-NO-UNSAFE-DESERIALIZATION-1, got: {:?}",
             group.citation.sources
         );
+    }
+
+    // ── Item 3: what's-healthy / curated-finding citations are EXTERNAL authorities only ──
+
+    #[tokio::test]
+    async fn citation_join_drops_internal_enforcement_md_citation_and_keeps_external_ones() {
+        // SEC-NO-UNSAFE-DESERIALIZATION-1's corpus entry carries an internal
+        // `docs/ENFORCEMENT.md` source (Camerata's own scaffolding, meaningless in an
+        // arbitrary client repo) ALONGSIDE two real external OWASP sources. The report must
+        // cite the OWASP sources and drop the internal one entirely, not just visually
+        // de-emphasize it.
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        let citation = resolve_citation("SEC-NO-UNSAFE-DESERIALIZATION-1", None, Some(&corpus));
+        assert_eq!(citation.kind, "grounded");
+        assert!(
+            !citation.sources.iter().any(|s| !is_external_source_url(&s.url)),
+            "an internal (non http/https) source leaked into the report: {:?}",
+            citation.sources
+        );
+        assert!(
+            !citation.label.contains("ENFORCEMENT.md") && !citation.label.contains("RULE_REGISTRY"),
+            "the citation label must not mention Camerata's own internal scaffolding docs: {}",
+            citation.label
+        );
+        assert!(
+            citation.sources.iter().any(|s| s.url.contains("owasp.org")),
+            "the real external OWASP sources must still be cited: {:?}",
+            citation.sources
+        );
+    }
+
+    #[test]
+    fn is_external_source_url_accepts_only_real_http_urls() {
+        assert!(is_external_source_url("https://owasp.org/foo"));
+        assert!(is_external_source_url("http://example.com"));
+        assert!(!is_external_source_url("docs/ENFORCEMENT.md"));
+        assert!(!is_external_source_url(""));
     }
 
     #[test]
@@ -1737,5 +2199,27 @@ mod tests {
              instead of `` `#value` `` (see the M6/M8 fixes in \
              docs/design/2026-07-26_audit-report-refinements.md)."
         );
+    }
+
+    /// Item 6 regression guard: the category scorecard renders as a compact heat-grid (color
+    /// intensity keyed to severity counts, numbers kept), the ONE visual addition the owner
+    /// approved — no funnels/bar charts/gauges/scatter plots. Pins the template helper names
+    /// so a future edit can't silently drop the heat-grid back to plain numeric cells (or add
+    /// an unapproved chart type) without this test flagging it.
+    #[test]
+    fn shipped_template_renders_the_scorecard_as_a_heat_grid_and_adds_no_other_chart_types() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(
+            template.contains("heat_bg") && template.contains("heat_cell"),
+            "the scorecard's heat-grid coloring helpers are missing from the shipped template"
+        );
+        for banned in ["chart(", "bar-chart", "gauge(", "funnel", "scatter"] {
+            assert!(
+                !template.contains(banned),
+                "found a banned decorative chart primitive ({banned:?}) — the owner's ruling \
+                 is the scorecard heat-grid and the severity x effort matrix are the ONLY \
+                 visuals; anything else reads as marketing."
+            );
+        }
     }
 }

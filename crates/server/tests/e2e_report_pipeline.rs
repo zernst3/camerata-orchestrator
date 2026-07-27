@@ -197,6 +197,7 @@ async fn e2e_deterministic_scan_to_pdf_report_pipeline() {
             state: "FalsePositive".to_string(),
             reason: "planted test fixture, not a live credential".to_string(),
             bucket: String::new(),
+            confirmed_by_client: false,
         },
     );
     dispositions.insert(
@@ -205,6 +206,11 @@ async fn e2e_deterministic_scan_to_pdf_report_pipeline() {
             state: "Ignored".to_string(),
             reason: "internal-only query path, parameterization ticketed separately".to_string(),
             bucket: String::new(),
+            // This e2e fixture represents a client who HAS confirmed the disposition (see the
+            // "Accepted risk: ..." assertion below) — distinct from the report_export unit
+            // tests and the sample-report fixture, which deliberately exercise the
+            // NOT-yet-confirmed default (see item 4, docs/design/2026-07-26...).
+            confirmed_by_client: true,
         },
     );
     // `url_finding` intentionally gets NO entry — it stays Unresolved/"Open".
