@@ -131,6 +131,10 @@
       #block(fill: rgb("#f5f5f5"), inset: 5pt, radius: 2pt, width: 100%)[#raw(breakable(site.snippet, n: 70))]
     ]
     #site.detail
+    #if site.fix != "" [
+      #v(0.1cm)
+      #text(size: 8.5pt)[#text(weight: "bold")[Fix: ]#site.fix]
+    ]
     #v(0.1cm)
     #text(size: 8.5pt)[
       #mini_chip("Effort: " + or_na(site.effort)) #mini_chip("Confidence: " + or_na(site.confidence)) #text(weight: "bold")[#site.disposition]

@@ -3624,13 +3624,20 @@ pub(super) fn DeepReportExportPanel(project_id: String, soc2_enabled: bool) -> E
     }
 }
 
-/// POST the audit-report export request (dispositions + options) and, on success, return
-/// `(pdf_bytes, suggested_filename)` — the filename is read off the server's
-/// `Content-Disposition` header (`camerata-audit-{repo}-{shortsha}.pdf`) so the save dialog
+/// POST the product-export request (dispositions + options) and, on success, return
+/// `(zip_bytes, suggested_filename)` — the filename is read off the server's
+/// `Content-Disposition` header (`camerata-audit-{repo}-{shortsha}.zip`) so the save dialog
 /// defaults to something meaningful; falls back to a generic name if the header is missing
 /// or unparsable. On a non-2xx response, returns the server's `{ "message": "…" }` text
 /// (or a generic fallback) as `Err` for the caller to toast.
-pub(super) async fn export_audit_report_pdf(
+///
+/// This is the PRIMARY export ("instead of a PDF export... a product export" — the owner's
+/// ruling): the zip contains the same curated PDF the old `/audit-report` route produces,
+/// PLUS a fully-formatted Excel workbook (every finding, false positives on their own
+/// sheet, a coverage sheet) and a README.txt manifest. `/api/projects/:id/audit-report`
+/// itself is left in place for one release (see `docs/design/2026-07-27_product-export.md`)
+/// but this panel's button no longer targets it.
+pub(super) async fn export_product_zip(
     project_id: &str,
     dispositions: &std::collections::HashMap<String, Disposition>,
     client_name: &str,
@@ -3639,7 +3646,7 @@ pub(super) async fn export_audit_report_pdf(
     executive_summary_override: Option<String>,
 ) -> Result<(Vec<u8>, String), String> {
     let url = format!(
-        "{}/api/projects/{}/audit-report",
+        "{}/api/projects/{}/product-export",
         crate::bff_base(),
         project_id,
     );
@@ -3664,7 +3671,7 @@ pub(super) async fn export_audit_report_pdf(
             .await
             .ok()
             .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
-            .unwrap_or_else(|| "Audit report export failed.".to_string());
+            .unwrap_or_else(|| "Product export failed.".to_string());
         return Err(msg);
     }
 
@@ -3674,17 +3681,18 @@ pub(super) async fn export_audit_report_pdf(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.split("filename=\"").nth(1))
         .map(|s| s.trim_end_matches('"').to_string())
-        .unwrap_or_else(|| "camerata-audit-report.pdf".to_string());
+        .unwrap_or_else(|| "camerata-audit-export.zip".to_string());
 
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?.to_vec();
     Ok((bytes, filename))
 }
 
-/// The PDF audit-report export panel: client-editable report framing (all optional) + a
-/// single export button. POSTs the CURRENT triage state (`dispositions.read()`, whatever
-/// it is right now — including any still-Unresolved findings; a draft mid-engagement
-/// report is legitimate, so this is never gated on triage completeness) and saves the
-/// returned PDF via the same native-save-dialog idiom `save_csv`/the deep-report panel use.
+/// The product-export panel: client-editable report framing (all optional) + a single
+/// export button. POSTs the CURRENT triage state (`dispositions.read()`, whatever it is
+/// right now — including any still-Unresolved findings; a draft mid-engagement report is
+/// legitimate, so this is never gated on triage completeness) and saves the returned ZIP
+/// (curated PDF + full Excel workbook + README) via the same native-save-dialog idiom
+/// `save_csv`/the deep-report panel use.
 ///
 /// Placed in the Onboard view right after the triage Process step, above the deep-tier
 /// panel — see `ScanResults`.
@@ -3702,13 +3710,16 @@ pub(super) fn AuditReportExportPanel(
 
     rsx! {
         div { class: "audit-export-panel",
-            p { class: "section-label", "Export audit report (PDF)" }
+            p { class: "section-label", "Export product (ZIP: PDF + Excel)" }
             p { class: "section-hint",
-                "Board-forwardable PDF: cover, executive summary, category scorecard, \
-                 severity\u{00d7}effort matrix, curated findings with citations, what's \
-                 healthy, dependency/CVE snapshot, and methodology. Uses your CURRENT \
-                 triage — a draft mid-engagement report (some findings still Unresolved) \
-                 is fine."
+                "One ZIP, two artifacts from the same scan: a board-forwardable PDF (cover, \
+                 executive summary, category scorecard, severity\u{00d7}effort matrix, \
+                 curated findings with citations and recommended fixes, what's healthy, \
+                 dependency/CVE snapshot, methodology) and a fully-formatted Excel \
+                 workbook — every finding, one row each, sortable and filterable, with a \
+                 per-category sheet and a False Positives sheet (nothing silently dropped). \
+                 Uses your CURRENT triage — a draft mid-engagement export (some findings \
+                 still Unresolved) is fine."
             }
             div { class: "audit-export-fields",
                 input {
@@ -3751,10 +3762,10 @@ pub(super) fn AuditReportExportPanel(
                     spawn(async move {
                         let _guard = crate::loading::LoadingGuard::new();
                         let override_opt = if so.trim().is_empty() { None } else { Some(so) };
-                        match export_audit_report_pdf(&pid, &disp_snapshot, &cn, &pt, &pb, override_opt).await {
+                        match export_product_zip(&pid, &disp_snapshot, &cn, &pt, &pb, override_opt).await {
                             Ok((bytes, filename)) => {
                                 if save_bytes(&filename, bytes).await {
-                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Audit report saved.");
+                                    crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, "Product export saved.");
                                 }
                             }
                             Err(msg) => crate::toast::push_toast(toasts, crate::toast::ToastKind::Error, msg),
@@ -3762,7 +3773,7 @@ pub(super) fn AuditReportExportPanel(
                         loading.set(false);
                     });
                 },
-                if loading() { "Exporting\u{2026}" } else { "Export audit report (PDF)" }
+                if loading() { "Exporting\u{2026}" } else { "Export product (ZIP: PDF + Excel)" }
             }
         }
     }

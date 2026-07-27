@@ -1,6 +1,12 @@
 //! Regenerates the flagship demo files under `sample-report/` from the REAL report
-//! pipeline (`report_export::build_report_json` -> `report_export::compile_pdf`, the exact
-//! embedded template shipped in the binary) — never hand-typed.
+//! pipeline (`report_export::build_report_json` -> `report_export::compile_pdf` /
+//! `xlsx_export::build_workbook`, the exact embedded template + workbook serializer shipped
+//! in the binary) — never hand-typed. As of the product-export pass (2026-07-27), this also
+//! emits `camerata-sample-audit-findings.xlsx` (the real workbook) and
+//! `camerata-sample-audit.zip` (the real PDF + real xlsx + a README.txt, zipped the same way
+//! `POST /api/projects/:id/product-export` does — the zip-assembly glue itself is inlined
+//! here rather than calling the server's private handler helpers, but the PDF and xlsx BYTES
+//! inside it are the exact same serializer output a live export would produce).
 //!
 //! Why this exists (2026-07-26 audit-report-refinements pass, "demo honesty" north star):
 //! the sample PDF used to be materially nicer than what the serializer could actually
@@ -34,6 +40,7 @@ use std::path::Path;
 use camerata_server::dep_audit::DEP_AUDIT_RULE_ID;
 use camerata_server::onboard::{AuditedRef, CoverageNote, Finding, ScanProvenance, ScanReport};
 use camerata_server::report_export::{self, DispositionWire, ReportOptions};
+use camerata_server::xlsx_export;
 
 fn finding(rule_id: &str, repo: &str, path: &str, line: usize, severity: &str) -> Finding {
     Finding {
@@ -332,9 +339,50 @@ async fn regenerate_sample_report() {
     let data_json = serde_json::to_string_pretty(&json).expect("serialize AuditReportJson");
     std::fs::write(repo_root.join("data.json"), data_json + "\n").expect("write sample-report/data.json");
 
+    // ═══ Build the REAL Excel workbook (the xlsx sibling of the PDF, same data pass) ═══
+    let xlsx = xlsx_export::build_workbook(&report, &dispositions, Some(&corpus), &opts)
+        .expect("build_workbook must succeed for the sample fixture");
+    assert_eq!(&xlsx[0..2], b"PK", "the workbook must be a valid xlsx (zip) container");
+    std::fs::write(repo_root.join("camerata-sample-audit-findings.xlsx"), &xlsx)
+        .expect("write sample-report/camerata-sample-audit-findings.xlsx");
+    // Sanity-check the xlsx structure: it must open as a zip and carry a workbook.xml with
+    // the sheets the product export promises (never just "non-empty bytes").
+    {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(xlsx.clone()))
+            .expect("the generated xlsx must be a valid zip archive");
+        let mut workbook_xml = String::new();
+        {
+            use std::io::Read;
+            archive
+                .by_name("xl/workbook.xml")
+                .expect("xlsx must contain xl/workbook.xml")
+                .read_to_string(&mut workbook_xml)
+                .expect("xl/workbook.xml must be readable UTF-8");
+        }
+        for expected in [
+            "name=\"Index\"",
+            "name=\"All Findings\"",
+            "name=\"Dependencies\"",
+            "name=\"False Positives\"",
+            "name=\"Coverage\"",
+        ] {
+            assert!(
+                workbook_xml.contains(expected),
+                "sample workbook missing expected sheet {expected}: {workbook_xml}"
+            );
+        }
+    }
+    eprintln!(
+        "regenerate_sample_report: wrote {} bytes to sample-report/camerata-sample-audit-findings.xlsx",
+        xlsx.len()
+    );
+
     // ═══ Compile the REAL embedded template against it and write the PDF ═══
     if !typst_on_path() {
-        eprintln!("regenerate_sample_report: typst not on PATH, wrote data.json but skipped the PDF compile");
+        eprintln!(
+            "regenerate_sample_report: typst not on PATH, wrote data.json + the xlsx but \
+             skipped the PDF compile and the zip"
+        );
         return;
     }
     let pdf = report_export::compile_pdf(&json)
@@ -345,6 +393,58 @@ async fn regenerate_sample_report() {
     eprintln!(
         "regenerate_sample_report: wrote {} bytes to sample-report/camerata-sample-audit.pdf",
         pdf.len()
+    );
+
+    // ═══ Zip PDF + xlsx + README.txt — mirrors POST /api/projects/:id/product-export's ═══
+    // assembly (that handler's own zip-building helpers are private to camerata-server, so
+    // this inlines the same three-entry Deflate zip directly over the REAL pdf/xlsx bytes
+    // built above; nothing here re-derives report content).
+    let readme = format!(
+        "Camerata Audit — Product Export (sample)\n\
+         =========================================\n\
+         \n\
+         This ZIP contains two artifacts derived from the SAME audit scan:\n\
+         \n\
+         camerata-sample-audit.pdf\n\
+         \x20 The curated NARRATIVE report — cover, executive summary, category scorecard,\n\
+         \x20 severity x effort matrix, curated findings with citations and recommended\n\
+         \x20 fixes, what's healthy, dependency snapshot, and methodology.\n\
+         \n\
+         camerata-sample-audit-findings.xlsx\n\
+         \x20 The COMPLETE working dataset — every finding as its own row, a per-category\n\
+         \x20 sheet, a Dependencies sheet, a Coverage sheet, and a False Positives sheet\n\
+         \x20 with the auditor's exclusion reasons.\n\
+         \n\
+         Repos audited: {}\n\
+         Generated: {}\n\
+         \n\
+         {}\n",
+        json.cover.repos.join(", "),
+        json.cover.generated_at,
+        report_export::AUDIT_REPORT_DISCLAIMER,
+    );
+    let zip_bytes = {
+        use std::io::Write;
+        let buf = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(buf);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file("camerata-sample-audit.pdf", options).expect("zip entry: pdf");
+        writer.write_all(&pdf).expect("zip write: pdf");
+        writer
+            .start_file("camerata-sample-audit-findings.xlsx", options)
+            .expect("zip entry: xlsx");
+        writer.write_all(&xlsx).expect("zip write: xlsx");
+        writer.start_file("README.txt", options).expect("zip entry: readme");
+        writer.write_all(readme.as_bytes()).expect("zip write: readme");
+        writer.finish().expect("finish zip").into_inner()
+    };
+    assert_eq!(&zip_bytes[0..2], b"PK", "the product-export zip itself must be a valid zip");
+    std::fs::write(repo_root.join("camerata-sample-audit.zip"), &zip_bytes)
+        .expect("write sample-report/camerata-sample-audit.zip");
+    eprintln!(
+        "regenerate_sample_report: wrote {} bytes to sample-report/camerata-sample-audit.zip",
+        zip_bytes.len()
     );
 }
 

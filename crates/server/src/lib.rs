@@ -62,6 +62,10 @@ pub mod report_export;
 pub mod review_agent;
 pub mod routine;
 pub mod run;
+/// Excel workbook export (product-export, Pass C): `build_workbook`, the Excel sibling of
+/// `report_export::build_report_json`. See the module doc comment and
+/// `docs/design/2026-07-27_product-export.md`.
+pub mod xlsx_export;
 pub mod scope_registration;
 pub mod scan_cache;
 pub mod scan_routing;
@@ -1226,6 +1230,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/deep-report", get(export_deep_report))
         // ── Audit-report (PDF) export ─────────────────────────────────────────
         .route("/api/projects/:id/audit-report", post(export_audit_report))
+        // ── Product export (PDF + Excel workbook, zipped) ─────────────────────
+        .route("/api/projects/:id/product-export", post(export_product))
         // ── App-wide credential manager ───────────────────────────────────────
         // POST /api/credentials/:name  — store a credential (body: { "value": "…" })
         // GET  /api/credentials        — list all known credentials with masked values
@@ -14002,20 +14008,7 @@ async fn export_audit_report(
         }
     };
 
-    let repo_slug = report
-        .repos
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "repo".to_string())
-        .replace('/', "-");
-    let short_sha = report
-        .provenance
-        .audited_refs
-        .first()
-        .and_then(|r| r.sha.as_deref())
-        .map(|s| s.chars().take(7).collect::<String>())
-        .unwrap_or_else(|| "nosha".to_string());
-    let filename = format!("camerata-audit-{repo_slug}-{short_sha}.pdf");
+    let filename = format!("{}.pdf", report_filename_stem(&report));
 
     (
         StatusCode::OK,
@@ -14029,6 +14022,204 @@ async fn export_audit_report(
         pdf_bytes,
     )
         .into_response()
+}
+
+/// `camerata-audit-{repo-slug}-{short-sha}` (no extension) — the shared filename stem for
+/// EVERY audit-export artifact (the standalone PDF, and the product-export ZIP; the
+/// workbook inside the zip gets its own `-findings` infix, see [`export_product`]). Kept as
+/// ONE function so the PDF route and the product-export route can never derive two
+/// different names for what is, underneath, the exact same scan.
+fn report_filename_stem(report: &crate::onboard::ScanReport) -> String {
+    let repo_slug = report
+        .repos
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "repo".to_string())
+        .replace('/', "-");
+    let short_sha = report
+        .provenance
+        .audited_refs
+        .first()
+        .and_then(|r| r.sha.as_deref())
+        .map(|s| s.chars().take(7).collect::<String>())
+        .unwrap_or_else(|| "nosha".to_string());
+    format!("camerata-audit-{repo_slug}-{short_sha}")
+}
+
+/// `POST /api/projects/:id/product-export` — the primary export button's target: a ZIP
+/// containing the SAME curated PDF `/audit-report` produces, a fully-formatted Excel
+/// workbook (the uncut dataset — every finding, false positives on their own sheet,
+/// per-category sheets, a full coverage sheet), and a short `README.txt` manifest. Body,
+/// 404/500 contract, and re-derivation-on-every-call semantics are identical to
+/// [`export_audit_report`] (see [`AuditReportReq`]) — this handler just builds BOTH
+/// artifacts from the same `build_report_json` pass instead of one.
+///
+/// If `compile_pdf` fails (typst missing/erroring), the whole export fails with the same
+/// 500 message the PDF-only route uses today — a half-product (xlsx-only zip) is a support
+/// headache, and the error message already tells the user how to fix it (install typst).
+async fn export_product(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AuditReportReq>,
+) -> Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    if state.projects.get(&id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+        )
+            .into_response();
+    }
+
+    let Some(report) = state.get_last_scan(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": "No scan results available for this project. Run an audit first."
+            })),
+        )
+            .into_response();
+    };
+
+    let corpus_path = camerata_rules::corpus_path();
+    let corpus = if corpus_path.exists() {
+        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+    } else {
+        None
+    };
+
+    let json = crate::report_export::build_report_json(
+        &report,
+        &req.dispositions,
+        corpus.as_ref(),
+        &req.options,
+    );
+
+    let pdf_bytes = match crate::report_export::compile_pdf(&json).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let xlsx_bytes = match crate::xlsx_export::build_workbook(
+        &report,
+        &req.dispositions,
+        corpus.as_ref(),
+        &req.options,
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let stem = report_filename_stem(&report);
+    let readme = product_export_readme(&stem, &json);
+
+    let zip_bytes = match build_product_zip(&stem, &pdf_bytes, &xlsx_bytes, &readme) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "message": format!("could not assemble the product export zip: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let filename = format!("{stem}.zip");
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        zip_bytes,
+    )
+        .into_response()
+}
+
+/// The README.txt manifest bundled inside the product-export zip: what each file is, who
+/// it's for, the repo(s)/SHA/generated-at, and the advisory disclaimer (verbatim, reused
+/// from `report_export::AUDIT_REPORT_DISCLAIMER` — never a second, drifting copy of that
+/// paragraph).
+fn product_export_readme(stem: &str, json: &crate::report_export::AuditReportJson) -> String {
+    format!(
+        "Camerata Audit — Product Export\n\
+         ================================\n\
+         \n\
+         This ZIP contains two artifacts derived from the SAME audit scan:\n\
+         \n\
+         {stem}.pdf\n\
+         \x20 The curated NARRATIVE report: cover, executive summary, category scorecard,\n\
+         \x20 severity x effort matrix, curated findings with citations and recommended\n\
+         \x20 fixes, what's healthy, dependency snapshot, and methodology. Intended for a\n\
+         \x20 board / buyer / decision-maker. False positives are excluded throughout and\n\
+         \x20 counted once, in the methodology section.\n\
+         \n\
+         {stem}-findings.xlsx\n\
+         \x20 The COMPLETE working dataset: every finding as its own row, sortable and\n\
+         \x20 filterable, with a per-category sheet, a Dependencies sheet, a Coverage sheet\n\
+         \x20 (every rule audited this run, found or not), and a False Positives sheet\n\
+         \x20 (with the auditor's exclusion reasons — nothing is silently dropped). Intended\n\
+         \x20 for the engineers doing remediation.\n\
+         \n\
+         Repos audited: {}\n\
+         Generated: {}\n\
+         \n\
+         {}\n",
+        json.cover.repos.join(", "),
+        json.cover.generated_at,
+        crate::report_export::AUDIT_REPORT_DISCLAIMER,
+    )
+}
+
+/// Zip the PDF + xlsx + README.txt into one in-memory archive (Deflate compression) for the
+/// product-export response body. The ONLY I/O here is the in-memory `Cursor<Vec<u8>>` —
+/// no temp files, matching `report_export`'s own "tiny, no persistence" contract.
+fn build_product_zip(
+    stem: &str,
+    pdf_bytes: &[u8],
+    xlsx_bytes: &[u8],
+    readme: &str,
+) -> zip::result::ZipResult<Vec<u8>> {
+    use std::io::Write;
+
+    let buf = std::io::Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(buf);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    writer.start_file(format!("{stem}.pdf"), options)?;
+    writer.write_all(pdf_bytes)?;
+
+    writer.start_file(format!("{stem}-findings.xlsx"), options)?;
+    writer.write_all(xlsx_bytes)?;
+
+    writer.start_file("README.txt", options)?;
+    writer.write_all(readme.as_bytes())?;
+
+    let cursor = writer.finish()?;
+    Ok(cursor.into_inner())
 }
 
 // ── error type ──────────────────────────────────────────────────────────────
@@ -20493,6 +20684,132 @@ mod tests {
         assert_eq!(a.findings[0].rule_id, "RULE-A");
         assert_eq!(b.findings[0].rule_id, "RULE-B");
         assert!(state.get_last_scan("proj-C").is_none());
+    }
+
+    // ── Product export (PDF + Excel workbook, zipped) ─────────────────────────────
+
+    /// Best-effort `typst` presence check (mirrors `report_export`'s own internal test
+    /// gate) — the PDF-compile stage of the happy-path product-export test skips
+    /// gracefully rather than hard-failing CI environments without Typst installed.
+    fn typst_on_path() -> bool {
+        std::process::Command::new("typst")
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .is_some()
+    }
+
+    #[tokio::test]
+    async fn product_export_404s_when_project_does_not_exist() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let resp = export_product(
+            axum::extract::State(state),
+            axum::extract::Path("nope".to_string()),
+            axum::Json(AuditReportReq {
+                dispositions: std::collections::HashMap::new(),
+                options: crate::report_export::ReportOptions::default(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn product_export_404s_when_no_scan_available() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let project = state.projects.create("Acme", vec![]).expect("project created");
+        let resp = export_product(
+            axum::extract::State(state),
+            axum::extract::Path(project.id),
+            axum::Json(AuditReportReq {
+                dispositions: std::collections::HashMap::new(),
+                options: crate::report_export::ReportOptions::default(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "no last_scan yet -> 404, same contract as /audit-report"
+        );
+    }
+
+    /// End-to-end: the product-export ZIP contains a real `%PDF`-magic PDF, a real
+    /// `PK`-magic xlsx (itself a zip container), and a README.txt naming both. Gated on
+    /// `typst` being on PATH (the PDF half needs it); the workbook half runs unconditionally
+    /// via the other degenerate-input tests in `xlsx_export`.
+    #[tokio::test]
+    async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
+        if !typst_on_path() {
+            eprintln!(
+                "product_export_zip_contains_a_real_pdf_xlsx_and_readme: skipping — typst not \
+                 on PATH"
+            );
+            return;
+        }
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let project = state
+            .projects
+            .create("Acme", vec!["owner/repo".to_string()])
+            .expect("project created");
+        state.set_last_scan(project.id.clone(), make_scan_report("SEC-NO-HARDCODED-SECRETS-1"));
+
+        let resp = export_product(
+            axum::extract::State(state),
+            axum::extract::Path(project.id.clone()),
+            axum::Json(AuditReportReq {
+                dispositions: std::collections::HashMap::new(),
+                options: crate::report_export::ReportOptions::default(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "application/zip"
+        );
+        let content_disposition = resp
+            .headers()
+            .get(axum::http::header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(content_disposition.contains(".zip"), "{content_disposition}");
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&bytes[0..2], b"PK", "the product export itself must be a valid zip");
+
+        use std::io::Read;
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).expect("valid zip");
+        let mut names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        names.sort();
+        assert!(names.iter().any(|n| n.ends_with(".pdf")), "{names:?}");
+        assert!(names.iter().any(|n| n.ends_with("-findings.xlsx")), "{names:?}");
+        assert!(names.contains(&"README.txt".to_string()), "{names:?}");
+
+        let pdf_name = names.iter().find(|n| n.ends_with(".pdf")).unwrap().clone();
+        let mut pdf_bytes = Vec::new();
+        archive.by_name(&pdf_name).unwrap().read_to_end(&mut pdf_bytes).unwrap();
+        assert!(pdf_bytes.starts_with(b"%PDF"), "the zipped PDF must carry the PDF magic bytes");
+
+        let xlsx_name = names.iter().find(|n| n.ends_with(".xlsx")).unwrap().clone();
+        let mut xlsx_bytes = Vec::new();
+        archive.by_name(&xlsx_name).unwrap().read_to_end(&mut xlsx_bytes).unwrap();
+        assert_eq!(
+            &xlsx_bytes[0..2],
+            b"PK",
+            "the zipped xlsx must itself be a valid zip container"
+        );
+
+        let mut readme = String::new();
+        archive.by_name("README.txt").unwrap().read_to_string(&mut readme).unwrap();
+        assert!(readme.contains(&pdf_name), "{readme}");
+        assert!(readme.contains(&xlsx_name), "{readme}");
     }
 
     /// active_project_context returns scan_results_section from last_scan when no draft.

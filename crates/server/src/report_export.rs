@@ -92,8 +92,12 @@ pub fn finding_key(f: &Finding) -> String {
 /// The report's own disposition classification — richer than the wire `DispositionWire`
 /// because it also reconciles `Finding.status == "suppressed-baseline"` (a PRIOR onboarding
 /// run's accepted debt, persisted independently of this scan's client-local triage map).
+///
+/// `pub(crate)`: shared with `xlsx_export` (product export, Pass C) so the workbook's own
+/// partition pass reuses this SAME classification, never a re-derived copy — see that
+/// module's doc comment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Disposition {
+pub(crate) enum Disposition {
     /// No triage decision yet this session (the default for an absent/unrecognized entry).
     Unresolved,
     /// Real, accepted risk — the client's `Ignored` disposition, this session.
@@ -119,7 +123,7 @@ enum Disposition {
 /// partition loop) — a PDF export must never be able to panic the server on triage data, so a
 /// future refactor that lets one slip through fails soft to `Unresolved` (debug-asserts in
 /// debug builds so the invariant is still loud in tests/dev) rather than `unreachable!`.
-fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Disposition {
+pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Disposition {
     match wire {
         Some(d) => match d.state.as_str() {
             "Ignored" => Disposition::Ignored,
@@ -164,7 +168,7 @@ fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Disposition {
 /// the serializer itself cannot produce "confirmed" language without that explicit flag.
 ///
 /// No em/en dashes (house style for this client deliverable) — see `bucket_title`.
-fn disposition_label(
+pub(crate) fn disposition_label(
     disposition: Disposition,
     reason: &str,
     bucket: &str,
@@ -195,7 +199,7 @@ fn disposition_label(
 
 /// Human title for a `matrix_bucket(...)` result (`"do_now"` -> `"Do now"`, etc.) — shared by
 /// `disposition_label` (M7) and anywhere else a bucket needs a reader-facing label.
-fn bucket_title(bucket: &str) -> &'static str {
+pub(crate) fn bucket_title(bucket: &str) -> &'static str {
     match bucket {
         "do_now" => "Do now",
         "do_next" => "Do next",
@@ -210,7 +214,7 @@ fn bucket_title(bucket: &str) -> &'static str {
 /// scorecard/matrix — every severity comparison in this module goes through this function
 /// exactly once per finding (computed alongside its disposition in `build_report_json`'s
 /// partition loop) rather than matching `finding.severity.as_str()` ad hoc in each section.
-fn normalize_severity(raw: &str) -> String {
+pub(crate) fn normalize_severity(raw: &str) -> String {
     match raw.to_ascii_lowercase().as_str() {
         "critical" => "critical".to_string(),
         "high" => "high".to_string(),
@@ -427,6 +431,11 @@ pub struct CuratedSiteJson {
     /// bold per-finding heading; the group's own rule id + invariant title (`CuratedGroupJson`)
     /// is demoted to a smaller subtitle line for registry traceability.
     pub headline: String,
+    /// The rule's corpus-default remediation directive (see [`resolve_fix`]), rendered as its
+    /// own "Fix:" line in the template — distinct from `detail`'s explanation of the
+    /// violation. Empty string (never fabricated) when the rule has no corpus entry, no
+    /// options, or no default option/directive.
+    pub fix: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -531,7 +540,7 @@ fn is_external_source_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
-fn resolve_citation(
+pub(crate) fn resolve_citation(
     rule_id: &str,
     preview_tool: Option<&str>,
     corpus: Option<&camerata_rules::RuleSet>,
@@ -573,6 +582,34 @@ fn resolve_citation(
         kind: "advisory".to_string(),
         label: "AI-advisory, model-inferred.".to_string(),
         sources: Vec::new(),
+    }
+}
+
+/// Join `rule_id` against the loaded corpus to recover its DEFAULT option's `directive` — the
+/// rule's own canonical prescribed remediation action (e.g. "Enable Row Level Security on
+/// every table exposed via the anon/authenticated Supabase API roles."). This is a
+/// serialization-time join exactly like [`resolve_citation`] — computed here, not stored on
+/// [`Finding`] — because the directive is a property of the RULE, not of any one finding site.
+///
+/// Returns an empty string (never a fabricated sentence) when: the corpus is absent, the rule
+/// id has no corpus entry, the rule has no options at all (a mechanical rule with no
+/// alternatives to codify), the rule has no adopted DEFAULT option (the architect must choose
+/// one and hasn't), or the resolved option's `directive` field is itself blank in the TOML.
+/// Surfaced as the PDF's "Fix:" line (`CuratedSiteJson::fix`, rendered by `render_site` in
+/// `audit_report.typ`) and the workbook's "Recommended Fix" column — same join, both places,
+/// so an absent directive reads as honestly blank in both artifacts rather than one inventing
+/// text the other doesn't have.
+pub(crate) fn resolve_fix(rule_id: &str, corpus: Option<&camerata_rules::RuleSet>) -> String {
+    let Some(rule) = corpus.and_then(|c| c.get_by_id(rule_id)) else {
+        return String::new();
+    };
+    // `chosen_option = None`: the report has no notion of a per-project chosen option today
+    // (that lives in onboarding's `SelectedRule` binding, not in a `Finding`/`ScanReport`), so
+    // this always resolves the rule's own DEFAULT — matching the design doc's "the corpus
+    // rule's default `[[option]].directive`" wording exactly, not a project-specific choice.
+    match rule.resolved_option(None) {
+        Some(option) if !option.directive.trim().is_empty() => option.directive.clone(),
+        _ => String::new(),
     }
 }
 
@@ -627,7 +664,7 @@ fn prettify_category_key(key: &str) -> String {
 /// lowercased/raw key (`"supabase:rls"` or `"supabase"`). Still a fallback for the
 /// corpus-absent case, not a taxonomy — good enough for a scorecard grouping, not
 /// load-bearing.
-fn category_for(rule_id: &str, corpus: Option<&camerata_rules::RuleSet>) -> String {
+pub(crate) fn category_for(rule_id: &str, corpus: Option<&camerata_rules::RuleSet>) -> String {
     if let Some(rule) = corpus.and_then(|c| c.get_by_id(rule_id)) {
         return prettify_category_key(&rule.domain);
     }
@@ -644,7 +681,11 @@ fn category_for(rule_id: &str, corpus: Option<&camerata_rules::RuleSet>) -> Stri
 /// time). `high` severity still needs `effort == Some("low")` for `do_now`; missing effort is
 /// treated as "not low" there — conservative, so an uncalibrated high finding never gets
 /// silently downgraded to a same-day fix. `medium`/`low` always land in `Plan`.
-fn matrix_bucket(disposition: Disposition, severity: &str, effort: Option<&str>) -> &'static str {
+pub(crate) fn matrix_bucket(
+    disposition: Disposition,
+    severity: &str,
+    effort: Option<&str>,
+) -> &'static str {
     match disposition {
         Disposition::Ignored | Disposition::BaselineAccepted => "accepted",
         Disposition::TechDebtNow => "do_now",
@@ -684,7 +725,7 @@ fn finding_ref(f: &Finding, severity: &str, headline: String) -> FindingRefJson 
 /// generalizes beyond this one report's fixture: it works for any finding whose `detail` text
 /// follows that convention, and degrades safely (falls back to the rule's own
 /// title/rule_id, never an empty string) for the rare finding with no `detail` at all.
-fn defect_headline(detail: &str, fallback: &str) -> String {
+pub(crate) fn defect_headline(detail: &str, fallback: &str) -> String {
     let trimmed = detail.trim();
     if trimmed.is_empty() {
         return fallback.to_string();
@@ -763,7 +804,7 @@ fn default_narrative(
 /// refactor or a cross-cutting change). Returns `None` for the hour bounds when effort was
 /// never calibrated (a deterministic-floor/preview finding, per M3) — the label still reads
 /// honestly ("not yet estimated") rather than silently guessing a number.
-fn effort_hours_bounds(effort: Option<&str>) -> (Option<(u32, u32)>, String) {
+pub(crate) fn effort_hours_bounds(effort: Option<&str>) -> (Option<(u32, u32)>, String) {
     match effort {
         Some("low") => (Some((2, 4)), "2 to 4 hours".to_string()),
         Some("medium") => (Some((8, 16)), "1 to 2 days (about 8 to 16 hours)".to_string()),
@@ -921,6 +962,7 @@ pub fn build_report_json(
                     disposition: disposition_label(*disposition, reason, bucket, confirmed_by_client),
                     also_matches: f.also_matches.clone(),
                     headline: defect_headline(&f.detail, &title),
+                    fix: resolve_fix(&rule_id, corpus),
                 }
             })
             .collect();
@@ -1930,6 +1972,55 @@ mod tests {
             "must cite OWASP for SEC-NO-UNSAFE-DESERIALIZATION-1, got: {:?}",
             group.citation.sources
         );
+    }
+
+    // ── Recommended-Fix corpus-directive join ──────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_fix_joins_the_default_option_directive_from_the_corpus() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        let fix = resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", Some(&corpus));
+        assert!(
+            fix.contains("yaml.safe_load") || fix.contains("SafeLoader"),
+            "expected the rule's default-option directive (safe-deserialization guidance), got: {fix:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_fix_is_empty_not_fabricated_when_corpus_is_absent() {
+        assert_eq!(resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", None), "");
+    }
+
+    #[tokio::test]
+    async fn resolve_fix_is_empty_when_rule_id_is_unknown_to_the_corpus() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        assert_eq!(resolve_fix("AI-CUSTOM-ARCH-RULE-1", Some(&corpus)), "");
+    }
+
+    #[tokio::test]
+    async fn curated_finding_site_carries_the_fix_line_populated_from_the_corpus() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        assert!(
+            !json.curated_findings[0].sites[0].fix.is_empty(),
+            "curated site's fix line must be populated from the corpus directive"
+        );
+    }
+
+    #[test]
+    fn curated_finding_site_fix_is_empty_not_fabricated_without_a_corpus() {
+        let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.curated_findings[0].sites[0].fix, "");
     }
 
     // ── Item 3: what's-healthy / curated-finding citations are EXTERNAL authorities only ──
