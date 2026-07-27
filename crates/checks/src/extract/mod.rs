@@ -25,6 +25,7 @@
 //! `docs/design/2026-07-27_ast-extractor-layer.md` §1).
 
 pub mod ecma;
+pub mod enclosing;
 pub mod python;
 pub mod resolver;
 pub mod rust_syn;

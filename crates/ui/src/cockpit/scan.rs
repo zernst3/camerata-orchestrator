@@ -111,6 +111,195 @@ pub(super) fn RepoHealthPanel(project_id: String) -> Element {
     }
 }
 
+// ── Finding-code-context (docs/design/2026-07-27_finding-code-context.md) ─────────
+//
+// Shows the WHOLE enclosing code block a finding's violation line lives in — the whole
+// function / RLS policy / SQL statement — inside the finding-detail modal, so the reviewer
+// sees context without opening the file. ON-DEMAND (no scan-time cache): each finding modal
+// open triggers exactly one small local-file read + parse on the server, always reflecting
+// the file as it exists right now. Zero LLM tokens — this is a local read + deterministic
+// display feature, fully decoupled from the AI audit.
+
+/// One `GET /api/onboard/finding-context` response, deserialized straight off the wire. Every
+/// field defaults so a response the UI doesn't recognize (or an older/newer server) degrades
+/// to an empty/false shape rather than failing to parse.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct FindingContextView {
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    lines: Vec<String>,
+    #[serde(default)]
+    start_line: usize,
+    #[serde(default)]
+    violation_line: usize,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    matches_snippet: bool,
+    #[serde(default)]
+    reason: String,
+}
+
+async fn fetch_finding_context(
+    repo: &str,
+    path: &str,
+    line: usize,
+    expect: &str,
+) -> Option<FindingContextView> {
+    let mut params = vec![
+        ("repo", repo.to_string()),
+        ("path", path.to_string()),
+        ("line", line.to_string()),
+    ];
+    if !expect.trim().is_empty() {
+        params.push(("expect", expect.trim().to_string()));
+    }
+    let resp = reqwest::Client::new()
+        .get(format!("{}/api/onboard/finding-context", crate::bff_base()))
+        .query(&params)
+        .send()
+        .await
+        .ok()?;
+    let v: serde_json::Value = resp.json().await.ok()?;
+    serde_json::from_value(v).ok()
+}
+
+/// A one-line human reason for a degraded (non-`ok`) status — mirrors the endpoint's own
+/// `reason` field as a client-side fallback in case an older server sends the status alone.
+fn degraded_context_reason(status: &str, reason: &str) -> String {
+    if !reason.is_empty() {
+        return reason.to_string();
+    }
+    match status {
+        "file_missing" => "file not found — changed since scan?",
+        "line_gone" => "file changed since scan",
+        "not_utf8" => "file is not valid UTF-8 (binary?)",
+        "too_large" => "file too large to load",
+        "path_traversal" => "couldn't resolve this file path",
+        _ => "couldn't load code context",
+    }
+    .to_string()
+}
+
+fn context_kind_label(kind: &str) -> &'static str {
+    match kind {
+        "function" => "enclosing function",
+        "sql_statement" => "SQL statement",
+        _ => "surrounding lines",
+    }
+}
+
+/// Big-block cap (design §4): a block over this many lines initially shows only ±40 lines
+/// around the violation, with a "Show full block" toggle to reveal the rest. The resolver
+/// itself never truncates — this is a pure display concern, applied client-side over the
+/// already-fetched `lines` so expanding never needs a second round trip.
+const FINDING_CTX_CAP: usize = 80;
+const FINDING_CTX_HALF: usize = 40;
+
+/// The "Code context" section of the finding-detail modal. Fetches ON-DEMAND every time it
+/// mounts; the caller keys this component by `repo`/`path`/`line` (see the finding-detail
+/// modal) so opening a DIFFERENT finding remounts it fresh rather than showing stale content
+/// left over from the previous one.
+///
+/// Degradation floor (design §5): the stored `finding.snippet` is already rendered above this
+/// section by the caller. ANY failure here — file moved/deleted, line gone, non-UTF8,
+/// oversized, unresolved repo, a path-traversal refusal, or the request simply failing —
+/// renders a single reason line and nothing else. This section can only ADD context on top of
+/// the snippet the modal already shows; it never replaces or hides it, and never panics.
+#[component]
+fn FindingCodeContext(finding: FindingView) -> Element {
+    let expect_line = finding
+        .snippet
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let f = finding.clone();
+    let ctx_res = use_resource(move || {
+        let f = f.clone();
+        let expect_line = expect_line.clone();
+        async move { fetch_finding_context(&f.repo, &f.path, f.line, &expect_line).await }
+    });
+    let mut expanded = use_signal(|| false);
+
+    let ctx = ctx_res.read().clone();
+    match ctx {
+        None => rsx! {
+            div { class: "finding-ctx finding-ctx-loading",
+                p { class: "rule-modal-label", "Code context" }
+                span { class: "finding-ctx-note", "loading…" }
+            }
+        },
+        // The request itself failed outright (server unreachable, bad JSON, etc.) — the
+        // stored snippet above already covers the finding, so say nothing further here
+        // rather than showing a confusing empty error box.
+        Some(None) => rsx! {},
+        Some(Some(v)) if v.status == "ok" => {
+            let total = v.lines.len();
+            let violation_idx = v.violation_line.saturating_sub(v.start_line);
+            let capped = total > FINDING_CTX_CAP;
+            let (show_from, show_to) = if capped && !expanded() {
+                let from = violation_idx.saturating_sub(FINDING_CTX_HALF);
+                let to = (violation_idx + FINDING_CTX_HALF).min(total.saturating_sub(1));
+                (from, to)
+            } else {
+                (0, total.saturating_sub(1))
+            };
+            let above = show_from;
+            let below = total.saturating_sub(1).saturating_sub(show_to);
+            rsx! {
+                div { class: "finding-ctx",
+                    div { class: "finding-ctx-head",
+                        p { class: "rule-modal-label", "Code context" }
+                        span { class: "rule-modal-tag", "{context_kind_label(&v.kind)}" }
+                        if !v.matches_snippet {
+                            span { class: "rule-modal-tag finding-ctx-stale", "file changed since this scan" }
+                        }
+                    }
+                    if capped && above > 0 {
+                        p { class: "finding-ctx-fold", "… {above} more lines above …" }
+                    }
+                    pre { class: "finding-ctx-pre",
+                        for (i, line) in v.lines.iter().enumerate() {
+                            if i >= show_from && i <= show_to {
+                                {
+                                    let lineno = v.start_line + i;
+                                    let hit = lineno == v.violation_line;
+                                    let row_class = if hit { "finding-ctx-line finding-ctx-line-hit" } else { "finding-ctx-line" };
+                                    rsx! {
+                                        div { class: "{row_class}", key: "{lineno}",
+                                            span { class: "finding-ctx-gutter", "{lineno}" }
+                                            span { class: "finding-ctx-code", "{line}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if capped && below > 0 {
+                        p { class: "finding-ctx-fold", "… {below} more lines below …" }
+                    }
+                    if capped {
+                        button {
+                            class: "finding-ctx-toggle",
+                            onclick: move |_| expanded.set(!expanded()),
+                            if expanded() { "Show less" } else { "Show full block ({total} lines)" }
+                        }
+                    }
+                }
+            }
+        }
+        Some(Some(v)) => rsx! {
+            div { class: "finding-ctx finding-ctx-degraded",
+                p { class: "rule-modal-label", "Code context" }
+                span { class: "finding-ctx-note", "{degraded_context_reason(&v.status, &v.reason)}" }
+            }
+        },
+    }
+}
+
 // csv_field moved to camerata-ui-core::rules (shared by rules_csv there and findings_csv here).
 pub(super) use camerata_ui_core::rules::csv_field;
 
@@ -2595,6 +2784,15 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             }
                             p { class: "rule-modal-label", "Finding" }
                             p { class: "rule-modal-title", "{f.snippet}" }
+                            // Enclosing-code-block context (finding-code-context feature,
+                            // docs/design/2026-07-27_finding-code-context.md): keyed by
+                            // repo/path/line so switching findings remounts this section and
+                            // starts a fresh on-demand fetch rather than showing stale content
+                            // left over from the previously open finding.
+                            FindingCodeContext {
+                                key: "{f.repo}\u{1f}{f.path}\u{1f}{f.line}",
+                                finding: f.clone(),
+                            }
                             p { class: "rule-modal-label", "Explanation" }
                             {
                                 // Bold the calibration "[needs review: …]" flag so the reason it

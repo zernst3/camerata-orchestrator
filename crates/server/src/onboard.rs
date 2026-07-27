@@ -19,6 +19,7 @@
 pub mod architectural;
 pub mod audit;
 pub mod files;
+pub mod finding_context;
 pub mod greenfield;
 pub mod propose;
 pub mod report;

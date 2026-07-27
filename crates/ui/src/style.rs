@@ -2579,6 +2579,33 @@ textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-f
 .rule-modal-tag { font-size: 11px; font-weight: 600; color: var(--ink-soft); background: var(--paper); border: 1px solid var(--line); border-radius: 6px; padding: 3px 8px; }
 .rule-modal-placement { font-size: 12.5px; color: var(--ink-soft); margin: 0 0 16px; line-height: 1.5; }
 .rule-modal-note { font-size: 13px; color: var(--ink-soft); font-style: italic; }
+
+/* ── Finding-code-context (docs/design/2026-07-27_finding-code-context.md): the
+   enclosing-block "Code context" section of the finding-detail modal. ── */
+.finding-ctx { margin: 4px 0 16px; }
+.finding-ctx-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.finding-ctx-head .rule-modal-label { margin: 0; }
+.finding-ctx-stale { color: #92400e; background: #fde68a; border-color: #fde68a; }
+.finding-ctx-note { font-size: 12.5px; color: var(--ink-soft); font-style: italic; }
+.finding-ctx-loading, .finding-ctx-degraded { display: flex; flex-direction: column; gap: 4px; }
+.finding-ctx-fold { font-size: 11.5px; color: var(--ink-faint); font-style: italic; margin: 4px 0; text-align: center; }
+.finding-ctx-pre {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.55;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 0; margin: 6px 0; max-width: 100%; overflow-x: auto;
+}
+.finding-ctx-line { display: flex; white-space: pre; }
+.finding-ctx-line-hit { background: var(--accent-wash); box-shadow: inset 3px 0 0 var(--accent); }
+.finding-ctx-gutter {
+  flex: 0 0 auto; min-width: 38px; text-align: right; padding: 0 10px; color: var(--ink-faint);
+  user-select: none;
+}
+.finding-ctx-code { flex: 1 1 auto; padding-right: 12px; color: var(--ink); }
+.finding-ctx-toggle {
+  font-size: 12px; font-weight: 600; color: var(--accent-ink); background: transparent;
+  border: none; cursor: pointer; padding: 4px 0;
+}
+.finding-ctx-toggle:hover { text-decoration: underline; }
 .rule-modal-label { font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-faint); margin: 0 0 8px; }
 .rule-modal-opts { display: flex; flex-direction: column; gap: 8px; }
 .rule-modal-section { margin: 0 0 16px; }

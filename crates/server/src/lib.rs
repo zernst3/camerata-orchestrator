@@ -1008,6 +1008,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/audit/start", post(onboard_audit_start))
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
+        .route(
+            "/api/onboard/finding-context",
+            get(onboard_finding_context),
+        )
         .route("/api/git/detect-repo", post(detect_repo))
         .route("/api/gate-probe", post(gate_probe))
         .route("/api/onboard/ticket", post(onboard_ticket))
@@ -5300,6 +5304,69 @@ async fn cancel_audit_job(
 ) -> impl IntoResponse {
     state.jobs.cancel(&id);
     StatusCode::NO_CONTENT
+}
+
+/// Query parameters for `GET /api/onboard/finding-context`.
+#[derive(serde::Deserialize)]
+struct FindingContextQuery {
+    /// `owner/repo` — resolved to a local checkout via `settings.repo_path` /
+    /// `settings.workspace_root`, same as the git-status endpoints.
+    repo: String,
+    /// Repo-relative file path (as stored on `FindingView::path`).
+    path: String,
+    /// 1-based violation line (as stored on `FindingView::line`).
+    line: usize,
+    /// Optional first line of the scan-time stored `snippet`, for a cheap staleness check
+    /// (`matches_snippet` in the response). Absent = no comparison, never flagged stale.
+    #[serde(default)]
+    expect: Option<String>,
+}
+
+/// `GET /api/onboard/finding-context` — the enclosing-code-block lookup for the scan-review
+/// finding modal (`docs/design/2026-07-27_finding-code-context.md`). ON-DEMAND, not scan-time
+/// cached (see `onboard::finding_context` module docs for why): a handful of reads per triage
+/// session, always reflects the file as it exists now, zero LLM tokens (a pure local file
+/// read + deterministic parse).
+///
+/// Resolves the repo dir exactly like the git-status endpoints (`resolve_git_dir`'s sibling
+/// here, inlined so the "unlinked repo" case maps to `file_missing` rather than a distinct
+/// error shape); an unresolved repo is indistinguishable from "file missing" to the UI, which
+/// is the correct degradation per the design's table. All other failure modes (missing file,
+/// non-UTF8, oversized, the line no longer existing, or a path-traversal refusal) are computed
+/// by `onboard::finding_context::lookup` and returned as `{ "status": "...", "reason": "..." }`
+/// — see that module for the floor guarantee. Path traversal is the only case that gets a
+/// non-200: everything else is 200 with a `status` field, exactly like every other onboard
+/// endpoint, so the UI's normal JSON-parsing path handles every case uniformly.
+async fn onboard_finding_context(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<FindingContextQuery>,
+) -> impl IntoResponse {
+    let override_path = state.settings.repo_path(&q.repo);
+    let workspace_root = state.settings.workspace_root();
+    let Some(repo_dir) = crate::workspace::resolve_repo_dir(
+        override_path.as_deref(),
+        workspace_root.as_deref(),
+        &q.repo,
+    ) else {
+        // Unlinked project / repo path unresolved — treated as file_missing (design §5).
+        return (
+            StatusCode::OK,
+            Json(crate::onboard::finding_context::FindingContextOutcome::FileMissing.to_json()),
+        );
+    };
+
+    let outcome =
+        crate::onboard::finding_context::lookup(&repo_dir, &q.path, q.line, q.expect.as_deref())
+            .await;
+    let status = if matches!(
+        outcome,
+        crate::onboard::finding_context::FindingContextOutcome::PathTraversal
+    ) {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::OK
+    };
+    (status, Json(outcome.to_json()))
 }
 
 #[derive(serde::Deserialize)]
@@ -23085,5 +23152,133 @@ mod tests {
             err.to_string().contains("internal sentinel leaked"),
             "clear sentinel error: {err}"
         );
+    }
+
+    // ── `GET /api/onboard/finding-context` (finding-code-context feature) ──────────
+
+    fn finding_context_state_with_fixture(repo: &str, rel_path: &str, content: &str) -> (AppState, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let full = tmp.path().join(rel_path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(&full, content).unwrap();
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state
+            .settings
+            .set_repo_path(repo, Some(tmp.path().to_string_lossy().into_owned()));
+        (state, tmp)
+    }
+
+    /// Happy path: a real fixture file + a real finding line returns the enclosing function,
+    /// with the violation line, kind, and language all populated.
+    #[tokio::test]
+    async fn finding_context_returns_the_enclosing_block_for_a_real_fixture() {
+        let (state, _tmp) = finding_context_state_with_fixture(
+            "me/api",
+            "src/lib.rs",
+            "fn f() -> i32 {\n    let bad = 1;\n    bad\n}\n",
+        );
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboard/finding-context?repo=me%2Fapi&path=src%2Flib.rs&line=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["kind"], "function");
+        assert_eq!(json["language"], "rust");
+        assert_eq!(json["start_line"], 1);
+        assert_eq!(json["end_line"], 4);
+        assert_eq!(json["violation_line"], 2);
+        assert!(json["lines"].as_array().unwrap().len() == 4);
+    }
+
+    /// A `../../etc/passwd`-style traversal in `path` is refused with 400, never a read.
+    #[tokio::test]
+    async fn finding_context_refuses_path_traversal() {
+        let (state, _tmp) = finding_context_state_with_fixture("me/api", "src/lib.rs", "fn f() {}\n");
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/onboard/finding-context?repo=me%2Fapi&path=..%2F..%2F..%2F..%2Fetc%2Fpasswd&line=1",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "path_traversal");
+    }
+
+    /// A repo with no local path set at all (never linked) degrades to `file_missing` — the
+    /// SAME shape the UI already handles, never a 500 or a distinct error surface.
+    #[tokio::test]
+    async fn finding_context_unresolved_repo_degrades_to_file_missing() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboard/finding-context?repo=me%2Fnever-linked&path=src%2Flib.rs&line=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "file_missing");
+    }
+
+    /// A file over the `MAX_FILE_BYTES` cap degrades to `too_large` rather than reading it.
+    #[tokio::test]
+    async fn finding_context_oversized_file_is_capped() {
+        let big = "x".repeat(crate::onboard::files::MAX_FILE_BYTES + 1);
+        let (state, _tmp) = finding_context_state_with_fixture("me/api", "src/huge.rs", &big);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboard/finding-context?repo=me%2Fapi&path=src%2Fhuge.rs&line=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "too_large");
+    }
+
+    /// A missing file (never written / already deleted) degrades to `file_missing`.
+    #[tokio::test]
+    async fn finding_context_missing_file_degrades_gracefully() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state
+            .settings
+            .set_repo_path("me/api", Some(tmp.path().to_string_lossy().into_owned()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboard/finding-context?repo=me%2Fapi&path=src%2Fgone.rs&line=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "file_missing");
     }
 }
