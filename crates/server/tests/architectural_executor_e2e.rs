@@ -237,7 +237,11 @@ async fn architectural_finding_rides_through_report_to_pdf() {
     assert_eq!(site.severity, "critical");
     assert!(site.detail.contains("profiles"));
     assert!(site.detail.to_lowercase().contains("confirm against"));
-    assert_eq!(site.disposition, "Open", "no disposition was supplied -> stays Open");
+    // M3: an uncalibrated critical finding always recommends "Do now" (M7 names the bucket).
+    assert_eq!(
+        site.disposition, "Open (recommended: Do now)",
+        "no disposition was supplied -> stays Open, recommending its computed matrix bucket"
+    );
     assert_eq!(
         group.citation.kind, "grounded",
         "SUPABASE-RLS-ENABLED-1 has real cited sources in the corpus — resolve_citation must prefer that \

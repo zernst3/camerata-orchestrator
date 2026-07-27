@@ -264,8 +264,9 @@ async fn e2e_deterministic_scan_to_pdf_report_pipeline() {
         json.matrix.accepted
     );
 
-    // Unresolved: still "Open", and the citation join resolved a REAL corpus rule id to
-    // its cited sources (ARCH-NO-SECRETS-IN-URL-1 is a grounded universal rule — see
+    // Unresolved: still "Open" (with its recommended matrix bucket named — M7), and the
+    // citation join resolved a REAL corpus rule id to its cited sources
+    // (ARCH-NO-SECRETS-IN-URL-1 is a grounded universal rule — see
     // crates/rules/principles/universal/arch-no-secrets-in-url-1.toml).
     let url_group = json
         .curated_findings
@@ -273,7 +274,9 @@ async fn e2e_deterministic_scan_to_pdf_report_pipeline() {
         .find(|g| g.rule_id == "ARCH-NO-SECRETS-IN-URL-1")
         .expect("the Unresolved finding's rule group must be present");
     assert_eq!(url_group.sites.len(), 1);
-    assert_eq!(url_group.sites[0].disposition, "Open");
+    // Every deterministic-floor finding is severity "critical" (onboard::audit::severity_for)
+    // — M3: an uncalibrated critical always recommends "Do now", never "Do next".
+    assert_eq!(url_group.sites[0].disposition, "Open (recommended: Do now)");
     assert_eq!(
         url_group.citation.kind, "grounded",
         "ARCH-NO-SECRETS-IN-URL-1 is grounded in the bundled corpus: {:?}",

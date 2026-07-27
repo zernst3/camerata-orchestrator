@@ -1,15 +1,56 @@
 #let d = json("data.json")
 
-#let or_dash(x) = if x == none { "\u{2014}" } else { x }
+// M6: an absent-or-empty option string both render as the placeholder — a client who
+// exports with no options modal input must never see a blank cover field.
+// No em/en dashes in the placeholder itself (house no-dash rule) — "N/A", not "\u{2014}".
+#let or_na(x) = if x == none or x == "" { "N/A" } else { x }
 
-#set document(title: d.cover.project_title + " -- Camerata Audit Report")
+#let plural(n, singular, plural_form) = if n == 1 { singular } else { plural_form }
+
+// S13: thousands separators so "486203 characters" on the cover reads as "486,203".
+#let thousands(n) = {
+  let s = str(n)
+  let len = s.len()
+  let parts = ()
+  let i = len
+  while i > 3 {
+    parts.push(s.slice(i - 3, i))
+    i -= 3
+  }
+  parts.push(s.slice(0, i))
+  parts.rev().join(",")
+}
+
+// M8: a long unbroken raw string (a deep node_modules path, a one-line minified snippet, a
+// scoped package name) has no natural break character, and Typst's raw/monospace rendering
+// does not wrap inside such a run — it overflows the page edge. Insert an invisible
+// zero-width-space break opportunity every `n` characters so it wraps instead, with zero
+// visual change to the text itself.
+#let breakable(s, n: 40) = {
+  let len = s.len()
+  let i = 0
+  let out = ()
+  while i < len {
+    let e = calc.min(i + n, len)
+    out.push(s.slice(i, e))
+    i = e
+  }
+  out.join("\u{200B}")
+}
+
+#let doc_title = if d.cover.project_title != "" {
+  d.cover.project_title + ", Camerata Audit Report"
+} else {
+  "Camerata Audit Report"
+}
+#set document(title: doc_title)
 #set page(
   paper: "us-letter",
   margin: (x: 2.2cm, y: 2cm),
   numbering: "1",
   footer: context [
     #set text(size: 8pt, fill: rgb("#808080"))
-    #align(center)[Camerata audit report -- advisory, not a certification -- page #counter(page).display()]
+    #align(center)[Camerata audit report (advisory, not a certification), page #counter(page).display()]
   ],
 )
 #set text(size: 10.5pt)
@@ -21,6 +62,10 @@
   line(length: 100%, stroke: 0.5pt + rgb("#cccccc"))
   v(0.3cm)
 }
+// M8: raw text (paths, shas, snippets) rendered a touch smaller than body copy, and never
+// justified (justification widens the invisible breakable() gaps unevenly).
+#show raw: set text(size: 8.5pt)
+#show raw.where(block: true): set par(justify: false)
 
 #let chip(label, kind) = {
   let bg = if kind == "clean" { rgb("#e6f4ea") } else if kind == "attention" { rgb("#fff4e0") } else { rgb("#fdeaea") }
@@ -32,12 +77,44 @@
   if status == "Clean" { "clean" } else if status == "Attention" { "attention" } else { "action" }
 }
 
+// S2: severity as a colored chip, not the lightest gray ink on the page — a "critical"
+// finding's severity word must be the most visible thing in its cell, not the least.
+#let severity_chip(sev) = {
+  let bg = if sev == "critical" { rgb("#fdeaea") } else if sev == "high" { rgb("#fff0e6") } else if sev == "medium" { rgb("#fff4e0") } else { rgb("#eeeeee") }
+  let fg = if sev == "critical" { rgb("#c0392b") } else if sev == "high" { rgb("#c0392b") } else if sev == "medium" { rgb("#b06a00") } else { rgb("#555555") }
+  box(fill: bg, inset: (x: 5pt, y: 2pt), radius: 3pt, [#text(fill: fg, size: 8pt, weight: "bold")[#upper(sev)]])
+}
+
+// Nice-to-have: effort/confidence as small neutral chips instead of plain inline text.
+#let mini_chip(label) = box(fill: rgb("#eeeeee"), inset: (x: 5pt, y: 2pt), radius: 2pt, [#text(size: 8pt, fill: rgb("#444444"))[#label]])
+
+// One curated-finding site row — factored out so the FIRST site of a group can be kept
+// together with its heading (S4) while later sites are free to break across pages.
+#let render_site(site) = {
+  block(inset: (left: 8pt, top: 4pt, bottom: 4pt))[
+    *#site.repo* / #raw(breakable(site.path)):#str(site.line) #severity_chip(site.severity)
+    #if site.snippet != "" [
+      #block(fill: rgb("#f5f5f5"), inset: 5pt, radius: 2pt, width: 100%)[#raw(breakable(site.snippet, n: 70))]
+    ]
+    #site.detail
+    #v(0.1cm)
+    #text(size: 8.5pt)[
+      #mini_chip("Effort: " + or_na(site.effort)) #mini_chip("Confidence: " + or_na(site.confidence)) #text(weight: "bold")[#site.disposition]
+    ]
+    #if site.also_matches.len() > 0 [
+      #text(size: 8pt, fill: rgb("#888888"))[Also violates: #site.also_matches.join(", ")]
+    ]
+  ]
+}
+
 // ── 1. Cover ─────────────────────────────────────────────────────────────
 #align(center)[
   #v(2cm)
   #text(size: 22pt, weight: "bold")[Camerata Brownfield Audit Report]
-  #v(0.4cm)
-  #text(size: 14pt)[#or_dash(d.cover.project_title)]
+  #if d.cover.project_title != "" [
+    #v(0.4cm)
+    #text(size: 14pt)[#d.cover.project_title]
+  ]
   #v(0.2cm)
   #if d.cover.client_name != "" [#text(size: 12pt, fill: rgb("#666666"))[Prepared for #d.cover.client_name]]
   #v(1cm)
@@ -48,20 +125,40 @@
   stroke: none,
   inset: 4pt,
   [*Repos audited*], [#d.cover.repos.join(", ")],
-  [*Files scanned*], [#str(d.cover.files_scanned) (#str(d.cover.files_excluded) excluded as noise)],
-  [*Code volume*], [#str(d.cover.code_chars) characters],
-  [*Camerata version*], [#or_dash(d.cover.camerata_version)],
-  [*Audit model*], [#or_dash(d.cover.audit_model)],
-  [*Calibration model*], [#or_dash(d.cover.calibration_model)],
+  [*Files scanned*], [#thousands(d.cover.files_scanned) (#thousands(d.cover.files_excluded) excluded as noise)],
+  [*Code volume*], [#thousands(d.cover.code_chars) characters],
+  [*Camerata version*], [#or_na(d.cover.camerata_version)],
+  [*Audit model*], [#or_na(d.cover.audit_model)],
+  [*Calibration model*], [#or_na(d.cover.calibration_model)],
   [*Generated*], [#d.cover.generated_at],
-  [*Prepared by*], [#or_dash(d.cover.prepared_by)],
+  [*Prepared by*], [#or_na(d.cover.prepared_by)],
 )
 
-#v(0.4cm)
-#text(weight: "bold")[Audited git state]
-#for r in d.cover.audited_refs [
-  - #r.repo --- #if r.sha != none [commit `#r.short_sha`] else [(no git metadata)] on #if r.branch != none [`#r.branch`] else [unknown branch]#if r.dirty [ (working tree had uncommitted changes at scan time)]
+// Nice-to-have: a cover stat strip so the story starts on page 1, not page 2.
+#v(0.2cm)
+#text(size: 9.5pt, fill: rgb("#444444"))[
+  #d.cover.stats.critical critical · #d.cover.stats.high high · #d.cover.stats.medium medium · #d.cover.stats.accepted accepted · #d.cover.stats.dependency_advisories #plural(d.cover.stats.dependency_advisories, "dependency advisory", "dependency advisories")
 ]
+
+// Nice-to-have: gate the heading when there is nothing under it.
+#if d.cover.audited_refs.len() > 0 [
+  #v(0.4cm)
+  #text(weight: "bold")[Audited git state]
+  #for r in d.cover.audited_refs [
+    #block(above: 2pt, below: 2pt)[
+      - *#r.repo*: #if r.sha == none and r.branch == none [
+          (no git metadata available)
+        ] else [
+          #if r.sha != none [commit #raw(r.short_sha)] else [no commit recorded], #if r.branch != none [branch #raw(r.branch)] else [unknown branch]
+        ]#if r.dirty [ (working tree had uncommitted changes at scan time)]
+    ]
+  ]
+]
+
+#pagebreak()
+
+// ── ToC (nice-to-have): one line of Typst, clickable bookmarks in every viewer ───────
+#outline(title: [Contents], depth: 1)
 
 #pagebreak()
 
@@ -101,7 +198,7 @@
       [#str(row.high)],
       [#str(row.medium)],
       [#str(row.low)],
-      [#str(row.clean_rules)/#str(row.audited_rules)],
+      [#str(row.audited_rules)/#str(row.clean_rules)],
       [#chip(row.status, status_kind(row.status))],
     )).flatten()
   )
@@ -116,10 +213,15 @@
   block(width: 100%, inset: 8pt, stroke: 0.5pt + rgb("#dddddd"), radius: 2pt)[
     #text(weight: "bold")[#title (#str(items.len()))]
     #if items.len() == 0 [
-      #text(fill: rgb("#999999"), size: 9pt)[none]
+      #text(fill: rgb("#999999"), size: 9pt)[None this run.]
     ] else [
-      #for it in items [
-        - #it.rule_id --- #it.path:#str(it.line) #text(fill: rgb("#999999"))[(#it.severity)]
+      #let cap = 10
+      #let shown = items.slice(0, calc.min(cap, items.len()))
+      #for it in shown [
+        - #severity_chip(it.severity) #it.repo / #raw(breakable(it.path)):#str(it.line)
+      ]
+      #if items.len() > cap [
+        #text(size: 8pt, fill: rgb("#888888"))[+#str(items.len() - cap) more (see Curated findings)]
       ]
     ]
   ]
@@ -143,37 +245,32 @@
   No open code findings survived triage.
 ] else [
   #for group in d.curated_findings [
-    #block(above: 12pt, below: 6pt)[
-      #text(size: 12.5pt, weight: "bold")[#group.rule_id --- #group.title] (#str(group.sites.len()) site(s))
-    ]
-    #text(size: 8.5pt, fill: rgb("#555555"))[#group.citation.label]
-    #if group.citation.sources.len() > 0 [
-      #for s in group.citation.sources [
-        - #s.title #if s.url != "" [(#s.url)]
+    // S4: keep the group heading + citation + FIRST site together (orphan control) — later
+    // sites in the same group are free to break across pages normally.
+    #block(breakable: false)[
+      #block(above: 12pt, below: 6pt)[
+        #text(size: 12.5pt, weight: "bold")[#group.rule_id: #group.title] (#str(group.sites.len()) #plural(group.sites.len(), "site", "sites"))
       ]
-    ]
-    #for site in group.sites [
-      #block(inset: (left: 8pt, top: 4pt, bottom: 4pt))[
-        *#site.repo* / `#site.path`:#str(site.line) --- #text(fill: rgb("#999999"))[#site.severity]
-        #if site.snippet != "" [
-          #block(fill: rgb("#f5f5f5"), inset: 5pt, radius: 2pt)[#raw(site.snippet)]
-        ]
-        #site.detail
-        #v(0.1cm)
-        #text(size: 8.5pt)[
-          Effort: #or_dash(site.effort) · Confidence: #or_dash(site.confidence) · #text(weight: "bold")[#site.disposition]
-        ]
-        #if site.also_matches.len() > 0 [
-          #text(size: 8pt, fill: rgb("#888888"))[Also violates: #site.also_matches.join(", ")]
+      #text(size: 8.5pt, fill: rgb("#555555"))[#group.citation.label]
+      #if group.citation.sources.len() > 0 [
+        #for s in group.citation.sources [
+          - #s.title #if s.url != "" [(#s.url)]
         ]
       ]
+      #if group.sites.len() > 0 [
+        #render_site(group.sites.at(0))
+      ]
+    ]
+    #for site in group.sites.slice(1) [
+      #render_site(site)
     ]
   ]
 ]
 
 #pagebreak()
 
-// ── 6. What's healthy ──────────────────────────────────────────────────────
+// ── 6 + 7. What's healthy + Dependency snapshot (S1: share a page — each was ~85-90% ──
+// blank on its own) ─────────────────────────────────────────────────────────────────
 = What's healthy
 
 #if d.whats_healthy.rules.len() == 0 and not d.whats_healthy.dependency_clean [
@@ -183,17 +280,16 @@
     - No known vulnerable dependencies detected in this scan.
   ]
   #for r in d.whats_healthy.rules [
-    - *#r.rule_id* --- #r.title #text(fill: rgb("#888888"), size: 8.5pt)[(#r.citation.label)]
+    - *#r.rule_id*: #r.title #if r.citation.kind == "grounded" [#text(fill: rgb("#888888"), size: 8.5pt)[(#r.citation.label)]]
+  ]
+  #if d.whats_healthy.further_clean_count > 0 [
+    #text(size: 8.5pt, fill: rgb("#888888"))[#str(d.whats_healthy.further_clean_count) further #plural(d.whats_healthy.further_clean_count, "rule", "rules") verified clean this run.]
+  ]
+  #text(size: 8.5pt, style: "italic", fill: rgb("#666666"))[
+    Verified absent in THIS scan, not a guarantee against future regressions.
   ]
 ]
 
-#text(size: 8.5pt, style: "italic", fill: rgb("#666666"))[
-  Verified absent in THIS scan -- not a guarantee against future regressions.
-]
-
-#pagebreak()
-
-// ── 7. Dependency / CVE snapshot ──────────────────────────────────────────
 = Dependency & CVE snapshot
 
 #if d.dependency_snapshot.clean [
@@ -205,28 +301,30 @@
     inset: 5pt,
     [*Package*], [*Repo*], [*Advisory*], [*Severity*],
     ..d.dependency_snapshot.rows.map(row => (
-      [`#row.package`],
+      [#raw(breakable(row.package, n: 24))],
       [#row.repo],
       [#row.advisory],
-      [#row.severity],
+      [#severity_chip(row.severity)],
     )).flatten()
   )
 ]
 
 #for note in d.dependency_snapshot.coverage_notes [
-  #text(size: 8.5pt, fill: rgb("#888888"))[Coverage note: #note]
+  #block(above: 4pt, below: 4pt)[
+    #text(size: 8.5pt, fill: rgb("#888888"))[Coverage note: #note]
+  ]
 ]
 
 #pagebreak()
 
-// ── 8. Methodology & limitations ──────────────────────────────────────────
+// ── 8 + 9. Methodology & limitations + Disclaimer (S1: share a page) ────────────────
 = Methodology & limitations
 
 #d.methodology.deterministic_note
 
 #d.methodology.ai_tier_note
 
-*#str(d.methodology.candidates_reviewed) candidate finding(s) reviewed; #str(d.methodology.excluded_false_positive) dispositioned as false positives by the auditor and excluded.*
+*#str(d.methodology.candidates_reviewed) candidate #plural(d.methodology.candidates_reviewed, "finding", "findings") reviewed; #str(d.methodology.excluded_false_positive) dispositioned as false positives by the auditor and excluded.*
 
 #d.methodology.severity_scale_note
 
@@ -235,9 +333,6 @@ Not performed in this engagement:
   - #item
 ]
 
-#pagebreak()
-
-// ── 9. Disclaimer ──────────────────────────────────────────────────────────
 = Disclaimer
 
 #block(stroke: 0.5pt + rgb("#cccccc"), inset: 10pt, radius: 2pt)[
