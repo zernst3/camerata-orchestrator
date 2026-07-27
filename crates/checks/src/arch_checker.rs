@@ -97,6 +97,28 @@ pub trait ArchChecker: Send + Sync {
     fn advisory_coexisting(&self) -> bool {
         false
     }
+
+    /// D3 (config-aware degradation, `docs/design/2026-07-27_ast-extractor-layer.md` §0):
+    /// whether THIS checker needs `.camerata/architecture.toml` config it does NOT find in
+    /// `repo` to answer its rule ids deterministically. Returns `true` only for a
+    /// config-gated checker (an import-boundary / layering checker, Pass 4b-2+) whose repo
+    /// lacks the config section it needs — in that case its rule ids must STAY in the
+    /// LLM-advisory prompt for THIS repo, exactly as if the checker weren't registered at
+    /// all (see [`checker_rule_ids_for_repo`]).
+    ///
+    /// The default (`false`) covers every checker registered as of this pass: none of them
+    /// are config-gated yet (Group A + the two Supabase migration-replay checkers all answer
+    /// their rules from the repo's files alone, no config needed), so the per-repo exclusion
+    /// set is IDENTICAL to the static [`all_checker_rule_ids`] set until the first
+    /// config-gated checker (`ImportBoundaryChecker`, Pass 4b-2) lands.
+    ///
+    /// Kept as a per-repo trait method (not a global flag) because config presence is a
+    /// PER-REPO fact — a config-gated checker might be fully deterministic for one repo in a
+    /// multi-repo scan and advisory-only for another, in the SAME run.
+    fn config_unsatisfied_for(&self, repo: &RepoView<'_>) -> bool {
+        let _ = repo;
+        false
+    }
 }
 
 /// Whether `checker` has at least one file of interest in `files` — the "zero matching
@@ -215,6 +237,29 @@ pub fn all_checker_rule_ids() -> std::collections::HashSet<&'static str> {
     all_checkers()
         .iter()
         .filter(|c| !c.advisory_coexisting())
+        .flat_map(|c| c.rule_ids().iter().copied())
+        .collect()
+}
+
+/// The PER-REPO, D3-config-aware sibling of [`all_checker_rule_ids`]: the set of rule ids a
+/// registered checker answers deterministically FOR THIS SPECIFIC `repo` — the set
+/// `onboard::audit_repos` subtracts from THAT repo's LLM-audit prompt (see
+/// `docs/design/2026-07-27_ast-extractor-layer.md` §0 D3). A checker is excluded from this
+/// set (its ids stay LLM-advisory for this repo) when EITHER:
+/// - it opts into [`ArchChecker::advisory_coexisting`] (the existing D3 exception, e.g.
+///   `HandlerNoDbChecker`'s unconfigured name-heuristic fallback), OR
+/// - it's config-gated and `repo` doesn't carry the config it needs
+///   ([`ArchChecker::config_unsatisfied_for`] returns `true`).
+///
+/// Until a config-gated checker is registered (Pass 4b-2's `ImportBoundaryChecker`), this is
+/// identical to [`all_checker_rule_ids`] for every repo — the mechanism is proven here via a
+/// unit-test-only dummy checker (see the tests module) so 4b-2 has a load-bearing contract to
+/// build against, not just a design doc.
+pub fn checker_rule_ids_for_repo(repo: &RepoView<'_>) -> std::collections::HashSet<&'static str> {
+    all_checkers()
+        .iter()
+        .filter(|c| !c.advisory_coexisting())
+        .filter(|c| !c.config_unsatisfied_for(repo))
         .flat_map(|c| c.rule_ids().iter().copied())
         .collect()
 }
@@ -350,5 +395,57 @@ mod tests {
     fn glob_match_double_star_alone_matches_empty_and_nonempty() {
         assert!(glob_match("**", "anything/at/all.rs"));
         assert!(glob_match("**", "single.rs"));
+    }
+
+    // ── D3: config-aware degradation (Pass 4b-1) ────────────────────────────────
+    //
+    // No REAL checker is config-gated yet (Pass 4b-2's `ImportBoundaryChecker` will be the
+    // first) — this dummy proves the `checker_rule_ids_for_repo` mechanism itself: a
+    // config-gated checker is excluded from the per-repo deterministic set ONLY when the
+    // repo's `.camerata/architecture.toml` is present, and stays advisory-eligible otherwise.
+
+    struct DummyConfigGatedChecker;
+    impl ArchChecker for DummyConfigGatedChecker {
+        fn rule_ids(&self) -> &'static [&'static str] {
+            &["DUMMY-CONFIG-GATED-1"]
+        }
+        fn interest_globs(&self) -> &'static [&'static str] {
+            &["**/*.ts"]
+        }
+        fn check(&self, _repo: &RepoView<'_>) -> Vec<ArchViolation> {
+            Vec::new()
+        }
+        fn config_unsatisfied_for(&self, repo: &RepoView<'_>) -> bool {
+            crate::architecture_config::architecture_config_from_files(repo.files)
+                .ok()
+                .flatten()
+                .is_none()
+        }
+    }
+
+    #[test]
+    fn config_gated_checker_excluded_when_repo_config_present() {
+        let files = vec![(
+            ".camerata/architecture.toml".to_string(),
+            "version = 1\n".to_string(),
+        )];
+        let repo = RepoView { spec: "test/repo", files: &files };
+        assert!(!DummyConfigGatedChecker.config_unsatisfied_for(&repo));
+    }
+
+    #[test]
+    fn config_gated_checker_stays_advisory_when_repo_config_absent() {
+        let files: Vec<(String, String)> = vec![("src/a.ts".to_string(), String::new())];
+        let repo = RepoView { spec: "test/repo", files: &files };
+        assert!(DummyConfigGatedChecker.config_unsatisfied_for(&repo));
+    }
+
+    #[test]
+    fn checker_rule_ids_for_repo_matches_static_set_when_no_checker_is_config_gated() {
+        // Every REGISTERED checker today defaults `config_unsatisfied_for` to `false`, so the
+        // per-repo set must equal the static set regardless of the repo's files.
+        let files: Vec<(String, String)> = vec![("README.md".to_string(), String::new())];
+        let repo = RepoView { spec: "test/repo", files: &files };
+        assert_eq!(checker_rule_ids_for_repo(&repo), all_checker_rule_ids());
     }
 }

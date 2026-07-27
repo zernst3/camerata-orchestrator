@@ -282,3 +282,243 @@ three through the real `onboard::audit_repos` deterministic scan path over a com
 fixture (`tests/fixtures/group_a_arch_repo/`), and asserting the D3 exclusion-set behavior
 end to end. `cargo test -p camerata-checks -p camerata-server` and
 `cargo check --workspace` both green.
+
+---
+
+## Pass 4b-1 "foundation" landed
+
+The three foundation pieces from Pass 4b-1's scope (config + D3 config-awareness + the
+extractor/resolver utility layer) are built. **No `ImportBoundaryChecker` or other real
+config-gated checker exists yet** — that's Pass 4b-2/4c, building on this.
+
+### 1. `.camerata/architecture.toml` config + loader (D1)
+
+`crates/checks/src/architecture_config.rs`. `ArchitectureConfig` is a typed struct matching
+§3's schema exactly (`version`, `layers: BTreeMap<String, Vec<String>>`,
+`imports: BTreeMap<String, Vec<String>>`, and optional `db`/`dtos`/`authz`/`helpers` sections),
+`Serialize + Deserialize` so it round-trips through `toml`. Two loaders, mirroring how
+`checks.toml` is read on both paths:
+
+- `load_architecture_config(repo_root: &Path)` — worktree-on-disk (Layer-2), byte-for-byte the
+  same `Ok(Some)`/`Ok(None)`/`Err` contract as `manifest::load_manifest`.
+- `architecture_config_from_files(files: &[(String, String)])` — the scan's `RepoView`-shaped
+  file slice, looking for `ARCHITECTURE_CONFIG_PATH` (`.camerata/architecture.toml`) by exact
+  path match.
+
+Missing file → `Ok(None)` on both (the common case). Malformed TOML (or a config missing the
+required `version` field) → `Err`, never a panic — every loader-facing test asserts this
+explicitly (`malformed_config_on_disk_returns_err_not_panic`,
+`malformed_in_file_slice_returns_err_not_panic`, `config_missing_required_version_field_returns_err`).
+
+Two behaviors beyond a bare loader, both needed by future checkers:
+
+- `ArchitectureConfig::layer_for_path(path) -> Result<Option<&str>, LayerConflict>` — glob-
+  classifies a file into a declared layer (reusing `arch_checker::matches_any_glob`, the same
+  `**`-capable matcher every checker already uses). Two or more layers matching the SAME file
+  returns `Err(LayerConflict)` rather than picking one — per design §3, a broken map must
+  report as a config diagnostic, never silently pick a side or fire a rule finding.
+- `ArchitectureConfig::diagnostics() -> Vec<String>` — the STATICALLY detectable subset of map
+  errors (no repo files needed): an `[imports]` entry naming an undeclared layer, or the exact
+  same glob string declared under two different `[layers]` entries.
+
+17 tests: full-example parse (the design doc's own worked TOML, verbatim), round-trip through
+`Serialize`, minimal/version-only configs, all four loader branches (missing/valid/malformed/
+missing-required-field) on both the disk and file-slice paths, `layer_for_path`'s three
+outcomes, and both `diagnostics()` cases.
+
+### 2. D3 config-aware degradation
+
+`ArchChecker` gained a second defaulted trait method alongside `advisory_coexisting`:
+
+```rust
+fn config_unsatisfied_for(&self, repo: &RepoView<'_>) -> bool { false }
+```
+
+(`crates/checks/src/arch_checker.rs`, next to the trait's existing `advisory_coexisting`).
+Default `false` — every checker registered as of this pass (Group A + both Supabase checkers)
+answers its rules from the repo's files alone, no config needed, so nothing changes for them.
+A future config-gated checker overrides it to check config presence for `repo` (e.g. via
+`architecture_config_from_files(repo.files)`).
+
+The static `all_checker_rule_ids()` is UNCHANGED (kept for existing callers/tests that don't
+have a `RepoView` in hand). The new per-repo sibling:
+
+```rust
+pub fn checker_rule_ids_for_repo(repo: &RepoView<'_>) -> HashSet<&'static str>
+```
+
+(`arch_checker.rs`, right after `all_checker_rule_ids`) filters out a checker when EITHER it's
+`advisory_coexisting` (the existing D3 exception) OR `config_unsatisfied_for(repo)` is `true`.
+`crates/server/src/onboard.rs` (around what was line 680, the `semantic` rule-set computation)
+was refactored to call this per-repo: the `arch_checker_rule_ids` binding moved from BEFORE the
+per-repo loop (computed once, statically) to INSIDE the `Ok(ExtractedRepo { files, .. })` match
+arm, right after a repo's files are read — since config presence is a file-content fact, it can
+only be known once the files are in hand. `semantic` (the rule set handed to the LLM audit) is
+now computed at that same point, from the per-repo set. No other call site changed; the e2e
+test (`group_a_architectural_checkers_e2e.rs::arch_handler_no_db_rule_id_stays_eligible_for_the_llm_prompt_per_d3`)
+still passes unchanged, proving the refactor is behavior-preserving for every checker that
+predates config-gating.
+
+Since no real config-gated checker exists yet, the mechanism is proven with a unit-test-only
+dummy checker in `arch_checker.rs`'s test module (`DummyConfigGatedChecker`), whose
+`config_unsatisfied_for` checks `architecture_config_from_files(repo.files)`: one test with
+`.camerata/architecture.toml` present in `RepoView::files` (→ `false`, excluded from the LLM
+prompt as normal), one absent (→ `true`, stays advisory), plus a test asserting
+`checker_rule_ids_for_repo` equals the static `all_checker_rule_ids()` for every currently-
+registered (non-gated) checker regardless of the repo's files. This is the load-bearing
+contract Pass 4b-2's `ImportBoundaryChecker` builds against.
+
+### 3. The extractor utility layer (D2)
+
+New `crates/checks/src/extract/` module tree, dispatched from `extract::{imports, functions,
+method_calls}` over a `SourceLang` resolved by `extract::lang_for_path`:
+
+```rust
+pub enum SourceLang { Rust, TypeScript, Tsx, JavaScript, Python }
+pub fn lang_for_path(path: &str) -> Option<SourceLang>;
+
+pub enum ImportKind { Named, Namespace, Default, Dynamic, ReExport, SideEffect }
+pub struct Import { pub specifier: String, pub names: Vec<String>, pub kind: ImportKind, pub line: usize }
+pub fn imports(lang: SourceLang, source: &str) -> Vec<Import>;
+
+pub struct FunctionSpan { pub name: String, pub start_line: usize, pub end_line: usize, pub attrs: Vec<String> }
+pub fn functions(lang: SourceLang, source: &str) -> Vec<FunctionSpan>;
+
+pub struct MethodCall { pub receiver: String, pub method: String, pub line: usize }
+pub fn method_calls(lang: SourceLang, source: &str) -> Vec<MethodCall>;
+```
+
+One addition beyond the design sketch: `Import` gained a `kind: ImportKind` field (the task's
+routing brief asked for "module path + imported symbols + **kind**"). It distinguishes a plain
+named import from a re-export (`export { a } from 'x'` — still a dependency edge, but
+semantically different from a normal import), a namespace/glob import (no enumerable names), a
+default import, a side-effect-only import, and a dynamic `import()`/`require()`/
+`importlib.import_module()` call — future checkers can filter on it without re-deriving it from
+`specifier` shape.
+
+**Per-language implementation** (one dispatch surface, per-language files behind it — `ecma.rs`
+covers TS/TSX/JS in ONE implementation rather than three near-identical files, since the
+node-kind vocabulary these functions need is identical across those three tree-sitter
+grammars; this deviates from the design sketch's per-file-per-dialect suggestion for less
+duplication, noted here as an engineering call):
+
+- **`extract/rust_syn.rs`** — `syn::parse_file` + a `syn::visit::Visit` visitor. Line numbers
+  via `proc-macro2`'s `span-locations` feature (`Span::start().line`); attribute TEXT is
+  sliced verbatim from the source by `Span::byte_range()` rather than re-serialized through
+  `quote`, so `#[get("/x")]` round-trips byte-for-byte. Walks `use`/`extern crate` (any
+  nesting: top-level, inside `mod`, inside a fn body — `syn::visit`'s default dispatch covers
+  all three for free), every `fn` (top-level, `impl` methods, default-bodied trait methods,
+  fns nested inside fn bodies), and every `receiver.method(...)` call site.
+- **`extract/ecma.rs`** — native `tree-sitter-typescript`/`tree-sitter-javascript`, one
+  `EcmaDialect` enum (`TypeScript`/`Tsx`/`JavaScript`) selecting the grammar. A manual
+  recursive tree walk matching on `node.kind()` (not the tree-sitter Query DSL the design
+  sketch mentioned — a walk was faster to get provably correct in this pass and carries the
+  same panic-safety contract; noted as an engineering-choice deviation, not a functional gap).
+  Handles `import`/`export ... from`/dynamic `import()`/CommonJS `require()`, function
+  declarations/methods/arrow-functions-via-binding-context (`const f = () => {}`, object
+  methods, `export default`, and — captured anonymously — a bare callback argument like
+  `router.get('/x', (req,res) => {})`), decorators (TS/JS attach as PRECEDING SIBLINGS, unlike
+  Python), and `a.b.c()`-shaped call sites.
+- **`extract/python.rs`** — native `tree-sitter-python`. Handles `import a, b as c`,
+  `from x import (a, b as c)`, `from x import *`, leading-dot relative imports (`from . import
+  x`, `from ..pkg import y` — see the resolver note below for how the dot-count is preserved
+  in `specifier`), `importlib.import_module('x')` as the closest Python analogue to a dynamic
+  import, decorators (attach as CHILDREN of a `decorated_definition` wrapper, unlike TS/JS),
+  and `self.db.query()`-shaped call sites.
+
+**Never-panic contract, verified per language**: `syn::parse_file` returns `Err` (not a panic)
+on anything unparseable — every public function maps that to an empty `Vec`. Both tree-sitter
+grammar families ALWAYS return `Some(Tree)` (error-recovery `ERROR` nodes embedded in an
+otherwise-valid tree, never a parse failure) — the walkers only ever index into a node after
+checking its kind/field, so a garbled tree still degrades to fewer/zero results. Adversarial
+tests per language (truncated mid-token source, "binary-like" content built from
+`\u{FFFD}`/control-char sequences, empty source, and a moderate-depth nesting stress case per
+language to rule out a naive-recursion stack-overflow risk) all assert "does not panic" rather
+than a specific result — the accepted failure mode is silence, never a crash.
+
+Cargo deps added to `crates/checks/Cargo.toml`: `syn = "2"` (features `full`, `visit`,
+`extra-traits`), `proc-macro2 = "1"` (feature `span-locations`), `tree-sitter = "0.25"`,
+`tree-sitter-typescript = "0.23"`, `tree-sitter-javascript = "0.25"`, `tree-sitter-python =
+"0.25"`. All confirmed to build NATIVELY (cc-compiled, statically linked, no wasm engine) —
+verified in isolation before wiring them into this crate: `tree-sitter 0.25.10` is
+ABI-compatible with all three grammar crates at these pinned versions. Build-time impact was
+modest in this workspace (an incremental `cargo check -p camerata-checks` pulling in all four
+new deps plus their own transitive deps — `cc`, `regex`, `streaming-iterator`, etc. — finished
+in ~18s from a cold dependency fetch; day-to-day incremental builds are unaffected since these
+are leaf dependencies with no proc-macro re-expansion cost on every build).
+
+Per-language test coverage (fixture-driven, covering the design's named "tricky forms" —
+re-exports, aliased imports, dynamic `import()`, `from x import y as z`, nested modules — plus
+the adversarial no-panic proof):
+
+| File | Tests |
+|---|---|
+| `extract/mod.rs` (dispatch) | 3 |
+| `extract/rust_syn.rs` | 19 |
+| `extract/ecma.rs` | 22 |
+| `extract/python.rs` | 17 |
+
+### 4. The cross-file import resolver
+
+`crates/checks/src/extract/resolver.rs`. `build_import_graph(files: &[(String, String)]) ->
+Vec<ResolvedImport>` walks every file, extracts its imports via the layer above, and resolves
+each specifier to a target file when — and only when — resolution is unambiguous. Per the
+design's explicit FP-avoidance stance, EVERY resolution path fails false-negative:
+
+- **Rust**: only `crate::`/`self::`/`super::`-prefixed specifiers are resolved (v1 scope — a
+  bare/extern-crate specifier like `serde::Deserialize` is out of scope and dropped, since
+  resolving it correctly needs full crate-name resolution this pass doesn't attempt). The
+  crate root is found structurally (the nearest ancestor `src/` directory in the importing
+  file's own path — no `Cargo.toml` read needed), and `mod.rs`/`lib.rs`/`main.rs` collapse to
+  their containing directory's module path, matching Rust's own file-to-module convention.
+- **TS/TSX/JS**: relative specifiers (`./`, `../`, `/`) resolve via directory-join + a fixed
+  extension/index-file priority list (`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`, then
+  `/index.*`). Bare specifiers only resolve through a `tsconfig.json` `compilerOptions.paths`
+  alias (read from the same file slice, `serde_json`-parsed — already a crate dependency, no
+  new one needed); a malformed or JSONC-with-comments `tsconfig.json` degrades to "no aliases"
+  rather than erroring the whole resolver.
+- **Python**: leading-dot relative imports resolve by counting the dots and walking up the
+  importing file's own directory tree (real Python package semantics: level 1 = the importing
+  file's own containing directory, each extra dot one more level up). An absolute dotted
+  import (`import a.b.c`) resolves by SUFFIX match against every `.py`/`.pyi` file's own
+  derived dotted module path, since this extractor doesn't know the repo's actual source root
+  (`src/`, `app/`, or the repo root itself) — zero matches OR more than one both drop the edge
+  (the ambiguity case), never a guess.
+
+`reachable_from(graph, start) -> HashSet<String>` is a small BFS-with-visited-set utility over
+the resulting edge list, added so "handles cycles without infinite loops" has real traversal
+logic to prove against rather than being trivially true of a flat edge list — a genuine A↔B
+import cycle terminates in `O(V+E)`.
+
+20 resolver tests: one per language's relative/absolute resolution paths, the tsconfig-alias
+path (including a malformed-tsconfig no-panic case), the ambiguous-Python-suffix-match drop,
+cross-language aggregation in one `build_import_graph` call, the cycle-traversal test, and two
+adversarial cases (empty file set; a file that "imports itself", which must resolve to NO
+self-edge rather than a meaningless loop).
+
+### Test totals + verification
+
+`cargo test -p camerata-checks --lib`: **469 passed, 0 failed** (101 new tests across the six
+files above: 3 dispatch + 19 Rust + 22 ecma + 17 Python + 20 resolver + 17 config, plus 3 new
+D3 unit tests in `arch_checker.rs`). `cargo test -p camerata-server --lib`: **1181 passed, 0
+failed** (refactor-only on this crate — the `semantic`/`arch_checker_rule_ids` move in
+`onboard.rs`; no new server-side tests this pass). The existing
+`group_a_architectural_checkers_e2e` integration test (2 tests) still passes unchanged,
+confirming the D3 refactor is behavior-preserving. `cargo check --workspace` green.
+
+### What Pass 4b-2 (`ImportBoundaryChecker`) builds on this
+
+- Load `.camerata/architecture.toml` for the repo via `architecture_config_from_files`; skip
+  entirely (stay LLM-advisory via `config_unsatisfied_for`) when absent.
+- Call `extract::resolver::build_import_graph(repo.files)` once to get every intra-repo import
+  edge.
+- Classify each edge's endpoints via `ArchitectureConfig::layer_for_path` (surfacing a
+  `LayerConflict` as a config diagnostic, never a rule finding).
+- For each edge where BOTH endpoints land in a declared layer, check `to`'s layer against
+  `[imports][from]`; a target layer not in that list is the `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1`
+  violation. The same edge set, filtered by `[dtos]`/`[db]` presence, answers
+  `ARCH-API-DTOS-1` and the import facet of `ARCH-STRICT-LAYERING-1` per design §4 Group C.
+- Override `config_unsatisfied_for` to return `true` whenever
+  `architecture_config_from_files(repo.files)` is `Ok(None)` (or the specific section the
+  rule needs is absent) — the D3 mechanism this pass built is otherwise a no-op until this
+  override exists.

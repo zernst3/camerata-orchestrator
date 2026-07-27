@@ -24,6 +24,19 @@ fs2 = { workspace = true }
 # Manifest (.camerata/checks.toml) parsing (Decision: 2026-06-22_check_manifest_single_source_of_truth).
 toml = "0.8"
 
+# AST extractor layer (Pass 4b-1, D1/D2 — docs/design/2026-07-27_ast-extractor-layer.md).
+# `syn` (full AST + visitor) for Rust; `proc-macro2/span-locations` so visited nodes carry
+# real line numbers instead of reporting line 0. Native tree-sitter grammars (cc-compiled,
+# statically linked — NOT wasm) for TS/TSX, JS, Python. All four version-pinned together;
+# the `tree-sitter` runtime and grammar crates must agree on ABI version (the one known
+# upgrade foot-gun per the design doc — bump as a set).
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+tree-sitter = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-python = "0.25"
+
 [dev-dependencies]
 # subprocess streaming tests (spawn sh to emit lines and verify heartbeat fires).
 tempfile = "3"

@@ -670,14 +670,18 @@ pub async fn audit_repos(
     // THIRD, drop rules a NATIVE ARCHITECTURAL CHECKER already answers deterministically
     // (the RLS/search-path migration-replay engine, ~line 726 below) from the LLM prompt —
     // exactly the same reasoning as the gate-arm exclusion above: fuzzing a rule the checker
-    // answers exactly is strictly worse than deterministic code answering it. Computed once
-    // (the registry is static), not per repo.
+    // answers exactly is strictly worse than deterministic code answering it. Pass 4b-1 (D3)
+    // made this exclusion PER-REPO CONFIG-AWARE rather than a single static set computed once:
+    // a config-gated checker (e.g. the future `ImportBoundaryChecker`, Pass 4b-2) only answers
+    // deterministically for a repo that actually carries `.camerata/architecture.toml` — for
+    // an unconfigured repo its rule ids must STAY in the LLM prompt (see
+    // `camerata_checks::arch_checker::checker_rule_ids_for_repo`, computed per repo below
+    // AFTER that repo's files are read, since config presence is a file-content fact).
     //
     // FOURTH, scope by REPO. The engine/governance filters above are global, but which
     // rules reach a given repo's LLM audit is decided PER REPO inside the loop, from each
     // SelectedRule's binding — so a multi-repo scan runs each repo against its own chosen
     // rules ∪ the project-level set, never the whole selection across the board.
-    let arch_checker_rule_ids = camerata_checks::arch_checker::all_checker_rule_ids();
 
     for (spec, dir) in sources {
         let spec = spec.trim();
@@ -696,17 +700,6 @@ pub async fn audit_repos(
             .filter(|r| r.applies_to(spec))
             .map(|r| r.id.as_str())
             .collect();
-        // The SEMANTIC (LLM-audited) rule set for THIS repo: rules bound to it (or
-        // project-level), minus the deterministic-arm, native-architectural-checker, and
-        // governance/process families.
-        let semantic: Vec<(String, String)> = selected
-            .iter()
-            .filter(|r| r.applies_to(spec))
-            .filter(|r| camerata_gateway::lookup_arm(&r.id).is_none())
-            .filter(|r| !arch_checker_rule_ids.contains(r.id.as_str()))
-            .filter(|r| is_code_auditable_rule(&r.id))
-            .map(|r| (r.id.clone(), r.directive.clone()))
-            .collect();
         // Clone `dir` for spawn_blocking (which moves it); the outer `dir` ref
         // comes from the loop binding and is the PathBuf we're iterating.
         let dir = dir.clone();
@@ -720,6 +713,24 @@ pub async fn audit_repos(
                 excluded_noise: _,
             }) => {
                 files_total += files.len();
+                // The SEMANTIC (LLM-audited) rule set for THIS repo: rules bound to it (or
+                // project-level), minus the deterministic-arm, native-architectural-checker,
+                // and governance/process families. The architectural-checker exclusion is
+                // computed HERE (not before the file read) because it's PER-REPO
+                // CONFIG-AWARE (D3) — it needs this repo's actual files to know whether
+                // `.camerata/architecture.toml` is present.
+                let repo_view =
+                    camerata_checks::arch_checker::RepoView { spec, files: &files };
+                let arch_checker_rule_ids =
+                    camerata_checks::arch_checker::checker_rule_ids_for_repo(&repo_view);
+                let semantic: Vec<(String, String)> = selected
+                    .iter()
+                    .filter(|r| r.applies_to(spec))
+                    .filter(|r| camerata_gateway::lookup_arm(&r.id).is_none())
+                    .filter(|r| !arch_checker_rule_ids.contains(r.id.as_str()))
+                    .filter(|r| is_code_auditable_rule(&r.id))
+                    .map(|r| (r.id.clone(), r.directive.clone()))
+                    .collect();
                 // Capture the WHOLE file set for the deep tier (it reads the full repo, not the
                 // incremental subset). Only when the deep tier is on, to avoid the clone otherwise.
                 if deep && run_ai_review {

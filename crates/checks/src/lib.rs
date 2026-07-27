@@ -29,6 +29,19 @@ pub mod architectural;
 /// `camerata_server::onboard::audit_repos`.
 pub mod arch_checker;
 
+/// `.camerata/architecture.toml` — the operator-authored boundary-map config (Pass 4b-1, D1).
+/// Schema + loader (both worktree-path and `RepoView`-file-slice variants) + layer
+/// classification + static config diagnostics. See
+/// `docs/design/2026-07-27_ast-extractor-layer.md` §3.
+pub mod architecture_config;
+
+/// The shared per-language AST extractor layer (Pass 4b-1, D2): `imports`/`functions`/
+/// `method_calls` over Rust (`syn`), TypeScript/TSX/JavaScript (native `tree-sitter`
+/// grammars), and Python (native `tree-sitter`), plus the cross-file import-graph resolver.
+/// Pure utilities — checkers (Pass 4b-2/4c) build their own models on top of these, per
+/// `docs/design/2026-07-27_ast-extractor-layer.md` §1's "no shared enriched model" stance.
+pub mod extract;
+
 /// Supabase-stack checkers built on the [`arch_checker`] seam: migration-timeline replay for
 /// Row Level Security and `SECURITY DEFINER` search_path hygiene. See `supabase/mod.rs`.
 pub mod supabase;
