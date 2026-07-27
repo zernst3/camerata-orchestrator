@@ -387,3 +387,97 @@ tier from a schema promise into a product capability. Defer triggers for the tai
 `syn`/tree-sitter layer when the first api-layer checker is actually demanded by an engagement;
 build the CI distributable when a client wants native checks enforced in *their* CI rather
 than via the existing CI-story path.
+
+---
+
+## 8. Pass 5 landed (2026-07-27) — the CI distributable (§2.4 closed)
+
+Scope shipped: exactly the deferred item §2.4 named — a standalone binary distributing the
+native architectural-checker registry for a client's own CI, closing the one honest asymmetry
+this memo accepted. Passes 1-4c (the seam, both Supabase checkers, the Layer-2 gate, the full
+`syn`/tree-sitter AST layer, and every Group A-D checker) are unchanged prerequisites; this pass
+adds nothing to the checker set itself.
+
+**New crate — `crates/camerata-check/`** (workspace member `camerata-check`, binary
+`camerata-check`). Depends on `camerata-checks` + `camerata-rules` only — **never**
+`camerata-server` (no HTTP/DB/GitHub-client surface belongs in a binary meant to run standalone
+on a bare client CI runner with none of that available).
+
+**Reuse, not duplication** — the one piece of file-walk logic this pass needed already existed
+verbatim inside `NativeArchCheckRunner` (`crates/checks/src/arch_check_runner.rs`, Pass 2):
+`collect_interest_files` (the pruned, glob-scoped, panic-free walk) was `fn` (private); this
+pass changes it to `pub fn` and documents in its own doc comment that it now has a second
+caller, rather than re-implementing a second walk in the new crate. Everything else this binary
+needs — the checker registry (`all_checkers`), `RepoView`, `checker_applies`,
+`ARCHITECTURE_CONFIG_PATH` — was already `pub` from Pass 1/4b-1. `crates/camerata-check/src/lib.rs`
+contributes only: CLI-shaped plumbing (`Options`/`RunReport`/`ViolationJson`), the
+`--config` override splice, the deterministic-vs-needs-review split, and human/JSON rendering.
+
+**CLI surface** (`crates/camerata-check/src/main.rs`, full detail in the crate's own README):
+`camerata-check [PATH] [--format human|json] [--config PATH] [--rule-id ID]... [--strict]`.
+Exit `0` clean, `1` a deterministic violation (or, under `--strict`, ANY violation), `2` a run
+error (e.g. a `--config` path that can't be read — the one case this binary treats as fatal
+rather than degrading, since the user explicitly asked for that exact file). `--rule-id` is
+repeatable and narrows to the selected checkers by `rule_ids()` intersection, exactly like
+`NativeArchCheckRunner`'s own "armed" filtering (minus the `Role`/gov-dev concept, which has no
+CI equivalent) — a requested id no registered checker answers at all is surfaced in
+`unmatched_rule_ids` rather than silently producing nothing (this is how a CI author discovers,
+first-hand, that a rule id is one of the two Group E rules deliberately left uncovered, or a
+typo).
+
+**Deterministic-vs-needs-review, the exit-code split.** Per the task's own framing — a CI gate
+must only hard-fail on what's deterministically true — `RunReport::exit_code` treats a violation
+as needs-review (excluded from the default gate) when EITHER its owning checker is
+`advisory_coexisting()` (today: `ResourceLifecycleChecker`'s spawn facet) OR its message carries
+the existing `"[needs review"` suffix convention (`ui_core::rules::split_needs_review`'s own
+marker — e.g. `HandlerNoDbChecker`'s attribute/name-fallback tiers). Deliberately did NOT add a
+new field to `ArchViolation` for this: both signals already exist and are already tested
+elsewhere; inventing a third representation of the same fact would be duplication, not
+reuse. `--strict` folds needs-review findings into the hard-fail set.
+
+**D3 (config-aware degradation) parity is free.** No special-casing exists in this crate for
+"config absent" — it falls out of calling the exact same `ArchChecker::check` methods over the
+exact same `RepoView` shape every other caller uses. Proven directly by
+`unconfigured_repo_config_gated_checkers_stay_silent` (unit test) and
+`no_config_repo_config_gated_rules_do_not_hard_fail` (black-box CLI test, driving the real
+`handler_no_db_unconfigured_repo` fixture already used by the Pass 4c e2e suite).
+
+**CI-story integration** — `ci_story_body_architectural` (`crates/server/src/lib.rs`) gained a
+new "Before you build anything: `camerata-check` may already cover this" section (between the
+rule list and the existing "How to implement each rule" how-to), telling a filed-issue reader to
+run `camerata-check . --format json` against the repo before hand-building a bespoke checker,
+and a `tool = "camerata-check"` manifest-entry example alongside the existing
+dependency-cruiser/Semgrep/script examples in Step 2 — exactly the "can now say 'or run
+camerata-check'" this memo's §2.4 anticipated. The existing bespoke-checker path is untouched
+(still correct for the two Group E rules and for any future rule with no native checker); 3 new
+tests (`architectural_body_mentions_camerata_check_distributable`,
+`architectural_body_camerata_check_manifest_example_present`,
+`architectural_body_still_names_bespoke_checker_path_for_group_e`) plus all 12 pre-existing
+`ci_story_body_architectural` tests pass unchanged.
+
+**Tests.** `crates/camerata-check`: 16 unit tests (`src/lib.rs` — clean-repo zero-exit,
+deterministic-violation exit 1, needs-review-only passes default but fails `--strict`,
+unconfigured-repo D3 parity, `--rule-id` filtering + `unmatched_rule_ids` reporting, `--config`
+override (including that it wins over an unconfigured repo, and that a missing override path is
+a fatal run error), three adversarial no-panic cases (malformed SQL, malformed
+`.camerata/architecture.toml`, non-UTF8 file), and JSON-schema-stability + round-trip tests) +
+12 black-box integration tests (`tests/cli_integration.rs`, via `assert_cmd` against the real
+compiled binary) covering the same matrix end-to-end through actual subprocess exit codes and
+stdout, using two NEW fixtures this crate owns (`tests/fixtures/clean_repo/`,
+`tests/fixtures/adversarial_repo/`) plus two REUSED fixtures from `camerata-server`'s existing
+e2e suites (`supabase_rls_repo`, `handler_no_db_unconfigured_repo`) rather than duplicating them.
+28/28 passing. `cargo test -p camerata-checks --lib`: 532 passed (unchanged from Pass 4c —
+the `collect_interest_files` visibility change is additive). `cargo test -p camerata-server
+--lib`: 1184 passed (1181 unchanged + 3 new `ci_story_body_architectural` tests).
+`cargo build -p camerata-check` produces a working binary, manually verified against
+`supabase_rls_repo` (human + JSON, exit 1, correct file/line/rule id) and `clean_repo` (exit 0).
+`cargo check --workspace` green throughout.
+
+**What's left.** With this pass, every item Passes 1-5 were scoped to build is built. The only
+remaining items anywhere in this executor's build order are the two Group E rules
+(`ARCH-STRUCTURED-ERRORS-1`, `ARCH-EXACT-DECIMALS-1`), which stay EXPLICITLY DEFERRED to AI
+review by design (not an oversight — see `docs/design/2026-07-27_ast-extractor-layer.md` §4),
+and release-ops for `camerata-check` itself (a crates.io publish pipeline or a versioned
+binary-release workflow) — deliberately out of scope for this pass per its own instructions;
+noted as a follow-up in both the crate's README and its `.camerata/checks.toml` manifest
+example ("pin however you distribute the binary").

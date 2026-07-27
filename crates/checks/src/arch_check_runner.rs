@@ -143,7 +143,15 @@ fn format_violation(v: &ArchViolation) -> String {
 /// non-UTF8 file is skipped (a readable-but-non-UTF8 file is lossily decoded, not dropped, so
 /// a checker still sees a best-effort text view) — consistent with "a malformed/adversarial
 /// input file degrades, never crashes."
-fn collect_interest_files(worktree: &Path, globs: &[&str]) -> Vec<(String, String)> {
+///
+/// `pub` (not `pub(crate)`): this is the exact pruned file-walk + `RepoView`-source-of-truth
+/// this runner uses, and [`crate::arch_checker::all_checkers`]'s OTHER caller outside a live
+/// worktree — the standalone `camerata-check` CI binary (Layer-3 parity,
+/// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.4, "Pass 5") — reuses it
+/// verbatim instead of re-implementing a second pruned walk. Kept as a free fn (not a method
+/// on [`NativeArchCheckRunner`]) since it has no runner state; both callers just need "walk
+/// this root, collect these globs."
+pub fn collect_interest_files(worktree: &Path, globs: &[&str]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     if !globs.is_empty() {
         walk_collect(worktree, worktree, globs, &mut out);

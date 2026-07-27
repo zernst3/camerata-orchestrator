@@ -1,0 +1,46 @@
+[package]
+name = "camerata-check"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+version = "0.0.0"
+
+[lints]
+workspace = true
+
+# camerata-check: the Layer-3 CI-parity distributable (Pass 5,
+# docs/design/2026-07-26_architectural-executor-feasibility.md §2.4). Runs the SAME native
+# architectural-checker registry (`camerata_checks::arch_checker::all_checkers`) that the
+# Camerata-hosted scan and Layer-2 governed-dev loop already run, but as a standalone binary a
+# CLIENT's own GitHub Actions can invoke directly — no Camerata server, no Camerata binary, no
+# network call back to Camerata required.
+#
+# Depends on `camerata-checks` (the checker registry + `RepoView` + the pruned file-walk) and
+# `camerata-rules` (best-effort corpus lookups for `--rule-id` validation / rule titles) ONLY.
+# MUST NEVER depend on `camerata-server` — that would pull the whole BFF (HTTP, DB, GitHub
+# client, ...) into a binary whose entire point is to run standalone in a client's CI with none
+# of that available.
+
+[lib]
+name = "camerata_check"
+path = "src/lib.rs"
+
+[[bin]]
+name = "camerata-check"
+path = "src/main.rs"
+
+[dependencies]
+camerata-checks = { path = "../checks" }
+camerata-rules = { path = "../rules" }
+anyhow.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+# Arg parsing — same version/features pin as tools/corpus-verifier and crates/cli.
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+# Black-box CLI integration tests (spawn the real compiled binary against fixture repos).
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"

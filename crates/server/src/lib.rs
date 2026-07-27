@@ -6596,8 +6596,32 @@ fn ci_story_body_architectural(repo: &str, rules: &[CiStoryRule]) -> String {
          **Rules that need a custom checker:**\n\
          {rule_lines}\n\
          ---\n\n\
+         ## Before you build anything: `camerata-check` may already cover this\n\n\
+         Camerata ships a growing set of NATIVE deterministic checkers for rules in this exact \
+         tier (Rust/TS/JS/Python AST + Supabase migration-timeline replay — see \
+         `docs/design/2026-07-27_ast-extractor-layer.md`). Some of the rules listed above may \
+         already be answered by one of them with zero custom-checker work. Before writing a \
+         bespoke script, run the `camerata-check` binary (Layer-3 parity distributable, \
+         `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.4) against this \
+         repo:\n\n\
+         ```sh\n\
+         camerata-check . --format json\n\
+         ```\n\n\
+         - Exit `0` and no matching finding in the output → check whether the rule id is one \
+         `camerata-check` doesn't own yet (`unmatched_rule_ids` in the JSON) before assuming \
+         it's clean — an unmatched id still needs the bespoke-checker path below.\n\
+         - A non-zero exit with the rule id present in `violations` → the native checker \
+         already covers this rule; skip Steps 1-2 below and wire `camerata-check` straight into \
+         CI (see the snippet at the end of this story) instead of building anything.\n\n\
+         A handful of rules are DELIBERATELY not covered by any native checker and stay \
+         AI-review-only by design (not an oversight) — e.g. `ARCH-STRUCTURED-ERRORS-1` (the \
+         honest mechanism is a runtime contract test, not static analysis) and \
+         `ARCH-EXACT-DECIMALS-1` (needs a project-specific `[decimals]` config annotation before \
+         it's checkable at all). For those, the bespoke-checker path below is still correct.\n\n\
+         ---\n\n\
          ## How to implement each rule (step-by-step)\n\n\
-         For each rule in the list above, follow this process:\n\n\
+         For each rule in the list above that `camerata-check` does NOT already cover, follow \
+         this process:\n\n\
          ### Step 1 — Design the deterministic checker\n\n\
          Choose a strategy that returns **exit 0 on pass, non-zero on violation**, with \
          CWD = repo root. Options (not exhaustive):\n\n\
@@ -6654,6 +6678,22 @@ fn ci_story_body_architectural(repo: &str, rules: &[CiStoryRule]) -> String {
          in_loop  = true\n\
          # tool / version / install omitted when no external binary is required\n\
          ```\n\n\
+         If `camerata-check` already covers the rule (see the section above), register IT as \
+         the tool instead of a bespoke script — no design phase needed:\n\n\
+         ```toml\n\
+         [[check]]\n\
+         id       = \"SUPABASE-RLS-ENABLED-1\"    # any rule id camerata-check's registry answers\n\
+         name     = \"Supabase RLS (native camerata-check)\"\n\
+         tool     = \"camerata-check\"\n\
+         version  = \"<pinned release/build>\"    # pin however you distribute the binary\n\
+         command  = \"camerata-check . --rule-id SUPABASE-RLS-ENABLED-1\"\n\
+         severity = \"critical\"\n\
+         in_loop  = true\n\
+         ```\n\n\
+         > **Note:** `camerata-check` itself is a release-ops follow-up (no crates.io/binary \
+         > publish pipeline exists yet) — for now, build it from source \
+         > (`cargo build --release -p camerata-check`) and vendor or cache the resulting binary \
+         > in your CI image; `install` above should reflect however your team distributes it.\n\n\
          > **Gate protection:** `.camerata/checks.toml` is protected by `SEC-NO-CAMERATA-CONFIG-1`. \
          > Agents cannot write to `.camerata/`. This manifest edit MUST be a human/operator \
          > commit.\n\n\
@@ -19728,6 +19768,37 @@ mod tests {
         assert!(
             body.contains("ARCH-API-LAYERING-1"),
             "architectural body must reference ARCH-API-LAYERING-1 as the canonical example"
+        );
+    }
+
+    // ── Pass 5: camerata-check distributable (Layer-3 CI parity) ──────────────
+
+    #[test]
+    fn architectural_body_mentions_camerata_check_distributable() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        assert!(
+            body.contains("camerata-check"),
+            "architectural body must tell teams to check whether camerata-check already \
+             covers the rule before hand-building a checker"
+        );
+    }
+
+    #[test]
+    fn architectural_body_camerata_check_manifest_example_present() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        assert!(
+            body.contains("tool     = \"camerata-check\""),
+            "architectural body must show how to register camerata-check as the manifest tool"
+        );
+    }
+
+    #[test]
+    fn architectural_body_still_names_bespoke_checker_path_for_group_e() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        assert!(
+            body.contains("ARCH-STRUCTURED-ERRORS-1") || body.contains("ARCH-EXACT-DECIMALS-1"),
+            "architectural body must still name the rules deliberately left uncovered by any \
+             native checker, so teams know the bespoke-checker path is still correct for them"
         );
     }
 
