@@ -42,6 +42,14 @@ pub mod architecture_config;
 /// `docs/design/2026-07-27_ast-extractor-layer.md` §1's "no shared enriched model" stance.
 pub mod extract;
 
+/// Pass 4b-2 — the first CONFIG-GATED checker on the AST-extractor layer:
+/// `ImportBoundaryChecker` builds the intra-repo import graph ([`extract::resolver`]) once and
+/// answers `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1`, `ARCH-API-DTOS-1`, and the import facet of
+/// `ARCH-STRICT-LAYERING-1` against the `.camerata/architecture.toml` boundary map
+/// ([`architecture_config`]). See `docs/design/2026-07-27_ast-extractor-layer.md` §4 Group C
+/// and the "Pass 4b-2 landed" note.
+pub mod import_boundary_checker;
+
 /// Supabase-stack checkers built on the [`arch_checker`] seam: migration-timeline replay for
 /// Row Level Security and `SECURITY DEFINER` search_path hygiene. See `supabase/mod.rs`.
 pub mod supabase;

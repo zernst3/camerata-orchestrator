@@ -522,3 +522,139 @@ confirming the D3 refactor is behavior-preserving. `cargo check --workspace` gre
   `architecture_config_from_files(repo.files)` is `Ok(None)` (or the specific section the
   rule needs is absent) — the D3 mechanism this pass built is otherwise a no-op until this
   override exists.
+
+---
+
+## Pass 4b-2 "`ImportBoundaryChecker`" landed
+
+The first REAL config-gated checker on this layer: `crates/checks/src/import_boundary_checker.rs`
+(`ImportBoundaryChecker`), registered in `arch_checker::all_checkers()` alongside the two
+Supabase checkers, Group A's three, and the handler-no-db promotion. It answers all three rule
+ids design §4 Group C names, as ONE struct building ONE model (the resolved import graph) per
+the design's own framing:
+
+- **`ARCH-NO-CROSS-BOUNDARY-IMPORTS-1`** — any resolved import edge whose source and target
+  both classify into a declared `[layers]` entry, where the target layer is not in the source
+  layer's `[imports]` allow-list. A source layer with NO `[imports]` key at all is treated
+  exactly like an explicit empty list (the schema's own "any edge not listed is forbidden"
+  semantics) — this includes same-layer edges unless a project explicitly lists itself as its
+  own allowed target, a literal reading of the worked example's `domain = []`.
+- **`ARCH-API-DTOS-1`** — the SAME resolved edge set, filtered to `[dtos].controllers` ->
+  `[dtos].domain_types` edges. Silently a no-op whenever `[dtos]` isn't configured (the rule's
+  own `default = false`), independent of whether `[layers]`/`[imports]` are configured.
+- **`ARCH-STRICT-LAYERING-1` (import facet only)** — deliberately NOT built on the resolved
+  graph: a real DB-client package (`prisma`, `supabase-js`, a bespoke `sea_orm` wrapper) is
+  typically EXTERNAL, so the resolver would drop it (correctly — see its own false-negative
+  discipline). Instead, a raw per-file `extract::imports` scan checks each declared-layer
+  file's specifiers for an EXACT TOKEN match (specifier split on non-alphanumeric/`_`
+  boundaries, e.g. `@prisma/client` -> `["prisma","client"]`) against `[db].handles` — a token
+  match, not a substring match, so a marker like `"db"` can never spuriously fire on
+  `"database-types"`. The call-site facet (`db.query(...)` inside a handler body) is Pass 4c,
+  not this checker.
+
+**A deliberate widening beyond the design table's literal wording:** the import facet also
+exempts `[db].tx_flow_control_in` layers (unioned with `[db].allowed_in`), not just
+`allowed_in`. The design table names the `tx_flow_control_in` exemption for the Group-D CALL
+facet only, but a service that legitimately wraps a repository call in `db.transaction(...)`
+(the rule TOML's own carve-out) needs to IMPORT the DB client to do that — an import-facet
+check with no matching exemption would flag that same legitimate service, defeating the
+option's purpose. Documented in the checker's module doc as a call for Pass 4c to revisit once
+the call-site facet exists and both facets can be cross-checked against real fixtures.
+
+**D3, this pass's version:** `ArchChecker::config_unsatisfied_for` answers ONE bool per
+checker — it cannot express "satisfied for rule A, unsatisfied for rule B" within a single
+repo. `ImportBoundaryChecker` resolves this by gating on config PRESENCE alone:
+`architecture_config_from_files(repo.files).ok().flatten().is_none()`. Absent OR malformed
+(the config module's own contract: treat `Err` like `Ok(None)`) → all three rule ids stay
+LLM-advisory for that repo; present and parses → all three are excluded, i.e. the same simple
+presence/absence gate the task named. This is a KNOWN coarsening for `ARCH-API-DTOS-1`
+specifically: a repo that configures `[layers]`/`[imports]`/`[db]` but never opts into
+`[dtos]` gets `ARCH-API-DTOS-1` excluded from the LLM prompt even though this checker emits
+zero verdicts for it. Flagged here as a refinement candidate — a future pass could widen
+`ArchChecker` to a per-rule-id `config_unsatisfied_for` (e.g. returning a
+`HashSet<&'static str>` of UNSATISFIED ids instead of one bool) — not fixed in this pass, since
+the task's own framing named the coarser presence/absence gate.
+
+**Interest globs** include the v1 source extensions (`**/*.rs`, `**/*.ts`, `**/*.tsx`,
+`**/*.js`, `**/*.jsx`, `**/*.py`) PLUS `.camerata/architecture.toml` and `tsconfig.json` /
+`**/tsconfig.json` — the config and any tsconfig alias file must be declared here too, or the
+Layer-2 runner's `collect_interest_files` (which only reads the UNION of every ARMED checker's
+globs from the worktree) would never see them, and the checker would wrongly read "no config"
+even when one exists on disk.
+
+**False-negative safeguards** (all proven by dedicated tests, see below): a `LayerConflict`
+(overlapping `[layers]` globs matching the same file) on either edge endpoint drops the edge;
+an unresolved import (external package, ambiguous Python suffix match, ...) never reaches the
+checker at all (the resolver already dropped it); a file matching no declared layer is never
+judged; a malformed `.camerata/architecture.toml` degrades to the same "absent" path, never an
+`Err` propagated or a panic.
+
+**Tests.** `crates/checks/src/import_boundary_checker.rs`: 23 unit tests — a Rust AND a TS
+fixture each proving a cross-layer violation with correct file:line + layer names in the
+message, a compliant layered repo (both languages) staying clean, the no-config abstain (zero
+findings + `config_unsatisfied_for` true + rule ids absent from
+`checker_rule_ids_for_repo`), the config-present exclusion (rule ids present in
+`checker_rule_ids_for_repo`), malformed-config-treated-as-absent, external-package /
+unclassified-file / layer-conflict false-negative cases, the full `ARCH-API-DTOS-1` fixture
+plus its "no `[dtos]` section" silence case, the `ARCH-STRICT-LAYERING-1` import-facet fixture
+(flagged outside `allowed_in`, clean inside `allowed_in`, exempted via
+`tx_flow_control_in`, silent with no `[db]` section, and the token-vs-substring marker-match
+adversarial case), and malformed-source / empty-file-set no-panic cases. Two supporting fixes
+to existing `arch_checker.rs` tests were required now that a REAL config-gated checker exists
+(previously only a test-only `DummyConfigGatedChecker` proved the mechanism): the static
+`all_checker_rule_ids()` set (which has no per-repo config awareness) now correctly asserts it
+STILL CONTAINS the three gated ids (this checker doesn't opt into `advisory_coexisting`), and
+the old `checker_rule_ids_for_repo_matches_static_set_when_no_checker_is_config_gated` test —
+whose premise ("no checker is config gated") this pass falsifies — was replaced by two tests
+proving the real divergence: the per-repo set drops the three ids for an unconfigured repo,
+and matches the static set again once `.camerata/architecture.toml` is present.
+
+**Integration — the scan (Plug point A).** `crates/server/tests/import_boundary_checker_e2e.rs`
++ two fixtures: `tests/fixtures/import_boundary_repo/` (a real `.camerata/architecture.toml`,
+4 layers, plus a Rust AND a TypeScript handler file each importing the repositories layer
+directly — both flagged, with the compliant services/repositories/domain edges in the SAME
+repo staying silent) and `tests/fixtures/import_boundary_unconfigured_repo/` (the identical
+TS violation shape with NO config file at all). Three tests, driven through the real
+`onboard::audit_repos`: the configured repo fires exactly 2 findings (one per language) with
+correct file/line/layer content and the `camerata-arch` preview tag; the unconfigured repo
+gets zero deterministic findings for all three rule ids; and a third test builds a `RepoView`
+from each fixture's REAL scan-read files (`read_local_repo_files`) and asserts
+`checker_rule_ids_for_repo` diverges exactly as designed (configured excludes all three ids,
+unconfigured leaves all three eligible) — the PER-REPO, config-aware D3 contract exercised
+end-to-end for the first time by a real checker rather than a test-only dummy.
+
+**Integration — the Layer-2 gov-dev gate (Plug point B).**
+`crates/checks/tests/import_boundary_checker_gov_dev_loop_e2e.rs`, mirroring
+`arch_check_runner_gov_dev_loop_e2e.rs`'s existing convention: drives the public
+`camerata_checks::runner_for_worktree` entry point over a real on-disk worktree. Four tests —
+a cross-boundary violation bounces with the exact file:line and rule id in the diagnostics; a
+fully compliant worktree passes clean; an un-armed rule never bounces even with matching
+files present; and an unconfigured worktree with the IDENTICAL violation shape does not bounce
+(D3 holds at Layer-2 too, not just the scan).
+
+**Test totals + verification.** `cargo test -p camerata-checks --lib`: 493 passed (23 new for
+`import_boundary_checker`, plus 2 updated + 2 new tests in `arch_checker.rs`'s own suite).
+`cargo test -p camerata-checks -p camerata-server` (all lib + integration + doc tests): every
+suite green, including the two new e2e files above (3 + 4 tests). `cargo check --workspace`
+green throughout.
+
+### What Pass 4c still needs
+
+- **`functions()` / `method_calls()`-based checkers** — this pass never called those two
+  extractor functions; Pass 4c is where they get their first real consumer.
+- **Production `HandlerNoDbChecker`**: route-attribute/decorator classification
+  (`#[get(...)]`, `@app.route`, Express `router.get` registration) replacing
+  `handler_no_direct_db`'s name heuristic, sharpened by `[layers]` when present (a file in the
+  `handlers` layer replaces name-guessing entirely).
+- **`ARCH-STRICT-LAYERING-1`'s CALL facet**: a `[db].handles` receiver method call
+  (`db.query(...)`) inside a body whose layer isn't in `[db].allowed_in`, with calls inside
+  `tx_flow_control_in` layers exempted ONLY when they match a transaction-primitive shape
+  (`db.transaction(...)`) — this pass's import-facet exemption is coarser (any import from a
+  tx-flow-control layer is exempt, not just transaction-wrapping calls), so Pass 4c's call
+  facet is where the finer-grained, call-site-verified version of that exemption belongs.
+- **`ARCH-RESOURCE-LIFECYCLE-1` (spawn facet)**: `syn`-based `tokio::process::Command`
+  builder-chain scan for a missing `.kill_on_drop(true)`.
+- Optional refinement candidate (not required, noted above): per-rule-id
+  `config_unsatisfied_for` granularity, so a repo that configures `[layers]`/`[db]` but not
+  `[dtos]` doesn't have `ARCH-API-DTOS-1` coarsely excluded from the LLM prompt alongside the
+  other two.

@@ -224,6 +224,7 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
         Box::new(crate::python_testing::PythonTestFileNamingChecker),
         Box::new(crate::ui_dates::UtcDatesChecker),
         Box::new(crate::handler_no_db_checker::HandlerNoDbChecker),
+        Box::new(crate::import_boundary_checker::ImportBoundaryChecker),
     ]
 }
 
@@ -345,6 +346,16 @@ mod tests {
         ] {
             assert!(ids.contains(expected), "missing {expected} from registry: {ids:?}");
         }
+        // ARCH-NO-CROSS-BOUNDARY-IMPORTS-1 / ARCH-API-DTOS-1 / ARCH-STRICT-LAYERING-1
+        // (Pass 4b-2's `ImportBoundaryChecker`) don't opt into `advisory_coexisting` (they're
+        // fully deterministic once configured, unlike the name-heuristic handler-no-db
+        // promotion), so this STATIC set — which has no per-repo config awareness — still
+        // contains them. The PER-REPO D3 gate lives in `config_unsatisfied_for` /
+        // `checker_rule_ids_for_repo` instead (see the tests further below and
+        // `import_boundary_checker`'s own registry test).
+        for gated in ["ARCH-NO-CROSS-BOUNDARY-IMPORTS-1", "ARCH-API-DTOS-1", "ARCH-STRICT-LAYERING-1"] {
+            assert!(ids.contains(gated), "missing {gated} from the static registry: {ids:?}");
+        }
     }
 
     #[test]
@@ -441,10 +452,29 @@ mod tests {
     }
 
     #[test]
-    fn checker_rule_ids_for_repo_matches_static_set_when_no_checker_is_config_gated() {
-        // Every REGISTERED checker today defaults `config_unsatisfied_for` to `false`, so the
-        // per-repo set must equal the static set regardless of the repo's files.
+    fn checker_rule_ids_for_repo_drops_the_real_config_gated_checkers_ids_when_unconfigured() {
+        // Pass 4b-2 landed a REAL config-gated checker (`ImportBoundaryChecker`): for a repo
+        // with no `.camerata/architecture.toml`, its three rule ids must be MISSING from the
+        // per-repo set even though they're present in the static set (see
+        // `all_checkers_registry_covers_expected_rule_ids` above) — this is exactly the
+        // divergence `checker_rule_ids_for_repo` exists to compute.
         let files: Vec<(String, String)> = vec![("README.md".to_string(), String::new())];
+        let repo = RepoView { spec: "test/repo", files: &files };
+        let per_repo = checker_rule_ids_for_repo(&repo);
+        let static_set = all_checker_rule_ids();
+        for gated in ["ARCH-NO-CROSS-BOUNDARY-IMPORTS-1", "ARCH-API-DTOS-1", "ARCH-STRICT-LAYERING-1"] {
+            assert!(static_set.contains(gated), "{gated} missing from static set: {static_set:?}");
+            assert!(!per_repo.contains(gated), "{gated} must be excluded per-repo when unconfigured: {per_repo:?}");
+        }
+    }
+
+    #[test]
+    fn checker_rule_ids_for_repo_matches_static_set_when_the_config_gated_checker_is_satisfied() {
+        // The SAME repo, but WITH `.camerata/architecture.toml` present — now every
+        // registered checker (including the config-gated one) answers deterministically, so
+        // the per-repo set equals the static set again.
+        let files: Vec<(String, String)> =
+            vec![(".camerata/architecture.toml".to_string(), "version = 1\n".to_string())];
         let repo = RepoView { spec: "test/repo", files: &files };
         assert_eq!(checker_rule_ids_for_repo(&repo), all_checker_rule_ids());
     }
