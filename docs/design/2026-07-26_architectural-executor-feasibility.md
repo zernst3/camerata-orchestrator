@@ -298,6 +298,78 @@ scan. `cargo check --workspace` and both crates' full test suites are green.
 
 ---
 
+## 7. Pass 2 landed (2026-07-27)
+
+Scope actually shipped: **§2.3 ("Plug point B") — the Layer-2 Governed Development
+write-time gate wiring**, i.e. (c) from the effort table above. The `syn`/tree-sitter
+code-AST layer, the api-layer checkers, and Layer-3 CI parity remain deferred exactly as
+Pass 1 left them.
+
+**`NativeArchCheckRunner`** — `crates/checks/src/arch_check_runner.rs`, implementing
+`camerata_core::CheckRunner` (the same seam `FmtCheckRunner`/`ClippyCheckRunner`/
+`ManifestCheckRunner` implement):
+- **Armed-rule binding**: reads `role.rule_subset` — the SAME field the Layer-1 gateway
+  already enforces against (`evaluate_call(&driver.rule_subset, ...)`) — as the "armed" rule
+  set for this work item. A checker only runs when at least one of its own `rule_ids()` is
+  armed, mirroring Pass 1's `audit_architectural` binding on the scan side exactly (same
+  filter, different caller).
+- **Cheap by construction**: only the UNION of every ARMED checker's `interest_globs` is
+  collected; an un-armed architectural rule's checker never sees its files, and if nothing is
+  armed the runner returns `CheckOutcome::clean()` without touching the filesystem at all.
+- **File read**: a pruned recursive walk of the worktree (reusing
+  `multilang::PRUNED_DIRS`, now `pub(crate)`, so the same heavy/vendored directories are
+  skipped as the language detector already skips) that reads CONTENT only for files matching
+  an armed checker's globs; non-UTF8 files are lossily decoded rather than dropped or panicking.
+- **Violation mapping**: each `ArchViolation` becomes one `RuleId` in `CheckOutcome.violated`
+  plus one `file:line [rule_id] object — message` line appended to `CheckOutcome.diagnostics`
+  — the exact file/line the design memo calls for, forwarded straight into the bounce prompt.
+  A defensive re-check at the mapping boundary drops any violation whose `rule_id` isn't in
+  the armed set (belt-and-suspenders against a hypothetical checker-side bug), so an un-armed
+  id can never bounce the loop even indirectly.
+
+**Composition** — `crates/checks/src/multilang.rs`: `CombinedCheckRunner` gained a third
+field, `arch: NativeArchCheckRunner`, run AFTER the manifest tier (language → manifest →
+arch; each additive, none replacing another; violations deduped at the end exactly as
+before). `runner_for_worktree`/`runner_for_worktree_impl` construct it unconditionally —
+unlike the language tier, the architectural tier doesn't depend on language detection, since
+its checkers key off `interest_globs`, not a detected programming language.
+
+**Tests**: 8 new unit tests in `arch_check_runner.rs` (violation → outcome mapping with
+file/line, armed-vs-unarmed-rule gating including "nothing armed → clean without touching
+disk", clean-on-zero-interest-files, a compliant worktree passing clean, two panic-adversarial
+cases — malformed/unterminated SQL and a non-UTF8 migration file — and a glob-scoping test
+proving a stray root-level `.sql` file outside `interest_globs` is never read). Plus 4 new
+black-box integration tests in
+`crates/checks/tests/arch_check_runner_gov_dev_loop_e2e.rs`, driving the PUBLIC
+`runner_for_worktree` entry point exactly as the real gov-dev loop would: a worktree adding a
+public table with no RLS is bounced under `SUPABASE-RLS-ENABLED-1` with the migration
+file/table named in the diagnostics; the RLS-plus-policy mirror-image passes clean; an
+un-armed RLS rule never bounces the combined runner even with matching files present; and a
+manifest-less, language-less, `supabase/`-less worktree with the RLS family armed stays clean
+(no regression of the existing "no manifest/language → `NoopChecks` clean" selector
+behavior). `camerata-checks` is now at 330 unit tests (up from 322) + all four integration
+suites green. `cargo test -p camerata-checks -p camerata-core -p camerata-server` and
+`cargo check --workspace` are green (camerata-core: unchanged, all passing; camerata-server:
+1181 unit tests + every integration suite, unchanged and passing — confirming the new tier
+doesn't regress the fmt/clippy/test/manifest built-ins or anything downstream of
+`CombinedCheckRunner`).
+
+**What's left for Pass 3-5** (unchanged from Pass 1's own list, since this pass was scoped
+strictly to §2.3):
+- The `syn`/tree-sitter code-AST layer and the api-layer checkers (`handler-no-db`
+  promotion, `strict-layering`, `no-cross-boundary-imports`) — still routed; RLS never needed
+  this layer, and neither does the Layer-2 wiring just landed.
+- Layer-3 CI parity (§2.4) — unchanged, still accepted as an asymmetry: native checkers now
+  cover BOTH Camerata-side surfaces (scan + this Layer-2 loop), but the generated client-side
+  CI workflow still has no distributable to run them.
+- The CI distributable (`camerata-check` binary) — unbuilt; still gated on a client wanting
+  native checks enforced in their own CI rather than via the existing CI-story path.
+- Any additional native checkers beyond the two Supabase ones (e.g. `SupabaseFnSearchPathChecker`
+  is already registered and therefore already wired into this Layer-2 gate for free — it needed
+  zero additional Pass 2 work, which is itself further evidence the seam generalizes as designed).
+
+---
+
 ## 5. Recommendation
 
 **BUILD-NOW, narrowly: phases (a)+(b) — the seam plus the RLS checker, scan surface first —

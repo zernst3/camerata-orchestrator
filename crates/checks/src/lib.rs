@@ -33,6 +33,17 @@ pub mod arch_checker;
 /// Row Level Security and `SECURITY DEFINER` search_path hygiene. See `supabase/mod.rs`.
 pub mod supabase;
 
+/// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s
+/// checker registry — "Plug point B" in
+/// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.3. Composed into
+/// [`CombinedCheckRunner`] right beside [`ManifestCheckRunner`] via [`runner_for_worktree`];
+/// a violation bounces the agent's work back for revision before it becomes a commit, the
+/// same as a clippy failure. Plug point A (the brownfield scan) is
+/// `camerata_server::onboard::architectural` (Pass 1); this is Pass 2's native sibling on
+/// the Layer-2 write-time gate.
+pub mod arch_check_runner;
+pub use arch_check_runner::NativeArchCheckRunner;
+
 /// Per-language layer-2 [`camerata_core::CheckRunner`]s (JS/TS, Python, Go,
 /// Ruby, Java, C#) plus the worktree language-detect selector
 /// ([`multilang::runner_for_worktree`]) that injects the right one. With
