@@ -3342,7 +3342,7 @@ pub(super) fn RuleCount(label: String, n: usize) -> Element {
 pub(super) use camerata_ui_core::rules::{
     split_needs_review, verif_badge,
     SelectionBucket, bucket_of, project_level_insert, RuleOptionView, RuleSourceView, ProposedRuleView, default_draft,
-    rules_csv, csv_field,
+    rules_csv, csv_field, rules_needing_option_chosen,
 };
 
 /// Build a human-readable tooltip string from a list of sources.
@@ -3634,6 +3634,16 @@ pub(super) fn rule_columns(domains: Vec<String>) -> Vec<ColumnDef<ProposedRuleVi
         .sortable()
         .render_kind(RenderKind::Badge(kind))
         .initial_width(120.0),
+        // Internal-only column backing the "Needs option" filter toggle. Never shown
+        // (hidden via `set_column_visibility` right after the table is constructed) and
+        // never surfaced in the per-column filter row — it exists purely so the toggle
+        // can drive chorale's OWN filter pipeline (AND-composing with the domain/search
+        // filters for free) via `handle.set_filter(ColumnId("needs_option"), ...)`. The
+        // cell value is just the rule id; the toggle sets a `FilterValue::MultiSelect`
+        // of exactly the ids from `rules_needing_option_chosen`.
+        ColumnDef::new(ColumnId("needs_option"), "Needs option", |r: &ProposedRuleView| {
+            CellValue::Text(r.id.clone())
+        }),
     ]
 }
 
@@ -3816,6 +3826,9 @@ pub(super) fn ProposedRulesTable(
         for rid in &suggested_ids {
             handle.set_selection(*rid, true);
         }
+        // The "needs_option" column is an internal filter seam only (see rule_columns) —
+        // never shown as a real table column or per-column filter widget.
+        handle.set_column_visibility(ColumnId("needs_option"), false);
     });
     // Publish the live selected-rule count to ScanResults (Step 2) so its cost estimate
     // tracks what the user has ticked, AND persist this repo's selection back to the lifted
@@ -3982,51 +3995,35 @@ pub(super) fn ProposedRulesTable(
     let all_by_id_audit = all_by_id.clone();
     let view_repo_audit = view_repo.clone();
 
-    // Rules whose alternative is still UNRESOLVED — they have options but no chosen choice
-    // AND no usable default directive, so the architect must pick one before the rule can be
-    // enforced. Recomputed each render (reads `chosen`), so picking an alternative clears it.
-    let needs_choice: std::collections::HashSet<String> = {
-        let chosen_map = chosen.read();
-        let cur_repo = viewed_repo();
-        id_map
-            .values()
-            .filter(|r| {
-                if r.options.is_empty() {
-                    return false;
-                }
-                let oid = chosen_map
-                    .get(&chosen_key(&cur_repo, &r.id))
-                    .cloned()
-                    .or_else(|| r.default_option.clone());
-                oid.and_then(|o| {
-                    r.options
-                        .iter()
-                        .find(|x| x.id == o)
-                        .map(|x| x.directive.clone())
-                })
-                .filter(|s| !s.is_empty())
-                .is_none()
-            })
-            .map(|r| r.id.clone())
-            .collect()
-    };
-    // The VIEWED table's live selection (rule ids). Drives the per-row highlight: a needs-a-
-    // choice rule is yellow ONLY while selected-but-unresolved; unselected = no highlight,
-    // selected-and-resolved = the normal blue selection.
+    // The VIEWED table's live selection (rule ids). This is the ONE "selected" set shared
+    // by the per-row highlight, the "Needs option" filter toggle below, and (layered with
+    // repo_selection) the audit/arm gate — so none of them can diverge on what's selected.
     let selected_rule_ids: std::collections::HashSet<String> = handle
         .selected_ids()
         .iter()
         .filter_map(|rid| id_map.get(rid).map(|r| r.id.clone()))
         .collect();
-    let needs_choice_hl = needs_choice.clone();
-    let selected_rule_ids_hl = selected_rule_ids.clone();
-    // The SELECTED unresolved rules (across every repo's picks, matching the arm guard). These
+    // Rules that are BOTH selected (in this table) AND still unresolved — they have options
+    // but neither a chosen alternative nor a usable default directive, so the architect must
+    // pick one before the rule can be enforced. Computed via the shared
+    // `rules_needing_option_chosen` predicate (ui-core) so the row highlight, this table's
+    // "Needs option" filter, and the audit/arm gate below can never disagree about which
+    // rules still need a choice. Recomputed each render (reads `chosen` + the live
+    // selection), so picking an alternative or (de)selecting a row updates it immediately.
+    let cur_repo = viewed_repo();
+    let needs_choice_hl: std::collections::HashSet<String> = {
+        let cur_repo = cur_repo.clone();
+        rules_needing_option_chosen(id_map.values(), &selected_rule_ids, move |rid: &str| {
+            chosen.read().get(&chosen_key(&cur_repo, rid)).cloned()
+        })
+    };
+    // The SELECTED unresolved rules ACROSS EVERY REPO's picks (matching the arm guard). These
     // BLOCK both buttons: an unresolved rule you've selected can't be audited or armed. An
     // unresolved rule you HAVEN'T selected is only highlighted, not blocking. This is also why
     // audit no longer silently falls back to the rule title — it's gated the same as arm now.
     let unresolved_selected: Vec<String> = {
-        let selected: std::collections::BTreeSet<String> = if view_repo.is_empty() {
-            selected_rule_ids.iter().cloned().collect()
+        let gate_selected: std::collections::HashSet<String> = if view_repo.is_empty() {
+            selected_rule_ids.clone()
         } else {
             let mut map = repo_selection.peek().clone();
             map.insert(
@@ -4035,10 +4032,16 @@ pub(super) fn ProposedRulesTable(
             );
             map.values().flatten().cloned().collect()
         };
-        selected
-            .into_iter()
-            .filter(|id| needs_choice.contains(id))
-            .collect()
+        let cur_repo = cur_repo.clone();
+        let mut v: Vec<String> = rules_needing_option_chosen(
+            id_map.values(),
+            &gate_selected,
+            move |rid: &str| chosen.read().get(&chosen_key(&cur_repo, rid)).cloned(),
+        )
+        .into_iter()
+        .collect();
+        v.sort();
+        v
     };
     let has_unresolved = !unresolved_selected.is_empty();
     let unresolved_hint = if has_unresolved {
@@ -4049,6 +4052,58 @@ pub(super) fn ProposedRulesTable(
     } else {
         String::new()
     };
+
+    // ── "Needs option" table filter ────────────────────────────────────────────────────
+    // A toggle that narrows the table to EXACTLY `needs_choice_hl` (selected-but-unresolved
+    // — the same set the row highlight above uses), routed through chorale's OWN filter
+    // pipeline via an always-hidden `needs_option` column (see `rule_columns`) so it
+    // AND-composes with any domain/search filter already active, instead of introducing a
+    // second, competing notion of "which rows are visible". Hidden when there's nothing to
+    // filter to (`has_needs_option_rows` is false).
+    let mut needs_option_only = use_signal(|| false);
+    let has_needs_option_rows = !needs_choice_hl.is_empty();
+    {
+        let id_map_filter = id_map.clone();
+        let cur_repo_filter = viewed_repo;
+        use_effect(move || {
+            // Recompute INSIDE the effect (not from a captured outer value) so its reactive
+            // reads of `chosen` / `handle`'s selection / `needs_option_only` are tracked —
+            // that's what makes the effect re-fire (and re-apply the filter) the moment the
+            // architect picks an alternative or changes the selection while the toggle is on.
+            let on = needs_option_only();
+            let chosen_map = chosen.read();
+            let cur_repo = cur_repo_filter();
+            let selected_ids: std::collections::HashSet<String> = handle
+                .selected_ids()
+                .iter()
+                .filter_map(|rid| id_map_filter.get(rid).map(|r| r.id.clone()))
+                .collect();
+            let needing = rules_needing_option_chosen(
+                id_map_filter.values(),
+                &selected_ids,
+                |rid: &str| chosen_map.get(&chosen_key(&cur_repo, rid)).cloned(),
+            );
+            let desired = if on && !needing.is_empty() {
+                Some(FilterValue::MultiSelect(needing))
+            } else {
+                None
+            };
+            // Compare via `peek()` (no subscription) before writing: `set_filter` dispatches
+            // through the SAME table-state signal this effect reads via `selected_ids()`
+            // above, so an unconditional write would re-notify this very effect on every
+            // fire. The equality guard makes it settle after one harmless extra run instead
+            // of looping.
+            let current = handle
+                .signal()
+                .peek()
+                .filters
+                .get(&ColumnId("needs_option"))
+                .cloned();
+            if current != desired {
+                handle.set_filter(ColumnId("needs_option"), desired);
+            }
+        });
+    }
 
     // Row-cell renderer for the Type (enforcement modality) column: a native `title`
     // tooltip with the modality definition. Mirrors ProjectRulesTable / AllRulesTable.
@@ -4068,6 +4123,23 @@ pub(super) fn ProposedRulesTable(
     };
 
     rsx! {
+        // "Needs option" filter toggle — hidden entirely when nothing needs a choice (no
+        // dead control, no empty-and-confusing filtered state to land in).
+        if has_needs_option_rows {
+            div { class: "rules-table-toolbar",
+                label { class: "audit-thorough-toggle",
+                    input {
+                        r#type: "checkbox",
+                        checked: needs_option_only(),
+                        onchange: move |e| needs_option_only.set(e.checked()),
+                    }
+                    span { "Needs option" }
+                }
+                span { class: "rules-table-hint",
+                    "Show only selected rules that still need an alternative chosen (same set highlighted yellow below)."
+                }
+            }
+        }
         // Per-domain "select all" is now native: the table is grouped by domain and
         // chorale 0.2.3 renders a tri-state select-all checkbox in each group header
         // (selection_enabled + grouping), so the old custom "Select rules by domain"
@@ -4087,9 +4159,10 @@ pub(super) fn ProposedRulesTable(
             // Highlight a rule yellow ONLY while it's selected AND still needs an alternative
             // chosen — that's the state that blocks audit/arm. Unselected = no highlight;
             // selected-and-resolved = the normal blue selection. Clears when a choice is made.
+            // `needs_choice_hl` is already selected-AND-unresolved (rules_needing_option_chosen),
+            // so membership alone drives the highlight — no separate selection check needed.
             row_class: RowClass::new(move |r: &ProposedRuleView| {
-                (selected_rule_ids_hl.contains(&r.id) && needs_choice_hl.contains(&r.id))
-                    .then(|| "rule-row-needs-choice".to_string())
+                needs_choice_hl.contains(&r.id).then(|| "rule-row-needs-choice".to_string())
             }),
             on_row_click: Callback::new(move |rid: RowId| {
                 if let Some(r) = id_map_click.get(&rid) {
