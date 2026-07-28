@@ -1418,6 +1418,227 @@ mod tests {
     }
 
     #[test]
+    fn detect_stack_recognizes_supabase_from_config_migrations_and_dependency() {
+        // Regression guard: a Supabase repo (CLI config.toml + a SQL migration under
+        // supabase/migrations/ + the @supabase/supabase-js client dependency) was
+        // previously invisible to detect_frameworks entirely — the "Supabase" marker
+        // never appeared, so none of the 17 supabase:* corpus rules could ever be
+        // suggested no matter how obviously the repo used Supabase.
+        let files = vec![
+            (
+                "supabase/config.toml".to_string(),
+                "project_id = \"acme\"\n[db]\nport = 54322\n".to_string(),
+            ),
+            (
+                "supabase/migrations/20240101000000_init.sql".to_string(),
+                "create table public.widgets (id uuid primary key);\n".to_string(),
+            ),
+            (
+                "package.json".to_string(),
+                r#"{ "dependencies": { "@supabase/supabase-js": "^2.0.0" } }"#.to_string(),
+            ),
+        ];
+        let stack = detect_stack("acme/app", &files);
+        assert!(
+            stack.frameworks.contains(&"Supabase".to_string()),
+            "Supabase must be detected: {stack:?}"
+        );
+        // ...and maps to every supabase:* child domain in the corpus, plus sql.
+        let domains = domains_for_stack(&stack);
+        for want in [
+            "supabase",
+            "supabase:rls",
+            "supabase:auth",
+            "supabase:secrets",
+            "supabase:storage",
+            "supabase:database-functions",
+            "supabase:exposure",
+            "sql",
+        ] {
+            assert!(
+                domains.contains(&want.to_string()),
+                "expected {want} in {domains:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn detect_stack_recognizes_supabase_from_config_toml_alone() {
+        // The CLI config marker alone (no migrations, no JS dependency) is sufficient —
+        // a repo can point at a Supabase Postgres instance without any JS client at all.
+        let files = vec![(
+            "supabase/config.toml".to_string(),
+            "project_id = \"acme\"\n".to_string(),
+        )];
+        let stack = detect_stack("acme/app", &files);
+        assert!(
+            stack.frameworks.contains(&"Supabase".to_string()),
+            "config.toml alone must trigger Supabase detection: {stack:?}"
+        );
+    }
+
+    #[test]
+    fn detect_stack_recognizes_supabase_from_migration_alone() {
+        // A migration file under supabase/migrations/ alone (no config.toml checked in,
+        // no JS dependency) is also sufficient.
+        let files = vec![(
+            "supabase/migrations/20240101000000_init.sql".to_string(),
+            "create table public.widgets (id uuid primary key);\n".to_string(),
+        )];
+        let stack = detect_stack("acme/app", &files);
+        assert!(
+            stack.frameworks.contains(&"Supabase".to_string()),
+            "a migration file alone must trigger Supabase detection: {stack:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_corpus_rules_proposes_all_17_supabase_rules_for_a_supabase_repo() {
+        // The end-to-end regression guard for the reported bug: given a repo whose stack
+        // is unambiguously Supabase, the REAL onboarding path (detect_stack ->
+        // domains_for_stack -> propose_corpus_rules against the real corpus) must
+        // actually propose the supabase:* rules, not just compute the right domain
+        // strings in isolation.
+        let files = vec![
+            (
+                "supabase/config.toml".to_string(),
+                "project_id = \"acme\"\n".to_string(),
+            ),
+            (
+                "supabase/migrations/20240101000000_init.sql".to_string(),
+                "create table public.widgets (id uuid primary key);\n".to_string(),
+            ),
+            (
+                "package.json".to_string(),
+                r#"{ "dependencies": { "@supabase/supabase-js": "^2.0.0" } }"#.to_string(),
+            ),
+        ];
+        let stack = detect_stack("acme/app", &files);
+        let domains = domains_for_stack(&stack);
+        let repo_domains = vec![("acme/app".to_string(), domains)];
+        let proposed = propose_corpus_rules(&repo_domains).await;
+
+        // Representative rule ids, one from each of the 6 supabase corpus areas.
+        let expected_ids = [
+            "SUPABASE-RLS-ENABLED-1",
+            "SUPABASE-RLS-NO-POLICY-1",
+            "SUPABASE-RLS-INITPLAN-1",
+            "SUPABASE-RLS-PERMISSIVE-TRUE-1",
+            "SUPABASE-RLS-POLICY-DISABLED-1",
+            "SUPABASE-RLS-USER-METADATA-1",
+            "SUPABASE-RLS-VIEW-INVOKER-1",
+            "SUPABASE-AUTH-EDGE-JWT-1",
+            "SUPABASE-AUTH-GETSESSION-SERVER-1",
+            "SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1",
+            "SUPABASE-AUTH-USERS-EXPOSED-1",
+            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
+            "SUPABASE-STORAGE-OBJECT-POLICY-1",
+            "SUPABASE-STORAGE-PUBLIC-BUCKET-1",
+            "SUPABASE-FUNC-SEARCH-PATH-1",
+            "SUPABASE-EXPOSURE-MATVIEW-1",
+            "SUPABASE-EXPOSURE-SCHEMAS-1",
+        ];
+        // SUPABASE-RLS-INITPLAN-1 is deliberately `opt_in_only = true` (a performance
+        // finding, not a security one — see its decision_why): the domain-match gate
+        // still binds it to this repo, but the opt-in gate means `recommended` is
+        // correctly false for it even here. Every other supabase rule is a genuine
+        // security finding and must be both present, domain-matched, AND recommended.
+        for id in expected_ids {
+            let rule = proposed.iter().find(|r| r.id == id);
+            assert!(
+                rule.is_some(),
+                "{id} must be present in the corpus-rules payload at all: {:?}",
+                proposed.iter().map(|r| &r.id).collect::<Vec<_>>()
+            );
+            let rule = rule.unwrap();
+            assert!(
+                rule.repos.contains(&"acme/app".to_string()),
+                "{id} must be bound to the matching repo: {rule:?}"
+            );
+            if id != "SUPABASE-RLS-INITPLAN-1" {
+                assert!(
+                    rule.recommended,
+                    "{id} must be recommended (suggested) for a Supabase repo: {rule:?}"
+                );
+            }
+        }
+        // All 17 supabase rules — not just the 17 spot-checked above — must be present
+        // and domain-matched to this repo, so a future corpus addition under
+        // supabase/<area>/ that isn't wired into domains_for_stack would still be
+        // caught here failing to match.
+        let supabase_rules: Vec<_> = proposed
+            .iter()
+            .filter(|r| r.domain.starts_with("supabase:"))
+            .collect();
+        assert_eq!(
+            supabase_rules.len(),
+            17,
+            "expected all 17 supabase corpus rules in the payload: {:?}",
+            supabase_rules.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        assert!(
+            supabase_rules
+                .iter()
+                .all(|r| r.repos.contains(&"acme/app".to_string())),
+            "every supabase rule must be domain-matched (bound) to this Supabase repo: {:?}",
+            supabase_rules
+                .iter()
+                .filter(|r| !r.repos.contains(&"acme/app".to_string()))
+                .map(|r| &r.id)
+                .collect::<Vec<_>>()
+        );
+        // All but the one deliberately opt-in-only rule must be recommended.
+        let non_opt_in_unrecommended: Vec<_> = supabase_rules
+            .iter()
+            .filter(|r| r.id != "SUPABASE-RLS-INITPLAN-1" && !r.recommended)
+            .map(|r| &r.id)
+            .collect();
+        assert!(
+            non_opt_in_unrecommended.is_empty(),
+            "every non-opt-in supabase rule must be recommended for this Supabase repo: {non_opt_in_unrecommended:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_corpus_rules_does_not_propose_supabase_rules_for_a_plain_react_repo() {
+        // No-false-positive guard: a plain TypeScript/React repo with zero Supabase
+        // markers must not get any supabase:* rule recommended. Without this, a broad
+        // Supabase detector (e.g. matching on the word "supabase" anywhere) could
+        // over-fire on unrelated repos.
+        let files = vec![
+            (
+                "src/App.tsx".to_string(),
+                "export default function App() { return null; }".to_string(),
+            ),
+            (
+                "package.json".to_string(),
+                r#"{ "dependencies": { "react": "18" } }"#.to_string(),
+            ),
+        ];
+        let stack = detect_stack("acme/web", &files);
+        assert!(
+            !stack.frameworks.contains(&"Supabase".to_string()),
+            "a plain React repo must not be detected as Supabase: {stack:?}"
+        );
+        let domains = domains_for_stack(&stack);
+        assert!(
+            !domains.iter().any(|d| d.starts_with("supabase")),
+            "a plain React repo's domains must not include any supabase:* domain: {domains:?}"
+        );
+        let repo_domains = vec![("acme/web".to_string(), domains)];
+        let proposed = propose_corpus_rules(&repo_domains).await;
+        let recommended_supabase: Vec<_> = proposed
+            .iter()
+            .filter(|r| r.domain.starts_with("supabase:") && r.recommended)
+            .collect();
+        assert!(
+            recommended_supabase.is_empty(),
+            "no supabase rule should be recommended for a plain React repo: {:?}",
+            recommended_supabase.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn audit_catches_the_testbed_tier1_plants() {
         // The three Tier-1 plants from budget-tracker-testrepo, in their real shapes.
         let sql = "        let sql = format!(\n\

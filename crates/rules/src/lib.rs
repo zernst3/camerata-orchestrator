@@ -1086,6 +1086,9 @@ fn domain_to_glob(domain: &str) -> String {
         "ci-cd" => "**/.github/**".to_owned(),
         "go" => "**/*.go".to_owned(),
         "python" => "**/*.py".to_owned(),
+        // Supabase rules span the CLI project config, SQL migrations (RLS/functions),
+        // and the JS/TS client code that talks to it (auth/secrets/storage misuse).
+        "supabase" => "**/*.{sql,ts,tsx,toml,env}".to_owned(),
         "universal" => "**".to_owned(),
         _ => {
             tracing::warn!(domain = %domain, "no file-glob mapping for domain; falling back to **");
@@ -1960,6 +1963,29 @@ mod tests {
         assert_eq!(domain_to_glob("rust:seaorm"), "**/*.rs");
         assert_eq!(domain_to_glob("sql:postgres"), "**/*.sql");
         assert_eq!(domain_to_glob("go:fiber"), "**/*.go");
+    }
+
+    #[test]
+    fn domain_to_glob_supabase_and_its_subdomains_map_to_supabase_glob() {
+        // The corpus's supabase rules all live under `supabase:<area>` (rls, auth,
+        // secrets, storage, database-functions, exposure) — every one must map through
+        // the primary-component strip to the same non-"**" glob, not fall back with a
+        // warning.
+        assert_eq!(domain_to_glob("supabase"), "**/*.{sql,ts,tsx,toml,env}");
+        for sub in [
+            "supabase:rls",
+            "supabase:auth",
+            "supabase:secrets",
+            "supabase:storage",
+            "supabase:database-functions",
+            "supabase:exposure",
+        ] {
+            assert_eq!(
+                domain_to_glob(sub),
+                "**/*.{sql,ts,tsx,toml,env}",
+                "{sub} must map to the supabase glob"
+            );
+        }
     }
 
     #[test]

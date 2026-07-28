@@ -61,6 +61,11 @@ pub(crate) fn detect_frameworks(
             if lc.contains("\"svelte\"") {
                 add("Svelte");
             }
+            // Any @supabase/* package (supabase-js, ssr, auth-helpers-*, etc.) means the
+            // repo talks to a Supabase project — drive the supabase:* domains below.
+            if lc.contains("\"@supabase/") {
+                add("Supabase");
+            }
         }
         "requirements.txt" | "pyproject.toml" | "Pipfile" => {
             if lc.contains("django") {
@@ -144,6 +149,16 @@ pub(crate) fn detect_frameworks(
         && (lc.contains("awstemplateformatversion") || lc.contains("aws::"))
     {
         add("CloudFormation");
+    }
+    // Supabase: the CLI project config or a migration file under `supabase/` is a
+    // reliable structural marker independent of any package.json dependency (a repo
+    // can point at a Supabase Postgres instance with only the CLI + raw SQL, no JS
+    // client at all). Either marker alone is sufficient.
+    if path.contains("supabase/config.toml") {
+        add("Supabase");
+    }
+    if path.contains("supabase/migrations/") && file.ends_with(".sql") {
+        add("Supabase");
     }
     // CI/CD → `ci-cd`:
     if path.contains(".github/workflows/") {
@@ -337,6 +352,22 @@ pub(crate) fn domains_for_stack(s: &RepoStack) -> Vec<String> {
             // `python` baseline domain.
             "Pydantic" => {
                 domains.insert("python");
+            }
+            // Supabase → every `supabase:*` child domain in the corpus
+            // (crates/rules/principles/supabase/{rls,auth,secrets,storage,
+            // database-functions,exposure}/), plus `sql` since migrations are raw SQL.
+            // propose_corpus_rules matches on EXACT domain string (repo domain ==
+            // rule.domain), so the parent `supabase` alone would match nothing — every
+            // rule's domain is a `supabase:<area>` leaf. List each leaf explicitly; if a
+            // new `supabase/<area>/` folder is added to the corpus, add its domain here too.
+            "Supabase" => {
+                domains.insert("supabase:rls");
+                domains.insert("supabase:auth");
+                domains.insert("supabase:secrets");
+                domains.insert("supabase:storage");
+                domains.insert("supabase:database-functions");
+                domains.insert("supabase:exposure");
+                domains.insert("sql");
             }
             // Infrastructure-as-code tooling → the `iac` corpus domain.
             "Terraform" | "Terragrunt" | "Bicep" | "Pulumi" | "CloudFormation" => {
