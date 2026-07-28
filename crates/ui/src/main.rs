@@ -11,6 +11,8 @@
 //!     cargo run -p camerata-ui
 //! (or `dx serve` from crates/ui if you have the Dioxus CLI and prefer hot-reload).
 
+use camerata_ui::desktop_chrome::{self, CLIPBOARD_SHIM_SCRIPT, GOOGLE_FONTS_LINK};
+
 mod agent_activity;
 mod bombe_bg;
 mod chat;
@@ -58,7 +60,7 @@ fn main() {
     dioxus::LaunchBuilder::desktop()
         .with_cfg(
             Config::new()
-                .with_menu(app_menu_bar())
+                .with_menu(desktop_chrome::app_menu_bar())
                 .with_window(WindowBuilder::new().with_title("Camerata Orchestrator"))
                 // Ensure closing the window CLOSES it (does not hide it — the macOS
                 // default for Dioxus when not set explicitly is WindowHides, which
@@ -78,181 +80,6 @@ fn main() {
         .launch(App);
 }
 
-/// Google Fonts <link> tags injected into <head> so that "Courier Prime"
-/// (title + monospace) and "Inter" (sans body) are available via the CDN.
-/// These are loaded before the clipboard shim and before the global stylesheet
-/// so the fonts are already resolving when layout paint fires.
-///
-/// Both families are variable-weight subsets served from fonts.googleapis.com.
-/// Courier Prime (400/700 roman only — it has no variable axis) is loaded
-/// alongside Inter's variable range (100..900 wght).
-const GOOGLE_FONTS_LINK: &str = r#"<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Courier+Prime:wght@400;700&family=Inter:wght@100..900&display=swap">"#;
-
-/// JavaScript injected into <head> on every page load.
-///
-/// WHY THIS EXISTS
-/// ---------------
-/// wry 0.53.5 ships `WryWebViewParent::keyDown:` which unconditionally forwards
-/// every key-down event to `NSApp.mainMenu().performKeyEquivalent()` and then drops
-/// the event — it never calls `interpretKeyEvents:` or forwards unhandled events to
-/// the WKWebView.  For Cmd-C/X/A, WKWebView handles these natively when it is the
-/// first responder *and* the responder chain finds `copy:`/`cut:`/`selectAll:` on it.
-/// In practice, with the bare-binary launch (`cargo run`), the first-responder focus
-/// and responder-chain delivery are fragile enough that WKWebView's built-in path
-/// fires inconsistently.
-///
-/// The JS `keydown` path is a separate, always-reliable channel: WKWebView delivers
-/// `keydown` events to JavaScript regardless of native responder-chain state.
-/// `document.execCommand('copy'/'cut'/'selectAll')` works from a JS event handler
-/// without any user-gesture restriction because the event itself is the gesture.
-///
-/// PASTE IS EXCLUDED
-/// -----------------
-/// `document.execCommand('paste')` is intentionally blocked by WebKit security
-/// policy: a page cannot read the clipboard programmatically without a native
-/// permission prompt.  `navigator.clipboard.readText()` requires the Clipboard
-/// Permission API, which WKWebView does not grant to injected scripts.  Paste
-/// therefore relies entirely on the native menu path: `NSApp.mainMenu()
-/// .performKeyEquivalent()` → `paste:` selector → WKWebView responder.  If that
-/// path remains broken in a future wry release, the correct fix is a one-line patch
-/// to `WryWebViewParent::keyDown:` to call `interpretKeyEvents:` after forwarding to
-/// the menu (tracked in wry#1711).
-///
-/// CROSS-PLATFORM SAFETY
-/// ----------------------
-/// The script guards on `navigator.platform` / `e.metaKey` (macOS Command key).  On
-/// Windows/Linux where Ctrl is the modifier, `e.ctrlKey` is also handled so the shim
-/// remains useful if the app is ever built there.  `execCommand` is a no-op when no
-/// text is selected, so there is no visible side-effect from the listener firing in
-/// neutral state.
-const CLIPBOARD_SHIM_SCRIPT: &str = r#"<script>
-(function () {
-  "use strict";
-  // Guard: only run once even if the head is injected multiple times.
-  if (window.__camerataClipboardShimInstalled) return;
-  window.__camerataClipboardShimInstalled = true;
-
-  document.addEventListener("keydown", function (e) {
-    // macOS Command key OR Windows/Linux Ctrl key.
-    var mod = e.metaKey || e.ctrlKey;
-    if (!mod) return;
-
-    switch (e.key) {
-      case "c":
-        // Cmd/Ctrl-C: copy selected text.
-        document.execCommand("copy");
-        break;
-      case "x":
-        // Cmd/Ctrl-X: cut selected text.
-        document.execCommand("cut");
-        break;
-      case "a":
-        // Cmd/Ctrl-A: select all content in the focused editable element.
-        // We do NOT call e.preventDefault() here so that the browser's
-        // default select-all (which works across a wider set of elements)
-        // also runs; execCommand fires first for elements that support it.
-        document.execCommand("selectAll");
-        break;
-      // "v" (paste) intentionally omitted — cannot be done safely from JS.
-      // See the PASTE IS EXCLUDED comment above.
-    }
-  }, /* useCapture = */ true);
-}());
-</script>"#;
-
-/// Build the application menu bar.
-///
-/// A complete, correctly-structured macOS menu bar is required for the native
-/// paste path (Cmd-V).  The flow is:
-///
-///   1. User presses Cmd-V
-///   2. tao's TaoApp.sendEvent: → [super sendEvent:] (standard NSApp)
-///   3. NSApp checks mainMenu.performKeyEquivalent: → finds Cmd-V "Paste" item
-///   4. Fires paste: selector → responder chain → WKWebView.paste: → pastes
-///
-/// wry's WryWebViewParent.keyDown: is a parallel path that also calls
-/// mainMenu.performKeyEquivalent: for any key events that bubble past the webview.
-/// Both paths require this menu to be registered as NSApp's main menu, which
-/// Dioxus does via muda::Menu::init_for_nsapp() inside Config::with_menu().
-///
-/// STRUCTURE
-/// ---------
-/// On macOS the first submenu is the "application menu" (shown bold in the menu
-/// bar as the app name).  We name it "Camerata Orchestrator" so it displays
-/// correctly when running as a bare binary without an app bundle.  Then a Window
-/// submenu (matching what dioxus_desktop::menubar::default_menu_bar() emits, and
-/// registered via set_as_windows_menu_for_nsapp() as AppKit expects), then a full
-/// Edit submenu with every standard text-editing predefined item.
-///
-/// CROSS-PLATFORM
-/// --------------
-/// PredefinedMenuItem items are the same on Windows/Linux (they use whatever the
-/// platform's default for cut/copy/paste is), so this is safe to ship as-is.
-/// The set_as_windows_menu_for_nsapp() call is guarded by #[cfg(target_os = "macos")].
-fn app_menu_bar() -> dioxus::desktop::muda::Menu {
-    use dioxus::desktop::muda::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
-
-    let menu = Menu::new();
-
-    // --- App menu (FIRST submenu = the bold app-named slot on macOS) ---
-    let app = Submenu::new("Camerata Orchestrator", true);
-    let _ = app.append_items(&[
-        &PredefinedMenuItem::about(
-            None,
-            Some(AboutMetadata {
-                name: Some("Camerata Orchestrator".to_string()),
-                ..Default::default()
-            }),
-        ),
-        &PredefinedMenuItem::separator(),
-        &PredefinedMenuItem::hide(None),
-        &PredefinedMenuItem::hide_others(None),
-        &PredefinedMenuItem::show_all(None),
-        &PredefinedMenuItem::separator(),
-        &PredefinedMenuItem::quit(None),
-    ]);
-
-    // --- Window menu (second submenu, registered with AppKit as the Window menu) ---
-    let window = Submenu::new("Window", true);
-    let _ = window.append_items(&[
-        &PredefinedMenuItem::fullscreen(None),
-        &PredefinedMenuItem::separator(),
-        &PredefinedMenuItem::maximize(None),
-        &PredefinedMenuItem::minimize(None),
-        &PredefinedMenuItem::close_window(None),
-    ]);
-
-    // --- Edit menu (the part that drives the native paste: responder-chain action) ---
-    let edit = Submenu::new("Edit", true);
-    let _ = edit.append_items(&[
-        &PredefinedMenuItem::undo(None),
-        &PredefinedMenuItem::redo(None),
-        &PredefinedMenuItem::separator(),
-        &PredefinedMenuItem::cut(None),
-        &PredefinedMenuItem::copy(None),
-        &PredefinedMenuItem::paste(None),
-        &PredefinedMenuItem::separator(),
-        &PredefinedMenuItem::select_all(None),
-    ]);
-
-    let _ = menu.append_items(&[&app, &window, &edit]);
-
-    // Tell AppKit which submenu is the Window menu.  Required for AppKit to
-    // auto-populate it with "Bring All to Front" and open-window entries.
-    // Must be called after the submenu is appended to the menu AND after
-    // init_for_nsapp() has been called (Dioxus calls that in Config::with_menu).
-    // We call it here on the submenu object; muda resolves the actual NSMenu
-    // instance via the MudaMenuDelegate id at call-time.  If init_for_nsapp()
-    // hasn't fired yet, resolve_ns_menu_for_nsapp() returns None and this is a
-    // harmless no-op — the call will happen again internally when needed.
-    #[cfg(target_os = "macos")]
-    window.set_as_windows_menu_for_nsapp();
-
-    menu
-}
-
 /// Root. Injects the global stylesheet, stands up the BFF subprocess once, and shows the
 /// Enterprise Cockpit.
 #[component]
@@ -266,6 +93,18 @@ fn App() -> Element {
     // lives only for the launch sequence; the guard is parked for the app's lifetime
     // and the spawned child is SIGTERMed on app exit by the watchdog subprocess
     // (tao exits via `process::exit`, so Drop alone would leak the server).
+    // The macOS clipboard bridge: Cmd-C/X/V handled via page JS + Rust +
+    // pbcopy/pbpaste, independent of the (historically unreliable) native
+    // menu/responder-chain dispatch. No-op on other platforms. See
+    // desktop_chrome::use_clipboard_bridge and
+    // docs/design/2026-07-28_desktop-copy-paste-fix.md.
+    desktop_chrome::use_clipboard_bridge();
+
+    // Self-driving clipboard diagnostic: `CAMERATA_CLIPBOARD_PROBE=1 cargo run
+    // -p camerata-ui` mechanically exercises Cmd-C/V/X/A inside the LIVE
+    // cockpit and prints a PROBE RESULT verdict. No-op without the env var.
+    camerata_ui::clipboard_probe::arm_if_requested();
+
     use_hook(|| {
         std::thread::spawn(|| match tokio::runtime::Runtime::new() {
             Ok(rt) => rt.block_on(async {
