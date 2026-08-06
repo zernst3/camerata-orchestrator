@@ -91,6 +91,7 @@ pub mod test_tamper;
 /// `docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
 pub mod credentials;
 pub mod model_registry;
+pub mod provider_policy;
 pub mod model_profile_cascade;
 pub mod rate_limit;
 pub mod workflow_gen;
@@ -2059,6 +2060,7 @@ async fn spawn_brownfield_dev_run(
     let impl_projects = state.projects.clone();
     let impl_project_id = state.projects.active().map(|p| p.id);
     let impl_registry = state.model_registry.clone();
+    let impl_policy = state.settings.provider_policy();
     let impl_creds = state.credential_store.clone();
     let impl_limiter = state.rate_limiter.clone();
     // Phase H2: threaded into `execute_dev_implement_run` so the audit trail (agent_step,
@@ -2092,6 +2094,7 @@ async fn spawn_brownfield_dev_run(
             integration_gate_bundle,
             repo_worktrees,
             impl_registry,
+            impl_policy,
             impl_creds,
             impl_limiter,
             impl_escalations,
@@ -2257,6 +2260,7 @@ async fn start_governed_run(
                     // Provider-dispatch context for the LEAD/orchestrator driver factory
                     // (the lead runs on the strongest model's OWN provider).
                     let live_registry = state.model_registry.clone();
+                    let live_policy = state.settings.provider_policy();
                     let live_creds = state.credential_store.clone();
                     let live_limiter = state.rate_limiter.clone();
                     // LIFECYCLE-1: register the abort handle so a Stop reaps the greenfield
@@ -2275,6 +2279,7 @@ async fn start_governed_run(
                             skip_layer2,
                             vision_enabled,
                             live_registry,
+                            live_policy,
                             live_creds,
                             live_limiter,
                         )
@@ -8030,6 +8035,7 @@ async fn draft_routine_prompt(
         state.credential_store.as_ref(),
         std::sync::Arc::new(state.llm()),
         state.rate_limiter.clone(),
+        &state.settings.provider_policy(),
     )
     .unwrap_or_else(|_| std::sync::Arc::new(state.llm()));
     match completer
@@ -8203,6 +8209,7 @@ async fn chat_escalation(
         state.credential_store.as_ref(),
         std::sync::Arc::new(state.llm()),
         state.rate_limiter.clone(),
+        &state.settings.provider_policy(),
     )
     .unwrap_or_else(|_| std::sync::Arc::new(state.llm()));
     let reply = match completer
@@ -8565,6 +8572,7 @@ async fn chat(
         state.credential_store.as_ref(),
         std::sync::Arc::new(state.llm()),
         state.rate_limiter.clone(),
+        &state.settings.provider_policy(),
     )
     .map_err(AppError)?;
     // Embed history into the prompt when prior turns exist; otherwise use the bare prompt.

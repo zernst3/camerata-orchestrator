@@ -85,3 +85,66 @@ Provider list + prices + policy flags come from a **lazy `/endpoints` fetch** wh
 ## Reversal note
 
 Supersedes the 2026-07 in-conversation decision to defer provider-selection to OpenRouter's account settings. New rationale: **data-safety-by-default is a product trust guarantee for handling client code**, not the generic region-convenience that was correctly deferred earlier.
+
+## Pass 1 landed (2026-08-06)
+
+Built exactly §1, §2, §6, and the enforcement half of §5's data. **No UI** (picker, settings toggle, warning banner) — that is Pass 2.
+
+### What shipped
+
+- **`ProviderPolicy`** — `crates/llm/src/provider_policy.rs`. `{ safe_mode: bool (default true), pinned_provider: Option<String> }`. `#[serde(default)]` on `safe_mode` so a settings file predating this feature (or `{}`) resolves to `safe_mode: true`, never panics, never silently unsafe.
+  - **Persistence**: added to `crates/server/src/settings.rs`'s `Settings` struct as `provider_policy: ProviderPolicy` (`#[serde(default)]`), alongside the existing `chat_model` / `llm_backend` app-level settings — same JSON file (`settings.json` in the per-user data dir), same `SettingsStore::load_or_new` / `.save()` machinery. New accessors: `SettingsStore::provider_policy()` / `set_provider_policy(..)`, mirroring `chat_model()` / `set_chat_model(..)`. Session-reset-to-safe (§3) is NOT implemented here — that's a Pass-2 app-lifecycle concern; the setter just persists whatever it's given.
+  - Server-side re-export shim at `crates/server/src/provider_policy.rs` (`pub use camerata_llm::provider_policy::*;`), following the existing `llm.rs` / `credentials.rs` / `model_registry.rs` shim pattern, so `crate::provider_policy::*` resolves unchanged everywhere in `camerata-server`.
+
+- **Per-provider data-policy fetch + cache** — extended `crates/llm/src/model_registry.rs`. Two OpenRouter endpoints, joined:
+  1. `GET /api/v1/models/<id>/endpoints` — per-model: which providers currently serve this model + per-model pricing. **Verified live 2026-08-06** against `deepseek/deepseek-chat` and `qwen/qwen3-coder` — does **NOT** carry any data-policy field. Shape: `{"data": {"id", "name", "endpoints": [{"provider_name", "tag", "pricing": {"prompt", "completion"}, ...}]}}`. The `tag` field (e.g. `"deepinfra/fp4"`, `"streamlake"`, `"google-vertex/us-south1"`) is the provider-variant slug; the segment before the first `/` is the provider slug used for the join and for the request-body `provider.only` array.
+  2. `GET /api/frontend/v1/all-providers` — per-provider (not per-model): every provider's `dataPolicy` block. **This is the source the design doc flagged as "reconcile the sources" — found and verified live 2026-08-06.** It is an **undocumented-but-public frontend endpoint** (no `/docs/api-reference` page for it as of this writing; no API key required — confirmed via an unauthenticated `curl`). Shape: `{"data": [{"slug", "name", "headquarters", "dataPolicy": {"training": bool, "trainingOpenRouter": bool, "retainsPrompts": bool, "retentionDays"?: number, ...}}]}`. Field names confirmed exactly as documented in the task brief (`training`, `retainsPrompts`, `retentionDays`).
+  - Join key: `tag.split('/').next()` (endpoint) against `slug` (all-providers) — NOT a display-name match (verified `"DeepInfra"` provider_name / `"deepinfra"` tag-prefix / `"deepinfra"` slug all line up; also verified the trickier `"Google"` provider_name / `"google-vertex/us-south1"` tag / `"google-vertex"` slug case, where a name-based join would have broken).
+  - `ModelRegistry::safe_providers_for(model_id) -> SafeProviders` (sync, cache-only) and `ensure_safe_providers_loaded(api_key, model_id) -> SafeProviders` (async, lazy-fetch-on-miss) added. Fail-closed throughout: a `tag` that's missing, or whose slug isn't in the policy catalog (unknown provider, catalog fetch failed), is recorded as `training: true, retains_prompts: true` — i.e. excluded from the safe set, never defaulted safe.
+  - Live-verified sample JSON (trimmed) for both endpoints is embedded directly in `model_registry.rs`'s test module (`SAMPLE_ENDPOINTS_JSON`, `SAMPLE_ALL_PROVIDERS_JSON`) and used to prove the parser doesn't panic on the real shape.
+
+### The exact `provider` JSON emitted, per mode
+
+All four cases live in `crates/llm/src/provider_policy.rs::provider_constraint_for_request` (the ONE function both OpenRouter request-body call sites go through) and are asserted at both the sub-object level (`provider_policy.rs` tests) and the full-request-body level (`llm.rs`'s `build_openrouter_chat_body` tests):
+
+- **safe_mode ON, no pin** (the default): `{"data_collection": "deny", "only": ["deepinfra", "novita", ...]}` — `only` is exactly the live-computed set where `training == false && retains_prompts == false` for this model. No hardcoded list.
+- **safe_mode ON, pin = safe provider**: `{"data_collection": "deny", "only": ["<pin>"]}` — narrows to exactly the pin.
+- **safe_mode ON, pin = unsafe/unknown provider**: pin is DROPPED; `only` stays the full safe set — same shape as the no-pin case. Never widens, never includes the unsafe pin.
+- **safe_mode OFF**: no `provider` key in the request body at all (verified at `chat_body_safe_mode_off_has_no_provider_key_at_all`).
+
+### Fail-closed behavior (the degenerate case)
+
+When `safe_mode` is ON but the safe-provider set can't be determined — either `SafeProviders::Unknown` (endpoints never fetched / fetch failed) or `SafeProviders::Known(vec![])` (fetched, but genuinely zero providers for this model pass the bar) — **`provider_constraint_for_request` returns `Err`, and both call sites propagate that as a hard error BEFORE building the request body or touching the HTTP client.** No HTTP request is sent at all in this case; this is stronger than the design doc's stated floor ("at minimum send `data_collection: deny`") — Pass 1 blocks entirely rather than sending a retention-only-safe/training-unsafe request, because an `only: []` array was judged too fragile a "block everything" signal to rely on at the OpenRouter API level (some provider-routing implementations treat an empty filter as "no filter" — never verified live, deliberately not risked). This is proven end-to-end without any network call via `llm.rs::complete_fails_closed_with_zero_safe_providers_no_network_call`, which seeds the registry's cache directly (`ModelRegistry::seed_provider_endpoints`, a test-only seam) with zero safe providers and asserts `OpenRouterCompleter::complete` errors before any HTTP client is constructed.
+
+### The core invariant test
+
+`crates/llm/src/provider_policy.rs::only_list_is_always_a_subset_of_the_safe_set` — property-style across six safe-set/pin combinations (including an unsafe pin and a bogus pin), asserting the emitted `only` array is always a subset of the input safe set. Paired with `training_or_retaining_provider_never_appears_in_only` and, at the join layer, `model_registry.rs::training_provider_excluded_from_safe_set` / `retaining_only_provider_excluded_from_safe_set` (using DeepSeek's live-verified `training: true` record and StreamLake's live-verified `retainsPrompts: true, training: false` record respectively — proving the bar is `training == false AND retains_prompts == false`, not just one flag).
+
+### How a training/retaining provider is proven excluded
+
+Three layers, each with dedicated tests:
+1. **Join layer** (`model_registry.rs`): `join_endpoints_with_policy` + `compute_safe_providers`, using the live-captured DeepSeek (`training: true`) and StreamLake (`retainsPrompts: true`) records — both excluded from the computed safe set (`training_provider_excluded_from_safe_set`, `retaining_only_provider_excluded_from_safe_set`).
+2. **Constraint-builder layer** (`provider_policy.rs`): given a safe set that already excludes the unsafe providers, the builder never reintroduces them, INCLUDING when they're pinned (`training_or_retaining_provider_never_appears_in_only`, `unsafe_pin_is_dropped_request_stays_restricted_to_safe_set`).
+3. **Full-request-body layer** (`llm.rs`): `chat_body_pinned_unsafe_provider_is_dropped_stays_restricted_to_safe_set` — the exact scenario the task calls out by name, asserted on the actual JSON body that would be posted.
+4. **Fail-closed layer**: unknown/malformed provider data resolves to UNSAFE, never safe (`missing_tag_and_unknown_slug_are_excluded_not_panicking`, `empty_policy_catalog_makes_every_endpoint_unsafe`).
+
+### Test counts
+
+- `camerata-llm`: 128 passed, 1 ignored (`complete_fails_closed_when_safe_set_never_loaded_live_smoke_test`, marked `#[ignore]` — hits the live OpenRouter `/endpoints` API, run manually not in CI).
+- `camerata-server`: 1251 lib tests + all integration test binaries green (`model_selection_e2e.rs` 29/29, plus every other suite unaffected).
+- `cargo check --workspace --all-targets`: clean (only pre-existing, unrelated dead-code warnings in `camerata-ui` / `camerata-gateway`).
+
+### The live smoke-test the operator must run
+
+Pass 1 could not verify (no live OpenRouter API key available in this session):
+- That `data_collection: "deny"` + `provider.only` actually compose the way OpenRouter's docs describe when sent together in one request (both were verified independently against docs/behavior description, not a live joint request).
+- **Which provider actually serves a real request** when `only` is set to Camerata's computed safe list — i.e., that OpenRouter's routing genuinely never falls through to a provider outside `only`.
+
+**Manual smoke test** (run with a real `OPENROUTER_API_KEY` before this handles client-repository content): call a cheap OpenRouter model (e.g. `deepseek/deepseek-chat`) through the normal chat path with safe_mode ON, capture the response, and cross-check the serving provider — either via the response's provider-identifying fields or via `https://openrouter.ai/activity` in the account dashboard — against the `only` list Camerata computed for that request (log it, or breakpoint `provider_constraint_for_request`'s return value). Confirm the served provider is IN the list. The `crates/llm/src/llm.rs::complete_fails_closed_when_safe_set_never_loaded_live_smoke_test` test (marked `#[ignore]`) exercises the adjacent fail-closed-on-first-call path live; there is no automated test for "OpenRouter honors `only`" since that requires asserting on OpenRouter's own routing behavior, not Camerata's.
+
+### What Pass 2 (UI) builds on
+
+- `ModelRegistry::safe_providers_for` / `provider_endpoints_for` (the richer, full-record sibling — pricing + region + training/retention per provider) are ALREADY the data source for the picker's per-provider list + "Auto — cheapest safe" option + safety badges (§5). No new data plumbing needed.
+- `SettingsStore::provider_policy()` / `set_provider_policy(..)` are the read/write seam for the settings-panel toggle + pin picker (§3). Pass 2 adds the confirm-dialog UX and the session-scoped auto-reset-to-safe-on-restart behavior (currently NOT implemented — `set_provider_policy` persists whatever it's given, with no lifecycle hook).
+- The global warning banner (§4) needs a way to read "is safe_mode currently off" — `SettingsStore::provider_policy().safe_mode` — no new backend surface required, just an endpoint/websocket to expose it to the `desktop_chrome` layer.
+- `ProviderEndpointInfo::region` (from `all-providers`' `headquarters` field) is captured but unused by Pass 1 logic — ready for the picker's region-flag column.

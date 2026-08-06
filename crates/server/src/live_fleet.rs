@@ -319,6 +319,9 @@ pub async fn execute_live_run_tiered(
     skip_layer2: bool,
     vision_enabled: bool,
     registry: crate::model_registry::ModelRegistry,
+    // THE TRUST CORE: the OpenRouter provider-safety policy (see `crate::provider_policy`)
+    // — resolved by the caller from `state.settings().provider_policy()`.
+    policy: crate::provider_policy::ProviderPolicy,
     creds: Arc<dyn crate::credentials::CredentialStore>,
     limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
 ) {
@@ -421,6 +424,7 @@ pub async fn execute_live_run_tiered(
         Some(Arc::new(
             crate::api_agent_driver::ServerOrchestratorDriverFactory::new(
                 registry,
+                policy,
                 creds,
                 limiter,
                 gateway_bin.clone(),

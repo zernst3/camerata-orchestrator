@@ -26,6 +26,7 @@
 pub mod credentials;
 pub mod llm;
 pub mod model_registry;
+pub mod provider_policy;
 pub mod rate_limit;
 pub mod usage_ledger;
 
@@ -37,5 +38,6 @@ pub use llm::{
     OpenRouterCompleter,
 };
 pub use model_registry::ModelRegistry;
+pub use provider_policy::{provider_constraint_for_request, ProviderPolicy, SafeProviders};
 pub use rate_limit::ProviderRateLimiter;
 pub use usage_ledger::UsageLedger;

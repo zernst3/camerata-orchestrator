@@ -39,6 +39,13 @@ pub struct Settings {
     /// default `cli`).
     #[serde(default)]
     pub llm_backend: Option<String>,
+    /// OpenRouter provider-safety policy (safe-by-default no-train/no-retain provider
+    /// enforcement) — see `docs/design/2026-07-28_openrouter-provider-safety.md`.
+    /// `#[serde(default)]` so a settings file predating this field (or a hand-trimmed
+    /// one) still deserializes to `ProviderPolicy::default()` (`safe_mode: true`), never
+    /// panics and never silently resolves to an unsafe posture.
+    #[serde(default)]
+    pub provider_policy: camerata_llm::provider_policy::ProviderPolicy,
 }
 
 /// Clone-shareable settings store, persisted to a JSON file so the workspace choice
@@ -154,6 +161,35 @@ impl SettingsStore {
         updated
     }
 
+    /// The current OpenRouter provider-safety policy. Never `None` — defaults to
+    /// `ProviderPolicy::default()` (`safe_mode: true`) when nothing has been stored yet,
+    /// so every request-building call site gets a safe answer even before any settings
+    /// file exists.
+    pub fn provider_policy(&self) -> camerata_llm::provider_policy::ProviderPolicy {
+        self.get().provider_policy
+    }
+
+    /// Set the OpenRouter provider-safety policy, persisting the change. Returns the
+    /// updated settings. Note: per the design doc, turning `safe_mode` off is meant to
+    /// be a SESSION-scoped act (reset to safe on app restart) — that reset behavior is a
+    /// Pass-2 app-lifecycle concern (e.g. calling this with the default at startup), not
+    /// enforced by this setter itself, which just persists whatever it's given.
+    pub fn set_provider_policy(
+        &self,
+        policy: camerata_llm::provider_policy::ProviderPolicy,
+    ) -> Settings {
+        let updated = {
+            let mut s = match self.inner.lock() {
+                Ok(s) => s,
+                Err(_) => return Settings::default(),
+            };
+            s.provider_policy = policy;
+            s.clone()
+        };
+        self.save();
+        updated
+    }
+
     /// The machine-local override path for `repo` (`owner/repo`), if one was set.
     pub fn repo_path(&self, repo: &str) -> Option<String> {
         self.get()
@@ -207,6 +243,64 @@ mod tests {
         // Empty / whitespace clears it.
         store.set_chat_model(Some("   ".to_string()));
         assert!(store.chat_model().is_none());
+    }
+
+    #[test]
+    fn provider_policy_defaults_to_safe_mode_on_with_no_pin_before_anything_is_set() {
+        let store = SettingsStore::new();
+        let policy = store.provider_policy();
+        assert!(policy.safe_mode, "a fresh store must read as safe_mode=true");
+        assert_eq!(policy.pinned_provider, None);
+    }
+
+    #[test]
+    fn set_and_get_provider_policy() {
+        let store = SettingsStore::new();
+        let policy = camerata_llm::provider_policy::ProviderPolicy {
+            safe_mode: false,
+            pinned_provider: Some("deepinfra".to_string()),
+        };
+        store.set_provider_policy(policy.clone());
+        assert_eq!(store.provider_policy(), policy);
+    }
+
+    #[test]
+    fn provider_policy_persists_across_reload() {
+        let dir =
+            std::env::temp_dir().join(format!("camerata-settings-policy-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        {
+            let store = SettingsStore::load_or_new(path.clone());
+            store.set_provider_policy(camerata_llm::provider_policy::ProviderPolicy {
+                safe_mode: false,
+                pinned_provider: Some("deepinfra".to_string()),
+            });
+        }
+        let reloaded = SettingsStore::load_or_new(path);
+        let policy = reloaded.provider_policy();
+        assert!(!policy.safe_mode);
+        assert_eq!(policy.pinned_provider.as_deref(), Some("deepinfra"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A settings.json predating this feature (no `provider_policy` key at all) must
+    /// still load as safe_mode=true — the whole point of `#[serde(default)]` on the
+    /// field. This is the fail-safe-on-upgrade guarantee.
+    #[test]
+    fn settings_file_without_provider_policy_key_loads_as_safe_default() {
+        let dir = std::env::temp_dir()
+            .join(format!("camerata-settings-legacy-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A settings file with only the pre-existing fields, no `provider_policy` key.
+        std::fs::write(&path, r#"{"workspace_root": "/tmp/ws", "chat_model": null, "llm_backend": null}"#).unwrap();
+        let store = SettingsStore::load_or_new(path);
+        let policy = store.provider_policy();
+        assert!(policy.safe_mode, "missing provider_policy key must default to safe_mode=true");
+        assert_eq!(policy.pinned_provider, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
