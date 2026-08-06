@@ -4486,6 +4486,29 @@ textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-f
   z-index: 10;
 }
 
+/* ── OpenRouter provider-safety: testing-mode warning banner (Pass 2 §4) ──
+   Global chrome, mounted once in App (main.rs) as a top-level sibling — NOT
+   inside any per-screen component — so it renders identically no matter
+   which cockpit view is active. Fixed at the very top of the viewport, above
+   EVERYTHING else (including the toast host, the highest z-index otherwise
+   in the app) so it can never be obscured. Non-dismissible: no close button,
+   by design — it disappears only when safe_mode turns back on. */
+.testing-mode-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2147483001;
+  padding: 8px 16px;
+  background: var(--danger-color, #dc2626);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  text-align: center;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.35);
+}
+
 /* ═══════════════════════════════════════════════════════════════════════════
    BLETCHLEY COMPONENT THEME — ports the effective mockup CSS onto the app's
    actual class names.  Palette vars are already in :root above; this section
@@ -5577,6 +5600,62 @@ select:focus {
 .backend-key-warning {
   margin-top: 8px;
   font-size: 13px;
+}
+
+/* ── Data safety (OpenRouter provider-safety toggle, Pass 2 §3) ── */
+/* Reuses .backend-toggle / .backend-seg (the CLI ⟷ API segmented control) via
+   .safety-toggle; only the active/OFF ("testing mode") segment needs its own
+   danger-red styling so it reads as visibly different from a normal selection. */
+.backend-seg-danger {
+  background: var(--danger-color, #dc2626) !important;
+}
+.safety-confirm-dialog {
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1.5px solid var(--danger-color, #dc2626);
+  border-radius: var(--r-md);
+  background: rgba(220,38,38,0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.safety-confirm-text {
+  margin: 0;
+  font-size: 13px;
+  color: var(--ink);
+  line-height: 1.5;
+  font-weight: 600;
+}
+.safety-confirm-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+}
+
+/* ── Provider picker (Pass 2 §5) ── */
+.provider-picker {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+.provider-picker-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+.provider-picker-select {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  color: var(--ink);
+  font-size: 12px;
+  padding: 4px 8px;
+  max-width: 100%;
+}
+.provider-picker-status {
+  font-size: 12px;
 }
 .bombe-toggle-btn {
   font: inherit;

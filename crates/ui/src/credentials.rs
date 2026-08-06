@@ -300,6 +300,9 @@ pub fn CredentialsSettings() -> Element {
             // ── OpenRouter model-registry refresh (manual trigger, 3 of 3) ──
             OpenRouterModelsRefresh {}
 
+            // ── Data safety (OpenRouter provider-safety toggle, Pass 2 §3) ──
+            crate::provider_safety::DataSafetySettings {}
+
             // ── Claude backend (CLI ⟷ API) ────────────────────────────────
             ModelBackendSettings {}
 
@@ -1004,13 +1007,19 @@ mod tests {
         );
     }
 
-    // CredentialsSettings consumes three contexts (toasts Signal, BombeEnabled,
-    // BombePreview) and a use_resource. On first SSR render the resource is pending,
-    // so it renders the "Loading…" branch plus the BombeSettings section.
+    // CredentialsSettings consumes four contexts (toasts Signal, BombeEnabled,
+    // BombePreview, ProviderPolicySignal — the last for the nested DataSafetySettings)
+    // and a use_resource. On first SSR render the resource is pending, so it renders the
+    // "Loading…" branch plus the BombeSettings section.
     fn credentials_settings_harness() -> Element {
         use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
         use_context_provider(|| BombeEnabled(Signal::new(true)));
         use_context_provider(|| BombePreview(Signal::new(false)));
+        use_context_provider(|| {
+            crate::provider_safety::ProviderPolicySignal(Signal::new(
+                crate::provider_safety::ProviderPolicyView::default(),
+            ))
+        });
         rsx! {
             CredentialsSettings {}
         }
@@ -1047,6 +1056,12 @@ mod tests {
             html.contains("Refresh models"),
             "the OpenRouter refresh button renders; html=\n{html}"
         );
+        // The Data safety toggle (Pass 2 §3) renders too, unconditionally.
+        assert!(
+            html.contains("Data safety"),
+            "the Data safety section renders; html=\n{html}"
+        );
+        assert!(html.contains("SAFE MODE"), "the SAFE segment renders; html=\n{html}");
     }
 
     // OpenRouterModelsRefresh only consumes the toasts context (no resource), so SSR

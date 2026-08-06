@@ -190,6 +190,40 @@ impl SettingsStore {
         updated
     }
 
+    /// **Pass 2's session-scoped safety reset** (design doc §3): force `safe_mode` back to
+    /// `true`, unconditionally, on every app start — regardless of what was persisted.
+    /// `pinned_provider` is preserved (only `safe_mode` is session-scoped; the pin may
+    /// persist across restarts).
+    ///
+    /// MECHANISM: called once from `AppState::from_env`, right after the settings file
+    /// loads, so it runs at the top of every BFF process boot. The desktop shell
+    /// (`crates/ui/src/main.rs` → `server_process::ensure_server_running`) spawns a FRESH
+    /// BFF subprocess on every app launch (unless reusing an already-healthy standalone
+    /// server on `:8787`, a dev-only edge case — see the design doc's "Pass 2 landed"
+    /// section for that caveat), so "server process boot" and "app session start" coincide
+    /// in the shipped desktop flow. This was chosen over a purely client-side session flag
+    /// because `safe_mode` is read server-side by the enforcement seam
+    /// (`provider_policy::provider_constraint_for_request`) on every request — a
+    /// server-side reset is the only place that can guarantee testing mode never survives
+    /// a restart even if the UI never loads (e.g. a routine/cron run against the same BFF).
+    ///
+    /// A no-op write when `safe_mode` is already `true` (the common case) — does not touch
+    /// disk unless a reset is actually needed, so a normal safe-mode boot doesn't rewrite
+    /// `settings.json` on every launch.
+    pub fn reset_provider_policy_to_safe_on_startup(
+        &self,
+    ) -> camerata_llm::provider_policy::ProviderPolicy {
+        let current = self.provider_policy();
+        if current.safe_mode {
+            return current;
+        }
+        self.set_provider_policy(camerata_llm::provider_policy::ProviderPolicy {
+            safe_mode: true,
+            pinned_provider: current.pinned_provider,
+        })
+        .provider_policy
+    }
+
     /// The machine-local override path for `repo` (`owner/repo`), if one was set.
     pub fn repo_path(&self, repo: &str) -> Option<String> {
         self.get()
@@ -300,6 +334,86 @@ mod tests {
         let policy = store.provider_policy();
         assert!(policy.safe_mode, "missing provider_policy key must default to safe_mode=true");
         assert_eq!(policy.pinned_provider, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── Pass 2: session-scoped safety reset ─────────────────────────────────────
+
+    #[test]
+    fn startup_reset_forces_off_to_on_and_preserves_the_pin() {
+        let store = SettingsStore::new();
+        store.set_provider_policy(camerata_llm::provider_policy::ProviderPolicy {
+            safe_mode: false,
+            pinned_provider: Some("deepinfra".to_string()),
+        });
+        assert!(!store.provider_policy().safe_mode, "precondition: testing mode was on");
+
+        let reset = store.reset_provider_policy_to_safe_on_startup();
+
+        assert!(reset.safe_mode, "the reset must force safe_mode back to true");
+        assert_eq!(
+            reset.pinned_provider.as_deref(),
+            Some("deepinfra"),
+            "the pin is NOT session-scoped — it must survive the reset"
+        );
+        // The reset must have actually persisted, not just returned a value.
+        assert!(store.provider_policy().safe_mode);
+    }
+
+    #[test]
+    fn startup_reset_is_a_noop_when_already_safe() {
+        let store = SettingsStore::new();
+        store.set_provider_policy(camerata_llm::provider_policy::ProviderPolicy {
+            safe_mode: true,
+            pinned_provider: Some("novita".to_string()),
+        });
+        let reset = store.reset_provider_policy_to_safe_on_startup();
+        assert!(reset.safe_mode);
+        assert_eq!(reset.pinned_provider.as_deref(), Some("novita"));
+    }
+
+    #[test]
+    fn startup_reset_on_a_fresh_store_with_no_policy_ever_set_stays_safe() {
+        // A brand-new store (no settings.json yet) already reads as safe_mode=true via the
+        // struct default — the reset must not disturb that, and must not panic on a store
+        // with nothing persisted.
+        let store = SettingsStore::new();
+        let reset = store.reset_provider_policy_to_safe_on_startup();
+        assert!(reset.safe_mode);
+        assert_eq!(reset.pinned_provider, None);
+    }
+
+    /// End-to-end across a simulated restart: persist testing mode to disk, "restart" by
+    /// loading a fresh `SettingsStore` from the same path (mirrors what `AppState::from_env`
+    /// does on every real boot), run the startup reset, and confirm safe_mode reads back as
+    /// true from disk — the exact guarantee the design doc's §3 asks for ("can never be
+    /// silently left on across sessions").
+    #[test]
+    fn startup_reset_survives_a_simulated_process_restart() {
+        let dir = std::env::temp_dir()
+            .join(format!("camerata-settings-reset-{}", std::process::id()));
+        let path = dir.join("settings.json");
+        let _ = std::fs::remove_dir_all(&dir);
+        {
+            // "Session 1": operator turns testing mode on and it persists to disk.
+            let store = SettingsStore::load_or_new(path.clone());
+            store.set_provider_policy(camerata_llm::provider_policy::ProviderPolicy {
+                safe_mode: false,
+                pinned_provider: Some("deepinfra".to_string()),
+            });
+        }
+        {
+            // "Session 2": a fresh process boots, loads the same file, and runs the reset —
+            // exactly the `AppState::from_env` sequence.
+            let store = SettingsStore::load_or_new(path.clone());
+            assert!(!store.provider_policy().safe_mode, "loaded the OFF value from disk");
+            store.reset_provider_policy_to_safe_on_startup();
+        }
+        // "Session 3": reload again to prove the reset itself persisted (not just an
+        // in-memory return value that a real process boot would also throw away).
+        let reloaded = SettingsStore::load_or_new(path);
+        assert!(reloaded.provider_policy().safe_mode, "safe_mode must never survive a restart as OFF");
+        assert_eq!(reloaded.provider_policy().pinned_provider.as_deref(), Some("deepinfra"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

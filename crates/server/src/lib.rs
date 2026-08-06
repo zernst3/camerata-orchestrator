@@ -719,6 +719,11 @@ impl AppState {
             let dir = data.join("camerata");
             state.projects = crate::project::ProjectStore::load_or_new(dir.join("projects.json"));
             state.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
+            // Provider-safety session-scoped reset (Pass 2 §3): `safe_mode` must never
+            // survive a restart as OFF, even though it's otherwise persisted alongside the
+            // rest of `Settings`. See `SettingsStore::reset_provider_policy_to_safe_on_startup`
+            // for the full mechanism note — this is the one call site.
+            state.settings.reset_provider_policy_to_safe_on_startup();
             // Hydrate the LLM-backend env var from the persisted setting so the existing
             // env-driven selection sites (`Llm::from_env`, the agent driver's
             // `anthropic_api_backend_key`) honor the stored choice unchanged. Making the
@@ -1078,10 +1083,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/models", get(list_models))
         .route("/api/models/registry", get(get_model_registry))
         .route("/api/models/registry/refresh", post(refresh_model_registry))
+        // Pass 2 (provider-safety UI): the picker's data source — per-provider
+        // pricing + data-policy for one model, lazily fetched on first request.
+        .route("/api/models/providers", get(get_model_providers))
         .route("/api/settings", get(get_settings))
         .route("/api/settings/workspace", post(set_workspace_root))
         .route("/api/settings/chat-model", post(set_chat_model))
         .route("/api/settings/llm-backend", post(set_llm_backend))
+        // Pass 2 (provider-safety UI): the settings-panel "Data safety" toggle + pin.
+        .route("/api/settings/provider-policy", post(set_provider_policy_handler))
         .route(
             "/api/projects/:id/checkout",
             get(checkout_status).post(checkout_project),
@@ -8456,6 +8466,124 @@ async fn refresh_model_registry(
     })
 }
 
+// ── Provider-safety (Pass 2 UI data source) ─────────────────────────────────────
+//
+// Thin routes over the Pass-1 `camerata_llm::ModelRegistry` / `SettingsStore` seams (see
+// `docs/design/2026-07-28_openrouter-provider-safety.md`'s "Pass 2" section). Neither
+// route touches enforcement — `provider_policy::provider_constraint_for_request` (the
+// trust core) reads the SAME `ModelRegistry` cache and `SettingsStore` these routes
+// read/write, so the picker can never show a state the enforcement path disagrees with.
+
+/// One provider's picker-facing record: the full joined pricing + data-policy fields the
+/// UI needs to render a row (name, region flag, cost, safety badge). Mirrors
+/// `camerata_llm::model_registry::ProviderEndpointInfo` field-for-field; kept as a
+/// separate wire type (rather than deriving `Serialize` on the lib type) so the JSON
+/// shape is a deliberate, documented contract independent of the internal struct.
+#[derive(serde::Serialize)]
+struct ProviderEndpointWire {
+    slug: String,
+    name: String,
+    region: Option<String>,
+    price_in: f64,
+    price_out: f64,
+    training: bool,
+    retains_prompts: bool,
+}
+
+#[derive(serde::Serialize)]
+struct ModelProvidersResp {
+    model_id: String,
+    /// Every provider currently serving `model_id`, per OpenRouter's `/endpoints` +
+    /// `/all-providers` join. Empty means either the model has no OpenRouter provider
+    /// data at all, or the lazy fetch failed — the UI treats both as "provider data
+    /// unavailable" and falls back to Auto (safe/fail-closed enforcement is unaffected
+    /// either way; it lives server-side in `provider_policy::provider_constraint_for_request`,
+    /// not in what this endpoint happens to return).
+    providers: Vec<ProviderEndpointWire>,
+}
+
+#[derive(serde::Deserialize)]
+struct ModelProvidersQuery {
+    model_id: String,
+}
+
+/// `GET /api/models/providers?model_id=<id>` — the Pass-2 provider picker's data source.
+/// Triggers the lazy per-model OpenRouter provider-safety fetch
+/// (`ModelRegistry::ensure_safe_providers_loaded`) if `model_id`'s data isn't already
+/// cached in this process, then returns the full per-provider record list
+/// (`ModelRegistry::provider_endpoints_for`) for the picker to render rows from. `model_id`
+/// is a query param (not a path segment) because OpenRouter model ids contain `/`
+/// (e.g. `deepseek/deepseek-chat`), which axum path routing does not accept unescaped.
+async fn get_model_providers(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ModelProvidersQuery>,
+) -> Json<ModelProvidersResp> {
+    let api_key = state
+        .credential_store
+        .get(crate::credentials::OPENROUTER_API_KEY)
+        .ok()
+        .flatten()
+        .filter(|k| !k.trim().is_empty());
+    state
+        .model_registry
+        .ensure_safe_providers_loaded(api_key.as_deref(), &q.model_id)
+        .await;
+    let providers = state
+        .model_registry
+        .provider_endpoints_for(&q.model_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| ProviderEndpointWire {
+            slug: e.provider_slug,
+            name: e.provider_name,
+            region: e.region,
+            price_in: e.price_in,
+            price_out: e.price_out,
+            training: e.training,
+            retains_prompts: e.retains_prompts,
+        })
+        .collect();
+    Json(ModelProvidersResp {
+        model_id: q.model_id,
+        providers,
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct ProviderPolicyReq {
+    safe_mode: bool,
+    #[serde(default)]
+    pinned_provider: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ProviderPolicyResp {
+    safe_mode: bool,
+    pinned_provider: Option<String>,
+}
+
+/// `POST /api/settings/provider-policy` — persist the OpenRouter provider-safety policy
+/// (the §3 settings-panel "Data safety" toggle + optional provider pin). Purely a
+/// persistence seam: an unsafe/unknown pin is NOT rejected here — the enforcement layer
+/// (`provider_policy::provider_constraint_for_request`) already drops an unsafe pin at
+/// request-build time (never widens the constraint), so this handler's only job is to
+/// store whatever the UI sends. Blank `pinned_provider` values collapse to `None`, same
+/// convention as the other settings setters in this file (e.g. `set_chat_model`).
+async fn set_provider_policy_handler(
+    State(state): State<AppState>,
+    Json(req): Json<ProviderPolicyReq>,
+) -> Json<ProviderPolicyResp> {
+    let pinned_provider = req.pinned_provider.filter(|p| !p.trim().is_empty());
+    let updated = state.settings.set_provider_policy(camerata_llm::provider_policy::ProviderPolicy {
+        safe_mode: req.safe_mode,
+        pinned_provider,
+    });
+    Json(ProviderPolicyResp {
+        safe_mode: updated.provider_policy.safe_mode,
+        pinned_provider: updated.provider_policy.pinned_provider,
+    })
+}
+
 /// One prior turn in a research-chat conversation, sent by the UI with each POST so the
 /// model has memory of the thread. role must be "user" or "assistant".
 #[derive(serde::Deserialize, Clone, PartialEq, Debug)]
@@ -8647,6 +8775,11 @@ struct SettingsResp {
     /// `anthropic_api_key` credential) or the `ANTHROPIC_API_KEY` env var. See
     /// [`anthropic_api_key_present`].
     api_key_present: bool,
+    /// OpenRouter provider-safety policy (Pass 2 §3): the current `safe_mode` + pinned
+    /// provider. Read by the credentials-panel toggle and the provider picker (both need
+    /// to know the current posture to render correctly — e.g. greying unsafe rows).
+    safe_mode: bool,
+    pinned_provider: Option<String>,
 }
 
 /// The current app settings (incl. the workspace root), plus the effective LLM backend and
@@ -8660,6 +8793,8 @@ async fn get_settings(State(state): State<AppState>) -> Json<SettingsResp> {
         chat_model: settings.chat_model,
         llm_backend,
         api_key_present: anthropic_api_key_present(state.credential_store.as_ref()),
+        safe_mode: settings.provider_policy.safe_mode,
+        pinned_provider: settings.provider_policy.pinned_provider,
     })
 }
 
@@ -14531,6 +14666,151 @@ mod tests {
             "the handler must not mutate CAMERATA_LLM_BACKEND"
         );
         std::env::remove_var("CAMERATA_LLM_BACKEND");
+    }
+
+    // ── Pass 2 (provider-safety UI): settings routes + the picker's data route ──────
+
+    /// `GET /api/settings` surfaces the provider-safety policy's default (safe_mode=true,
+    /// no pin) when nothing has ever been set — the same fail-safe guarantee
+    /// `SettingsStore::provider_policy` gives at the store layer, now visible over HTTP.
+    #[tokio::test]
+    async fn get_settings_includes_default_safe_mode_and_no_pin() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["safe_mode"], true);
+        assert!(json["pinned_provider"].is_null());
+    }
+
+    /// `POST /api/settings/provider-policy` persists both fields and echoes them; the
+    /// store reflects the new value afterward.
+    #[tokio::test]
+    async fn post_provider_policy_persists_safe_mode_and_pin() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/settings/provider-policy")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"safe_mode":false,"pinned_provider":"deepinfra"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["safe_mode"], false);
+        assert_eq!(json["pinned_provider"], "deepinfra");
+
+        let stored = state.settings.provider_policy();
+        assert!(!stored.safe_mode);
+        assert_eq!(stored.pinned_provider.as_deref(), Some("deepinfra"));
+    }
+
+    /// A blank/whitespace `pinned_provider` collapses to `None` — same convention as
+    /// `set_chat_model` / `set_llm_backend` elsewhere in this file.
+    #[tokio::test]
+    async fn post_provider_policy_blank_pin_collapses_to_none() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/settings/provider-policy")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"safe_mode":true,"pinned_provider":"   "}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["pinned_provider"].is_null());
+        assert_eq!(state.settings.provider_policy().pinned_provider, None);
+    }
+
+    /// `GET /api/models/providers?model_id=...` returns the joined provider records from
+    /// the (test-seeded) registry cache — no live network call. Seeds via
+    /// `ModelRegistry::seed_provider_endpoints`, the same test-only seam
+    /// `crates/llm/src/model_registry.rs` uses.
+    #[tokio::test]
+    async fn get_model_providers_returns_seeded_endpoint_records() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.model_registry.seed_provider_endpoints(
+            "deepseek/deepseek-chat",
+            vec![crate::model_registry::ProviderEndpointInfo {
+                provider_slug: "deepinfra".to_string(),
+                provider_name: "DeepInfra".to_string(),
+                region: Some("US".to_string()),
+                training: false,
+                retains_prompts: false,
+                price_in: 0.14,
+                price_out: 0.28,
+            }],
+        );
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/models/providers?model_id=deepseek%2Fdeepseek-chat")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["model_id"], "deepseek/deepseek-chat");
+        let providers = json["providers"].as_array().expect("providers array");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0]["slug"], "deepinfra");
+        assert_eq!(providers[0]["name"], "DeepInfra");
+        assert_eq!(providers[0]["region"], "US");
+        assert_eq!(providers[0]["training"], false);
+        assert_eq!(providers[0]["retains_prompts"], false);
+        assert!((providers[0]["price_in"].as_f64().unwrap() - 0.14).abs() < 1e-9);
+    }
+
+    /// A model with no cached provider data returns an empty `providers` array (not an
+    /// error) — the UI's "provider data unavailable, fall back to Auto" path reads this as
+    /// the degrade-gracefully signal, per the design doc's §5 requirement. Seeds an EMPTY
+    /// endpoint list directly (the same shape a failed/empty live fetch would cache) so
+    /// this stays a no-network unit test rather than hitting the real OpenRouter API.
+    #[tokio::test]
+    async fn get_model_providers_empty_for_unknown_model_does_not_error() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state
+            .model_registry
+            .seed_provider_endpoints("not-a-real-model", vec![]);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/models/providers?model_id=not-a-real-model")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["model_id"], "not-a-real-model");
+        assert_eq!(json["providers"].as_array().unwrap().len(), 0);
     }
 
     // ── `effective_workspace_root` (workspace-folder-derivation fix) ─────────────

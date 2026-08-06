@@ -1,6 +1,6 @@
 # OpenRouter Provider Safety + Selection — Design
 
-**Date:** 2026-07-28 · **Status:** design, LOCKED (all forks decided), **not built** · **Branch:** feat/audit-report-export
+**Date:** 2026-07-28 · **Status:** Pass 1 (backend) + Pass 2 (UI) both LANDED — see the two "landed" sections below · **Branch:** feat/audit-report-export
 
 ## Context & rationale
 
@@ -148,3 +148,64 @@ Pass 1 could not verify (no live OpenRouter API key available in this session):
 - `SettingsStore::provider_policy()` / `set_provider_policy(..)` are the read/write seam for the settings-panel toggle + pin picker (§3). Pass 2 adds the confirm-dialog UX and the session-scoped auto-reset-to-safe-on-restart behavior (currently NOT implemented — `set_provider_policy` persists whatever it's given, with no lifecycle hook).
 - The global warning banner (§4) needs a way to read "is safe_mode currently off" — `SettingsStore::provider_policy().safe_mode` — no new backend surface required, just an endpoint/websocket to expose it to the `desktop_chrome` layer.
 - `ProviderEndpointInfo::region` (from `all-providers`' `headquarters` field) is captured but unused by Pass 1 logic — ready for the picker's region-flag column.
+
+## Pass 2 landed (2026-08-06)
+
+Built §3 (settings toggle), §4 (global warning banner), and §5 (provider picker) — the UI layer on top of Pass 1's backend. Nothing in Pass 1's enforcement path (`provider_constraint_for_request`) changed; Pass 2 only drives the policy it already reads.
+
+### New server routes (thin seams over the Pass-1 backend)
+
+Added to `crates/server/src/lib.rs`:
+
+- **`GET /api/settings`** — extended `SettingsResp` with `safe_mode: bool` and `pinned_provider: Option<String>`, sourced from `state.settings.get().provider_policy`. No new route; existing settings fetch now carries the policy.
+- **`POST /api/settings/provider-policy`** — body `{ safe_mode: bool, pinned_provider: Option<String> }`, calls `SettingsStore::set_provider_policy`, echoes the stored value. Blank/whitespace `pinned_provider` collapses to `None` (same convention as `set_chat_model`). Does NOT validate the pin against the live safe set — `provider_constraint_for_request` already drops an unsafe/unknown pin at request-build time, so this route's only job is persistence.
+- **`GET /api/models/providers?model_id=<id>`** — the picker's data source. `model_id` is a QUERY param, not a path segment, because OpenRouter model ids contain `/` (e.g. `deepseek/deepseek-chat`), which axum path routing doesn't accept unescaped. Triggers `ModelRegistry::ensure_safe_providers_loaded` (the lazy fetch-on-miss) if not already cached, then returns the full per-provider record list from `ModelRegistry::provider_endpoints_for` (`{slug, name, region, price_in, price_out, training, retains_prompts}` per provider). An empty `providers` array (no key configured, fetch failed, or the model genuinely has no OpenRouter provider data) is a normal 200, not an error — the UI reads that as "provider data unavailable" and falls back to Auto.
+
+### The session-scoped safety reset — the mechanism
+
+**Chosen mechanism: server-side, at BFF process boot** (`SettingsStore::reset_provider_policy_to_safe_on_startup` in `crates/server/src/settings.rs`, called once from `AppState::from_env` in `crates/server/src/lib.rs`, immediately after `SettingsStore::load_or_new`). It force-sets `safe_mode = true`, preserving `pinned_provider` unchanged, and is a no-op write when already safe (doesn't touch `settings.json` on a normal safe boot).
+
+Why server-side rather than a client-side session flag (the design doc's other option): `safe_mode` is read by the enforcement seam (`provider_policy::provider_constraint_for_request`) on the SERVER, on every request — a purely client-side reset could not guarantee testing mode never survives a restart for a request that never goes through the desktop UI (e.g. a routine/cron run hitting the same BFF process). A server-side reset is the only place that gives the actual guarantee the design doc asks for.
+
+Why this counts as "session-scoped" for the shipped desktop app: `crates/ui/src/main.rs`'s `App` component stands up the BFF via `server_process::ensure_server_running`, which spawns a FRESH `camerata-server` subprocess on every app launch (unless reusing an already-healthy standalone server already bound to `:8787` — a dev-only edge case, e.g. running `cargo run -p camerata-server` separately from `cargo run -p camerata-ui`, called out in the code comment). So "BFF process boot" and "app session start" coincide in the normal shipped flow, and the reset fires before the UI's health-check poll ever succeeds (no race).
+
+Tested in `crates/server/src/settings.rs`: `startup_reset_forces_off_to_on_and_preserves_the_pin`, `startup_reset_is_a_noop_when_already_safe`, `startup_reset_on_a_fresh_store_with_no_policy_ever_set_stays_safe`, and `startup_reset_survives_a_simulated_process_restart` (persists testing mode to disk, reloads a fresh `SettingsStore` from the same path — mirroring a real restart — runs the reset, reloads again to prove it persisted).
+
+### Settings toggle (§3)
+
+`crates/ui/src/provider_safety.rs::DataSafetySettings`, mounted in `crates/ui/src/credentials.rs`'s `CredentialsSettings` (between the "Refresh models" control and the Claude-backend segmented toggle). A SAFE MODE ⟷ TESTING MODE segmented control (reusing the `.backend-toggle`/`.backend-seg` styling the CLI⟷API control already established, plus a new `.backend-seg-danger` red variant for the active TESTING state). Turning SAFE→TESTING doesn't fire immediately — it opens a `.safety-confirm-dialog` with the exact copy from the design doc's §3 ("This sends prompts to providers that may retain or train on them. Never use with client code."); only confirming there POSTs `safe_mode: false`.
+
+### Global warning banner (§4)
+
+`crates/ui/src/provider_safety.rs::TestingModeBanner`, mounted as a top-level sibling in `crates/ui/src/main.rs`'s `App` component — NOT nested inside `desktop_chrome.rs` (that module turned out to hold only the native menu bar + clipboard shim, not a rendered UI layer; `App` in `main.rs` is the actual global-chrome root the design doc's "desktop_chrome layer" phrase was pointing at). It renders before `bombe_bg::BombeBg` and `div.app-root`, with `position: fixed; z-index: 2147483001` (above even the toast host's `2147483000`, previously the highest layer in the app) — see `.testing-mode-banner` in `crates/ui/src/style.rs`. It is genuinely global: because it's mounted once at the app root rather than per-screen, it shows/hides identically no matter which cockpit tab is active, and it has no dismiss affordance — the only way it disappears is `safe_mode` turning back on.
+
+### Shared policy state (the mechanism that keeps toggle/banner/picker in sync)
+
+All three pieces read the SAME Dioxus context signal (`provider_safety::ProviderPolicySignal`, a `Signal<ProviderPolicyView>`), provided once in `App` via `provider_safety::provide_provider_policy_context()` (seeded by one `GET /api/settings` fetch at app start). Every writer (the settings toggle, every provider-picker selection) updates this signal directly right after a successful POST — no polling, and no possibility of the banner disagreeing with the toggle, because there is only one signal.
+
+### Provider picker (§5)
+
+`crates/ui/src/provider_safety.rs::ProviderPicker` — a reusable component taking `model: Signal<String>, models: Option<ModelsResp>`. Renders nothing when the selected model isn't `provider == "openrouter"`. When it is: fetches `GET /api/models/providers?model_id=<id>` via `use_resource` (re-fires when `model()` changes, following the same `use_resource` + signal-read dependency pattern already used elsewhere in `chat.rs`, e.g. `uow_res`), shows a "Loading providers…" state while pending, "Provider data unavailable — using Auto." when the fetch resolves empty, and otherwise a `<select>` built from `camerata_ui_core::provider_safety::build_provider_rows`: "Auto — cheapest safe" first (maps to `pinned_provider = None`), then one `<option>` per provider showing name, region flag, `$/1M in / $/1M out`, and a ✓/⚠ safety badge. **Unsafe options carry the native `disabled` attribute whenever safe mode is ON** (browsers grey + block-select disabled `<option>`s natively — no custom dropdown needed), and are fully selectable in testing mode. Picking a row POSTs the new pin to `/api/settings/provider-policy` and updates the shared signal.
+
+**Wiring: `chat.rs`'s `ChatBubble` only** (the primary/global model picker), placed directly under the model `<select>` in the chat header. `routines.rs` and `cockpit/scan.rs` each have their own LOCAL, pre-existing `ModelOption`/`ModelsResp`-shaped types and their own model `<select>` markup (not yet migrated onto `camerata_ui_core::models`, unlike `chat.rs`) — wiring `ProviderPicker` into them is mechanical (pass their own `model: Signal<String>` + an equivalent `Option<ModelsResp>` view) but not done in this pass, per the task's explicit "wire the primary picker first, factor a reusable component, note what you did" guidance. `ProviderPicker` itself has zero `chat.rs`-specific coupling, so this is the only remaining step for the other two.
+
+### Pure logic (unit-tested, no VirtualDom)
+
+New module `crates/ui-core/src/provider_safety.rs`: `ProviderOption`/`ProviderEndpointsResp` (the wire shapes), `ProviderOption::is_safe` (mirrors `ProviderEndpointInfo::is_safe` exactly — a VIEW of the same fact, not a second definition), `build_provider_rows` (the Auto-row + per-provider-row + selectable/selected derivation), `region_flag` (small known-country-code → flag-emoji map, falls back to the bare code, never blank), `format_price_per_million`, `testing_mode_banner_visible`, and the two banner/confirm-dialog copy constants. One deliberate hardening beyond the wire contract: `ProviderOption`'s `training`/`retains_prompts` fields default to `true` (unsafe) — not `false` — when absent from a parseable-but-malformed payload, mirroring the server's fail-closed join in `model_registry.rs`'s `join_endpoints_with_policy`; a display bug here can only ever UNDER-claim safety, never show a false safe checkmark.
+
+### Test counts
+
+- `camerata-ui-core`: 153 passed (20 new, all in `provider_safety`).
+- `camerata-ui` (bin target — `cargo test -p camerata-ui --bin camerata-ui`; the crate's lib target is a separate, narrower surface for `desktop_chrome`/`clipboard_probe` and doesn't hold the app modules): 594 passed (10 new in `provider_safety`, plus 1 updated assertion + context-provider fix in `credentials.rs`'s existing `CredentialsSettings` SSR test).
+- `camerata-server`: 1260 passed (9 new: 4 in `settings.rs` for the session-reset mechanism, 5 in `lib.rs` for the new/extended routes).
+- `cargo check --workspace`: clean (only pre-existing, unrelated warnings).
+
+### Manual smoke test (to see the banner + picker end-to-end)
+
+1. `cargo run -p camerata-ui`.
+2. Open Settings → Credentials. Confirm the "Data safety" section shows **SAFE MODE** active and no banner is visible anywhere in the app.
+3. Add an OpenRouter API key (or confirm one is already saved) so the model registry has OpenRouter entries.
+4. Click **TESTING MODE** → confirm the dialog appears with the exact warning copy → click "Turn off (testing mode)". The red **⚠ TESTING MODE** banner should appear immediately at the very top of the window and stay visible while navigating to any other cockpit tab (it has no close button).
+5. Open the chat bubble (bottom-right FAB), pick an OpenRouter model (e.g. a DeepSeek entry) from the model dropdown. A "Provider" row should appear below it: while testing mode is still on, every provider option (including training/retaining ones, marked ⚠) should be selectable.
+6. Go back to Settings → Credentials, click **SAFE MODE** (no confirm needed going back to safe) — the banner should disappear immediately everywhere, and reopening the chat's Provider dropdown should now show unsafe providers greyed out/disabled with a "(requires testing mode)" suffix, while ✓ providers and "Auto — cheapest safe" remain selectable.
+7. Quit and relaunch the app with safe mode left OFF beforehand (step 4) to confirm the session-scoped reset: on relaunch, Settings → Credentials should show **SAFE MODE** active again and no banner, even though nothing was manually turned back on.

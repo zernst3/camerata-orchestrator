@@ -20,6 +20,7 @@ mod cockpit;
 mod credentials;
 pub mod loading;
 pub mod md;
+mod provider_safety;
 mod routines;
 mod server_process;
 mod style;
@@ -148,10 +149,26 @@ fn App() -> Element {
     let rules_catalog = use_resource(chat::fetch_rules_catalog);
     use_context_provider(|| rules_catalog);
 
+    // OpenRouter provider-safety policy (Pass 2): one shared signal, fetched once here and
+    // written by both the settings toggle (credentials.rs) and every provider picker
+    // instance, so the global banner below can never see a stale/disagreeing value.  See
+    // provider_safety::provide_provider_policy_context and
+    // docs/design/2026-07-28_openrouter-provider-safety.md §3/§4.
+    provider_safety::provide_provider_policy_context();
+
     rsx! {
         // Global stylesheet, injected as a raw <style> so it works identically on
         // desktop without the asset pipeline. Keeps the whole look in one place.
         style { dangerous_inner_html: style::GLOBAL_CSS }
+
+        // The always-visible testing-mode warning (design doc §4). Mounted as a top-level
+        // sibling of app-root — NOT nested inside any per-screen component — so it is
+        // genuinely global chrome: it renders (or doesn't) identically no matter which
+        // cockpit view/tab is active, and its fixed positioning + z-index (see
+        // `.testing-mode-banner` in style.rs) keep it above everything else, including the
+        // Bombe background and the app shell. Non-dismissible: it has no close affordance,
+        // only reading `safe_mode` turning back on makes it disappear.
+        provider_safety::TestingModeBanner {}
 
         // The Bombe machine background — fixed full-viewport layer at z-index 0,
         // pointer-events:none.  Activates .bombe-running (animations, higher opacity)

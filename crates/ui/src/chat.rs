@@ -1036,6 +1036,13 @@ pub fn ChatBubble(props: ChatBubbleProps) -> Element {
                     }
                 }
 
+                // ── OpenRouter provider sub-selector (Pass 2 §5) ──────────
+                // Renders nothing when the selected model isn't an OpenRouter model (the
+                // component's own short-circuit). This is the PRIMARY wiring of the
+                // reusable `ProviderPicker`; see its module docs for why routines.rs /
+                // cockpit/scan.rs aren't wired in this pass.
+                crate::provider_safety::ProviderPicker { model, models: models.clone() }
+
                 // ── "what this assistant can see" affordance ─────────────
                 div {
                     class: "chat-context",
