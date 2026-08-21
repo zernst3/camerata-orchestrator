@@ -225,3 +225,76 @@ above was caught and fixed during this visual pass, not by the test suite alone 
 only asserts the helpers are present, not that Typst lays them out correctly — a `typst
 compile` syntax check would have passed even with the corrupted layout, since `auto` + `100%`
 is valid Typst, just circularly under-specified).
+
+---
+
+## Round 3 (2026-08-20): recommended fix in the finding modal + `findings.json`
+
+Two additions on `feat/audit-report-export`, both under the same overriding constraint as
+everything else in this doc: the fix shown during triage (the modal) and the fix shipped in
+the report (PDF/xlsx/JSON) must be byte-identical, and `findings.json` must be the same data
+the xlsx is built from — never a second, divergently-computed copy.
+
+**1. Recommended fix in the scan-review finding modal.** New `GET
+/api/onboard/finding-fix?rule_id=` (`lib.rs::onboard_finding_fix`) calls
+`report_export::resolve_fix(rule_id, corpus)` — the EXACT function the PDF's "Fix:" line and
+the xlsx's "Recommended Fix" column already call — and returns `{ "fix": "..." }` (empty,
+never fabricated, when the corpus has no entry/option/directive). Chose the server-endpoint
+path over reusing UI-loaded corpus directives: the UI does not have a client-side copy of
+`resolved_option(None)`'s resolution logic, and re-deriving it there would risk silent drift
+from the server's own join the moment either side changed independently. The modal
+(`crates/ui/src/cockpit/scan.rs`, new `FindingRecommendedFix` component, mirrors
+`FindingCodeContext`'s on-demand-fetch/degrade-soft idiom exactly) fetches on mount, keyed by
+`rule_id`, and renders a "Recommended fix:" block only when the fix is non-empty — omitted
+entirely otherwise, never an empty box. Loading state and fetch failure both render nothing
+(the existing "Rule violated"/"Explanation" sections already cover the finding).
+Tests: `onboard_finding_fix` — `finding_fix_returns_resolve_fix_output_for_a_known_rule`
+(asserts the endpoint's output equals a direct `resolve_fix` call for the same rule id +
+corpus, non-empty) and `finding_fix_is_empty_for_an_unknown_rule` (`lib.rs`).
+
+**2. `findings.json` in the product-export zip.** New `xlsx_export::build_findings_export`
+returns `FindingsExport { provenance, summary, findings }`: `findings` is the SAME
+(non-FP, severity-desc/repo/path/line-sorted) `FindingRow` set that becomes the workbook's
+"All Findings" sheet — `partition_rows` (which both `build_workbook` and
+`build_findings_export` call) now does its own sort internally rather than each caller
+re-sorting a copy, so the two artifacts cannot silently diverge in row order either.
+`FindingRow` itself gained `#[derive(Serialize)]` (and `Disposition` gained `Serialize` too,
+for the `disposition_kind` field) — the JSON is a serialization of the identical struct the
+xlsx writer already renders cell-by-cell, not a parallel DTO. `provenance` and `summary` are
+reused verbatim from the already-built `AuditReportJson` (`cover` and `executive_summary`
+respectively, both already `Clone`) rather than re-derived from `ScanReport` a second time.
+Wired into `POST /api/projects/:id/product-export` (`lib.rs::export_product`): built from the
+same `report`/`req.dispositions`/`corpus` the xlsx pass uses, serialized pretty
+(`serde_json::to_vec_pretty`), added to the zip as `findings.json` (`build_product_zip` now
+takes a 4th byte-slice param), and the `README.txt` manifest updated to describe it.
+Tests (`xlsx_export.rs`): `findings_export_length_matches_the_all_findings_sheet_row_count`
+(builds both the xlsx and the JSON from one FP-containing fixture, counts `<row ` in the
+actual `xl/worksheets/sheet2.xml` — the All Findings sheet — and asserts it equals
+`findings_export.findings.len()`, not just that the code paths look the same),
+`findings_export_fix_field_matches_resolve_fix` (real corpus), 
+`findings_export_json_shape_has_provenance_summary_and_findings_keys`, and two
+degenerate-input tests (zero findings, all-false-positive) asserting a valid, panic-free
+serialization with an empty `findings` array. `lib.rs`'s existing
+`product_export_zip_contains_a_real_pdf_xlsx_and_readme` e2e test extended to also assert the
+zip contains a `findings.json` entry, that it parses as JSON with `provenance`/`summary`/
+`findings` keys, and that the findings array length matches the fixture's one non-FP finding.
+`crates/server/tests/generate_sample_report.rs` extended to build the same `findings_export`
+from the sample fixture, write a standalone `sample-report/camerata-sample-audit-findings.json`
+(gitignored, like the other regenerated sample artifacts, for Zach to eyeball), and add it as
+the 4th zip entry in `sample-report/camerata-sample-audit.zip`, with the sample README updated
+to describe three artifacts instead of two.
+
+Visibility judgment call: `FindingRow`, `FindingsExport`, and `build_findings_export` were
+promoted from module-private / `pub(crate)` to fully `pub` — `generate_sample_report.rs` is an
+integration test that links `camerata-server` as an external crate, so `pub(crate)` items are
+invisible to it. `FindingRow`'s individual fields stay private (unit tests inside
+`xlsx_export::tests` still reach them directly, since a private field is visible to the
+defining module and its descendants); external callers only serialize the struct wholesale via
+serde, never read a field off it directly.
+
+`cargo test -p camerata-server --lib`: 1267 passed, 0 failed (58 new/changed:
+`report_export`/`xlsx_export`/`tests` combined). `cargo test -p camerata-server --test
+generate_sample_report -- --ignored --nocapture`: regenerated `camerata-sample-audit.zip`
+(4 entries), `camerata-sample-audit-findings.xlsx`, `camerata-sample-audit-findings.json`
+(17,258 bytes, 6 findings matching `curated_total`), and `camerata-sample-audit.pdf`.
+`cargo check --workspace`: green.

@@ -300,6 +300,70 @@ fn FindingCodeContext(finding: FindingView) -> Element {
     }
 }
 
+// ── Recommended fix (docs/design/2026-07-26_audit-report-refinements.md) ──────────
+//
+// Surfaces the finding's recommended fix directly in the finding-detail modal, during
+// triage — rather than the architect only discovering it later in an exported report.
+// MUST be byte-identical to the report's own "Fix:" line (PDF) / "Recommended Fix" column
+// (xlsx): both of those call `report_export::resolve_fix(rule_id, corpus)` server-side, and
+// this component fetches that SAME function's output over `GET /api/onboard/finding-fix`
+// rather than re-deriving the corpus join client-side — one function, three renderers, never
+// a second divergent computation. See `crates/server/src/lib.rs::onboard_finding_fix`.
+
+/// One `GET /api/onboard/finding-fix` response. `fix` defaults to empty so an unrecognized/
+/// older/newer server response degrades to "no fix" rather than failing to parse.
+#[derive(Clone, PartialEq, serde::Deserialize)]
+struct FindingFixView {
+    #[serde(default)]
+    fix: String,
+}
+
+async fn fetch_finding_fix(rule_id: &str) -> Option<FindingFixView> {
+    let resp = reqwest::Client::new()
+        .get(format!("{}/api/onboard/finding-fix", crate::bff_base()))
+        .query(&[("rule_id", rule_id)])
+        .send()
+        .await
+        .ok()?;
+    let v: serde_json::Value = resp.json().await.ok()?;
+    serde_json::from_value(v).ok()
+}
+
+/// The "Recommended fix" block of the finding-detail modal. Fetches ON-DEMAND every time it
+/// mounts; the caller keys this component by `rule_id` (see the finding-detail modal) so
+/// switching to a different finding remounts it fresh.
+///
+/// Degradation floor (matches `FindingCodeContext`'s discipline): no corpus entry, no
+/// adopted default option, a blank directive, a request that fails outright, or a response
+/// this client doesn't recognize — ALL of these render nothing rather than an empty box or a
+/// fabricated sentence. This block can only ADD information on top of the modal's existing
+/// "Rule violated" / "Explanation" sections; it never blocks or replaces them, and never
+/// panics.
+#[component]
+fn FindingRecommendedFix(rule_id: String) -> Element {
+    let rid = rule_id.clone();
+    let fix_res = use_resource(move || {
+        let rid = rid.clone();
+        async move { fetch_finding_fix(&rid).await }
+    });
+
+    let fix = fix_res.read().clone();
+    match fix {
+        // Loading, request failed outright, or an unparseable response — the modal's
+        // existing "Rule violated"/"Explanation" text already covers the finding, so this
+        // section says nothing rather than showing a loading flicker or an error box.
+        None | Some(None) => rsx! {},
+        Some(Some(v)) if !v.fix.trim().is_empty() => rsx! {
+            div { class: "finding-ctx",
+                p { class: "rule-modal-label", "Recommended fix" }
+                p { class: "rule-modal-detail", "{v.fix}" }
+            }
+        },
+        // No corpus directive for this rule — omit the block entirely, never an empty one.
+        Some(Some(_)) => rsx! {},
+    }
+}
+
 // csv_field moved to camerata-ui-core::rules (shared by rules_csv there and findings_csv here).
 pub(super) use camerata_ui_core::rules::csv_field;
 
@@ -2792,6 +2856,13 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             FindingCodeContext {
                                 key: "{f.repo}\u{1f}{f.path}\u{1f}{f.line}",
                                 finding: f.clone(),
+                            }
+                            // Recommended fix (docs/design/2026-07-26_audit-report-refinements.md):
+                            // keyed by rule_id so switching findings remounts this section and
+                            // starts a fresh on-demand fetch, same idiom as FindingCodeContext.
+                            FindingRecommendedFix {
+                                key: "{f.rule_id}",
+                                rule_id: f.rule_id.clone(),
                             }
                             p { class: "rule-modal-label", "Explanation" }
                             {

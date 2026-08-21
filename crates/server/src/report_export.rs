@@ -96,7 +96,12 @@ pub fn finding_key(f: &Finding) -> String {
 /// `pub(crate)`: shared with `xlsx_export` (product export, Pass C) so the workbook's own
 /// partition pass reuses this SAME classification, never a re-derived copy — see that
 /// module's doc comment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize`: so `xlsx_export::FindingRow` (whose `disposition_kind: Option<Disposition>`
+/// field feeds `findings.json`, the product export's machine-readable sibling of the
+/// workbook) can serialize this classification verbatim rather than re-deriving a string
+/// form for JSON specifically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum Disposition {
     /// No triage decision yet this session (the default for an absent/unrecognized entry).
     Unresolved,

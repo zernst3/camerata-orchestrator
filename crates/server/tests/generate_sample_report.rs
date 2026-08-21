@@ -377,6 +377,31 @@ async fn regenerate_sample_report() {
         xlsx.len()
     );
 
+    // ═══ Build + write the REAL findings.json (machine-readable sibling of the xlsx) ═══
+    // Same `report`/`dispositions`/`corpus` inputs as the xlsx above, plus the ALREADY-BUILT
+    // `json` (`AuditReportJson`) for provenance/summary reuse — see
+    // `xlsx_export::build_findings_export`'s doc comment. Both a standalone file (for Zach
+    // to eyeball) and the zip entry below come from this one call.
+    let findings_export =
+        xlsx_export::build_findings_export(&report, &dispositions, Some(&corpus), &json);
+    assert_eq!(
+        findings_export.findings.len(),
+        6,
+        "findings.json must carry exactly the 6 non-FP code findings (matches curated_total)"
+    );
+    let findings_json_bytes =
+        serde_json::to_vec_pretty(&findings_export).expect("serialize findings.json");
+    std::fs::write(
+        repo_root.join("camerata-sample-audit-findings.json"),
+        &findings_json_bytes,
+    )
+    .expect("write sample-report/camerata-sample-audit-findings.json");
+    eprintln!(
+        "regenerate_sample_report: wrote {} bytes to \
+         sample-report/camerata-sample-audit-findings.json",
+        findings_json_bytes.len()
+    );
+
     // ═══ Compile the REAL embedded template against it and write the PDF ═══
     if !typst_on_path() {
         eprintln!(
@@ -395,15 +420,16 @@ async fn regenerate_sample_report() {
         pdf.len()
     );
 
-    // ═══ Zip PDF + xlsx + README.txt — mirrors POST /api/projects/:id/product-export's ═══
-    // assembly (that handler's own zip-building helpers are private to camerata-server, so
-    // this inlines the same three-entry Deflate zip directly over the REAL pdf/xlsx bytes
-    // built above; nothing here re-derives report content).
+    // ═══ Zip PDF + xlsx + findings.json + README.txt — mirrors ═══
+    // POST /api/projects/:id/product-export's assembly (that handler's own zip-building
+    // helpers are private to camerata-server, so this inlines the same four-entry Deflate
+    // zip directly over the REAL pdf/xlsx/json bytes built above; nothing here re-derives
+    // report content).
     let readme = format!(
         "Camerata Audit — Product Export (sample)\n\
          =========================================\n\
          \n\
-         This ZIP contains two artifacts derived from the SAME audit scan:\n\
+         This ZIP contains three artifacts derived from the SAME audit scan:\n\
          \n\
          camerata-sample-audit.pdf\n\
          \x20 The curated NARRATIVE report — cover, executive summary, category scorecard,\n\
@@ -414,6 +440,10 @@ async fn regenerate_sample_report() {
          \x20 The COMPLETE working dataset — every finding as its own row, a per-category\n\
          \x20 sheet, a Dependencies sheet, a Coverage sheet, and a False Positives sheet\n\
          \x20 with the auditor's exclusion reasons.\n\
+         \n\
+         findings.json\n\
+         \x20 The MACHINE-READABLE version of the xlsx's \"All Findings\" data, wrapped with\n\
+         \x20 the report's provenance and summary counts.\n\
          \n\
          Repos audited: {}\n\
          Generated: {}\n\
@@ -435,6 +465,8 @@ async fn regenerate_sample_report() {
             .start_file("camerata-sample-audit-findings.xlsx", options)
             .expect("zip entry: xlsx");
         writer.write_all(&xlsx).expect("zip write: xlsx");
+        writer.start_file("findings.json", options).expect("zip entry: findings.json");
+        writer.write_all(&findings_json_bytes).expect("zip write: findings.json");
         writer.start_file("README.txt", options).expect("zip entry: readme");
         writer.write_all(readme.as_bytes()).expect("zip write: readme");
         writer.finish().expect("finish zip").into_inner()

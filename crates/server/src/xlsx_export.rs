@@ -32,6 +32,7 @@ use rust_xlsxwriter::{
     Color, ConditionalFormatText, ConditionalFormatTextRule, Format, FormatAlign, Workbook,
     Worksheet, XlsxError,
 };
+use serde::Serialize;
 
 use crate::dep_audit::DEP_AUDIT_RULE_ID;
 use crate::onboard::ScanReport;
@@ -47,7 +48,14 @@ use crate::report_export::{
 /// spec from the design doc, PLUS the Recommended-Fix column (approved addition). Computed
 /// once per non-dependency [`crate::onboard::Finding`] in [`partition_rows`], then written
 /// verbatim by every sheet writer (never re-derived per sheet).
-struct FindingRow {
+///
+/// `Serialize`: this is ALSO the row shape `findings.json` (the product export's
+/// machine-readable sibling of the workbook, see [`build_findings_export`]) serializes
+/// verbatim — the exact same struct, not a parallel DTO, so the JSON and the xlsx can never
+/// disagree on a field. Field names are the stable wire contract for `findings.json`; treat
+/// a rename here as a breaking change for anything that parses that file.
+#[derive(Serialize)]
+pub struct FindingRow {
     severity: String,
     headline: String,
     repo: String,
@@ -124,6 +132,10 @@ struct SheetSummary {
 /// carve-out) + dependency rows, reusing the exact same classification/citation/fix helpers
 /// `report_export::build_report_json` calls. False positives are KEPT here (with their
 /// reason) rather than dropped — the workbook's False Positives sheet is where they surface.
+///
+/// Rows are returned PRE-SORTED (severity desc, then repo/path/line) — the one true sort
+/// order both `build_workbook` and `build_findings_export` (`findings.json`) consume as-is,
+/// rather than each sorting its own copy and risking two orderings silently drifting apart.
 fn partition_rows(
     report: &ScanReport,
     dispositions: &HashMap<String, DispositionWire>,
@@ -216,6 +228,15 @@ fn partition_rows(
             fp_reason,
         });
     }
+
+    rows.sort_by(|a, b| {
+        (severity_rank(&a.severity), &a.repo, &a.path, a.line).cmp(&(
+            severity_rank(&b.severity),
+            &b.repo,
+            &b.path,
+            b.line,
+        ))
+    });
 
     (rows, dep_rows)
 }
@@ -957,15 +978,7 @@ pub fn build_workbook(
     corpus: Option<&camerata_rules::RuleSet>,
     opts: &ReportOptions,
 ) -> anyhow::Result<Vec<u8>> {
-    let (mut rows, dep_rows) = partition_rows(report, dispositions, corpus);
-    rows.sort_by(|a, b| {
-        (severity_rank(&a.severity), &a.repo, &a.path, a.line).cmp(&(
-            severity_rank(&b.severity),
-            &b.repo,
-            &b.path,
-            b.line,
-        ))
-    });
+    let (rows, dep_rows) = partition_rows(report, dispositions, corpus);
 
     let live_rows: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
     let fp_rows: Vec<&FindingRow> = rows.iter().filter(|r| r.is_fp).collect();
@@ -1085,6 +1098,47 @@ pub fn build_workbook(
 
     wb.save_to_buffer()
         .context("serializing the xlsx workbook to bytes")
+}
+
+// ── `findings.json` (product export, machine-readable sibling of the workbook) ────────
+
+/// The `findings.json` payload bundled into the product-export zip: the machine-readable
+/// version of the Excel data. `findings` is the SAME (non-FP, severity-desc-then-repo/path/
+/// line-sorted) [`FindingRow`] set that becomes the workbook's "All Findings" sheet — see
+/// [`build_findings_export`] — so the JSON and the xlsx can never disagree on a row count or
+/// a field value; both come from one `partition_rows` pass.
+///
+/// `provenance` and `summary` are reused VERBATIM from the already-built
+/// [`crate::report_export::AuditReportJson`] (`cover` and `executive_summary` respectively)
+/// rather than re-derived here — same discipline as the row data: one computation, three
+/// consumers (PDF, xlsx, JSON).
+#[derive(Serialize)]
+pub struct FindingsExport {
+    pub provenance: crate::report_export::CoverJson,
+    pub summary: crate::report_export::ExecutiveSummaryJson,
+    pub findings: Vec<FindingRow>,
+}
+
+/// Build the `findings.json` payload — the JSON sibling of [`build_workbook`]. Takes the
+/// already-built `report_json` (the SAME [`crate::report_export::AuditReportJson`] the PDF
+/// was compiled from and the caller also passes to `build_workbook`'s call site) so
+/// `provenance`/`summary` are reused, never recomputed a second time from `report` directly.
+/// `pub` (not `pub(crate)`): needed both by `lib.rs`'s product-export route and by the
+/// integration test `tests/generate_sample_report.rs`, which links `camerata-server` as an
+/// external crate.
+pub fn build_findings_export(
+    report: &ScanReport,
+    dispositions: &HashMap<String, DispositionWire>,
+    corpus: Option<&camerata_rules::RuleSet>,
+    report_json: &crate::report_export::AuditReportJson,
+) -> FindingsExport {
+    let (rows, _dep_rows) = partition_rows(report, dispositions, corpus);
+    let findings: Vec<FindingRow> = rows.into_iter().filter(|r| !r.is_fp).collect();
+    FindingsExport {
+        provenance: report_json.cover.clone(),
+        summary: report_json.executive_summary.clone(),
+        findings,
+    }
 }
 
 #[cfg(test)]
@@ -1303,6 +1357,112 @@ mod tests {
         let report = report_with(vec![f], vec![]);
         let (rows, _) = partition_rows(&report, &HashMap::new(), None);
         assert_eq!(rows[0].fix, "", "must not fabricate a fix when the corpus is absent");
+    }
+
+    // ── `findings.json` (product export, machine-readable sibling of the workbook) ─────
+
+    /// `findings_export.findings` must have the same length as the "All Findings" sheet
+    /// (sheet2.xml — Index is sheet1) actually written into the xlsx: both are built from
+    /// the SAME `partition_rows` call, filtered the same way (`!is_fp`), so this is the
+    /// consistency guarantee, not a coincidence. An FP is excluded from both.
+    #[test]
+    fn findings_export_length_matches_the_all_findings_sheet_row_count() {
+        let a = finding("SEC-1", "a.rs", 1, "critical");
+        let b = finding("SEC-2", "b.rs", 2, "high");
+        let fp = finding("SEC-3", "c.rs", 3, "medium");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(finding_key(&fp), wire("FalsePositive", "fixture"));
+        let report = report_with(vec![a, b, fp], vec![]);
+        let json =
+            crate::report_export::build_report_json(&report, &dispositions, None, &empty_opts());
+        let xlsx_bytes = build_workbook(&report, &dispositions, None, &empty_opts()).unwrap();
+        let findings_export = build_findings_export(&report, &dispositions, None, &json);
+
+        assert_eq!(
+            findings_export.findings.len(),
+            2,
+            "the FP-dispositioned finding must be excluded, same as the All Findings sheet"
+        );
+
+        // "All Findings" is the second worksheet added (after Index) -> sheet2.xml.
+        // `<row ` appears once per row, including the header — subtract 1 for it.
+        let sheet_xml = read_zip_entry(&xlsx_bytes, "xl/worksheets/sheet2.xml");
+        let row_count = sheet_xml.matches("<row ").count();
+        assert_eq!(
+            row_count.saturating_sub(1),
+            findings_export.findings.len(),
+            "findings.json row count must match the All Findings sheet's actual data rows"
+        );
+    }
+
+    /// A finding's `fix` field in `findings.json` is exactly `resolve_fix`'s output for the
+    /// same rule id + corpus — the same guarantee the xlsx's Recommended Fix column has.
+    #[tokio::test]
+    async fn findings_export_fix_field_matches_resolve_fix() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
+        let report = report_with(vec![f], vec![]);
+        let json = crate::report_export::build_report_json(
+            &report,
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let findings_export = build_findings_export(&report, &HashMap::new(), Some(&corpus), &json);
+        let expected =
+            crate::report_export::resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", Some(&corpus));
+        assert!(!expected.is_empty(), "fixture rule must have a real corpus directive");
+        assert_eq!(findings_export.findings[0].fix, expected);
+    }
+
+    /// The top-level JSON object has exactly the documented shape: `provenance`, `summary`,
+    /// `findings`.
+    #[test]
+    fn findings_export_json_shape_has_provenance_summary_and_findings_keys() {
+        let f = finding("SEC-1", "a.rs", 1, "high");
+        let report = report_with(vec![f], vec![]);
+        let json =
+            crate::report_export::build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let findings_export = build_findings_export(&report, &HashMap::new(), None, &json);
+        let v = serde_json::to_value(&findings_export).expect("must serialize");
+        assert!(v.get("provenance").is_some(), "{v:?}");
+        assert!(v.get("summary").is_some(), "{v:?}");
+        assert!(v.get("findings").and_then(|f| f.as_array()).is_some(), "{v:?}");
+    }
+
+    // ── Degenerate inputs must never panic ─────────────────────────────────────
+
+    #[test]
+    fn findings_export_zero_findings_is_empty_and_serializes_cleanly() {
+        let report = report_with(vec![], vec![]);
+        let json =
+            crate::report_export::build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let findings_export = build_findings_export(&report, &HashMap::new(), None, &json);
+        assert!(findings_export.findings.is_empty());
+        let bytes = serde_json::to_vec_pretty(&findings_export)
+            .expect("zero findings must still serialize to valid JSON");
+        assert!(!bytes.is_empty());
+    }
+
+    #[test]
+    fn findings_export_all_false_positive_produces_an_empty_findings_array() {
+        let f1 = finding("SEC-1", "a.rs", 1, "critical");
+        let f2 = finding("SEC-2", "b.rs", 2, "high");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(finding_key(&f1), wire("FalsePositive", "fixture"));
+        dispositions.insert(finding_key(&f2), wire("FalsePositive", "fixture"));
+        let report = report_with(vec![f1, f2], vec![]);
+        let json =
+            crate::report_export::build_report_json(&report, &dispositions, None, &empty_opts());
+        let findings_export = build_findings_export(&report, &dispositions, None, &json);
+        assert!(
+            findings_export.findings.is_empty(),
+            "all-FP input must yield an empty findings array, not panic"
+        );
+        serde_json::to_vec_pretty(&findings_export)
+            .expect("all-FP input must still serialize to valid JSON");
     }
 
     // ── Conditional formatting / autofilter / freeze panes are actually applied ────

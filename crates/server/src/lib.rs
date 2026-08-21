@@ -1018,6 +1018,7 @@ pub fn router(state: AppState) -> Router {
             "/api/onboard/finding-context",
             get(onboard_finding_context),
         )
+        .route("/api/onboard/finding-fix", get(onboard_finding_fix))
         .route("/api/git/detect-repo", post(detect_repo))
         .route("/api/gate-probe", post(gate_probe))
         .route("/api/onboard/ticket", post(onboard_ticket))
@@ -5382,6 +5383,38 @@ async fn onboard_finding_context(
         StatusCode::OK
     };
     (status, Json(outcome.to_json()))
+}
+
+/// Query parameters for `GET /api/onboard/finding-fix`.
+#[derive(serde::Deserialize)]
+struct FindingFixQuery {
+    rule_id: String,
+}
+
+/// `GET /api/onboard/finding-fix?rule_id=` — the recommended-fix lookup for the scan-review
+/// finding modal. Resolves `rule_id` against the loaded corpus via
+/// [`crate::report_export::resolve_fix`] — the EXACT SAME function the PDF's "Fix:" line and
+/// the xlsx "Recommended Fix" column call. Routing the modal through this endpoint (rather
+/// than having the UI re-derive the join over its own copy of the corpus) is what guarantees
+/// byte-identical output across all three surfaces: one function, three callers, never a
+/// second divergent computation.
+///
+/// Always 200; body is `{ "fix": "..." }`, empty (never fabricated) when the corpus is
+/// absent, the rule id has no corpus entry, or the rule has no adopted default option/
+/// directive — same degrade-soft contract as `resolve_fix` itself. No project/repo
+/// resolution needed (the corpus is global, not per-project), so unlike
+/// `onboard_finding_context` this handler takes no `State`.
+async fn onboard_finding_fix(
+    axum::extract::Query(q): axum::extract::Query<FindingFixQuery>,
+) -> impl IntoResponse {
+    let corpus_path = camerata_rules::corpus_path();
+    let corpus = if corpus_path.exists() {
+        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+    } else {
+        None
+    };
+    let fix = crate::report_export::resolve_fix(&q.rule_id, corpus.as_ref());
+    Json(serde_json::json!({ "fix": fix }))
 }
 
 #[derive(serde::Deserialize)]
@@ -14335,10 +14368,41 @@ async fn export_product(
         }
     };
 
+    // `findings.json`: the machine-readable sibling of the workbook's "All Findings" sheet.
+    // Built from the SAME `report`/`dispositions`/`corpus` pass as `xlsx_bytes` above (and
+    // reuses `json`'s already-computed cover/executive-summary for provenance/summary), so
+    // the JSON can never disagree with either the PDF or the xlsx — see
+    // `xlsx_export::build_findings_export`'s doc comment.
+    let findings_export = crate::xlsx_export::build_findings_export(
+        &report,
+        &req.dispositions,
+        corpus.as_ref(),
+        &json,
+    );
+    let findings_json_bytes = match serde_json::to_vec_pretty(&findings_export) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "message": format!("could not serialize findings.json: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
     let stem = report_filename_stem(&report);
     let readme = product_export_readme(&stem, &json);
 
-    let zip_bytes = match build_product_zip(&stem, &pdf_bytes, &xlsx_bytes, &readme) {
+    let zip_bytes = match build_product_zip(
+        &stem,
+        &pdf_bytes,
+        &xlsx_bytes,
+        &findings_json_bytes,
+        &readme,
+    ) {
         Ok(bytes) => bytes,
         Err(e) => {
             return (
@@ -14377,7 +14441,7 @@ fn product_export_readme(stem: &str, json: &crate::report_export::AuditReportJso
         "Camerata Audit — Product Export\n\
          ================================\n\
          \n\
-         This ZIP contains two artifacts derived from the SAME audit scan:\n\
+         This ZIP contains three artifacts derived from the SAME audit scan:\n\
          \n\
          {stem}.pdf\n\
          \x20 The curated NARRATIVE report: cover, executive summary, category scorecard,\n\
@@ -14393,6 +14457,14 @@ fn product_export_readme(stem: &str, json: &crate::report_export::AuditReportJso
          \x20 (with the auditor's exclusion reasons — nothing is silently dropped). Intended\n\
          \x20 for the engineers doing remediation.\n\
          \n\
+         findings.json\n\
+         \x20 The MACHINE-READABLE version of the xlsx's \"All Findings\" data: the same\n\
+         \x20 rows (severity, category, repo/path/line, snippet, detail, recommended fix,\n\
+         \x20 disposition, effort, confidence, citation, ...), wrapped with the report's\n\
+         \x20 provenance and summary counts. Intended for scripting / CI ingestion / a\n\
+         \x20 client's own tooling — never disagrees with the xlsx, since both are built\n\
+         \x20 from the same pass over the scan.\n\
+         \n\
          Repos audited: {}\n\
          Generated: {}\n\
          \n\
@@ -14403,13 +14475,15 @@ fn product_export_readme(stem: &str, json: &crate::report_export::AuditReportJso
     )
 }
 
-/// Zip the PDF + xlsx + README.txt into one in-memory archive (Deflate compression) for the
-/// product-export response body. The ONLY I/O here is the in-memory `Cursor<Vec<u8>>` —
-/// no temp files, matching `report_export`'s own "tiny, no persistence" contract.
+/// Zip the PDF + xlsx + `findings.json` + README.txt into one in-memory archive (Deflate
+/// compression) for the product-export response body. The ONLY I/O here is the in-memory
+/// `Cursor<Vec<u8>>` — no temp files, matching `report_export`'s own "tiny, no persistence"
+/// contract.
 fn build_product_zip(
     stem: &str,
     pdf_bytes: &[u8],
     xlsx_bytes: &[u8],
+    findings_json_bytes: &[u8],
     readme: &str,
 ) -> zip::result::ZipResult<Vec<u8>> {
     use std::io::Write;
@@ -14424,6 +14498,9 @@ fn build_product_zip(
 
     writer.start_file(format!("{stem}-findings.xlsx"), options)?;
     writer.write_all(xlsx_bytes)?;
+
+    writer.start_file("findings.json", options)?;
+    writer.write_all(findings_json_bytes)?;
 
     writer.start_file("README.txt", options)?;
     writer.write_all(readme.as_bytes())?;
@@ -21145,6 +21222,7 @@ mod tests {
         names.sort();
         assert!(names.iter().any(|n| n.ends_with(".pdf")), "{names:?}");
         assert!(names.iter().any(|n| n.ends_with("-findings.xlsx")), "{names:?}");
+        assert!(names.contains(&"findings.json".to_string()), "{names:?}");
         assert!(names.contains(&"README.txt".to_string()), "{names:?}");
 
         let pdf_name = names.iter().find(|n| n.ends_with(".pdf")).unwrap().clone();
@@ -21161,10 +21239,31 @@ mod tests {
             "the zipped xlsx must itself be a valid zip container"
         );
 
+        let mut findings_json_str = String::new();
+        archive
+            .by_name("findings.json")
+            .unwrap()
+            .read_to_string(&mut findings_json_str)
+            .unwrap();
+        let findings_json: serde_json::Value =
+            serde_json::from_str(&findings_json_str).expect("findings.json must be valid JSON");
+        assert!(findings_json.get("provenance").is_some(), "{findings_json_str}");
+        assert!(findings_json.get("summary").is_some(), "{findings_json_str}");
+        let findings_arr = findings_json
+            .get("findings")
+            .and_then(|f| f.as_array())
+            .expect("findings.json must have a findings array");
+        assert_eq!(
+            findings_arr.len(),
+            1,
+            "the one non-FP fixture finding must be the sole findings.json row: {findings_json_str}"
+        );
+
         let mut readme = String::new();
         archive.by_name("README.txt").unwrap().read_to_string(&mut readme).unwrap();
         assert!(readme.contains(&pdf_name), "{readme}");
         assert!(readme.contains(&xlsx_name), "{readme}");
+        assert!(readme.contains("findings.json"), "{readme}");
     }
 
     /// active_project_context returns scan_results_section from last_scan when no draft.
@@ -23568,5 +23667,54 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["status"], "file_missing");
+    }
+
+    // ── `GET /api/onboard/finding-fix` (recommended-fix-in-modal feature) ──────────
+
+    /// A rule with a real corpus entry + adopted default option's directive returns that
+    /// directive verbatim — the SAME string `resolve_fix` (and therefore the PDF's "Fix:"
+    /// line and the xlsx "Recommended Fix" column) would produce for the same rule id.
+    #[tokio::test]
+    async fn finding_fix_returns_resolve_fix_output_for_a_known_rule() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboard/finding-fix?rule_id=SEC-NO-UNSAFE-DESERIALIZATION-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        let expected = crate::report_export::resolve_fix(
+            "SEC-NO-UNSAFE-DESERIALIZATION-1",
+            Some(&corpus),
+        );
+        assert!(!expected.is_empty(), "fixture rule must have a real corpus directive");
+        assert_eq!(json["fix"], expected);
+    }
+
+    /// A rule id absent from the corpus returns an EMPTY fix — never a fabricated sentence.
+    #[tokio::test]
+    async fn finding_fix_is_empty_for_an_unknown_rule() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboard/finding-fix?rule_id=NO-SUCH-RULE-EVER-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["fix"], "");
     }
 }
