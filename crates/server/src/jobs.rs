@@ -412,6 +412,8 @@ mod tests {
             needs_review: false,
             confidence: None,
             effort: None,
+            category: None,
+            located: true,
         }
     }
 

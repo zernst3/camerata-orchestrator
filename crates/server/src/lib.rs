@@ -21068,6 +21068,8 @@ mod tests {
                 needs_review: false,
                 confidence: None,
                 effort: None,
+                category: None,
+                located: true,
             }],
             proposed_rules: Vec::new(),
             gated: false,

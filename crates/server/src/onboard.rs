@@ -150,6 +150,29 @@ pub struct Finding {
     /// never load-bearing).
     #[serde(default)]
     pub effort: Option<String>,
+    /// Semantic category from a closed taxonomy (`authorization`, `rls-policy`,
+    /// `transport-security`, `arch-conformance`, `testing-style`, …). Drives the SECOND,
+    /// cross-family merge pass ([`crate::ai_audit::merge_semantic_groups`]): two findings only
+    /// collapse when they share a category. `None` when no source or heuristic could classify
+    /// the rule — a `None`-category finding is NEVER semantically merged (fail-open to
+    /// over-telling). Assigned from the deterministic rule-id token map or the calibration
+    /// verdict's `category` field. Back-compatible (serde-defaulted).
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Whether this finding's snippet was resolved to REAL code present in the file (a
+    /// presence-type violation) vs an absence/architectural observation whose snippet is a
+    /// description, not code (`located == false`). Computed in [`crate::ai_audit::merge_by_location`]
+    /// and reused (rather than recomputed) by the informational-bucketing predicate — an
+    /// absence-type stance finding is the noise Item 2 down-buckets. Deterministic floor/checker
+    /// findings cite real lines, so this defaults to `true` (back-compatible serde default).
+    #[serde(default = "default_located")]
+    pub located: bool,
+}
+
+/// A finding is presumed presence-type (`located = true`) unless the AI merge pass proves its
+/// snippet is a description rather than code present in the file.
+fn default_located() -> bool {
+    true
 }
 
 /// Findings default to `active` (enforced) until classified against suppressions.
@@ -179,6 +202,8 @@ impl Default for Finding {
             needs_review: false,
             confidence: None,
             effort: None,
+            category: None,
+            located: default_located(),
         }
     }
 }
@@ -853,6 +878,13 @@ pub async fn audit_repos(
                 manifest_builder.record_repo(spec, &files, &ai_for_repo);
 
                 repo_findings.extend(ai_for_repo);
+                // Bug 3: second, cross-FAMILY merge pass over the COMBINED floor + arch + AI set
+                // (exact-location merge + snippet anchoring already ran inside the AI tier). Fuses
+                // the same defect flagged by two rule families a few lines apart, keeping the
+                // deterministic/most-specific primary + its exact line, siblings → `also_matches`.
+                // Runs BEFORE suppression classification so a waiver still sees the merged row.
+                let mut repo_findings =
+                    crate::ai_audit::merge_semantic_groups(repo_findings, &files);
                 classify_repo_findings(&mut repo_findings, spec, &files);
                 all_findings.extend(repo_findings);
                 repos_ok.push(spec.to_string());
@@ -1744,6 +1776,8 @@ mod tests {
             needs_review: false,
             confidence: None,
             effort: None,
+            category: None,
+            located: true,
         };
         let mut findings = vec![
             mk("a.rs", 5, "SEC-NO-HARDCODED-SECRETS-1", snippet), // baselined
@@ -1777,6 +1811,8 @@ mod tests {
                 needs_review: false,
                 confidence: None,
                 effort: None,
+                category: None,
+                located: true,
             },
             Finding {
                 repo: "me/web".into(),
@@ -1794,6 +1830,8 @@ mod tests {
                 needs_review: false,
                 confidence: None,
                 effort: None,
+                category: None,
+                located: true,
             },
         ];
         let body = tech_debt_issue_body(&findings);
@@ -1832,6 +1870,8 @@ mod tests {
             needs_review: false,
             confidence: None,
             effort: None,
+            category: None,
+            located: true,
         }
     }
 
@@ -1973,6 +2013,8 @@ mod tests {
             needs_review: false,
             confidence: None,
             effort: None,
+            category: None,
+            located: true,
         };
         let csv = tech_debt_csv(&[f]);
         let data_row = csv.lines().nth(1).expect("expected data row");

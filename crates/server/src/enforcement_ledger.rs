@@ -497,6 +497,8 @@ mod tests {
             needs_review: false,
             confidence: None,
             effort: None,
+            category: None,
+            located: true,
         }];
         // Must not panic or error.
         capture_scan_findings(&ledger, &findings).await;
@@ -558,6 +560,8 @@ mod tests {
                 needs_review: false,
                 confidence: None,
                 effort: None,
+                category: None,
+                located: true,
             },
             // Suppressed finding → skipped silently (no panic).
             crate::onboard::Finding {
@@ -576,6 +580,8 @@ mod tests {
                 needs_review: false,
                 confidence: None,
                 effort: None,
+                category: None,
+                located: true,
             },
             // Non-floor rule → skipped silently (no panic).
             crate::onboard::Finding {
@@ -594,6 +600,8 @@ mod tests {
                 needs_review: false,
                 confidence: None,
                 effort: None,
+                category: None,
+                located: true,
             },
         ];
 

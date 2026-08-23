@@ -72,6 +72,8 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                         needs_review: false,
                         confidence: None,
                         effort: None,
+                        category: None,
+                        located: true,
                     });
                 }
             }
@@ -118,6 +120,8 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                 needs_review,
                 confidence: None,
                 effort: None,
+                category: None,
+                located: true,
             });
         }
     }
@@ -221,6 +225,8 @@ pub(crate) fn classify_repo_findings(
             needs_review: false,
             confidence: None,
             effort: None,
+            category: None,
+            located: true,
         });
     }
 }
