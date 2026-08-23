@@ -577,7 +577,7 @@ mod tests {
             "src".to_string(),
             MergeSourceKind::Local,
             None,
-            "claude-opus-4-8".to_string(),
+            "claude-opus-5".to_string(),
             None,
             Vec::new(),
             camerata_checks::vcs_action::ProcessRuleConfig::default(),

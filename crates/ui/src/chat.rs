@@ -1479,7 +1479,7 @@ mod tests {
             .and(path("/api/chat"))
             .and(body_json(serde_json::json!({
                 "prompt": "What is CAM-1 blocked on?",
-                "model": "claude-opus-4-8",
+                "model": "claude-opus-5",
                 "system": "SYS PROMPT",
                 "history": [
                     { "role": "user", "content": "hi" },
@@ -1499,7 +1499,7 @@ mod tests {
             super::ChatHistoryTurn { role: "user", content: "hi".to_string() },
             super::ChatHistoryTurn { role: "assistant", content: "hello".to_string() },
         ];
-        let res = super::send_chat("What is CAM-1 blocked on?", "claude-opus-4-8", "SYS PROMPT", history).await;
+        let res = super::send_chat("What is CAM-1 blocked on?", "claude-opus-5", "SYS PROMPT", history).await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         let resp = res.expect("2xx with a valid ChatResp body parses");
@@ -1594,7 +1594,7 @@ mod tests {
             .and(path("/api/settings"))
             .respond_with(
                 ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "chat_model": "claude-opus-4-8" })),
+                    .set_body_json(serde_json::json!({ "chat_model": "claude-opus-5" })),
             )
             .mount(&server)
             .await;
@@ -1603,7 +1603,7 @@ mod tests {
         let model = super::fetch_app_chat_model().await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(model, Some("claude-opus-4-8".to_string()));
+        assert_eq!(model, Some("claude-opus-5".to_string()));
     }
 
     #[tokio::test]
@@ -1646,7 +1646,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "models": [
                     {
-                        "id": "claude-opus-4-8",
+                        "id": "claude-opus-5",
                         "display": "Opus",
                         "provider": "claude",
                         "free": false,
@@ -1677,8 +1677,8 @@ mod tests {
         let resp = resp.expect("registry response must parse into ModelsResp");
         assert_eq!(resp.models.len(), 2);
         // The first claude model is the default.
-        assert_eq!(resp.default, "claude-opus-4-8");
-        let opus = resp.models.iter().find(|m| m.id == "claude-opus-4-8").expect("opus present");
+        assert_eq!(resp.default, "claude-opus-5");
+        let opus = resp.models.iter().find(|m| m.id == "claude-opus-5").expect("opus present");
         assert_eq!(opus.provider, "claude");
         // price_out 15 -> "$15/M"; tool_use -> "tool-use"; 200000 ctx -> "200K"; caching -> "cache".
         assert!(opus.label.contains("Opus"), "label keeps display name; got {}", opus.label);

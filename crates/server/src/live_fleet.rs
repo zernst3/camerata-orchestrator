@@ -750,14 +750,14 @@ mod tests {
             BuildEvent::AgentTier {
                 index: 0,
                 role: "Lead-1".to_string(),
-                model: "claude-opus-4-8".to_string(),
+                model: "claude-opus-5".to_string(),
                 is_lead: true,
             },
         )
         .unwrap();
         assert_eq!(ev.layer, "tier");
         assert_eq!(ev.verdict, "info");
-        assert!(ev.detail.contains("claude-opus-4-8"));
+        assert!(ev.detail.contains("claude-opus-5"));
         assert!(ev.detail.contains("lead"));
     }
 

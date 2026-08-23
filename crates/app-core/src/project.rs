@@ -283,7 +283,7 @@ pub struct Project {
     /// Serde default fills in [`TierMap::default()`] for projects persisted before this
     /// field existed, so no migration is required. The default Claude tier map is:
     /// `fast=claude-haiku-4-5-20251001`, `balanced=claude-sonnet-5`,
-    /// `strongest=claude-opus-4-8`.
+    /// `strongest=claude-opus-5`.
     #[serde(default)]
     pub tier_map: TierMap,
     /// VCS-action gate configuration: per-rule enabled flags and tunables for the
@@ -1113,10 +1113,10 @@ mod tests {
             "repos": [],
             "ruleset": {},
             "onboarded": [],
-            "step_models": { "audit": "claude-opus-4-8" }
+            "step_models": { "audit": "claude-opus-5" }
         }"#;
         let p2: Project = serde_json::from_str(partial).unwrap();
-        assert_eq!(p2.step_models.audit, "claude-opus-4-8");
+        assert_eq!(p2.step_models.audit, "claude-opus-5");
         assert_eq!(
             p2.step_models.calibration, DEFAULT_MODEL,
             "absent step fields fall back to DEFAULT_MODEL even in a partial blob"
@@ -1144,12 +1144,12 @@ mod tests {
             hierarchy_schema: HierarchySchema::default(),
             ruleset: ProjectRuleset::default(),
         };
-        original.set_model_for_step(StepKind::Decomposition, "claude-opus-4-8".into());
+        original.set_model_for_step(StepKind::Decomposition, "claude-opus-5".into());
         original.set_model_for_step(StepKind::ResearchChat, "claude-haiku-4-5-20251001".into());
         let json = serde_json::to_string(&original).unwrap();
         let back: Project = serde_json::from_str(&json).unwrap();
         assert_eq!(back.step_models, original.step_models);
-        assert_eq!(back.model_for_step(StepKind::Decomposition), "claude-opus-4-8");
+        assert_eq!(back.model_for_step(StepKind::Decomposition), "claude-opus-5");
     }
 
     #[test]

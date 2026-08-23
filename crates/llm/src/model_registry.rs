@@ -44,8 +44,8 @@ pub use camerata_api_types::model_registry::{
 /// Opus=10.
 pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
     RegistryEntryStatic {
-        display: "Opus 4.8",
-        id: "claude-opus-4-8",
+        display: "Opus 5",
+        id: "claude-opus-5",
         context: 200_000,
         weight: 10,
         // Anthropic list price: $5 / $25 per million tokens (input / output).
@@ -759,7 +759,7 @@ mod tests {
     fn claude_entries_has_all_three_tiers() {
         let entries = claude_entries();
         assert_eq!(entries.len(), 3, "expect exactly 3 Claude tiers");
-        assert!(entries.iter().any(|e| e.id == "claude-opus-4-8"));
+        assert!(entries.iter().any(|e| e.id == "claude-opus-5"));
         assert!(entries.iter().any(|e| e.id == "claude-sonnet-5"));
         assert!(entries.iter().any(|e| e.id == "claude-haiku-4-5-20251001"));
     }
@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn claude_opus_has_highest_weight() {
         let entries = claude_entries();
-        let opus = entries.iter().find(|e| e.id == "claude-opus-4-8").unwrap();
+        let opus = entries.iter().find(|e| e.id == "claude-opus-5").unwrap();
         let sonnet = entries.iter().find(|e| e.id == "claude-sonnet-5").unwrap();
         let haiku = entries.iter().find(|e| e.id == "claude-haiku-4-5-20251001").unwrap();
         assert!(
@@ -809,7 +809,7 @@ mod tests {
     fn claude_entries_ids_match_fleet_tier_defaults() {
         // These must stay in sync with fleet/src/tier.rs default_*_model().
         let entries = claude_entries();
-        assert!(entries.iter().any(|e| e.id == "claude-opus-4-8"));
+        assert!(entries.iter().any(|e| e.id == "claude-opus-5"));
         assert!(entries.iter().any(|e| e.id == "claude-sonnet-5"));
         assert!(entries.iter().any(|e| e.id == "claude-haiku-4-5-20251001"));
     }
@@ -824,15 +824,15 @@ mod tests {
     #[test]
     fn claude_opus_carries_list_price_5_25() {
         let entries = claude_entries();
-        let opus = entries.iter().find(|e| e.id == "claude-opus-4-8").unwrap();
+        let opus = entries.iter().find(|e| e.id == "claude-opus-5").unwrap();
         assert!(
             (opus.price_in - 5.0).abs() < f64::EPSILON,
-            "Opus 4.8 price_in must be $5/M, got {}",
+            "Opus 5 price_in must be $5/M, got {}",
             opus.price_in
         );
         assert!(
             (opus.price_out - 25.0).abs() < f64::EPSILON,
-            "Opus 4.8 price_out must be $25/M, got {}",
+            "Opus 5 price_out must be $25/M, got {}",
             opus.price_out
         );
     }
@@ -1068,7 +1068,7 @@ mod tests {
     #[test]
     fn caching_heuristic_claude_provider_always_true() {
         // All claude-provider models are caching-capable (the subscription/CLI path).
-        assert!(caching_heuristic("claude", "claude-opus-4-8"));
+        assert!(caching_heuristic("claude", "claude-opus-5"));
         assert!(caching_heuristic("claude", "claude-sonnet-5"));
         assert!(caching_heuristic("claude", "claude-haiku-4-5-20251001"));
     }

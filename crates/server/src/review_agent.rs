@@ -320,7 +320,7 @@ mod tests {
     fn l3_enabled_when_explicitly_set() {
         let config = L3ReviewConfig {
             enabled: true,
-            model: "claude-opus-4-8".to_string(),
+            model: "claude-opus-5".to_string(),
         };
         assert!(config.enabled);
     }
@@ -527,11 +527,11 @@ mod tests {
                 &p.id,
                 L3ReviewConfig {
                     enabled: true,
-                    model: "claude-opus-4-8".to_string(),
+                    model: "claude-opus-5".to_string(),
                 },
             )
             .unwrap();
-        assert_eq!(updated.l3_model(), "claude-opus-4-8");
+        assert_eq!(updated.l3_model(), "claude-opus-5");
     }
 
     // ── 7. check_integration_gate_live short-circuits ─────────────────────────

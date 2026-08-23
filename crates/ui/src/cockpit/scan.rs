@@ -4826,7 +4826,7 @@ mod tests {
             .and(body_json(serde_json::json!({
                 "repos": ["owner/a"],
                 "rules": [ { "id": "R1", "directive": "do it", "repos": ["owner/a"] } ],
-                "model": "claude-opus-4-8",
+                "model": "claude-opus-5",
                 "calibration_model": "claude-sonnet-4",
                 "mode": "parallel",
                 "thorough": false,
@@ -4852,7 +4852,7 @@ mod tests {
         let report = super::audit_against(
             &["owner/a".to_string()],
             &rules,
-            "claude-opus-4-8",
+            "claude-opus-5",
             "claude-sonnet-4",
             "parallel",
             false,

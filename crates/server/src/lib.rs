@@ -3982,7 +3982,7 @@ struct SetStepModelReq {
     /// The step key: `audit` | `calibration` | `research_chat` | `story_authoring` |
     /// `decomposition` | `escalation` | `clarification`.
     step: String,
-    /// The model id to bind (e.g. `claude-opus-4-8`).
+    /// The model id to bind (e.g. `claude-opus-5`).
     model: String,
 }
 
@@ -15120,15 +15120,15 @@ mod tests {
         let p = state.projects.create("Routing", vec![]).unwrap();
         state
             .projects
-            .set_step_model(&p.id, StepKind::StoryAuthoring, "claude-opus-4-8".to_string())
+            .set_step_model(&p.id, StepKind::StoryAuthoring, "claude-opus-5".to_string())
             .unwrap();
 
         // The fallback-step resolver now returns the project's configured model (no env floor).
         let model = step_model(&state, StepKind::StoryAuthoring);
-        assert_eq!(model, "claude-opus-4-8");
+        assert_eq!(model, "claude-opus-5");
         // And it is exactly what a fallback-step call site puts on the LlmRequest.
         let req = crate::llm::LlmRequest::new("draft").with_model(model);
-        assert_eq!(req.model, "claude-opus-4-8");
+        assert_eq!(req.model, "claude-opus-5");
 
         // A different step on the same project is still the default (per-step isolation).
         assert_eq!(
@@ -15151,8 +15151,8 @@ mod tests {
 
         // Explicit pick overrides the project default.
         assert_eq!(
-            step_model_or(&state, StepKind::Audit, Some("claude-opus-4-8")),
-            "claude-opus-4-8"
+            step_model_or(&state, StepKind::Audit, Some("claude-opus-5")),
+            "claude-opus-5"
         );
         // Blank / None falls back to the project's per-step model.
         assert_eq!(
@@ -15945,7 +15945,7 @@ mod tests {
             base_commit: "abc123".to_string(),
             iteration: 0,
             max_iterations: 1,
-            model: "claude-opus-4-8".to_string(),
+            model: "claude-opus-5".to_string(),
             project_id: None,
         });
         state.escalations.set_checkpoint(&esc.id, &ckpt.id);
@@ -16055,7 +16055,7 @@ mod tests {
                 story_id: "me/api#3".to_string(),
                 story_title: "Add export".to_string(),
                 story_desc: "desc".to_string(),
-                model: "claude-opus-4-8".to_string(),
+                model: "claude-opus-5".to_string(),
                 phase: crate::clarify_resume::PausedPhase::Investigation,
                 original_task: "Analyze the story.".to_string(),
                 asked_question: "Include archived rows?".to_string(),
@@ -16104,7 +16104,7 @@ mod tests {
                 story_id: "me/api#5".to_string(),
                 story_title: "T".to_string(),
                 story_desc: "D".to_string(),
-                model: "claude-opus-4-8".to_string(),
+                model: "claude-opus-5".to_string(),
                 phase: crate::clarify_resume::PausedPhase::Investigation,
                 original_task: "task".to_string(),
                 asked_question: "Which flag?".to_string(),
@@ -16223,10 +16223,10 @@ mod tests {
         let state = AppState::seeded();
         // Anthropic-shaped: cost reported directly.
         state.usage_ledger.record(
-            "claude-opus-4-8",
+            "claude-opus-5",
             &crate::llm::LlmResponse {
                 text: String::new(),
-                model: "claude-opus-4-8".to_string(),
+                model: "claude-opus-5".to_string(),
                 backend: "cli".to_string(),
                 cost_usd: Some(0.05),
                 input_tokens: Some(1000),
@@ -18138,8 +18138,8 @@ mod tests {
     fn start_run_req_tier_map_absent_is_back_compat_single_model() {
         // No tier_map, just a model → single-model path (back-compat).
         let req: StartRunReq =
-            serde_json::from_value(serde_json::json!({ "model": "claude-opus-4-8" })).unwrap();
-        assert_eq!(req.model.as_deref(), Some("claude-opus-4-8"));
+            serde_json::from_value(serde_json::json!({ "model": "claude-opus-5" })).unwrap();
+        assert_eq!(req.model.as_deref(), Some("claude-opus-5"));
         assert!(req.tier_map.is_none());
 
         // Entirely empty body also parses (no-body callers stay compatible).
@@ -18266,7 +18266,7 @@ mod tests {
                     .uri(format!("/api/uow/{story}/begin-investigation"))
                     .header("content-type", "application/json")
                     .body(Body::from(
-                        serde_json::json!({ "model": "claude-opus-4-8" }).to_string(),
+                        serde_json::json!({ "model": "claude-opus-5" }).to_string(),
                     ))
                     .unwrap(),
             )
@@ -18725,7 +18725,7 @@ mod tests {
             base_commit: "abc123".to_string(),
             iteration: 0,
             max_iterations: 1,
-            model: "claude-opus-4-8".to_string(),
+            model: "claude-opus-5".to_string(),
             project_id: None,
         });
 

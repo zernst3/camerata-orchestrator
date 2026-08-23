@@ -1262,7 +1262,7 @@ mod tests {
         let e6 = BuildEvent::AgentTier {
             index: 0,
             role: "Lead-1".to_string(),
-            model: "claude-opus-4-8".to_string(),
+            model: "claude-opus-5".to_string(),
             is_lead: true,
         };
         let _ = format!("{:?}", e6.clone());
@@ -1400,7 +1400,7 @@ mod tests {
 
         let expected = [
             (CapabilityBand::Balanced, "claude-sonnet-5"),
-            (CapabilityBand::Strongest, "claude-opus-4-8"),
+            (CapabilityBand::Strongest, "claude-opus-5"),
             (CapabilityBand::Balanced, "claude-sonnet-5"),
             (CapabilityBand::Fast, "claude-haiku-4-5-20251001"),
         ];
@@ -1490,7 +1490,7 @@ mod tests {
         .unwrap();
         let cb: HeartbeatFn = Arc::new(|| {});
         let ctx = LeadBuildContext {
-            strongest_model: "claude-opus-4-8",
+            strongest_model: "claude-opus-5",
             session: &session,
             worktree: std::path::Path::new("/work/crate"),
             tier_map: &crate::tier::TierMap::default(),
@@ -1500,7 +1500,7 @@ mod tests {
         let _driver = factory.build_lead(&ctx).unwrap();
         let calls = factory.calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "build_lead called exactly once for the lead");
-        assert_eq!(calls[0].0, "claude-opus-4-8", "lead built for the strongest model");
+        assert_eq!(calls[0].0, "claude-opus-5", "lead built for the strongest model");
         assert_eq!(calls[0].1, std::path::PathBuf::from("/work/crate"));
         assert!(calls[0].2, "the activity heartbeat is threaded to build_lead");
     }

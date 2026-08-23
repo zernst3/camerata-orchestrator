@@ -143,7 +143,7 @@ mod tests {
             base_commit: "abc123".to_string(),
             iteration: 0,
             max_iterations: 3,
-            model: "claude-opus-4-8".to_string(),
+            model: "claude-opus-5".to_string(),
             project_id: Some("proj-1".to_string()),
         })
     }

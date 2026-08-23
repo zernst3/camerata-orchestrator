@@ -2156,7 +2156,7 @@ mod tests {
             &[approved_decision("opt-a", "Q", "R")],
             None,
             &[],
-            "claude-opus-4-8",
+            "claude-opus-5",
         );
 
         // Governance kernel markers + a load-bearing clause.
@@ -2210,7 +2210,7 @@ mod tests {
             &[approved_decision("opt", "Q", "R")],
             Some(grounding),
             &[],
-            "claude-opus-4-8",
+            "claude-opus-5",
         );
         let i_kernel = p.find("=== CAMERATA OPERATING PROTOCOL").expect("layer 1");
         let i_grounding = p.find("=== PROJECT GROUNDING ===").expect("layer 2");
@@ -2245,7 +2245,7 @@ mod tests {
                 &[approved_decision("opt", "Q", "R")],
                 Some(grounding),
                 &[],
-                "claude-opus-4-8",
+                "claude-opus-5",
             )
         };
         let a = mk("Story A", "description alpha");
@@ -2636,7 +2636,7 @@ mod tests {
             "camerata/story-42".to_string(),
             vec![approved_decision("auth", "JWT?", "Use JWT.")],
             None,
-            "claude-opus-4-8".to_string(),
+            "claude-opus-5".to_string(),
             1,
             false,
             None,

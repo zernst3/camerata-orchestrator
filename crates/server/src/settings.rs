@@ -272,8 +272,8 @@ mod tests {
     fn set_and_get_chat_model() {
         let store = SettingsStore::new();
         assert!(store.chat_model().is_none());
-        store.set_chat_model(Some("claude-opus-4-8".to_string()));
-        assert_eq!(store.chat_model().as_deref(), Some("claude-opus-4-8"));
+        store.set_chat_model(Some("claude-opus-5".to_string()));
+        assert_eq!(store.chat_model().as_deref(), Some("claude-opus-5"));
         // Empty / whitespace clears it.
         store.set_chat_model(Some("   ".to_string()));
         assert!(store.chat_model().is_none());

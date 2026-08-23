@@ -7463,7 +7463,7 @@ mod bff_tests {
             .and(body_json(serde_json::json!({
                 "source_branch": "main",
                 "source": "origin",
-                "model": "claude-opus-4-8",
+                "model": "claude-opus-5",
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "run_id": "run-42" })))
             .expect(1)
@@ -7471,7 +7471,7 @@ mod bff_tests {
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let out = super::start_update_branch_run("CAM-9", "main", "origin", "claude-opus-4-8").await;
+        let out = super::start_update_branch_run("CAM-9", "main", "origin", "claude-opus-5").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         match out {
@@ -8664,14 +8664,14 @@ mod bff_tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/uow/CAM-1/author"))
-            .and(body_json(serde_json::json!({ "message": "hi", "model": "claude-opus-4-8" })))
+            .and(body_json(serde_json::json!({ "message": "hi", "model": "claude-opus-5" })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "story_id": "CAM-1" })))
             .expect(1)
             .mount(&server)
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let out = super::post_author_message("CAM-1", "hi", "  claude-opus-4-8  ").await;
+        let out = super::post_author_message("CAM-1", "hi", "  claude-opus-5  ").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(out.is_some());

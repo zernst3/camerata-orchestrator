@@ -107,11 +107,11 @@ mod tests {
     fn chat_model_groups_never_empty_when_registry_not_loaded() {
         // Resource None (still loading or fetch failed): the selector must still show the current
         // model, never render with zero options (which reads as "the selector disappeared").
-        let groups = chat_model_groups(&None, "claude-opus-4-8");
+        let groups = chat_model_groups(&None, "claude-opus-5");
         assert!(total_options(&groups) >= 1, "selector must always have an option");
         assert!(groups
             .iter()
-            .any(|(_, o)| o.iter().any(|m| m.id == "claude-opus-4-8")));
+            .any(|(_, o)| o.iter().any(|m| m.id == "claude-opus-5")));
     }
 
     #[test]
@@ -136,16 +136,16 @@ mod tests {
     #[test]
     fn chat_model_groups_uses_registry_when_present() {
         let resp = ModelsResp {
-            models: vec![opt("claude-opus-4-8", "claude"), opt("gpt-x", "openrouter")],
-            default: "claude-opus-4-8".into(),
+            models: vec![opt("claude-opus-5", "claude"), opt("gpt-x", "openrouter")],
+            default: "claude-opus-5".into(),
             backend: String::new(),
         };
-        let groups = chat_model_groups(&Some(resp), "claude-opus-4-8");
+        let groups = chat_model_groups(&Some(resp), "claude-opus-5");
         let ids: Vec<String> = groups
             .iter()
             .flat_map(|(_, o)| o.iter().map(|m| m.id.clone()))
             .collect();
-        assert!(ids.contains(&"claude-opus-4-8".to_string()));
+        assert!(ids.contains(&"claude-opus-5".to_string()));
         assert!(ids.contains(&"gpt-x".to_string()));
         // Two providers -> two groups (not the single "Current" fallback).
         assert!(groups.len() >= 2, "registry models should be grouped by provider");

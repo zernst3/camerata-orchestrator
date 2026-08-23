@@ -285,7 +285,7 @@ impl LlmPort for Llm {
 /// One completion request.
 #[derive(Debug, Clone)]
 pub struct LlmRequest {
-    /// Model id (e.g. `claude-opus-4-8`). Empty -> the provider's default.
+    /// Model id (e.g. `claude-opus-5`). Empty -> the provider's default.
     pub model: String,
     /// Optional system prompt.
     pub system: Option<String>,
@@ -1964,8 +1964,8 @@ mod tests {
         assert_eq!(llm.model_for(&LlmRequest::new("hi")), "claude-sonnet-5");
         // Explicit model wins.
         assert_eq!(
-            llm.model_for(&LlmRequest::new("hi").with_model("claude-opus-4-8")),
-            "claude-opus-4-8"
+            llm.model_for(&LlmRequest::new("hi").with_model("claude-opus-5")),
+            "claude-opus-5"
         );
     }
 
@@ -1973,11 +1973,11 @@ mod tests {
     fn request_builder() {
         let r = LlmRequest::new("do it")
             .with_system("be terse")
-            .with_model("claude-opus-4-8")
+            .with_model("claude-opus-5")
             .with_max_tokens(100);
         assert_eq!(r.prompt, "do it");
         assert_eq!(r.system.as_deref(), Some("be terse"));
-        assert_eq!(r.model, "claude-opus-4-8");
+        assert_eq!(r.model, "claude-opus-5");
         assert_eq!(r.max_tokens, 100);
         assert_eq!(r.cache_prefix_len, None, "caching off by default");
     }
@@ -2039,7 +2039,7 @@ mod tests {
         // opus: price_in 5, price_out 25 ($/Mtok) — the registry's live Anthropic list price
         // (see crate::model_registry::CLAUDE_REGISTRY_MODELS). input folds cache fields
         // (base 100, read 200, creation 30 -> 330); fresh input is 100.
-        let cost = compute_cost_usd("claude-opus-4-8", Some(330), Some(50), 200, 30)
+        let cost = compute_cost_usd("claude-opus-5", Some(330), Some(50), 200, 30)
             .expect("priced model");
         // 100*5 (fresh) + 200*5*0.1 (read) + 30*5*1.25 (creation) + 50*25 (out) = 1837.5
         let expected = (100.0 * 5.0 + 200.0 * 5.0 * 0.1 + 30.0 * 5.0 * 1.25 + 50.0 * 25.0)
@@ -2050,12 +2050,12 @@ mod tests {
         assert!(cost < naive, "cached reads must not be billed at full input rate");
 
         // No cache tokens -> matches the plain input*price formula.
-        let plain = compute_cost_usd("claude-opus-4-8", Some(100), Some(50), 0, 0).unwrap();
+        let plain = compute_cost_usd("claude-opus-5", Some(100), Some(50), 0, 0).unwrap();
         assert!((plain - (100.0 * 5.0 + 50.0 * 25.0) / 1_000_000.0).abs() < 1e-12);
 
         // Unknown model or missing counts -> None.
         assert!(compute_cost_usd("nope", Some(1), Some(1), 0, 0).is_none());
-        assert!(compute_cost_usd("claude-opus-4-8", None, Some(1), 0, 0).is_none());
+        assert!(compute_cost_usd("claude-opus-5", None, Some(1), 0, 0).is_none());
     }
 
     // Regression for the stale-pricing bug: `price_for` (and everything built on it —
@@ -2071,7 +2071,7 @@ mod tests {
             assert_eq!(pin, reg.price_in, "{} price_in must match the registry", reg.id);
             assert_eq!(pout, reg.price_out, "{} price_out must match the registry", reg.id);
         }
-        let (opus_in, opus_out) = price_for("claude-opus-4-8").unwrap();
+        let (opus_in, opus_out) = price_for("claude-opus-5").unwrap();
         assert_eq!((opus_in, opus_out), (5.0, 25.0), "Opus must price at the current $5/$25, not the stale $15/$75");
     }
 
@@ -2091,7 +2091,7 @@ mod tests {
     #[test]
     fn models_list_has_known_ids() {
         let list = models();
-        assert!(list.iter().any(|m| m.id == "claude-opus-4-8"));
+        assert!(list.iter().any(|m| m.id == "claude-opus-5"));
         assert!(list.iter().any(|m| m.id == DEFAULT_MODEL));
         // Every model is tagged with a vendor (the agent-agnostic axis).
         assert!(list.iter().all(|m| !m.vendor.is_empty()));

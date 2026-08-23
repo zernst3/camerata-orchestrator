@@ -128,7 +128,7 @@ impl KernelTier {
 /// Accepts both explicit tier names (`fast`, `low`, `balanced`, `mid`, `strongest`,
 /// `orchestration`) and model ids/substrings (`haiku`, `deepseek-flash`, `sonnet`,
 /// `deepseek-pro`, `opus`, `glm`, ...). Matching is case-insensitive and substring-based so a
-/// fully-qualified model id (e.g. `claude-opus-4-8` or `us.anthropic.claude-3-5-sonnet`) maps
+/// fully-qualified model id (e.g. `claude-opus-5` or `us.anthropic.claude-3-5-sonnet`) maps
 /// correctly. Anything unrecognized defaults to [`KernelTier::Balanced`] — the middle,
 /// literal-model discipline is the safest default for an unknown model.
 pub fn tier_of(model_or_tier: &str) -> KernelTier {
@@ -272,7 +272,7 @@ mod tests {
 
     #[test]
     fn tier_of_resolves_model_ids_case_insensitively() {
-        assert_eq!(tier_of("claude-opus-4-8"), KernelTier::Strongest);
+        assert_eq!(tier_of("claude-opus-5"), KernelTier::Strongest);
         assert_eq!(tier_of("GLM-5.2"), KernelTier::Strongest);
         assert_eq!(tier_of("claude-3-5-haiku"), KernelTier::Fast);
         assert_eq!(tier_of("deepseek-flash"), KernelTier::Fast);
@@ -299,7 +299,7 @@ mod tests {
         assert!(balanced.contains(KERNEL_ADDENDUM_BALANCED));
         assert!(!balanced.contains(KERNEL_ADDENDUM_FAST));
 
-        let strongest = kernel_for("claude-opus-4-8");
+        let strongest = kernel_for("claude-opus-5");
         assert!(strongest.contains(GOVERNANCE_KERNEL));
         assert!(strongest.contains(KERNEL_ADDENDUM_STRONGEST));
         assert!(!strongest.contains(KERNEL_ADDENDUM_FAST));

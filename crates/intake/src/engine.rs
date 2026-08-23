@@ -1284,8 +1284,8 @@ mod tests {
 
     #[test]
     fn with_model_uses_supplied_id() {
-        let le = ClaudeLeadEngineer::with_model("claude-opus-4-8");
-        assert_eq!(le.model, "claude-opus-4-8");
+        let le = ClaudeLeadEngineer::with_model("claude-opus-5");
+        assert_eq!(le.model, "claude-opus-5");
     }
 
     #[test]

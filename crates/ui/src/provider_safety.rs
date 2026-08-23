@@ -578,10 +578,10 @@ mod tests {
 
     fn picker_harness_claude() -> Element {
         use_context_provider(|| ProviderPolicySignal(Signal::new(ProviderPolicyView::default())));
-        let model = use_signal(|| "claude-opus-4-8".to_string());
+        let model = use_signal(|| "claude-opus-5".to_string());
         let models = Some(ModelsResp {
-            models: vec![model_option("claude-opus-4-8", "claude")],
-            default: "claude-opus-4-8".to_string(),
+            models: vec![model_option("claude-opus-5", "claude")],
+            default: "claude-opus-5".to_string(),
             backend: String::new(),
         });
         rsx! { ProviderPicker { model, models } }

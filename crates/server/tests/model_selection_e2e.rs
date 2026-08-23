@@ -481,7 +481,7 @@ fn scope4_balanced_profile_overwrites_all_entries() {
     let p = apply_profile_real(&store, &registry, &p.id, ModelProfile::Balanced);
 
     assert_eq!(p.model_profile, ModelProfile::Balanced);
-    assert_eq!(p.tier_map.strongest, "claude-opus-4-8");
+    assert_eq!(p.tier_map.strongest, "claude-opus-5");
     assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-5".to_string()]);
     assert_eq!(p.tier_map.fast, vec!["claude-haiku-4-5-20251001".to_string()]);
     // Every step model overwritten to Haiku.
@@ -504,7 +504,7 @@ fn scope4_max_quality_profile_overwrites_all_entries() {
     let p = apply_profile_real(&store, &registry, &p.id, ModelProfile::MaxQuality);
 
     assert_eq!(p.model_profile, ModelProfile::MaxQuality);
-    assert_eq!(p.tier_map.strongest, "claude-opus-4-8");
+    assert_eq!(p.tier_map.strongest, "claude-opus-5");
     assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-5".to_string()]);
     assert_eq!(p.tier_map.fast, vec!["claude-sonnet-5".to_string()]);
     for (kind, _) in ALL_STEPS {
@@ -539,7 +539,7 @@ fn scope4_max_efficiency_profile_picks_free_models() {
 
     assert_eq!(p.model_profile, ModelProfile::MaxEfficiency);
     // Strongest stays Opus; balanced/fast chains lead with the free model.
-    assert_eq!(p.tier_map.strongest, "claude-opus-4-8");
+    assert_eq!(p.tier_map.strongest, "claude-opus-5");
     assert_eq!(p.tier_map.balanced[0], "qwen/qwen3-coder:free");
     // Step models use the free coder.
     assert_eq!(p.model_for_step(StepKind::Audit), "qwen/qwen3-coder:free");
@@ -700,10 +700,10 @@ fn scope5_cli_driver_carries_selected_model_in_with_model() {
     // is what becomes the `--model` CLI arg (agent::build_args). This is the CLI boundary
     // that we cannot exercise by spawning `claude`.
     let driver =
-        camerata_agent::ClaudeCliDriver::new("/tmp/mcp.json").with_model("claude-opus-4-8");
+        camerata_agent::ClaudeCliDriver::new("/tmp/mcp.json").with_model("claude-opus-5");
     assert_eq!(
         driver.model.as_deref(),
-        Some("claude-opus-4-8"),
+        Some("claude-opus-5"),
         "selected id is the model that becomes the --model arg"
     );
     // A blank selection leaves model None (the CLI then uses its own default).
@@ -874,7 +874,7 @@ fn server_orch_factory(
 #[test]
 fn scope7_claude_strongest_routes_to_cli_orchestrator() {
     let mut tier_map = TierMap::default();
-    tier_map.strongest = "claude-opus-4-8".to_string(); // claude provider in the static registry
+    tier_map.strongest = "claude-opus-5".to_string(); // claude provider in the static registry
     let factory = server_orch_factory(ModelRegistry::new(), MemoryCredentialStore::new());
     let session = lead_session(&tier_map);
     let ctx = LeadBuildContext {

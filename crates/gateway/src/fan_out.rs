@@ -263,7 +263,7 @@ mod tests {
         DelegateModels {
             fast: "claude-haiku-4-5-20251001".to_string(),
             balanced: "claude-sonnet-5".to_string(),
-            strongest: "claude-opus-4-8".to_string(),
+            strongest: "claude-opus-5".to_string(),
             vision: String::new(),
         }
     }

@@ -775,14 +775,14 @@ mod tests {
 
         // Set A's audit model to a non-default id.
         let updated_a = store
-            .set_step_model(&a.id, StepKind::Audit, "claude-opus-4-8".to_string())
+            .set_step_model(&a.id, StepKind::Audit, "claude-opus-5".to_string())
             .unwrap();
-        assert_eq!(updated_a.model_for_step(StepKind::Audit), "claude-opus-4-8");
+        assert_eq!(updated_a.model_for_step(StepKind::Audit), "claude-opus-5");
 
         // A's audit model changed...
         assert_eq!(
             store.get(&a.id).unwrap().model_for_step(StepKind::Audit),
-            "claude-opus-4-8",
+            "claude-opus-5",
             "project A's audit model was set"
         );
         // ...but B's audit model is STILL the default — the change did not leak.

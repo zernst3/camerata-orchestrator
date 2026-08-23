@@ -2223,7 +2223,7 @@ pub(super) fn TierMapEditor(project: ProjectView) -> Element {
                         input {
                             class: "tier-map-input addressee-input",
                             r#type: "text",
-                            placeholder: "e.g. claude-opus-4-8",
+                            placeholder: "e.g. claude-opus-5",
                             value: "{strongest}",
                             oninput: move |e| strongest.set(e.value()),
                         }
@@ -5777,7 +5777,7 @@ mod tests {
         // single diff line + count are produced.
         let project = project_from_json(serde_json::json!({
             "id": "p", "name": "n",
-            "tier_map": { "strongest": "claude-opus-4-8", "balanced": [], "fast": [] }
+            "tier_map": { "strongest": "claude-opus-5", "balanced": [], "fast": [] }
         }));
         let preview = Some(serde_json::json!({
             "assignments": {
@@ -5788,7 +5788,7 @@ mod tests {
         assert!(count >= 1, "at least the strongest change counts; lines={lines:?}");
         assert!(
             lines.iter().any(|l| l.contains("tier.strongest")
-                && l.contains("claude-opus-4-8")
+                && l.contains("claude-opus-5")
                 && l.contains("claude-sonnet-5")),
             "lines={lines:?}"
         );
@@ -5808,7 +5808,7 @@ mod tests {
         let project = project_from_json(serde_json::json!({
             "id": "p", "name": "n",
             "step_models": {
-                "audit": "claude-opus-4-8",
+                "audit": "claude-opus-5",
                 "calibration": "claude-sonnet-5",
                 "research_chat": "claude-sonnet-5",
                 "story_authoring": "claude-sonnet-5",
@@ -5834,7 +5834,7 @@ mod tests {
         assert_eq!(count, 1, "exactly the audit step changed; lines={lines:?}");
         assert!(
             lines.iter().any(|l| l.contains("step.audit")
-                && l.contains("claude-opus-4-8")
+                && l.contains("claude-opus-5")
                 && l.contains("claude-sonnet-5")),
             "lines={lines:?}"
         );
@@ -5851,7 +5851,7 @@ mod tests {
         }));
         let preview = Some(serde_json::json!({
             "assignments": {
-                "l3_review": { "enabled": true, "model": "claude-opus-4-8" }
+                "l3_review": { "enabled": true, "model": "claude-opus-5" }
             }
         }));
         let (lines, count) = super::build_change_summary(&project, &preview);
@@ -5865,7 +5865,7 @@ mod tests {
         assert!(
             lines.iter().any(|l| l.contains("l3.model")
                 && l.contains("(balanced fallback)")
-                && l.contains("claude-opus-4-8")),
+                && l.contains("claude-opus-5")),
             "lines={lines:?}"
         );
     }

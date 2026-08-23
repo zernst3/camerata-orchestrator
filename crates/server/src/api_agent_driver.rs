@@ -2642,7 +2642,7 @@ mod tests {
     #[test]
     fn build_system_prompt_embeds_kernel_and_working_discipline() {
         let role = test_role();
-        let p = build_system_prompt(&role, "claude-opus-4-8").expect("prompt is Some");
+        let p = build_system_prompt(&role, "claude-opus-5").expect("prompt is Some");
 
         // Kernel markers + a couple of load-bearing clauses.
         assert!(
@@ -3905,7 +3905,7 @@ mod tests {
             models: camerata_gateway::delegate::DelegateModels {
                 fast: "claude-haiku-4-5-20251001".to_string(),
                 balanced: "claude-sonnet-5".to_string(),
-                strongest: "claude-opus-4-8".to_string(),
+                strongest: "claude-opus-5".to_string(),
                 vision: String::new(),
             },
             worktree_root: PathBuf::from("/tmp/wt"),
@@ -4096,13 +4096,13 @@ mod tests {
         let schemas = build_tool_schemas_for(false, ApiShape::Anthropic);
         let messages = vec![serde_json::json!({"role": "user", "content": "do it"})];
         let (body, use_caching) = build_anthropic_request_body(
-            "claude-opus-4-8",
+            "claude-opus-5",
             Some("You are governed."),
             &messages,
             &schemas,
         );
         assert!(use_caching, "system present → caching active");
-        assert_eq!(body["model"].as_str(), Some("claude-opus-4-8"));
+        assert_eq!(body["model"].as_str(), Some("claude-opus-5"));
         assert!(body["max_tokens"].as_u64().is_some());
         // Top-level system as a cache_control text block (NOT a bare string, NOT inside messages).
         assert_eq!(body["system"][0]["type"].as_str(), Some("text"));
@@ -4118,7 +4118,7 @@ mod tests {
     #[test]
     fn anthropic_request_body_no_system_no_caching() {
         let (body, use_caching) =
-            build_anthropic_request_body("claude-opus-4-8", None, &[], &[]);
+            build_anthropic_request_body("claude-opus-5", None, &[], &[]);
         assert!(!use_caching, "no system → no caching header");
         assert!(body.get("system").is_none());
         // No tools → no tools/tool_choice keys.
@@ -4153,7 +4153,7 @@ mod tests {
         let task = "=== PROJECT GROUNDING ===\ndigest here\n=== END PROJECT GROUNDING ===\n\n## Story\ndo the thing";
         let messages = vec![serde_json::json!({"role": "user", "content": task})];
         let (body, use_caching) =
-            build_anthropic_request_body("claude-opus-4-8", None, &messages, &[]);
+            build_anthropic_request_body("claude-opus-5", None, &messages, &[]);
         // Even without a system prompt, the grounding breakpoint activates caching.
         assert!(use_caching, "grounded first message → caching active");
         let content = &body["messages"][0]["content"];
@@ -4170,7 +4170,7 @@ mod tests {
     fn anthropic_first_user_message_unchanged_without_grounding() {
         let messages = vec![serde_json::json!({"role": "user", "content": "plain task, no grounding"})];
         let (body, _use_caching) =
-            build_anthropic_request_body("claude-opus-4-8", Some("sys"), &messages, &[]);
+            build_anthropic_request_body("claude-opus-5", Some("sys"), &messages, &[]);
         // No grounding marker → first message content stays a plain string.
         assert_eq!(body["messages"][0]["content"].as_str(), Some("plain task, no grounding"));
     }
@@ -4183,7 +4183,7 @@ mod tests {
             serde_json::json!({"role": "user", "content": "plain opener no marker"}),
             serde_json::json!({"role": "user", "content": "later =[END PROJECT GROUNDING]= x\n\ntail"}),
         ];
-        let (body, _) = build_anthropic_request_body("claude-opus-4-8", None, &messages, &[]);
+        let (body, _) = build_anthropic_request_body("claude-opus-5", None, &messages, &[]);
         // Index 0 has no marker → stays a string; index 1 is passed through untouched.
         assert!(body["messages"][0]["content"].is_string());
         assert!(body["messages"][1]["content"].is_string());
@@ -4240,7 +4240,7 @@ mod tests {
                 "id": "msg_01",
                 "type": "message",
                 "role": "assistant",
-                "model": "claude-opus-4-8",
+                "model": "claude-opus-5",
                 "stop_reason": "tool_use",
                 "content": [
                     {"type": "text", "text": "I'll write the file."},
@@ -4254,7 +4254,7 @@ mod tests {
                 "usage": {"input_tokens": 10, "output_tokens": 5}
             })
             .to_string(),
-            model: "claude-opus-4-8".into(),
+            model: "claude-opus-5".into(),
             backend: "anthropic/api/agentic".into(),
             cost_usd: None,
             input_tokens: Some(10),
@@ -4285,7 +4285,7 @@ mod tests {
 
     #[test]
     fn with_shape_and_key_set_anthropic_fields() {
-        let d = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-opus-4-8")
+        let d = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-opus-5")
             .with_shape(ApiShape::Anthropic)
             .with_anthropic_api_key("sk-ant-test");
         assert_eq!(d.shape, ApiShape::Anthropic);
@@ -4428,7 +4428,7 @@ mod tests {
         std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-test");
         assert!(anthropic_api_backend_key(&creds).is_some());
         let _api_driver = build_claude_driver(
-            "claude-opus-4-8",
+            "claude-opus-5",
             &creds,
             "/tmp/fake-mcp.json",
             vec![gov1_rule()],
@@ -4444,7 +4444,7 @@ mod tests {
         std::env::remove_var("ANTHROPIC_API_KEY");
         assert!(anthropic_api_backend_key(&creds).is_none());
         let _cli_driver = build_claude_driver(
-            "claude-opus-4-8",
+            "claude-opus-5",
             &creds,
             "/tmp/fake-mcp.json",
             vec![gov1_rule()],
@@ -4548,7 +4548,7 @@ mod tests {
         // An Anthropic-shape worker (what build_claude_driver builds for a Claude tier under
         // backend=api) must be orchestrator=false (no delegate/fan_out), jailed to a
         // worktree, and its (Anthropic-format) tool schemas must be gated_write + reads only.
-        let driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-opus-4-8")
+        let driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), "claude-opus-5")
             .with_rule_subset(vec![gov1_rule()])
             .with_worktree(PathBuf::from("/tmp/wt"))
             .with_shape(ApiShape::Anthropic)

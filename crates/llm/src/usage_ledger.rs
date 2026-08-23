@@ -286,11 +286,11 @@ mod tests {
     #[test]
     fn accumulates_across_calls_with_cache_and_by_model() {
         let l = UsageLedger::new();
-        let mut a = anthropic_resp("claude-opus-4-8", 100, 50, 0.01);
+        let mut a = anthropic_resp("claude-opus-5", 100, 50, 0.01);
         a.cache_read_input_tokens = 30;
         a.cache_creation_input_tokens = 20;
-        l.record("claude-opus-4-8", &a);
-        l.record("claude-opus-4-8", &anthropic_resp("claude-opus-4-8", 200, 100, 0.02));
+        l.record("claude-opus-5", &a);
+        l.record("claude-opus-5", &anthropic_resp("claude-opus-5", 200, 100, 0.02));
         l.record(
             "claude-sonnet-5",
             &anthropic_resp("claude-sonnet-5", 10, 5, 0.001),
@@ -307,7 +307,7 @@ mod tests {
         // by_model: opus has 2 calls / 450 tokens, sonnet has 1 / 15 tokens.
         assert_eq!(s.by_model.len(), 2);
         // Sorted by descending cost -> opus first.
-        assert_eq!(s.by_model[0].model, "claude-opus-4-8");
+        assert_eq!(s.by_model[0].model, "claude-opus-5");
         assert_eq!(s.by_model[0].calls, 2);
         assert_eq!(s.by_model[0].tokens, 450);
         let sonnet = s
@@ -322,13 +322,13 @@ mod tests {
     #[test]
     fn cost_fallback_derives_from_pricing_for_known_model() {
         // Gemini-shape: no cost_usd, but a model id present in the registry -> derive cost.
-        // claude-opus-4-8 is $5/Mtok in, $25/Mtok out (the live registry price — see
+        // claude-opus-5 is $5/Mtok in, $25/Mtok out (the live registry price — see
         // crate::model_registry::CLAUDE_REGISTRY_MODELS; NOT the stale $15/$75 a prior,
         // independently-maintained price list used to carry).
         let l = UsageLedger::new();
         l.record(
-            "claude-opus-4-8",
-            &gemini_shape_resp("claude-opus-4-8", 1_000_000, 1_000_000),
+            "claude-opus-5",
+            &gemini_shape_resp("claude-opus-5", 1_000_000, 1_000_000),
         );
         let s = l.snapshot();
         // 1M * 5 + 1M * 25 over 1M = 30.0.
@@ -414,7 +414,7 @@ mod tests {
 
         // A successful record CLEARS the flag (we're being served again). The last_rate_limit
         // history is retained for the UI.
-        l.record("claude-opus-4-8", &anthropic_resp("claude-opus-4-8", 1, 1, 0.0));
+        l.record("claude-opus-5", &anthropic_resp("claude-opus-5", 1, 1, 0.0));
         let s2 = l.snapshot();
         assert!(!s2.rate_limited);
         assert!(s2.last_rate_limit.is_some(), "history retained after clear");

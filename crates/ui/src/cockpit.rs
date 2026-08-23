@@ -306,7 +306,7 @@ fn default_balanced_chain_str() -> Vec<String> {
 }
 
 fn default_strongest_model_str() -> String {
-    "claude-opus-4-8".to_string()
+    "claude-opus-5".to_string()
 }
 
 impl Default for TierMapView {
@@ -4397,14 +4397,14 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/step-models"))
-            .and(body_json(serde_json::json!({ "step": "audit", "model": "claude-opus-4-8" })))
+            .and(body_json(serde_json::json!({ "step": "audit", "model": "claude-opus-5" })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let ok = super::set_project_step_model("p-1", "audit", "claude-opus-4-8").await;
+        let ok = super::set_project_step_model("p-1", "audit", "claude-opus-5").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
@@ -4650,14 +4650,14 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/projects/p-1/l3-review"))
-            .and(body_json(serde_json::json!({ "enabled": true, "model": "claude-opus-4-8" })))
+            .and(body_json(serde_json::json!({ "enabled": true, "model": "claude-opus-5" })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let ok = super::set_project_l3_review("p-1", true, "claude-opus-4-8").await;
+        let ok = super::set_project_l3_review("p-1", true, "claude-opus-5").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
@@ -4882,7 +4882,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/settings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "chat_model": "claude-opus-4-8"
+                "chat_model": "claude-opus-5"
             })))
             .mount(&server)
             .await;
@@ -4891,7 +4891,7 @@ mod tests {
         let m = super::fetch_app_chat_model().await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(m.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(m.as_deref(), Some("claude-opus-5"));
     }
 
     /// `save_app_chat_model` POSTs {model} to /api/settings/chat-model.
@@ -5091,7 +5091,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/uow/s-1/begin-investigation"))
-            .and(body_json(serde_json::json!({ "model": "claude-opus-4-8" })))
+            .and(body_json(serde_json::json!({ "model": "claude-opus-5" })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "run_id": "run-3", "story_id": "s-1"
             })))
@@ -5100,7 +5100,7 @@ mod tests {
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let outcome = super::begin_investigation_run("s-1", "claude-opus-4-8").await;
+        let outcome = super::begin_investigation_run("s-1", "claude-opus-5").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         match outcome {

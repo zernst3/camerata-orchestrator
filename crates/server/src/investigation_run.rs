@@ -997,7 +997,7 @@ mod tests {
                 "CAM-7",
                 "Add export",
                 "Members CSV export.",
-                "claude-opus-4-8",
+                "claude-opus-5",
                 &investigation_prompt("CAM-7", "Add export", "Members CSV export.", None),
                 req,
                 1,
@@ -1039,7 +1039,7 @@ mod tests {
         let ctx = resume.get(&parked_clar_id).expect("resume ctx survived reload");
         assert_eq!(ctx.run_id, run_id);
         assert_eq!(ctx.phase, PausedPhase::Investigation);
-        assert_eq!(ctx.model, "claude-opus-4-8");
+        assert_eq!(ctx.model, "claude-opus-5");
         assert!(ctx.original_task.contains("CAM-7"));
         assert_eq!(ctx.asked_question, "Include archived members in the export?");
 
@@ -1087,7 +1087,7 @@ mod tests {
             "CAM-INV-CANCEL".to_string(),
             "A story".to_string(),
             "Some description.".to_string(),
-            "claude-opus-4-8".to_string(),
+            "claude-opus-5".to_string(),
             None,
             None,
             Vec::new(),
@@ -1121,7 +1121,7 @@ mod tests {
             "CAM-INV-1".to_string(),
             "A story".to_string(),
             "Some description.".to_string(),
-            "claude-opus-4-8".to_string(),
+            "claude-opus-5".to_string(),
             None,
             None,
             Vec::new(),

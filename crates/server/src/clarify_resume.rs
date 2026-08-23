@@ -133,7 +133,7 @@ mod tests {
             story_id: "CAM-7".into(),
             story_title: "Add export".into(),
             story_desc: "Members CSV export.".into(),
-            model: "claude-opus-4-8".into(),
+            model: "claude-opus-5".into(),
             phase: PausedPhase::Investigation,
             original_task: "Analyze the story.".into(),
             asked_question: "Include archived members?".into(),

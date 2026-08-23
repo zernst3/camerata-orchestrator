@@ -18,9 +18,9 @@ use serde::{Deserialize, Serialize};
 pub struct RegistryEntry {
     /// Provider key — `"claude"` or `"openrouter"`. Drives selector grouping.
     pub provider: String,
-    /// Human-readable display label (e.g. `"Opus 4.8"`, `"Qwen3 235B Coder (free)"`).
+    /// Human-readable display label (e.g. `"Opus 5"`, `"Qwen3 235B Coder (free)"`).
     pub display: String,
-    /// The model id as passed to the API / CLI (e.g. `"claude-opus-4-8"`,
+    /// The model id as passed to the API / CLI (e.g. `"claude-opus-5"`,
     /// `"qwen/qwen3-235b-a22b-04-28:free"`).
     pub id: String,
     /// Whether this model is free to call (prompt + completion price = 0). Always `false`

@@ -477,7 +477,7 @@ mod tests {
         DelegateModels {
             fast: "claude-haiku-4-5-20251001".to_string(),
             balanced: "claude-sonnet-5".to_string(),
-            strongest: "claude-opus-4-8".to_string(),
+            strongest: "claude-opus-5".to_string(),
             // Default test map: vision UNSET (the common case — vision off).
             vision: String::new(),
         }
@@ -590,7 +590,7 @@ mod tests {
         let or_models = DelegateModels {
             fast: "openrouter/meta-llama/llama-3-8b".to_string(),
             balanced: "openrouter/mistralai/mistral-7b".to_string(),
-            strongest: "claude-opus-4-8".to_string(),
+            strongest: "claude-opus-5".to_string(),
             vision: String::new(),
         };
         let factory = Arc::new(RecordingFactory::default());
@@ -644,7 +644,7 @@ mod tests {
         let m = models();
         assert_eq!(m.resolve("fast"), Some("claude-haiku-4-5-20251001"));
         assert_eq!(m.resolve("BALANCED"), Some("claude-sonnet-5"));
-        assert_eq!(m.resolve("  Strongest "), Some("claude-opus-4-8"));
+        assert_eq!(m.resolve("  Strongest "), Some("claude-opus-5"));
         assert_eq!(m.resolve("ultra"), None);
         assert_eq!(m.resolve(""), None);
     }
