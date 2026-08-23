@@ -7,7 +7,9 @@ use std::collections::BTreeSet;
 
 use super::config::parse_exposed_schemas;
 use super::timeline::{build_timeline, TableState};
-use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_CRITICAL, SEVERITY_MEDIUM};
+use crate::arch_checker::{
+    ArchChecker, ArchViolation, RepoView, SEVERITY_CRITICAL, SEVERITY_INFO, SEVERITY_MEDIUM,
+};
 
 pub const RULE_RLS_ENABLED: &str = "SUPABASE-RLS-ENABLED-1";
 pub const RULE_RLS_NO_POLICY: &str = "SUPABASE-RLS-NO-POLICY-1";
@@ -96,12 +98,22 @@ fn check_table(state: &TableState, exposed_schemas: &BTreeSet<String>) -> Vec<Ar
                 ),
             });
         } else {
+            // Exposed-schema membership is a REACHABILITY precondition for
+            // `SUPABASE-RLS-ENABLED-1`, not a severity modifier: PostgREST cannot serve a
+            // schema absent from `[api].schemas`, so a no-RLS table there cannot be reached
+            // with the shipped anon key and is not a live defect. We do NOT drop the
+            // observation (over-tell) — we emit it as `info`, honestly bucketed as a
+            // defense-in-depth suggestion rather than a critical/medium finding, so the
+            // report shows it in the informational channel and never in do_now/do_next/plan.
+            // NB: this exposure gate is scoped to MISSING-RLS only; NO-POLICY and
+            // POLICY-DISABLED below signal broken INTENT independent of reachability and stay
+            // ungated.
             out.push(ArchViolation {
                 rule_id: RULE_RLS_ENABLED.to_string(),
                 file: est_file.clone(),
                 line: est_line,
                 object: Some(format!("{}.{}", state.schema, state.table)),
-                severity: SEVERITY_MEDIUM,
+                severity: SEVERITY_INFO,
                 message: format!(
                     "Defense-in-depth note: your {name} table has no Row Level Security, but the `{}` schema is \
                      not listed as API-exposed in supabase/config.toml, so this is not directly reachable through \
@@ -193,7 +205,10 @@ mod tests {
     }
 
     #[test]
-    fn non_exposed_schema_is_demoted_not_critical() {
+    fn non_exposed_schema_emits_info_not_a_defect() {
+        // A no-RLS table in a schema NOT listed in `[api].schemas` is unreachable via
+        // PostgREST, so it is not a live defect. The observation is still emitted (over-tell)
+        // — but as `info`, the informational channel, never as a critical/medium finding.
         let f = files(vec![
             ("supabase/config.toml", "[api]\nschemas = [\"public\"]\n"),
             (
@@ -204,7 +219,14 @@ mod tests {
         let vs = SupabaseRlsChecker.check(&view(&f));
         assert_eq!(vs.len(), 1, "{vs:#?}");
         assert_eq!(vs[0].rule_id, RULE_RLS_ENABLED);
-        assert_ne!(vs[0].severity, SEVERITY_CRITICAL, "non-exposed schema must be demoted");
+        assert_eq!(
+            vs[0].severity, SEVERITY_INFO,
+            "non-exposed schema is an informational suggestion, not a defect"
+        );
+        assert!(
+            vs[0].message.contains("Defense-in-depth"),
+            "the informational note text is preserved: {vs:#?}"
+        );
     }
 
     #[test]
@@ -328,9 +350,9 @@ mod tests {
         let vs = SupabaseRlsChecker.check(&view(&f));
         // RLS is off (no ALTER ... ENABLE anywhere) and a policy exists -> POLICY-DISABLED-1
         // fires regardless of exposure (that rule isn't exposure-scoped); the bare
-        // RLS-ENABLED-1 finding is present but DEMOTED because `internal` isn't exposed.
+        // RLS-ENABLED-1 finding is present but INFORMATIONAL because `internal` isn't exposed.
         let enabled = vs.iter().find(|v| v.rule_id == RULE_RLS_ENABLED).unwrap();
-        assert_ne!(enabled.severity, SEVERITY_CRITICAL, "non-exposed schema stays demoted even with a policy present");
+        assert_eq!(enabled.severity, SEVERITY_INFO, "non-exposed schema stays informational even with a policy present");
         let disabled = vs.iter().find(|v| v.rule_id == RULE_RLS_POLICY_DISABLED).unwrap();
         assert_eq!(disabled.severity, SEVERITY_CRITICAL);
     }

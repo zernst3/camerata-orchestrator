@@ -545,14 +545,22 @@ async fn full_grade_supabase_fixture_scan() {
     // ═══ Discrimination pairs (GROUND_TRUTH "grader notes") ═══
 
     // I3: internal.audit_log has no RLS but lives in a non-exposed schema — must NOT be
-    // flagged at all. KNOWN CURRENT GAP: SupabaseRlsChecker still emits a `medium`
-    // "defense-in-depth" finding for non-exposed schemas rather than omitting them.
-    let i3 = any_finding_for_path(f, "supabase/migrations/0001_init.sql");
+    // flagged as an ACTIONABLE defect. Corrected behavior (scan-quality refinement Item 4):
+    // `SupabaseRlsChecker` no longer emits a medium "defense-in-depth" finding for a
+    // non-exposed schema; exposed-schema membership is a reachability precondition for
+    // `SUPABASE-RLS-ENABLED-1`, so a table PostgREST cannot serve is not a defect. The
+    // observation is not dropped (over-tell) — it is emitted at `info` severity and routed to
+    // the informational channel, never into do_now/do_next/plan. So the assertion is: no
+    // actionable (non-`info`) finding for this file.
+    let i3_actionable = f
+        .iter()
+        .find(|x| x.path == "supabase/migrations/0001_init.sql" && x.severity != "info");
     scorecard.push(grade(
         "I3",
-        "internal.audit_log (non-exposed schema) must NOT be flagged at all (currently emits a medium finding)",
-        i3.is_none(),
-        format!("{i3:?}"),
+        "internal.audit_log (non-exposed schema) must NOT be flagged as an actionable defect \
+         (only an informational note is allowed)",
+        i3_actionable.is_none(),
+        format!("{i3_actionable:?}"),
     ));
 
     // charge (D5) flagged / notify (the JWT-verified, getUser()-checked control) spared.

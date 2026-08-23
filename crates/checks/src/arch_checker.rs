@@ -39,6 +39,12 @@ pub struct RepoView<'a> {
 pub const SEVERITY_CRITICAL: &str = "critical";
 pub const SEVERITY_HIGH: &str = "high";
 pub const SEVERITY_MEDIUM: &str = "medium";
+/// Informational: a true observation that is NOT a live defect — a suggestion honestly
+/// bucketed out of the actionable matrix (do_now/do_next/plan) but still surfaced in the
+/// report so it is never hidden (the over-tell rule). A checker emits this for a
+/// reachability-gated observation whose threat model does not currently apply (e.g. a
+/// no-RLS table in a schema PostgREST does not serve — see `rls_checker`).
+pub const SEVERITY_INFO: &str = "info";
 
 /// One violation found by a deterministic architectural checker. Carries enough to build a
 /// `Finding` on the server side without the adapter having to re-derive anything.
