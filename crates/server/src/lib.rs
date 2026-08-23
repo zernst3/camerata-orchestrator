@@ -14495,6 +14495,32 @@ fn product_export_readme(stem: &str, json: &crate::report_export::AuditReportJso
     )
 }
 
+/// The current wall-clock time as a `zip::DateTime`, for stamping every entry's
+/// last-modified field with the actual build time.
+///
+/// The `zip` crate's `SimpleFileOptions::default()` leaves `last_modified_time` at its own
+/// `Default` — the DOS epoch, 1980-01-01 — unless a caller sets one explicitly. `zip`'s own
+/// `DateTime::default_for_write()` helper would paper over this, but only when the crate's
+/// `time` (or `chrono`) cargo feature is enabled; this workspace builds `zip` with
+/// `default-features = false, features = ["deflate"]`, so that helper silently falls back to
+/// the same 1980 default. Building the `DateTime` by hand from `chrono` (already a
+/// `camerata-server` dependency, independent of `zip`'s own optional features) avoids adding
+/// a cargo feature just for this. Falls back to the DOS epoch only if the current date is
+/// somehow outside the format's representable range (year 1980..=2107) — never panics.
+fn zip_now() -> zip::DateTime {
+    use chrono::{Datelike, Timelike};
+    let now = chrono::Utc::now();
+    zip::DateTime::from_date_and_time(
+        now.year() as u16,
+        now.month() as u8,
+        now.day() as u8,
+        now.hour() as u8,
+        now.minute() as u8,
+        now.second() as u8,
+    )
+    .unwrap_or_default()
+}
+
 /// Zip the PDF + xlsx + `findings.json` + README.txt into one in-memory archive (Deflate
 /// compression) for the product-export response body. The ONLY I/O here is the in-memory
 /// `Cursor<Vec<u8>>` — no temp files, matching `report_export`'s own "tiny, no persistence"
@@ -14510,8 +14536,11 @@ fn build_product_zip(
 
     let buf = std::io::Cursor::new(Vec::new());
     let mut writer = zip::ZipWriter::new(buf);
+    // Real timestamps (the build time), not the zip crate's 1980-01-01 default — see
+    // `zip_now`'s doc comment.
     let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(zip_now());
 
     writer.start_file(format!("{stem}.pdf"), options)?;
     writer.write_all(pdf_bytes)?;
@@ -21379,6 +21408,50 @@ mod tests {
         assert!(readme.contains(&pdf_name), "{readme}");
         assert!(readme.contains(&xlsx_name), "{readme}");
         assert!(readme.contains("findings.json"), "{readme}");
+    }
+
+    /// Regression for the zip-crate-default-timestamp bug: with `SimpleFileOptions::default()`
+    /// left alone, every entry's `last_modified()` reads 1980-01-01 00:00:00 (the DOS/zip
+    /// epoch `zip` falls back to when no timestamp is set, since this workspace doesn't enable
+    /// the crate's `time`/`chrono` cargo features). `build_product_zip` now stamps every entry
+    /// with `zip_now()` (the actual build time) instead. Exercises `build_product_zip`
+    /// directly with dummy bytes — no `typst` dependency, so it always runs.
+    #[test]
+    fn product_zip_entries_carry_a_real_build_timestamp_not_the_1980_epoch() {
+        let zip_bytes = build_product_zip(
+            "acme-audit",
+            b"%PDF-fake",
+            b"PK-fake-xlsx",
+            b"{}",
+            "readme text",
+        )
+        .expect("zip assembles");
+
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(zip_bytes)).expect("valid zip");
+        assert!(archive.len() >= 4, "expects pdf + xlsx + json + readme entries");
+        for i in 0..archive.len() {
+            let entry = archive.by_index(i).unwrap();
+            let mtime = entry.last_modified().expect("a timestamp was set on every entry");
+            assert_ne!(
+                (mtime.year(), mtime.month(), mtime.day()),
+                (1980, 1, 1),
+                "entry {:?} still carries the zip crate's 1980-01-01 default — \
+                 last_modified_time() was not applied",
+                entry.name()
+            );
+        }
+    }
+
+    /// `zip_now` must resolve to the current calendar year (sanity check that it's actually
+    /// reading the clock, not silently falling back to `DateTime::default()` — which would
+    /// pass unnoticed since `unwrap_or_default()` never panics).
+    #[test]
+    fn zip_now_reflects_the_current_year() {
+        use chrono::Datelike;
+        let now = zip_now();
+        let current_year = chrono::Utc::now().year() as u16;
+        assert_eq!(now.year(), current_year, "zip_now must not fall back to the 1980 default");
     }
 
     /// active_project_context returns scan_results_section from last_scan when no draft.
