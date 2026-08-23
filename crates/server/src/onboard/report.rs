@@ -16,6 +16,7 @@ pub fn build_report(
         repos,
         stacks,
         files_scanned,
+        test_file_count: 0,
         files_excluded: 0,
         excluded_mechanical_rules: Vec::new(),
         code_chars: 0,

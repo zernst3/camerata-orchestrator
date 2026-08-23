@@ -402,6 +402,12 @@ pub struct ScanReport {
     pub stacks: Vec<RepoStack>,
     /// Number of files scanned across all repos.
     pub files_scanned: usize,
+    /// How many of `files_scanned` are test/fixture files (`is_test_or_fixture_path`). Drives
+    /// the style-family minimum-corpus gate (Bug 4 §2d): a repo below `MIN_STYLE_CORPUS_FILES`
+    /// test files has no established test corpus, so `testing-style` deviations are conventions,
+    /// not defects. Additive/`serde(default)` so prior persisted reports still load.
+    #[serde(default)]
+    pub test_file_count: usize,
     /// Scannable files (code extension) PRUNED as build/dep/cache/generated noise before the
     /// scan. Surfaced so the filter's effect is visible ("N scanned, M excluded as noise").
     #[serde(default)]
@@ -456,6 +462,7 @@ impl ScanReport {
             repos: repos.to_vec(),
             stacks: Vec::new(),
             files_scanned: 0,
+            test_file_count: 0,
             files_excluded: 0,
             excluded_mechanical_rules: Vec::new(),
             code_chars: 0,
@@ -654,6 +661,7 @@ pub async fn audit_repos(
     let mut all_findings = Vec::new();
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
+    let mut test_files_total = 0usize;
     let mut repos_ok = Vec::new();
     let mut notes = extra_notes;
     // Provenance (P1): the git identity of every source dir this run touched (sha/branch/
@@ -739,6 +747,10 @@ pub async fn audit_repos(
                 excluded_noise: _,
             }) => {
                 files_total += files.len();
+                test_files_total += files
+                    .iter()
+                    .filter(|(p, _)| is_test_or_fixture_path(p))
+                    .count();
                 // The SEMANTIC (LLM-audited) rule set for THIS repo: rules bound to it (or
                 // project-level), minus the deterministic-arm, native-architectural-checker,
                 // and governance/process families. The architectural-checker exclusion is
@@ -927,6 +939,7 @@ pub async fn audit_repos(
     };
 
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
+    report.test_file_count = test_files_total;
     report.actual_usage = Some(meter.snapshot());
     report.deep = deep_report;
     // Fold the always-on dep-audit coverage notes into the report.  The scan-tools

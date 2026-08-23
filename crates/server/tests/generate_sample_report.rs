@@ -262,6 +262,7 @@ async fn regenerate_sample_report() {
         repos: vec![PORTAL.to_string(), EDGE.to_string()],
         stacks: Vec::new(),
         files_scanned: 214,
+        test_file_count: 0,
         files_excluded: 1188,
         code_chars: 486_203,
         excluded_mechanical_rules: Vec::new(),

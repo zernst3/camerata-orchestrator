@@ -1165,6 +1165,7 @@ mod tests {
             repos: vec!["owner/repo".to_string()],
             stacks: Vec::new(),
             files_scanned: 10,
+            test_file_count: 0,
             files_excluded: 2,
             code_chars: 5000,
             excluded_mechanical_rules: Vec::new(),

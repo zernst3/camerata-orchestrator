@@ -663,22 +663,25 @@ pub async fn verify_findings(
     calibration_model: Option<&str>,
     meter: Option<&UsageMeter>,
     thorough: bool,
-    files_count: usize,
+    // One repo-shape sentence — detected stack + code-file count (e.g. "This is a Next.js repo
+    // with 42 code files.") — computed by the caller from signals already in hand. Gives the
+    // model real context to hedge stance/YAGNI findings, instead of a hardcoded size threshold
+    // deciding whether a rule fires. Empty string is fine (the paragraph still reads).
+    repo_shape: &str,
 ) -> Vec<Finding> {
     if findings.is_empty() {
         return findings;
     }
     let mut prompt = format!("Repository: {repo}\n");
-    if thorough {
-        // Proportionality signal (#51): a small/young codebase should not be held to the
-        // architecture of a large one — over-engineering / YAGNI notes auto-hedge.
-        prompt.push_str(&format!(
-            "This repository has {files_count} code files. Judge each finding PROPORTIONALLY to the \
-             codebase's size and maturity: an 'over-engineering'/'missing abstraction'/YAGNI note on \
-             a small codebase is a debatable preference (low confidence, capped severity), not a \
-             violation.\n"
-        ));
-    }
+    // Proportionality signal (#51, Bug 4 §2b): ALWAYS given now (was thorough-only) — a
+    // small/young codebase must not be held to the architecture of a large one, and this feeds
+    // the informational bucketing of stance/YAGNI notes downstream. Over-engineering / YAGNI
+    // notes auto-hedge to low confidence + capped severity.
+    prompt.push_str(&format!(
+        "{repo_shape} Judge each finding PROPORTIONALLY to the codebase's size and maturity: an \
+         'over-engineering'/'missing abstraction'/YAGNI note on a small codebase is a debatable \
+         preference (low confidence, capped severity), not a violation.\n"
+    ));
     prompt.push_str("\nScrutinize these findings:\n");
     for (i, f) in findings.iter().enumerate() {
         prompt.push_str(&format!(
@@ -2462,6 +2465,18 @@ pub async fn audit_repo(
                 },
             );
         }
+        // Repo-shape line for the proportionality signal (Bug 4 §2b): detected stack + code-file
+        // count, from signals already computed. detect_stack is the same one grounding uses.
+        let stack = crate::onboard::detect_stack(repo, files);
+        let repo_shape = if stack.frameworks.is_empty() {
+            format!("This repository has {} code files.", files.len())
+        } else {
+            format!(
+                "This is a {} repo with {} code files.",
+                stack.frameworks.join(", "),
+                files.len()
+            )
+        };
         let out = verify_findings(
             llm,
             repo,
@@ -2469,7 +2484,7 @@ pub async fn audit_repo(
             calib_model.as_deref(),
             meter,
             thorough,
-            files.len(),
+            &repo_shape,
         )
         .await;
         if let Some((store, key)) = feedback {

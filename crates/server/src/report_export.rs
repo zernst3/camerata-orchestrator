@@ -187,6 +187,9 @@ pub(crate) fn disposition_label(
     confirmed_by_client: bool,
 ) -> String {
     match disposition {
+        Disposition::Unresolved if bucket == "informational" => {
+            "Convention to consider (informational)".to_string()
+        }
         Disposition::Unresolved => format!("Open (recommended: {})", bucket_title(bucket)),
         Disposition::Ignored => {
             if confirmed_by_client {
@@ -217,6 +220,7 @@ pub(crate) fn bucket_title(bucket: &str) -> &'static str {
         "do_now" => "Do now",
         "do_next" => "Do next",
         "plan" => "Plan",
+        "informational" => "Informational",
         _ => "Accepted",
     }
 }
@@ -232,6 +236,10 @@ pub(crate) fn normalize_severity(raw: &str) -> String {
         "critical" => "critical".to_string(),
         "high" => "high".to_string(),
         "medium" => "medium".to_string(),
+        // `info` is a real, distinct tier (Bug 4): a convention-to-consider, ranked BELOW
+        // `low`. It must survive normalization rather than collapsing into `low`, or an
+        // informational stance note would silently re-enter the plan/low action tier.
+        "info" => "info".to_string(),
         _ => "low".to_string(),
     }
 }
@@ -409,6 +417,14 @@ pub struct MatrixJson {
     pub do_next: Vec<FindingRefJson>,
     pub plan: Vec<FindingRefJson>,
     pub accepted: Vec<FindingRefJson>,
+    /// Bug 4's "Conventions to consider" appendix: absence-type stance/architecture notes,
+    /// `needs-review` low/medium rows, testing-style deviations in a repo with no test corpus,
+    /// and any `info`-severity finding. VISIBLE (over-tell preserved) but deliberately OUTSIDE
+    /// the do_now/do_next/plan action tiers and excluded from `curated_total` — a report
+    /// appendix, not a work item. A critical or high finding is NEVER placed here (see
+    /// `is_informational`).
+    #[serde(default)]
+    pub informational: Vec<FindingRefJson>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -719,6 +735,74 @@ pub(crate) fn matrix_bucket(
     }
 }
 
+/// A style rule needs an established corpus before deviations are findings (Bug 4 §2d). A
+/// repo with fewer than this many test files has no test corpus to speak of, so
+/// `testing-style` deviations are conventions-to-consider, not defects.
+pub(crate) const MIN_STYLE_CORPUS_FILES: usize = 3;
+
+/// Rule DOMAINS whose `structured` (decision-shaped) rules are architectural/framework STANCE
+/// rules — "the project hasn't adopted X" conventions rather than concrete defects. This is
+/// the "universal or framework layer" of Bug 4 §2a, expressed over the corpus's real domain
+/// vocabulary (the folder each rule lives under). Language-core domains (`rust`, `go`,
+/// `python`, `java`, `csharp`, `ruby`) and security/infra-checker domains (`supabase`, `sql`,
+/// `permissions`, `iac`, `ci-cd`) are deliberately ABSENT: a located violation there is a real
+/// defect even in a tiny app. A whitelist (not a blacklist) so an unrecognized future domain
+/// fails OPEN to over-telling — it stays in the action tier rather than being auto-demoted.
+pub(crate) const STANCE_LAYER_DOMAINS: &[&str] =
+    &["universal", "api-layer", "fullstack", "ui", "javascript", "integration"];
+
+/// Whether a finding is a "convention to consider" rather than an action item (Bug 4). Routes
+/// to the `informational` matrix appendix instead of do_now/do_next/plan. NEVER true for a
+/// critical/high finding or for a finding the auditor has explicitly dispositioned — the hard
+/// invariant that keeps true defects in the action tiers. `severity` must already be
+/// normalized. The four independent informational signals (design §2a/2c/2d + the `info` tier
+/// itself):
+///   - `info`-severity (e.g. the unexposed-schema RLS note from I3),
+///   - `testing-style` category in a repo below the test-corpus threshold (§2d),
+///   - `needs-review` confidence at ≤ medium severity (§2c),
+///   - absence-type (`located == false`) `structured` stance-layer rule at ≤ medium (§2a).
+pub(crate) fn is_informational(
+    finding: &Finding,
+    disposition: Disposition,
+    severity: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    test_file_count: usize,
+) -> bool {
+    // Only ever re-bucket an OPEN row — an auditor's explicit call (accepted/tech-debt/FP)
+    // keeps its own destination.
+    if disposition != Disposition::Unresolved {
+        return false;
+    }
+    // Hard invariant: a critical or high finding is never auto-informational, whatever family.
+    if severity == "critical" || severity == "high" {
+        return false;
+    }
+    // The `info` tier is informational by definition (nothing below `low` is an action item).
+    if severity == "info" {
+        return true;
+    }
+    // §2d — testing-style deviation with no test corpus to deviate FROM.
+    if finding.category.as_deref() == Some("testing-style") && test_file_count < MIN_STYLE_CORPUS_FILES
+    {
+        return true;
+    }
+    // §2c — a low/medium finding the calibrator itself flagged as debatable.
+    if finding.confidence.as_deref() == Some("needs-review") {
+        return true;
+    }
+    // §2a — an absence-type structured stance-rule note (the generic-arch/style over-firing).
+    if !finding.located {
+        if let Some(rule) = corpus.and_then(|c| c.get_by_id(&finding.rule_id)) {
+            if rule.enforcement == camerata_rules::EnforcementKind::Structured
+                && STANCE_LAYER_DOMAINS.contains(&rule.domain.as_str())
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn finding_ref(f: &Finding, severity: &str, headline: String) -> FindingRefJson {
     FindingRefJson {
         rule_id: f.rule_id.clone(),
@@ -920,11 +1004,19 @@ pub fn build_report_json(
     // ── Matrix + curated findings + scorecard, over code_findings only ───────────
     let mut matrix = MatrixJson::default();
     for (f, disposition, _, severity) in &code_findings {
-        let bucket = matrix_bucket(*disposition, severity, f.effort.as_deref());
+        // Bug 4: convention-to-consider rows are diverted to the informational appendix BEFORE
+        // the severity×effort quadrant — they must never reach do_now/do_next/plan. The
+        // invariant that a critical/high is never informational lives in `is_informational`.
+        let bucket = if is_informational(f, *disposition, severity, corpus, report.test_file_count) {
+            "informational"
+        } else {
+            matrix_bucket(*disposition, severity, f.effort.as_deref())
+        };
         let target = match bucket {
             "do_now" => &mut matrix.do_now,
             "do_next" => &mut matrix.do_next,
             "plan" => &mut matrix.plan,
+            "informational" => &mut matrix.informational,
             _ => &mut matrix.accepted,
         };
         let fallback_title = corpus
@@ -960,7 +1052,15 @@ pub fn build_report_json(
         let site_jsons = sites
             .iter()
             .map(|(f, disposition, reason, severity)| {
-                let bucket = matrix_bucket(*disposition, severity, f.effort.as_deref());
+                // Bug 4: keep the curated-site LABEL in lockstep with the matrix cell this
+                // finding actually lands in — an informational row reads "Convention to
+                // consider", never "Open (recommended: Plan)".
+                let bucket =
+                    if is_informational(f, *disposition, severity, corpus, report.test_file_count) {
+                        "informational"
+                    } else {
+                        matrix_bucket(*disposition, severity, f.effort.as_deref())
+                    };
                 let confirmed_by_client = dispositions
                     .get(&finding_key(f))
                     .map(|d| d.confirmed_by_client)
@@ -1141,15 +1241,22 @@ pub fn build_report_json(
     };
 
     // ── Executive summary ──────────────────────────────────────────────────────
-    let curated_total = code_findings.len();
+    // Bug 4: informational (appendix) rows are NOT curated action items — they sit outside the
+    // four-bucket partition, so `curated_total` excludes them and the self-checking narrative
+    // invariant `do_now + do_next + plan + accepted == curated_total` still holds exactly.
+    let informational = matrix.informational.len();
+    let curated_total = code_findings.len() - informational;
     let do_now = matrix.do_now.len();
     let do_next = matrix.do_next.len();
     let plan = matrix.plan.len();
     let accepted = matrix.accepted.len();
+    // Still-open action items (every informational row is Unresolved by construction — see
+    // `is_informational` — so subtracting them keeps `open` an ACTION count, not an appendix one).
     let open = code_findings
         .iter()
         .filter(|(_, d, _, _)| *d == Disposition::Unresolved)
-        .count();
+        .count()
+        - informational;
     let mut do_now_sorted = matrix.do_now.clone();
     do_now_sorted.sort_by_key(|f| match f.severity.as_str() {
         "critical" => 0,
@@ -1398,6 +1505,7 @@ mod tests {
             repos: vec!["owner/repo".to_string()],
             stacks: Vec::new(),
             files_scanned: 10,
+            test_file_count: 0,
             files_excluded: 2,
             code_chars: 5000,
             excluded_mechanical_rules: Vec::new(),
@@ -2356,5 +2464,193 @@ mod tests {
                  visuals; anything else reads as marketing."
             );
         }
+    }
+
+    // ── Item 2 (Bug 4): informational bucketing predicate ─────────────────────────
+    //
+    // `is_informational` is the single gate that diverts a low-signal OPEN finding out of the
+    // do_now/do_next/plan action tiers into the visible-but-advisory `informational` appendix.
+    // These pin the four independent signals AND the two hard invariants (never critical/high,
+    // never a dispositioned finding) that keep real defects in the action tiers.
+
+    /// The `info` severity tier is informational by definition — nothing below `low` is an
+    /// action item (e.g. the unexposed-schema RLS note from I3).
+    #[test]
+    fn info_severity_is_always_informational() {
+        let f = finding("SOME-RULE-1", "a.rs", 1, "info");
+        assert!(is_informational(
+            &f,
+            Disposition::Unresolved,
+            "info",
+            None,
+            0
+        ));
+    }
+
+    /// The load-bearing invariant: a critical or high finding is NEVER auto-demoted to the
+    /// appendix, no matter which other signals fire. A buyer must see every real defect in the
+    /// action tiers.
+    #[test]
+    fn critical_and_high_are_never_informational() {
+        // Even with every other informational signal set (testing-style, needs-review,
+        // not-located), a high/critical stays an action item.
+        let mut f = finding("ARCH-SERVICE-DI-1", "a.rs", 1, "high");
+        f.category = Some("testing-style".to_string());
+        f.confidence = Some("needs-review".to_string());
+        f.located = false;
+        assert!(
+            !is_informational(&f, Disposition::Unresolved, "high", None, 0),
+            "a high finding must never be auto-informational"
+        );
+        assert!(
+            !is_informational(&f, Disposition::Unresolved, "critical", None, 0),
+            "a critical finding must never be auto-informational"
+        );
+    }
+
+    /// §2d — a `testing-style` note is informational only when the repo has too few test files
+    /// to have a house style to deviate FROM. At/above the corpus threshold it's a real note.
+    #[test]
+    fn testing_style_is_gated_on_test_corpus_size() {
+        let mut f = finding("STYLE-TEST-1", "a.rs", 1, "low");
+        f.category = Some("testing-style".to_string());
+        // Below the threshold: no corpus to deviate from → informational.
+        assert!(is_informational(
+            &f,
+            Disposition::Unresolved,
+            "low",
+            None,
+            MIN_STYLE_CORPUS_FILES - 1
+        ));
+        // At/above the threshold: a genuine style deviation → stays an action item.
+        assert!(!is_informational(
+            &f,
+            Disposition::Unresolved,
+            "low",
+            None,
+            MIN_STYLE_CORPUS_FILES
+        ));
+    }
+
+    /// §2c — a low/medium finding the calibrator itself flagged `needs-review` (debatable /
+    /// theoretical / under-evidenced) is advisory, not an action item.
+    #[test]
+    fn needs_review_confidence_is_informational_at_low_severity() {
+        let mut f = finding("SOME-RULE-1", "a.rs", 1, "medium");
+        f.confidence = Some("needs-review".to_string());
+        assert!(is_informational(
+            &f,
+            Disposition::Unresolved,
+            "medium",
+            None,
+            0
+        ));
+        // But a high-confidence low finding is a normal (if minor) action item.
+        f.confidence = Some("high".to_string());
+        assert!(!is_informational(
+            &f,
+            Disposition::Unresolved,
+            "medium",
+            None,
+            0
+        ));
+    }
+
+    /// A finding the auditor has EXPLICITLY dispositioned (accepted / tech-debt / FP) keeps its
+    /// own destination — the predicate only ever re-buckets an OPEN (`Unresolved`) row.
+    #[test]
+    fn dispositioned_findings_are_never_re_bucketed() {
+        let f = finding("SOME-RULE-1", "a.rs", 1, "info");
+        // Even an `info`-severity finding, which is informational when open, is left alone once
+        // an auditor has ruled on it.
+        assert!(!is_informational(
+            &f,
+            Disposition::BaselineAccepted,
+            "info",
+            None,
+            0
+        ));
+        assert!(!is_informational(
+            &f,
+            Disposition::TechDebtLater,
+            "info",
+            None,
+            0
+        ));
+    }
+
+    /// §2a — an ABSENCE-type (`located == false`) `structured` stance rule in the universal /
+    /// framework layer is a "the project hasn't adopted X" convention, not a concrete defect.
+    /// Uses the REAL corpus (the predicate reads the rule's enforcement + domain), and the real
+    /// stance rule `ARCH-SERVICE-DI-1` (domain `api-layer`, enforcement `structured`).
+    #[tokio::test]
+    async fn absence_type_structured_stance_rule_is_informational() {
+        let corpus = camerata_rules::load_corpus(&camerata_rules::corpus_path())
+            .await
+            .expect("bundled corpus must load");
+        // Sanity: the rule exists and is the shape §2a keys on.
+        let rule = corpus
+            .get_by_id("ARCH-SERVICE-DI-1")
+            .expect("ARCH-SERVICE-DI-1 must exist in the bundled corpus");
+        assert_eq!(rule.enforcement, camerata_rules::EnforcementKind::Structured);
+        assert_eq!(rule.domain, "api-layer");
+
+        let mut f = finding("ARCH-SERVICE-DI-1", "src/svc.rs", 1, "medium");
+        // Absence-type: the "snippet" is a description, not code located in the file.
+        f.located = false;
+        assert!(
+            is_informational(&f, Disposition::Unresolved, "medium", Some(&corpus), 100),
+            "an absence-type structured stance note is informational"
+        );
+
+        // A PRESENCE-type violation of the same rule (real code located) IS a defect → action.
+        f.located = true;
+        assert!(
+            !is_informational(&f, Disposition::Unresolved, "medium", Some(&corpus), 100),
+            "a located (presence-type) violation of the stance rule stays an action item"
+        );
+
+        // And a high-severity instance is never demoted, absence-type or not.
+        f.located = false;
+        assert!(
+            !is_informational(&f, Disposition::Unresolved, "high", Some(&corpus), 100),
+            "severity still overrides the stance-layer signal"
+        );
+    }
+
+    /// End-to-end at the `build_report_json` level: an `info`-severity finding lands in the
+    /// `informational` appendix, NEVER in an action tier, and the curated four-bucket invariant
+    /// `do_now + do_next + plan + accepted == curated_total` still holds exactly (informational
+    /// is excluded from `curated_total`).
+    #[test]
+    fn build_report_json_routes_info_to_appendix_and_preserves_the_invariant() {
+        let action = finding("SEC-NO-HARDCODED-SECRETS-1", "a.rs", 10, "critical");
+        let advisory = finding("SOME-RULE-1", "b.rs", 20, "info");
+        let report = report_with(
+            vec![action, advisory],
+            vec!["SEC-NO-HARDCODED-SECRETS-1", "SOME-RULE-1"],
+        );
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(json.matrix.informational.len(), 1, "the info finding is in the appendix");
+        assert_eq!(json.matrix.informational[0].path, "b.rs");
+        assert_eq!(json.matrix.do_now.len(), 1, "the critical is an action item");
+
+        // No info-severity finding may appear in any action tier.
+        for tier in [&json.matrix.do_now, &json.matrix.do_next, &json.matrix.plan] {
+            assert!(
+                tier.iter().all(|r| r.severity != "info"),
+                "no info-severity finding may land in an action tier"
+            );
+        }
+
+        // The self-checking curated partition still balances, appendix excluded.
+        let curated = json.executive_summary.curated_total;
+        let summed = json.matrix.do_now.len()
+            + json.matrix.do_next.len()
+            + json.matrix.plan.len()
+            + json.matrix.accepted.len();
+        assert_eq!(summed, curated, "do_now+do_next+plan+accepted must equal curated_total");
+        assert_eq!(curated, 1, "only the critical is curated; the info note is appendix-only");
     }
 }
