@@ -53,8 +53,8 @@ pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
         price_out: 25.0,
     },
     RegistryEntryStatic {
-        display: "Sonnet 4.6",
-        id: "claude-sonnet-4-6",
+        display: "Sonnet 5",
+        id: "claude-sonnet-5",
         context: 200_000,
         weight: 3,
         // Anthropic list price: $3 / $15 per million tokens (input / output).
@@ -760,7 +760,7 @@ mod tests {
         let entries = claude_entries();
         assert_eq!(entries.len(), 3, "expect exactly 3 Claude tiers");
         assert!(entries.iter().any(|e| e.id == "claude-opus-4-8"));
-        assert!(entries.iter().any(|e| e.id == "claude-sonnet-4-6"));
+        assert!(entries.iter().any(|e| e.id == "claude-sonnet-5"));
         assert!(entries.iter().any(|e| e.id == "claude-haiku-4-5-20251001"));
     }
 
@@ -789,7 +789,7 @@ mod tests {
     fn claude_opus_has_highest_weight() {
         let entries = claude_entries();
         let opus = entries.iter().find(|e| e.id == "claude-opus-4-8").unwrap();
-        let sonnet = entries.iter().find(|e| e.id == "claude-sonnet-4-6").unwrap();
+        let sonnet = entries.iter().find(|e| e.id == "claude-sonnet-5").unwrap();
         let haiku = entries.iter().find(|e| e.id == "claude-haiku-4-5-20251001").unwrap();
         assert!(
             opus.weight > sonnet.weight,
@@ -810,7 +810,7 @@ mod tests {
         // These must stay in sync with fleet/src/tier.rs default_*_model().
         let entries = claude_entries();
         assert!(entries.iter().any(|e| e.id == "claude-opus-4-8"));
-        assert!(entries.iter().any(|e| e.id == "claude-sonnet-4-6"));
+        assert!(entries.iter().any(|e| e.id == "claude-sonnet-5"));
         assert!(entries.iter().any(|e| e.id == "claude-haiku-4-5-20251001"));
     }
 
@@ -840,15 +840,15 @@ mod tests {
     #[test]
     fn claude_sonnet_carries_list_price_3_15() {
         let entries = claude_entries();
-        let sonnet = entries.iter().find(|e| e.id == "claude-sonnet-4-6").unwrap();
+        let sonnet = entries.iter().find(|e| e.id == "claude-sonnet-5").unwrap();
         assert!(
             (sonnet.price_in - 3.0).abs() < f64::EPSILON,
-            "Sonnet 4.6 price_in must be $3/M, got {}",
+            "Sonnet 5 price_in must be $3/M, got {}",
             sonnet.price_in
         );
         assert!(
             (sonnet.price_out - 15.0).abs() < f64::EPSILON,
-            "Sonnet 4.6 price_out must be $15/M, got {}",
+            "Sonnet 5 price_out must be $15/M, got {}",
             sonnet.price_out
         );
     }
@@ -1069,7 +1069,7 @@ mod tests {
     fn caching_heuristic_claude_provider_always_true() {
         // All claude-provider models are caching-capable (the subscription/CLI path).
         assert!(caching_heuristic("claude", "claude-opus-4-8"));
-        assert!(caching_heuristic("claude", "claude-sonnet-4-6"));
+        assert!(caching_heuristic("claude", "claude-sonnet-5"));
         assert!(caching_heuristic("claude", "claude-haiku-4-5-20251001"));
     }
 

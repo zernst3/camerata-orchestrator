@@ -4430,7 +4430,7 @@ mod tests {
                 "audited_refs": [
                     { "repo": "owner/repo", "sha": "deadbeef".repeat(5), "branch": "main", "dirty": true }
                 ],
-                "audit_model": "claude-sonnet-4-6",
+                "audit_model": "claude-sonnet-5",
                 "calibration_model": "claude-haiku-4-5",
                 "mode": "parallel",
                 "thorough": true,
@@ -4448,7 +4448,7 @@ mod tests {
         assert_eq!(p.audited_refs[0].repo, "owner/repo");
         assert_eq!(p.audited_refs[0].branch.as_deref(), Some("main"));
         assert!(p.audited_refs[0].dirty, "dirty flag must survive the round trip");
-        assert_eq!(p.audit_model.as_deref(), Some("claude-sonnet-4-6"));
+        assert_eq!(p.audit_model.as_deref(), Some("claude-sonnet-5"));
         assert_eq!(p.calibration_model.as_deref(), Some("claude-haiku-4-5"));
         assert_eq!(p.mode, "parallel");
         assert!(p.thorough);

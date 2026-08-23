@@ -55,10 +55,10 @@ pub struct RegistryEntry {
     #[serde(default)]
     pub caching: bool,
     /// Whether this model supports vision / multimodal input (images). `true` for all
-    /// Claude 4.x Opus, Sonnet, and Haiku models (all multimodal). For OpenRouter models,
-    /// derived from `architecture.input_modalities` — `true` when the list contains
-    /// `"image"`. Used to filter the Designer (vision) band model selector so only
-    /// vision-capable models are offered.
+    /// current Claude Opus, Sonnet, and Haiku models (all multimodal). For OpenRouter
+    /// models, derived from `architecture.input_modalities` — `true` when the list
+    /// contains `"image"`. Used to filter the Designer (vision) band model selector so
+    /// only vision-capable models are offered.
     #[serde(default)]
     pub vision: bool,
 }
@@ -76,11 +76,11 @@ pub struct RegistryEntryStatic {
 
 impl RegistryEntryStatic {
     pub fn to_entry(&self) -> RegistryEntry {
-        // All Claude 4.x models (Opus 4.x, Sonnet 4.x, Haiku 4.5) are multimodal.
-        // The static catalog only lists Claude 4 models, so all entries are vision-capable.
-        let vision = self.id.contains("claude-opus-4")
-            || self.id.contains("claude-sonnet-4")
-            || self.id.contains("claude-haiku-4");
+        // Every current Claude model (Opus, Sonnet, Haiku) is multimodal, and this static
+        // catalog only ever lists Claude models — so every entry is vision-capable. Not
+        // substring-matched against a generation number (e.g. `-4-`, `-5-`) so this stays
+        // correct across model refreshes without needing an update here too.
+        let vision = true;
         RegistryEntry {
             provider: "claude".to_string(),
             display: self.display.to_string(),
@@ -131,8 +131,8 @@ mod tests {
     fn registry_entry_serde_roundtrip() {
         let entry = RegistryEntry {
             provider: "claude".to_string(),
-            display: "Sonnet 4.6".to_string(),
-            id: "claude-sonnet-4-6".to_string(),
+            display: "Sonnet 5".to_string(),
+            id: "claude-sonnet-5".to_string(),
             free: false,
             tool_use: true,
             context: 200_000,

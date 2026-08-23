@@ -13,7 +13,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// The default model used when a routine does not specify one. This mirrors the
 /// `DEFAULT_MODEL` constant in `camerata-server::llm`, but is declared here independently
 /// so this crate carries no dependency on the server adapter.
-pub const DEFAULT_ROUTINE_MODEL: &str = "claude-sonnet-4-6";
+pub const DEFAULT_ROUTINE_MODEL: &str = "claude-sonnet-5";
 
 /// The lifecycle status of a routine, persisted alongside it (issue #43).
 ///

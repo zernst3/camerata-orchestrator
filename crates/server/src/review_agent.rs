@@ -335,7 +335,7 @@ mod tests {
             story: "Add user authentication with JWT tokens.",
             rules_prose: "RULE-1: All endpoints must be authenticated.",
             diff: "+fn authenticate(token: &str) -> bool { true }",
-            model: "claude-sonnet-4-6",
+            model: "claude-sonnet-5",
         };
         let prompt = build_l3_prompt(&input);
 
@@ -495,7 +495,7 @@ mod tests {
         let input = IntegrationGateReviewInput {
             contract: "GET /api/users returns [{id, name, email}]",
             repo_outputs: &outputs,
-            model: "claude-sonnet-4-6",
+            model: "claude-sonnet-5",
         };
         let prompt = build_integration_prompt(&input);
 
@@ -561,7 +561,7 @@ mod tests {
             }
         }
         let result =
-            check_integration_gate_live(&PanicLlm, None, &[], "claude-sonnet-4-6").await.unwrap();
+            check_integration_gate_live(&PanicLlm, None, &[], "claude-sonnet-5").await.unwrap();
         assert_eq!(result, LiveGateResult::NoContractRequired);
     }
 
@@ -608,7 +608,7 @@ mod tests {
             &llm,
             Some("GET /api/users returns [{id}]"),
             &[("backend", "returns [{id}]")],
-            "claude-sonnet-4-6",
+            "claude-sonnet-5",
         )
         .await
         .unwrap();
@@ -623,7 +623,7 @@ mod tests {
             &llm,
             Some("GET /api/users returns [{id, email}]"),
             &[("backend", "returns [{id}]")],
-            "claude-sonnet-4-6",
+            "claude-sonnet-5",
         )
         .await
         .unwrap();

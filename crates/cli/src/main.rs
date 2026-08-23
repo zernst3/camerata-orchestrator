@@ -385,7 +385,7 @@ mod cli_parse_tests {
             "start-run",
             "owner/repo#1",
             "--model",
-            "claude-sonnet-4-6",
+            "claude-sonnet-5",
             "--skip-layer2",
         ])
         .expect("must parse");
@@ -396,7 +396,7 @@ mod cli_parse_tests {
                 skip_layer2,
             } => {
                 assert_eq!(story_id, "owner/repo#1");
-                assert_eq!(model.as_deref(), Some("claude-sonnet-4-6"));
+                assert_eq!(model.as_deref(), Some("claude-sonnet-5"));
                 assert!(skip_layer2);
             }
             other => panic!("expected Command::StartRun, got a different variant: {other:?}"),

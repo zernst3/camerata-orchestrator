@@ -482,7 +482,7 @@ fn scope4_balanced_profile_overwrites_all_entries() {
 
     assert_eq!(p.model_profile, ModelProfile::Balanced);
     assert_eq!(p.tier_map.strongest, "claude-opus-4-8");
-    assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-4-6".to_string()]);
+    assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-5".to_string()]);
     assert_eq!(p.tier_map.fast, vec!["claude-haiku-4-5-20251001".to_string()]);
     // Every step model overwritten to Haiku.
     for (kind, _) in ALL_STEPS {
@@ -505,13 +505,13 @@ fn scope4_max_quality_profile_overwrites_all_entries() {
 
     assert_eq!(p.model_profile, ModelProfile::MaxQuality);
     assert_eq!(p.tier_map.strongest, "claude-opus-4-8");
-    assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-4-6".to_string()]);
-    assert_eq!(p.tier_map.fast, vec!["claude-sonnet-4-6".to_string()]);
+    assert_eq!(p.tier_map.balanced, vec!["claude-sonnet-5".to_string()]);
+    assert_eq!(p.tier_map.fast, vec!["claude-sonnet-5".to_string()]);
     for (kind, _) in ALL_STEPS {
-        assert_eq!(p.model_for_step(*kind), "claude-sonnet-4-6");
+        assert_eq!(p.model_for_step(*kind), "claude-sonnet-5");
     }
     assert!(p.l3_review.enabled, "MaxQuality turns L3 on");
-    assert_eq!(p.l3_review.model, "claude-sonnet-4-6");
+    assert_eq!(p.l3_review.model, "claude-sonnet-5");
 }
 
 #[test]
@@ -575,11 +575,11 @@ fn scope4_custom_profile_is_a_noop_no_overwrite() {
 fn scope5_claude_model_routes_to_cli_backed_llm() {
     // A claude-provider model id -> build_completer returns the CLI-backed `Llm`
     // (the same Arc we passed in), NOT an OpenRouterCompleter.
-    let registry = ModelRegistry::new(); // static registry has claude-sonnet-4-6 as `claude`.
+    let registry = ModelRegistry::new(); // static registry has claude-sonnet-5 as `claude`.
     let creds = MemoryCredentialStore::new(); // no OpenRouter key needed for claude.
     let llm = cli_llm();
     let completer =
-        build_completer("claude-sonnet-4-6", &registry, &creds, llm, limiter(), &default_policy())
+        build_completer("claude-sonnet-5", &registry, &creds, llm, limiter(), &default_policy())
         .expect("claude model must build without an OpenRouter key");
     assert!(
         !completer.as_any().is::<OpenRouterCompleter>(),
@@ -632,7 +632,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
     let registry = ModelRegistry::new();
     let creds = MemoryCredentialStore::new();
     let claude = build_agent_driver(
-        "claude-sonnet-4-6",
+        "claude-sonnet-5",
         &registry,
         &default_policy(),
         &creds,

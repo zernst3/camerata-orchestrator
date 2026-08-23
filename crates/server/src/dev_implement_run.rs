@@ -2800,7 +2800,7 @@ mod tests {
     fn integration_gate_bundle_holds_contract_prose() {
         // Prove the struct fields are pub and accessible (compile-time check).
         let contract = "GET /api/users returns [{id, name, email}]";
-        let model = "claude-sonnet-4-6".to_string();
+        let model = "claude-sonnet-5".to_string();
         let _ = std::hint::black_box((contract, model));
     }
 
@@ -3071,7 +3071,7 @@ mod tests {
             selected_integration_rules: Vec::new(), // model-advisory-only path here
             waivers: Vec::new(),
             contract: "GET /api/users returns [{id, name, email}]".to_string(),
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5".to_string(),
             llm: Some(llm),
         });
         // Two repos; empty base_commits mean diff returns "" (short-circuit in worktree_diff_from_base).
@@ -3119,7 +3119,7 @@ mod tests {
             selected_integration_rules: Vec::new(),
             waivers: Vec::new(),
             contract: "GET /api/users returns [{id, name, email}]".to_string(),
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5".to_string(),
             llm: Some(llm),
         });
         let worktrees = vec![
@@ -3281,7 +3281,7 @@ mod tests {
             selected_integration_rules: Vec::new(),
             waivers: Vec::new(),
             contract: "single-repo contract".to_string(),
-            model: "claude-sonnet-4-6".to_string(),
+            model: "claude-sonnet-5".to_string(),
             llm: Some(llm),
         });
         let single = vec![RepoWorktree {

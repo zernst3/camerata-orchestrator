@@ -7771,9 +7771,9 @@ mod bff_tests {
             role: "user".to_string(),
             content: "earlier".to_string(),
         }];
-        let body = super::phase_chat_body("hello", "claude-sonnet-4-6", "SYS", &hist);
+        let body = super::phase_chat_body("hello", "claude-sonnet-5", "SYS", &hist);
         assert_eq!(body["prompt"], "hello");
-        assert_eq!(body["model"], "claude-sonnet-4-6");
+        assert_eq!(body["model"], "claude-sonnet-5");
         assert_eq!(body["system"], "SYS");
         assert_eq!(body["history"][0]["role"], "user");
         assert_eq!(body["history"][0]["content"], "earlier");

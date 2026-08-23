@@ -373,11 +373,11 @@ mod tests {
         );
     }
 
-    /// Sonnet 4.6 registry prices ($3/$15 per M) produce a meaningful estimate for a
+    /// Sonnet 5 registry prices ($3/$15 per M) produce a meaningful estimate for a
     /// medium-sized repo scan — sanity-checks the default fallback used by the UI.
     #[test]
     fn sonnet_registry_price_estimate_is_positive() {
-        // Sonnet 4.6 list price: $3 in / $15 out per million tokens.
+        // Sonnet 5 list price: $3 in / $15 out per million tokens.
         let (_, dollars, _) =
             estimate_audit_cost(350_000, 30, "parallel", 3.0, 15.0, 3.0, 15.0, false, false, false);
         assert!(

@@ -146,7 +146,7 @@ pub fn default_fast_chain() -> Vec<String> {
 
 /// The shipped default chain for [`TierMap::balanced`]: Sonnet only (1-element).
 pub fn default_balanced_chain() -> Vec<String> {
-    vec!["claude-sonnet-4-6".to_string()]
+    vec!["claude-sonnet-5".to_string()]
 }
 
 /// The shipped default for [`TierMap::fast`] primary (back-compat for callers that
@@ -157,7 +157,7 @@ pub fn default_fast_model() -> String {
 
 /// The shipped default for [`TierMap::balanced`] primary (back-compat).
 pub fn default_balanced_model() -> String {
-    "claude-sonnet-4-6".to_string()
+    "claude-sonnet-5".to_string()
 }
 
 /// The shipped default for [`TierMap::strongest`]: Claude Opus 4.8 (frontier-class).
@@ -189,7 +189,7 @@ impl TierMap {
 
     /// The primary (first) model in the `balanced` chain. Never empty when default is used.
     pub fn balanced_primary(&self) -> &str {
-        self.balanced.first().map(String::as_str).unwrap_or("claude-sonnet-4-6")
+        self.balanced.first().map(String::as_str).unwrap_or("claude-sonnet-5")
     }
 
     /// The full `balanced` fallback chain as a slice.
@@ -340,7 +340,7 @@ mod tests {
         let m = TierMap::default();
         // fast/balanced are now Vec<String>; check the primary (first) element.
         assert_eq!(m.fast_primary(), "claude-haiku-4-5-20251001");
-        assert_eq!(m.balanced_primary(), "claude-sonnet-4-6");
+        assert_eq!(m.balanced_primary(), "claude-sonnet-5");
         assert_eq!(m.strongest, "claude-opus-4-8");
     }
 
@@ -348,7 +348,7 @@ mod tests {
     fn tier_map_model_for_each_band() {
         let m = TierMap::default();
         assert_eq!(m.model_for(CapabilityBand::Fast), "claude-haiku-4-5-20251001");
-        assert_eq!(m.model_for(CapabilityBand::Balanced), "claude-sonnet-4-6");
+        assert_eq!(m.model_for(CapabilityBand::Balanced), "claude-sonnet-5");
         assert_eq!(m.model_for(CapabilityBand::Strongest), "claude-opus-4-8");
     }
 
@@ -469,8 +469,8 @@ mod tests {
 
         assert_eq!(m.model_for_task(&backend), "claude-opus-4-8");
         assert_eq!(m.model_for_task(&test_t), "claude-haiku-4-5-20251001");
-        assert_eq!(m.model_for_task(&db), "claude-sonnet-4-6");
-        assert_eq!(m.model_for_task(&frontend), "claude-sonnet-4-6");
+        assert_eq!(m.model_for_task(&db), "claude-sonnet-5");
+        assert_eq!(m.model_for_task(&frontend), "claude-sonnet-5");
     }
 
     #[test]
@@ -487,11 +487,11 @@ mod tests {
     fn single_string_back_compat_fast_deserializes_to_vec() {
         // A project JSON written with the OLD `"fast": "<model>"` string form
         // must deserialise into a 1-element Vec (back-compat via deserialize_chain).
-        let json = r#"{"fast":"claude-haiku-4-5-20251001","balanced":"claude-sonnet-4-6","strongest":"claude-opus-4-8"}"#;
+        let json = r#"{"fast":"claude-haiku-4-5-20251001","balanced":"claude-sonnet-5","strongest":"claude-opus-4-8"}"#;
         let m: TierMap = serde_json::from_str(json).unwrap();
         assert_eq!(m.fast, vec!["claude-haiku-4-5-20251001"],
             "legacy fast string must deserialise to 1-element Vec");
-        assert_eq!(m.balanced, vec!["claude-sonnet-4-6"],
+        assert_eq!(m.balanced, vec!["claude-sonnet-5"],
             "legacy balanced string must deserialise to 1-element Vec");
         assert_eq!(m.strongest, "claude-opus-4-8",
             "strongest stays a String");
@@ -499,10 +499,10 @@ mod tests {
 
     #[test]
     fn chain_form_deserializes_multiple_models() {
-        let json = r#"{"fast":["free-coder:free","claude-haiku-4-5-20251001"],"balanced":["qwen:free","claude-sonnet-4-6"],"strongest":"claude-opus-4-8"}"#;
+        let json = r#"{"fast":["free-coder:free","claude-haiku-4-5-20251001"],"balanced":["qwen:free","claude-sonnet-5"],"strongest":"claude-opus-4-8"}"#;
         let m: TierMap = serde_json::from_str(json).unwrap();
         assert_eq!(m.fast, vec!["free-coder:free", "claude-haiku-4-5-20251001"]);
-        assert_eq!(m.balanced, vec!["qwen:free", "claude-sonnet-4-6"]);
+        assert_eq!(m.balanced, vec!["qwen:free", "claude-sonnet-5"]);
         assert_eq!(m.fast_primary(), "free-coder:free",
             "primary is the first element");
         assert_eq!(m.balanced_primary(), "qwen:free");
@@ -535,6 +535,6 @@ mod tests {
         // An empty JSON object (project pre-TierMap): defaults fill in 1-element chains.
         let m: TierMap = serde_json::from_str("{}").unwrap();
         assert_eq!(m.fast, vec!["claude-haiku-4-5-20251001"]);
-        assert_eq!(m.balanced, vec!["claude-sonnet-4-6"]);
+        assert_eq!(m.balanced, vec!["claude-sonnet-5"]);
     }
 }

@@ -231,7 +231,7 @@ pub(super) fn UowReviewPanel(
         .read()
         .clone()
         .flatten()
-        .unwrap_or_else(|| "claude-sonnet-4-6".to_string());
+        .unwrap_or_else(|| "claude-sonnet-5".to_string());
 
     rsx! {
         div { class: "uow-review-card",
@@ -999,10 +999,10 @@ mod render_tests {
         // Deserialize — build the fixture from JSON (the same wire shape the BFF sends).
         let models: super::super::scan::AuditModelsResp = serde_json::from_value(serde_json::json!({
             "models": [
-                { "label": "Claude Sonnet 4.6", "id": "claude-sonnet-4-6", "provider": "claude" },
+                { "label": "Claude Sonnet 5", "id": "claude-sonnet-5", "provider": "claude" },
                 { "label": "DeepSeek R1", "id": "deepseek-r1", "provider": "openrouter" }
             ],
-            "default": "claude-sonnet-4-6",
+            "default": "claude-sonnet-5",
             "openrouter_fetched": true
         }))
         .expect("valid AuditModelsResp fixture");
@@ -1014,7 +1014,7 @@ mod render_tests {
     // Inner wrapper that owns the bound Signal<String> ModelSelect needs.
     #[component]
     fn ModelSelectHarnessInner(models: super::super::scan::AuditModelsResp) -> Element {
-        let selected = use_signal(|| "claude-sonnet-4-6".to_string());
+        let selected = use_signal(|| "claude-sonnet-5".to_string());
         rsx! {
             super::ModelSelect { models: Some(models), selected }
         }
@@ -1028,7 +1028,7 @@ mod render_tests {
         assert!(html.contains("run-model-select"), "the <select> renders; html=\n{html}");
         assert!(html.contains("Claude (subscription)"), "claude optgroup; html=\n{html}");
         assert!(html.contains("OpenRouter"), "openrouter optgroup; html=\n{html}");
-        assert!(html.contains("Claude Sonnet 4.6"), "claude option label; html=\n{html}");
+        assert!(html.contains("Claude Sonnet 5"), "claude option label; html=\n{html}");
         assert!(html.contains("DeepSeek R1"), "openrouter option label; html=\n{html}");
     }
 
@@ -1418,7 +1418,7 @@ mod tests {
             .and(path("/api/escalations/esc-3/chat"))
             .and(body_json(serde_json::json!({
                 "message": "Why did this stop?",
-                "model": "claude-sonnet-4-6"
+                "model": "claude-sonnet-5"
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "esc-3", "routine_id": "r1", "routine_name": "dev",
@@ -1436,7 +1436,7 @@ mod tests {
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
         let out =
-            super::chat_uow_escalation("esc-3", "Why did this stop?", "claude-sonnet-4-6").await;
+            super::chat_uow_escalation("esc-3", "Why did this stop?", "claude-sonnet-5").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         let out = out.expect("the escalation with the appended turns parses");

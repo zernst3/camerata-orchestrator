@@ -1956,12 +1956,12 @@ mod tests {
         let llm = Llm {
             vendor: Vendor::Anthropic,
             backend: Backend::Cli,
-            default_model: "claude-sonnet-4-6".to_string(),
+            default_model: "claude-sonnet-5".to_string(),
             api_key: None,
             ledger: None,
         };
         // Empty request model -> default.
-        assert_eq!(llm.model_for(&LlmRequest::new("hi")), "claude-sonnet-4-6");
+        assert_eq!(llm.model_for(&LlmRequest::new("hi")), "claude-sonnet-5");
         // Explicit model wins.
         assert_eq!(
             llm.model_for(&LlmRequest::new("hi").with_model("claude-opus-4-8")),
@@ -2127,11 +2127,11 @@ mod tests {
     #[test]
     fn build_batch_item_plain_prompt() {
         let req = LlmRequest::new("audit this code")
-            .with_model("claude-sonnet-4-6")
+            .with_model("claude-sonnet-5")
             .with_max_tokens(2048);
-        let item = build_batch_item("c0-b1", &req, "claude-sonnet-4-6");
+        let item = build_batch_item("c0-b1", &req, "claude-sonnet-5");
         assert_eq!(item.custom_id, "c0-b1");
-        assert_eq!(item.params.model, "claude-sonnet-4-6");
+        assert_eq!(item.params.model, "claude-sonnet-5");
         assert_eq!(item.params.max_tokens, 2048);
         assert!(item.params.system.is_none());
         // Plain string content when no cache prefix is set.
@@ -2147,8 +2147,8 @@ mod tests {
         let split = "static prefix part\n".len();
         let req = LlmRequest::new(prompt)
             .with_cache_prefix_len(split)
-            .with_model("claude-sonnet-4-6");
-        let item = build_batch_item("c2-b0", &req, "claude-sonnet-4-6");
+            .with_model("claude-sonnet-5");
+        let item = build_batch_item("c2-b0", &req, "claude-sonnet-5");
         let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
         let arr = content.as_array().expect("cached content is an array");
         assert_eq!(arr.len(), 2);
@@ -2179,9 +2179,9 @@ mod tests {
     /// malformed lines — the fundamental parse + reassemble contract.
     #[test]
     fn parse_batch_results_jsonl_succeeded_and_errored() {
-        let jsonl = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"finding A"}],"usage":{"input_tokens":100,"output_tokens":50}}}}
+        let jsonl = r#"{"custom_id":"c0-b0","result":{"type":"succeeded","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"finding A"}],"usage":{"input_tokens":100,"output_tokens":50}}}}
 {"custom_id":"c1-b0","result":{"type":"errored","error":{"message":"token limit exceeded"}}}
-{"custom_id":"c0-b1","result":{"type":"succeeded","message":{"model":"claude-sonnet-4-6","content":[{"type":"text","text":"finding B"}],"usage":{"input_tokens":80,"output_tokens":40}}}}
+{"custom_id":"c0-b1","result":{"type":"succeeded","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"finding B"}],"usage":{"input_tokens":80,"output_tokens":40}}}}
 malformed line, not json
 "#;
         let rows = parse_batch_results_jsonl(jsonl).expect("parse should not fail");
@@ -2268,8 +2268,8 @@ malformed line, not json
     /// `build_batch_item` serialises correctly (no private fields, correct JSON shape).
     #[test]
     fn batch_item_serialises_to_expected_shape() {
-        let req = LlmRequest::new("hello").with_model("claude-sonnet-4-6").with_max_tokens(512);
-        let item = build_batch_item("c0-b0", &req, "claude-sonnet-4-6");
+        let req = LlmRequest::new("hello").with_model("claude-sonnet-5").with_max_tokens(512);
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
         let v = serde_json::to_value(&item).unwrap();
         assert_eq!(v["custom_id"], "c0-b0");
         assert!(v["params"]["model"].is_string());
@@ -2344,7 +2344,7 @@ malformed line, not json
         std::sync::Arc::new(Llm {
             vendor: Vendor::Anthropic,
             backend: Backend::Cli,
-            default_model: "claude-sonnet-4-6".to_string(),
+            default_model: "claude-sonnet-5".to_string(),
             api_key: None,
             ledger: None,
         })
@@ -2375,7 +2375,7 @@ malformed line, not json
         );
     }
 
-    /// For a claude-provider model (e.g. `claude-sonnet-4-6` in the static registry),
+    /// For a claude-provider model (e.g. `claude-sonnet-5` in the static registry),
     /// the factory returns the Anthropic Llm without touching the credential store.
     #[test]
     fn factory_returns_anthropic_for_claude_provider_model() {
@@ -2385,7 +2385,7 @@ malformed line, not json
         let llm = make_llm();
 
         let completer =
-            build_completer("claude-sonnet-4-6", &registry, &creds, llm, make_limiter(), &default_policy());
+            build_completer("claude-sonnet-5", &registry, &creds, llm, make_limiter(), &default_policy());
         assert!(
             completer.is_ok(),
             "claude-provider model must succeed even without an OpenRouter key"

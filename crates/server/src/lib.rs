@@ -4523,7 +4523,7 @@ struct AuditReq {
     #[serde(default)]
     rules: Vec<AuditRuleReq>,
     /// The model the USER picked for this audit (company-agnostic id, e.g.
-    /// `claude-sonnet-4-6`). None / empty → the server default. The user owns the
+    /// `claude-sonnet-5`). None / empty → the server default. The user owns the
     /// thoroughness-vs-speed trade-off by choosing here.
     #[serde(default)]
     model: Option<String>,
@@ -15146,7 +15146,7 @@ mod tests {
         let p = state.projects.create("UiPick", vec![]).unwrap();
         state
             .projects
-            .set_step_model(&p.id, StepKind::Audit, "claude-sonnet-4-6".to_string())
+            .set_step_model(&p.id, StepKind::Audit, "claude-sonnet-5".to_string())
             .unwrap();
 
         // Explicit pick overrides the project default.
@@ -15157,11 +15157,11 @@ mod tests {
         // Blank / None falls back to the project's per-step model.
         assert_eq!(
             step_model_or(&state, StepKind::Audit, Some("   ")),
-            "claude-sonnet-4-6"
+            "claude-sonnet-5"
         );
         assert_eq!(
             step_model_or(&state, StepKind::Audit, None),
-            "claude-sonnet-4-6"
+            "claude-sonnet-5"
         );
     }
 
@@ -16238,10 +16238,10 @@ mod tests {
         );
         // Gemini-shaped: no cost field, known model id -> derived cost (sonnet 3/15 per Mtok).
         state.usage_ledger.record(
-            "claude-sonnet-4-6",
+            "claude-sonnet-5",
             &crate::llm::LlmResponse {
                 text: String::new(),
-                model: "claude-sonnet-4-6".to_string(),
+                model: "claude-sonnet-5".to_string(),
                 backend: "api".to_string(),
                 cost_usd: None,
                 input_tokens: Some(1_000_000),
@@ -16278,7 +16278,7 @@ mod tests {
         // by_model array of {model,tokens,cost,calls}, sorted by descending cost (sonnet first).
         let by_model = json["by_model"].as_array().unwrap();
         assert_eq!(by_model.len(), 2);
-        assert_eq!(by_model[0]["model"], "claude-sonnet-4-6");
+        assert_eq!(by_model[0]["model"], "claude-sonnet-5");
         assert_eq!(by_model[0]["calls"], 1);
         assert_eq!(by_model[0]["tokens"], 2_000_000);
     }

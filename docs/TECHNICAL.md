@@ -2789,7 +2789,7 @@ non-orchestrator (it can never re-delegate).
 Every non-fleet AI step (audit, calibration, research chat, story authoring,
 decomposition, escalation, clarification) has a dedicated model slot in
 `StepModels`, stored on the `Project` (`#[serde(default)]`, back-compat). Default
-at project creation: `DEFAULT_MODEL` (`claude-sonnet-4-6`) for every slot.
+at project creation: `DEFAULT_MODEL` (`claude-sonnet-5`) for every slot.
 
 `StepKind` enum variants: `Audit`, `Calibration`, `ResearchChat`, `StoryAuthoring`,
 `Decomposition`, `Escalation`, `Clarification`.

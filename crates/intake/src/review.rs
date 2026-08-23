@@ -272,7 +272,7 @@ impl RefinementReviewer for StubRefinementReviewer {
 /// Callers that want a different model should use
 /// [`ClaudeRefinementReviewer::with_model`]. The `CAMERATA_REVIEWER_MODEL`
 /// environment variable overrides this at runtime for CLI / one-off invocations.
-pub const DEFAULT_REVIEWER_MODEL: &str = "claude-sonnet-4-6";
+pub const DEFAULT_REVIEWER_MODEL: &str = "claude-sonnet-5";
 
 /// The REAL refinement reviewer: a headless `claude -p` call that reviews the
 /// session and returns the review JSON. Read-only and ungoverned (it plans, it

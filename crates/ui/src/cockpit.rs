@@ -302,7 +302,7 @@ fn default_fast_chain_str() -> Vec<String> {
 }
 
 fn default_balanced_chain_str() -> Vec<String> {
-    vec!["claude-sonnet-4-6".to_string()]
+    vec!["claude-sonnet-5".to_string()]
 }
 
 fn default_strongest_model_str() -> String {
@@ -4215,7 +4215,7 @@ mod tests {
                 "output_tokens": 500,
                 "total_cost_usd": 0.42,
                 "calls": 7,
-                "by_model": [ { "model": "claude-sonnet-4-6", "tokens": 1500, "cost": 0.42, "calls": 7 } ],
+                "by_model": [ { "model": "claude-sonnet-5", "tokens": 1500, "cost": 0.42, "calls": 7 } ],
                 "rate_limited": false
             })))
             .mount(&server)
@@ -4230,7 +4230,7 @@ mod tests {
         assert_eq!(u.calls, 7);
         assert!(!u.rate_limited);
         assert_eq!(u.by_model.len(), 1);
-        assert_eq!(u.by_model[0].model, "claude-sonnet-4-6");
+        assert_eq!(u.by_model[0].model, "claude-sonnet-5");
     }
 
     /// `fetch_active_project` GETs /api/projects/active and flattens the `Option<ProjectView>`.
@@ -4424,14 +4424,14 @@ mod tests {
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/api/projects/p-9/step-models"))
-                .and(body_json(serde_json::json!({ "step": step, "model": "claude-sonnet-4-6" })))
+                .and(body_json(serde_json::json!({ "step": step, "model": "claude-sonnet-5" })))
                 .respond_with(ResponseTemplate::new(200))
                 .expect(1)
                 .mount(&server)
                 .await;
 
             std::env::set_var("CAMERATA_BFF_URL", server.uri());
-            let ok = super::set_project_step_model("p-9", step, "claude-sonnet-4-6").await;
+            let ok = super::set_project_step_model("p-9", step, "claude-sonnet-5").await;
             std::env::remove_var("CAMERATA_BFF_URL");
 
             assert!(ok, "step variant `{step}` POSTs its name verbatim and maps 2xx to true");
@@ -4904,14 +4904,14 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/settings/chat-model"))
-            .and(body_json(serde_json::json!({ "model": "claude-sonnet-4-6" })))
+            .and(body_json(serde_json::json!({ "model": "claude-sonnet-5" })))
             .respond_with(ResponseTemplate::new(200))
             .expect(1)
             .mount(&server)
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let ok = super::save_app_chat_model("claude-sonnet-4-6").await;
+        let ok = super::save_app_chat_model("claude-sonnet-5").await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);

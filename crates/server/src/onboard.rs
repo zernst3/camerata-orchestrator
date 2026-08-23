@@ -2834,7 +2834,7 @@ mod tests {
                     dirty: false,
                 },
             ],
-            audit_model: Some("claude-sonnet-4-6".to_string()),
+            audit_model: Some("claude-sonnet-5".to_string()),
             calibration_model: Some("claude-haiku-4-5".to_string()),
             mode: "parallel".to_string(),
             thorough: true,

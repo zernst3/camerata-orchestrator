@@ -220,7 +220,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/stories/story-1/run"))
             .and(body_json(serde_json::json!({
-                "model": "claude-sonnet-4-6",
+                "model": "claude-sonnet-5",
                 "skip_layer2": true,
             })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
@@ -236,7 +236,7 @@ mod tests {
         let json = handle_start_run(
             &client,
             "story-1",
-            Some("claude-sonnet-4-6".to_string()),
+            Some("claude-sonnet-5".to_string()),
             true,
         )
         .await

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 /// The default model when none is configured / requested. Capable by default; override
 /// per call or via `CAMERATA_LLM_MODEL`.
-pub const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
+pub const DEFAULT_MODEL: &str = "claude-sonnet-5";
 
 /// serde default for each [`StepModels`] field — the shipped [`DEFAULT_MODEL`]. Used so a
 /// project JSON written before a given step field existed deserializes to the default

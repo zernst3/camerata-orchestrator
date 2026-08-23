@@ -476,7 +476,7 @@ mod tests {
     fn models() -> DelegateModels {
         DelegateModels {
             fast: "claude-haiku-4-5-20251001".to_string(),
-            balanced: "claude-sonnet-4-6".to_string(),
+            balanced: "claude-sonnet-5".to_string(),
             strongest: "claude-opus-4-8".to_string(),
             // Default test map: vision UNSET (the common case — vision off).
             vision: String::new(),
@@ -577,10 +577,10 @@ mod tests {
             .await
             .unwrap();
         // The factory-built child ran (echo marker present, model echoed).
-        assert!(out.contains("ECHO model=claude-sonnet-4-6"), "got: {out}");
+        assert!(out.contains("ECHO model=claude-sonnet-5"), "got: {out}");
         // And the factory was asked for EXACTLY the balanced (Claude) model.
         let asked = factory.models.lock().unwrap().clone();
-        assert_eq!(asked, vec!["claude-sonnet-4-6".to_string()]);
+        assert_eq!(asked, vec!["claude-sonnet-5".to_string()]);
     }
 
     #[tokio::test]
@@ -643,7 +643,7 @@ mod tests {
     fn resolve_tier_to_model_is_case_insensitive() {
         let m = models();
         assert_eq!(m.resolve("fast"), Some("claude-haiku-4-5-20251001"));
-        assert_eq!(m.resolve("BALANCED"), Some("claude-sonnet-4-6"));
+        assert_eq!(m.resolve("BALANCED"), Some("claude-sonnet-5"));
         assert_eq!(m.resolve("  Strongest "), Some("claude-opus-4-8"));
         assert_eq!(m.resolve("ultra"), None);
         assert_eq!(m.resolve(""), None);

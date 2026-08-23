@@ -418,7 +418,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/stories/story-1/run"))
-            .and(body_json(serde_json::json!({ "model": "claude-sonnet-4-6" })))
+            .and(body_json(serde_json::json!({ "model": "claude-sonnet-5" })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "run_id": "run-42",
                 "story_id": "story-1",
@@ -433,7 +433,7 @@ mod tests {
             .start_run(
                 "story-1",
                 StartRunRequest {
-                    model: Some("claude-sonnet-4-6".to_string()),
+                    model: Some("claude-sonnet-5".to_string()),
                     ..Default::default()
                 },
             )

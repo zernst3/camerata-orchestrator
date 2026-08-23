@@ -1327,7 +1327,7 @@ mod tests {
             bin: &std::path::Path,
         ) {
             let _: std::pin::Pin<Box<dyn std::future::Future<Output = _>>> = Box::pin(
-                build_from_plan_with_model(plan, root, bin, Some("claude-sonnet-4-6"), &|_| {}),
+                build_from_plan_with_model(plan, root, bin, Some("claude-sonnet-5"), &|_| {}),
             );
         }
         // This test proves the API compiles with both None and Some; the _ suffix
@@ -1399,9 +1399,9 @@ mod tests {
         };
 
         let expected = [
-            (CapabilityBand::Balanced, "claude-sonnet-4-6"),
+            (CapabilityBand::Balanced, "claude-sonnet-5"),
             (CapabilityBand::Strongest, "claude-opus-4-8"),
-            (CapabilityBand::Balanced, "claude-sonnet-4-6"),
+            (CapabilityBand::Balanced, "claude-sonnet-5"),
             (CapabilityBand::Fast, "claude-haiku-4-5-20251001"),
         ];
 

@@ -3351,7 +3351,7 @@ mod tests {
         let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
 
         // Pick any Claude model id (it's in the static registry with provider = "claude").
-        let model_id = "claude-sonnet-4-6";
+        let model_id = "claude-sonnet-5";
 
         let result = build_agent_driver(
             model_id,
@@ -3818,7 +3818,7 @@ mod tests {
         let factory = factory_with(registry, creds);
 
         let tmp = tempfile::tempdir().unwrap();
-        let child = factory.build_child("claude-sonnet-4-6", tmp.path(), &[]);
+        let child = factory.build_child("claude-sonnet-5", tmp.path(), &[]);
         assert!(
             child.is_ok(),
             "claude model must build a CLI child without an OpenRouter key: {:?}",
@@ -3904,7 +3904,7 @@ mod tests {
         camerata_gateway::delegate::OrchestratorConfig {
             models: camerata_gateway::delegate::DelegateModels {
                 fast: "claude-haiku-4-5-20251001".to_string(),
-                balanced: "claude-sonnet-4-6".to_string(),
+                balanced: "claude-sonnet-5".to_string(),
                 strongest: "claude-opus-4-8".to_string(),
                 vision: String::new(),
             },
@@ -4471,7 +4471,7 @@ mod tests {
         // no OpenRouter credential needed, no claude binary spawn at build time).
         assert!(anthropic_api_backend_key(&creds).is_some());
         let result = build_agent_driver(
-            "claude-sonnet-4-6",
+            "claude-sonnet-5",
             &registry,
             &default_policy(),
             &creds,
@@ -4501,7 +4501,7 @@ mod tests {
 
         assert!(anthropic_api_backend_key(&creds).is_none());
         let result = build_agent_driver(
-            "claude-sonnet-4-6",
+            "claude-sonnet-5",
             &registry,
             &default_policy(),
             &creds,
@@ -4533,7 +4533,7 @@ mod tests {
         let factory = factory_with(registry, creds);
 
         let tmp = tempfile::tempdir().unwrap();
-        let child = factory.build_child("claude-sonnet-4-6", tmp.path(), &[]);
+        let child = factory.build_child("claude-sonnet-5", tmp.path(), &[]);
         assert!(
             child.is_ok(),
             "claude child under backend=api must build (Anthropic API child): {:?}",

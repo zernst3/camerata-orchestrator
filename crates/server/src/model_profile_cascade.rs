@@ -11,7 +11,7 @@ use crate::project::{L3ReviewConfig, ModelProfile, StepModels};
 // ── Known model ids ───────────────────────────────────────────────────────────
 
 const OPUS: &str = "claude-opus-4-8";
-const SONNET: &str = "claude-sonnet-4-6";
+const SONNET: &str = "claude-sonnet-5";
 const HAIKU: &str = "claude-haiku-4-5-20251001";
 
 // ── Assignment output ─────────────────────────────────────────────────────────

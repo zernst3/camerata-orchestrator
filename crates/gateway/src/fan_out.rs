@@ -262,7 +262,7 @@ mod tests {
     fn models() -> DelegateModels {
         DelegateModels {
             fast: "claude-haiku-4-5-20251001".to_string(),
-            balanced: "claude-sonnet-4-6".to_string(),
+            balanced: "claude-sonnet-5".to_string(),
             strongest: "claude-opus-4-8".to_string(),
             vision: String::new(),
         }
@@ -433,7 +433,7 @@ mod tests {
         // repo partition (write-isolation), proving both per-model coupling and the jail.
         let factory = Arc::new(RecordingFactory::default());
         let config = OrchestratorConfig {
-            models: models(), // balanced = claude-sonnet-4-6
+            models: models(), // balanced = claude-sonnet-5
             worktree_root: std::path::PathBuf::from("/work/project"),
             gateway_bin: std::path::PathBuf::from("/bin/camerata-gateway"),
             depth: 0,
@@ -449,12 +449,12 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 2);
         // Both workers ran via the factory (echo marker for the balanced model).
-        assert!(results.iter().all(|r| r.output.contains("ECHO model=claude-sonnet-4-6")));
+        assert!(results.iter().all(|r| r.output.contains("ECHO model=claude-sonnet-5")));
 
         // The factory was asked for the balanced model TWICE (one per worker).
         let asked = factory.models.lock().unwrap().clone();
         assert_eq!(asked.len(), 2);
-        assert!(asked.iter().all(|m| m == "claude-sonnet-4-6"));
+        assert!(asked.iter().all(|m| m == "claude-sonnet-5"));
 
         // Each worker was jailed to its OWN repo partition (write-isolation invariant).
         let jails: std::collections::HashSet<String> = factory

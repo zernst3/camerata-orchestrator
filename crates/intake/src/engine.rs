@@ -468,7 +468,7 @@ impl LeadEngineer for StubLeadEngineer {
 /// Callers that want a different model should use [`ClaudeLeadEngineer::with_model`].
 /// The `CAMERATA_LEAD_ENGINEER_MODEL` environment variable overrides this at
 /// runtime for CLI / one-off invocations.
-pub const DEFAULT_LEAD_ENGINEER_MODEL: &str = "claude-sonnet-4-6";
+pub const DEFAULT_LEAD_ENGINEER_MODEL: &str = "claude-sonnet-5";
 
 /// The read-only built-in tools the ungoverned planning calls (lead engineer + refinement
 /// reviewer) allow so the agent can SCAN the bound repo on demand. These cannot mutate the
@@ -1302,7 +1302,7 @@ mod tests {
         // Keep this in sync with camerata_server::llm::DEFAULT_MODEL.
         // If the catalog's default changes, this test will fail as a reminder to
         // update DEFAULT_LEAD_ENGINEER_MODEL in this crate too.
-        assert_eq!(DEFAULT_LEAD_ENGINEER_MODEL, "claude-sonnet-4-6");
+        assert_eq!(DEFAULT_LEAD_ENGINEER_MODEL, "claude-sonnet-5");
     }
 
     #[test]

@@ -85,7 +85,7 @@ pub struct StartRunArgs {
     /// The canonical story id to run, e.g. "owner/repo#123" (as listed by
     /// `list_stories`).
     pub story_id: String,
-    /// Optional single model override for the run (e.g. "claude-sonnet-4-6"). Leave
+    /// Optional single model override for the run (e.g. "claude-sonnet-5"). Leave
     /// unset to use the server's default.
     #[serde(default)]
     pub model: Option<String>,
@@ -445,7 +445,7 @@ mod tests {
         let bff = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/api/stories/story-1/run"))
-            .and(body_json(serde_json::json!({ "model": "claude-sonnet-4-6" })))
+            .and(body_json(serde_json::json!({ "model": "claude-sonnet-5" })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "run_id": "run-42",
                 "story_id": "story-1",
@@ -459,7 +459,7 @@ mod tests {
         let result = server
             .start_run(Parameters(StartRunArgs {
                 story_id: "story-1".to_string(),
-                model: Some("claude-sonnet-4-6".to_string()),
+                model: Some("claude-sonnet-5".to_string()),
                 tier_map: None,
                 skip_layer2: None,
             }))

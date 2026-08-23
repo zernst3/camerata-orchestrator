@@ -296,7 +296,7 @@ pub struct ClaudeCliDriver {
     /// write gate (`gated_write` jailed to `CAMERATA_WORKTREE_ROOT`) is untouched, so these
     /// dirs are NOT writable. Deduped against `worktree` when args are built.
     pub extra_read_dirs: Vec<PathBuf>,
-    /// Optional model id (e.g. `claude-sonnet-4-6`) passed via `--model`. When `None`
+    /// Optional model id (e.g. `claude-sonnet-5`) passed via `--model`. When `None`
     /// the CLI uses its configured default. Lets a caller (a routine, the fleet) run a
     /// run on a chosen model.
     pub model: Option<String>,
@@ -774,13 +774,13 @@ mod tests {
 
     #[test]
     fn build_args_with_model_passes_model_flag() {
-        let driver = ClaudeCliDriver::new("/tmp/mcp.json").with_model("claude-sonnet-4-6");
+        let driver = ClaudeCliDriver::new("/tmp/mcp.json").with_model("claude-sonnet-5");
         let args = driver.build_args(&role(), "task");
         let i = args
             .iter()
             .position(|a| a == "--model")
             .expect("--model present");
-        assert_eq!(args[i + 1], "claude-sonnet-4-6");
+        assert_eq!(args[i + 1], "claude-sonnet-5");
         // A blank model id is ignored (CLI default).
         let blank = ClaudeCliDriver::new("/tmp/mcp.json").with_model("   ");
         assert!(!blank

@@ -5781,7 +5781,7 @@ mod tests {
         }));
         let preview = Some(serde_json::json!({
             "assignments": {
-                "tier_map": { "strongest": "claude-sonnet-4-6" }
+                "tier_map": { "strongest": "claude-sonnet-5" }
             }
         }));
         let (lines, count) = super::build_change_summary(&project, &preview);
@@ -5789,7 +5789,7 @@ mod tests {
         assert!(
             lines.iter().any(|l| l.contains("tier.strongest")
                 && l.contains("claude-opus-4-8")
-                && l.contains("claude-sonnet-4-6")),
+                && l.contains("claude-sonnet-5")),
             "lines={lines:?}"
         );
     }
@@ -5809,24 +5809,24 @@ mod tests {
             "id": "p", "name": "n",
             "step_models": {
                 "audit": "claude-opus-4-8",
-                "calibration": "claude-sonnet-4-6",
-                "research_chat": "claude-sonnet-4-6",
-                "story_authoring": "claude-sonnet-4-6",
-                "decomposition": "claude-sonnet-4-6",
-                "escalation": "claude-sonnet-4-6",
-                "clarification": "claude-sonnet-4-6"
+                "calibration": "claude-sonnet-5",
+                "research_chat": "claude-sonnet-5",
+                "story_authoring": "claude-sonnet-5",
+                "decomposition": "claude-sonnet-5",
+                "escalation": "claude-sonnet-5",
+                "clarification": "claude-sonnet-5"
             }
         }));
         let preview = Some(serde_json::json!({
             "assignments": {
                 "step_models": {
-                    "audit": "claude-sonnet-4-6",
-                    "calibration": "claude-sonnet-4-6",
-                    "research_chat": "claude-sonnet-4-6",
-                    "story_authoring": "claude-sonnet-4-6",
-                    "decomposition": "claude-sonnet-4-6",
-                    "escalation": "claude-sonnet-4-6",
-                    "clarification": "claude-sonnet-4-6"
+                    "audit": "claude-sonnet-5",
+                    "calibration": "claude-sonnet-5",
+                    "research_chat": "claude-sonnet-5",
+                    "story_authoring": "claude-sonnet-5",
+                    "decomposition": "claude-sonnet-5",
+                    "escalation": "claude-sonnet-5",
+                    "clarification": "claude-sonnet-5"
                 }
             }
         }));
@@ -5835,7 +5835,7 @@ mod tests {
         assert!(
             lines.iter().any(|l| l.contains("step.audit")
                 && l.contains("claude-opus-4-8")
-                && l.contains("claude-sonnet-4-6")),
+                && l.contains("claude-sonnet-5")),
             "lines={lines:?}"
         );
     }

@@ -66,7 +66,7 @@ fn approved(story: &str, slug: &str) -> DecisionRecord {
 fn models() -> DelegateModels {
     DelegateModels {
         fast: "claude-haiku-4-5-20251001".to_string(),
-        balanced: "claude-sonnet-4-6".to_string(),
+        balanced: "claude-sonnet-5".to_string(),
         strongest: "claude-opus-4-8".to_string(),
         vision: String::new(),
     }
@@ -355,7 +355,7 @@ async fn scope3c_delegate_child_receives_gated_write_only_jailed_non_orchestrato
     // The factory was asked for EXACTLY the balanced model (per-tier resolution).
     assert_eq!(
         factory.models.lock().unwrap().clone(),
-        vec!["claude-sonnet-4-6".to_string()]
+        vec!["claude-sonnet-5".to_string()]
     );
     // The child was jailed to the orchestrator's shared worktree root.
     assert_eq!(

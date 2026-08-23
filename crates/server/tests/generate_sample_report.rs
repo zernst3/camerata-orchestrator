@@ -298,7 +298,7 @@ async fn regenerate_sample_report() {
                 },
             ],
             audit_model: Some("anthropic/claude-opus-4.8".to_string()),
-            calibration_model: Some("anthropic/claude-sonnet-4.6".to_string()),
+            calibration_model: Some("anthropic/claude-sonnet-5".to_string()),
             mode: "parallel".to_string(),
             thorough: false,
             deep: false,

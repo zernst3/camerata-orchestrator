@@ -292,8 +292,8 @@ mod tests {
         l.record("claude-opus-4-8", &a);
         l.record("claude-opus-4-8", &anthropic_resp("claude-opus-4-8", 200, 100, 0.02));
         l.record(
-            "claude-sonnet-4-6",
-            &anthropic_resp("claude-sonnet-4-6", 10, 5, 0.001),
+            "claude-sonnet-5",
+            &anthropic_resp("claude-sonnet-5", 10, 5, 0.001),
         );
 
         let s = l.snapshot();
@@ -313,7 +313,7 @@ mod tests {
         let sonnet = s
             .by_model
             .iter()
-            .find(|m| m.model == "claude-sonnet-4-6")
+            .find(|m| m.model == "claude-sonnet-5")
             .expect("sonnet row present");
         assert_eq!(sonnet.calls, 1);
         assert_eq!(sonnet.tokens, 15);
@@ -362,13 +362,13 @@ mod tests {
         // both accumulate correctly into the same ledger.
         let l = UsageLedger::new();
         l.record(
-            "claude-sonnet-4-6",
-            &anthropic_resp("claude-sonnet-4-6", 100, 100, 0.0018),
+            "claude-sonnet-5",
+            &anthropic_resp("claude-sonnet-5", 100, 100, 0.0018),
         );
         // sonnet pricing 3/15: 1M in + 1M out -> 3 + 15 = 18.0.
         l.record(
-            "claude-sonnet-4-6",
-            &gemini_shape_resp("claude-sonnet-4-6", 1_000_000, 1_000_000),
+            "claude-sonnet-5",
+            &gemini_shape_resp("claude-sonnet-5", 1_000_000, 1_000_000),
         );
         let s = l.snapshot();
         assert_eq!(s.calls, 2);

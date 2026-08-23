@@ -306,7 +306,7 @@ mod tests {
         let json = delegate_models_json(&TierMap::default(), false).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["fast"], "claude-haiku-4-5-20251001");
-        assert_eq!(v["balanced"], "claude-sonnet-4-6");
+        assert_eq!(v["balanced"], "claude-sonnet-5");
         assert_eq!(v["strongest"], "claude-opus-4-8");
         assert!(v.get("vision").is_none(), "no vision key when disabled");
     }
@@ -390,7 +390,7 @@ mod tests {
         // The models env is a JSON object string with all three tiers.
         let models: serde_json::Value =
             serde_json::from_str(env[DELEGATE_MODELS_ENV].as_str().unwrap()).unwrap();
-        assert_eq!(models["balanced"], "claude-sonnet-4-6");
+        assert_eq!(models["balanced"], "claude-sonnet-5");
     }
 
     #[test]
