@@ -989,6 +989,10 @@ pub async fn execute_dev_implement_run(
     // ClaudeCliDriver (claude provider) and ApiAgentDriver (openrouter provider).
     // Passed from AppState so the live run picks the right driver for `model`.
     registry: crate::model_registry::ModelRegistry,
+    // THE TRUST CORE: the OpenRouter provider-safety policy (see `crate::provider_policy`)
+    // — resolved by the caller from `state.settings().provider_policy()` and threaded
+    // through to `build_agent_driver` below (safe by default).
+    policy: crate::provider_policy::ProviderPolicy,
     credential_store: Arc<dyn crate::credentials::CredentialStore>,
     rate_limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
     // Test-tamper guard (AGENTIC-NO-TEST-TAMPER-1). When the run blocks on a tampered
@@ -1213,6 +1217,7 @@ pub async fn execute_dev_implement_run(
     let driver: Arc<dyn AgentDriver> = match build_agent_driver(
         &model,
         &registry,
+        &policy,
         credential_store.as_ref(),
         &mcp_config_path,
         role.rule_subset.clone(),
@@ -2640,6 +2645,7 @@ mod tests {
             None,       // integration gate not enabled in this test
             Vec::new(), // single-repo: no multi-repo worktrees
             crate::model_registry::ModelRegistry::new(),
+            crate::provider_policy::ProviderPolicy::default(),
             std::sync::Arc::new(crate::credentials::MemoryCredentialStore::new()),
             std::sync::Arc::new(crate::rate_limit::ProviderRateLimiter::new()),
             crate::escalation::EscalationStore::new(),

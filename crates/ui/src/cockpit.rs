@@ -22,8 +22,8 @@ pub(crate) use dioxus::prelude::*;
 // proposed-rules tables — the surfaces where the data genuinely scales.
 // `pub(crate) use` so submodules inherit these via `use super::*;`.
 pub(crate) use chorale_core::{
-    BadgeVariant, BadgeVariantMap, CellValue, ColumnDef, ColumnId, FilterKind, PaginationMode,
-    RenderKind, RowId, TableState, Theme,
+    BadgeVariant, BadgeVariantMap, CellValue, ColumnDef, ColumnId, FilterKind, FilterValue,
+    PaginationMode, RenderKind, RowId, TableState, Theme,
 };
 pub(crate) use chorale_dioxus::{use_table, RowCellRenderer, RowCellRenderers, RowClass, Table};
 

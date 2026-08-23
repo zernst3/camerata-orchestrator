@@ -1,0 +1,53 @@
+id = "SUPABASE-EXPOSURE-MATVIEW-1"
+title = "A materialized view in an API-exposed schema cannot be row-secured; its exposure is all-or-nothing"
+tag = "stack"
+domain = "supabase:exposure"
+layer = "platform"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a statement scan for CREATE MATERIALIZED VIEW targeting an API-exposed schema (public by default, or per SUPABASE-EXPOSURE-SCHEMAS-1's config parse). Postgres materialized views do not support Row Level Security at all — there is no policy mechanism to apply, so any exposed materialized view grants either full access to its contents or none. Conformance holds when materialized views are kept out of exposed schemas (moved to a non-exposed schema and accessed only through a RLS-capable wrapper, e.g. a security_invoker view or a function) or are deliberately, reviewably intended as fully public data."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/database-advisors?lint=0016_materialized_view_in_api"
+title = "Supabase Database Linter — 0016_materialized_view_in_api (\"Materialized view exposed in API\")"
+linter = "splinter: materialized_view_in_api"
+
+[decision]
+question = "Is every materialized view in an API-exposed schema flagged, given that Postgres materialized views structurally cannot support RLS?"
+default = "flag-exposed-materialized-views"
+why = """
+Row Level Security policies attach to TABLES and (via security_invoker) ordinary VIEWS — Postgres
+provides no equivalent mechanism for MATERIALIZED views, which are physically-stored snapshots
+with no per-row policy hook at all. This is Splinter's materialized_view_in_api lint (0016,
+confirmed against the live database-advisors page): once a materialized view is reachable through
+PostgREST, there is no way to scope which rows a given caller sees — it is either fully open to
+whatever role can query it, or not exposed at all. This differs structurally from
+SUPABASE-RLS-VIEW-INVOKER-1 (ordinary views, which CAN be fixed with security_invoker) — a
+materialized view has no equivalent fix short of moving it out of the exposed schema or wrapping
+its data behind a RLS-capable interface.
+
+Because the finding is unconditional given the exposure fact (there is no partial-remediation
+option beyond removing exposure or wrapping the data differently), the report should name the
+specific materialized view and let the reader judge whether its (necessarily all-or-nothing)
+content is appropriate for public access — often a rollup/aggregate view is genuinely meant to be
+public, so this ships as a high-severity finding for review, not an automatic critical.
+"""
+
+[[option]]
+id = "flag-exposed-materialized-views"
+label = "Flag every materialized view in an exposed schema, naming the structural all-or-nothing limitation"
+directive = """
+Scan CREATE MATERIALIZED VIEW statements targeting exposed schemas. Emit a high-severity finding
+for each: "Your `<matview>` snapshot table can't be row-secured at all, and it's reachable from the
+public API." Remediation: move the materialized view to a non-exposed schema and access it only
+through a security_invoker view or a SECURITY DEFINER function that applies its own row-scoping
+logic before returning data, or confirm the view's full contents are intentionally public.
+"""
+why = "The finding is unconditional given the exposure fact — there is no RLS mechanism a materialized view could adopt — so naming every instance and explaining the structural limitation is the correct, honest framing rather than a probabilistic guess."
+
+[[option]]
+id = "ignore-materialized-views-treat-as-equivalent-to-regular-views"
+label = "Treat materialized views the same as ordinary views; rely on SUPABASE-RLS-VIEW-INVOKER-1's security_invoker check"
+directive = "Apply the security_invoker check to materialized views as if they were ordinary views, and skip a dedicated exposure rule."
+why = "Rejected: security_invoker is not a valid WITH-option for CREATE MATERIALIZED VIEW in Postgres — there is no RLS-equivalent mechanism to check for, so applying the ordinary-view rule would either silently no-op or produce a nonsensical finding. The exposure fact itself (materialized view + exposed schema) is the entire signal; a dedicated rule naming that structural limitation is the only correct treatment."

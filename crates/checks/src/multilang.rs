@@ -70,8 +70,10 @@ use crate::subprocess::{run_command, CommandOutput};
 /// build outputs, vendored deps, VCS metadata, and virtualenvs — scanning them
 /// would (a) be slow and (b) misclassify a vendored `package.json` deep inside
 /// `node_modules/` as a separate JS project. Kept in one place so the prune list
-/// and the docs stay in sync.
-const PRUNED_DIRS: &[&str] = &[
+/// and the docs stay in sync. `pub(crate)` so [`crate::arch_check_runner`]'s
+/// interest-glob file walk prunes the exact same directories rather than
+/// maintaining a second list that could drift.
+pub(crate) const PRUNED_DIRS: &[&str] = &[
     "node_modules",
     "target",
     ".git",
@@ -1469,23 +1471,32 @@ impl CheckRunner for PolyglotCheckRunner {
 }
 
 /// Combined runner: language-tier checks (fmt/clippy/test/polyglot) FOLLOWED BY
-/// manifest-tier checks (`.camerata/checks.toml`, `in_loop = true`).
+/// manifest-tier checks (`.camerata/checks.toml`, `in_loop = true`) FOLLOWED BY the
+/// native architectural-checker tier (`crate::arch_checker::all_checkers`, Layer-2
+/// "Plug point B" — see
+/// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.3).
 ///
 /// This is the runner returned by [`runner_for_worktree`]. It ensures:
 ///
 /// 1. Built-in language checks always run first (cheapest signal first, same
 ///    ordering the existing `RustCheckRunner` uses internally).
-/// 2. Manifest checks run AFTER — they are ADDITIVE, never replacing built-ins.
-/// 3. If the language runner produces violations the manifest runner still runs,
-///    so the agent gets the full picture in a single bounce-back pass.
+/// 2. Manifest checks run next — they are ADDITIVE, never replacing built-ins.
+/// 3. Native architectural checks run last — also ADDITIVE, and the native
+///    sibling of the manifest tier: same position in the loop, but the checker
+///    ships inside Camerata rather than being operator-authored shell.
+/// 4. If an earlier tier produces violations the later tiers still run, so the
+///    agent gets the full picture in a single bounce-back pass.
 ///
-/// If either sub-runner returns `Err`, the combined runner propagates it. This
-/// is the fail-closed stance: a half-verified worktree is not a verified one.
+/// If any sub-runner returns `Err`, the combined runner propagates it. This is
+/// the fail-closed stance: a half-verified worktree is not a verified one.
 pub struct CombinedCheckRunner {
     /// Handles built-in language checks (fmt/clippy/test/polyglot or noop).
     pub language: Box<dyn CheckRunner>,
     /// Handles manifest checks (`.camerata/checks.toml` `in_loop = true`).
     pub manifest: crate::manifest_runner::ManifestCheckRunner,
+    /// Handles the native architectural-checker registry (Supabase RLS /
+    /// search-path today; the seam scales to the rest of the corpus).
+    pub arch: crate::arch_check_runner::NativeArchCheckRunner,
 }
 
 #[async_trait::async_trait]
@@ -1500,6 +1511,12 @@ impl CheckRunner for CombinedCheckRunner {
         outcome.push_diagnostics(&manifest.diagnostics);
         outcome.violated.extend(manifest.violated);
 
+        // Run the native architectural-checker tier. On Err, propagate (fail-closed).
+        // Diagnostics land AFTER the manifest tail — last tier, last in the message.
+        let arch = self.arch.check(role, worktree).await?;
+        outcome.push_diagnostics(&arch.diagnostics);
+        outcome.violated.extend(arch.violated);
+
         // Deduplicate so the bounce-back message is clean.
         outcome.violated.dedup_by(|a, b| a.0 == b.0);
         Ok(outcome)
@@ -1511,10 +1528,17 @@ impl CheckRunner for CombinedCheckRunner {
 /// and the po-demo use in place of the old hardcoded `RustCheckRunner::new()`.
 ///
 /// - Zero languages detected -> a [`CombinedCheckRunner`] over [`NoopChecks`]
-///   + manifest runner AND a logged warning: the loop degrades for language
-///   checks, but manifest checks still run if a manifest is present.
+///   + manifest runner + the native architectural-checker runner AND a logged
+///   warning: the loop degrades for language checks, but manifest checks and
+///   armed architectural checks still run if present.
 /// - One or more -> a [`CombinedCheckRunner`] over a [`PolyglotCheckRunner`] +
-///   manifest runner. A single-language repo has one polyglot entry.
+///   manifest runner + the native architectural-checker runner. A
+///   single-language repo has one polyglot entry.
+///
+/// The architectural-checker tier ([`crate::arch_check_runner::NativeArchCheckRunner`])
+/// is unconditional — it doesn't depend on language detection, since its checkers
+/// key off their own `interest_globs` (e.g. `supabase/migrations/*.sql`), not a
+/// detected programming language.
 ///
 /// The fleet wiring is untouched: this still returns `Box<dyn CheckRunner>`.
 pub fn runner_for_worktree(worktree: &Path) -> Box<dyn CheckRunner> {
@@ -1562,8 +1586,9 @@ fn runner_for_worktree_impl(worktree: &Path, on_progress: Option<HeartbeatFn>) -
     };
 
     let manifest = crate::manifest_runner::ManifestCheckRunner::load_from(worktree);
+    let arch = crate::arch_check_runner::NativeArchCheckRunner::new();
 
-    Box::new(CombinedCheckRunner { language, manifest })
+    Box::new(CombinedCheckRunner { language, manifest, arch })
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────

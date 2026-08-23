@@ -1,0 +1,9 @@
+[package]
+name = "e2e-report-fixture"
+version = "0.1.0"
+edition = "2021"
+
+# NOTE: this manifest is DATA, not a workspace member. It exists only so
+# `onboard::detect_stack` recognizes this fixture as a Rust repo when scanned;
+# it is never listed in the root `Cargo.toml` workspace `members` and is never
+# built or checked by `cargo check --workspace` / `cargo test --workspace`.

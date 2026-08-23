@@ -1,0 +1,13 @@
+version = 1
+
+[layers]
+handlers     = ["src/routes/**"]
+services     = ["src/services/**"]
+repositories = ["src/repositories/**"]
+domain       = ["src/domain/**"]
+
+[imports]
+handlers     = ["services", "domain"]
+services     = ["repositories", "domain"]
+repositories = ["domain"]
+domain       = []

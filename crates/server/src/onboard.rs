@@ -16,14 +16,17 @@
 //! are re-exported here so `crate::onboard::X` paths remain stable.
 
 // ── Submodules ──────────────────────────────────────────────────────────────────
+pub mod architectural;
 pub mod audit;
 pub mod files;
+pub mod finding_context;
 pub mod greenfield;
 pub mod propose;
 pub mod report;
 pub mod self_ref;
 
 // ── Re-exports (keep crate::onboard::X paths stable) ────────────────────────────
+pub use architectural::{arch_violation_to_finding, audit_architectural, ARCH_PREVIEW_TOOL};
 pub use audit::{audit_content, audit_files};
 pub use files::{read_local_repo_files, ExtractedRepo};
 pub use greenfield::{scaffold_greenfield_blocking, GreenfieldResult};
@@ -52,7 +55,7 @@ pub(crate) use camerata_gateway::{
 // from root's perspective (the root orchestration functions call files::* directly via
 // the submodule). The re-export is needed so `use super::*` in the test module reaches them.
 #[allow(unused_imports)]
-pub(crate) use files::{extra_exclude_dirs, has_code_ext, is_noise_path, HARD_CAP_FILES};
+pub(crate) use files::{extra_exclude_dirs, has_code_ext, is_admissible_text, is_noise_path, HARD_CAP_FILES};
 pub(crate) use propose::domains_for_stack;
 pub(crate) use report::merge_deep_reports;
 
@@ -130,6 +133,46 @@ pub struct Finding {
     /// flagged it with `[needs review]`. False for clear-cut production findings.
     #[serde(default)]
     pub needs_review: bool,
+    /// Structured calibration confidence: `"high"` (clear, concrete violation) or
+    /// `"needs-review"` (the calibration pass flagged it as debatable / theoretical /
+    /// under-evidenced). `None` for findings calibration never saw (the deterministic
+    /// floor, preview findings) — those have no calibrated opinion to report.
+    /// Promoted out of the string-embedded `[needs review: reason]` `detail` suffix
+    /// (`apply_verdicts`, ai_audit.rs) so a report can show a confidence chip without
+    /// regex-parsing prose. The `detail` tag is KEPT for one release for UI back-compat
+    /// (`split_needs_review`, ui-core/src/rules.rs).
+    #[serde(default)]
+    pub confidence: Option<String>,
+    /// Structured remediation-effort estimate: `"low"` | `"medium"` | `"high"`, emitted
+    /// by the calibration pass's verdict JSON (it already reads the finding's
+    /// path/snippet/detail). `None` for findings calibration never saw, or when the
+    /// model's verdict omitted/mis-shaped the field (fail-soft — effort is advisory,
+    /// never load-bearing).
+    #[serde(default)]
+    pub effort: Option<String>,
+    /// Semantic category from a closed taxonomy (`authorization`, `rls-policy`,
+    /// `transport-security`, `arch-conformance`, `testing-style`, …). Drives the SECOND,
+    /// cross-family merge pass ([`crate::ai_audit::merge_semantic_groups`]): two findings only
+    /// collapse when they share a category. `None` when no source or heuristic could classify
+    /// the rule — a `None`-category finding is NEVER semantically merged (fail-open to
+    /// over-telling). Assigned from the deterministic rule-id token map or the calibration
+    /// verdict's `category` field. Back-compatible (serde-defaulted).
+    #[serde(default)]
+    pub category: Option<String>,
+    /// Whether this finding's snippet was resolved to REAL code present in the file (a
+    /// presence-type violation) vs an absence/architectural observation whose snippet is a
+    /// description, not code (`located == false`). Computed in [`crate::ai_audit::merge_by_location`]
+    /// and reused (rather than recomputed) by the informational-bucketing predicate — an
+    /// absence-type stance finding is the noise Item 2 down-buckets. Deterministic floor/checker
+    /// findings cite real lines, so this defaults to `true` (back-compatible serde default).
+    #[serde(default = "default_located")]
+    pub located: bool,
+}
+
+/// A finding is presumed presence-type (`located = true`) unless the AI merge pass proves its
+/// snippet is a description rather than code present in the file.
+fn default_located() -> bool {
+    true
 }
 
 /// Findings default to `active` (enforced) until classified against suppressions.
@@ -157,6 +200,10 @@ impl Default for Finding {
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
+            category: None,
+            located: default_located(),
         }
     }
 }
@@ -281,6 +328,67 @@ pub struct CoverageNote {
     pub message: String,
 }
 
+/// The git identity of ONE audited source dir at the moment it was scanned: exactly
+/// what code was read, so a report can state without ambiguity what state the
+/// audited tree was in. Captured via `git rev-parse HEAD` + `git status --porcelain`
+/// (mirrors `workspace::checkout_status`'s pattern). A dirty tree never blocks the
+/// scan — it is only disclosed, here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AuditedRef {
+    /// `owner/repo` (matches `ScanReport::repos` / `Finding::repo`).
+    pub repo: String,
+    /// Full commit SHA (`git rev-parse HEAD`). `None` when the source dir is not a
+    /// git repo or the command failed — fail-soft, never blocks the scan.
+    #[serde(default)]
+    pub sha: Option<String>,
+    /// Current branch name (`git rev-parse --abbrev-ref HEAD`). `None` on detached
+    /// HEAD or when the command failed.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// True when `git status --porcelain` reported uncommitted changes at scan time.
+    #[serde(default)]
+    pub dirty: bool,
+}
+
+/// Provenance stamp on a `ScanReport`: exactly what was audited, with what
+/// models/config, so the report can be forwarded to a client or board without an
+/// asterisk. Additive — see `ScanReport::provenance`'s `#[serde(default)]` — so
+/// previously-persisted reports still deserialize (with an empty/default stamp).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ScanProvenance {
+    /// Git identity of every source dir audited (see [`AuditedRef`]).
+    pub audited_refs: Vec<AuditedRef>,
+    /// The model resolved for the Phase-2 AI audit (`onboard_audit_start`). `None`
+    /// on a floor-only / Phase-1 scan that never resolved an audit model.
+    pub audit_model: Option<String>,
+    /// The model resolved for the calibration pass. `None` when calibration never ran.
+    pub calibration_model: Option<String>,
+    /// The execution mode (`parallel` | `sequential`).
+    pub mode: String,
+    /// Whether thorough (multi-pass consensus) calibration was requested (#51).
+    pub thorough: bool,
+    /// Whether the opt-in deep compliance & security tier ran (#55).
+    pub deep: bool,
+    /// Fingerprint of the rule selection actually audited (already computed for the
+    /// incremental-scan cache; stamped here so the report states exactly which rule
+    /// SET produced these findings).
+    pub rules_fingerprint: String,
+    /// The rule ids ACTUALLY audited this run (the `selected` set passed to
+    /// `audit_repos` — NOT `proposed_rules`, which is only the starter-set proposal).
+    /// Powers "what's healthy" (audited rules with zero findings).
+    pub audited_rule_ids: Vec<String>,
+    /// Camerata's own version (`env!("CARGO_PKG_VERSION")`) at scan time.
+    pub camerata_version: String,
+    /// The osv-scanner version used for the dependency-vulnerability pass, when the
+    /// deterministic floor (and therefore dep-audit) ran. `None` when
+    /// `run_deterministic` was false (dep-audit never ran).
+    pub osv_scanner_version: Option<String>,
+    /// RFC3339 timestamp when this audit run started.
+    pub started_at: String,
+    /// RFC3339 timestamp when this audit run finished.
+    pub finished_at: String,
+}
+
 /// The full scan result across one or more repos. Brownfield onboarding treats a
 /// SET of inter-related repos (e.g. a .NET API + a Python worker + a React app) as
 /// one unit: findings and the proposed ruleset aggregate across all of them, each
@@ -294,6 +402,12 @@ pub struct ScanReport {
     pub stacks: Vec<RepoStack>,
     /// Number of files scanned across all repos.
     pub files_scanned: usize,
+    /// How many of `files_scanned` are test/fixture files (`is_test_or_fixture_path`). Drives
+    /// the style-family minimum-corpus gate (Bug 4 §2d): a repo below `MIN_STYLE_CORPUS_FILES`
+    /// test files has no established test corpus, so `testing-style` deviations are conventions,
+    /// not defects. Additive/`serde(default)` so prior persisted reports still load.
+    #[serde(default)]
+    pub test_file_count: usize,
     /// Scannable files (code extension) PRUNED as build/dep/cache/generated noise before the
     /// scan. Surfaced so the filter's effect is visible ("N scanned, M excluded as noise").
     #[serde(default)]
@@ -332,6 +446,13 @@ pub struct ScanReport {
     /// not appear in the findings/violations table. Use [`CoverageNote`] entries.
     #[serde(default)]
     pub coverage_notes: Vec<CoverageNote>,
+    /// What was actually audited: git refs (sha/branch/dirty) per repo, the
+    /// models/mode/rule-selection used, and the tool versions involved. The
+    /// board-forwardable report's credibility backbone — see [`ScanProvenance`].
+    /// Additive (`#[serde(default)]`) so previously-persisted reports still load,
+    /// with an empty/default stamp.
+    #[serde(default)]
+    pub provenance: ScanProvenance,
 }
 
 impl ScanReport {
@@ -341,6 +462,7 @@ impl ScanReport {
             repos: repos.to_vec(),
             stacks: Vec::new(),
             files_scanned: 0,
+            test_file_count: 0,
             files_excluded: 0,
             excluded_mechanical_rules: Vec::new(),
             code_chars: 0,
@@ -354,6 +476,7 @@ impl ScanReport {
                     .to_string(),
             ),
             coverage_notes: Vec::new(),
+            provenance: ScanProvenance::default(),
         }
     }
 }
@@ -519,20 +642,33 @@ pub async fn audit_repos(
     // tests / non-cockpit callers — recording is then simply skipped. Observability only.
     ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
+    // Provenance (P1): stamp the start time now, before any I/O, so `finished_at -
+    // started_at` reflects the whole run including the git-ref capture below.
+    let started_at = chrono::Utc::now().to_rfc3339();
     // Fingerprint the rule selection so a change to it invalidates the incremental cache
     // (carried findings must always reflect the CURRENT rules). A prior manifest is only usable
-    // if its rule fingerprint matches.
+    // if its rule fingerprint matches. Also stamped onto the report's provenance below (P1) so
+    // the report states exactly which rule SET produced these findings.
     let rules_fp = crate::scan_cache::rules_fingerprint(
         selected.iter().map(|r| (r.id.as_str(), r.repos.as_slice())),
     );
+    // The set ACTUALLY audited this run (NOT `proposed_rules`, which is only the starter-set
+    // proposal) — powers the "what's healthy" (audited rules with zero findings) derivation.
+    let audited_rule_ids: Vec<String> = selected.iter().map(|r| r.id.clone()).collect();
     let effective_prior = incremental_prior.filter(|m| m.matches_rules(&rules_fp));
     let mut manifest_builder =
-        crate::scan_cache::ManifestBuilder::new().with_rules_fingerprint(rules_fp);
+        crate::scan_cache::ManifestBuilder::new().with_rules_fingerprint(rules_fp.clone());
     let mut all_findings = Vec::new();
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
+    let mut test_files_total = 0usize;
     let mut repos_ok = Vec::new();
     let mut notes = extra_notes;
+    // Provenance (P1): the git identity of every source dir this run touched (sha/branch/
+    // dirty), captured unconditionally per source — even a repo whose file-read later fails
+    // still gets its ref recorded, since the dir is what was attempted. A dirty tree never
+    // blocks the scan; it is only disclosed here.
+    let mut audited_refs: Vec<AuditedRef> = Vec::new();
     // When the deep tier is on, the WHOLE file set per repo is captured here (the deep lenses
     // read the full repo, not just the incrementally-changed files) and run after the standard
     // audit completes. Empty / unused when `deep` is false.
@@ -565,7 +701,18 @@ pub async fn audit_repos(
     // AI token budget"). The arm path still installs them; only the AI code-audit
     // prompt is filtered.
     //
-    // THIRD, scope by REPO. The engine/governance filters above are global, but which
+    // THIRD, drop rules a NATIVE ARCHITECTURAL CHECKER already answers deterministically
+    // (the RLS/search-path migration-replay engine, ~line 726 below) from the LLM prompt —
+    // exactly the same reasoning as the gate-arm exclusion above: fuzzing a rule the checker
+    // answers exactly is strictly worse than deterministic code answering it. Pass 4b-1 (D3)
+    // made this exclusion PER-REPO CONFIG-AWARE rather than a single static set computed once:
+    // a config-gated checker (e.g. the future `ImportBoundaryChecker`, Pass 4b-2) only answers
+    // deterministically for a repo that actually carries `.camerata/architecture.toml` — for
+    // an unconfigured repo its rule ids must STAY in the LLM prompt (see
+    // `camerata_checks::arch_checker::checker_rule_ids_for_repo`, computed per repo below
+    // AFTER that repo's files are read, since config presence is a file-content fact).
+    //
+    // FOURTH, scope by REPO. The engine/governance filters above are global, but which
     // rules reach a given repo's LLM audit is decided PER REPO inside the loop, from each
     // SelectedRule's binding — so a multi-repo scan runs each repo against its own chosen
     // rules ∪ the project-level set, never the whole selection across the board.
@@ -575,14 +722,17 @@ pub async fn audit_repos(
         if spec.is_empty() {
             continue;
         }
-        // The SEMANTIC (LLM-audited) rule set for THIS repo: rules bound to it (or
-        // project-level), minus the deterministic-arm and governance/process families.
-        let semantic: Vec<(String, String)> = selected
+        // Provenance (P1): capture THIS source dir's git identity before anything else —
+        // unconditional, so even a repo whose subsequent file-read fails still gets its ref
+        // recorded (the dir is what was attempted).
+        audited_refs.push(capture_audited_ref(spec, dir).await);
+        // The rule ids actually SELECTED for this repo (bound to it, or project-level) —
+        // reused both by the semantic (LLM) filter below and by the architectural-engine
+        // call further down, so the two engines agree on "what applies to this repo".
+        let repo_selected_ids: std::collections::HashSet<&str> = selected
             .iter()
             .filter(|r| r.applies_to(spec))
-            .filter(|r| camerata_gateway::lookup_arm(&r.id).is_none())
-            .filter(|r| is_code_auditable_rule(&r.id))
-            .map(|r| (r.id.clone(), r.directive.clone()))
+            .map(|r| r.id.as_str())
             .collect();
         // Clone `dir` for spawn_blocking (which moves it); the outer `dir` ref
         // comes from the loop binding and is the PathBuf we're iterating.
@@ -597,6 +747,28 @@ pub async fn audit_repos(
                 excluded_noise: _,
             }) => {
                 files_total += files.len();
+                test_files_total += files
+                    .iter()
+                    .filter(|(p, _)| is_test_or_fixture_path(p))
+                    .count();
+                // The SEMANTIC (LLM-audited) rule set for THIS repo: rules bound to it (or
+                // project-level), minus the deterministic-arm, native-architectural-checker,
+                // and governance/process families. The architectural-checker exclusion is
+                // computed HERE (not before the file read) because it's PER-REPO
+                // CONFIG-AWARE (D3) — it needs this repo's actual files to know whether
+                // `.camerata/architecture.toml` is present.
+                let repo_view =
+                    camerata_checks::arch_checker::RepoView { spec, files: &files };
+                let arch_checker_rule_ids =
+                    camerata_checks::arch_checker::checker_rule_ids_for_repo(&repo_view);
+                let semantic: Vec<(String, String)> = selected
+                    .iter()
+                    .filter(|r| r.applies_to(spec))
+                    .filter(|r| camerata_gateway::lookup_arm(&r.id).is_none())
+                    .filter(|r| !arch_checker_rule_ids.contains(r.id.as_str()))
+                    .filter(|r| is_code_auditable_rule(&r.id))
+                    .map(|r| (r.id.clone(), r.directive.clone()))
+                    .collect();
                 // Capture the WHOLE file set for the deep tier (it reads the full repo, not the
                 // incremental subset). Only when the deep tier is on, to avoid the clone otherwise.
                 if deep && run_ai_review {
@@ -625,6 +797,24 @@ pub async fn audit_repos(
                         jstore.add_findings(jid, floor.clone());
                     }
                     repo_findings = floor;
+
+                    // Deterministic architectural engine (Pass 1 — the scan surface only;
+                    // see `onboard::architectural`): migration-timeline replay checkers
+                    // (Supabase RLS, function search_path today) run as the THIRD
+                    // deterministic route beside the floor, gated on the SAME
+                    // `run_deterministic` flag. A checker only fires when at least one of
+                    // its rule ids is armed for THIS repo (`repo_selected_ids`, computed
+                    // above) AND at least one of its `interest_globs` files exists — never a
+                    // false "clean" on a repo with no `supabase/` directory.
+                    if let Some((jstore, jid)) = job {
+                        jstore.det_tool_running(jid, "architectural");
+                    }
+                    let arch = audit_architectural(spec, &files, &repo_selected_ids);
+                    if let Some((jstore, jid)) = job {
+                        jstore.det_tool_done(jid, "architectural", arch.len());
+                        jstore.add_findings(jid, arch.clone());
+                    }
+                    repo_findings.extend(arch);
                 }
 
                 // ── Incremental: only the AI audit (the token cost) is short-circuited. ──
@@ -700,6 +890,13 @@ pub async fn audit_repos(
                 manifest_builder.record_repo(spec, &files, &ai_for_repo);
 
                 repo_findings.extend(ai_for_repo);
+                // Bug 3: second, cross-FAMILY merge pass over the COMBINED floor + arch + AI set
+                // (exact-location merge + snippet anchoring already ran inside the AI tier). Fuses
+                // the same defect flagged by two rule families a few lines apart, keeping the
+                // deterministic/most-specific primary + its exact line, siblings → `also_matches`.
+                // Runs BEFORE suppression classification so a waiver still sees the merged row.
+                let mut repo_findings =
+                    crate::ai_audit::merge_semantic_groups(repo_findings, &files);
                 classify_repo_findings(&mut repo_findings, spec, &files);
                 all_findings.extend(repo_findings);
                 repos_ok.push(spec.to_string());
@@ -742,6 +939,7 @@ pub async fn audit_repos(
     };
 
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
+    report.test_file_count = test_files_total;
     report.actual_usage = Some(meter.snapshot());
     report.deep = deep_report;
     // Fold the always-on dep-audit coverage notes into the report.  The scan-tools
@@ -753,7 +951,64 @@ pub async fn audit_repos(
     if !notes.is_empty() {
         report.message = Some(notes.join(" · "));
     }
+    // Provenance (P1): stamp exactly what was audited, so the report is board-forwardable
+    // without an asterisk. `osv_scanner_version` is the PINNED version Camerata provisions
+    // (`tool_provisioning::OSV_SCANNER_VERSION`) — the dep-audit pass itself runs AFTER this
+    // function returns (in the caller), gated on the same `run_deterministic` flag.
+    report.provenance = ScanProvenance {
+        audited_refs,
+        audit_model: model.map(str::to_string),
+        calibration_model: calibration_model.map(str::to_string),
+        mode: match mode {
+            crate::ai_audit::ScanMode::Sequential => "sequential",
+            crate::ai_audit::ScanMode::Parallel => "parallel",
+            crate::ai_audit::ScanMode::Batch => "batch",
+        }
+        .to_string(),
+        thorough,
+        deep,
+        rules_fingerprint: rules_fp,
+        audited_rule_ids,
+        camerata_version: env!("CARGO_PKG_VERSION").to_string(),
+        osv_scanner_version: run_deterministic
+            .then(|| crate::tool_provisioning::OSV_SCANNER_VERSION.to_string()),
+        started_at,
+        finished_at: chrono::Utc::now().to_rfc3339(),
+    };
     (report, manifest_builder.finish())
+}
+
+/// Capture ONE source dir's git identity for the `ScanProvenance` stamp: full commit SHA
+/// (`git rev-parse HEAD`), current branch (`git rev-parse --abbrev-ref HEAD`), and a dirty
+/// flag (`git status --porcelain`). Mirrors `workspace::checkout_status`'s git-shelling
+/// pattern. Fail-soft: a non-git dir or a `git` invocation failure yields `None` fields
+/// rather than blocking the scan — a dirty or ref-less tree is disclosed, never blocking.
+async fn capture_audited_ref(spec: &str, dir: &std::path::Path) -> AuditedRef {
+    async fn run(dir: &std::path::Path, args: &[&str]) -> Option<std::process::Output> {
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.args(args).current_dir(dir).kill_on_drop(true);
+        cmd.output().await.ok()
+    }
+    let sha = run(dir, &["rev-parse", "HEAD"])
+        .await
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    let branch = run(dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .await
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    let dirty = run(dir, &["status", "--porcelain"])
+        .await
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+    AuditedRef {
+        repo: spec.to_string(),
+        sha,
+        branch,
+        dirty,
+    }
 }
 #[cfg(test)]
 mod tests {
@@ -957,8 +1212,34 @@ mod tests {
         assert!(has_code_ext("src/main.rs"));
         assert!(has_code_ext("a/b/config.YAML"));
         assert!(!has_code_ext("logo.png"));
-        assert!(!has_code_ext("Dockerfile"));
+        // Dockerfile is a CODE_BASENAMES match (like Jenkinsfile) — it commonly carries
+        // hardcoded ARG/ENV secrets, and its build steps are real audit signal.
+        assert!(has_code_ext("Dockerfile"));
         assert!(!has_code_ext("README"));
+    }
+
+    #[test]
+    fn admissible_text_covers_code_plus_config_plus_dotfiles() {
+        // Every has_code_ext path is still admissible.
+        assert!(is_admissible_text("src/main.rs"));
+        assert!(is_admissible_text("Dockerfile"));
+        // Newly-admitted non-code config extensions.
+        assert!(is_admissible_text("app.conf"));
+        assert!(is_admissible_text("config/app.properties"));
+        assert!(is_admissible_text("notes.txt"));
+        assert!(is_admissible_text("certs/server.pem"));
+        // The structural bug this fix targets: a dotenv VARIANT whose naive "extension" (the
+        // substring after the LAST dot) is the environment name, not `env`.
+        assert!(is_admissible_text(".env.production"));
+        assert!(is_admissible_text(".env.local"));
+        assert!(is_admissible_text(".env"));
+        // Other dotfiles that carry real committed-secret risk (npm/netrc auth tokens).
+        assert!(is_admissible_text(".npmrc"));
+        assert!(is_admissible_text(".netrc"));
+        // Still excluded: no extension AND not a dotfile AND not a CODE_BASENAMES match, or a
+        // genuinely non-text extension.
+        assert!(!is_admissible_text("logo.png"));
+        assert!(!is_admissible_text("bin/some-binary"));
     }
 
     #[test]
@@ -1208,6 +1489,227 @@ mod tests {
     }
 
     #[test]
+    fn detect_stack_recognizes_supabase_from_config_migrations_and_dependency() {
+        // Regression guard: a Supabase repo (CLI config.toml + a SQL migration under
+        // supabase/migrations/ + the @supabase/supabase-js client dependency) was
+        // previously invisible to detect_frameworks entirely — the "Supabase" marker
+        // never appeared, so none of the 17 supabase:* corpus rules could ever be
+        // suggested no matter how obviously the repo used Supabase.
+        let files = vec![
+            (
+                "supabase/config.toml".to_string(),
+                "project_id = \"acme\"\n[db]\nport = 54322\n".to_string(),
+            ),
+            (
+                "supabase/migrations/20240101000000_init.sql".to_string(),
+                "create table public.widgets (id uuid primary key);\n".to_string(),
+            ),
+            (
+                "package.json".to_string(),
+                r#"{ "dependencies": { "@supabase/supabase-js": "^2.0.0" } }"#.to_string(),
+            ),
+        ];
+        let stack = detect_stack("acme/app", &files);
+        assert!(
+            stack.frameworks.contains(&"Supabase".to_string()),
+            "Supabase must be detected: {stack:?}"
+        );
+        // ...and maps to every supabase:* child domain in the corpus, plus sql.
+        let domains = domains_for_stack(&stack);
+        for want in [
+            "supabase",
+            "supabase:rls",
+            "supabase:auth",
+            "supabase:secrets",
+            "supabase:storage",
+            "supabase:database-functions",
+            "supabase:exposure",
+            "sql",
+        ] {
+            assert!(
+                domains.contains(&want.to_string()),
+                "expected {want} in {domains:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn detect_stack_recognizes_supabase_from_config_toml_alone() {
+        // The CLI config marker alone (no migrations, no JS dependency) is sufficient —
+        // a repo can point at a Supabase Postgres instance without any JS client at all.
+        let files = vec![(
+            "supabase/config.toml".to_string(),
+            "project_id = \"acme\"\n".to_string(),
+        )];
+        let stack = detect_stack("acme/app", &files);
+        assert!(
+            stack.frameworks.contains(&"Supabase".to_string()),
+            "config.toml alone must trigger Supabase detection: {stack:?}"
+        );
+    }
+
+    #[test]
+    fn detect_stack_recognizes_supabase_from_migration_alone() {
+        // A migration file under supabase/migrations/ alone (no config.toml checked in,
+        // no JS dependency) is also sufficient.
+        let files = vec![(
+            "supabase/migrations/20240101000000_init.sql".to_string(),
+            "create table public.widgets (id uuid primary key);\n".to_string(),
+        )];
+        let stack = detect_stack("acme/app", &files);
+        assert!(
+            stack.frameworks.contains(&"Supabase".to_string()),
+            "a migration file alone must trigger Supabase detection: {stack:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_corpus_rules_proposes_all_17_supabase_rules_for_a_supabase_repo() {
+        // The end-to-end regression guard for the reported bug: given a repo whose stack
+        // is unambiguously Supabase, the REAL onboarding path (detect_stack ->
+        // domains_for_stack -> propose_corpus_rules against the real corpus) must
+        // actually propose the supabase:* rules, not just compute the right domain
+        // strings in isolation.
+        let files = vec![
+            (
+                "supabase/config.toml".to_string(),
+                "project_id = \"acme\"\n".to_string(),
+            ),
+            (
+                "supabase/migrations/20240101000000_init.sql".to_string(),
+                "create table public.widgets (id uuid primary key);\n".to_string(),
+            ),
+            (
+                "package.json".to_string(),
+                r#"{ "dependencies": { "@supabase/supabase-js": "^2.0.0" } }"#.to_string(),
+            ),
+        ];
+        let stack = detect_stack("acme/app", &files);
+        let domains = domains_for_stack(&stack);
+        let repo_domains = vec![("acme/app".to_string(), domains)];
+        let proposed = propose_corpus_rules(&repo_domains).await;
+
+        // Representative rule ids, one from each of the 6 supabase corpus areas.
+        let expected_ids = [
+            "SUPABASE-RLS-ENABLED-1",
+            "SUPABASE-RLS-NO-POLICY-1",
+            "SUPABASE-RLS-INITPLAN-1",
+            "SUPABASE-RLS-PERMISSIVE-TRUE-1",
+            "SUPABASE-RLS-POLICY-DISABLED-1",
+            "SUPABASE-RLS-USER-METADATA-1",
+            "SUPABASE-RLS-VIEW-INVOKER-1",
+            "SUPABASE-AUTH-EDGE-JWT-1",
+            "SUPABASE-AUTH-GETSESSION-SERVER-1",
+            "SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1",
+            "SUPABASE-AUTH-USERS-EXPOSED-1",
+            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
+            "SUPABASE-STORAGE-OBJECT-POLICY-1",
+            "SUPABASE-STORAGE-PUBLIC-BUCKET-1",
+            "SUPABASE-FUNC-SEARCH-PATH-1",
+            "SUPABASE-EXPOSURE-MATVIEW-1",
+            "SUPABASE-EXPOSURE-SCHEMAS-1",
+        ];
+        // SUPABASE-RLS-INITPLAN-1 is deliberately `opt_in_only = true` (a performance
+        // finding, not a security one — see its decision_why): the domain-match gate
+        // still binds it to this repo, but the opt-in gate means `recommended` is
+        // correctly false for it even here. Every other supabase rule is a genuine
+        // security finding and must be both present, domain-matched, AND recommended.
+        for id in expected_ids {
+            let rule = proposed.iter().find(|r| r.id == id);
+            assert!(
+                rule.is_some(),
+                "{id} must be present in the corpus-rules payload at all: {:?}",
+                proposed.iter().map(|r| &r.id).collect::<Vec<_>>()
+            );
+            let rule = rule.unwrap();
+            assert!(
+                rule.repos.contains(&"acme/app".to_string()),
+                "{id} must be bound to the matching repo: {rule:?}"
+            );
+            if id != "SUPABASE-RLS-INITPLAN-1" {
+                assert!(
+                    rule.recommended,
+                    "{id} must be recommended (suggested) for a Supabase repo: {rule:?}"
+                );
+            }
+        }
+        // All 17 supabase rules — not just the 17 spot-checked above — must be present
+        // and domain-matched to this repo, so a future corpus addition under
+        // supabase/<area>/ that isn't wired into domains_for_stack would still be
+        // caught here failing to match.
+        let supabase_rules: Vec<_> = proposed
+            .iter()
+            .filter(|r| r.domain.starts_with("supabase:"))
+            .collect();
+        assert_eq!(
+            supabase_rules.len(),
+            17,
+            "expected all 17 supabase corpus rules in the payload: {:?}",
+            supabase_rules.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        assert!(
+            supabase_rules
+                .iter()
+                .all(|r| r.repos.contains(&"acme/app".to_string())),
+            "every supabase rule must be domain-matched (bound) to this Supabase repo: {:?}",
+            supabase_rules
+                .iter()
+                .filter(|r| !r.repos.contains(&"acme/app".to_string()))
+                .map(|r| &r.id)
+                .collect::<Vec<_>>()
+        );
+        // All but the one deliberately opt-in-only rule must be recommended.
+        let non_opt_in_unrecommended: Vec<_> = supabase_rules
+            .iter()
+            .filter(|r| r.id != "SUPABASE-RLS-INITPLAN-1" && !r.recommended)
+            .map(|r| &r.id)
+            .collect();
+        assert!(
+            non_opt_in_unrecommended.is_empty(),
+            "every non-opt-in supabase rule must be recommended for this Supabase repo: {non_opt_in_unrecommended:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn propose_corpus_rules_does_not_propose_supabase_rules_for_a_plain_react_repo() {
+        // No-false-positive guard: a plain TypeScript/React repo with zero Supabase
+        // markers must not get any supabase:* rule recommended. Without this, a broad
+        // Supabase detector (e.g. matching on the word "supabase" anywhere) could
+        // over-fire on unrelated repos.
+        let files = vec![
+            (
+                "src/App.tsx".to_string(),
+                "export default function App() { return null; }".to_string(),
+            ),
+            (
+                "package.json".to_string(),
+                r#"{ "dependencies": { "react": "18" } }"#.to_string(),
+            ),
+        ];
+        let stack = detect_stack("acme/web", &files);
+        assert!(
+            !stack.frameworks.contains(&"Supabase".to_string()),
+            "a plain React repo must not be detected as Supabase: {stack:?}"
+        );
+        let domains = domains_for_stack(&stack);
+        assert!(
+            !domains.iter().any(|d| d.starts_with("supabase")),
+            "a plain React repo's domains must not include any supabase:* domain: {domains:?}"
+        );
+        let repo_domains = vec![("acme/web".to_string(), domains)];
+        let proposed = propose_corpus_rules(&repo_domains).await;
+        let recommended_supabase: Vec<_> = proposed
+            .iter()
+            .filter(|r| r.domain.starts_with("supabase:") && r.recommended)
+            .collect();
+        assert!(
+            recommended_supabase.is_empty(),
+            "no supabase rule should be recommended for a plain React repo: {:?}",
+            recommended_supabase.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn audit_catches_the_testbed_tier1_plants() {
         // The three Tier-1 plants from budget-tracker-testrepo, in their real shapes.
         let sql = "        let sql = format!(\n\
@@ -1285,6 +1787,10 @@ mod tests {
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
+            category: None,
+            located: true,
         };
         let mut findings = vec![
             mk("a.rs", 5, "SEC-NO-HARDCODED-SECRETS-1", snippet), // baselined
@@ -1316,6 +1822,10 @@ mod tests {
                 preview_tool: None,
                 in_test: false,
                 needs_review: false,
+                confidence: None,
+                effort: None,
+                category: None,
+                located: true,
             },
             Finding {
                 repo: "me/web".into(),
@@ -1331,6 +1841,10 @@ mod tests {
                 preview_tool: None,
                 in_test: false,
                 needs_review: false,
+                confidence: None,
+                effort: None,
+                category: None,
+                located: true,
             },
         ];
         let body = tech_debt_issue_body(&findings);
@@ -1367,6 +1881,10 @@ mod tests {
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
+            category: None,
+            located: true,
         }
     }
 
@@ -1506,6 +2024,10 @@ mod tests {
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
+            category: None,
+            located: true,
         };
         let csv = tech_debt_csv(&[f]);
         let data_row = csv.lines().nth(1).expect("expected data row");
@@ -1843,15 +2365,21 @@ mod tests {
         )
         .await;
         let progress = jobs.det_progress(&jid).unwrap();
-        // Only the floor tool must have been registered inside audit_repos.
+        // Only the TWO deterministic engines audit_repos itself owns — the floor and the
+        // architectural checker registry — must have been registered; dep-audit runs in the
+        // caller, never inside audit_repos.
         assert_eq!(
-            progress.total, 1,
-            "audit_repos must register exactly ONE tool (floor); dep-audit must NOT be inside it: {:?}",
+            progress.total, 2,
+            "audit_repos must register exactly the floor + architectural tools; dep-audit must NOT be inside it: {:?}",
             progress.tools
         );
         assert!(
             progress.tools.iter().any(|t| t.tool == "floor"),
             "floor tool must be registered"
+        );
+        assert!(
+            progress.tools.iter().any(|t| t.tool == "architectural"),
+            "architectural tool must be registered"
         );
         assert!(
             !progress.tools.iter().any(|t| t.tool == "dep-audit"),
@@ -2254,6 +2782,87 @@ mod tests {
         assert!(!f2.needs_review);
     }
 
+    // ── Structured confidence + effort (Part 1 §3) ────────────────────────────
+    // Wire-contract sync: this pins the JSON SHAPE `apply_verdicts` (ai_audit.rs) emits onto
+    // `Finding`, which `crates/ui/src/cockpit/scan.rs`'s `FindingView` mirror must also accept
+    // (see `finding_view_mirrors_server_confidence_and_effort_shape` there).
+    #[test]
+    fn finding_confidence_and_effort_serialize_and_round_trip() {
+        let f = Finding {
+            repo: "me/repo".to_string(),
+            path: "src/main.rs".to_string(),
+            line: 5,
+            rule_id: "AI-LAYERING".to_string(),
+            severity: "medium".to_string(),
+            snippet: "s".to_string(),
+            detail: "d".to_string(),
+            confidence: Some("needs-review".to_string()),
+            effort: Some("high".to_string()),
+            ..Finding::default()
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        assert!(json.contains(r#""confidence":"needs-review""#), "json={json}");
+        assert!(json.contains(r#""effort":"high""#), "json={json}");
+        let back: Finding = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.confidence.as_deref(), Some("needs-review"));
+        assert_eq!(back.effort.as_deref(), Some("high"));
+
+        // Back-compat: a pre-P3 persisted finding (no confidence/effort keys) still loads,
+        // defaulting both to None.
+        let legacy = r#"{"repo":"r","path":"p","line":1,"rule_id":"X","severity":"high","snippet":"s","detail":"d","status":"active"}"#;
+        let legacy_f: Finding = serde_json::from_str(legacy).unwrap();
+        assert_eq!(legacy_f.confidence, None);
+        assert_eq!(legacy_f.effort, None);
+    }
+
+    // ── ScanProvenance (Part 1 §1) ─────────────────────────────────────────────
+
+    #[test]
+    fn scan_provenance_round_trip_including_dirty_flag() {
+        let prov = ScanProvenance {
+            audited_refs: vec![
+                AuditedRef {
+                    repo: "me/api".to_string(),
+                    sha: Some("a".repeat(40)),
+                    branch: Some("main".to_string()),
+                    dirty: true,
+                },
+                AuditedRef {
+                    repo: "me/web".to_string(),
+                    sha: None,
+                    branch: None,
+                    dirty: false,
+                },
+            ],
+            audit_model: Some("claude-sonnet-4-6".to_string()),
+            calibration_model: Some("claude-haiku-4-5".to_string()),
+            mode: "parallel".to_string(),
+            thorough: true,
+            deep: false,
+            rules_fingerprint: "fp-abc123".to_string(),
+            audited_rule_ids: vec!["SEC-NO-HARDCODED-SECRETS-1".to_string(), "ARCH-1".to_string()],
+            camerata_version: env!("CARGO_PKG_VERSION").to_string(),
+            osv_scanner_version: Some("v1.9.2".to_string()),
+            started_at: "2026-07-23T00:00:00+00:00".to_string(),
+            finished_at: "2026-07-23T00:05:00+00:00".to_string(),
+        };
+        let json = serde_json::to_string(&prov).unwrap();
+        let back: ScanProvenance = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, prov, "ScanProvenance must round-trip byte-for-byte via serde");
+        // The dirty flag specifically — the doc's explicit callout ("a dirty tree does NOT
+        // block the scan, only disclosed") depends on this surviving the wire.
+        assert!(back.audited_refs[0].dirty);
+        assert!(!back.audited_refs[1].dirty);
+    }
+
+    #[test]
+    fn scan_provenance_default_is_empty_for_gated_reports() {
+        let r = ScanReport::gated(&["me/api".to_string()]);
+        assert!(r.provenance.audited_refs.is_empty());
+        assert_eq!(r.provenance.audit_model, None);
+        assert_eq!(r.provenance.rules_fingerprint, "");
+    }
+
     // ── Gitignore-aware walk tests (Feature: scan-hygiene) ────────────────
 
     /// Helper: run `git init` in `dir` and return the path as a string.
@@ -2266,6 +2875,21 @@ mod tests {
             .status()
             .expect("git init failed");
         assert!(status.success(), "git init must succeed");
+    }
+
+    /// Helper: `git add` the given repo-relative paths in `dir` — stages them into the index
+    /// so `git ls-files` reports them as tracked WITHOUT requiring a commit (no `user.name`/
+    /// `user.email` config needed in a sandboxed test environment).
+    fn git_add(dir: &std::path::Path, paths: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("add")
+            .args(paths)
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git add failed");
+        assert!(status.success(), "git add must succeed for {paths:?}");
     }
 
     #[test]
@@ -2327,6 +2951,204 @@ mod tests {
         assert!(
             paths.iter().any(|p| *p == ".env"),
             "tracked .env must be scanned when not gitignored: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn gitignore_walk_still_scans_a_tracked_file_later_added_to_gitignore() {
+        // The highest-value case: a secret was committed, then someone tried to "fix" it by
+        // adding the file to .gitignore going forward — the file is STILL tracked (still in
+        // the index / git history), so the ignore-crate's gitignore-only walk would silently
+        // drop it. read_local_repo_files must union git_tracked_files back in.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        git_init(root);
+
+        let secret_content =
+            concat!("NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=sb_secret_", "FAKE_DO_NOT_USE\n");
+        std::fs::write(root.join(".env.production"), secret_content)
+            .expect("write .env.production");
+        git_add(root, &[".env.production"]);
+
+        // NOW gitignore it — a real (if mistaken) attempt to stop tracking it going forward.
+        // The file remains in the index; git status would show it as still-tracked-but-
+        // matches-gitignore, not untracked.
+        std::fs::write(root.join(".gitignore"), ".env.production\n")
+            .expect("write .gitignore");
+
+        std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+        std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("write lib.rs");
+
+        let extracted = read_local_repo_files(root).expect("scan ok");
+        let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            paths.contains(&".env.production"),
+            "a git-tracked file must still be scanned even after being added to .gitignore: {paths:?}"
+        );
+        let (_, content) = extracted
+            .files
+            .iter()
+            .find(|(p, _)| p == ".env.production")
+            .expect("file present");
+        assert!(content.contains("sb_secret_"), "the union'd file must carry real content, not a stub");
+    }
+
+    #[test]
+    fn gitignore_walk_does_not_resurrect_an_untracked_gitignored_file() {
+        // Companion negative case to the test above: an UNTRACKED file that matches
+        // .gitignore must still be excluded — the union only pulls in git-TRACKED paths, it
+        // must never turn "ignored and never committed" into "scanned".
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        git_init(root);
+
+        std::fs::write(root.join(".gitignore"), "local-only.env\n").expect("write .gitignore");
+        std::fs::write(root.join("local-only.env"), "LOCAL_SECRET=whatever\n")
+            .expect("write local-only.env");
+        // Deliberately never `git add`ed — stays untracked.
+        std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+        std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("write lib.rs");
+
+        let extracted = read_local_repo_files(root).expect("scan ok");
+        let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            !paths.iter().any(|p| p.contains("local-only.env")),
+            "an untracked gitignored file must stay excluded: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn collector_admits_and_finds_secrets_in_non_env_committed_config_files() {
+        // GENERAL regression guard (not fixture-specific): a committed secret in a `.yaml`,
+        // `.json`, or `.properties` file — none of them named `.env*` — must be found. Proves
+        // the fix is a genuine file-type-policy broadening, not a `.env.production` band-aid.
+        // Also covers `.env.staging` (a DIFFERENT dotenv variant than the benchmark fixture's
+        // `.env.production`) to prove the dotfile fix generalizes across the whole family.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        git_init(root);
+
+        // AKIA-shaped secret (matches SEC-NO-VENDOR-TOKEN-1 regardless of quoting/format), so
+        // this test is independent of the `.env`-specific sb_secret_ pattern extension.
+        let akia = concat!("AKIA", "IOSFODNN7EXAMPLE");
+
+        std::fs::create_dir_all(root.join("k8s")).expect("mkdir k8s");
+        std::fs::write(
+            root.join("k8s/deploy.yaml"),
+            format!("env:\n  - name: AWS_ACCESS_KEY_ID\n    value: \"{akia}\"\n"),
+        )
+        .expect("write deploy.yaml");
+
+        std::fs::write(
+            root.join("secrets.json"),
+            format!("{{\"awsAccessKeyId\": \"{akia}\"}}\n"),
+        )
+        .expect("write secrets.json");
+
+        std::fs::create_dir_all(root.join("config")).expect("mkdir config");
+        std::fs::write(
+            root.join("config/app.properties"),
+            format!("aws.access.key.id={akia}\n"),
+        )
+        .expect("write app.properties");
+
+        std::fs::write(
+            root.join(".env.staging"),
+            format!("AWS_ACCESS_KEY_ID={akia}\n"),
+        )
+        .expect("write .env.staging");
+
+        let extracted = read_local_repo_files(root).expect("scan ok");
+        let findings = audit_files("test/repo", &extracted.files);
+
+        for path in ["k8s/deploy.yaml", "secrets.json", "config/app.properties", ".env.staging"] {
+            assert!(
+                extracted.files.iter().any(|(p, _)| p == path),
+                "{path} must be admitted into the scanned file list: {:?}",
+                extracted.files.iter().map(|(p, _)| p).collect::<Vec<_>>()
+            );
+            assert!(
+                findings.iter().any(|f| f.path == path && f.rule_id == "SEC-NO-VENDOR-TOKEN-1"),
+                "expected a SEC-NO-VENDOR-TOKEN-1 finding in {path}: {:?}",
+                findings.iter().filter(|f| f.path == path).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn collector_broadening_produces_no_noise_on_benign_config_files() {
+        // Negative control: a normal repo with ordinary, secret-free config/text files must
+        // produce ZERO findings from those files — neither from the deterministic secrets
+        // floor NOR from the architectural/style checkers (even maximally armed). This proves
+        // the broadening feeds the secrets floor WITHOUT flooding style-rule noise onto
+        // config files, and that ordinary config content isn't a false-positive magnet.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        git_init(root);
+
+        std::fs::write(root.join(".editorconfig"), "root = true\n[*]\nindent_style = space\n")
+            .expect("write .editorconfig");
+        std::fs::write(
+            root.join("app.conf"),
+            "listen_port = 8080\nlog_level = info\n",
+        )
+        .expect("write app.conf");
+        std::fs::write(root.join("notes.txt"), "TODO: rename this module someday.\n")
+            .expect("write notes.txt");
+        std::fs::write(root.join(".npmrc"), "save-exact=true\nengine-strict=true\n")
+            .expect("write .npmrc");
+        std::fs::create_dir_all(root.join("config")).expect("mkdir config");
+        std::fs::write(
+            root.join("config/app.properties"),
+            "server.port=8080\nspring.application.name=demo\n",
+        )
+        .expect("write app.properties");
+
+        // Noise that must still be excluded even though the admission gate broadened.
+        let nm = root.join("node_modules/react");
+        std::fs::create_dir_all(&nm).expect("mkdir node_modules");
+        std::fs::write(nm.join("index.js"), "module.exports = {};\n").expect("write noise");
+
+        let extracted = read_local_repo_files(root).expect("scan ok");
+        let admitted_paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+
+        // File-count sanity: the benign config files WERE admitted (so an empty-findings
+        // result below is a genuine "scanned clean", not "silently skipped").
+        for path in [".editorconfig", "app.conf", "notes.txt", ".npmrc", "config/app.properties"] {
+            assert!(
+                admitted_paths.contains(&path),
+                "{path} must be admitted: {admitted_paths:?}"
+            );
+        }
+        // node_modules must still be excluded despite the broadened admission gate.
+        assert!(
+            !admitted_paths.iter().any(|p| p.contains("node_modules")),
+            "node_modules must remain excluded as noise: {admitted_paths:?}"
+        );
+
+        let floor_findings = audit_files("test/repo", &extracted.files);
+        let config_paths = [".editorconfig", "app.conf", "notes.txt", ".npmrc", "config/app.properties"];
+        let floor_noise: Vec<_> = floor_findings
+            .iter()
+            .filter(|f| config_paths.contains(&f.path.as_str()))
+            .collect();
+        assert!(
+            floor_noise.is_empty(),
+            "benign config files must produce zero secrets-floor findings: {floor_noise:?}"
+        );
+
+        // Maximally arm EVERY architectural/style checker rule id and confirm none of them
+        // fire on the config files either — proves the broadening doesn't leak into the
+        // AST/style tier, which self-scopes by interest_globs but is worth asserting directly.
+        let all_rule_ids = camerata_checks::arch_checker::all_checker_rule_ids();
+        let arch_findings = audit_architectural("test/repo", &extracted.files, &all_rule_ids);
+        let arch_noise: Vec<_> = arch_findings
+            .iter()
+            .filter(|f| config_paths.contains(&f.path.as_str()))
+            .collect();
+        assert!(
+            arch_noise.is_empty(),
+            "benign config files must produce zero architectural/style findings: {arch_noise:?}"
         );
     }
 

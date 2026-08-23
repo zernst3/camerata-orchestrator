@@ -6,23 +6,33 @@
 //! keeps the reactive signals, the chorale table effects, the toasts, and the rsx; every pure
 //! transition + derivation lives here and is unit-tested with no VirtualDom.
 //!
-//! The architect moves each finding between three tables (Unresolved / Ignored / Tech debt) until
-//! nothing is Unresolved, then buckets the tech-debt findings (resolve later / now). This is LOCAL
-//! triage state — the backend commit (baseline waiver / ticket / dev-engine import) happens at
-//! Process, not on each move.
+//! The architect moves each finding between four tables (Unresolved / Ignored / Tech debt /
+//! False positive) until nothing is Unresolved, then buckets the tech-debt findings (resolve
+//! later / now). This is LOCAL triage state — the backend commit (baseline waiver / ticket /
+//! dev-engine import) happens at Process, not on each move. False positive is the odd one out:
+//! it is never committed anywhere — see `TriageState::FalsePositive`'s doc comment.
 
 use std::collections::HashMap;
 
 /// Where a finding sits in onboarding triage. The architect moves each finding between these
-/// three tables (a single-select switches the view) until nothing is Unresolved; then the
+/// FOUR tables (a single-select switches the view) until nothing is Unresolved; then the
 /// ignored and tech-debt buckets are processed. This is LOCAL triage state — the backend
 /// commit (baseline waiver / ticket / dev-engine import) happens at Process, not on each move.
+///
+/// `FalsePositive` is NOT "accepted risk" like `Ignored` — it means the tool was WRONG. It
+/// never reaches the baseline and never files a ticket; at Process it is a pure client-local
+/// no-op (see the Process handler in `cockpit/scan.rs`), counted once in the report's
+/// Methodology section and otherwise excluded entirely. Durably suppressing a false positive
+/// via the baseline would be exactly the invisible, reasonless-waiver hole the require-reason
+/// baseline invariant prevents — if the same code trips again next scan, that is correct: the
+/// reviewer re-judges it fresh.
 #[derive(Clone, Copy, PartialEq, Eq, Default, Debug, serde::Serialize, serde::Deserialize)]
 pub enum TriageState {
     #[default]
     Unresolved,
     Ignored,
     TechDebt,
+    FalsePositive,
 }
 
 impl TriageState {
@@ -31,6 +41,7 @@ impl TriageState {
             Self::Unresolved => "Unresolved",
             Self::Ignored => "Ignored",
             Self::TechDebt => "Tech debt",
+            Self::FalsePositive => "False positive",
         }
     }
 }
@@ -99,6 +110,17 @@ pub struct FindingView {
     /// True when this finding needs manual verification.
     #[serde(default)]
     pub needs_review: bool,
+    /// Structured calibration confidence: `"high"` | `"needs-review"`. `None` for findings
+    /// calibration never saw (the deterministic floor, preview findings). Mirrors
+    /// `camerata_server::onboard::Finding::confidence` on the wire — kept in sync so a field
+    /// added server-side is never silently dropped by serde here (see the round-trip
+    /// contract tests at the bottom of this module).
+    #[serde(default)]
+    pub confidence: Option<String>,
+    /// Structured remediation-effort estimate: `"low"` | `"medium"` | `"high"`. `None` for
+    /// findings calibration never saw. Mirrors `camerata_server::onboard::Finding::effort`.
+    #[serde(default)]
+    pub effort: Option<String>,
 }
 
 /// The default finding status (`"active"`). FindingView's `#[serde(default)]` provider; lives in
@@ -161,6 +183,20 @@ impl TriageModel {
         }
     }
 
+    /// Mark each finding as a FALSE POSITIVE: set state = FalsePositive AND record the
+    /// (required) reason together — mirrors `ignore`'s require-reason invariant. The reason
+    /// is the audit trail (why the tool was wrong) and feeds the report's methodology count
+    /// ("N dispositioned as false positives by the auditor and excluded"). Unlike `ignore`,
+    /// this disposition is a Process-time NO-OP: it never reaches the baseline and never
+    /// files a ticket (see the Process handler in `cockpit/scan.rs`).
+    pub fn mark_false_positive(&mut self, findings: &[FindingView], reason: &str) {
+        for f in findings {
+            let e = self.dispositions.entry(finding_key(f)).or_default();
+            e.state = TriageState::FalsePositive;
+            e.reason = reason.to_string();
+        }
+    }
+
     /// Bucket each tech-debt finding (resolve later / now). Leaves the state unchanged; only the
     /// Bucket flag moves.
     pub fn set_bucket(&mut self, findings: &[FindingView], bucket: TechDebtBucket) {
@@ -190,19 +226,21 @@ impl TriageModel {
         out
     }
 
-    /// Tally the three buckets over `findings`: `(Unresolved, Ignored, TechDebt)`.
-    pub fn counts(&self, findings: &[FindingView]) -> (usize, usize, usize) {
+    /// Tally the four buckets over `findings`: `(Unresolved, Ignored, TechDebt, FalsePositive)`.
+    pub fn counts(&self, findings: &[FindingView]) -> (usize, usize, usize, usize) {
         let mut unresolved = 0;
         let mut ignored = 0;
         let mut tech_debt = 0;
+        let mut false_positive = 0;
         for f in findings {
             match self.state_of(f) {
                 TriageState::Unresolved => unresolved += 1,
                 TriageState::Ignored => ignored += 1,
                 TriageState::TechDebt => tech_debt += 1,
+                TriageState::FalsePositive => false_positive += 1,
             }
         }
-        (unresolved, ignored, tech_debt)
+        (unresolved, ignored, tech_debt, false_positive)
     }
 }
 
@@ -358,14 +396,92 @@ mod tests {
     }
 
     #[test]
-    fn counts_tallies_the_three_buckets() {
+    fn counts_tallies_the_four_buckets() {
         let mut m = TriageModel::new();
         let a = f("r", 1, "low", "active");
         let b = f("r", 2, "low", "active");
         let c = f("r", 3, "low", "active");
+        let d = f("r", 4, "low", "active");
         m.ignore(std::slice::from_ref(&b), "noise");
         m.move_to(std::slice::from_ref(&c), TriageState::TechDebt);
-        let all = vec![a, b, c];
-        assert_eq!(m.counts(&all), (1, 1, 1));
+        m.mark_false_positive(std::slice::from_ref(&d), "not exploitable — mocked in test scope");
+        let all = vec![a, b, c, d];
+        assert_eq!(m.counts(&all), (1, 1, 1, 1));
+    }
+
+    // ── FalsePositive disposition (the explicit ask) ──────────────────────────
+
+    #[test]
+    fn false_positive_label_reads_false_positive() {
+        assert_eq!(TriageState::FalsePositive.label(), "False positive");
+    }
+
+    #[test]
+    fn mark_false_positive_sets_state_and_reason_together() {
+        let mut m = TriageModel::new();
+        let item = f("r", 1, "low", "active");
+        m.mark_false_positive(std::slice::from_ref(&item), "tool misfired on generated code");
+        let d = m.dispositions.get(&finding_key(&item)).expect("recorded");
+        assert_eq!(d.state, TriageState::FalsePositive);
+        assert_eq!(d.reason, "tool misfired on generated code");
+    }
+
+    #[test]
+    fn mark_false_positive_is_distinct_from_ignore() {
+        // FalsePositive and Ignored must never collapse into the same state — a false
+        // positive is "the tool was wrong" (excluded, no baseline entry), Ignored is
+        // "real but accepted risk" (committed to the baseline). Mixing them up would be
+        // dishonest in both directions.
+        let mut m = TriageModel::new();
+        let fp = f("r", 1, "low", "active");
+        let ignored = f("r", 2, "low", "active");
+        m.mark_false_positive(std::slice::from_ref(&fp), "false alarm");
+        m.ignore(std::slice::from_ref(&ignored), "accepted for now");
+        assert_eq!(m.state_of(&fp), TriageState::FalsePositive);
+        assert_eq!(m.state_of(&ignored), TriageState::Ignored);
+        assert_ne!(TriageState::FalsePositive, TriageState::Ignored);
+    }
+
+    #[test]
+    fn visible_filters_false_positive_into_its_own_view() {
+        let mut m = TriageModel::new();
+        let unresolved = f("r", 1, "high", "active");
+        let fp = f("r", 2, "critical", "active");
+        m.mark_false_positive(std::slice::from_ref(&fp), "generated fixture, not real code");
+        let all = vec![unresolved.clone(), fp.clone()];
+
+        // Unresolved view excludes the false positive.
+        let vis = m.visible(&all);
+        assert_eq!(vis.len(), 1);
+        assert_eq!(vis[0].line, 1);
+
+        // FalsePositive view shows only the false positive.
+        m.triage_view = TriageState::FalsePositive;
+        let vis = m.visible(&all);
+        assert_eq!(vis.len(), 1);
+        assert_eq!(vis[0].line, 2);
+    }
+
+    // ── FindingView confidence/effort mirror (server `Finding` sync) ──────────
+
+    #[test]
+    fn finding_view_confidence_and_effort_default_to_none() {
+        let f = finding(serde_json::json!({
+            "repo": "r", "path": "p", "line": 1,
+            "rule_id": "R", "severity": "low", "snippet": "s", "detail": ""
+        }));
+        assert_eq!(f.confidence, None);
+        assert_eq!(f.effort, None);
+    }
+
+    #[test]
+    fn finding_view_deserializes_confidence_and_effort_when_present() {
+        let f = finding(serde_json::json!({
+            "repo": "r", "path": "p", "line": 1,
+            "rule_id": "R", "severity": "high", "snippet": "s", "detail": "",
+            "confidence": "needs-review", "effort": "high"
+        }));
+        assert_eq!(f.confidence.as_deref(), Some("needs-review"));
+        assert_eq!(f.effort.as_deref(), Some("high"));
     }
 }

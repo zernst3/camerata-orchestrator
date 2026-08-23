@@ -1233,6 +1233,12 @@ fn sec_vendor_token_regex() -> &'static Regex {
             | sk_live_[A-Za-z0-9]{24,}
             | AIza[0-9A-Za-z_\-]{35}
             | sk-ant-[A-Za-z0-9_\-]{20,}
+            # Supabase new-format secret key: a fixed literal prefix (sb_secret_) followed by
+            # an opaque body — same near-zero-FP shape as the other vendor prefixes above (see
+            # crates/rules/principles/universal/sec-no-vendor-token-1.toml item (a)). The
+            # sibling sb_publishable_ (anon/publishable) prefix is deliberately NOT matched
+            # here — that key is designed to be public; see the same principle doc's rationale.
+            | sb_secret_[A-Za-z0-9_\-]{6,}
             ",
         )
         .expect("SEC-NO-VENDOR-TOKEN-1 regex must compile")
@@ -2574,6 +2580,22 @@ mod tests {
     fn vendor_token_in_production_denied() {
         let content = "const AWS_KEY: &str = \"AKIAIOSFODNN7EXAMPLE\";";
         assert!(arm_sec_no_vendor_token_1("src/config.rs", content).is_err());
+    }
+
+    #[test]
+    fn vendor_token_detects_supabase_sb_secret() {
+        // sb_secret_ + opaque body, unquoted (.env shape) — this is the exact GROUND_TRUTH D3
+        // shape from the supabase-portal-fixture benchmark.
+        let content = "NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=sb_secret_FAKE_DO_NOT_USE";
+        assert!(arm_sec_no_vendor_token_1(".env.production", content).is_err());
+    }
+
+    #[test]
+    fn vendor_token_ignores_supabase_anon_publishable_key() {
+        // The anon/publishable key is designed to be public — sb_publishable_ must never
+        // match, even though it shares the `sb_` family prefix with sb_secret_.
+        let content = "NEXT_PUBLIC_SUPABASE_ANON_KEY=sb_publishable_FAKE_anon_key_safe_to_expose";
+        assert!(arm_sec_no_vendor_token_1(".env.production", content).is_ok());
     }
 
     // ── SEC-NO-SECRET-FILE-1 ─────────────────────────────────────────────────────

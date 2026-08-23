@@ -603,6 +603,7 @@ async fn call_provider(
     if any.is::<crate::llm::OpenRouterCompleter>() {
         // Use OpenRouter directly with tool schemas + caching controls.
         let openrouter_key = get_openrouter_key_from_completer(completer)?;
+        let (policy, registry) = get_policy_and_registry_from_completer(completer)?;
         call_openrouter_with_tools(
             &openrouter_key,
             model,
@@ -611,6 +612,8 @@ async fn call_provider(
             tool_schemas,
             &driver.session_id,
             bust_cache,
+            &policy,
+            &registry,
         )
         .await
     } else {
@@ -638,11 +641,27 @@ fn get_openrouter_key_from_completer(completer: &dyn LlmPort) -> anyhow::Result<
     Ok(or.api_key_for_agent())
 }
 
+/// Extract the provider-safety policy + model registry from an `OpenRouterCompleter`
+/// reference — the SAME two values `OpenRouterCompleter::call_api_inner` (the bare-LLM
+/// path, in `camerata-llm`) enforces with, so this direct-HTTP tool-schema path
+/// (`call_openrouter_with_tools`) can never drift from it. See
+/// `crate::llm::OpenRouterCompleter::policy_for_agent` / `registry_for_agent`.
+fn get_policy_and_registry_from_completer(
+    completer: &dyn LlmPort,
+) -> anyhow::Result<(crate::provider_policy::ProviderPolicy, crate::model_registry::ModelRegistry)> {
+    let any = completer.as_any();
+    let or = any
+        .downcast_ref::<crate::llm::OpenRouterCompleter>()
+        .ok_or_else(|| anyhow::anyhow!("expected OpenRouterCompleter"))?;
+    Ok((or.policy_for_agent(), or.registry_for_agent()))
+}
+
 /// POST directly to OpenRouter's `/api/v1/chat/completions` with tool schemas included.
 ///
 /// `session_id` enables sticky routing + KV-cache warmth from request #1.
 /// `bust_cache` adds `X-OpenRouter-Cache-Clear: true` to force a fresh model call
 /// (use on stuck-loop / bad-cached-response retries).
+#[allow(clippy::too_many_arguments)]
 async fn call_openrouter_with_tools(
     api_key: &str,
     model: &str,
@@ -651,7 +670,26 @@ async fn call_openrouter_with_tools(
     tool_schemas: &[Value],
     session_id: &str,
     bust_cache: bool,
+    // THE TRUST CORE, second call site: the agentic/tool-schema path bypasses
+    // `OpenRouterCompleter::call_api_inner` (it builds + posts the body directly, see
+    // the module docs on `call_provider`), so the SAME provider-safety enforcement is
+    // re-applied here rather than shared through one code path. `policy` and `registry`
+    // are pulled from the driver's `OpenRouterCompleter` via
+    // `get_policy_and_registry_from_completer` — the identical values
+    // `call_api_inner` would use for the same run, so the two call sites can't disagree.
+    policy: &crate::provider_policy::ProviderPolicy,
+    registry: &crate::model_registry::ModelRegistry,
 ) -> anyhow::Result<LlmResponse> {
+    // Resolve the provider-safety constraint BEFORE building the request body — see
+    // `crate::provider_policy::provider_constraint_for_request` for the fail-closed
+    // contract (never an unconstrained request while safe_mode is on).
+    let safe_providers = registry.ensure_safe_providers_loaded(Some(api_key), model).await;
+    let provider_constraint =
+        crate::provider_policy::provider_constraint_for_request(policy, &safe_providers, model)
+            .map_err(|reason| {
+                anyhow::anyhow!("OpenRouter provider-safety check refused this request: {reason}")
+            })?;
+
     // Build the full messages array with an optional system message prepended.
     // The system message gets a `cache_control` breakpoint so Anthropic-compatible
     // models routed via OpenRouter cache the static system prefix once per session.
@@ -679,6 +717,9 @@ async fn call_openrouter_with_tools(
         body["tools"] = Value::Array(tool_schemas.to_vec());
         // "auto" = model decides whether to call a tool or respond with text.
         body["tool_choice"] = serde_json::json!("auto");
+    }
+    if let Some(constraint) = provider_constraint {
+        body["provider"] = constraint;
     }
 
     let mut builder = reqwest::Client::new()
@@ -2071,9 +2112,17 @@ fn build_claude_driver(
 ///
 /// Returns `Err` when an OpenRouter driver is requested but the credential store
 /// does not have the `OPENROUTER_API_KEY`.
+#[allow(clippy::too_many_arguments)]
 pub fn build_agent_driver(
     model_id: &str,
     registry: &crate::model_registry::ModelRegistry,
+    // THE TRUST CORE: the OpenRouter provider-safety policy (see
+    // `crate::provider_policy`) — resolve from `state.settings().provider_policy()` at
+    // the call site (safe by default) and pass it in. Threaded through to the
+    // `OpenRouterCompleter` this builds, which enforces it on every request the driver
+    // makes (both the bare-LLM and the tool-schema call sites). Ignored for the Claude
+    // CLI/Anthropic-API path.
+    policy: &crate::provider_policy::ProviderPolicy,
     creds: &dyn crate::credentials::CredentialStore,
     mcp_config_path: &str,
     rule_subset: Vec<RuleId>,
@@ -2119,7 +2168,12 @@ pub fn build_agent_driver(
                     )
                 })?;
 
-            let mut or_completer = crate::llm::OpenRouterCompleter::for_agent(key, limiter);
+            let mut or_completer = crate::llm::OpenRouterCompleter::for_agent(
+                key,
+                limiter,
+                policy.clone(),
+                registry.clone(),
+            );
             if let Some(sid) = run_session_id {
                 or_completer = or_completer.with_session_id(sid);
             }
@@ -2186,6 +2240,10 @@ pub fn build_agent_driver(
 /// — identical to the legacy hard-coded CLI child, just on the correct provider.
 pub struct ServerChildDriverFactory {
     registry: crate::model_registry::ModelRegistry,
+    /// The OpenRouter provider-safety policy every OpenRouter-provider child inherits
+    /// from the parent run (see `crate::provider_policy`) — children never get their own
+    /// independent safety posture.
+    policy: crate::provider_policy::ProviderPolicy,
     creds: Arc<dyn crate::credentials::CredentialStore>,
     limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
     /// Located `camerata-gateway` binary, used to wire each CLI child's own gated gateway.
@@ -2203,8 +2261,10 @@ pub struct ServerChildDriverFactory {
 
 impl ServerChildDriverFactory {
     /// Build the factory with the provider-dispatch context the children need.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         registry: crate::model_registry::ModelRegistry,
+        policy: crate::provider_policy::ProviderPolicy,
         creds: Arc<dyn crate::credentials::CredentialStore>,
         limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
         gateway_bin: PathBuf,
@@ -2214,6 +2274,7 @@ impl ServerChildDriverFactory {
     ) -> Self {
         Self {
             registry,
+            policy,
             creds,
             limiter,
             gateway_bin,
@@ -2278,6 +2339,7 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
         let inner = build_agent_driver(
             model,
             &self.registry,
+            &self.policy,
             self.creds.as_ref(),
             &mcp_config_path,
             self.rule_subset.clone(),
@@ -2335,6 +2397,9 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
 ///   `max_depth=1`) lives in the gated primitive; this factory only supplies the config.
 pub struct ServerOrchestratorDriverFactory {
     registry: crate::model_registry::ModelRegistry,
+    /// The OpenRouter provider-safety policy (see `crate::provider_policy`) the lead —
+    /// and every child the embedded [`ServerChildDriverFactory`] builds — inherits.
+    policy: crate::provider_policy::ProviderPolicy,
     creds: Arc<dyn crate::credentials::CredentialStore>,
     limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
     /// Located `camerata-gateway` binary (each native child wires its own gated gateway).
@@ -2348,8 +2413,10 @@ pub struct ServerOrchestratorDriverFactory {
 
 impl ServerOrchestratorDriverFactory {
     /// Build the factory with the provider-dispatch context the lead (and its children) need.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         registry: crate::model_registry::ModelRegistry,
+        policy: crate::provider_policy::ProviderPolicy,
         creds: Arc<dyn crate::credentials::CredentialStore>,
         limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
         gateway_bin: PathBuf,
@@ -2358,6 +2425,7 @@ impl ServerOrchestratorDriverFactory {
     ) -> Self {
         Self {
             registry,
+            policy,
             creds,
             limiter,
             gateway_bin,
@@ -2431,8 +2499,12 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                         )
                     })?;
 
-                let mut or_completer =
-                    crate::llm::OpenRouterCompleter::for_agent(key, self.limiter.clone());
+                let mut or_completer = crate::llm::OpenRouterCompleter::for_agent(
+                    key,
+                    self.limiter.clone(),
+                    self.policy.clone(),
+                    self.registry.clone(),
+                );
                 if let Some(sid) = self.run_session_id.as_deref() {
                     or_completer = or_completer.with_session_id(sid);
                 }
@@ -2440,6 +2512,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
 
                 let child_factory = ServerChildDriverFactory::new(
                     self.registry.clone(),
+                    self.policy.clone(),
                     self.creds.clone(),
                     self.limiter.clone(),
                     self.gateway_bin.clone(),
@@ -2479,6 +2552,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
 
                     let child_factory = ServerChildDriverFactory::new(
                         self.registry.clone(),
+                        self.policy.clone(),
                         self.creds.clone(),
                         self.limiter.clone(),
                         self.gateway_bin.clone(),
@@ -2543,6 +2617,13 @@ mod tests {
             rule_subset: vec![gov1_rule()],
             allowed_paths: vec!["src/".to_string()],
         }
+    }
+
+    /// The default provider-safety policy (`safe_mode: true`, no pin) — used by tests
+    /// that don't specifically exercise the provider-safety enforcement itself (that
+    /// gets its own dedicated tests below).
+    fn default_policy() -> crate::provider_policy::ProviderPolicy {
+        crate::provider_policy::ProviderPolicy::default()
     }
 
     fn all_rules_role() -> Role {
@@ -3275,6 +3356,7 @@ mod tests {
         let result = build_agent_driver(
             model_id,
             &registry,
+            &default_policy(),
             &creds,
             "/tmp/fake-mcp.json", // mcp_config_path — not opened for this test
             vec![],               // rule_subset
@@ -3329,6 +3411,7 @@ mod tests {
         let result = build_agent_driver(
             "openrouter/mistral-7b",
             &registry,
+            &default_policy(),
             &creds,
             "/tmp/fake-mcp.json",
             vec![],
@@ -3360,6 +3443,7 @@ mod tests {
         let result = build_agent_driver(
             "openrouter/mistral-7b",
             &registry,
+            &default_policy(),
             &creds,
             "/tmp/fake-mcp.json",
             vec![],
@@ -3561,6 +3645,8 @@ mod tests {
         let or_completer = crate::llm::OpenRouterCompleter::for_agent(
             "sk-or-test".to_string(),
             limiter,
+            default_policy(),
+            crate::model_registry::ModelRegistry::new(),
         )
         .with_session_id("my-story-id-123");
         let expected_session = or_completer.session_id_for_agent();
@@ -3603,7 +3689,12 @@ mod tests {
     #[test]
     fn openrouter_completer_with_session_id_overrides_generated_token() {
         let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
-        let completer = crate::llm::OpenRouterCompleter::for_agent("key".to_string(), limiter)
+        let completer = crate::llm::OpenRouterCompleter::for_agent(
+            "key".to_string(),
+            limiter,
+            default_policy(),
+            crate::model_registry::ModelRegistry::new(),
+        )
             .with_session_id("custom-session-xyz");
         assert_eq!(completer.session_id_for_agent(), "custom-session-xyz");
     }
@@ -3612,7 +3703,12 @@ mod tests {
     #[test]
     fn openrouter_completer_empty_session_id_is_noop() {
         let limiter = Arc::new(crate::rate_limit::ProviderRateLimiter::new());
-        let completer = crate::llm::OpenRouterCompleter::for_agent("key".to_string(), limiter)
+        let completer = crate::llm::OpenRouterCompleter::for_agent(
+            "key".to_string(),
+            limiter,
+            default_policy(),
+            crate::model_registry::ModelRegistry::new(),
+        )
             .with_session_id("");
         // Empty override must leave the auto-generated session id in place (non-empty).
         assert!(
@@ -3648,6 +3744,7 @@ mod tests {
         let driver = build_agent_driver(
             "openrouter/mistral-7b",
             &registry,
+            &default_policy(),
             &creds,
             "/tmp/fake-mcp.json",
             vec![],
@@ -3700,6 +3797,7 @@ mod tests {
     ) -> ServerChildDriverFactory {
         ServerChildDriverFactory::new(
             registry,
+            default_policy(),
             creds,
             Arc::new(crate::rate_limit::ProviderRateLimiter::new()),
             PathBuf::from("/tmp/fake-camerata-gateway"), // path only; binary need not exist
@@ -4375,6 +4473,7 @@ mod tests {
         let result = build_agent_driver(
             "claude-sonnet-4-6",
             &registry,
+            &default_policy(),
             &creds,
             "/tmp/fake-mcp.json",
             vec![],
@@ -4404,6 +4503,7 @@ mod tests {
         let result = build_agent_driver(
             "claude-sonnet-4-6",
             &registry,
+            &default_policy(),
             &creds,
             "/tmp/fake-mcp.json",
             vec![],

@@ -1,0 +1,59 @@
+id = "SUPABASE-RLS-VIEW-INVOKER-1"
+title = "A view in an exposed schema must set security_invoker = true so it does not bypass base-table RLS"
+tag = "stack"
+domain = "supabase:rls"
+layer = "platform"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a statement-granular scan of CREATE VIEW statements in exposed schemas (public by default, or per SUPABASE-EXPOSURE-SCHEMAS-1's config parse): a view lacking the `security_invoker = true` WITH-option (available Postgres 15+) executes with its OWNER's privileges by default, which silently bypasses the RLS policies on its underlying base tables. Conformance holds when every view in an exposed schema explicitly sets security_invoker = true, or is a security-barrier view intentionally curated as a controlled, narrower surface over a locked-down base table (a legitimate exception the finding should name, not silently allow)."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/database-advisors?lint=0010_security_definer_view"
+title = "Supabase Database Linter — 0010_security_definer_view (\"View bypasses row-level security\")"
+linter = "splinter: security_definer_view"
+
+[[sources]]
+url = "https://www.postgresql.org/docs/current/sql-createview.html"
+title = "PostgreSQL docs — CREATE VIEW: the security_invoker option"
+
+[decision]
+question = "Must every view in an API-exposed schema explicitly set security_invoker = true?"
+default = "flag-views-without-security-invoker"
+why = """
+By default, a Postgres view executes queries against its underlying tables using the VIEW OWNER's
+privileges, not the querying user's — this is documented CREATE VIEW behavior, and the
+security_invoker WITH-option (Postgres 15+) is the switch that makes a view instead check
+privileges (including RLS) against the actual invoking role. Because Supabase table owners are
+typically a privileged role, an exposed view with no security_invoker silently reads through any
+RLS policy on its base tables: the base tables are locked, but the view sitting next to them is
+not. This is Splinter's security_definer_view lint (0010, confirmed against the live
+database-advisors page — the lint name mirrors the pre-Postgres-15 SECURITY DEFINER-equivalent
+default behavior of views, not a literal `SECURITY DEFINER` keyword, which views do not use).
+
+The match-set is a per-statement fact: does a CREATE VIEW statement targeting an exposed schema
+carry `WITH (security_invoker = true)`? No cross-file replay is required for the flag itself,
+though the "is this view intentionally curated as a narrower, reviewed surface" judgment (e.g. a
+view deliberately excluding sensitive columns for read convenience) is a legitimate exception the
+finding should surface by name rather than silently skip — the report names the view and asks
+whether the wider access was deliberate.
+"""
+
+[[option]]
+id = "flag-views-without-security-invoker"
+label = "Flag every exposed-schema view lacking security_invoker = true"
+directive = """
+Scan CREATE VIEW statements targeting exposed schemas. Any view without `WITH (security_invoker =
+true)` is a high-severity finding: "Your `<view>` view punches through the security on the tables
+underneath it. The tables are locked, and the window next to them is open." Remediation: add
+`security_invoker = true`, or (on Postgres <15, which Supabase does not run — Supabase ships
+Postgres 15+) restructure the view's access via a SECURITY DEFINER function with an explicit,
+audited grant.
+"""
+why = "A view with no security_invoker executes as its owner by default and is the single most common way an otherwise-correct RLS setup is silently bypassed — the base tables are locked, the view reading them is not, and nothing in the migration diff signals that to a reviewer."
+
+[[option]]
+id = "allow-owner-privileged-views-for-convenience"
+label = "Permit owner-privileged (non-invoker) views when they aggregate or simplify data for internal dashboards"
+directive = "Allow views without security_invoker when their purpose is internal reporting/aggregation rather than direct end-user data access, on the theory that internal tooling does not need row-level scoping."
+why = "Rejected: 'internal dashboard' is not a property a static scan (or a reviewer, months later) can verify at the view definition site — the same view is routinely later exposed through PostgREST once someone builds a customer-facing feature against it, at which point the owner-privileged default silently reintroduces the bypass with no code change to flag. The security_invoker default (Postgres 15+, which Supabase runs) costs nothing and removes the failure mode entirely."

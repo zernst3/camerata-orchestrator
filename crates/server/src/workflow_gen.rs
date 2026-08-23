@@ -358,7 +358,7 @@ mod tests {
             checks: vec![
                 check("ARCH-A", "scripts/arch_check.sh", true),
                 check("SEC-B", "trufflehog filesystem .", false),
-            ],
+            ], ..Default::default()
         };
         let l2 = layer2_commands(&stack, &manifest);
         let l3 = all_ci_commands(&stack, &manifest);
@@ -387,7 +387,7 @@ mod tests {
             checks: vec![
                 check("IN-LOOP-1", "cmd_in_loop", true),
                 check("CI-ONLY-1", "cmd_ci_only", false),
-            ],
+            ], ..Default::default()
         };
         for stack in &stacks {
             let l2 = layer2_commands(stack, &manifest);
@@ -407,7 +407,7 @@ mod tests {
     fn ci_only_command_is_in_l3_but_not_l2() {
         let stack = RepoStack::Rust;
         let manifest = CheckManifest {
-            checks: vec![check("SEC-B", "trufflehog filesystem .", false)],
+            checks: vec![check("SEC-B", "trufflehog filesystem .", false)], ..Default::default()
         };
         let l2 = layer2_commands(&stack, &manifest);
         let l3 = all_ci_commands(&stack, &manifest);
@@ -447,7 +447,7 @@ mod tests {
             checks: vec![
                 check("ARCH-A", "scripts/arch.sh", true),
                 check("SEC-B", "trufflehog filesystem .", false),
-            ],
+            ], ..Default::default()
         };
         let yaml = generate_gates_workflow(&RepoStack::Rust, &manifest);
         assert!(yaml.contains("scripts/arch.sh"), "in_loop check command must appear in YAML");
@@ -490,7 +490,7 @@ mod tests {
             checks: vec![
                 check("IN-LOOP", "run_in_loop.sh", true),
                 check("CI-ONLY", "run_ci_only.sh", false),
-            ],
+            ], ..Default::default()
         };
         let l2 = layer2_commands(&stack, &manifest);
         assert!(
@@ -517,7 +517,7 @@ mod tests {
                 "dependency-cruiser",
                 "6.3.0",
                 "npm install -g dependency-cruiser@6.3.0",
-            )],
+            )], ..Default::default()
         };
         let yaml = generate_gates_workflow(&RepoStack::Rust, &manifest);
 
@@ -550,7 +550,7 @@ mod tests {
     #[test]
     fn generated_workflow_no_install_step_for_unpinned_check() {
         let manifest = CheckManifest {
-            checks: vec![check("ARCH-A", "scripts/arch.sh", true)],
+            checks: vec![check("ARCH-A", "scripts/arch.sh", true)], ..Default::default()
         };
         let yaml = generate_gates_workflow(&RepoStack::Rust, &manifest);
         assert!(
@@ -576,7 +576,7 @@ mod tests {
                 "dependency-cruiser",
                 "6.3.0",
                 "npm install -g dependency-cruiser@6.3.0",
-            )],
+            )], ..Default::default()
         };
         let l2 = layer2_commands(&stack, &manifest);
         let l3 = all_ci_commands(&stack, &manifest);
@@ -612,7 +612,7 @@ mod tests {
                 "semgrep",
                 "1.55.2",
                 "pip install semgrep==1.55.2",
-            )],
+            )], ..Default::default()
         };
         let l2 = layer2_commands(&stack, &manifest);
         let l3 = all_ci_commands(&stack, &manifest);
@@ -675,7 +675,7 @@ mod tests {
                     "1.55.2",
                     "pip install semgrep==1.55.2",
                 ),
-            ],
+            ], ..Default::default()
         };
         for stack in &stacks {
             let l2 = layer2_commands(stack, &manifest);
@@ -700,7 +700,7 @@ mod tests {
                 "semgrep",
                 "1.55.2",
                 "pip install semgrep==1.55.2",
-            )],
+            )], ..Default::default()
         };
         let yaml = generate_gates_workflow(&RepoStack::Rust, &manifest);
         assert!(

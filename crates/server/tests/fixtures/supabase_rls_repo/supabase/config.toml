@@ -1,0 +1,7 @@
+# Minimal Supabase CLI config for the architectural-executor e2e fixture. Only the
+# `[api].schemas` key matters to the RLS checker (`camerata_checks::supabase::config`) —
+# everything else is a stub, present only so the file parses as valid TOML.
+project_id = "camerata-e2e-fixture"
+
+[api]
+schemas = ["public"]

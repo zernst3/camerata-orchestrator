@@ -212,6 +212,10 @@ pub fn parse_osv_json(
                     preview_tool: None,
                     in_test: false,
                     needs_review: false,
+                    confidence: None,
+                    effort: None,
+                    category: None,
+                    located: true,
                 });
             }
         }

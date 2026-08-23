@@ -121,6 +121,129 @@ async fn post_credential(name: &str, value: &str) -> Result<String, String> {
     }
 }
 
+// ── OpenRouter model-registry refresh (manual UI trigger, 3 of 3) ─────────────
+//
+// The other two triggers (server startup, and right after `POST /api/credentials/
+// openrouter_api_key` succeeds) are wired server-side in `crates/server/src/lib.rs`
+// (`spawn_startup_openrouter_refresh`, `trigger_openrouter_refresh_if_needed`). This is
+// the manual escape hatch: hit it after rotating a key, or just to force the latest
+// OpenRouter catalog without waiting for a restart.
+
+/// Subset of `POST /api/models/registry/refresh`'s response body this control reads.
+/// `#[serde(default)]` on both fields tolerates the full `models` array in the real
+/// response (ignored here — the pickers re-fetch it themselves via
+/// `GET /api/models/registry`) and any future field additions.
+#[derive(serde::Deserialize)]
+struct RefreshRegistryResp {
+    #[serde(default)]
+    openrouter_count: usize,
+    #[serde(default)]
+    attempted: bool,
+}
+
+/// `POST /api/models/registry/refresh` — (re-)fetch OpenRouter's catalog using whatever
+/// key is currently saved in the OS keychain. `None` only on a transport/parse failure
+/// (server unreachable); the endpoint itself always returns 200, so a missing key is a
+/// normal `Some(RefreshRegistryResp { attempted: false, openrouter_count: 0 })`, not an
+/// error.
+async fn refresh_openrouter_registry() -> Option<RefreshRegistryResp> {
+    reqwest::Client::new()
+        .post(format!("{}/api/models/registry/refresh", crate::bff_base()))
+        .send()
+        .await
+        .ok()?
+        .json::<RefreshRegistryResp>()
+        .await
+        .ok()
+}
+
+/// Refresh-button state machine. `Done`'s `attempted` flag distinguishes "fetched zero
+/// OpenRouter models because none are free/available" (rare) from "fetched zero because no
+/// key is configured" (common — the button's whole reason to exist for a first-time user),
+/// so the done-state message can point at the right next step instead of just saying "0".
+#[derive(Clone, Copy, PartialEq)]
+enum RefreshStatus {
+    Idle,
+    Loading,
+    Done { count: usize, attempted: bool },
+    Failed,
+}
+
+/// Manual "Refresh models" control for the OpenRouter catalog. Renders a button plus an
+/// inline status line that walks Idle → Loading → Done/Failed, then re-reads nothing
+/// itself — the model pickers elsewhere (`cockpit/scan.rs`, `chat.rs`, `routines.rs`) each
+/// own their own `GET /api/models/registry` fetch and will pick up the refreshed cache the
+/// next time they load or are reopened.
+#[component]
+fn OpenRouterModelsRefresh() -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut status = use_signal(|| RefreshStatus::Idle);
+    let is_loading = status() == RefreshStatus::Loading;
+
+    let (status_text, status_is_warn): (Option<String>, bool) = match status() {
+        RefreshStatus::Idle => (None, false),
+        RefreshStatus::Loading => (Some("Refreshing…".to_string()), false),
+        RefreshStatus::Done { count: 0, attempted: false } => (
+            Some("Add an OpenRouter API key to load its models.".to_string()),
+            true,
+        ),
+        RefreshStatus::Done { count: 0, attempted: true } => {
+            (Some("OpenRouter returned 0 models.".to_string()), true)
+        }
+        RefreshStatus::Done { count, .. } => {
+            (Some(format!("{count} OpenRouter models loaded.")), false)
+        }
+        RefreshStatus::Failed => {
+            (Some("Refresh failed — check the server connection.".to_string()), true)
+        }
+    };
+
+    rsx! {
+        div { class: "credentials-field-section",
+            div { class: "credentials-field-header",
+                label { class: "credentials-label", "OpenRouter Models" }
+            }
+            p { class: "credentials-intro",
+                "Models refresh automatically on startup and right after you save a key above. Use this to pull the latest catalog on demand."
+            }
+            div { class: "credentials-input-row",
+                button {
+                    class: "credentials-save-btn btn-primary",
+                    disabled: is_loading,
+                    onclick: move |_| {
+                        status.set(RefreshStatus::Loading);
+                        spawn(async move {
+                            match refresh_openrouter_registry().await {
+                                Some(resp) => {
+                                    status.set(RefreshStatus::Done {
+                                        count: resp.openrouter_count,
+                                        attempted: resp.attempted,
+                                    });
+                                }
+                                None => {
+                                    status.set(RefreshStatus::Failed);
+                                    push_toast(
+                                        toasts,
+                                        ToastKind::Error,
+                                        "Could not reach the server to refresh models.".to_string(),
+                                    );
+                                }
+                            }
+                        });
+                    },
+                    if is_loading { "Refreshing…" } else { "Refresh models" }
+                }
+                if let Some(text) = status_text {
+                    span {
+                        class: if status_is_warn { "ink-soft warn" } else { "ink-soft" },
+                        "{text}"
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 /// The "Settings → Credentials" panel. Renders one row per known credential:
@@ -173,6 +296,12 @@ pub fn CredentialsSettings() -> Element {
                     }
                 },
             }
+
+            // ── OpenRouter model-registry refresh (manual trigger, 3 of 3) ──
+            OpenRouterModelsRefresh {}
+
+            // ── Data safety (OpenRouter provider-safety toggle, Pass 2 §3) ──
+            crate::provider_safety::DataSafetySettings {}
 
             // ── Claude backend (CLI ⟷ API) ────────────────────────────────
             ModelBackendSettings {}
@@ -697,6 +826,80 @@ mod tests {
         assert!(!view.api_key_present);
     }
 
+    // POST /api/models/registry/refresh (manual "Refresh models" trigger, 3 of 3 — see
+    // crates/server/src/lib.rs for triggers 1 and 2). Asserts the request is a bare POST
+    // with no body, and that the response's openrouter_count/attempted fields parse; the
+    // `models` array in the real response is intentionally ignored by this control.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn refresh_openrouter_registry_posts_and_parses_count_and_attempted() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/models/registry/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "openrouter_count": 345,
+                "attempted": true,
+                "models": [],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::refresh_openrouter_registry().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let resp = out.expect("refresh response parsed");
+        assert_eq!(resp.openrouter_count, 345);
+        assert!(resp.attempted);
+    }
+
+    // The no-key case: the endpoint still returns 200 with attempted:false and count:0 —
+    // NOT an error. `refresh_openrouter_registry` must surface that as `Some(..)`, not
+    // collapse it to `None` (which would incorrectly toast "could not reach the server").
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn refresh_openrouter_registry_no_key_is_some_not_none() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/models/registry/refresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "openrouter_count": 0,
+                "attempted": false,
+                "models": [],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::refresh_openrouter_registry().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let resp = out.expect("a 200 with attempted:false must still parse as Some");
+        assert_eq!(resp.openrouter_count, 0);
+        assert!(!resp.attempted);
+    }
+
+    // Transport failure (server unreachable) collapses to None — the UI shows the "could
+    // not reach the server" toast rather than misreporting a fetch attempt.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn refresh_openrouter_registry_returns_none_when_server_unreachable() {
+        // An address nothing is listening on — no MockServer mounted.
+        std::env::set_var("CAMERATA_BFF_URL", "http://127.0.0.1:1");
+        let out = super::refresh_openrouter_registry().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(out.is_none(), "an unreachable server collapses to None");
+    }
+
     // ── Tier 1: render tests (dioxus-ssr) ───────────────────────────────────────
     // Render components headlessly to an HTML string and assert KEY static
     // structure. SSR is static (no clicks, no async-loaded data): use_resource is
@@ -804,13 +1007,19 @@ mod tests {
         );
     }
 
-    // CredentialsSettings consumes three contexts (toasts Signal, BombeEnabled,
-    // BombePreview) and a use_resource. On first SSR render the resource is pending,
-    // so it renders the "Loading…" branch plus the BombeSettings section.
+    // CredentialsSettings consumes four contexts (toasts Signal, BombeEnabled,
+    // BombePreview, ProviderPolicySignal — the last for the nested DataSafetySettings)
+    // and a use_resource. On first SSR render the resource is pending, so it renders the
+    // "Loading…" branch plus the BombeSettings section.
     fn credentials_settings_harness() -> Element {
         use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
         use_context_provider(|| BombeEnabled(Signal::new(true)));
         use_context_provider(|| BombePreview(Signal::new(false)));
+        use_context_provider(|| {
+            crate::provider_safety::ProviderPolicySignal(Signal::new(
+                crate::provider_safety::ProviderPolicyView::default(),
+            ))
+        });
         rsx! {
             CredentialsSettings {}
         }
@@ -840,6 +1049,52 @@ mod tests {
         assert!(
             html.contains("Claude backend"),
             "the Claude backend control renders; html=\n{html}"
+        );
+        // The manual OpenRouter "Refresh models" control renders too — unconditionally,
+        // unlike the credential rows above it (which wait on the resource).
+        assert!(
+            html.contains("Refresh models"),
+            "the OpenRouter refresh button renders; html=\n{html}"
+        );
+        // The Data safety toggle (Pass 2 §3) renders too, unconditionally.
+        assert!(
+            html.contains("Data safety"),
+            "the Data safety section renders; html=\n{html}"
+        );
+        assert!(html.contains("SAFE MODE"), "the SAFE segment renders; html=\n{html}");
+    }
+
+    // OpenRouterModelsRefresh only consumes the toasts context (no resource), so SSR
+    // renders its real Idle state directly — no pending-resource branch to work around.
+    fn openrouter_refresh_harness() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        rsx! {
+            OpenRouterModelsRefresh {}
+        }
+    }
+
+    #[test]
+    fn openrouter_models_refresh_renders_label_and_button_idle_with_no_status_line() {
+        let mut vdom = VirtualDom::new(openrouter_refresh_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("OpenRouter Models"),
+            "the section label renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("Refresh models"),
+            "the idle-state button label renders (not \"Refreshing…\"); html=\n{html}"
+        );
+        // Idle state renders no status line at all (not even an empty span) — the model
+        // count / hint text only appears after a refresh has been attempted at least once.
+        assert!(
+            !html.contains("Add an OpenRouter API key"),
+            "the no-key hint must not render before any refresh attempt; html=\n{html}"
+        );
+        assert!(
+            !html.contains("OpenRouter models loaded"),
+            "no stale count must render before any refresh attempt; html=\n{html}"
         );
     }
 

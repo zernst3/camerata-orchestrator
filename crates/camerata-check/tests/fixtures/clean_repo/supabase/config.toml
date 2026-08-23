@@ -1,0 +1,6 @@
+# Minimal Supabase CLI config for the camerata-check integration fixture. Only
+# `[api].schemas` matters to the RLS checker.
+project_id = "camerata-check-clean-fixture"
+
+[api]
+schemas = ["public"]

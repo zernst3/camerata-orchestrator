@@ -55,9 +55,17 @@ pub mod pr_resolve_run;
 pub mod project;
 pub mod provider;
 pub mod reconcile;
+/// PDF audit-report export (brownfield audit hardening Pass B): `AuditReportJson` +
+/// `build_report_json` (pure serializer) + `compile_pdf` (Typst compile). See the
+/// module doc comment and `docs/design/2026-07-23_brownfield-audit-report.md`.
+pub mod report_export;
 pub mod review_agent;
 pub mod routine;
 pub mod run;
+/// Excel workbook export (product-export, Pass C): `build_workbook`, the Excel sibling of
+/// `report_export::build_report_json`. See the module doc comment and
+/// `docs/design/2026-07-27_product-export.md`.
+pub mod xlsx_export;
 pub mod scope_registration;
 pub mod scan_cache;
 pub mod scan_routing;
@@ -83,6 +91,7 @@ pub mod test_tamper;
 /// `docs/decisions/2026-06-22_check_manifest_single_source_of_truth.md`.
 pub mod credentials;
 pub mod model_registry;
+pub mod provider_policy;
 pub mod model_profile_cascade;
 pub mod rate_limit;
 pub mod workflow_gen;
@@ -710,6 +719,11 @@ impl AppState {
             let dir = data.join("camerata");
             state.projects = crate::project::ProjectStore::load_or_new(dir.join("projects.json"));
             state.settings = crate::settings::SettingsStore::load_or_new(dir.join("settings.json"));
+            // Provider-safety session-scoped reset (Pass 2 §3): `safe_mode` must never
+            // survive a restart as OFF, even though it's otherwise persisted alongside the
+            // rest of `Settings`. See `SettingsStore::reset_provider_policy_to_safe_on_startup`
+            // for the full mechanism note — this is the one call site.
+            state.settings.reset_provider_policy_to_safe_on_startup();
             // Hydrate the LLM-backend env var from the persisted setting so the existing
             // env-driven selection sites (`Llm::from_env`, the agent driver's
             // `anthropic_api_backend_key`) honor the stored choice unchanged. Making the
@@ -1000,6 +1014,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/onboard/audit/start", post(onboard_audit_start))
         .route("/api/onboard/audit/job/:id", get(onboard_audit_job))
         .route("/api/onboard/audit/job/:id/cancel", post(cancel_audit_job))
+        .route(
+            "/api/onboard/finding-context",
+            get(onboard_finding_context),
+        )
+        .route("/api/onboard/finding-fix", get(onboard_finding_fix))
         .route("/api/git/detect-repo", post(detect_repo))
         .route("/api/gate-probe", post(gate_probe))
         .route("/api/onboard/ticket", post(onboard_ticket))
@@ -1065,10 +1084,15 @@ pub fn router(state: AppState) -> Router {
         .route("/api/models", get(list_models))
         .route("/api/models/registry", get(get_model_registry))
         .route("/api/models/registry/refresh", post(refresh_model_registry))
+        // Pass 2 (provider-safety UI): the picker's data source — per-provider
+        // pricing + data-policy for one model, lazily fetched on first request.
+        .route("/api/models/providers", get(get_model_providers))
         .route("/api/settings", get(get_settings))
         .route("/api/settings/workspace", post(set_workspace_root))
         .route("/api/settings/chat-model", post(set_chat_model))
         .route("/api/settings/llm-backend", post(set_llm_backend))
+        // Pass 2 (provider-safety UI): the settings-panel "Data safety" toggle + pin.
+        .route("/api/settings/provider-policy", post(set_provider_policy_handler))
         .route(
             "/api/projects/:id/checkout",
             get(checkout_status).post(checkout_project),
@@ -1220,6 +1244,10 @@ pub fn router(state: AppState) -> Router {
         )
         // ── Deep-report export ────────────────────────────────────────────────
         .route("/api/projects/:id/deep-report", get(export_deep_report))
+        // ── Audit-report (PDF) export ─────────────────────────────────────────
+        .route("/api/projects/:id/audit-report", post(export_audit_report))
+        // ── Product export (PDF + Excel workbook, zipped) ─────────────────────
+        .route("/api/projects/:id/product-export", post(export_product))
         // ── App-wide credential manager ───────────────────────────────────────
         // POST /api/credentials/:name  — store a credential (body: { "value": "…" })
         // GET  /api/credentials        — list all known credentials with masked values
@@ -1228,11 +1256,79 @@ pub fn router(state: AppState) -> Router {
         .with_state(state)
 }
 
+// ── OpenRouter model-registry refresh triggers ──────────────────────────────────
+//
+// `POST /api/models/registry/refresh` (`refresh_model_registry` below) used to have ZERO
+// callers: not startup, not credential-save, no UI. A user could save a valid OpenRouter
+// key and never see an OpenRouter model in any picker until they manually curled the
+// refresh endpoint. Three triggers now cover it:
+//   1. Startup — `spawn_startup_openrouter_refresh`, called from `serve()`.
+//   2. Credential save — `trigger_openrouter_refresh_if_needed`, called from
+//      `set_credential` below, gated on the saved credential being `openrouter_api_key`.
+//   3. Manual — the existing `POST /api/models/registry/refresh` endpoint, now also
+//      reachable from a "Refresh models" button in the UI (`crates/ui/src/credentials.rs`).
+
+/// Startup trigger (1 of 3). Fire-and-forget a best-effort OpenRouter registry refresh at
+/// boot so a previously-saved key populates the picker without a manual POST. Spawned so
+/// it never blocks server start; graceful when no key is configured because
+/// `ModelRegistry::try_refresh_from_store` itself no-ops (no HTTP call, no error) in that
+/// case — see `try_refresh_from_store_is_a_graceful_noop_with_no_key_configured` in
+/// `crates/llm/src/model_registry.rs`, which exercises that exact no-key path directly and
+/// synchronously (this function only wraps it in `tokio::spawn`, which cannot itself
+/// panic, so there is nothing further to unit-test here without racing the task).
+fn spawn_startup_openrouter_refresh(state: &AppState) {
+    let model_registry = state.model_registry.clone();
+    let credential_store = state.credential_store.clone();
+    tokio::spawn(async move {
+        model_registry.try_refresh_from_store(credential_store.as_ref()).await;
+    });
+}
+
+/// True when saving credential `name` should trigger an OpenRouter model-registry
+/// refresh. Extracted as its own pure, synchronous predicate — separate from
+/// [`trigger_openrouter_refresh_if_needed`] — so the name-matching decision is testable
+/// with a plain `assert!`, with no tokio runtime and no risk of a live network call.
+fn is_openrouter_credential(name: &str) -> bool {
+    name == crate::credentials::OPENROUTER_API_KEY
+}
+
+/// Credential-save trigger (2 of 3). Call after a credential write succeeds in
+/// `set_credential`. When `name` is `openrouter_api_key`, fire-and-forget a registry
+/// refresh so models populate immediately without a restart; any other credential name is
+/// a no-op. Returns whether a refresh was scheduled, purely so tests can assert the
+/// dispatch decision synchronously without awaiting (and thereby racing, or risking a live
+/// HTTP call from) the spawned task itself — the task is never awaited here or by callers.
+fn trigger_openrouter_refresh_if_needed(
+    name: &str,
+    model_registry: &crate::model_registry::ModelRegistry,
+    credential_store: Arc<dyn crate::credentials::CredentialStore>,
+) -> bool {
+    if !is_openrouter_credential(name) {
+        return false;
+    }
+    let registry = model_registry.clone();
+    tokio::spawn(async move {
+        registry.try_refresh_from_store(credential_store.as_ref()).await;
+    });
+    true
+}
+
 /// Bind `addr` and serve. The same entry point runs locally and in the cloud. The
 /// provider is selected from the environment, so setting the GitHub vars switches the
 /// whole BFF onto a real repo with no code change.
 pub async fn serve(addr: &str) -> anyhow::Result<()> {
     let state = AppState::from_env();
+
+    // OpenRouter model-registry refresh, trigger 1 of 3 (startup). The other two are the
+    // post-credential-save trigger in `set_credential` and the manual "Refresh models" UI
+    // button (`POST /api/models/registry/refresh`, unchanged). Before this, NOTHING ever
+    // called the refresh automatically: a previously-saved key sat unused until someone
+    // manually hit the refresh endpoint. Spawned (never blocks server start) and graceful
+    // when no key is configured — `try_refresh_from_store`'s own guard returns `false`
+    // immediately with no HTTP call in that case, so a fresh install neither errors nor
+    // spams logs. See `try_refresh_from_store_is_a_graceful_noop_with_no_key_configured`
+    // in `crates/llm/src/model_registry.rs` for the direct, non-racy test of that contract.
+    spawn_startup_openrouter_refresh(&state);
 
     // Background event-ingest pollers (tracker events -> notification feed -> UI
     // toasts). Cadences are env-configurable; see crate::notify. Spawned here, not
@@ -1337,6 +1433,49 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
                         repo,
                     ) {
                         crate::workspace::prune_worktrees(&clone).await;
+
+                        // Pass 3 — T3 janitor startup sweep (disk-buildup guardrail,
+                        // docs/design/2026-07-27_build-artifact-janitor.md): remove
+                        // any `.camerata-worktrees/*` subdir that ISN'T a currently
+                        // registered `git worktree` (a true orphan — e.g. leftover
+                        // from a crash between admin-record pruning and disk cleanup,
+                        // or predating per-stage teardown), then apply the same T2
+                        // shared-target cap/age/orphan policy the teardown path uses.
+                        // Best-effort + non-blocking-of-startup (this whole block
+                        // already runs in a spawned background task); honors
+                        // `CAMERATA_JANITOR` via the janitor functions themselves.
+                        let mode = camerata_checks::janitor::janitor_mode();
+                        if mode != camerata_checks::janitor::JanitorMode::Off {
+                            let dry_run = mode == camerata_checks::janitor::JanitorMode::DryRun;
+                            let worktrees_root = clone.join(".camerata-worktrees");
+                            for orphan in camerata_checks::janitor::list_orphan_worktree_dirs(&clone) {
+                                let outcome = camerata_checks::janitor::reclaim_dir(
+                                    &orphan,
+                                    &worktrees_root,
+                                    &[],
+                                    true,
+                                    "startup-sweep",
+                                    dry_run,
+                                    |entry| {
+                                        tracing::info!(
+                                            path = %entry.path.display(),
+                                            bytes = entry.bytes,
+                                            "janitor: T3 startup sweep reclaimed orphan worktree"
+                                        );
+                                    },
+                                );
+                                if let camerata_checks::janitor::ReclaimOutcome::Skipped { reason, .. } =
+                                    outcome
+                                {
+                                    tracing::debug!(
+                                        path = %orphan.display(),
+                                        %reason,
+                                        "janitor: T3 startup sweep skipped orphan candidate"
+                                    );
+                                }
+                            }
+                        }
+                        crate::workspace::maybe_prune_shared_target(&clone, "startup-sweep").await;
                     }
                 }
             }
@@ -1932,6 +2071,7 @@ async fn spawn_brownfield_dev_run(
     let impl_projects = state.projects.clone();
     let impl_project_id = state.projects.active().map(|p| p.id);
     let impl_registry = state.model_registry.clone();
+    let impl_policy = state.settings.provider_policy();
     let impl_creds = state.credential_store.clone();
     let impl_limiter = state.rate_limiter.clone();
     // Phase H2: threaded into `execute_dev_implement_run` so the audit trail (agent_step,
@@ -1965,6 +2105,7 @@ async fn spawn_brownfield_dev_run(
             integration_gate_bundle,
             repo_worktrees,
             impl_registry,
+            impl_policy,
             impl_creds,
             impl_limiter,
             impl_escalations,
@@ -2130,6 +2271,7 @@ async fn start_governed_run(
                     // Provider-dispatch context for the LEAD/orchestrator driver factory
                     // (the lead runs on the strongest model's OWN provider).
                     let live_registry = state.model_registry.clone();
+                    let live_policy = state.settings.provider_policy();
                     let live_creds = state.credential_store.clone();
                     let live_limiter = state.rate_limiter.clone();
                     // LIFECYCLE-1: register the abort handle so a Stop reaps the greenfield
@@ -2148,6 +2290,7 @@ async fn start_governed_run(
                             skip_layer2,
                             vision_enabled,
                             live_registry,
+                            live_policy,
                             live_creds,
                             live_limiter,
                         )
@@ -5179,6 +5322,101 @@ async fn cancel_audit_job(
     StatusCode::NO_CONTENT
 }
 
+/// Query parameters for `GET /api/onboard/finding-context`.
+#[derive(serde::Deserialize)]
+struct FindingContextQuery {
+    /// `owner/repo` — resolved to a local checkout via `settings.repo_path` /
+    /// `settings.workspace_root`, same as the git-status endpoints.
+    repo: String,
+    /// Repo-relative file path (as stored on `FindingView::path`).
+    path: String,
+    /// 1-based violation line (as stored on `FindingView::line`).
+    line: usize,
+    /// Optional first line of the scan-time stored `snippet`, for a cheap staleness check
+    /// (`matches_snippet` in the response). Absent = no comparison, never flagged stale.
+    #[serde(default)]
+    expect: Option<String>,
+}
+
+/// `GET /api/onboard/finding-context` — the enclosing-code-block lookup for the scan-review
+/// finding modal (`docs/design/2026-07-27_finding-code-context.md`). ON-DEMAND, not scan-time
+/// cached (see `onboard::finding_context` module docs for why): a handful of reads per triage
+/// session, always reflects the file as it exists now, zero LLM tokens (a pure local file
+/// read + deterministic parse).
+///
+/// Resolves the repo dir exactly like the git-status endpoints (`resolve_git_dir`'s sibling
+/// here, inlined so the "unlinked repo" case maps to `file_missing` rather than a distinct
+/// error shape); an unresolved repo is indistinguishable from "file missing" to the UI, which
+/// is the correct degradation per the design's table. All other failure modes (missing file,
+/// non-UTF8, oversized, the line no longer existing, or a path-traversal refusal) are computed
+/// by `onboard::finding_context::lookup` and returned as `{ "status": "...", "reason": "..." }`
+/// — see that module for the floor guarantee. Path traversal is the only case that gets a
+/// non-200: everything else is 200 with a `status` field, exactly like every other onboard
+/// endpoint, so the UI's normal JSON-parsing path handles every case uniformly.
+async fn onboard_finding_context(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<FindingContextQuery>,
+) -> impl IntoResponse {
+    let override_path = state.settings.repo_path(&q.repo);
+    let workspace_root = state.settings.workspace_root();
+    let Some(repo_dir) = crate::workspace::resolve_repo_dir(
+        override_path.as_deref(),
+        workspace_root.as_deref(),
+        &q.repo,
+    ) else {
+        // Unlinked project / repo path unresolved — treated as file_missing (design §5).
+        return (
+            StatusCode::OK,
+            Json(crate::onboard::finding_context::FindingContextOutcome::FileMissing.to_json()),
+        );
+    };
+
+    let outcome =
+        crate::onboard::finding_context::lookup(&repo_dir, &q.path, q.line, q.expect.as_deref())
+            .await;
+    let status = if matches!(
+        outcome,
+        crate::onboard::finding_context::FindingContextOutcome::PathTraversal
+    ) {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::OK
+    };
+    (status, Json(outcome.to_json()))
+}
+
+/// Query parameters for `GET /api/onboard/finding-fix`.
+#[derive(serde::Deserialize)]
+struct FindingFixQuery {
+    rule_id: String,
+}
+
+/// `GET /api/onboard/finding-fix?rule_id=` — the recommended-fix lookup for the scan-review
+/// finding modal. Resolves `rule_id` against the loaded corpus via
+/// [`crate::report_export::resolve_fix`] — the EXACT SAME function the PDF's "Fix:" line and
+/// the xlsx "Recommended Fix" column call. Routing the modal through this endpoint (rather
+/// than having the UI re-derive the join over its own copy of the corpus) is what guarantees
+/// byte-identical output across all three surfaces: one function, three callers, never a
+/// second divergent computation.
+///
+/// Always 200; body is `{ "fix": "..." }`, empty (never fabricated) when the corpus is
+/// absent, the rule id has no corpus entry, or the rule has no adopted default option/
+/// directive — same degrade-soft contract as `resolve_fix` itself. No project/repo
+/// resolution needed (the corpus is global, not per-project), so unlike
+/// `onboard_finding_context` this handler takes no `State`.
+async fn onboard_finding_fix(
+    axum::extract::Query(q): axum::extract::Query<FindingFixQuery>,
+) -> impl IntoResponse {
+    let corpus_path = camerata_rules::corpus_path();
+    let corpus = if corpus_path.exists() {
+        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+    } else {
+        None
+    };
+    let fix = crate::report_export::resolve_fix(&q.rule_id, corpus.as_ref());
+    Json(serde_json::json!({ "fix": fix }))
+}
+
 #[derive(serde::Deserialize)]
 struct DetectRepoReq {
     path: String,
@@ -6522,8 +6760,32 @@ fn ci_story_body_architectural(repo: &str, rules: &[CiStoryRule]) -> String {
          **Rules that need a custom checker:**\n\
          {rule_lines}\n\
          ---\n\n\
+         ## Before you build anything: `camerata-check` may already cover this\n\n\
+         Camerata ships a growing set of NATIVE deterministic checkers for rules in this exact \
+         tier (Rust/TS/JS/Python AST + Supabase migration-timeline replay — see \
+         `docs/design/2026-07-27_ast-extractor-layer.md`). Some of the rules listed above may \
+         already be answered by one of them with zero custom-checker work. Before writing a \
+         bespoke script, run the `camerata-check` binary (Layer-3 parity distributable, \
+         `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.4) against this \
+         repo:\n\n\
+         ```sh\n\
+         camerata-check . --format json\n\
+         ```\n\n\
+         - Exit `0` and no matching finding in the output → check whether the rule id is one \
+         `camerata-check` doesn't own yet (`unmatched_rule_ids` in the JSON) before assuming \
+         it's clean — an unmatched id still needs the bespoke-checker path below.\n\
+         - A non-zero exit with the rule id present in `violations` → the native checker \
+         already covers this rule; skip Steps 1-2 below and wire `camerata-check` straight into \
+         CI (see the snippet at the end of this story) instead of building anything.\n\n\
+         A handful of rules are DELIBERATELY not covered by any native checker and stay \
+         AI-review-only by design (not an oversight) — e.g. `ARCH-STRUCTURED-ERRORS-1` (the \
+         honest mechanism is a runtime contract test, not static analysis) and \
+         `ARCH-EXACT-DECIMALS-1` (needs a project-specific `[decimals]` config annotation before \
+         it's checkable at all). For those, the bespoke-checker path below is still correct.\n\n\
+         ---\n\n\
          ## How to implement each rule (step-by-step)\n\n\
-         For each rule in the list above, follow this process:\n\n\
+         For each rule in the list above that `camerata-check` does NOT already cover, follow \
+         this process:\n\n\
          ### Step 1 — Design the deterministic checker\n\n\
          Choose a strategy that returns **exit 0 on pass, non-zero on violation**, with \
          CWD = repo root. Options (not exhaustive):\n\n\
@@ -6580,6 +6842,22 @@ fn ci_story_body_architectural(repo: &str, rules: &[CiStoryRule]) -> String {
          in_loop  = true\n\
          # tool / version / install omitted when no external binary is required\n\
          ```\n\n\
+         If `camerata-check` already covers the rule (see the section above), register IT as \
+         the tool instead of a bespoke script — no design phase needed:\n\n\
+         ```toml\n\
+         [[check]]\n\
+         id       = \"SUPABASE-RLS-ENABLED-1\"    # any rule id camerata-check's registry answers\n\
+         name     = \"Supabase RLS (native camerata-check)\"\n\
+         tool     = \"camerata-check\"\n\
+         version  = \"<pinned release/build>\"    # pin however you distribute the binary\n\
+         command  = \"camerata-check . --rule-id SUPABASE-RLS-ENABLED-1\"\n\
+         severity = \"critical\"\n\
+         in_loop  = true\n\
+         ```\n\n\
+         > **Note:** `camerata-check` itself is a release-ops follow-up (no crates.io/binary \
+         > publish pipeline exists yet) — for now, build it from source \
+         > (`cargo build --release -p camerata-check`) and vendor or cache the resulting binary \
+         > in your CI image; `install` above should reflect however your team distributes it.\n\n\
          > **Gate protection:** `.camerata/checks.toml` is protected by `SEC-NO-CAMERATA-CONFIG-1`. \
          > Agents cannot write to `.camerata/`. This manifest edit MUST be a human/operator \
          > commit.\n\n\
@@ -7800,6 +8078,7 @@ async fn draft_routine_prompt(
         state.credential_store.as_ref(),
         std::sync::Arc::new(state.llm()),
         state.rate_limiter.clone(),
+        &state.settings.provider_policy(),
     )
     .unwrap_or_else(|_| std::sync::Arc::new(state.llm()));
     match completer
@@ -7973,6 +8252,7 @@ async fn chat_escalation(
         state.credential_store.as_ref(),
         std::sync::Arc::new(state.llm()),
         state.rate_limiter.clone(),
+        &state.settings.provider_policy(),
     )
     .unwrap_or_else(|_| std::sync::Arc::new(state.llm()));
     let reply = match completer
@@ -8219,6 +8499,124 @@ async fn refresh_model_registry(
     })
 }
 
+// ── Provider-safety (Pass 2 UI data source) ─────────────────────────────────────
+//
+// Thin routes over the Pass-1 `camerata_llm::ModelRegistry` / `SettingsStore` seams (see
+// `docs/design/2026-07-28_openrouter-provider-safety.md`'s "Pass 2" section). Neither
+// route touches enforcement — `provider_policy::provider_constraint_for_request` (the
+// trust core) reads the SAME `ModelRegistry` cache and `SettingsStore` these routes
+// read/write, so the picker can never show a state the enforcement path disagrees with.
+
+/// One provider's picker-facing record: the full joined pricing + data-policy fields the
+/// UI needs to render a row (name, region flag, cost, safety badge). Mirrors
+/// `camerata_llm::model_registry::ProviderEndpointInfo` field-for-field; kept as a
+/// separate wire type (rather than deriving `Serialize` on the lib type) so the JSON
+/// shape is a deliberate, documented contract independent of the internal struct.
+#[derive(serde::Serialize)]
+struct ProviderEndpointWire {
+    slug: String,
+    name: String,
+    region: Option<String>,
+    price_in: f64,
+    price_out: f64,
+    training: bool,
+    retains_prompts: bool,
+}
+
+#[derive(serde::Serialize)]
+struct ModelProvidersResp {
+    model_id: String,
+    /// Every provider currently serving `model_id`, per OpenRouter's `/endpoints` +
+    /// `/all-providers` join. Empty means either the model has no OpenRouter provider
+    /// data at all, or the lazy fetch failed — the UI treats both as "provider data
+    /// unavailable" and falls back to Auto (safe/fail-closed enforcement is unaffected
+    /// either way; it lives server-side in `provider_policy::provider_constraint_for_request`,
+    /// not in what this endpoint happens to return).
+    providers: Vec<ProviderEndpointWire>,
+}
+
+#[derive(serde::Deserialize)]
+struct ModelProvidersQuery {
+    model_id: String,
+}
+
+/// `GET /api/models/providers?model_id=<id>` — the Pass-2 provider picker's data source.
+/// Triggers the lazy per-model OpenRouter provider-safety fetch
+/// (`ModelRegistry::ensure_safe_providers_loaded`) if `model_id`'s data isn't already
+/// cached in this process, then returns the full per-provider record list
+/// (`ModelRegistry::provider_endpoints_for`) for the picker to render rows from. `model_id`
+/// is a query param (not a path segment) because OpenRouter model ids contain `/`
+/// (e.g. `deepseek/deepseek-chat`), which axum path routing does not accept unescaped.
+async fn get_model_providers(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<ModelProvidersQuery>,
+) -> Json<ModelProvidersResp> {
+    let api_key = state
+        .credential_store
+        .get(crate::credentials::OPENROUTER_API_KEY)
+        .ok()
+        .flatten()
+        .filter(|k| !k.trim().is_empty());
+    state
+        .model_registry
+        .ensure_safe_providers_loaded(api_key.as_deref(), &q.model_id)
+        .await;
+    let providers = state
+        .model_registry
+        .provider_endpoints_for(&q.model_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| ProviderEndpointWire {
+            slug: e.provider_slug,
+            name: e.provider_name,
+            region: e.region,
+            price_in: e.price_in,
+            price_out: e.price_out,
+            training: e.training,
+            retains_prompts: e.retains_prompts,
+        })
+        .collect();
+    Json(ModelProvidersResp {
+        model_id: q.model_id,
+        providers,
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct ProviderPolicyReq {
+    safe_mode: bool,
+    #[serde(default)]
+    pinned_provider: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ProviderPolicyResp {
+    safe_mode: bool,
+    pinned_provider: Option<String>,
+}
+
+/// `POST /api/settings/provider-policy` — persist the OpenRouter provider-safety policy
+/// (the §3 settings-panel "Data safety" toggle + optional provider pin). Purely a
+/// persistence seam: an unsafe/unknown pin is NOT rejected here — the enforcement layer
+/// (`provider_policy::provider_constraint_for_request`) already drops an unsafe pin at
+/// request-build time (never widens the constraint), so this handler's only job is to
+/// store whatever the UI sends. Blank `pinned_provider` values collapse to `None`, same
+/// convention as the other settings setters in this file (e.g. `set_chat_model`).
+async fn set_provider_policy_handler(
+    State(state): State<AppState>,
+    Json(req): Json<ProviderPolicyReq>,
+) -> Json<ProviderPolicyResp> {
+    let pinned_provider = req.pinned_provider.filter(|p| !p.trim().is_empty());
+    let updated = state.settings.set_provider_policy(camerata_llm::provider_policy::ProviderPolicy {
+        safe_mode: req.safe_mode,
+        pinned_provider,
+    });
+    Json(ProviderPolicyResp {
+        safe_mode: updated.provider_policy.safe_mode,
+        pinned_provider: updated.provider_policy.pinned_provider,
+    })
+}
+
 /// One prior turn in a research-chat conversation, sent by the UI with each POST so the
 /// model has memory of the thread. role must be "user" or "assistant".
 #[derive(serde::Deserialize, Clone, PartialEq, Debug)]
@@ -8335,6 +8733,7 @@ async fn chat(
         state.credential_store.as_ref(),
         std::sync::Arc::new(state.llm()),
         state.rate_limiter.clone(),
+        &state.settings.provider_policy(),
     )
     .map_err(AppError)?;
     // Embed history into the prompt when prior turns exist; otherwise use the bare prompt.
@@ -8409,6 +8808,11 @@ struct SettingsResp {
     /// `anthropic_api_key` credential) or the `ANTHROPIC_API_KEY` env var. See
     /// [`anthropic_api_key_present`].
     api_key_present: bool,
+    /// OpenRouter provider-safety policy (Pass 2 §3): the current `safe_mode` + pinned
+    /// provider. Read by the credentials-panel toggle and the provider picker (both need
+    /// to know the current posture to render correctly — e.g. greying unsafe rows).
+    safe_mode: bool,
+    pinned_provider: Option<String>,
 }
 
 /// The current app settings (incl. the workspace root), plus the effective LLM backend and
@@ -8422,6 +8826,8 @@ async fn get_settings(State(state): State<AppState>) -> Json<SettingsResp> {
         chat_model: settings.chat_model,
         llm_backend,
         api_key_present: anthropic_api_key_present(state.credential_store.as_ref()),
+        safe_mode: settings.provider_policy.safe_mode,
+        pinned_provider: settings.provider_policy.pinned_provider,
     })
 }
 
@@ -8554,6 +8960,10 @@ async fn set_credential(
             })),
         );
     }
+    // OpenRouter refresh trigger 2 of 3 (see the block above `serve()`): a freshly-saved
+    // OpenRouter key should populate the model picker immediately, not after a restart or
+    // a manual refresh-endpoint POST. No-op for every other credential name.
+    trigger_openrouter_refresh_if_needed(&name, &state.model_registry, state.credential_store.clone());
     // ROUTES-9: this handler used to `std::env::set_var("ANTHROPIC_API_KEY", ...)` so a
     // freshly-saved key took effect for the `api` backend without a restart. That mutated
     // process-global env from a request-handler thread while worker threads read the same var
@@ -13765,6 +14175,340 @@ fn render_deep_report_markdown(deep: &crate::ai_audit::DeepReport, soc2_enabled:
     md
 }
 
+// ── Audit-report (PDF) export ────────────────────────────────────────────────
+
+/// Request body for `POST /api/projects/:id/audit-report`. Dispositions are POSTed by the
+/// client because triage state is client-local until Process (see `crate::report_export`'s
+/// module doc) — there is no server-side disposition store.
+#[derive(serde::Deserialize)]
+struct AuditReportReq {
+    #[serde(default)]
+    dispositions: std::collections::HashMap<String, crate::report_export::DispositionWire>,
+    #[serde(default)]
+    options: crate::report_export::ReportOptions,
+}
+
+/// `POST /api/projects/:id/audit-report` — export the project's last scan as a
+/// client-facing/board-forwardable PDF. Body: `{ dispositions, options }` (see
+/// [`AuditReportReq`]). Re-derives the report from `last_scan` + the POSTed dispositions on
+/// every call; nothing is persisted server-side (re-export = re-run this handler).
+///
+/// 404s when the project doesn't exist or has no completed scan yet. 500s (with a plain-
+/// text-ish JSON message) when `typst` isn't installed or the compile otherwise fails —
+/// see `report_export::compile_pdf`'s fail-soft contract.
+async fn export_audit_report(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AuditReportReq>,
+) -> Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    if state.projects.get(&id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+        )
+            .into_response();
+    }
+
+    let Some(report) = state.get_last_scan(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": "No scan results available for this project. Run an audit first."
+            })),
+        )
+            .into_response();
+    };
+
+    // Best-effort corpus load for the citation join (§4.4) — mirrors `split_scannable_rules`'
+    // own fallback: a missing/unreadable corpus degrades every citation to "AI-advisory,
+    // model-inferred." rather than failing the export.
+    let corpus_path = camerata_rules::corpus_path();
+    let corpus = if corpus_path.exists() {
+        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+    } else {
+        None
+    };
+
+    let json = crate::report_export::build_report_json(
+        &report,
+        &req.dispositions,
+        corpus.as_ref(),
+        &req.options,
+    );
+
+    let pdf_bytes = match crate::report_export::compile_pdf(&json).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let filename = format!("{}.pdf", report_filename_stem(&report));
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/pdf".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        pdf_bytes,
+    )
+        .into_response()
+}
+
+/// `camerata-audit-{repo-slug}-{short-sha}` (no extension) — the shared filename stem for
+/// EVERY audit-export artifact (the standalone PDF, and the product-export ZIP; the
+/// workbook inside the zip gets its own `-findings` infix, see [`export_product`]). Kept as
+/// ONE function so the PDF route and the product-export route can never derive two
+/// different names for what is, underneath, the exact same scan.
+fn report_filename_stem(report: &crate::onboard::ScanReport) -> String {
+    let repo_slug = report
+        .repos
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "repo".to_string())
+        .replace('/', "-");
+    let short_sha = report
+        .provenance
+        .audited_refs
+        .first()
+        .and_then(|r| r.sha.as_deref())
+        .map(|s| s.chars().take(7).collect::<String>())
+        .unwrap_or_else(|| "nosha".to_string());
+    format!("camerata-audit-{repo_slug}-{short_sha}")
+}
+
+/// `POST /api/projects/:id/product-export` — the primary export button's target: a ZIP
+/// containing the SAME curated PDF `/audit-report` produces, a fully-formatted Excel
+/// workbook (the uncut dataset — every finding, false positives on their own sheet,
+/// per-category sheets, a full coverage sheet), and a short `README.txt` manifest. Body,
+/// 404/500 contract, and re-derivation-on-every-call semantics are identical to
+/// [`export_audit_report`] (see [`AuditReportReq`]) — this handler just builds BOTH
+/// artifacts from the same `build_report_json` pass instead of one.
+///
+/// If `compile_pdf` fails (typst missing/erroring), the whole export fails with the same
+/// 500 message the PDF-only route uses today — a half-product (xlsx-only zip) is a support
+/// headache, and the error message already tells the user how to fix it (install typst).
+async fn export_product(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AuditReportReq>,
+) -> Response {
+    use axum::http::{header, StatusCode};
+    use axum::response::IntoResponse;
+
+    if state.projects.get(&id).is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+        )
+            .into_response();
+    }
+
+    let Some(report) = state.get_last_scan(&id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "message": "No scan results available for this project. Run an audit first."
+            })),
+        )
+            .into_response();
+    };
+
+    let corpus_path = camerata_rules::corpus_path();
+    let corpus = if corpus_path.exists() {
+        Some(camerata_rules::load_corpus_lenient(&corpus_path).await.0)
+    } else {
+        None
+    };
+
+    let json = crate::report_export::build_report_json(
+        &report,
+        &req.dispositions,
+        corpus.as_ref(),
+        &req.options,
+    );
+
+    let pdf_bytes = match crate::report_export::compile_pdf(&json).await {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    let xlsx_bytes = match crate::xlsx_export::build_workbook(
+        &report,
+        &req.dispositions,
+        corpus.as_ref(),
+        &req.options,
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({ "ok": false, "message": e.to_string() })),
+            )
+                .into_response();
+        }
+    };
+
+    // `findings.json`: the machine-readable sibling of the workbook's "All Findings" sheet.
+    // Built from the SAME `report`/`dispositions`/`corpus` pass as `xlsx_bytes` above (and
+    // reuses `json`'s already-computed cover/executive-summary for provenance/summary), so
+    // the JSON can never disagree with either the PDF or the xlsx — see
+    // `xlsx_export::build_findings_export`'s doc comment.
+    let findings_export = crate::xlsx_export::build_findings_export(
+        &report,
+        &req.dispositions,
+        corpus.as_ref(),
+        &json,
+    );
+    let findings_json_bytes = match serde_json::to_vec_pretty(&findings_export) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "message": format!("could not serialize findings.json: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let stem = report_filename_stem(&report);
+    let readme = product_export_readme(&stem, &json);
+
+    let zip_bytes = match build_product_zip(
+        &stem,
+        &pdf_bytes,
+        &xlsx_bytes,
+        &findings_json_bytes,
+        &readme,
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "message": format!("could not assemble the product export zip: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let filename = format!("{stem}.zip");
+
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/zip".to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        zip_bytes,
+    )
+        .into_response()
+}
+
+/// The README.txt manifest bundled inside the product-export zip: what each file is, who
+/// it's for, the repo(s)/SHA/generated-at, and the advisory disclaimer (verbatim, reused
+/// from `report_export::AUDIT_REPORT_DISCLAIMER` — never a second, drifting copy of that
+/// paragraph).
+fn product_export_readme(stem: &str, json: &crate::report_export::AuditReportJson) -> String {
+    format!(
+        "Camerata Audit — Product Export\n\
+         ================================\n\
+         \n\
+         This ZIP contains three artifacts derived from the SAME audit scan:\n\
+         \n\
+         {stem}.pdf\n\
+         \x20 The curated NARRATIVE report: cover, executive summary, category scorecard,\n\
+         \x20 severity x effort matrix, curated findings with citations and recommended\n\
+         \x20 fixes, what's healthy, dependency snapshot, and methodology. Intended for a\n\
+         \x20 board / buyer / decision-maker. False positives are excluded throughout and\n\
+         \x20 counted once, in the methodology section.\n\
+         \n\
+         {stem}-findings.xlsx\n\
+         \x20 The COMPLETE working dataset: every finding as its own row, sortable and\n\
+         \x20 filterable, with a per-category sheet, a Dependencies sheet, a Coverage sheet\n\
+         \x20 (every rule audited this run, found or not), and a False Positives sheet\n\
+         \x20 (with the auditor's exclusion reasons — nothing is silently dropped). Intended\n\
+         \x20 for the engineers doing remediation.\n\
+         \n\
+         findings.json\n\
+         \x20 The MACHINE-READABLE version of the xlsx's \"All Findings\" data: the same\n\
+         \x20 rows (severity, category, repo/path/line, snippet, detail, recommended fix,\n\
+         \x20 disposition, effort, confidence, citation, ...), wrapped with the report's\n\
+         \x20 provenance and summary counts. Intended for scripting / CI ingestion / a\n\
+         \x20 client's own tooling — never disagrees with the xlsx, since both are built\n\
+         \x20 from the same pass over the scan.\n\
+         \n\
+         Repos audited: {}\n\
+         Generated: {}\n\
+         \n\
+         {}\n",
+        json.cover.repos.join(", "),
+        json.cover.generated_at,
+        crate::report_export::AUDIT_REPORT_DISCLAIMER,
+    )
+}
+
+/// Zip the PDF + xlsx + `findings.json` + README.txt into one in-memory archive (Deflate
+/// compression) for the product-export response body. The ONLY I/O here is the in-memory
+/// `Cursor<Vec<u8>>` — no temp files, matching `report_export`'s own "tiny, no persistence"
+/// contract.
+fn build_product_zip(
+    stem: &str,
+    pdf_bytes: &[u8],
+    xlsx_bytes: &[u8],
+    findings_json_bytes: &[u8],
+    readme: &str,
+) -> zip::result::ZipResult<Vec<u8>> {
+    use std::io::Write;
+
+    let buf = std::io::Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(buf);
+    let options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    writer.start_file(format!("{stem}.pdf"), options)?;
+    writer.write_all(pdf_bytes)?;
+
+    writer.start_file(format!("{stem}-findings.xlsx"), options)?;
+    writer.write_all(xlsx_bytes)?;
+
+    writer.start_file("findings.json", options)?;
+    writer.write_all(findings_json_bytes)?;
+
+    writer.start_file("README.txt", options)?;
+    writer.write_all(readme.as_bytes())?;
+
+    let cursor = writer.finish()?;
+    Ok(cursor.into_inner())
+}
+
 // ── error type ──────────────────────────────────────────────────────────────
 
 /// A handler error carrying an explicit HTTP status + a JSON body, so handlers can use `?`.
@@ -13999,6 +14743,151 @@ mod tests {
             "the handler must not mutate CAMERATA_LLM_BACKEND"
         );
         std::env::remove_var("CAMERATA_LLM_BACKEND");
+    }
+
+    // ── Pass 2 (provider-safety UI): settings routes + the picker's data route ──────
+
+    /// `GET /api/settings` surfaces the provider-safety policy's default (safe_mode=true,
+    /// no pin) when nothing has ever been set — the same fail-safe guarantee
+    /// `SettingsStore::provider_policy` gives at the store layer, now visible over HTTP.
+    #[tokio::test]
+    async fn get_settings_includes_default_safe_mode_and_no_pin() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/settings")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["safe_mode"], true);
+        assert!(json["pinned_provider"].is_null());
+    }
+
+    /// `POST /api/settings/provider-policy` persists both fields and echoes them; the
+    /// store reflects the new value afterward.
+    #[tokio::test]
+    async fn post_provider_policy_persists_safe_mode_and_pin() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/settings/provider-policy")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"safe_mode":false,"pinned_provider":"deepinfra"}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["safe_mode"], false);
+        assert_eq!(json["pinned_provider"], "deepinfra");
+
+        let stored = state.settings.provider_policy();
+        assert!(!stored.safe_mode);
+        assert_eq!(stored.pinned_provider.as_deref(), Some("deepinfra"));
+    }
+
+    /// A blank/whitespace `pinned_provider` collapses to `None` — same convention as
+    /// `set_chat_model` / `set_llm_backend` elsewhere in this file.
+    #[tokio::test]
+    async fn post_provider_policy_blank_pin_collapses_to_none() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/settings/provider-policy")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"safe_mode":true,"pinned_provider":"   "}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert!(json["pinned_provider"].is_null());
+        assert_eq!(state.settings.provider_policy().pinned_provider, None);
+    }
+
+    /// `GET /api/models/providers?model_id=...` returns the joined provider records from
+    /// the (test-seeded) registry cache — no live network call. Seeds via
+    /// `ModelRegistry::seed_provider_endpoints`, the same test-only seam
+    /// `crates/llm/src/model_registry.rs` uses.
+    #[tokio::test]
+    async fn get_model_providers_returns_seeded_endpoint_records() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state.model_registry.seed_provider_endpoints(
+            "deepseek/deepseek-chat",
+            vec![crate::model_registry::ProviderEndpointInfo {
+                provider_slug: "deepinfra".to_string(),
+                provider_name: "DeepInfra".to_string(),
+                region: Some("US".to_string()),
+                training: false,
+                retains_prompts: false,
+                price_in: 0.14,
+                price_out: 0.28,
+            }],
+        );
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/models/providers?model_id=deepseek%2Fdeepseek-chat")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["model_id"], "deepseek/deepseek-chat");
+        let providers = json["providers"].as_array().expect("providers array");
+        assert_eq!(providers.len(), 1);
+        assert_eq!(providers[0]["slug"], "deepinfra");
+        assert_eq!(providers[0]["name"], "DeepInfra");
+        assert_eq!(providers[0]["region"], "US");
+        assert_eq!(providers[0]["training"], false);
+        assert_eq!(providers[0]["retains_prompts"], false);
+        assert!((providers[0]["price_in"].as_f64().unwrap() - 0.14).abs() < 1e-9);
+    }
+
+    /// A model with no cached provider data returns an empty `providers` array (not an
+    /// error) — the UI's "provider data unavailable, fall back to Auto" path reads this as
+    /// the degrade-gracefully signal, per the design doc's §5 requirement. Seeds an EMPTY
+    /// endpoint list directly (the same shape a failed/empty live fetch would cache) so
+    /// this stays a no-network unit test rather than hitting the real OpenRouter API.
+    #[tokio::test]
+    async fn get_model_providers_empty_for_unknown_model_does_not_error() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state
+            .model_registry
+            .seed_provider_endpoints("not-a-real-model", vec![]);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/models/providers?model_id=not-a-real-model")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["model_id"], "not-a-real-model");
+        assert_eq!(json["providers"].as_array().unwrap().len(), 0);
     }
 
     // ── `effective_workspace_root` (workspace-folder-derivation fix) ─────────────
@@ -19548,6 +20437,37 @@ mod tests {
         );
     }
 
+    // ── Pass 5: camerata-check distributable (Layer-3 CI parity) ──────────────
+
+    #[test]
+    fn architectural_body_mentions_camerata_check_distributable() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        assert!(
+            body.contains("camerata-check"),
+            "architectural body must tell teams to check whether camerata-check already \
+             covers the rule before hand-building a checker"
+        );
+    }
+
+    #[test]
+    fn architectural_body_camerata_check_manifest_example_present() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        assert!(
+            body.contains("tool     = \"camerata-check\""),
+            "architectural body must show how to register camerata-check as the manifest tool"
+        );
+    }
+
+    #[test]
+    fn architectural_body_still_names_bespoke_checker_path_for_group_e() {
+        let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
+        assert!(
+            body.contains("ARCH-STRUCTURED-ERRORS-1") || body.contains("ARCH-EXACT-DECIMALS-1"),
+            "architectural body must still name the rules deliberately left uncovered by any \
+             native checker, so teams know the bespoke-checker path is still correct for them"
+        );
+    }
+
     #[test]
     fn architectural_body_teaches_regenerate_workflow_step() {
         let body = ci_story_body_architectural("owner/repo", &architectural_rules_fixture());
@@ -20129,6 +21049,7 @@ mod tests {
             repos: vec!["owner/repo".to_string()],
             stacks: Vec::new(),
             files_scanned: 1,
+            test_file_count: 0,
             files_excluded: 0,
             code_chars: 100,
             excluded_mechanical_rules: Vec::new(),
@@ -20146,6 +21067,10 @@ mod tests {
                 preview_tool: None,
                 in_test: false,
                 needs_review: false,
+                confidence: None,
+                effort: None,
+                category: None,
+                located: true,
             }],
             proposed_rules: Vec::new(),
             gated: false,
@@ -20153,6 +21078,7 @@ mod tests {
             actual_usage: None,
             deep: None,
             coverage_notes: Vec::new(),
+            provenance: crate::onboard::ScanProvenance::default(),
         }
     }
 
@@ -20193,6 +21119,154 @@ mod tests {
         assert_eq!(a.findings[0].rule_id, "RULE-A");
         assert_eq!(b.findings[0].rule_id, "RULE-B");
         assert!(state.get_last_scan("proj-C").is_none());
+    }
+
+    // ── Product export (PDF + Excel workbook, zipped) ─────────────────────────────
+
+    /// Best-effort `typst` presence check (mirrors `report_export`'s own internal test
+    /// gate) — the PDF-compile stage of the happy-path product-export test skips
+    /// gracefully rather than hard-failing CI environments without Typst installed.
+    fn typst_on_path() -> bool {
+        std::process::Command::new("typst")
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .is_some()
+    }
+
+    #[tokio::test]
+    async fn product_export_404s_when_project_does_not_exist() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let resp = export_product(
+            axum::extract::State(state),
+            axum::extract::Path("nope".to_string()),
+            axum::Json(AuditReportReq {
+                dispositions: std::collections::HashMap::new(),
+                options: crate::report_export::ReportOptions::default(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn product_export_404s_when_no_scan_available() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let project = state.projects.create("Acme", vec![]).expect("project created");
+        let resp = export_product(
+            axum::extract::State(state),
+            axum::extract::Path(project.id),
+            axum::Json(AuditReportReq {
+                dispositions: std::collections::HashMap::new(),
+                options: crate::report_export::ReportOptions::default(),
+            }),
+        )
+        .await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "no last_scan yet -> 404, same contract as /audit-report"
+        );
+    }
+
+    /// End-to-end: the product-export ZIP contains a real `%PDF`-magic PDF, a real
+    /// `PK`-magic xlsx (itself a zip container), and a README.txt naming both. Gated on
+    /// `typst` being on PATH (the PDF half needs it); the workbook half runs unconditionally
+    /// via the other degenerate-input tests in `xlsx_export`.
+    #[tokio::test]
+    async fn product_export_zip_contains_a_real_pdf_xlsx_and_readme() {
+        if !typst_on_path() {
+            eprintln!(
+                "product_export_zip_contains_a_real_pdf_xlsx_and_readme: skipping — typst not \
+                 on PATH"
+            );
+            return;
+        }
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let project = state
+            .projects
+            .create("Acme", vec!["owner/repo".to_string()])
+            .expect("project created");
+        state.set_last_scan(project.id.clone(), make_scan_report("SEC-NO-HARDCODED-SECRETS-1"));
+
+        let resp = export_product(
+            axum::extract::State(state),
+            axum::extract::Path(project.id.clone()),
+            axum::Json(AuditReportReq {
+                dispositions: std::collections::HashMap::new(),
+                options: crate::report_export::ReportOptions::default(),
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "application/zip"
+        );
+        let content_disposition = resp
+            .headers()
+            .get(axum::http::header::CONTENT_DISPOSITION)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(content_disposition.contains(".zip"), "{content_disposition}");
+
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&bytes[0..2], b"PK", "the product export itself must be a valid zip");
+
+        use std::io::Read;
+        let mut archive =
+            zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).expect("valid zip");
+        let mut names: Vec<String> = (0..archive.len())
+            .map(|i| archive.by_index(i).unwrap().name().to_string())
+            .collect();
+        names.sort();
+        assert!(names.iter().any(|n| n.ends_with(".pdf")), "{names:?}");
+        assert!(names.iter().any(|n| n.ends_with("-findings.xlsx")), "{names:?}");
+        assert!(names.contains(&"findings.json".to_string()), "{names:?}");
+        assert!(names.contains(&"README.txt".to_string()), "{names:?}");
+
+        let pdf_name = names.iter().find(|n| n.ends_with(".pdf")).unwrap().clone();
+        let mut pdf_bytes = Vec::new();
+        archive.by_name(&pdf_name).unwrap().read_to_end(&mut pdf_bytes).unwrap();
+        assert!(pdf_bytes.starts_with(b"%PDF"), "the zipped PDF must carry the PDF magic bytes");
+
+        let xlsx_name = names.iter().find(|n| n.ends_with(".xlsx")).unwrap().clone();
+        let mut xlsx_bytes = Vec::new();
+        archive.by_name(&xlsx_name).unwrap().read_to_end(&mut xlsx_bytes).unwrap();
+        assert_eq!(
+            &xlsx_bytes[0..2],
+            b"PK",
+            "the zipped xlsx must itself be a valid zip container"
+        );
+
+        let mut findings_json_str = String::new();
+        archive
+            .by_name("findings.json")
+            .unwrap()
+            .read_to_string(&mut findings_json_str)
+            .unwrap();
+        let findings_json: serde_json::Value =
+            serde_json::from_str(&findings_json_str).expect("findings.json must be valid JSON");
+        assert!(findings_json.get("provenance").is_some(), "{findings_json_str}");
+        assert!(findings_json.get("summary").is_some(), "{findings_json_str}");
+        let findings_arr = findings_json
+            .get("findings")
+            .and_then(|f| f.as_array())
+            .expect("findings.json must have a findings array");
+        assert_eq!(
+            findings_arr.len(),
+            1,
+            "the one non-FP fixture finding must be the sole findings.json row: {findings_json_str}"
+        );
+
+        let mut readme = String::new();
+        archive.by_name("README.txt").unwrap().read_to_string(&mut readme).unwrap();
+        assert!(readme.contains(&pdf_name), "{readme}");
+        assert!(readme.contains(&xlsx_name), "{readme}");
+        assert!(readme.contains("findings.json"), "{readme}");
     }
 
     /// active_project_context returns scan_results_section from last_scan when no draft.
@@ -21004,6 +22078,83 @@ mod tests {
         );
         // The prefix appears.
         assert!(masked.starts_with("ghp_"), "masked starts with first 4 chars");
+    }
+
+    // ── OpenRouter registry-refresh triggers ────────────────────────────────────
+    //
+    // `is_openrouter_credential` and `trigger_openrouter_refresh_if_needed` are the
+    // gap fix: before this, `POST /api/models/registry/refresh` had zero callers, so a
+    // saved key never populated any picker until someone curled the endpoint by hand.
+    // These tests assert the DECISION synchronously rather than awaiting (and thereby
+    // racing, or making a live OpenRouter network call from) the task the trigger
+    // spawns — see the doc comments on both functions above `serve()`.
+
+    /// Pure name-matching predicate: only the OpenRouter credential name matches.
+    #[test]
+    fn is_openrouter_credential_matches_only_the_openrouter_key_name() {
+        assert!(is_openrouter_credential(crate::credentials::OPENROUTER_API_KEY));
+        assert!(!is_openrouter_credential(crate::credentials::GITHUB_TOKEN));
+        assert!(!is_openrouter_credential("anthropic_api_key"));
+        assert!(!is_openrouter_credential(""));
+    }
+
+    /// Saving the OpenRouter credential schedules a refresh (return value `true`). The
+    /// credential store passed in has NO key set, so even if the spawned task happens to
+    /// be polled before this test function returns, `try_refresh_from_store`'s own guard
+    /// no-ops immediately — this test can never make a live HTTP call, by construction.
+    #[tokio::test]
+    async fn trigger_openrouter_refresh_if_needed_schedules_for_the_openrouter_key() {
+        let model_registry = crate::model_registry::ModelRegistry::new();
+        let credential_store: Arc<dyn crate::credentials::CredentialStore> =
+            Arc::new(crate::credentials::MemoryCredentialStore::new());
+        let scheduled = trigger_openrouter_refresh_if_needed(
+            crate::credentials::OPENROUTER_API_KEY,
+            &model_registry,
+            credential_store,
+        );
+        assert!(scheduled, "saving the OpenRouter key must schedule a refresh");
+    }
+
+    /// Saving any OTHER credential must NOT schedule a refresh.
+    #[tokio::test]
+    async fn trigger_openrouter_refresh_if_needed_ignores_other_credentials() {
+        let model_registry = crate::model_registry::ModelRegistry::new();
+        let credential_store: Arc<dyn crate::credentials::CredentialStore> =
+            Arc::new(crate::credentials::MemoryCredentialStore::new());
+        let scheduled = trigger_openrouter_refresh_if_needed(
+            crate::credentials::GITHUB_TOKEN,
+            &model_registry,
+            credential_store,
+        );
+        assert!(!scheduled, "saving a non-OpenRouter credential must not schedule a refresh");
+    }
+
+    /// End-to-end through the real HTTP handler: saving a DIFFERENT credential (github_token)
+    /// must leave the OpenRouter registry cache untouched (`openrouter_fetched` stays false).
+    /// This is the safe half of the handler-level assertion — the openrouter_api_key case is
+    /// covered at the function level above instead of here, to avoid any chance of the
+    /// request handler's spawned task making a live call to openrouter.ai mid-test.
+    #[tokio::test]
+    async fn set_credential_for_non_openrouter_name_does_not_touch_the_registry_cache() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(!state.model_registry.openrouter_fetched());
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/credentials/github_token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"value":"ghp_unrelated_token"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            !state.model_registry.openrouter_fetched(),
+            "a non-OpenRouter credential save must never trigger a registry refresh"
+        );
     }
 
     /// ROUTES-9: saving the Anthropic key via `POST /api/credentials/anthropic_api_key`
@@ -22391,5 +23542,182 @@ mod tests {
             err.to_string().contains("internal sentinel leaked"),
             "clear sentinel error: {err}"
         );
+    }
+
+    // ── `GET /api/onboard/finding-context` (finding-code-context feature) ──────────
+
+    fn finding_context_state_with_fixture(repo: &str, rel_path: &str, content: &str) -> (AppState, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let full = tmp.path().join(rel_path);
+        std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+        std::fs::write(&full, content).unwrap();
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state
+            .settings
+            .set_repo_path(repo, Some(tmp.path().to_string_lossy().into_owned()));
+        (state, tmp)
+    }
+
+    /// Happy path: a real fixture file + a real finding line returns the enclosing function,
+    /// with the violation line, kind, and language all populated.
+    #[tokio::test]
+    async fn finding_context_returns_the_enclosing_block_for_a_real_fixture() {
+        let (state, _tmp) = finding_context_state_with_fixture(
+            "me/api",
+            "src/lib.rs",
+            "fn f() -> i32 {\n    let bad = 1;\n    bad\n}\n",
+        );
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboard/finding-context?repo=me%2Fapi&path=src%2Flib.rs&line=2")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "ok");
+        assert_eq!(json["kind"], "function");
+        assert_eq!(json["language"], "rust");
+        assert_eq!(json["start_line"], 1);
+        assert_eq!(json["end_line"], 4);
+        assert_eq!(json["violation_line"], 2);
+        assert!(json["lines"].as_array().unwrap().len() == 4);
+    }
+
+    /// A `../../etc/passwd`-style traversal in `path` is refused with 400, never a read.
+    #[tokio::test]
+    async fn finding_context_refuses_path_traversal() {
+        let (state, _tmp) = finding_context_state_with_fixture("me/api", "src/lib.rs", "fn f() {}\n");
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(
+                        "/api/onboard/finding-context?repo=me%2Fapi&path=..%2F..%2F..%2F..%2Fetc%2Fpasswd&line=1",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "path_traversal");
+    }
+
+    /// A repo with no local path set at all (never linked) degrades to `file_missing` — the
+    /// SAME shape the UI already handles, never a 500 or a distinct error surface.
+    #[tokio::test]
+    async fn finding_context_unresolved_repo_degrades_to_file_missing() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboard/finding-context?repo=me%2Fnever-linked&path=src%2Flib.rs&line=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "file_missing");
+    }
+
+    /// A file over the `MAX_FILE_BYTES` cap degrades to `too_large` rather than reading it.
+    #[tokio::test]
+    async fn finding_context_oversized_file_is_capped() {
+        let big = "x".repeat(crate::onboard::files::MAX_FILE_BYTES + 1);
+        let (state, _tmp) = finding_context_state_with_fixture("me/api", "src/huge.rs", &big);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboard/finding-context?repo=me%2Fapi&path=src%2Fhuge.rs&line=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "too_large");
+    }
+
+    /// A missing file (never written / already deleted) degrades to `file_missing`.
+    #[tokio::test]
+    async fn finding_context_missing_file_degrades_gracefully() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        state
+            .settings
+            .set_repo_path("me/api", Some(tmp.path().to_string_lossy().into_owned()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboard/finding-context?repo=me%2Fapi&path=src%2Fgone.rs&line=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["status"], "file_missing");
+    }
+
+    // ── `GET /api/onboard/finding-fix` (recommended-fix-in-modal feature) ──────────
+
+    /// A rule with a real corpus entry + adopted default option's directive returns that
+    /// directive verbatim — the SAME string `resolve_fix` (and therefore the PDF's "Fix:"
+    /// line and the xlsx "Recommended Fix" column) would produce for the same rule id.
+    #[tokio::test]
+    async fn finding_fix_returns_resolve_fix_output_for_a_known_rule() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboard/finding-fix?rule_id=SEC-NO-UNSAFE-DESERIALIZATION-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        let expected = crate::report_export::resolve_fix(
+            "SEC-NO-UNSAFE-DESERIALIZATION-1",
+            Some(&corpus),
+        );
+        assert!(!expected.is_empty(), "fixture rule must have a real corpus directive");
+        assert_eq!(json["fix"], expected);
+    }
+
+    /// A rule id absent from the corpus returns an EMPTY fix — never a fabricated sentence.
+    #[tokio::test]
+    async fn finding_fix_is_empty_for_an_unknown_rule() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboard/finding-fix?rule_id=NO-SUCH-RULE-EVER-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["fix"], "");
     }
 }

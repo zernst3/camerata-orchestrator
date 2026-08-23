@@ -1418,6 +1418,16 @@ pub struct OpenRouterCompleter {
     /// random token. Identical across all calls made by this instance so the router
     /// routes them to the same backend slot and the KV cache stays warm.
     session_id: String,
+    /// THE TRUST GUARANTEE (see `crate::provider_policy`): the OpenRouter provider-safety
+    /// policy in effect for every request this completer makes. Captured at construction
+    /// time — a completer models one run/session, and the design's session-scoped
+    /// safety-toggle semantics mean "the policy at the moment this run started" is the
+    /// correct thing to hold, not something re-read per call.
+    policy: crate::provider_policy::ProviderPolicy,
+    /// The shared model registry, used to resolve (and lazily fetch/cache) the live
+    /// safe-provider set for whichever model this completer is asked to call. Cheap to
+    /// clone (`Arc`-backed internally).
+    registry: crate::model_registry::ModelRegistry,
 }
 
 impl OpenRouterCompleter {
@@ -1430,14 +1440,23 @@ impl OpenRouterCompleter {
     ///
     /// `pub` (not `pub(crate)`) since the extraction into `camerata-llm`: the
     /// `ApiAgentDriver` caller lives in `camerata-server`, one crate up.
+    ///
+    /// `policy` and `registry` thread the OpenRouter provider-safety enforcement (see
+    /// `crate::provider_policy`) into every request this completer makes — callers
+    /// resolve `policy` from the app's persisted settings (safe by default) before
+    /// calling this, mirroring how `limiter` and `api_key` are already resolved upstream.
     pub fn for_agent(
         api_key: String,
         limiter: std::sync::Arc<crate::rate_limit::ProviderRateLimiter>,
+        policy: crate::provider_policy::ProviderPolicy,
+        registry: crate::model_registry::ModelRegistry,
     ) -> Self {
         Self {
             api_key,
             limiter,
             session_id: new_session_token(),
+            policy,
+            registry,
         }
     }
 
@@ -1466,6 +1485,23 @@ impl OpenRouterCompleter {
     /// in direct HTTP calls that bypass the `LlmPort` trait (the tool-schema path).
     pub fn session_id_for_agent(&self) -> String {
         self.session_id.clone()
+    }
+
+    /// Expose the provider-safety policy so the `ApiAgentDriver` (in `camerata-server`)
+    /// can reuse it when it builds the OpenRouter request body directly (the
+    /// tool-schema path, which bypasses `LlmPort::complete`/`call_api_inner` — see
+    /// `camerata_server::api_agent_driver::call_openrouter_with_tools`). This is the
+    /// SAME policy value `call_api_inner` enforces, so the two OpenRouter request-body
+    /// call sites can never disagree.
+    pub fn policy_for_agent(&self) -> crate::provider_policy::ProviderPolicy {
+        self.policy.clone()
+    }
+
+    /// Expose the model registry (for the live safe-provider lookup) to the
+    /// `ApiAgentDriver`'s direct-HTTP tool-schema path, for the same reason as
+    /// [`Self::policy_for_agent`].
+    pub fn registry_for_agent(&self) -> crate::model_registry::ModelRegistry {
+        self.registry.clone()
     }
 
     /// Call OpenRouter's `/api/v1/chat/completions` endpoint and return the completion.
@@ -1499,34 +1535,24 @@ impl OpenRouterCompleter {
         // return immediately; rate-limited ones park until a refill token is available.
         self.limiter.acquire("openrouter").await;
 
-        // Build the messages array. The system message gets a `cache_control` breakpoint
-        // so Anthropic-compatible models behind OpenRouter cache the static prefix once
-        // and serve it cheaply on subsequent calls within the same session.
-        let mut messages: Vec<serde_json::Value> = Vec::new();
-        if let Some(system) = &req.system {
-            messages.push(serde_json::json!({
-                "role": "system",
-                "content": [{
-                    "type": "text",
-                    "text": system,
-                    "cache_control": {"type": "ephemeral", "ttl": "1h"}
-                }]
-            }));
-        }
-        messages.push(serde_json::json!({
-            "role": "user",
-            "content": req.prompt
-        }));
+        // ── THE TRUST CORE: resolve the provider-safety constraint BEFORE building the
+        // request body. `ensure_safe_providers_loaded` is a cache-hit no-op after the
+        // first call for this model in this process; on a cache miss it fetches
+        // OpenRouter's per-model /endpoints + the shared /all-providers data-policy
+        // catalog. See `crate::provider_policy::provider_constraint_for_request` for the
+        // exact fail-closed contract this enforces (never an unconstrained request while
+        // safe_mode is on).
+        let safe_providers = self
+            .registry
+            .ensure_safe_providers_loaded(Some(&self.api_key), model)
+            .await;
+        let provider_constraint =
+            crate::provider_policy::provider_constraint_for_request(&self.policy, &safe_providers, model)
+                .map_err(|reason| {
+                    anyhow::anyhow!("OpenRouter provider-safety check refused this request: {reason}")
+                })?;
 
-        let body = serde_json::json!({
-            "model": model,
-            "max_tokens": req.max_tokens,
-            "messages": messages,
-            // Sticky routing: tells OpenRouter to route this session to the same backend
-            // slot so the KV cache stays warm from request #1. Must be stable within a
-            // run and distinct across independent runs.
-            "session_id": self.session_id,
-        });
+        let body = build_openrouter_chat_body(model, req, &self.session_id, provider_constraint);
 
         let mut builder = reqwest::Client::new()
             .post("https://openrouter.ai/api/v1/chat/completions")
@@ -1627,6 +1653,53 @@ impl LlmPort for OpenRouterCompleter {
     }
 }
 
+/// Build the exact JSON body posted to OpenRouter's `/api/v1/chat/completions`, given an
+/// already-resolved `provider_constraint` (from
+/// `crate::provider_policy::provider_constraint_for_request` — see the module docs for
+/// the fail-closed contract that produces it). Pure and synchronous: no I/O, so this is
+/// directly unit-testable without a mock HTTP server — see the `build_openrouter_chat_body`
+/// tests below for the request-body assertions (safe/pinned/off/fail-closed all the way
+/// through to the exact `provider` object, not just the sub-object).
+fn build_openrouter_chat_body(
+    model: &str,
+    req: &LlmRequest,
+    session_id: &str,
+    provider_constraint: Option<serde_json::Value>,
+) -> serde_json::Value {
+    // The system message gets a `cache_control` breakpoint so Anthropic-compatible
+    // models behind OpenRouter cache the static prefix once and serve it cheaply on
+    // subsequent calls within the same session.
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    if let Some(system) = &req.system {
+        messages.push(serde_json::json!({
+            "role": "system",
+            "content": [{
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral", "ttl": "1h"}
+            }]
+        }));
+    }
+    messages.push(serde_json::json!({
+        "role": "user",
+        "content": req.prompt
+    }));
+
+    let mut body = serde_json::json!({
+        "model": model,
+        "max_tokens": req.max_tokens,
+        "messages": messages,
+        // Sticky routing: tells OpenRouter to route this session to the same backend
+        // slot so the KV cache stays warm from request #1. Must be stable within a run
+        // and distinct across independent runs.
+        "session_id": session_id,
+    });
+    if let Some(constraint) = provider_constraint {
+        body["provider"] = constraint;
+    }
+    body
+}
+
 /// Generate a stable per-instance session token. Combines timestamp nanoseconds +
 /// a process-local counter for uniqueness within a process; cheap + collision-free.
 fn new_session_token() -> String {
@@ -1671,6 +1744,13 @@ pub fn build_completer(
     creds: &dyn crate::credentials::CredentialStore,
     llm: std::sync::Arc<Llm>,
     limiter: std::sync::Arc<crate::rate_limit::ProviderRateLimiter>,
+    // The OpenRouter provider-safety policy (see `crate::provider_policy`) — resolve
+    // from the app's persisted settings at the call site (e.g.
+    // `state.settings().provider_policy()` in `camerata-server`) and pass it in here.
+    // Ignored for the Claude path (Anthropic's API has no comparable per-request
+    // provider-routing surface); required (not optional) because callers should always
+    // have a real answer, even if it's just `ProviderPolicy::default()`.
+    policy: &crate::provider_policy::ProviderPolicy,
 ) -> anyhow::Result<std::sync::Arc<dyn LlmPort>> {
     let provider = registry
         .all_entries()
@@ -1692,10 +1772,12 @@ pub fn build_completer(
                     )
                 })?;
             Ok(std::sync::Arc::new(OpenRouterCompleter {
-            api_key: key,
-            limiter,
-            session_id: new_session_token(),
-        }))
+                api_key: key,
+                limiter,
+                session_id: new_session_token(),
+                policy: policy.clone(),
+                registry: registry.clone(),
+            }))
         }
         // "claude" or any unrecognised provider: use the existing Anthropic Llm.
         _ => Ok(llm),
@@ -1783,6 +1865,7 @@ pub async fn call_with_fallback(
     creds: &dyn crate::credentials::CredentialStore,
     llm: std::sync::Arc<Llm>,
     limiter: std::sync::Arc<crate::rate_limit::ProviderRateLimiter>,
+    policy: &crate::provider_policy::ProviderPolicy,
     base_req: LlmRequest,
 ) -> anyhow::Result<LlmResponse> {
     if chain.is_empty() {
@@ -1790,7 +1873,8 @@ pub async fn call_with_fallback(
     }
     let mut last_err = anyhow::anyhow!("call_with_fallback: no models tried");
     for model_id in chain {
-        let completer = build_completer(model_id, registry, creds, llm.clone(), limiter.clone())?;
+        let completer =
+            build_completer(model_id, registry, creds, llm.clone(), limiter.clone(), policy)?;
         let req = base_req.clone().with_model(model_id);
         match completer.complete(req).await {
             Ok(resp) => return Ok(resp),
@@ -2250,6 +2334,10 @@ malformed line, not json
         std::sync::Arc::new(crate::rate_limit::ProviderRateLimiter::new())
     }
 
+    fn default_policy() -> crate::provider_policy::ProviderPolicy {
+        crate::provider_policy::ProviderPolicy::default()
+    }
+
     /// When the model id is not in the registry at all, the factory defaults to the
     /// Anthropic Llm (safe fallback: unknown models stay on the existing path).
     #[test]
@@ -2258,7 +2346,8 @@ malformed line, not json
         let creds = crate::credentials::MemoryCredentialStore::new();
         let llm = make_llm();
 
-        let completer = build_completer("unknown-model-xyz", &registry, &creds, llm, make_limiter());
+        let completer =
+            build_completer("unknown-model-xyz", &registry, &creds, llm, make_limiter(), &default_policy());
         // Should succeed (no error for an unknown model — safe fallback to Anthropic).
         assert!(
             completer.is_ok(),
@@ -2275,7 +2364,8 @@ malformed line, not json
         // Note: no OPENROUTER_API_KEY set, yet this must not error.
         let llm = make_llm();
 
-        let completer = build_completer("claude-sonnet-4-6", &registry, &creds, llm, make_limiter());
+        let completer =
+            build_completer("claude-sonnet-4-6", &registry, &creds, llm, make_limiter(), &default_policy());
         assert!(
             completer.is_ok(),
             "claude-provider model must succeed even without an OpenRouter key"
@@ -2304,7 +2394,8 @@ malformed line, not json
         let creds = crate::credentials::MemoryCredentialStore::new();
         // No key set → error.
         let llm = make_llm();
-        let result = build_completer("qwen/qwen3-235b:free", &registry, &creds, llm, make_limiter());
+        let result =
+            build_completer("qwen/qwen3-235b:free", &registry, &creds, llm, make_limiter(), &default_policy());
         assert!(result.is_err(), "factory must error when key is absent");
         // Extract the error without relying on `T: Debug` (Arc<dyn LlmPort> is not Debug).
         let msg = match result {
@@ -2341,13 +2432,179 @@ malformed line, not json
             .set(crate::credentials::OPENROUTER_API_KEY, "sk-or-test-key")
             .unwrap();
         let llm = make_llm();
-        let completer = build_completer("qwen/qwen3-235b:free", &registry, &creds, llm, make_limiter())
-            .expect("factory must succeed when key is set");
+        let completer = build_completer(
+            "qwen/qwen3-235b:free",
+            &registry,
+            &creds,
+            llm,
+            make_limiter(),
+            &default_policy(),
+        )
+        .expect("factory must succeed when key is set");
         // Verify the concrete type is OpenRouterCompleter via downcast.
         assert!(
             completer.as_any().is::<OpenRouterCompleter>(),
             "expected an OpenRouterCompleter for an openrouter-provider model"
         );
+    }
+
+    // ── build_openrouter_chat_body: the FULL request body, not just the `provider`
+    // sub-object — proves the constraint (or its absence) lands correctly merged
+    // alongside `model`/`messages`/`session_id` in the exact body that would be posted.
+
+    fn sample_req() -> LlmRequest {
+        LlmRequest::new("do the audit".to_string())
+            .with_model("deepseek/deepseek-v4-pro")
+            .with_system("you are an auditor")
+    }
+
+    #[test]
+    fn chat_body_safe_mode_on_carries_data_collection_deny_and_only() {
+        let policy = default_policy(); // safe_mode: true, no pin
+        let safe = crate::provider_policy::SafeProviders::Known(vec![
+            "deepinfra".to_string(),
+            "novita".to_string(),
+        ]);
+        let constraint =
+            crate::provider_policy::provider_constraint_for_request(&policy, &safe, "m").unwrap();
+        let body = build_openrouter_chat_body(
+            "deepseek/deepseek-v4-pro",
+            &sample_req(),
+            "sess-123",
+            constraint,
+        );
+        assert_eq!(body["model"], "deepseek/deepseek-v4-pro");
+        assert_eq!(body["session_id"], "sess-123");
+        assert_eq!(body["provider"]["data_collection"], "deny");
+        assert_eq!(body["provider"]["only"], serde_json::json!(["deepinfra", "novita"]));
+        // The messages array is present and unaffected by the constraint injection.
+        assert!(body["messages"].as_array().unwrap().len() == 2);
+    }
+
+    #[test]
+    fn chat_body_safe_mode_off_has_no_provider_key_at_all() {
+        let policy = crate::provider_policy::ProviderPolicy {
+            safe_mode: false,
+            pinned_provider: None,
+        };
+        let constraint = crate::provider_policy::provider_constraint_for_request(
+            &policy,
+            &crate::provider_policy::SafeProviders::Unknown,
+            "m",
+        )
+        .unwrap();
+        assert_eq!(constraint, None);
+        let body = build_openrouter_chat_body("any/model", &sample_req(), "sess-1", constraint);
+        assert!(
+            body.get("provider").is_none(),
+            "safe_mode OFF must omit the `provider` key entirely, got: {body}"
+        );
+    }
+
+    #[test]
+    fn chat_body_safe_pin_narrows_only_to_the_pin() {
+        let policy = crate::provider_policy::ProviderPolicy {
+            safe_mode: true,
+            pinned_provider: Some("deepinfra".to_string()),
+        };
+        let safe = crate::provider_policy::SafeProviders::Known(vec![
+            "deepinfra".to_string(),
+            "novita".to_string(),
+        ]);
+        let constraint =
+            crate::provider_policy::provider_constraint_for_request(&policy, &safe, "m").unwrap();
+        let body = build_openrouter_chat_body("m", &sample_req(), "sess-1", constraint);
+        assert_eq!(body["provider"]["only"], serde_json::json!(["deepinfra"]));
+    }
+
+    /// SAFETY-CRITICAL: pinning an UNSAFE provider while safe_mode is ON must NOT widen
+    /// the request — the pin is dropped and the body stays restricted to the safe set.
+    /// This is the exact scenario the task calls out by name.
+    #[test]
+    fn chat_body_pinned_unsafe_provider_is_dropped_stays_restricted_to_safe_set() {
+        let policy = crate::provider_policy::ProviderPolicy {
+            safe_mode: true,
+            pinned_provider: Some("deepseek".to_string()), // trains + retains
+        };
+        let safe = crate::provider_policy::SafeProviders::Known(vec![
+            "deepinfra".to_string(),
+            "novita".to_string(),
+        ]);
+        let constraint =
+            crate::provider_policy::provider_constraint_for_request(&policy, &safe, "m").unwrap();
+        let body = build_openrouter_chat_body("m", &sample_req(), "sess-1", constraint);
+        let only = body["provider"]["only"].as_array().unwrap();
+        assert!(
+            !only.iter().any(|v| v == "deepseek"),
+            "unsafe pinned provider must never be emitted in the request body: {only:?}"
+        );
+        assert_eq!(only, &vec![
+            serde_json::Value::String("deepinfra".to_string()),
+            serde_json::Value::String("novita".to_string()),
+        ]);
+    }
+
+    /// FAIL-CLOSED at the body-builder call site: when the safe set is `Unknown`, the
+    /// constraint-resolution step errors BEFORE `build_openrouter_chat_body` is ever
+    /// called — there is no code path that reaches the HTTP POST with an unconstrained
+    /// body while safe_mode is on. This test proves the `Err` propagates all the way
+    /// through `OpenRouterCompleter::complete` without a live network call: the registry
+    /// is seeded with an EMPTY safe list (a `Known(vec![])`, reachable without I/O via
+    /// `seed_provider_endpoints`), which must refuse the call before any HTTP client is
+    /// constructed.
+    #[tokio::test]
+    async fn complete_fails_closed_with_zero_safe_providers_no_network_call() {
+        let registry = crate::model_registry::ModelRegistry::new();
+        // Zero safe providers for this model — simulates "fetched, but every provider
+        // serving this model trains or retains."
+        registry.seed_provider_endpoints("all-unsafe/model", vec![]);
+        let completer = OpenRouterCompleter::for_agent(
+            "sk-or-test-key".to_string(),
+            make_limiter(),
+            default_policy(), // safe_mode: true
+            registry,
+        );
+        let req = LlmRequest::new("hello".to_string()).with_model("all-unsafe/model");
+        let result = completer.complete(req).await;
+        assert!(
+            result.is_err(),
+            "safe_mode ON + zero safe providers must refuse the call, not fall through to \
+             an unconstrained HTTP request"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("provider-safety"),
+            "error must clearly identify the provider-safety refusal: {msg}"
+        );
+    }
+
+    /// Same fail-closed guarantee, but for the `Unknown` case (endpoints never fetched
+    /// at all) rather than `Known(empty)`. Uses a model id whose provider is NOT seeded
+    /// in the registry, so `ensure_safe_providers_loaded` would need to hit the network
+    /// to resolve it — but the registry it's given here has `try_refresh_from_store`
+    /// never called and no credential store wired for a live fetch to succeed against
+    /// (bogus key, and more importantly this assertion only cares that the eventual
+    /// outcome is a hard error, whether from the fail-closed policy check or from the
+    /// network call itself failing — either way, `safe_mode` ON never lets an
+    /// unconstrained request reach a 2xx from OpenRouter). Marked `#[ignore]` because
+    /// unlike the `Known(empty)` case above, this path DOES attempt a real network call
+    /// (the cache is genuinely empty, not pre-seeded) — run explicitly, not in normal CI,
+    /// per the "no live OpenRouter calls in tests" rule; kept as a documented manual
+    /// smoke-test rather than deleted, since it's the one test that exercises the
+    /// `Unknown`-without-seeding path end-to-end.
+    #[tokio::test]
+    #[ignore = "hits the live OpenRouter /endpoints API; run manually, not in CI"]
+    async fn complete_fails_closed_when_safe_set_never_loaded_live_smoke_test() {
+        let registry = crate::model_registry::ModelRegistry::new();
+        let completer = OpenRouterCompleter::for_agent(
+            "sk-or-invalid-test-key".to_string(),
+            make_limiter(),
+            default_policy(),
+            registry,
+        );
+        let req = LlmRequest::new("hello".to_string()).with_model("deepseek/deepseek-chat");
+        let result = completer.complete(req).await;
+        assert!(result.is_err());
     }
 
     // ── call_with_fallback + is_retryable_for_chain ───────────────────────────

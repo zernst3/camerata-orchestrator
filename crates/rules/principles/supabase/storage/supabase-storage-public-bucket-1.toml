@@ -1,0 +1,63 @@
+id = "SUPABASE-STORAGE-PUBLIC-BUCKET-1"
+title = "A storage bucket created public bypasses auth/RLS for object retrieval; every public bucket is named and reviewed"
+tag = "stack"
+domain = "supabase:storage"
+layer = "platform"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan for bucket-publicness declarations: `insert into storage.buckets (...) values (..., true, ...)` / `update storage.buckets set public = true` in migrations, and `createBucket(name, { public: true })` (or the dashboard-equivalent flag) in application code. A public bucket serves every object inside it to anyone holding or guessing the URL, with no auth check and no RLS evaluation for GET/download. Conformance holds when every public bucket is deliberately, reviewably public (avatars, public assets); it fails — flagged with `needs_review`, not an automatic critical — when a bucket holding what looks like private data (its name or referencing code suggests documents, uploads, invoices, etc.) is public, since public buckets are also a common and legitimate pattern this report must not cry wolf on."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/storage/buckets/fundamentals"
+title = "Supabase docs — Storage bucket fundamentals: a public bucket bypasses access control for retrieving/serving files"
+
+[[sources]]
+url = "https://supabase.com/docs/guides/storage/security/access-control"
+title = "Supabase docs — Storage access control (RLS on storage.objects; public buckets skip it for reads)"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/732.html"
+title = "CWE-732: Incorrect Permission Assignment for Critical Resource"
+
+[decision]
+question = "Is every public storage bucket surfaced as a named, needs_review finding rather than silently accepted or automatically flagged critical?"
+default = "flag-public-buckets-needs-review"
+why = """
+Supabase's own bucket-fundamentals docs state it directly: "When a bucket is designated as
+'Public,' it effectively bypasses access controls for both retrieving and serving files within the
+bucket." That means every object in a public bucket is downloadable by anyone with (or able to
+guess) its URL — no signed URL, no auth header, no RLS policy evaluation happens on that read
+path, regardless of what storage.objects policies exist (they still gate upload/delete/move, but
+not public reads). This is CWE-732 (Incorrect Permission Assignment for Critical Resource) when the
+bucket's contents are actually sensitive.
+
+The critical honesty point (per the design's public-bucket FP carve-out): public buckets are also
+a completely standard, intentional pattern — avatar images, public product photos, marketing
+assets. A scanner that flags every public bucket as a vulnerability would be wrong most of the
+time in a typical app and would train the reader to ignore the report. The correct behavior is to
+NAME every public bucket and ASK, using signals available in the repo (the bucket's name,
+referencing code paths) to prioritize which ones look worth a second look, but never assert
+certainty the scanner does not have — `needs_review`, not an automatic critical.
+"""
+
+[[option]]
+id = "flag-public-buckets-needs-review"
+label = "Name every public bucket in the report as needs_review, prioritizing name/usage signals that suggest sensitive content"
+directive = """
+Scan migrations for `insert into storage.buckets` / `update storage.buckets set public = true`,
+and application code for `createBucket(..., { public: true })`. For every bucket found public,
+emit a high-severity `needs_review` finding naming the bucket: "Your `<bucket>` bucket is public:
+every file in it is downloadable by anyone who has or guesses the link." Where the bucket's name or
+referencing code (e.g. an `invoices`/`documents`/`uploads` table or upload handler) suggests
+private content, note that signal explicitly in the finding to help the reader prioritize; where
+the name suggests intentional public use (avatars, public-assets, media), note that too, without
+downgrading the review requirement.
+"""
+why = "Public buckets are a legitimate, common Supabase pattern; naming every one and asking rather than asserting keeps the report honest and prevents an avatar bucket from being reported with the same alarm as an exposed documents bucket, while still surfacing every case for the human reviewer to judge."
+
+[[option]]
+id = "flag-only-buckets-with-suspicious-names-as-critical"
+label = "Skip reporting on buckets with 'safe-sounding' names; flag only suspicious-named buckets, at critical severity"
+directive = "Apply a name-based allowlist/denylist heuristic (skip buckets named avatars/public-assets/media; flag buckets named documents/uploads/invoices as critical) and omit the rest from the report entirely."
+why = "Rejected: a name-based filter both under- and over-reports. A bucket literally named `avatars` can still contain user-uploaded private documents if the developer repurposed it; a bucket named `uploads` might genuinely be a public asset drop. Silently omitting buckets from the report (rather than naming all of them and flagging the ambiguous ones for review) also means a genuinely mis-scoped public bucket with an innocuous name never reaches the reader at all — the needs_review approach names every instance and lets a human make the actual call."

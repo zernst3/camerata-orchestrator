@@ -73,3 +73,24 @@ wiremock = "0.6"
 # serial_test's shared key (#[serial(bff_env)]) serializes every such test crate-wide so they can't
 # clobber each other's override under cargo's parallel test threads.
 serial_test = "3"
+
+# Runtime clipboard probe (src/clipboard_probe.rs): synthesizes native Cmd-key
+# NSEvents and posts them to the probe's own process, so the macOS clipboard behavior
+# (Cmd-C/V/X/A in the webview) can be reproduced and verified mechanically instead of
+# by hand-testing the GUI. In-process `postEvent:` needs no Accessibility permission.
+# Real (not dev) deps so the probe can run INSIDE the live cockpit
+# (CAMERATA_CLIPBOARD_PROBE=1); they are already in the tree via tao/wry/muda,
+# so this adds no new transitive dependencies. Versions match that family.
+# NOTE: only SAFE objc2 APIs are used — the workspace forbids `unsafe_code`.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSGeometry"] }
+objc2-app-kit = { version = "0.3", features = [
+    "NSApplication",
+    "NSEvent",
+    "NSGraphicsContext",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+    "NSWindow",
+] }

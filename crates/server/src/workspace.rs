@@ -805,6 +805,63 @@ pub async fn remove_uow_worktree(clone: &Path, branch: &str) {
         let _ = tokio::fs::remove_dir_all(&path).await;
     }
     prune_worktrees(clone).await;
+
+    // T2 (disk-buildup guardrail, docs/design/2026-07-27_build-artifact-janitor.md):
+    // right after a worktree just stopped existing is the natural moment to check
+    // whether the shared target has grown over its cap, gone stale, or is now
+    // orphaned (no worktrees left for this clone at all) — see
+    // `camerata_checks::janitor::should_prune_shared_target`. Best-effort: never
+    // blocks or fails teardown; a blocking-fs call on a background async task is an
+    // accepted tradeoff here, same as the rest of this module's sync `fs2`/`std::fs`
+    // calls inside async fns.
+    maybe_prune_shared_target(clone, "worktree-teardown").await;
+}
+
+/// T2 policy check + reclaim: prune `<clone>/.camerata-shared-target` when
+/// [`camerata_checks::janitor::should_prune_shared_target`] fires (over the size
+/// cap, stale, or this clone now has zero live worktrees). Honors `CAMERATA_JANITOR`
+/// (`on` / `dry-run` / `off`). Best-effort and silent on any error — this is
+/// maintenance housekeeping, never a hard dependency of the caller's own operation.
+///
+/// `pub(crate)` so the T3 startup sweep (`crate::lib`'s per-UoW worktree housekeeping
+/// task) can apply the SAME policy on startup that [`remove_uow_worktree`] applies at
+/// teardown, rather than duplicating the decision logic.
+pub(crate) async fn maybe_prune_shared_target(clone: &Path, trigger: &str) {
+    let mode = camerata_checks::janitor::janitor_mode();
+    if mode == camerata_checks::janitor::JanitorMode::Off {
+        return;
+    }
+    let shared = shared_target_dir(clone);
+    if !shared.is_dir() {
+        return;
+    }
+    let bytes = camerata_checks::janitor::dir_size(&shared);
+    let max_bytes = camerata_checks::janitor::shared_target_max_bytes();
+    let max_age = camerata_checks::janitor::artifact_max_age();
+    let age = std::fs::metadata(&shared)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|m| m.elapsed().ok())
+        .unwrap_or_default();
+    let live = camerata_checks::janitor::has_live_worktrees(clone);
+
+    if !camerata_checks::janitor::should_prune_shared_target(bytes, max_bytes, age, max_age, live) {
+        return;
+    }
+
+    let dry_run = mode == camerata_checks::janitor::JanitorMode::DryRun;
+    let outcome = camerata_checks::janitor::reclaim_dir(&shared, clone, &[], true, trigger, dry_run, |entry| {
+        tracing::info!(
+            path = %entry.path.display(),
+            bytes = entry.bytes,
+            trigger = %entry.trigger,
+            dry_run = entry.dry_run,
+            "janitor: T2 shared-target prune"
+        );
+    });
+    if let camerata_checks::janitor::ReclaimOutcome::Skipped { reason, .. } = outcome {
+        tracing::debug!(clone = %clone.display(), %reason, "janitor: T2 shared-target prune skipped");
+    }
 }
 
 /// `git worktree prune` on the shared clone: drop administrative records for worktrees whose
@@ -913,7 +970,16 @@ pub fn available_disk_bytes(path: &Path) -> Option<u64> {
     fs2::available_space(path).ok()
 }
 
-/// Assert there is at least `min_bytes` of free disk space at `path`.
+/// Assert there is at least `min_bytes` of free disk space at `path` (this is called
+/// with `path` == the CLONE root, i.e. [`ensure_uow_worktree`]'s `clone` argument).
+///
+/// T4 (disk-buildup guardrail, `docs/design/2026-07-27_build-artifact-janitor.md`):
+/// on a headroom shortfall this now RECLAIMS `path`'s Zone-A scratch (orphaned
+/// `.camerata-worktrees/*` entries, plus — as an emergency measure, since disk is
+/// critically low right now — the whole `.camerata-shared-target`), RE-CHECKS, and
+/// only bails if STILL short. The bail message reports what was reclaimed plus a
+/// sized Zone-B inventory (this clone's OWN artifact dirs) with a named remedy —
+/// Zone B is NEVER auto-deleted (see `camerata_checks::janitor` module doc).
 ///
 /// Returns `Ok(())` when headroom is sufficient (or the query cannot be made —
 /// fail-open for cross-platform safety). Returns a descriptive [`anyhow::Error`]
@@ -921,23 +987,75 @@ pub fn available_disk_bytes(path: &Path) -> Option<u64> {
 /// run status / UI rather than silently filling the disk.
 ///
 /// Call this at the start of [`ensure_uow_worktree`] and before cargo build steps
-/// in the check runner. The check is cheap (one `statvfs` syscall).
+/// in the check runner. The check is cheap (one `statvfs` syscall) except on the
+/// rare reclaim path, which does a bounded filesystem walk — acceptable since it
+/// only runs when disk is already critically low.
 pub fn ensure_disk_headroom(path: &Path, min_bytes: u64) -> anyhow::Result<()> {
-    let Some(available) = available_disk_bytes(path) else {
-        // Cannot query — fail-open: better to attempt the operation than to
-        // block it spuriously on a platform where statvfs is unavailable.
-        return Ok(());
-    };
-    if has_headroom(available, min_bytes) {
-        return Ok(());
+    let mode = camerata_checks::janitor::janitor_mode();
+    let mut reclaimed_log: Vec<camerata_checks::janitor::ReclaimLogEntry> = Vec::new();
+
+    let outcome = camerata_checks::janitor::check_headroom_with_reclaim(
+        min_bytes,
+        || available_disk_bytes(path),
+        || {
+            if mode == camerata_checks::janitor::JanitorMode::Off {
+                return 0;
+            }
+            let dry_run = mode == camerata_checks::janitor::JanitorMode::DryRun;
+            camerata_checks::janitor::reclaim_zone_a_for_clone(
+                path,
+                true, // emergency: prune shared-target unconditionally, disk is critically low
+                "headroom-guard",
+                dry_run,
+                |entry| reclaimed_log.push(entry.clone()),
+            )
+        },
+    );
+
+    match outcome {
+        camerata_checks::janitor::HeadroomOutcome::CannotQuery => Ok(()), // fail-open, unchanged
+        camerata_checks::janitor::HeadroomOutcome::Sufficient { .. } => Ok(()),
+        camerata_checks::janitor::HeadroomOutcome::ReclaimedSufficient {
+            reclaimed_bytes,
+            available,
+        } => {
+            let reclaimed_gb = reclaimed_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            let available_gb = available as f64 / (1024.0 * 1024.0 * 1024.0);
+            tracing::info!(
+                reclaimed_gb,
+                available_gb,
+                clone = %path.display(),
+                "janitor: reclaimed Camerata scratch before worktree creation, headroom now sufficient"
+            );
+            Ok(())
+        }
+        camerata_checks::janitor::HeadroomOutcome::StillInsufficient {
+            available,
+            reclaimed_bytes,
+        } => {
+            let available_gb = available as f64 / (1024.0 * 1024.0 * 1024.0);
+            let required_gb = min_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            let reclaimed_gb = reclaimed_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+            let inventory = camerata_checks::janitor::scan_zone_b(path, &[]);
+            let inventory_msg = camerata_checks::janitor::format_zone_b_inventory(&inventory, 5);
+            let reclaimed_note = if reclaimed_bytes > 0 {
+                format!(" (reclaimed {reclaimed_gb:.1} GB of Camerata scratch first)")
+            } else {
+                String::new()
+            };
+            let remedy = if inventory_msg.is_empty() {
+                "reclaim space (remove stale worktrees under .camerata-worktrees/ or \
+                 .camerata-shared-target/) before starting more work"
+                    .to_string()
+            } else {
+                inventory_msg
+            };
+            anyhow::bail!(
+                "insufficient disk headroom: {available_gb:.1} GB free, need >= {required_gb:.0} GB\
+                 {reclaimed_note}; {remedy}"
+            )
+        }
     }
-    let available_gb = available as f64 / (1024.0 * 1024.0 * 1024.0);
-    let required_gb = min_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-    anyhow::bail!(
-        "insufficient disk headroom: {available_gb:.1} GB free, need >= {required_gb:.0} GB; \
-         reclaim space (remove stale worktrees under .camerata-worktrees/ or \
-         .camerata-shared-target/) before starting more work"
-    )
 }
 
 // ── Local git controls (issue #37) ───────────────────────────────────────────
@@ -2206,6 +2324,74 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// T2 (disk-buildup guardrail): tearing down the LAST live worktree for a clone
+    /// prunes the clone's `.camerata-shared-target`, since
+    /// `camerata_checks::janitor::should_prune_shared_target`'s "no live worktrees"
+    /// branch fires unconditionally once this clone has zero worktrees left.
+    #[tokio::test]
+    async fn remove_uow_worktree_prunes_now_orphaned_shared_target() {
+        let base = std::env::temp_dir().join(format!("cam-wt-t2-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let clone = base.join("clone");
+        init_repo_with_commit(&clone);
+
+        let wt = ensure_uow_worktree(&clone, "camerata/t2-prune")
+            .await
+            .expect("created");
+        assert!(wt.exists());
+
+        // Seed the shared target with real bytes, as a build would.
+        let shared = shared_target_dir(&clone);
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("artifact.rlib"), vec![0u8; 4096]).unwrap();
+        assert!(shared.exists());
+
+        // This is the ONLY worktree for this clone — tearing it down leaves zero
+        // live worktrees, so T2 must prune the now-orphaned shared target.
+        remove_uow_worktree(&clone, "camerata/t2-prune").await;
+
+        assert!(
+            !shared.exists(),
+            "shared target must be pruned once this clone has no live worktrees left"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// T2 must NOT prune the shared target while ANOTHER worktree for the SAME clone
+    /// is still live — only tearing down the clone's LAST worktree triggers the
+    /// "orphaned" prune branch.
+    #[tokio::test]
+    async fn remove_uow_worktree_does_not_prune_shared_target_while_a_sibling_worktree_is_live() {
+        let base = std::env::temp_dir().join(format!("cam-wt-t2-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let clone = base.join("clone");
+        init_repo_with_commit(&clone);
+
+        let _wt_a = ensure_uow_worktree(&clone, "camerata/t2-keep-a")
+            .await
+            .expect("created a");
+        let _wt_b = ensure_uow_worktree(&clone, "camerata/t2-keep-b")
+            .await
+            .expect("created b");
+
+        let shared = shared_target_dir(&clone);
+        std::fs::create_dir_all(&shared).unwrap();
+        // Small and fresh — under any reasonable cap/age default, so the ONLY reason
+        // it would be pruned is the (false, here) "no live worktrees" branch.
+        std::fs::write(shared.join("artifact.rlib"), vec![0u8; 16]).unwrap();
+
+        // Tear down worktree A only — worktree B is still live for this clone.
+        remove_uow_worktree(&clone, "camerata/t2-keep-a").await;
+
+        assert!(
+            shared.exists(),
+            "shared target must survive while a sibling worktree is still live"
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// `resolve_uow_worktree` honors the override path and threads through to a worktree.
     #[tokio::test]
     async fn resolve_uow_worktree_uses_override_clone() {
@@ -2292,20 +2478,37 @@ mod tests {
         assert!(!has_headroom(131 * 1024 * 1024, 10 * 1024 * 1024 * 1024)); // incident: 131 MB free
     }
 
+    /// A fresh, EMPTY, isolated subdirectory (never the raw system temp root) for the
+    /// disk-headroom tests below. `ensure_disk_headroom` now (T4, the janitor's
+    /// reclaim-then-recheck-then-block upgrade) walks `path` for Zone-B candidates on
+    /// a shortfall via `camerata_checks::janitor::scan_zone_b`; pointing that walk at
+    /// the bare `std::env::temp_dir()` would sweep every OTHER test's leftover
+    /// fixtures living as siblings in the same OS temp root, which is both slow and
+    /// nondeterministic. A dedicated empty subdir keeps these tests bounded and
+    /// hermetic, matching the convention every other test in this module already
+    /// uses (`std::env::temp_dir().join("cam-...-{pid}")`).
+    fn isolated_empty_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("cam-headroom-{label}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     /// `ensure_disk_headroom` returns `Ok(())` when space is sufficient (simulated via
     /// a path with real free space and a min of 0).
     #[test]
     fn ensure_disk_headroom_passes_at_zero_minimum() {
         // Any real path with 0 minimum always has headroom.
-        let tmp = std::env::temp_dir();
+        let tmp = isolated_empty_dir("zero-min");
         assert!(ensure_disk_headroom(&tmp, 0).is_ok());
     }
 
     /// `ensure_disk_headroom` returns `Err` when min exceeds any conceivable free space.
     #[test]
     fn ensure_disk_headroom_fails_when_min_exceeds_free_space() {
-        let tmp = std::env::temp_dir();
-        // u64::MAX bytes required — no disk can satisfy this.
+        let tmp = isolated_empty_dir("max-min");
+        // u64::MAX bytes required — no disk can satisfy this, and this dir is EMPTY
+        // (no Zone-A scratch, no Zone-B candidates), so reclaim finds nothing and the
+        // guard still bails.
         assert!(ensure_disk_headroom(&tmp, u64::MAX).is_err());
     }
 
@@ -2313,12 +2516,83 @@ mod tests {
     /// and includes actionable remediation text.
     #[test]
     fn ensure_disk_headroom_error_is_actionable() {
-        let tmp = std::env::temp_dir();
+        let tmp = isolated_empty_dir("actionable");
         let err = ensure_disk_headroom(&tmp, u64::MAX).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("insufficient disk headroom"), "names problem: {msg}");
         assert!(msg.contains("GB free"), "states free space: {msg}");
         assert!(msg.contains("reclaim space"), "gives remediation: {msg}");
+    }
+
+    /// T4 end-to-end (disk-buildup guardrail): `ensure_disk_headroom` RECLAIMS this
+    /// clone's Zone-A scratch (an orphaned, unregistered `.camerata-worktrees/*`
+    /// entry, plus a `.camerata-shared-target`) BEFORE giving up, using the real
+    /// filesystem (no injected seam needed at this layer — the pure
+    /// reclaim-then-recheck-then-block DECISION logic is already exhaustively unit
+    /// tested with an injected seam in `camerata_checks::janitor::tests`; this test
+    /// instead proves the real wiring actually reaches and executes the reclaim,
+    /// not just that the pure function would decide to). `min_bytes = u64::MAX`
+    /// guarantees the guard still bails (no real disk has that much free space), so
+    /// this asserts the STILL-INSUFFICIENT-AFTER-RECLAIM branch — but with REAL
+    /// bytes having been reclaimed, which the message must report.
+    #[test]
+    fn ensure_disk_headroom_reclaims_zone_a_scratch_before_blocking() {
+        let clone = isolated_empty_dir("t4-reclaim");
+        // Make `clone` a real git repo so the janitor's git-worktree-list query
+        // succeeds and the orphan is genuinely unregistered (not just "unknown").
+        assert!(std::process::Command::new("git")
+            .current_dir(&clone)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success());
+
+        // An orphaned worktree entry: a directory under `.camerata-worktrees` that
+        // is NOT a registered git worktree (simulating a crash leftover).
+        let worktrees = clone.join(".camerata-worktrees");
+        let orphan = worktrees.join("stray-from-a-crash");
+        std::fs::create_dir_all(&orphan).unwrap();
+        std::fs::write(orphan.join("leftover.o"), vec![0u8; 4096]).unwrap();
+
+        // A shared-target dir with real bytes in it.
+        let shared = shared_target_dir(&clone);
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("artifact.rlib"), vec![0u8; 8192]).unwrap();
+
+        let err = ensure_disk_headroom(&clone, u64::MAX).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("reclaimed") && msg.contains("GB of Camerata scratch first"),
+            "must report that real Zone-A bytes were reclaimed before blocking: {msg}"
+        );
+        assert!(!orphan.exists(), "the orphaned worktree dir must actually be gone");
+        assert!(!shared.exists(), "the shared-target dir must actually be gone");
+    }
+
+    /// T4's Zone-B inventory: when reclaiming this clone's OWN Zone-A scratch isn't
+    /// enough, the bail message names this clone's Zone-B (host repo) candidates —
+    /// sized, with a `rm -rf` remedy — and NEVER deletes them.
+    #[test]
+    fn ensure_disk_headroom_still_insufficient_names_zone_b_candidates_never_deletes() {
+        let clone = isolated_empty_dir("t4-zone-b");
+        assert!(std::process::Command::new("git")
+            .current_dir(&clone)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success());
+        std::fs::write(clone.join(".gitignore"), "/target\n").unwrap();
+        let target = clone.join("target");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("big.rlib"), vec![0u8; 1024]).unwrap();
+
+        let err = ensure_disk_headroom(&clone, u64::MAX).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("never auto-deleted"), "names the Zone-B inventory: {msg}");
+        assert!(msg.contains("target"), "names the specific candidate dir: {msg}");
+        assert!(msg.contains("rm -rf"), "gives a concrete remedy command: {msg}");
+        assert!(target.exists(), "Zone B must NEVER be auto-deleted");
+        assert!(target.join("big.rlib").exists());
     }
 
     /// `parse_disk_headroom_gb` returns the default bytes when env var is absent (None).

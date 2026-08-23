@@ -1,7 +1,10 @@
 # Desktop clipboard (copy / cut / paste / select-all) on macOS
 
 **Date:** 2026-06-24
-**Status:** Accepted (verify interactively)
+**Status:** SUPERSEDED by `docs/design/2026-07-28_desktop-copy-paste-fix.md`
+(clipboard bridge: Cmd-C/X/V handled via page JS + Rust + pbcopy/pbpaste,
+independent of the native menu/responder-chain path this note relied on).
+Kept as history of the second fix attempt.
 **Context:** Cmd-C / X / V / A did not work anywhere in the running macOS desktop app, despite an existing App+Edit native menu (`app_menu_bar`, commit db45d36). That menu had been in every build for ~5 days and was ineffective, so the prior fix was confirmed broken, not merely missing.
 
 ## Root cause

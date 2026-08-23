@@ -16,11 +16,13 @@
 //! model selectors from this registry, grouped by provider, with badges (FREE · tool-use ✓/✗ ·
 //! context). Adding a provider = adding a registry source here; no other code needs to change.
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde::Deserialize;
 
 use crate::credentials::{CredentialStore, OPENROUTER_API_KEY};
+use crate::provider_policy::SafeProviders;
 
 // ── Registry entry (the unified shape) ───────────────────────────────────────
 //
@@ -224,6 +226,17 @@ struct RegistryInner {
     /// Cached OpenRouter entries. `None` = not yet fetched. `Some([])` = fetched but
     /// either the key is absent or the API returned zero models.
     openrouter_cache: Option<Vec<RegistryEntry>>,
+    /// Cached provider data-policy catalog (`/api/frontend/v1/all-providers`), keyed by
+    /// provider slug. `None` = not yet fetched. Shared across all models — fetched once,
+    /// lazily, on the first call that needs it.
+    provider_policy_cache: Option<HashMap<String, ProviderPolicyRecord>>,
+    /// Cached, JOINED per-model provider endpoints (pricing + data policy), keyed by
+    /// model id. A model id absent from this map means "never fetched for this model"
+    /// — see [`ModelRegistry::safe_providers_for`]'s `SafeProviders::Unknown` case. A
+    /// present-but-empty `Vec` means "fetched, this model currently has zero providers
+    /// serving it" (distinct from zero *safe* providers, which is a non-empty `Vec`
+    /// where every entry has `is_safe() == false`).
+    provider_endpoints_cache: HashMap<String, Vec<ProviderEndpointInfo>>,
 }
 
 impl ModelRegistry {
@@ -299,6 +312,162 @@ impl ModelRegistry {
         self.refresh_openrouter(&key).await;
         true
     }
+
+    // ── Provider-safety data (endpoints + data-policy join) ────────────────────
+    //
+    // See the module-level "Per-provider data policy" section above for the two
+    // OpenRouter endpoints involved and how they're joined. This is the plumbing
+    // `provider_policy::provider_constraint_for_request` (the enforcement seam) is built
+    // on: it never does I/O itself, it only reads `safe_providers_for`'s answer.
+
+    /// The safe-provider slugs for `model_id` — providers whose live data policy is
+    /// `training == false && retains_prompts == false`.
+    ///
+    /// SYNC, cache-only: does no I/O and never blocks on the network. Returns
+    /// [`SafeProviders::Unknown`] when this model's endpoints have not been fetched yet
+    /// in this process — call [`Self::ensure_safe_providers_loaded`] (or
+    /// [`Self::refresh_provider_endpoints`] directly) first. Returns
+    /// [`SafeProviders::Known`] once fetched, which may wrap an empty `Vec` when the
+    /// model genuinely has zero clean providers right now.
+    pub fn safe_providers_for(&self, model_id: &str) -> SafeProviders {
+        match self.inner.lock() {
+            Ok(inner) => match inner.provider_endpoints_cache.get(model_id) {
+                Some(endpoints) => SafeProviders::Known(compute_safe_providers(endpoints)),
+                None => SafeProviders::Unknown,
+            },
+            // A poisoned lock is exactly the "we don't know" case — fail closed, don't
+            // pretend we have data.
+            Err(_) => SafeProviders::Unknown,
+        }
+    }
+
+    /// The full joined provider-endpoint list for `model_id` (pricing + data policy for
+    /// every provider currently serving it), from cache only. `None` when not yet
+    /// fetched. This is the richer sibling of [`Self::safe_providers_for`] — intended
+    /// for the Pass-2 picker UI (full list with prices/badges), not for the Pass-1
+    /// enforcement path, which only needs the safe-slug list.
+    pub fn provider_endpoints_for(&self, model_id: &str) -> Option<Vec<ProviderEndpointInfo>> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|inner| inner.provider_endpoints_cache.get(model_id).cloned())
+    }
+
+    /// Lazily ensure `model_id`'s provider-safety data is loaded (fetch on cache miss —
+    /// including fetching the shared provider-policy catalog first if it too is
+    /// uncached), then return the safe-provider set. Request-building call sites should
+    /// use this: the FIRST request for a given model pays one (or two, the first time
+    /// ever) network round trips; every subsequent request in this process reads cache.
+    ///
+    /// `api_key` is optional — both underlying endpoints are public — but is sent as an
+    /// `Authorization` header when available, matching every other OpenRouter call
+    /// site's convention. A fetch failure is NOT retried automatically here (mirrors
+    /// [`Self::refresh_openrouter`]'s "cache the failure as empty" behavior for the
+    /// provider-policy catalog); an empty per-model endpoint list is cached as
+    /// `Known(vec![])` so a request-time caller fails closed via
+    /// `provider_policy::provider_constraint_for_request` rather than re-fetching on
+    /// every single request during an outage.
+    pub async fn ensure_safe_providers_loaded(
+        &self,
+        api_key: Option<&str>,
+        model_id: &str,
+    ) -> SafeProviders {
+        let already_cached = self
+            .inner
+            .lock()
+            .map(|g| g.provider_endpoints_cache.contains_key(model_id))
+            .unwrap_or(false);
+        if !already_cached {
+            self.refresh_provider_endpoints(api_key, model_id).await;
+        }
+        self.safe_providers_for(model_id)
+    }
+
+    /// Fetch `/api/v1/models/<model_id>/endpoints`, join with the (fetched-if-needed,
+    /// cached) provider data-policy catalog, cache the joined result for `model_id`, and
+    /// return it.
+    ///
+    /// On any error (network, parse) for the per-model endpoints fetch, logs to stderr
+    /// and caches (and returns) an empty `Vec` — same "fail-safe-visible, not
+    /// fail-silent-and-retry-forever" shape as [`Self::refresh_openrouter`]. A provider
+    /// data-policy fetch failure does NOT abort this call: it is cached as an empty map
+    /// (see [`Self::refresh_provider_policies`]), which — via
+    /// [`join_endpoints_with_policy`]'s fail-closed unknown-provider path — makes every
+    /// endpoint in this fetch resolve to unsafe, not silently safe.
+    pub async fn refresh_provider_endpoints(
+        &self,
+        api_key: Option<&str>,
+        model_id: &str,
+    ) -> Vec<ProviderEndpointInfo> {
+        let policy_needed = self
+            .inner
+            .lock()
+            .map(|g| g.provider_policy_cache.is_none())
+            .unwrap_or(true);
+        if policy_needed {
+            self.refresh_provider_policies(api_key).await;
+        }
+
+        let raw = match fetch_model_endpoints(api_key, model_id).await {
+            Ok(eps) => eps,
+            Err(err) => {
+                eprintln!(
+                    "[model-registry] OpenRouter /endpoints fetch failed for `{model_id}`: {err}"
+                );
+                Vec::new()
+            }
+        };
+
+        let joined = {
+            let policies = self
+                .inner
+                .lock()
+                .ok()
+                .and_then(|g| g.provider_policy_cache.clone())
+                .unwrap_or_default();
+            join_endpoints_with_policy(&raw, &policies)
+        };
+
+        if let Ok(mut inner) = self.inner.lock() {
+            inner
+                .provider_endpoints_cache
+                .insert(model_id.to_string(), joined.clone());
+        }
+        joined
+    }
+
+    /// Fetch and cache the shared provider data-policy catalog
+    /// (`/api/frontend/v1/all-providers`). On any error, logs to stderr and caches an
+    /// empty map — every subsequent join treats every provider slug as unknown, which
+    /// [`join_endpoints_with_policy`] resolves to UNSAFE, never safe.
+    pub async fn refresh_provider_policies(
+        &self,
+        api_key: Option<&str>,
+    ) -> HashMap<String, ProviderPolicyRecord> {
+        let map = match fetch_provider_policies(api_key).await {
+            Ok(m) => m,
+            Err(err) => {
+                eprintln!("[model-registry] OpenRouter /all-providers fetch failed: {err}");
+                HashMap::new()
+            }
+        };
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.provider_policy_cache = Some(map.clone());
+        }
+        map
+    }
+
+    /// Directly seed the per-model provider-endpoints cache — a TEST-ONLY seam, mirrors
+    /// [`Self::seed_openrouter_entries`]. `#[doc(hidden)]`, not `#[cfg(test)]` (so
+    /// integration tests in `tests/` can use it without a live HTTP call).
+    #[doc(hidden)]
+    pub fn seed_provider_endpoints(&self, model_id: &str, endpoints: Vec<ProviderEndpointInfo>) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner
+                .provider_endpoints_cache
+                .insert(model_id.to_string(), endpoints);
+        }
+    }
 }
 
 /// Fetch and parse the OpenRouter `/api/v1/models` endpoint.
@@ -319,6 +488,263 @@ async fn fetch_openrouter_models(api_key: &str) -> anyhow::Result<Vec<RegistryEn
     let body: OpenRouterModelsResp = resp.json().await?;
     let entries: Vec<RegistryEntry> = body.data.iter().map(|m| m.to_entry()).collect();
     Ok(entries)
+}
+
+// ── Per-provider data policy (the OpenRouter provider-safety trust core) ────────
+//
+// Two separate OpenRouter endpoints, joined here:
+//
+// 1. `GET /api/v1/models/<id>/endpoints` — PER-MODEL: which providers currently serve
+//    this specific model, plus per-model pricing. Does NOT carry data-policy fields
+//    (verified live 2026-08-06 against `deepseek/deepseek-chat` and
+//    `qwen/qwen3-coder`). Each endpoint carries a `tag` (e.g. `"deepinfra/fp4"`,
+//    `"streamlake"`) whose segment before the first `/` is the provider SLUG.
+// 2. `GET /api/frontend/v1/all-providers` — PER-PROVIDER (not per-model): every
+//    provider's `dataPolicy` block (`training`, `retainsPrompts`, `retentionDays`,
+//    ...), keyed by `slug`. This is an undocumented-but-public frontend endpoint (no
+//    `/docs/api-reference` page for it as of 2026-08-06); confirmed live and stable
+//    enough to build on — see the design doc's "Pass 1 landed" section for the raw
+//    verification transcript. Requires no API key (confirmed via an unauthenticated
+//    curl); an `Authorization` header is still sent when a key is available, matching
+//    every other OpenRouter call site's convention.
+//
+// The join key is `tag.split('/').next()` (the endpoint's provider slug) against the
+// all-providers `slug` field — NOT a name match, which is unreliable (`"Google Vertex"`
+// display name vs `"google-vertex"` slug vs the endpoint's `"Google"` provider_name).
+
+/// One provider's data-policy `dataPolicy` block from `/api/frontend/v1/all-providers`.
+///
+/// Field names verified live 2026-08-06 against a real response (see design doc). All
+/// fields are `#[serde(default)]` so a provider record with a missing/malformed
+/// `dataPolicy` block still parses — it just resolves to `training: false,
+/// retains_prompts: false` at the STRUCT level, but see [`join_endpoints_with_policy`]
+/// for how a provider absent from the map entirely (not malformed — simply not found)
+/// is treated as UNSAFE, not safe, which is the fail-closed direction that matters.
+#[derive(Debug, Clone, Default, Deserialize)]
+struct OpenRouterDataPolicy {
+    #[serde(default)]
+    training: bool,
+    #[serde(default, rename = "retainsPrompts")]
+    retains_prompts: bool,
+    #[serde(default, rename = "retentionDays")]
+    #[allow(dead_code)] // Carried for future Pass-2 UI display; not consumed by Pass 1 logic.
+    retention_days: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterProviderRaw {
+    slug: String,
+    #[serde(default)]
+    #[allow(dead_code)] // Display name; not needed for the safety join (slug is the key).
+    name: String,
+    #[serde(default)]
+    headquarters: Option<String>,
+    #[serde(default, rename = "dataPolicy")]
+    data_policy: OpenRouterDataPolicy,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterAllProvidersResp {
+    data: Vec<OpenRouterProviderRaw>,
+}
+
+/// A provider's data policy + region, keyed by slug in the cache — the join target for
+/// [`join_endpoints_with_policy`]. `pub` because it appears in
+/// [`ModelRegistry::refresh_provider_policies`]'s return type.
+#[derive(Debug, Clone, Default)]
+pub struct ProviderPolicyRecord {
+    data_policy: OpenRouterDataPolicy,
+    region: Option<String>,
+}
+
+/// One endpoint entry from `/api/v1/models/<id>/endpoints` (pre-join, no data policy).
+#[derive(Debug, Deserialize)]
+struct OpenRouterEndpointRaw {
+    provider_name: String,
+    /// The provider-variant slug, e.g. `"deepinfra/fp4"` or `"streamlake"`. `None`
+    /// (missing/malformed) means the provider can't be resolved against the
+    /// all-providers policy map — treated as unsafe, see [`join_endpoints_with_policy`].
+    #[serde(default)]
+    tag: Option<String>,
+    #[serde(default)]
+    pricing: OpenRouterPricing,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterEndpointsResp {
+    data: OpenRouterEndpointsData,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterEndpointsData {
+    #[serde(default)]
+    endpoints: Vec<OpenRouterEndpointRaw>,
+}
+
+/// One provider's joined pricing + data-policy record for a SPECIFIC model —
+/// `/endpoints` (which providers serve this model, at what price) joined with
+/// `/all-providers` (does that provider train / retain).
+///
+/// This is the shape both [`ModelRegistry::safe_providers_for`] (Pass 1, the
+/// enforcement seam) and the Pass-2 provider picker UI will read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderEndpointInfo {
+    /// The OpenRouter provider slug (e.g. `"deepinfra"`). This — NOT the display name —
+    /// is what belongs in the request-body `provider.only` array.
+    pub provider_slug: String,
+    pub provider_name: String,
+    /// Headquarters/region, when OpenRouter reports one (e.g. `"US"`, `"SG"`).
+    pub region: Option<String>,
+    /// `true` when this provider trains on prompts sent to it.
+    pub training: bool,
+    /// `true` when this provider retains (stores) prompts beyond serving the request.
+    pub retains_prompts: bool,
+    /// USD per million input/output tokens for this provider serving this model.
+    pub price_in: f64,
+    pub price_out: f64,
+}
+
+impl ProviderEndpointInfo {
+    /// Camerata's safe-mode bar: no training AND no prompt retention. This is the ONLY
+    /// place that definition lives — [`compute_safe_providers`] and
+    /// `provider_policy::provider_constraint_for_request`'s callers both go through it.
+    pub fn is_safe(&self) -> bool {
+        !self.training && !self.retains_prompts
+    }
+}
+
+/// Resolve the provider slug this endpoint's `tag` names — the segment before the first
+/// `/` (e.g. `"deepinfra/fp4"` -> `"deepinfra"`, `"streamlake"` -> `"streamlake"`).
+fn provider_slug_from_tag(tag: &str) -> &str {
+    tag.split('/').next().unwrap_or(tag)
+}
+
+/// Join per-model endpoints with the provider data-policy map.
+///
+/// FAIL-CLOSED: an endpoint whose `tag` is missing, or whose resolved slug is not found
+/// in `policies` (unknown provider, malformed data, policy catalog not yet loaded) is
+/// recorded with `training: true, retains_prompts: true` — i.e. treated as UNSAFE. An
+/// unknown data policy NEVER defaults to safe. This never panics on malformed input.
+fn join_endpoints_with_policy(
+    endpoints: &[OpenRouterEndpointRaw],
+    policies: &HashMap<String, ProviderPolicyRecord>,
+) -> Vec<ProviderEndpointInfo> {
+    endpoints
+        .iter()
+        .map(|ep| {
+            let slug = ep
+                .tag
+                .as_deref()
+                .map(provider_slug_from_tag)
+                .unwrap_or_default();
+            let price_in = ep.pricing.prompt * 1_000_000.0;
+            let price_out = ep.pricing.completion * 1_000_000.0;
+            match policies.get(slug) {
+                Some(record) => ProviderEndpointInfo {
+                    provider_slug: slug.to_string(),
+                    provider_name: ep.provider_name.clone(),
+                    region: record.region.clone(),
+                    training: record.data_policy.training,
+                    retains_prompts: record.data_policy.retains_prompts,
+                    price_in,
+                    price_out,
+                },
+                None => ProviderEndpointInfo {
+                    provider_slug: slug.to_string(),
+                    provider_name: ep.provider_name.clone(),
+                    region: None,
+                    // Unknown policy — fail closed, never default to safe.
+                    training: true,
+                    retains_prompts: true,
+                    price_in,
+                    price_out,
+                },
+            }
+        })
+        .collect()
+}
+
+/// The safe-provider slugs (sorted, deduped) from a joined endpoint list: providers
+/// satisfying [`ProviderEndpointInfo::is_safe`]. May be empty.
+pub fn compute_safe_providers(endpoints: &[ProviderEndpointInfo]) -> Vec<String> {
+    let mut slugs: Vec<String> = endpoints
+        .iter()
+        .filter(|e| e.is_safe())
+        .map(|e| e.provider_slug.clone())
+        .collect();
+    slugs.sort();
+    slugs.dedup();
+    slugs
+}
+
+/// Fetch and parse `/api/frontend/v1/all-providers`, returning slug -> data policy.
+/// `api_key` is optional (the endpoint is public) but sent when available, matching
+/// every other OpenRouter call site's header convention. On any error (network, parse),
+/// logs to stderr and returns an empty map — callers must treat an empty map the same
+/// as "no data available" (fail closed via [`join_endpoints_with_policy`]'s
+/// unknown-provider path), never as "every provider is safe."
+async fn fetch_provider_policies(
+    api_key: Option<&str>,
+) -> anyhow::Result<HashMap<String, ProviderPolicyRecord>> {
+    let client = reqwest::Client::new();
+    let mut req = client
+        .get("https://openrouter.ai/api/frontend/v1/all-providers")
+        .header("HTTP-Referer", "https://camerata.ai")
+        .header("X-Title", "Camerata");
+    if let Some(key) = api_key {
+        if !key.trim().is_empty() {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "OpenRouter /api/frontend/v1/all-providers returned {}",
+            resp.status()
+        );
+    }
+    let body: OpenRouterAllProvidersResp = resp.json().await?;
+    let map = body
+        .data
+        .into_iter()
+        .map(|p| {
+            (
+                p.slug,
+                ProviderPolicyRecord {
+                    data_policy: p.data_policy,
+                    region: p.headquarters,
+                },
+            )
+        })
+        .collect();
+    Ok(map)
+}
+
+/// Fetch and parse `/api/v1/models/<model_id>/endpoints`, returning the raw (pre-join)
+/// endpoint list. `api_key` is optional (public endpoint) but sent when available.
+async fn fetch_model_endpoints(
+    api_key: Option<&str>,
+    model_id: &str,
+) -> anyhow::Result<Vec<OpenRouterEndpointRaw>> {
+    let client = reqwest::Client::new();
+    let mut req = client
+        .get(format!("https://openrouter.ai/api/v1/models/{model_id}/endpoints"))
+        .header("HTTP-Referer", "https://camerata.ai")
+        .header("X-Title", "Camerata");
+    if let Some(key) = api_key {
+        if !key.trim().is_empty() {
+            req = req.header("Authorization", format!("Bearer {key}"));
+        }
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "OpenRouter /api/v1/models/{model_id}/endpoints returned {}",
+            resp.status()
+        );
+    }
+    let body: OpenRouterEndpointsResp = resp.json().await?;
+    Ok(body.data.endpoints)
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -542,6 +968,28 @@ mod tests {
         assert!(!reg.openrouter_fetched());
     }
 
+    /// `try_refresh_from_store` is the single code path all THREE OpenRouter refresh
+    /// triggers (server startup, post-credential-save, and the manual UI button) funnel
+    /// through. This locks its no-key contract directly and synchronously — no live HTTP
+    /// call, no panic, cache stays un-fetched (not "fetched-empty") — so the startup and
+    /// credential-save call sites don't each need their own network-adjacent test to prove
+    /// the same graceful behaviour.
+    #[tokio::test]
+    async fn try_refresh_from_store_is_a_graceful_noop_with_no_key_configured() {
+        let reg = ModelRegistry::new();
+        let creds = crate::credentials::MemoryCredentialStore::new();
+        // No key ever set on this store — mirrors a fresh install / no OpenRouter key saved.
+        let attempted = reg.try_refresh_from_store(&creds).await;
+        assert!(!attempted, "no key configured: must no-op, not attempt a live call");
+        assert!(
+            !reg.openrouter_fetched(),
+            "cache must stay unpopulated (None), not Some([]) — that's the fetch-attempted state"
+        );
+        let all = reg.all_entries();
+        assert!(all.iter().any(|e| e.provider == "claude"), "Claude entries unaffected");
+        assert!(!all.iter().any(|e| e.provider == "openrouter"), "no OpenRouter entries appear");
+    }
+
     #[tokio::test]
     async fn refresh_with_bad_key_stores_empty_and_marks_fetched() {
         let reg = ModelRegistry::new();
@@ -727,6 +1175,312 @@ mod tests {
         assert!(
             !entry.vision,
             "OpenRouter model with no modalities must have vision=false"
+        );
+    }
+
+    // ── Provider-safety data: parsing, join, safe_providers_for ─────────────────
+
+    /// A real (trimmed) `/api/v1/models/<id>/endpoints` response body, captured live
+    /// 2026-08-06 against `deepseek/deepseek-chat` (see the design doc's "Pass 1
+    /// landed" section for the full transcript). Exercises the real field names/shapes:
+    /// `data.endpoints[].{provider_name,tag,pricing:{prompt,completion}}`.
+    const SAMPLE_ENDPOINTS_JSON: &str = r#"{
+        "data": {
+            "id": "deepseek/deepseek-chat",
+            "name": "DeepSeek: DeepSeek V3",
+            "endpoints": [
+                {
+                    "name": "StreamLake | deepseek/deepseek-chat-v3",
+                    "provider_name": "StreamLake",
+                    "tag": "streamlake",
+                    "pricing": {"prompt": "0.0000002574", "completion": "0.0000010287", "discount": 0.1}
+                },
+                {
+                    "name": "DeepInfra | deepseek/deepseek-chat-v3",
+                    "provider_name": "DeepInfra",
+                    "tag": "deepinfra/fp4",
+                    "pricing": {"prompt": "0.00000032", "completion": "0.00000089", "discount": 0}
+                },
+                {
+                    "name": "Novita | deepseek/deepseek-chat-v3",
+                    "provider_name": "Novita",
+                    "tag": "novita/fp8",
+                    "pricing": {"prompt": "0.0000004", "completion": "0.0000013", "discount": 0}
+                }
+            ]
+        }
+    }"#;
+
+    /// A real (trimmed) `/api/frontend/v1/all-providers` response body, captured live
+    /// 2026-08-06. Exercises the real field names: `data[].{slug,headquarters,
+    /// dataPolicy:{training,retainsPrompts,retentionDays}}`. Includes DeepSeek's
+    /// first-party listing (`training: true` — the training provider a safe list must
+    /// exclude) and StreamLake (`retainsPrompts: true`, no `retentionDays` — the
+    /// retaining-but-not-training provider a safe list must also exclude).
+    const SAMPLE_ALL_PROVIDERS_JSON: &str = r#"{
+        "data": [
+            {
+                "name": "DeepInfra",
+                "slug": "deepinfra",
+                "dataPolicy": {"training": false, "retainsPrompts": false},
+                "headquarters": "US"
+            },
+            {
+                "name": "Novita",
+                "slug": "novita",
+                "dataPolicy": {"training": false, "retainsPrompts": false},
+                "headquarters": "US"
+            },
+            {
+                "name": "StreamLake",
+                "slug": "streamlake",
+                "dataPolicy": {"training": false, "retainsPrompts": true}
+            },
+            {
+                "name": "DeepSeek",
+                "slug": "deepseek",
+                "dataPolicy": {"training": true, "retainsPrompts": true}
+            },
+            {
+                "name": "Cohere",
+                "slug": "cohere",
+                "dataPolicy": {"training": false, "retainsPrompts": true, "retentionDays": 30}
+            }
+        ]
+    }"#;
+
+    fn sample_policies() -> HashMap<String, ProviderPolicyRecord> {
+        let resp: OpenRouterAllProvidersResp =
+            serde_json::from_str(SAMPLE_ALL_PROVIDERS_JSON).unwrap();
+        resp.data
+            .into_iter()
+            .map(|p| {
+                (
+                    p.slug,
+                    ProviderPolicyRecord {
+                        data_policy: p.data_policy,
+                        region: p.headquarters,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn sample_endpoints() -> Vec<OpenRouterEndpointRaw> {
+        let resp: OpenRouterEndpointsResp = serde_json::from_str(SAMPLE_ENDPOINTS_JSON).unwrap();
+        resp.data.endpoints
+    }
+
+    #[test]
+    fn real_endpoints_response_parses_without_panicking() {
+        let endpoints = sample_endpoints();
+        assert_eq!(endpoints.len(), 3);
+        assert_eq!(endpoints[0].provider_name, "StreamLake");
+        assert_eq!(endpoints[0].tag.as_deref(), Some("streamlake"));
+        assert_eq!(endpoints[1].tag.as_deref(), Some("deepinfra/fp4"));
+    }
+
+    #[test]
+    fn real_all_providers_response_parses_without_panicking() {
+        let policies = sample_policies();
+        assert_eq!(policies.len(), 5);
+        let deepinfra = policies.get("deepinfra").unwrap();
+        assert!(!deepinfra.data_policy.training);
+        assert!(!deepinfra.data_policy.retains_prompts);
+        assert_eq!(deepinfra.region.as_deref(), Some("US"));
+    }
+
+    #[test]
+    fn provider_slug_from_tag_splits_on_first_slash() {
+        assert_eq!(provider_slug_from_tag("deepinfra/fp4"), "deepinfra");
+        assert_eq!(provider_slug_from_tag("streamlake"), "streamlake");
+        assert_eq!(provider_slug_from_tag("google-vertex/us-south1"), "google-vertex");
+    }
+
+    #[test]
+    fn join_produces_exactly_the_clean_providers_for_safe_set() {
+        let endpoints = sample_endpoints();
+        let policies = sample_policies();
+        let joined = join_endpoints_with_policy(&endpoints, &policies);
+        assert_eq!(joined.len(), 3);
+
+        let safe = compute_safe_providers(&joined);
+        assert_eq!(safe, vec!["deepinfra".to_string(), "novita".to_string()]);
+    }
+
+    /// A China-hosted / training provider (DeepSeek's own first-party endpoint) must be
+    /// excluded from the safe set. Simulated by adding a fourth endpoint whose tag
+    /// resolves to the `deepseek` slug (training=true in the sample policy catalog).
+    #[test]
+    fn training_provider_excluded_from_safe_set() {
+        let mut endpoints = sample_endpoints();
+        endpoints.push(OpenRouterEndpointRaw {
+            provider_name: "DeepSeek".to_string(),
+            tag: Some("deepseek".to_string()),
+            pricing: OpenRouterPricing { prompt: 0.0000002, completion: 0.0000008 },
+        });
+        let policies = sample_policies();
+        let joined = join_endpoints_with_policy(&endpoints, &policies);
+        let safe = compute_safe_providers(&joined);
+        assert!(
+            !safe.contains(&"deepseek".to_string()),
+            "training provider must never appear in the safe set: {safe:?}"
+        );
+        // The other two clean providers are still present.
+        assert_eq!(safe, vec!["deepinfra".to_string(), "novita".to_string()]);
+    }
+
+    /// A retaining-but-not-training provider (StreamLake) is ALSO excluded — the safe
+    /// bar is `training == false && retains_prompts == false`, not `training == false`
+    /// alone.
+    #[test]
+    fn retaining_only_provider_excluded_from_safe_set() {
+        let endpoints = sample_endpoints();
+        let policies = sample_policies();
+        let joined = join_endpoints_with_policy(&endpoints, &policies);
+        let streamlake = joined.iter().find(|e| e.provider_slug == "streamlake").unwrap();
+        assert!(streamlake.retains_prompts);
+        assert!(!streamlake.training);
+        assert!(!streamlake.is_safe());
+        let safe = compute_safe_providers(&joined);
+        assert!(!safe.contains(&"streamlake".to_string()));
+    }
+
+    /// Malformed/missing fields (no `tag` at all, or a `tag` whose slug isn't in the
+    /// policy catalog) must not panic, and must resolve to UNSAFE — never silently safe.
+    #[test]
+    fn missing_tag_and_unknown_slug_are_excluded_not_panicking() {
+        let endpoints = vec![
+            OpenRouterEndpointRaw {
+                provider_name: "No Tag Provider".to_string(),
+                tag: None,
+                pricing: OpenRouterPricing::default(),
+            },
+            OpenRouterEndpointRaw {
+                provider_name: "Unknown Provider".to_string(),
+                tag: Some("totally-unknown-slug/variant".to_string()),
+                pricing: OpenRouterPricing::default(),
+            },
+        ];
+        let policies = sample_policies();
+        // Must not panic.
+        let joined = join_endpoints_with_policy(&endpoints, &policies);
+        assert_eq!(joined.len(), 2);
+        for entry in &joined {
+            assert!(
+                !entry.is_safe(),
+                "unknown/malformed provider `{}` must resolve to unsafe (fail-closed)",
+                entry.provider_slug
+            );
+            assert!(entry.training && entry.retains_prompts);
+        }
+        let safe = compute_safe_providers(&joined);
+        assert!(safe.is_empty());
+    }
+
+    #[test]
+    fn empty_policy_catalog_makes_every_endpoint_unsafe() {
+        // Simulates the all-providers fetch having failed (cached as an empty map).
+        let endpoints = sample_endpoints();
+        let joined = join_endpoints_with_policy(&endpoints, &HashMap::new());
+        assert_eq!(joined.len(), 3);
+        assert!(joined.iter().all(|e| !e.is_safe()));
+        assert!(compute_safe_providers(&joined).is_empty());
+    }
+
+    #[test]
+    fn compute_safe_providers_dedupes_and_sorts() {
+        let entries = vec![
+            ProviderEndpointInfo {
+                provider_slug: "novita".to_string(),
+                provider_name: "Novita".to_string(),
+                region: None,
+                training: false,
+                retains_prompts: false,
+                price_in: 1.0,
+                price_out: 1.0,
+            },
+            ProviderEndpointInfo {
+                provider_slug: "deepinfra".to_string(),
+                provider_name: "DeepInfra".to_string(),
+                region: None,
+                training: false,
+                retains_prompts: false,
+                price_in: 1.0,
+                price_out: 1.0,
+            },
+            // Duplicate slug (same provider serving via two variants/quantizations).
+            ProviderEndpointInfo {
+                provider_slug: "deepinfra".to_string(),
+                provider_name: "DeepInfra (fp8)".to_string(),
+                region: None,
+                training: false,
+                retains_prompts: false,
+                price_in: 2.0,
+                price_out: 2.0,
+            },
+        ];
+        let safe = compute_safe_providers(&entries);
+        assert_eq!(safe, vec!["deepinfra".to_string(), "novita".to_string()]);
+    }
+
+    // ── ModelRegistry.safe_providers_for / seed_provider_endpoints ─────────────
+
+    #[test]
+    fn safe_providers_for_unknown_before_any_fetch() {
+        let reg = ModelRegistry::new();
+        assert_eq!(reg.safe_providers_for("some/model"), SafeProviders::Unknown);
+    }
+
+    #[test]
+    fn safe_providers_for_known_after_seeding() {
+        let reg = ModelRegistry::new();
+        let endpoints = join_endpoints_with_policy(&sample_endpoints(), &sample_policies());
+        reg.seed_provider_endpoints("deepseek/deepseek-chat", endpoints);
+        match reg.safe_providers_for("deepseek/deepseek-chat") {
+            SafeProviders::Known(list) => {
+                assert_eq!(list, vec!["deepinfra".to_string(), "novita".to_string()]);
+            }
+            SafeProviders::Unknown => panic!("expected Known after seeding"),
+        }
+        // A DIFFERENT model id, never seeded, is still Unknown.
+        assert_eq!(
+            reg.safe_providers_for("some/other-model"),
+            SafeProviders::Unknown
+        );
+    }
+
+    #[test]
+    fn safe_providers_for_known_empty_when_seeded_with_zero_safe_providers() {
+        let reg = ModelRegistry::new();
+        // Seed with only unsafe providers.
+        let joined = join_endpoints_with_policy(
+            &[OpenRouterEndpointRaw {
+                provider_name: "StreamLake".to_string(),
+                tag: Some("streamlake".to_string()),
+                pricing: OpenRouterPricing::default(),
+            }],
+            &sample_policies(),
+        );
+        reg.seed_provider_endpoints("all-unsafe/model", joined);
+        assert_eq!(
+            reg.safe_providers_for("all-unsafe/model"),
+            SafeProviders::Known(vec![])
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_safe_providers_loaded_is_a_noop_read_when_already_cached() {
+        // No network in this test: seed the cache directly, then call the lazy-load
+        // wrapper — it must return the seeded value without attempting any I/O (which
+        // would fail/hang in a sandboxed test run if it tried).
+        let reg = ModelRegistry::new();
+        let endpoints = join_endpoints_with_policy(&sample_endpoints(), &sample_policies());
+        reg.seed_provider_endpoints("cached/model", endpoints);
+        let result = reg.ensure_safe_providers_loaded(None, "cached/model").await;
+        assert_eq!(
+            result,
+            SafeProviders::Known(vec!["deepinfra".to_string(), "novita".to_string()])
         );
     }
 }

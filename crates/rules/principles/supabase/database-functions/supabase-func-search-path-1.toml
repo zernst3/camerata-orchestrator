@@ -1,0 +1,69 @@
+id = "SUPABASE-FUNC-SEARCH-PATH-1"
+title = "A SECURITY DEFINER function must set search_path explicitly to prevent search-path hijacking"
+tag = "stack"
+domain = "supabase:database-functions"
+layer = "platform"
+enforcement = "architectural"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a multi-line statement scan over CREATE FUNCTION bodies: a function declared SECURITY DEFINER (runs with its creator's privileges, not the caller's) without a corresponding SET search_path clause is flagged. This is deterministic once a CREATE FUNCTION statement is parsed as a whole (definer presence and search_path absence are both facts about the same statement), and the DEFINER subset of the match is near-zero-FP — making this a floor-port candidate once the statement-splitter infrastructure it depends on exists; until then it ships at the architectural tier. Conformance holds when every SECURITY DEFINER function pins search_path (to a trusted schema list ending in pg_temp, per Postgres's own recommendation)."
+
+[[sources]]
+url = "https://www.postgresql.org/docs/current/sql-createfunction.html#SQL-CREATEFUNCTION-SECURITY"
+title = "PostgreSQL docs — CREATE FUNCTION: Writing SECURITY DEFINER Functions Safely (search_path must exclude untrusted-writable schemas)"
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/database-advisors?lint=0011_function_search_path_mutable"
+title = "Supabase Database Linter — 0011_function_search_path_mutable (\"Unsecured function search path\")"
+linter = "splinter: function_search_path_mutable"
+
+[decision]
+question = "Must every SECURITY DEFINER function pin its search_path explicitly, and is SECURITY INVOKER preferred by default unless DEFINER is required?"
+default = "require-search-path-on-definer-functions"
+why = """
+PostgreSQL's own documentation is explicit and unambiguous on this exact attack: "For security,
+search_path should be set to exclude any schemas writable by untrusted users. This prevents
+malicious users from creating objects (e.g., tables, functions, and operators) that mask objects
+intended to be used by the function." A SECURITY DEFINER function executes with the PRIVILEGES OF
+ITS CREATOR regardless of who calls it — if that function resolves an unqualified table or function
+name via the caller's mutable search_path (which by default can include a schema the caller
+controls, including pg_temp), an attacker can create an object with a colliding name that gets
+resolved and executed with the definer's elevated privileges instead of the intended one. This is
+exactly Splinter's function_search_path_mutable lint (0011, confirmed against the live
+database-advisors page).
+
+The match-set is deterministic once a CREATE FUNCTION statement is parsed as a whole: does the
+statement carry SECURITY DEFINER, and does it also carry a SET search_path clause? Both facts live
+in the same statement, so no cross-file replay is needed — this differs from the RLS-state rules,
+which need timeline replay because their state is established ACROSS files. The remaining
+implementation gap is a statement-granular SQL parser capable of reliably isolating a full
+CREATE FUNCTION body (including its dollar-quoted function definition) rather than a naive
+line-oriented regex; once that exists, the DEFINER-present / search_path-absent match has no known
+benign counter-example and is a floor-port candidate.
+
+Folded into this rule's remediation text (per the pruned SUPABASE-FUNC-DEFINER-MINIMAL-1's intent):
+prefer SECURITY INVOKER (the Postgres default) unless the function specifically needs to act with
+elevated privileges the caller doesn't have; when DEFINER is genuinely required, pinning
+search_path is the mandatory mitigation, not an alternative to minimizing DEFINER usage in the
+first place.
+"""
+
+[[option]]
+id = "require-search-path-on-definer-functions"
+label = "Flag every SECURITY DEFINER function lacking SET search_path; recommend SECURITY INVOKER when DEFINER isn't required"
+directive = """
+Parse each CREATE FUNCTION statement as a whole. When it carries SECURITY DEFINER and does NOT
+carry a SET search_path clause, emit a high-severity finding: "One of your database functions runs
+with elevated power but resolves names loosely — a known Postgres attack lets someone swap in their
+own code underneath it." Remediation, in priority order: (1) if the function does not actually need
+elevated privileges, switch to SECURITY INVOKER (the Postgres default) and remove DEFINER entirely;
+(2) if DEFINER is genuinely required, add `SET search_path = <trusted_schema(s)>, pg_temp` — with
+pg_temp listed last so the temporary schema is searched last, per Postgres's own guidance.
+"""
+why = "search_path hijacking against a SECURITY DEFINER function is a well-documented, well-understood Postgres attack with a known, low-cost fix (SET search_path); folding the SECURITY INVOKER preference into this rule's remediation gives the report one clear finding instead of two overlapping, lower-value ones."
+
+[[option]]
+id = "flag-all-security-definer-functions-regardless-of-search-path"
+label = "Flag every SECURITY DEFINER function as a finding, regardless of whether search_path is already set"
+directive = "Treat the mere presence of SECURITY DEFINER as report-worthy, without checking whether SET search_path is already present."
+why = "Rejected: SECURITY DEFINER with a correctly pinned search_path is the Postgres-documented SAFE pattern, not a residual risk — flagging it anyway would produce a finding with no actionable remediation (the function is already doing the right thing) and would train the reader to distrust the report's other DEFINER-related findings. The absence of search_path is the actual vulnerability condition, not DEFINER by itself."

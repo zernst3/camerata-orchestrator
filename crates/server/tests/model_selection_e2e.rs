@@ -29,6 +29,7 @@ use camerata_server::llm::{
 };
 use camerata_server::model_registry::{ModelRegistry, RegistryEntry};
 use camerata_server::model_tier::{CapabilityBand, TierMap};
+use camerata_server::provider_policy::ProviderPolicy;
 use camerata_server::project::{
     L3ReviewConfig, ModelProfile, ProjectStore, StepKind,
 };
@@ -125,6 +126,15 @@ fn registry_with_openrouter(id: &str) -> ModelRegistry {
 
 fn limiter() -> Arc<ProviderRateLimiter> {
     Arc::new(ProviderRateLimiter::new())
+}
+
+/// The default OpenRouter provider-safety policy (`safe_mode: true`, no pin) — these
+/// model-selection/wiring tests don't exercise the provider-safety enforcement itself
+/// (that has its own dedicated test coverage in `camerata-llm`); they just need a
+/// well-formed policy value to satisfy the `build_completer`/`build_agent_driver`
+/// signatures.
+fn default_policy() -> ProviderPolicy {
+    ProviderPolicy::default()
 }
 
 /// A construction-only `Llm` (CLI backend). `Llm::from_env()` does NOT spawn `claude`;
@@ -568,7 +578,8 @@ fn scope5_claude_model_routes_to_cli_backed_llm() {
     let registry = ModelRegistry::new(); // static registry has claude-sonnet-4-6 as `claude`.
     let creds = MemoryCredentialStore::new(); // no OpenRouter key needed for claude.
     let llm = cli_llm();
-    let completer = build_completer("claude-sonnet-4-6", &registry, &creds, llm, limiter())
+    let completer =
+        build_completer("claude-sonnet-4-6", &registry, &creds, llm, limiter(), &default_policy())
         .expect("claude model must build without an OpenRouter key");
     assert!(
         !completer.as_any().is::<OpenRouterCompleter>(),
@@ -586,7 +597,8 @@ fn scope5_openrouter_model_routes_to_openrouter_completer() {
     let registry = registry_with_openrouter("vendor/some-model");
     let creds = creds_with_openrouter_key();
     let llm = cli_llm();
-    let completer = build_completer("vendor/some-model", &registry, &creds, llm, limiter())
+    let completer =
+        build_completer("vendor/some-model", &registry, &creds, llm, limiter(), &default_policy())
         .expect("openrouter model with a key must build");
     assert!(
         completer.as_any().is::<OpenRouterCompleter>(),
@@ -599,7 +611,8 @@ fn scope5_openrouter_model_without_key_errors_cleanly() {
     let registry = registry_with_openrouter("vendor/no-key-model");
     let creds = MemoryCredentialStore::new(); // NO key.
     let llm = cli_llm();
-    let result = build_completer("vendor/no-key-model", &registry, &creds, llm, limiter());
+    let result =
+        build_completer("vendor/no-key-model", &registry, &creds, llm, limiter(), &default_policy());
     let msg = match result {
         Err(e) => e.to_string(),
         Ok(_) => panic!("build_completer must error for an openrouter model with no key"),
@@ -621,6 +634,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
     let claude = build_agent_driver(
         "claude-sonnet-4-6",
         &registry,
+        &default_policy(),
         &creds,
         "/tmp/mcp.json",
         vec![],
@@ -640,6 +654,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
     let or = build_agent_driver(
         "vendor/agent-model",
         &reg_or,
+        &default_policy(),
         &creds_or,
         "/tmp/mcp.json",
         vec![],
@@ -658,6 +673,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
     let err = build_agent_driver(
         "vendor/agent-model",
         &reg_or,
+        &default_policy(),
         &creds_none,
         "/tmp/mcp.json",
         vec![],
@@ -842,6 +858,7 @@ fn server_orch_factory(
 ) -> camerata_server::api_agent_driver::ServerOrchestratorDriverFactory {
     camerata_server::api_agent_driver::ServerOrchestratorDriverFactory::new(
         registry,
+        default_policy(),
         Arc::new(creds),
         limiter(),
         std::path::PathBuf::from("/bin/camerata-gateway"),
@@ -980,6 +997,7 @@ fn scope7_gate_lead_is_orchestrator_child_is_not() {
     // A child built by the server child factory is ALWAYS a non-orchestrator worker.
     let child_factory = camerata_server::api_agent_driver::ServerChildDriverFactory::new(
         registry_with_openrouter("vendor/child"),
+        default_policy(),
         Arc::new(creds_with_openrouter_key()),
         limiter(),
         std::path::PathBuf::from("/bin/camerata-gateway"),

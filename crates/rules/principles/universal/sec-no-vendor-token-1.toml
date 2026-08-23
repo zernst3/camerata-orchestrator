@@ -1,5 +1,5 @@
 id = "SEC-NO-VENDOR-TOKEN-1"
-title = "Vendor credential tokens (AWS, GitHub, Slack, Stripe, Google, Anthropic) are never hardcoded; they live in a secrets manager or environment variables"
+title = "Vendor credential tokens (AWS, GitHub, Slack, Stripe, Google, Anthropic, Supabase) are never hardcoded; they live in a secrets manager or environment variables"
 tag = "universal"
 domain = "universal"
 layer = "universal"
@@ -19,16 +19,54 @@ title = "CWE-798: Use of Hard-coded Credentials"
 url = "https://docs.github.com/en/code-security/secret-scanning/about-secret-scanning"
 title = "GitHub Docs — About secret scanning"
 
+[[sources]]
+url = "https://supabase.com/docs/guides/api/api-keys"
+title = "Supabase docs — API keys: service_role bypasses RLS; new sb_secret_ secret-key format; never expose either publicly"
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/connecting-to-postgres"
+title = "Supabase docs — Connecting to Postgres: direct connection string shape (postgres(ql)://postgres:<password>@db.<ref>.supabase.co:5432/postgres)"
+
 [decision]
 question = "Where do vendor API tokens and credentials live?"
 default = "env-or-secrets-manager"
-why = "Vendor tokens (AWS AKIA/ASIA access key IDs, GitHub personal access tokens, Slack bot/app tokens, Stripe live secret keys, Google API keys, Anthropic API keys) are high-value credentials that grant access to production systems. The token shapes covered have near-zero false-positive rates: each is anchored to a known vendor-specific prefix plus a fixed-length alphanumeric body. A hardcoded vendor token is a publicly-accessible credential the moment the file is pushed; automated credential scanners index GitHub continuously. The only correct location is a secrets manager (Vault, AWS Secrets Manager, Azure Key Vault) or environment variable injected at runtime."
+why = """
+Vendor tokens (AWS AKIA/ASIA access key IDs, GitHub personal access tokens, Slack bot/app tokens,
+Stripe live secret keys, Google API keys, Anthropic API keys, Supabase secret keys) are high-value
+credentials that grant access to production systems. The token shapes covered have near-zero
+false-positive rates: each is anchored to a known vendor-specific prefix plus a fixed-length
+alphanumeric body. A hardcoded vendor token is a publicly-accessible credential the moment the file
+is pushed; automated credential scanners index GitHub continuously. The only correct location is a
+secrets manager (Vault, AWS Secrets Manager, Azure Key Vault) or environment variable injected at
+runtime.
+
+Supabase secret shapes added to the match-set (confirmed against the live Supabase API-keys docs):
+  (a) sb_secret_ new-format secret keys — a fixed literal prefix (sb_secret_) followed by an
+      opaque body; near-zero FP, matched the same way AWS AKIA/ASIA prefixes are.
+  (b) Legacy service_role JWTs — Supabase's pre-sb_secret_ format is a standard three-part JWT
+      whose PAYLOAD (the base64 middle segment) decodes to a claims object containing
+      "role":"service_role". A bare regex cannot see inside a JWT's base64 payload, so this arm
+      decodes the matched token's middle segment at match time and checks for that claim — the
+      same decode-at-match-time technique this rule already uses for the SafeLoader/FullLoader
+      carve-out precedent in SEC-NO-UNSAFE-DESERIALIZATION-1. A JWT decoding to
+      "role":"anon" or "role":"authenticated" is NOT flagged — those are the intentionally-public
+      anon/publishable keys (see SUPABASE-KEY-SERVICE-ROLE-CLIENT-1's qualifies for why the anon
+      key's mere presence must never be flagged).
+  (c) Supabase Postgres connection strings with an inline password — postgres(ql)?://[^@]+:[^@]+@
+      db.<project-ref>.supabase.co(:5432)?/postgres. The project's direct-connection URI embeds the
+      database password in the URI itself (confirmed against Supabase's own "Connecting to
+      Postgres" docs, whose example is literally
+      postgresql://postgres:[YOUR-PASSWORD]@db.<ref>.supabase.co:5432/postgres) — a hardcoded copy
+      of this string is a hardcoded database password, not merely an API credential.
+This is a match-set EXTENSION to an already-`grounded` floor rule — no new rule id, no change to
+the rule's tier or its enforcement status; it remains `AUDIT_RULES`-enforced exactly as before.
+"""
 
 [[option]]
 id = "env-or-secrets-manager"
 label = "Vendor tokens in env vars or a secrets manager, never source"
-directive = "AWS access key IDs, GitHub PATs, Slack tokens, Stripe live keys, Google API keys, and Anthropic API keys are never written into source files, config files, or any file committed to the repository. Tests that require a vendor token use a test-doubles pattern (recorded cassettes, mocked HTTP, stub services) or retrieve a short-lived token from the secrets manager at test startup. The gate enforces this by matching known vendor token shapes and denying any write that includes them."
-why = "Vendor tokens in source are immediately exposed on push. Automated scanning services index public GitHub in near-real time; rotations after an exposure are slower than the attacker's first request."
+directive = "AWS access key IDs, GitHub PATs, Slack tokens, Stripe live keys, Google API keys, Anthropic API keys, Supabase sb_secret_/service_role keys, and Supabase Postgres connection strings with an inline password are never written into source files, config files, or any file committed to the repository. Tests that require a vendor token use a test-doubles pattern (recorded cassettes, mocked HTTP, stub services) or retrieve a short-lived token from the secrets manager at test startup. The gate enforces this by matching known vendor token shapes — including a decode-at-match-time check for service_role JWTs — and denying any write that includes them. The anon/publishable Supabase key is explicitly NOT matched: it is designed to be public, and its downstream risk is RLS quality, not its own presence (see the supabase/rls/* rule group)."
+why = "Vendor tokens in source are immediately exposed on push. Automated scanning services index public GitHub in near-real time; rotations after an exposure are slower than the attacker's first request. The Supabase additions close a gap the original AWS/GitHub/Slack/Stripe/Google/Anthropic match-set didn't cover: a service_role JWT or an inline-password connection string is exactly as damaging as any other vendor secret, but neither has the fixed-length-alphanumeric-after-a-prefix shape the other vendors share, which is why the JWT arm needs the decode step and the connection-string arm needs its own dedicated pattern."
 
 [[option]]
 id = "commit-vendor-tokens-as-test-fixtures"

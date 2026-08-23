@@ -12,6 +12,7 @@ pub mod git;
 pub mod govdev;
 pub mod llm_backend;
 pub mod models;
+pub mod provider_safety;
 pub mod readiness;
 pub mod rules;
 pub mod run;

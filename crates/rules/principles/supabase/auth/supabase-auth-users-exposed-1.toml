@@ -1,0 +1,53 @@
+id = "SUPABASE-AUTH-USERS-EXPOSED-1"
+title = "auth.users must never be exposed to anon/authenticated via a view, materialized view, or grant in an exposed schema"
+tag = "stack"
+domain = "supabase:auth"
+layer = "platform"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a statement-granular scan for SQL referencing auth.users inside a CREATE VIEW, CREATE MATERIALIZED VIEW, or GRANT statement whose target object lives in an API-exposed schema (public by default, or per SUPABASE-EXPOSURE-SCHEMAS-1). auth.users carries every account's email, phone number, and metadata; exposing any of it through PostgREST is a full account-directory leak. Conformance holds when no exposed-schema object selects from or grants access to auth.users directly — legitimate app-level user data belongs in an application-owned public.profiles-style table populated via trigger, never a direct view over auth.users."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/database-advisors?lint=0002_auth_users_exposed"
+title = "Supabase Database Linter — 0002_auth_users_exposed (\"User data exposed through a view\")"
+linter = "splinter: auth_users_exposed"
+
+[decision]
+question = "Is any exposed-schema view, materialized view, or grant that references auth.users treated as a critical finding?"
+default = "flag-any-exposed-auth-users-reference"
+why = """
+auth.users is Supabase's own internal identity table — it holds every user's email, phone number,
+and raw_user_meta_data, none of which is meant to be readable through the public API surface. A
+view or materialized view defined in an exposed schema that selects from auth.users (commonly
+created so app code can "join user info" conveniently) or a GRANT that hands anon/authenticated
+direct SELECT on auth.users itself makes the entire user directory readable through PostgREST —
+this is Splinter's auth_users_exposed lint (0002, confirmed against the live database-advisors
+page: "User data exposed through a view... inadvertently expose personal information"). There is
+no partial-exposure version of this finding that is acceptable: any reference from an exposed
+object to auth.users is a full account-list leak, so it ships as an unconditional critical with no
+needs_review carve-out.
+
+The correct pattern (which the finding's remediation text should point at) is a separate,
+application-owned public.profiles table (or similar), populated by a trigger on auth.users insert,
+exposing only the columns the application actually needs to share — never a live view over the
+auth schema itself.
+"""
+
+[[option]]
+id = "flag-any-exposed-auth-users-reference"
+label = "Flag any exposed-schema CREATE VIEW / CREATE MATERIALIZED VIEW / GRANT referencing auth.users, unconditionally critical"
+directive = """
+Scan CREATE VIEW, CREATE MATERIALIZED VIEW, and GRANT statements whose target schema is
+API-exposed for any reference to auth.users. Any match is a critical, unconditional finding:
+"Your entire user list — emails included — is readable through your public API." Remediation:
+replace the view with an application-owned profiles table populated via an auth.users insert
+trigger, exposing only the specific non-sensitive columns the app needs.
+"""
+why = "There is no legitimate reason for an exposed-schema object to reference auth.users directly — the correct pattern (a curated profiles table) exists precisely to avoid this, so an unconditional critical with no carve-out is the right severity."
+
+[[option]]
+id = "allow-column-restricted-views-over-auth-users"
+label = "Allow a view over auth.users when it explicitly selects only non-sensitive columns (e.g. just the id)"
+directive = "Permit an exposed view referencing auth.users if its column list is limited to non-identifying fields such as id, and flag only views that select email/phone/metadata columns."
+why = "Rejected: even an id-only view over auth.users still confirms which UUIDs exist as real accounts (an enumeration primitive) and, more importantly, is a fragile pattern that silently widens the moment someone adds `select *` or another column to the same view later — a change a reviewer is unlikely to recognize as security-relevant since the view already existed. The application-owned profiles-table pattern achieves the same legitimate need (referencing a user by id) without ever exposing the auth schema itself."

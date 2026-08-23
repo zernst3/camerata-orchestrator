@@ -186,6 +186,51 @@ impl ProposedRuleView {
     }
 }
 
+/// Whether a rule's alternative is UNRESOLVED: it has options (alternatives to choose
+/// between) but neither the caller-supplied `chosen_option_id` (the architect's saved pick,
+/// already looked up scoped to whichever repo is being viewed) nor the rule's own
+/// `default_option` resolves to an option carrying a non-empty directive. A rule with no
+/// options is never unresolved — there is nothing to pick.
+///
+/// This is the ONE predicate backing the proposed-rules table's yellow "needs an
+/// alternative chosen" row highlight, the audit/arm gate ("Choose an alternative first
+/// for: ..."), and the "Needs option" table filter (`rules_needing_option_chosen` below) —
+/// all three read it so they can never disagree about which rules still need a choice.
+pub fn rule_option_unresolved(rule: &ProposedRuleView, chosen_option_id: Option<&str>) -> bool {
+    if rule.options.is_empty() {
+        return false;
+    }
+    let oid = chosen_option_id.or(rule.default_option.as_deref());
+    let directive = oid
+        .and_then(|id| rule.options.iter().find(|o| o.id == id))
+        .map(|o| o.directive.as_str())
+        .unwrap_or("");
+    directive.is_empty()
+}
+
+/// The ids of the rules that are BOTH selected and still [`rule_option_unresolved`] — the
+/// exact set the proposed-rules table's yellow row highlight, the "before you can audit or
+/// add them" gate warning, and the "Needs option" table filter all show. `resolve_chosen`
+/// looks up a rule's saved chosen-option id (already scoped by the caller to whichever repo
+/// is being viewed); return `None` when there is no saved pick (falls back to the rule's own
+/// default inside [`rule_option_unresolved`]).
+///
+/// Pure and framework-free so this is unit-tested directly against fixtures, with no
+/// VirtualDom — `ProposedRulesTable` itself is intentionally excluded from SSR render tests
+/// (it depends on six+ contexts and async-loaded data).
+pub fn rules_needing_option_chosen<'a>(
+    rules: impl IntoIterator<Item = &'a ProposedRuleView>,
+    selected_ids: &std::collections::HashSet<String>,
+    mut resolve_chosen: impl FnMut(&str) -> Option<String>,
+) -> std::collections::HashSet<String> {
+    rules
+        .into_iter()
+        .filter(|r| selected_ids.contains(&r.id))
+        .filter(|r| rule_option_unresolved(r, resolve_chosen(&r.id).as_deref()))
+        .map(|r| r.id.clone())
+        .collect()
+}
+
 /// Quote a CSV field if it contains a comma, quote, or newline (RFC 4180).
 pub fn csv_field(s: &str) -> String {
     if s.contains([',', '"', '\n', '\r']) {
@@ -336,6 +381,118 @@ mod tests {
         // repos-empty selection would be garbage-collected downstream — so skip.
         assert_eq!(project_level_insert(SelectionBucket::Process, &[]), None);
         assert_eq!(project_level_insert(SelectionBucket::CrossRepo, &[]), None);
+    }
+
+    // ── rule_option_unresolved / rules_needing_option_chosen ───────────────────
+    // These back the yellow row highlight, the audit/arm gate warning, and the
+    // "Needs option" table filter — all three must read the SAME predicate so
+    // they can never disagree about which rules still need a choice.
+
+    fn rule_with_options(
+        default_option: Option<&str>,
+        options: &[(&str, &str)],
+    ) -> ProposedRuleView {
+        let opts: Vec<serde_json::Value> = options
+            .iter()
+            .map(|(id, directive)| {
+                serde_json::json!({"id": id, "label": id, "directive": directive})
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "id": "RULE-OPT-1",
+            "title": "T",
+            "kind": "structured",
+            "scope": "repo-local",
+            "options": opts,
+            "default_option": default_option,
+        }))
+        .expect("valid ProposedRuleView fixture")
+    }
+
+    #[test]
+    fn rule_option_unresolved_no_options_is_always_resolved() {
+        // A rule with no options has nothing to pick — never unresolved, regardless
+        // of what (if anything) is passed as the chosen option id.
+        let r = rule_with_options(None, &[]);
+        assert!(!rule_option_unresolved(&r, None));
+        assert!(!rule_option_unresolved(&r, Some("whatever")));
+    }
+
+    #[test]
+    fn rule_option_unresolved_options_no_pick_no_default_is_unresolved() {
+        // Options exist, but neither a caller pick nor a corpus default resolves —
+        // the architect must choose.
+        let r = rule_with_options(None, &[("a", "Do the thing")]);
+        assert!(rule_option_unresolved(&r, None));
+    }
+
+    #[test]
+    fn rule_option_unresolved_chosen_pick_with_directive_is_resolved() {
+        // A caller-supplied pick that resolves to a non-empty directive resolves the
+        // rule even though there is no default_option at all.
+        let r = rule_with_options(None, &[("a", "Do the thing"), ("b", "Do the other thing")]);
+        assert!(!rule_option_unresolved(&r, Some("b")));
+    }
+
+    #[test]
+    fn rule_option_unresolved_default_option_with_directive_is_resolved() {
+        // No caller pick — falls back to the rule's own default_option, which
+        // resolves to a non-empty directive.
+        let r = rule_with_options(Some("a"), &[("a", "Do the thing")]);
+        assert!(!rule_option_unresolved(&r, None));
+    }
+
+    #[test]
+    fn rule_option_unresolved_pick_resolving_to_empty_directive_is_unresolved() {
+        // The pick resolves to a REAL option, but that option's directive is empty
+        // (an alternative that hasn't been fleshed out yet) — still unresolved.
+        let r = rule_with_options(None, &[("a", "")]);
+        assert!(rule_option_unresolved(&r, Some("a")));
+    }
+
+    #[test]
+    fn rule_option_unresolved_pick_overrides_default() {
+        // The caller's pick takes priority over default_option even when the
+        // default would itself have resolved — the architect's explicit choice wins.
+        let r = rule_with_options(Some("a"), &[("a", "Default directive"), ("b", "")]);
+        // Picking "b" (empty directive) must NOT fall back to the resolved default "a".
+        assert!(rule_option_unresolved(&r, Some("b")));
+    }
+
+    #[test]
+    fn rules_needing_option_chosen_returns_exactly_selected_and_unresolved() {
+        let mut r1 = rule_with_options(None, &[("a", "")]); // unresolved
+        r1.id = "R1".to_string();
+        let mut r2 = rule_with_options(Some("a"), &[("a", "Resolved")]); // resolved
+        r2.id = "R2".to_string();
+        let mut r3 = rule_with_options(None, &[("a", "")]); // unresolved, but NOT selected
+        r3.id = "R3".to_string();
+        let mut r4 = rule_with_options(Some("a"), &[("a", "Resolved")]); // resolved, NOT selected
+        r4.id = "R4".to_string();
+        let rules = vec![r1, r2, r3, r4];
+        let selected: std::collections::HashSet<String> =
+            ["R1", "R2"].iter().map(|s| s.to_string()).collect();
+
+        let needing = rules_needing_option_chosen(&rules, &selected, |_id| None);
+
+        let expected: std::collections::HashSet<String> = ["R1".to_string()].into_iter().collect();
+        assert_eq!(needing, expected, "must be exactly selected-AND-unresolved: not unselected-but-unresolved (R3), not selected-but-resolved (R2)");
+    }
+
+    #[test]
+    fn rules_needing_option_chosen_resolve_chosen_takes_priority_over_default() {
+        // R1's default would resolve it, but the caller's saved pick (via
+        // resolve_chosen) points at an option with an empty directive — still unresolved.
+        let mut r1 = rule_with_options(Some("a"), &[("a", "Resolved default"), ("b", "")]);
+        r1.id = "R1".to_string();
+        let rules = vec![r1];
+        let selected: std::collections::HashSet<String> = ["R1".to_string()].into_iter().collect();
+
+        let needing = rules_needing_option_chosen(&rules, &selected, |id| {
+            if id == "R1" { Some("b".to_string()) } else { None }
+        });
+
+        assert_eq!(needing, ["R1".to_string()].into_iter().collect());
     }
 
     // ── rules_csv ─────────────────────────────────────────────────────────────

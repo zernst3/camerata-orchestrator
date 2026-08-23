@@ -204,6 +204,8 @@ Do not stop after the first violation of a rule, and do not stop after the first
 
 RECALL OVER PRECISION. This is a discovery audit and a human architect reviews every finding before anything is enforced, so the cost of a borderline false positive is tiny and the cost of a missed real violation is high. When you are unsure whether something violates a rule, REPORT IT (use severity "low" and say it's borderline in `detail`). Do not stay silent to seem precise. Do not cap yourself at a handful — if there are thirty violations, return thirty.
 
+SEVERITY. Use "low"/"medium"/"high" for the normal range (a debatable architectural preference is "low" or "medium"; a concrete, demonstrable security or correctness break is "high"). Reserve "critical" — it must stay RARE — for a violation that clears ALL of: (1) it is concretely exploitable, not theoretical, and (2) a competent attacker or a single bad input reaches real, serious impact quickly. Qualifying classes: unauthenticated (or unauthorized) access to a privileged, destructive, or financial operation; a credential or secret exposed to clients or committed to the repo; PII or equivalently sensitive data readable or writable with no access control on an internet-exposed surface; remote code execution or injection with a real, reachable path (not just an untrusted-input pattern that happens to be sanitized elsewhere). Do not use "critical" for a bad-but-contained bug, a missing best practice, or anything you would call "high" out of general alarm — when in doubt between "high" and "critical", use "high".
+
 CRITICAL — do NOT invent rule names that duplicate adopted rules. Before you set `rule`, check whether the violation is already covered by one of the adopted `[RULE-ID]`s above. If it is, you MUST use that exact adopted RULE-ID — even if you would have phrased the issue differently. A controller reaching into the database directly is `ARCH-STRICT-LAYERING-1`, not "controller-direct-db" or "handler-bypasses-repo"; a handler panicking on a DB error is `ARCH-STRUCTURED-ERRORS-1`, not "panic-on-db-error". Inventing a new name for a violation an adopted rule already covers is the single worst failure mode of this audit — it produces triplicate findings that all mean the same thing.
 
 Flagging novel issues (issues no adopted rule covers) is GATED by this pass's instruction line. ONLY when that line says to "ALSO flag any other genuine issues" may you report something outside the adopted rules — and then set `rule` to a short kebab name (e.g. "auth-on-write-paths"), reserved strictly for genuinely-novel issues (if any adopted rule fits, use the adopted id instead). When the instruction line says to check ONLY the listed rules, report nothing outside them.
@@ -224,7 +226,7 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
     {
       "path": "relative/file/path",
       "line": 0,
-      "severity": "high|medium|low",
+      "severity": "critical|high|medium|low",
       "rule": "EXACT adopted RULE-ID, or a short-kebab-name for an unlisted issue",
       "title": "one-line statement of the specific violation here",
       "code": "the EXACT offending source line, copied verbatim from the digest",
@@ -236,7 +238,7 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
       "name": "short-kebab-name (only for issues NOT covered by an adopted rule)",
       "title": "the rule to enforce going forward",
       "rationale": "why this rule, grounded in the findings",
-      "severity": "high|medium|low",
+      "severity": "critical|high|medium|low",
       "enforcement": "mechanical|review"
     }
   ],
@@ -325,6 +327,7 @@ pub fn parse_ai_findings(
                 format!("AI-{norm}")
             };
             let severity = match f["severity"].as_str().unwrap_or("medium") {
+                "critical" => "critical",
                 "high" => "high",
                 "low" => "low",
                 _ => "medium",
@@ -360,6 +363,14 @@ pub fn parse_ai_findings(
                 preview_tool: None,
                 in_test: false,
                 needs_review: false,
+                // Calibration (apply_verdicts) sets these once the calibration pass runs;
+                // a raw pre-calibration finding has no confidence/effort opinion yet.
+                confidence: None,
+                effort: None,
+                // Category comes from calibration (or the heuristic in merge_semantic_groups);
+                // `located` is set by merge_by_location once snippets are anchored to files.
+                category: None,
+                located: true,
             });
         }
     }
@@ -432,20 +443,40 @@ or assertive — that does NOT carry over. Calibration is where humility lives: 
 scan tends to over-assert on debatable points, and your job is to put the nuance back.
 
 For EACH finding, do two things:
-- Assign a CALIBRATED severity (high/medium/low) for this app's real-world context, using this
-  rubric:
-  * A concrete, demonstrable SECURITY or CORRECTNESS break (injection, missing auth on a write
-    path, data loss/corruption, a real exploit) can be "high".
+- Assign a CALIBRATED severity (critical/high/medium/low) for this app's real-world context,
+  using this rubric:
+  * "critical" is RARE. Only assign it when the finding clears ALL of: concretely (not
+    theoretically) exploitable, AND a competent attacker or a single bad input reaches serious
+    impact quickly. Qualifying classes: unauthenticated/unauthorized access to a privileged,
+    destructive, or financial operation; a credential/secret exposed to clients or committed to
+    the repo; PII or equivalently sensitive data readable/writable with no access control on an
+    internet-exposed surface; remote code execution or injection with a real, reachable path.
+    When in doubt between "high" and "critical", use "high" — do not inflate an ordinary high
+    into critical out of general alarm, and never assign "critical" to a debatable preference.
+  * A concrete, demonstrable SECURITY or CORRECTNESS break that does NOT clear the critical bar
+    above (injection needing extra steps to reach, missing auth on a write path with contained
+    blast radius, data loss/corruption, a real but non-catastrophic exploit) is "high".
   * A DEBATABLE ARCHITECTURAL PREFERENCE — a "valid pattern but not the one this rule prefers"
     call, a layering/structure/abstraction opinion, an over-engineering/YAGNI note on a small
-    codebase, a stylistic or convention preference — is NOT "high". Cap it at "medium", usually
-    "low". These are preferences a reasonable team could disagree on, not violations.
+    codebase, a stylistic or convention preference — is NEVER "critical" or "high". Cap it at
+    "medium", usually "low". These are preferences a reasonable team could disagree on, not
+    violations.
   * A real but low-impact issue is "low", not removed.
 - Set confidence: "low" when the finding is a debatable preference (per above), is theoretical,
   is likely over-flagged, or you cannot tell it is real without seeing more code; "high" only
   for clear, concrete violations. Confidence "low" flags the finding for the architect's review —
   it is ADVICE, not a deletion. When in doubt between a violation and a preference, treat it as a
   preference: low confidence, capped severity.
+- Estimate remediation EFFORT for a developer to fix this ONE finding, given only what you can
+  see (the path/snippet/detail) — "low" (a one-line/local change: rename, add a check, swap a
+  call), "medium" (touches a few call sites or needs a small new helper/test), or "high" (a
+  structural change: new abstraction, cross-file rework, a migration). When you cannot tell,
+  default to "medium" rather than guessing an extreme.
+- Assign a semantic CATEGORY from this closed set (pick the single best fit; omit the field if
+  none clearly applies): authorization, authentication, secret-exposure, injection,
+  transport-security, rls-policy, resource-exposure, input-validation, error-handling,
+  arch-conformance, testing-style, performance. This groups the same defect flagged under
+  different rule names; it does NOT change severity.
 
 Do NOT deduplicate, and do NOT cross-reference other findings — no "same as [N]", "duplicate
 of [N]", "as index N", "index N", "row N", or ANY pointer to another finding by index/row.
@@ -453,7 +484,7 @@ Deduplication already happened upstream; your `reason` is one line about THIS fi
 severity/confidence only, with no reference to any other finding.
 
 Return ONLY JSON, no prose:
-{"verdicts":[{"index":0,"severity":"high|medium|low","confidence":"high|low","reason":"one line"}]}
+{"verdicts":[{"index":0,"severity":"critical|high|medium|low","confidence":"high|low","effort":"low|medium|high","category":"authorization|authentication|secret-exposure|injection|transport-security|rls-policy|resource-exposure|input-validation|error-handling|arch-conformance|testing-style|performance","reason":"one line"}]}
 One verdict per finding, addressed by its [index]."#
         .to_string()
 }
@@ -559,6 +590,7 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
         if let Some(verdict) = arr.iter().find(|x| x["index"].as_u64() == Some(i as u64)) {
             if let Some(sev) = verdict["severity"].as_str() {
                 f.severity = match sev {
+                    "critical" => "critical",
                     "high" => "high",
                     "low" => "low",
                     _ => "medium",
@@ -566,6 +598,33 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
                 .to_string();
             }
             let low_conf = verdict["confidence"].as_str() == Some("low");
+            // Structured confidence (Part 1 §3): promoted out of the string-embedded
+            // `[needs review: reason]` detail suffix below. `needs_review` is also set
+            // here — previously calibration never touched it for AI findings (only
+            // `classify_repo_findings`'s in_test path did), so the UI's structured
+            // "needs review" filter silently missed every AI-flagged finding.
+            f.confidence = Some(if low_conf { "needs-review" } else { "high" }.to_string());
+            if low_conf {
+                f.needs_review = true;
+            }
+            // Structured effort (Part 1 §3): the calibration verdict schema now emits it
+            // alongside severity/confidence. Only accept the three known values — a
+            // mis-shaped or missing field leaves `effort` at its prior value (None for a
+            // fresh AI finding) rather than recording a guess.
+            if let Some(eff) = verdict["effort"].as_str() {
+                if matches!(eff, "low" | "medium" | "high") {
+                    f.effort = Some(eff.to_string());
+                }
+            }
+            // Semantic category (Bug 3): the calibration verdict may classify the finding into
+            // the closed taxonomy that drives the cross-family merge pass. Only a KNOWN value is
+            // accepted; anything mis-shaped/absent leaves `category` for the rule-id heuristic in
+            // `merge_semantic_groups` to fill (fail-through, per design §1a step 3).
+            if let Some(cat) = verdict["category"].as_str() {
+                if is_known_category(cat) {
+                    f.category = Some(cat.to_string());
+                }
+            }
             // Strip any cross-finding dedup pointers ("same as [6]", "duplicate of [10]") the
             // model still volunteers: the indices are batch-local and wrong, the relationship
             // is already encoded structurally (rule_id + path + line + also_matches), and a
@@ -578,6 +637,10 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
                 } else {
                     "calibrated"
                 };
+                // The `[needs review]`/`[calibrated]` detail tag is KEPT for one release for UI
+                // back-compat (`split_needs_review`, ui-core/src/rules.rs still regex-parses
+                // it) — the structured `confidence`/`needs_review` fields above are additive,
+                // not a replacement, until the UI reads them directly.
                 f.detail = if reason.is_empty() {
                     format!("{} [{tag}]", f.detail)
                 } else {
@@ -600,22 +663,25 @@ pub async fn verify_findings(
     calibration_model: Option<&str>,
     meter: Option<&UsageMeter>,
     thorough: bool,
-    files_count: usize,
+    // One repo-shape sentence — detected stack + code-file count (e.g. "This is a Next.js repo
+    // with 42 code files.") — computed by the caller from signals already in hand. Gives the
+    // model real context to hedge stance/YAGNI findings, instead of a hardcoded size threshold
+    // deciding whether a rule fires. Empty string is fine (the paragraph still reads).
+    repo_shape: &str,
 ) -> Vec<Finding> {
     if findings.is_empty() {
         return findings;
     }
     let mut prompt = format!("Repository: {repo}\n");
-    if thorough {
-        // Proportionality signal (#51): a small/young codebase should not be held to the
-        // architecture of a large one — over-engineering / YAGNI notes auto-hedge.
-        prompt.push_str(&format!(
-            "This repository has {files_count} code files. Judge each finding PROPORTIONALLY to the \
-             codebase's size and maturity: an 'over-engineering'/'missing abstraction'/YAGNI note on \
-             a small codebase is a debatable preference (low confidence, capped severity), not a \
-             violation.\n"
-        ));
-    }
+    // Proportionality signal (#51, Bug 4 §2b): ALWAYS given now (was thorough-only) — a
+    // small/young codebase must not be held to the architecture of a large one, and this feeds
+    // the informational bucketing of stance/YAGNI notes downstream. Over-engineering / YAGNI
+    // notes auto-hedge to low confidence + capped severity.
+    prompt.push_str(&format!(
+        "{repo_shape} Judge each finding PROPORTIONALLY to the codebase's size and maturity: an \
+         'over-engineering'/'missing abstraction'/YAGNI note on a small codebase is a debatable \
+         preference (low confidence, capped severity), not a violation.\n"
+    ));
     prompt.push_str("\nScrutinize these findings:\n");
     for (i, f) in findings.iter().enumerate() {
         prompt.push_str(&format!(
@@ -662,14 +728,20 @@ pub async fn verify_findings(
 }
 
 /// Merge several calibration passes into one CONSERVATIVE consensus verdict set (#51 thorough
-/// mode). For each finding index: severity = the majority vote (ties break to the LOWER severity);
-/// confidence = "high" only when the passes AGREE (all "high" and a single agreed severity) —
-/// any disagreement means uncertainty, which is exactly what the architect should review, so it
-/// becomes "low" (needs review). Returns a `{"verdicts":[…]}` JSON string for `apply_verdicts`.
+/// mode). For each finding index: severity = the majority vote across the four levels
+/// (low/medium/high/critical), ties break to the LOWER severity — so "critical" only wins when
+/// it is the sole vote or an outright majority, never a tie against "high" (the anti-over-
+/// rotation guard: disagreement about critical resolves down, not up); confidence = "high" only
+/// when EVERY pass agreed on the same severity AND none of them was itself low-confidence — any
+/// disagreement (on severity, or an individual pass's own confidence) means uncertainty, which
+/// is exactly what the architect should review, so it becomes "low" (needs review). effort = the
+/// majority vote (ties break to "medium" — a neutral default when the passes disagree, since
+/// over- and under-estimating effort are equally misleading, unlike severity's asymmetric
+/// humility rule). Returns a `{"verdicts":[…]}` JSON string for `apply_verdicts`.
 fn consensus_verdicts(votes: &[String], n: usize) -> String {
     use serde_json::Value;
-    // Per index: collected (severity, confidence, reason) across passes.
-    let mut per: Vec<Vec<(String, String, String)>> = vec![Vec::new(); n];
+    // Per index: collected (severity, confidence, reason, effort) across passes.
+    let mut per: Vec<Vec<(String, String, String, String)>> = vec![Vec::new(); n];
     for raw in votes {
         let Some(json) = extract_json_object(raw) else {
             continue;
@@ -689,6 +761,7 @@ fn consensus_verdicts(votes: &[String], n: usize) -> String {
                 continue;
             }
             let sev = match verdict["severity"].as_str().unwrap_or("medium") {
+                "critical" => "critical",
                 "high" => "high",
                 "low" => "low",
                 _ => "medium",
@@ -701,10 +774,26 @@ fn consensus_verdicts(votes: &[String], n: usize) -> String {
             }
             .to_string();
             let reason = verdict["reason"].as_str().unwrap_or("").trim().to_string();
-            per[idx].push((sev, conf, reason));
+            let effort = match verdict["effort"].as_str().unwrap_or("medium") {
+                "low" => "low",
+                "high" => "high",
+                _ => "medium",
+            }
+            .to_string();
+            per[idx].push((sev, conf, reason, effort));
         }
     }
-    let rank = |s: &str| match s {
+    // Severity has FOUR levels now that "critical" is a real tier; effort still has three
+    // (low/medium/high — a calibration verdict never emits "critical" effort). Two separate
+    // rank functions rather than one shared one, so effort's 3-slot count array never has to
+    // reason about a severity-only value.
+    let sev_rank = |s: &str| match s {
+        "critical" => 3,
+        "high" => 2,
+        "medium" => 1,
+        _ => 0,
+    };
+    let effort_rank = |s: &str| match s {
         "high" => 2,
         "medium" => 1,
         _ => 0,
@@ -714,43 +803,58 @@ fn consensus_verdicts(votes: &[String], n: usize) -> String {
         if votes_for.is_empty() {
             continue;
         }
-        // Majority severity; tie breaks to the lower rank (humble).
-        let mut counts = [0u32; 3]; // [low, medium, high]
-        for (s, _, _) in votes_for {
-            counts[rank(s)] += 1;
+        // Majority severity; tie breaks to the lower rank (humble). This is an ANTI-OVER-
+        // ROTATION guard too: "critical" only wins a tie when it is the SOLE or MAJORITY vote
+        // at the top rank — a single critical vote against an equal number of high votes
+        // resolves to "high", never silently promoted.
+        let mut counts = [0u32; 4]; // [low, medium, high, critical]
+        for (s, _, _, _) in votes_for {
+            counts[sev_rank(s)] += 1;
         }
         let max = counts.iter().copied().max().unwrap_or(0);
         // Tie-breaks to the LOWER severity (humble / conservative design): low wins over
-        // medium wins over high when vote counts are equal. This is the correct behaviour
-        // documented in the comment at the top of this function; the previous ordering
-        // (high first) was the opposite of the spec. Fixed by BUG-5.
+        // medium wins over high wins over critical when vote counts are equal. This is the
+        // correct behaviour documented in the comment at the top of this function; the
+        // previous ordering (high first) was the opposite of the spec. Fixed by BUG-5;
+        // extended to the critical tier the same way.
         let sev = if counts[0] == max {
             "low"
         } else if counts[1] == max {
             "medium"
-        } else {
+        } else if counts[2] == max {
             "high"
+        } else {
+            "critical"
         };
         // Disagreement on severity, or any low-confidence vote → low confidence (needs review).
         let distinct_sevs = counts.iter().filter(|&&c| c > 0).count();
-        let any_low_conf = votes_for.iter().any(|(_, c, _)| c == "low");
-        let agreed_high = sev == "high" && distinct_sevs == 1 && !any_low_conf;
-        let confidence = if agreed_high {
-            "high"
-        } else if distinct_sevs > 1 || any_low_conf {
-            "low"
-        } else {
-            "high"
+        let any_low_conf = votes_for.iter().any(|(_, c, _, _)| c == "low");
+        let agreed = distinct_sevs == 1 && !any_low_conf;
+        let confidence = if agreed { "high" } else { "low" };
+        // Majority effort; a tie among the top vote-getters breaks to "medium" (see the
+        // function doc — effort has no humility direction the way severity does, so a
+        // single clear winner is used as-is, but ANY tie among the leaders is neutral).
+        let mut effort_counts = [0u32; 3]; // [low, medium, high]
+        for (_, _, _, e) in votes_for {
+            effort_counts[effort_rank(e)] += 1;
+        }
+        let effort_max = effort_counts.iter().copied().max().unwrap_or(0);
+        let effort_winners: Vec<usize> =
+            (0..3).filter(|&i| effort_counts[i] == effort_max).collect();
+        let effort = match effort_winners.as_slice() {
+            [0] => "low",
+            [2] => "high",
+            _ => "medium", // a single "medium" winner, or any tie among the leaders
         };
         // First non-empty reason, preferring a low-confidence pass's reason.
         let reason = votes_for
             .iter()
-            .find(|(_, c, r)| c == "low" && !r.is_empty())
-            .or_else(|| votes_for.iter().find(|(_, _, r)| !r.is_empty()))
-            .map(|(_, _, r)| r.clone())
+            .find(|(_, c, r, _)| c == "low" && !r.is_empty())
+            .or_else(|| votes_for.iter().find(|(_, _, r, _)| !r.is_empty()))
+            .map(|(_, _, r, _)| r.clone())
             .unwrap_or_default();
         verdicts.push(serde_json::json!({
-            "index": idx, "severity": sev, "confidence": confidence, "reason": reason
+            "index": idx, "severity": sev, "confidence": confidence, "effort": effort, "reason": reason
         }));
     }
     serde_json::json!({ "verdicts": verdicts }).to_string()
@@ -1515,7 +1619,7 @@ fn merge_by_location(findings: Vec<Finding>, files: &[(String, String)]) -> Vec<
     let mut groups: std::collections::HashMap<(String, usize, usize), Vec<Finding>> =
         std::collections::HashMap::new();
     let mut solo: usize = 0;
-    for f in findings {
+    for mut f in findings {
         let snippet = f.snippet.trim();
         // CO-LOCATION requires the finding to cite REAL code that is present in the file at this
         // spot. The legit merge ("one smell reported under several rule names") cites the same
@@ -1529,6 +1633,10 @@ fn merge_by_location(findings: Vec<Finding>, files: &[(String, String)]) -> Vec<
             && by_path
                 .get(f.path.as_str())
                 .is_some_and(|c| c.contains(snippet));
+        // Persist the presence/absence signal on the finding so the informational-bucketing
+        // predicate (Bug 4) reuses it rather than recomputing — an absence-type stance finding
+        // (line 0 / description-not-code snippet) is exactly the low-tier noise to down-bucket.
+        f.located = located;
         let key = if located {
             (f.path.clone(), f.line, 0)
         } else {
@@ -1549,6 +1657,335 @@ fn merge_by_location(findings: Vec<Finding>, files: &[(String, String)]) -> Vec<
 /// Minimum snippet length for a finding to be considered co-located with others. Below this a
 /// snippet is too short to be a reliable "this is the same offending code" signal.
 const MIN_MERGE_SNIPPET: usize = 8;
+
+// ── Bug 3: cross-family semantic dedup ───────────────────────────────────────────────────
+
+/// How many lines apart two same-category findings may sit and still be considered the SAME
+/// defect for the semantic merge. Covers the benchmark's observed ~3-line attribution drift
+/// between an AI finding and the native checker for the same policy, with margin, while staying
+/// inside the harness's ±2 line-grading tolerance for the surviving primary (whose line is the
+/// deterministic anchor, never the drifted sibling's).
+const SEMANTIC_MERGE_WINDOW: usize = 5;
+
+/// The closed semantic taxonomy (design §1a). A finding is only ever merged with another of the
+/// SAME category, so the set is deliberately coarse — one bucket per defect *family*, not per
+/// rule. Membership is validated (`is_known_category`) so a mis-shaped calibration value can
+/// never invent a category and cause a wrong merge.
+const KNOWN_CATEGORIES: &[&str] = &[
+    "authorization",
+    "authentication",
+    "secret-exposure",
+    "injection",
+    "transport-security",
+    "rls-policy",
+    "resource-exposure",
+    "input-validation",
+    "error-handling",
+    "arch-conformance",
+    "testing-style",
+    "performance",
+];
+
+/// True if `c` is a member of the closed taxonomy.
+fn is_known_category(c: &str) -> bool {
+    KNOWN_CATEGORIES.contains(&c)
+}
+
+/// Fallback heuristic (design §1a step 3): map a rule id to a taxonomy category by the tokens it
+/// contains. This is our own finite, repo-agnostic rule vocabulary — the token set is exhaustive
+/// by construction over the corpus + floor + checker ids, not fitted to any one repo. Priority
+/// order matters: more specific families (RLS, TLS, secrets) are checked before the broad
+/// authorization/arch buckets so a `SUPABASE-RLS-*` id lands in `rls-policy`, not `authorization`.
+/// No token matches → `None` (which makes the finding un-mergeable — fail-open to over-telling).
+fn categorize_rule_id(rule_id: &str) -> Option<String> {
+    let id = rule_id.to_ascii_uppercase();
+    let has = |needle: &str| id.contains(needle);
+    let cat = if has("RLS") || has("POLICY") || has("ROW-LEVEL") {
+        "rls-policy"
+    } else if has("TLS") || has("SSL") || has("HTTPS") || has("CERT") {
+        "transport-security"
+    } else if has("SECRET") || has("HARDCODED") || has("CREDENTIAL") || has("API-KEY") || has("APIKEY") || has("PASSWORD") {
+        "secret-exposure"
+    } else if has("SQL") || has("INJECT") || has("XSS") || has("SSRF") || has("DESERIAL") || has("RCE") {
+        "injection"
+    } else if has("SESSION") || has("LOGIN") || has("GETUSER") || has("GETSESSION") || has("AUTHN") || has("AUTHENTICAT") {
+        "authentication"
+    } else if has("AUTHZ") || has("AUTHORIZ") || has("BYPASS") || has("SERVICE-ROLE") || has("RBAC") || has("PERMISSION") || has("ACCESS-CONTROL") {
+        "authorization"
+    } else if has("VALIDAT") || has("SANITIZE") || has("INPUT") {
+        "input-validation"
+    } else if has("PANIC") || has("UNWRAP") || has("EXPECT") || has("ERROR-HANDL") || has("FALLIBLE") {
+        "error-handling"
+    } else if has("TEST") || has("SPEC") || has("FIXTURE") {
+        "testing-style"
+    } else if has("PERF") || has("N-PLUS") || has("NPLUS") || has("HOT-READ") || has("CACHE") || has("PAGINATION") {
+        "performance"
+    } else if has("EXPOSE") || has("EXPOSED") || has("EXPOSURE") || has("CORS") || has("PUBLIC-") {
+        "resource-exposure"
+    } else if has("ARCH") || has("LAYER") || has("-DI-") || has("MONOLITH") || has("MIDDLEWARE") || has("REPO-PER") || has("ROUTE-PLACEMENT") || has("QUERY-LIBRARY") || has("VERSIONING") {
+        "arch-conformance"
+    } else {
+        return None;
+    };
+    Some(cat.to_string())
+}
+
+/// The origin tier of a finding, for the semantic merge's primary ordering and its
+/// "both-deterministic-never-merge" guard. Deterministic = produced by the floor / native
+/// checkers / preview tools (exact by construction); AI findings are the model's, split into
+/// `adopted` (mapped to a real corpus rule id) and `invented` (`AI-` prefix). Signal: the AI
+/// pipeline is the only producer that sets `confidence` (calibration) or an `AI-` rule id;
+/// floor/checker/preview findings carry neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    Deterministic,
+    AdoptedAi,
+    InventedAi,
+}
+
+fn finding_origin(f: &Finding) -> Origin {
+    if f.rule_id.starts_with("AI-") {
+        Origin::InventedAi
+    } else if f.confidence.is_some() {
+        // A non-AI- rule id that calibration touched = an adopted corpus rule from the AI tier.
+        Origin::AdoptedAi
+    } else {
+        Origin::Deterministic
+    }
+}
+
+/// Rank for choosing the primary of a semantic group: deterministic beats adopted beats
+/// invented (design §1c). The deterministic side owns the exact line, which is what preserves
+/// D1/D2/D7 line-grading through the merge.
+fn origin_rank(o: Origin) -> u8 {
+    match o {
+        Origin::Deterministic => 2,
+        Origin::AdoptedAi => 1,
+        Origin::InventedAi => 0,
+    }
+}
+
+/// Extract the structural OBJECTS a finding names — dotted identifiers (`schema.table`) and
+/// quoted identifiers (`"policy name"`, `'table'`). Two findings that each name a non-empty,
+/// DISJOINT object set are about different things (different tables/policies) and must not
+/// merge even when same-category and adjacent — the discrimination guard that keeps
+/// SELECT-vs-INSERT / table-A-vs-table-B distinct. Repo-agnostic: pure lexical extraction over
+/// snippet+detail, no rule-specific parsing.
+fn structural_objects(f: &Finding) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let text = format!("{} {}", f.snippet, f.detail);
+    // Dotted identifiers: schema.table / a.b.c — take each dotted run as one object.
+    let mut cur = String::new();
+    for ch in text.chars() {
+        if ch.is_alphanumeric() || ch == '_' || ch == '.' {
+            cur.push(ch);
+        } else {
+            if cur.contains('.') && cur.chars().any(|c| c.is_alphabetic()) {
+                out.insert(cur.to_ascii_lowercase());
+            }
+            cur.clear();
+        }
+    }
+    if cur.contains('.') && cur.chars().any(|c| c.is_alphabetic()) {
+        out.insert(cur.to_ascii_lowercase());
+    }
+    // Quoted identifiers: "..." or '...' (policy names, quoted table names).
+    for (open, close) in [('"', '"'), ('\'', '\'')] {
+        let mut it = text.split(open);
+        let _ = it.next();
+        let mut toggle = true;
+        for seg in it {
+            if toggle {
+                let name = seg.trim();
+                if !name.is_empty() && name.len() <= 64 && !name.contains(close) {
+                    // seg up to the next delimiter is the quoted content only when the split
+                    // gave us the inside; guard against runaway by length + single-token shape.
+                    if name.chars().all(|c| c.is_alphanumeric() || c == '_' || c == ' ' || c == '.') {
+                        out.insert(name.to_ascii_lowercase());
+                    }
+                }
+            }
+            toggle = !toggle;
+        }
+    }
+    out
+}
+
+/// Two objectsets conflict when BOTH are non-empty and share no element — the findings name
+/// disjoint structural targets.
+fn objects_conflict(a: &Finding, b: &Finding) -> bool {
+    let oa = structural_objects(a);
+    let ob = structural_objects(b);
+    if oa.is_empty() || ob.is_empty() {
+        return false;
+    }
+    oa.is_disjoint(&ob)
+}
+
+/// The smallest brace-delimited block containing 1-based `line`, as `(start_line, end_line)`.
+/// Cheap single-pass brace matcher; returns `None` for brace-free content (SQL, YAML) so callers
+/// fall back to the line-window rule. Used to unify two findings on the same handler body even
+/// when they sit more than `SEMANTIC_MERGE_WINDOW` lines apart.
+fn enclosing_block(content: &str, line: usize) -> Option<(usize, usize)> {
+    let mut stack: Vec<usize> = Vec::new();
+    let mut cur_line = 1usize;
+    let mut best: Option<(usize, usize)> = None;
+    for ch in content.chars() {
+        match ch {
+            '\n' => cur_line += 1,
+            '{' => stack.push(cur_line),
+            '}' => {
+                if let Some(open) = stack.pop() {
+                    let close = cur_line;
+                    // Inner blocks close first, so the FIRST containing block we see is the
+                    // innermost (smallest) one — take it and stop updating.
+                    if best.is_none() && open <= line && line <= close {
+                        best = Some((open, close));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    best
+}
+
+/// True when `a` and `b` fall inside the same innermost brace block of `content`.
+fn same_construct(content: &str, a: usize, b: usize) -> bool {
+    match enclosing_block(content, a) {
+        Some((s, e)) => b >= s && b <= e,
+        None => false,
+    }
+}
+
+/// The pairwise semantic-merge predicate (design §1b). `a` and `b` are the same defect iff same
+/// path + same (present) category + within-window-or-same-construct, AND every wrong-fusion
+/// guard passes.
+fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool {
+    if a.path != b.path {
+        return false;
+    }
+    // Category None on either side ⇒ never merge (fail-open to over-telling).
+    match (&a.category, &b.category) {
+        (Some(ca), Some(cb)) if ca == cb => {}
+        _ => return false,
+    }
+    // Overlap: line window OR same enclosing construct.
+    let in_window = a.line != 0 && b.line != 0 && a.line.abs_diff(b.line) <= SEMANTIC_MERGE_WINDOW;
+    let in_construct = content.is_some_and(|c| same_construct(c, a.line, b.line));
+    if !in_window && !in_construct {
+        return false;
+    }
+    // Guard: two deterministic rows are two distinct defects by construction — never merge.
+    if finding_origin(a) == Origin::Deterministic && finding_origin(b) == Origin::Deterministic {
+        return false;
+    }
+    // Guard: disjoint structural objects (different tables/policies) — never merge.
+    if objects_conflict(a, b) {
+        return false;
+    }
+    // Guard: AI+AI needs snippet corroboration — one snippet contains the other, or both are
+    // located (real, resolved code) inside the same construct. Two AI findings citing DIFFERENT
+    // real code that merely sit near each other stay separate.
+    let both_ai = matches!(finding_origin(a), Origin::AdoptedAi | Origin::InventedAi)
+        && matches!(finding_origin(b), Origin::AdoptedAi | Origin::InventedAi);
+    if both_ai {
+        let sa = a.snippet.trim();
+        let sb = b.snippet.trim();
+        let snippet_corroborated = (!sa.is_empty() && sb.contains(sa))
+            || (!sb.is_empty() && sa.contains(sb))
+            || (a.located && b.located && in_construct);
+        if !snippet_corroborated {
+            return false;
+        }
+    }
+    true
+}
+
+/// Collapse one semantic group into a single finding: deterministic > adopted > invented for
+/// the primary, then higher severity, then earliest; max severity kept; every OTHER distinct
+/// rule id (including the members' own pre-existing `also_matches`) demoted into `also_matches`.
+/// The primary keeps its OWN line — the deterministic anchor that preserves line-grading.
+fn merge_semantic_group(group: Vec<Finding>) -> Finding {
+    let primary_idx = group
+        .iter()
+        .enumerate()
+        .max_by_key(|(i, f)| {
+            (
+                origin_rank(finding_origin(f)),
+                severity_rank(&f.severity),
+                group.len() - i,
+            )
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let max_sev = group
+        .iter()
+        .max_by_key(|f| severity_rank(&f.severity))
+        .map(|f| f.severity.clone())
+        .unwrap_or_else(|| "low".to_string());
+    let mut group = group;
+    let mut primary = group.remove(primary_idx);
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    seen.insert(primary.rule_id.clone());
+    let mut also: Vec<String> = Vec::new();
+    // Preserve any already-demoted siblings the primary carried in from location-merge.
+    for r in primary.also_matches.drain(..) {
+        if seen.insert(r.clone()) {
+            also.push(r);
+        }
+    }
+    for f in &group {
+        if seen.insert(f.rule_id.clone()) {
+            also.push(f.rule_id.clone());
+        }
+        for r in &f.also_matches {
+            if seen.insert(r.clone()) {
+                also.push(r.clone());
+            }
+        }
+    }
+    primary.severity = max_sev;
+    primary.also_matches = also;
+    primary
+}
+
+/// The SECOND merge pass (design §1): after `resolve_finding_lines` + `merge_by_location` have
+/// collapsed exact-location duplicates, fuse cross-FAMILY duplicates — the same defect flagged by
+/// two rule families a few lines apart (an AI RLS finding + the native RLS checker; a
+/// service-role-bypass + a fetch-then-authorize on one handler body). Greedy single pass: each
+/// finding joins the first existing group whose seed it merges with, else seeds a new group.
+/// Category is filled from the rule-id heuristic for any finding a source didn't classify.
+pub fn merge_semantic_groups(findings: Vec<Finding>, files: &[(String, String)]) -> Vec<Finding> {
+    let by_path: std::collections::HashMap<&str, &str> = files
+        .iter()
+        .map(|(p, c)| (p.as_str(), c.as_str()))
+        .collect();
+    // Backfill category from the heuristic where no source assigned one.
+    let mut findings = findings;
+    for f in findings.iter_mut() {
+        if f.category.is_none() {
+            f.category = categorize_rule_id(&f.rule_id);
+        }
+    }
+    let mut groups: Vec<Vec<Finding>> = Vec::new();
+    for f in findings {
+        let content = by_path.get(f.path.as_str()).copied();
+        let mut placed = false;
+        for g in groups.iter_mut() {
+            // Compare against the group's seed (first member) — a stable, deterministic anchor.
+            if semantic_pair_merges(&g[0], &f, content) {
+                g.push(f.clone());
+                placed = true;
+                break;
+            }
+        }
+        if !placed {
+            groups.push(vec![f]);
+        }
+    }
+    groups.into_iter().map(merge_semantic_group).collect()
+}
 
 /// Run the real-time audit passes with rule-routing applied.
 ///
@@ -2028,6 +2465,18 @@ pub async fn audit_repo(
                 },
             );
         }
+        // Repo-shape line for the proportionality signal (Bug 4 §2b): detected stack + code-file
+        // count, from signals already computed. detect_stack is the same one grounding uses.
+        let stack = crate::onboard::detect_stack(repo, files);
+        let repo_shape = if stack.frameworks.is_empty() {
+            format!("This repository has {} code files.", files.len())
+        } else {
+            format!(
+                "This is a {} repo with {} code files.",
+                stack.frameworks.join(", "),
+                files.len()
+            )
+        };
         let out = verify_findings(
             llm,
             repo,
@@ -2035,7 +2484,7 @@ pub async fn audit_repo(
             calib_model.as_deref(),
             meter,
             thorough,
-            files.len(),
+            &repo_shape,
         )
         .await;
         if let Some((store, key)) = feedback {
@@ -2287,10 +2736,12 @@ You have the REPO MAP (every file + its public symbols) and SOME file bodies. Wh
 
 RECALL OVER PRECISION — a human triages every finding; report borderline issues at severity "low". Cite the exact offending line in `code` (copied verbatim) and `line` (the NNNN| number). For `rule`, use a short kebab security name (e.g. "missing-authz-on-write", "pii-in-logs", "ssrf-on-fetch").
 
+SEVERITY. Use "low"/"medium"/"high" for the normal range. Reserve "critical" — it must stay RARE — for a finding that clears ALL of: concretely (not theoretically) exploitable, AND a competent attacker or a single bad input reaches serious impact quickly. Qualifying classes for THIS lens: an entry point reachable with NO authentication or authorization that performs a privileged, destructive, or financial operation (e.g. a payment/charge/refund/balance-mutating endpoint callable by anyone, an admin action with no role check); a credential or secret that flows to a client or an untrusted sink; PII or equivalently sensitive data readable/writable with no access control on an internet-exposed surface; injection or deserialization with a real, reachable, unauthenticated path. When in doubt between "high" and "critical", use "high" — critical is not a synonym for "this is bad," it is reserved for "an attacker exploits this quickly for serious impact."
+
 Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 {
   "findings": [
-    {"path":"…","line":0,"severity":"high|medium|low","rule":"short-kebab-security-name","title":"…","code":"the exact offending line","detail":"why it's exploitable and the fix direction"}
+    {"path":"…","line":0,"severity":"critical|high|medium|low","rule":"short-kebab-security-name","title":"…","code":"the exact offending line","detail":"why it's exploitable and the fix direction"}
   ],
   "proposed_rules": [],
   "needs_files": []
@@ -2397,6 +2848,7 @@ pub fn parse_threats(raw: &str) -> (String, Vec<Threat>) {
             }
             .to_string();
             let severity = match t["severity"].as_str().unwrap_or("medium").trim() {
+                "critical" => "critical",
                 "high" => "high",
                 "low" => "low",
                 _ => "medium",
@@ -2785,6 +3237,24 @@ mod tests {
         assert_eq!(v1["confidence"], "high", "unanimous high stays confident");
     }
 
+    /// Thorough-mode consensus (#51) must thread `effort` through the same majority-vote
+    /// merge as severity/confidence: unanimous votes pass straight through, and a tie
+    /// breaks to "medium" (effort has no humility direction the way severity does).
+    #[test]
+    fn consensus_verdicts_threads_effort_with_majority_and_tie_to_medium() {
+        let votes = vec![
+            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","effort":"low","reason":""},{"index":1,"severity":"high","confidence":"high","effort":"low","reason":""}]}"#.to_string(),
+            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","effort":"low","reason":""},{"index":1,"severity":"high","confidence":"high","effort":"high","reason":""}]}"#.to_string(),
+        ];
+        let out = consensus_verdicts(&votes, 2);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let arr = v["verdicts"].as_array().unwrap();
+        let v0 = arr.iter().find(|x| x["index"] == 0).unwrap();
+        assert_eq!(v0["effort"], "low", "unanimous effort votes pass straight through");
+        let v1 = arr.iter().find(|x| x["index"] == 1).unwrap();
+        assert_eq!(v1["effort"], "medium", "a low/high tie must break to medium");
+    }
+
     #[test]
     fn parse_needs_files_reads_array_and_tolerates_absence() {
         let with =
@@ -2811,6 +3281,10 @@ mod tests {
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
+            category: None,
+            located: true,
         }
     }
 
@@ -3124,6 +3598,32 @@ mod tests {
         assert_eq!(rules[0].finding_count, 1);
     }
 
+    /// The raw-audit parser must ACCEPT and PRESERVE an explicit `"critical"` severity from
+    /// the model — this is the emit-path half of the critical-severity fix (the schema now
+    /// offers it; this pins that the parser doesn't silently demote it to "medium" the way an
+    /// unrecognized string would).
+    #[test]
+    fn parse_ai_findings_accepts_and_preserves_critical_severity() {
+        let raw = r#"{"findings":[
+            {"path":"supabase/functions/charge/index.ts","line":30,"severity":"critical",
+             "rule":"unauthenticated-charge-endpoint",
+             "title":"charge handler has no auth check and holds a service_role key",
+             "code":"export default async function handler(req) {",
+             "detail":"any caller can trigger a real charge with the service_role key"},
+            {"path":"a.rs","line":1,"severity":"medium","rule":"y","title":"t","detail":"d"}
+        ],"proposed_rules":[]}"#;
+        let none = std::collections::HashSet::new();
+        let (findings, _) = parse_ai_findings("me/api", raw, &none);
+        assert_eq!(findings.len(), 2);
+        assert_eq!(
+            findings[0].severity, "critical",
+            "an explicit critical verdict from the model must survive parsing unchanged"
+        );
+        // Anti-over-rotation guard: the sibling medium finding must NOT be swept up into
+        // critical just because another finding in the same batch was critical.
+        assert_eq!(findings[1].severity, "medium");
+    }
+
     #[test]
     fn parse_uses_verbatim_code_as_snippet_and_keeps_title_in_detail() {
         let raw = r#"{"findings":[{"path":"a.rs","line":5,"severity":"high","rule":"x",
@@ -3195,6 +3695,10 @@ mod tests {
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
+            category: None,
+            located: true,
         }
     }
 
@@ -3220,6 +3724,101 @@ mod tests {
         );
         let authz = out.iter().find(|f| f.rule_id == "AI-AUTHZ").unwrap();
         assert_eq!(authz.severity, "low", "recalibrated down");
+    }
+
+    /// Calibration must ACCEPT an explicit `"critical"` verdict and apply it to the finding —
+    /// this is the D5-shaped case: an AI-tier finding starts at "high" from the raw audit pass,
+    /// and the calibration pass upgrades it to "critical" when it judges the finding clears the
+    /// bar (e.g. an unauthenticated privileged operation).
+    #[test]
+    fn apply_verdicts_accepts_explicit_critical_verdict() {
+        let findings = vec![finding("AI-UNAUTH-CHARGE", "high")];
+        let raw = r#"{"verdicts":[
+            {"index":0,"severity":"critical","confidence":"high","reason":"unauthenticated charge with service_role"}
+        ]}"#;
+        let out = apply_verdicts(raw, findings);
+        assert_eq!(out[0].severity, "critical", "an explicit critical verdict must be applied");
+    }
+
+    /// ANTI-OVER-ROTATION GUARD: ordinary findings must NEVER be auto-escalated to critical.
+    /// An explicit "high" verdict stays "high" (it is a recognized value, not funneled through
+    /// the "unknown -> medium" fallback into anything resembling critical), and a verdict that
+    /// omits `severity` entirely leaves the finding's prior severity untouched — neither path
+    /// can produce "critical" without the model saying so explicitly.
+    #[test]
+    fn apply_verdicts_does_not_auto_escalate_ordinary_findings_to_critical() {
+        let findings = vec![
+            finding("AI-ORDINARY-HIGH", "medium"), // index 0: explicit "high" verdict
+            finding("AI-UNTOUCHED", "high"),        // index 1: verdict omits severity
+        ];
+        let raw = r#"{"verdicts":[
+            {"index":0,"severity":"high","confidence":"high","reason":"a real but contained bug"},
+            {"index":1,"confidence":"high","reason":"no severity opinion given"}
+        ]}"#;
+        let out = apply_verdicts(raw, findings);
+        let ordinary = out.iter().find(|f| f.rule_id == "AI-ORDINARY-HIGH").unwrap();
+        assert_eq!(ordinary.severity, "high", "an explicit high verdict must stay high, never inflate to critical");
+        let untouched = out.iter().find(|f| f.rule_id == "AI-UNTOUCHED").unwrap();
+        assert_eq!(untouched.severity, "high", "no severity field in the verdict leaves the finding's prior severity as-is");
+    }
+
+    // ── Structured confidence + effort (Part 1 §3) ────────────────────────────
+
+    /// `apply_verdicts` must set the STRUCTURED `confidence`/`needs_review` fields, not just
+    /// the string-embedded `[needs review]` detail tag — the tag stays for one release (UI
+    /// back-compat), but a report/consumer that reads the structured field must see it too.
+    #[test]
+    fn apply_verdicts_sets_structured_confidence_and_needs_review() {
+        let findings = vec![
+            finding("AI-TIMING", "medium"), // index 0 -> low confidence
+            finding("AI-REAL", "high"),     // index 1 -> high confidence
+        ];
+        let raw = r#"{"verdicts":[
+            {"index":0,"confidence":"low","effort":"low","reason":"negligible timing residual"},
+            {"index":1,"severity":"high","confidence":"high","effort":"high","reason":"concrete"}
+        ]}"#;
+        let out = apply_verdicts(raw, findings);
+        let timing = out.iter().find(|f| f.rule_id == "AI-TIMING").unwrap();
+        assert_eq!(timing.confidence.as_deref(), Some("needs-review"));
+        assert!(timing.needs_review, "low confidence must set structured needs_review");
+        assert_eq!(timing.effort.as_deref(), Some("low"));
+        // The detail tag is KEPT for one release (UI back-compat) alongside the new field.
+        assert!(timing.detail.contains("[needs review"));
+
+        let real = out.iter().find(|f| f.rule_id == "AI-REAL").unwrap();
+        assert_eq!(real.confidence.as_deref(), Some("high"));
+        assert!(!real.needs_review, "high confidence must not set needs_review");
+        assert_eq!(real.effort.as_deref(), Some("high"));
+    }
+
+    /// A verdict with a mis-shaped or missing `effort` value must leave `Finding.effort`
+    /// untouched (fail-soft — effort is advisory, never load-bearing) rather than recording a
+    /// guessed value.
+    #[test]
+    fn apply_verdicts_ignores_invalid_effort_value() {
+        let findings = vec![finding("AI-X", "medium")];
+        let raw = r#"{"verdicts":[{"index":0,"confidence":"high","effort":"extreme","reason":""}]}"#;
+        let out = apply_verdicts(raw, findings);
+        assert_eq!(out[0].effort, None, "an unrecognized effort value must not be recorded");
+
+        let findings2 = vec![finding("AI-Y", "medium")];
+        let raw2 = r#"{"verdicts":[{"index":0,"confidence":"high","reason":""}]}"#;
+        let out2 = apply_verdicts(raw2, findings2);
+        assert_eq!(out2[0].effort, None, "an absent effort field must leave effort as None");
+    }
+
+    /// The calibration verdict JSON schema (Part 1 §3) parses `effort` alongside
+    /// severity/confidence/reason — this pins the wire shape the system prompt
+    /// (`verify_system_prompt`) asks the model to emit.
+    #[test]
+    fn calibration_verdict_json_parses_effort_field() {
+        let raw = r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","effort":"medium","reason":"a clear break"}]}"#;
+        let v: serde_json::Value = serde_json::from_str(raw).unwrap();
+        let verdict = &v["verdicts"][0];
+        assert_eq!(verdict["effort"], "medium");
+        // Round-trips through apply_verdicts onto the Finding.
+        let out = apply_verdicts(raw, vec![finding("SEC-X", "high")]);
+        assert_eq!(out[0].effort.as_deref(), Some("medium"));
     }
 
     #[test]
@@ -3337,6 +3936,31 @@ mod tests {
         let p = deep_security_system_prompt();
         assert!(p.contains("DO NOT re-report"));
         assert!(p.contains("authorization") || p.contains("AUTHORIZATION"));
+    }
+
+    /// The `critical` severity tier must be OFFERED (in the schema string) and CALIBRATED
+    /// (general escalation criteria in the prose) by every AI-tier prompt that emits a
+    /// severity — otherwise the model is vocabulary-constrained away from ever reporting a
+    /// critical finding no matter how severe, which was the original bug. This pins the wire
+    /// contract independent of any specific model call.
+    #[test]
+    fn every_ai_tier_prompt_offers_and_defines_critical_severity() {
+        for (name, prompt) in [
+            ("audit_system_prompt", audit_system_prompt()),
+            ("deep_security_system_prompt", deep_security_system_prompt()),
+            ("verify_system_prompt (calibration)", verify_system_prompt()),
+        ] {
+            assert!(
+                prompt.contains("critical|high|medium|low")
+                    || prompt.contains("critical/high/medium/low"),
+                "{name} must offer \"critical\" in its severity schema/rubric"
+            );
+            assert!(
+                prompt.to_lowercase().contains("rare") || prompt.contains("RARE"),
+                "{name} must define critical as a RARE, reserved tier (not a synonym for \
+                 high) so the model doesn't inflate ordinary findings"
+            );
+        }
     }
 
     #[test]
@@ -3649,6 +4273,44 @@ mod tests {
         assert_eq!(v0["confidence"], "high", "unanimous high → high confidence");
     }
 
+    // ── critical severity tier: consensus tie-breaking + unanimity ───────────────────
+
+    /// ANTI-OVER-ROTATION GUARD (thorough/consensus mode): a tie between "critical" and "high"
+    /// (one pass votes each) must resolve to "high" — the SAME lower-wins tie-break BUG-5
+    /// established for high-vs-medium, extended one tier up. A single over-eager pass can never
+    /// unilaterally push a finding to critical against an equally-confident dissent.
+    #[test]
+    fn consensus_critical_vs_high_tie_resolves_to_high_not_critical() {
+        let votes = vec![
+            r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":"looks unauthenticated"}]}"#.to_string(),
+            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":"contained blast radius"}]}"#.to_string(),
+        ];
+        let out = consensus_verdicts(&votes, 1);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let v0 = v["verdicts"].as_array().unwrap().iter().find(|x| x["index"] == 0).unwrap();
+        assert_eq!(
+            v0["severity"], "high",
+            "a critical-vs-high tie must resolve to high (lower), not silently promote to critical: {v0}"
+        );
+        assert_eq!(v0["confidence"], "low", "disagreement forces low confidence (needs review)");
+    }
+
+    /// Unanimous "critical" across every pass must resolve to "critical" with high confidence —
+    /// the fix must not cap the new tier below its own unanimous vote.
+    #[test]
+    fn consensus_unanimous_critical_stays_critical() {
+        let votes = vec![
+            r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":"unauthenticated charge endpoint"}]}"#.to_string(),
+            r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":""}]}"#.to_string(),
+            r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":""}]}"#.to_string(),
+        ];
+        let out = consensus_verdicts(&votes, 1);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let v0 = v["verdicts"].as_array().unwrap().iter().find(|x| x["index"] == 0).unwrap();
+        assert_eq!(v0["severity"], "critical", "unanimous critical must stay critical");
+        assert_eq!(v0["confidence"], "high", "unanimous critical → high confidence");
+    }
+
     // ── BUG-4: resolution round add_total guard in Batch mode ────────────────────────
 
     /// BUG-4 regression: in Batch mode the resolution round's add_total call was
@@ -3740,6 +4402,10 @@ mod tests {
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
+            category: None,
+            located: true,
         };
         // Three AI- findings with equal severity — earliest (index 0) must win.
         let group = vec![
@@ -4189,5 +4855,76 @@ mod tests {
             findings.iter().any(|f| f.rule_id == "ARCH-NO-DIRECT-DB-1"),
             "stub-served finding must survive the audit pipeline: {findings:?}"
         );
+    }
+
+    // ---- Semantic dedup (design §1d) ----------------------------------------------------
+
+    #[test]
+    fn semantic_det_and_ai_same_category_merge_det_primary_keeps_line() {
+        // A deterministic RLS finding and an AI RLS finding three lines apart are the same
+        // defect: they fuse, the deterministic side wins the primary and keeps its exact line,
+        // and the AI rule id is demoted to also_matches.
+        let mut det = site_finding("RLS-MISSING", "a.rs", 10, "high", "");
+        det.category = Some("rls-policy".to_string());
+        let mut ai = site_finding("AI-rls-thing", "a.rs", 13, "medium", "");
+        ai.category = Some("rls-policy".to_string());
+        let out = merge_semantic_groups(vec![det, ai], &[]);
+        assert_eq!(out.len(), 1, "same defect must collapse to one row");
+        assert_eq!(out[0].rule_id, "RLS-MISSING", "deterministic side is primary");
+        assert_eq!(out[0].line, 10, "primary keeps its own deterministic anchor line");
+        assert_eq!(out[0].severity, "high", "max severity is kept");
+        assert!(
+            out[0].also_matches.contains(&"AI-rls-thing".to_string()),
+            "sibling rule demoted to also_matches: {:?}",
+            out[0].also_matches
+        );
+    }
+
+    #[test]
+    fn semantic_two_ai_same_construct_merge() {
+        // Two AI findings in the same handler body but > window lines apart merge via the
+        // same-construct rule (both located inside one brace block corroborates the fusion).
+        let content = "fn handler() {\n a\n b\n c\n d\n e\n f\n g\n h\n}\n";
+        let mut a = site_finding("AI-authz-1", "h.rs", 2, "medium", "");
+        a.category = Some("authorization".to_string());
+        let mut b = site_finding("AI-authz-2", "h.rs", 8, "medium", "");
+        b.category = Some("authorization".to_string());
+        let files = vec![("h.rs".to_string(), content.to_string())];
+        let out = merge_semantic_groups(vec![a, b], &files);
+        assert_eq!(out.len(), 1, "one construct, one defect");
+    }
+
+    #[test]
+    fn semantic_same_category_different_object_does_not_merge() {
+        // Same category, adjacent lines, but disjoint structural objects (two different
+        // tables) — the discrimination guard keeps them separate.
+        let mut a = site_finding("AI-rls-a", "s.sql", 10, "high", "public.orders");
+        a.category = Some("rls-policy".to_string());
+        let mut b = site_finding("AI-rls-b", "s.sql", 12, "high", "public.payments");
+        b.category = Some("rls-policy".to_string());
+        let out = merge_semantic_groups(vec![a, b], &[]);
+        assert_eq!(out.len(), 2, "disjoint tables stay distinct");
+    }
+
+    #[test]
+    fn semantic_category_none_never_merges() {
+        // Uncategorized findings (heuristic returns None too) never fuse — fail-open to
+        // over-telling.
+        let a = site_finding("XYZ-1", "a.rs", 10, "high", "");
+        let b = site_finding("XYZ-2", "a.rs", 11, "high", "");
+        let out = merge_semantic_groups(vec![a, b], &[]);
+        assert_eq!(out.len(), 2, "no category ⇒ no merge");
+    }
+
+    #[test]
+    fn semantic_two_deterministic_never_merge() {
+        // Two deterministic rows are two distinct defects by construction — never merge even
+        // when same-category and adjacent.
+        let mut a = site_finding("RLS-A", "a.rs", 10, "high", "");
+        a.category = Some("rls-policy".to_string());
+        let mut b = site_finding("RLS-B", "a.rs", 11, "high", "");
+        b.category = Some("rls-policy".to_string());
+        let out = merge_semantic_groups(vec![a, b], &[]);
+        assert_eq!(out.len(), 2, "two deterministic rows stay separate");
     }
 }

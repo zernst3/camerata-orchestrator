@@ -410,6 +410,10 @@ mod tests {
             preview_tool: None,
             in_test: false,
             needs_review: false,
+            confidence: None,
+            effort: None,
+            category: None,
+            located: true,
         }
     }
 

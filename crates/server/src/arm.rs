@@ -293,7 +293,8 @@ fn emit_checks_toml_and_workflow(ci_tier: &[&ArmRule]) -> (String, String) {
         })
         .collect();
 
-    let manifest = CheckManifest { checks };
+    let manifest = CheckManifest { checks, ..Default::default()
+        };
 
     // Serialize via the real structs so the output is guaranteed to round-trip through
     // load_manifest. `toml::to_string` on a CheckManifest serializes as `[[check]]`

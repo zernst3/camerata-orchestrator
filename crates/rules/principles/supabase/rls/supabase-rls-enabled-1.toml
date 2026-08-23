@@ -1,0 +1,84 @@
+id = "SUPABASE-RLS-ENABLED-1"
+title = "Every table in an API-exposed schema has Row Level Security enabled in its replayed end-state"
+tag = "stack"
+domain = "supabase:rls"
+layer = "platform"
+enforcement = "architectural"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a migration-timeline replay pass: a mini schema-state interpreter folds CREATE TABLE / ALTER ... ENABLE|DISABLE ROW LEVEL SECURITY / DROP TABLE / ALTER ... RENAME across the ordered supabase/migrations/<timestamp>_*.sql timeline (or an authoritative supabase/schemas/*.sql declarative snapshot, when present) to compute the FINAL RLS state per table, per schema. Conformance holds when every table reachable from an API-exposed schema (public by default, plus any schema named in SUPABASE-EXPOSURE-SCHEMAS-1's config parse) has RLS enabled in that replayed end-state. A table in a non-exposed schema with no RLS is a demoted defense-in-depth note, not a critical finding. Because this is a repo-only signal, every finding's detail carries the table name, the migration file + line where the state was last established, and the honest caveat that 'no evidence of RLS in the migration history' is not the same as 'RLS is disabled in production' — dashboard-applied changes never land in a migration."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/postgres/row-level-security"
+title = "Supabase docs — Row Level Security guide (ENABLE ROW LEVEL SECURITY, policy mechanics)"
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/database-advisors?lint=0013_rls_disabled_in_public"
+title = "Supabase Database Linter — 0013_rls_disabled_in_public (\"Table publicly accessible\")"
+linter = "splinter: rls_disabled_in_public"
+
+[[sources]]
+url = "https://owasp.org/Top10/2021/A01_2021-Broken_Access_Control/index.html"
+title = "OWASP Top 10:2021 — A01 Broken Access Control"
+
+[decision]
+question = "Does every table reachable from an API-exposed schema have Row Level Security enabled, verified against the REPLAYED END-STATE of the migration timeline rather than a single migration file?"
+default = "enforce-rls-enabled-replayed-end-state"
+why = """
+A Supabase table in an exposed schema (public by default) is reachable through PostgREST using
+the project's anon key, which ships inside the frontend bundle by design. Without RLS enabled,
+that public key is sufficient to read and write every row: RLS is the ONLY access-control layer
+between an anonymous internet request and the table's data — there is no separate application
+firewall in front of PostgREST. This is exactly Splinter's rls_disabled_in_public lint (0013,
+confirmed against the live database-advisors page) and is the load-bearing check of the entire
+Supabase rule group.
+
+Detection must be a TIMELINE REPLAY, not a per-file regex: migrations are ordered
+(supabase/migrations/<timestamp>_*.sql) and a table's RLS state is whatever the LAST relevant
+statement in the ordered timeline left it as. A regex over a single file produces both false
+positives (a later migration enables RLS that an earlier file's regex missed) and false
+negatives (RLS enabled in one migration, then disabled in a later one that a partial scan never
+reaches) — do not ship this rule at regex tier. When the repo ships a declarative
+supabase/schemas/*.sql snapshot (supabase db dump style), treat it as authoritative end-state and
+skip replay for the tables it covers.
+
+Exposure scoping: which schemas are API-exposed comes from SUPABASE-EXPOSURE-SCHEMAS-1's config
+parse (default public). A table in a schema that is NOT exposed and lacks RLS is downgraded to a
+defense-in-depth note, not a critical.
+
+Honest limits: a repo scan can only prove what the MIGRATION HISTORY says, never what the live
+database currently enforces. Changes made through the Supabase dashboard (routine for
+Lovable/Bolt/Cursor-built apps) never land in a migration, so the finding language must say 'no
+evidence of RLS in the repository for `<table>`' with an explicit 'confirm against production'
+step, never assert live state from the repo alone.
+"""
+
+[[option]]
+id = "enforce-rls-enabled-replayed-end-state"
+label = "Flag every exposed-schema table whose replayed migration-timeline end-state has no RLS enabled"
+directive = """
+Run the migration-timeline replay (or read the declarative schema snapshot when present) to
+compute each table's final RLS state. For every table reachable from an API-exposed schema whose
+final state has RLS disabled or never enabled, emit a critical finding naming the table and the
+migration file + line that last established the state, phrased as: "Your `<table>` table has no
+Row Level Security. Anyone holding your public API key — which ships in your frontend — can read
+and write every row." Always append the honest caveat: this is what the repository shows; confirm
+against the live database, since dashboard-only changes are invisible to a repo scan. Tables in
+schemas not exposed via SUPABASE-EXPOSURE-SCHEMAS-1's config parse are demoted to a
+defense-in-depth note rather than a critical.
+"""
+why = "RLS is the only access-control layer between an anonymous PostgREST request (using the public anon key) and a table's rows. The end-state replay is the only mechanically-correct way to determine the CURRENT RLS state across an ordered migration history without both FP and FN failure modes."
+
+[[option]]
+id = "regex-grep-each-migration-independently"
+label = "Grep each migration file independently for ENABLE ROW LEVEL SECURITY (no timeline replay)"
+directive = "Scan each migration file in isolation for ENABLE ROW LEVEL SECURITY / DISABLE ROW LEVEL SECURITY and report per-file matches without reconstructing the ordered end-state."
+why = """
+Rejected: per-file regex cannot express state that changes ACROSS files. It produces false
+positives (flagging a table as unprotected when a LATER migration enables RLS the scanner never
+correlates to the same table) and, more dangerously, false negatives (RLS enabled in an early
+migration, silently disabled in a later one the naive scan treats as a second, unrelated finding
+rather than the final state). Both failure modes are unacceptable for a critical-severity finding
+in a paid audit report; the timeline-replay option is strictly more precise for the same detection
+surface.
+"""
