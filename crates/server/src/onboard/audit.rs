@@ -174,7 +174,26 @@ pub(crate) fn classify_repo_findings(
             line: f.line,
             snippet: f.snippet.clone(),
         };
-        f.status = match classify_one(&fr, &inline, &baseline) {
+        let mut status = classify_one(&fr, &inline, &baseline);
+        // A merged finding carries the sibling rule ids it also matches (`also_matches`).
+        // A waiver written against ANY of those ids must suppress the merged row — otherwise
+        // deduplication (which picks one primary) would silently defeat a legitimate waiver
+        // aimed at a demoted sibling. Only an inline waiver can hinge on rule-id like this
+        // (baseline matches by content fingerprint, which is identical across the group), so
+        // we only escalate the inline case.
+        if status == Status::Active && !f.also_matches.is_empty() {
+            for alt in &f.also_matches {
+                let alt_fr = FindingRef {
+                    rule_id: alt.clone(),
+                    ..fr.clone()
+                };
+                if classify_one(&alt_fr, &inline, &baseline) == Status::SuppressedInline {
+                    status = Status::SuppressedInline;
+                    break;
+                }
+            }
+        }
+        f.status = match status {
             Status::Active => "active",
             Status::SuppressedInline => "suppressed-inline",
             Status::SuppressedBaseline => "suppressed-baseline",
@@ -203,5 +222,60 @@ pub(crate) fn classify_repo_findings(
             confidence: None,
             effort: None,
         });
+    }
+}
+
+#[cfg(test)]
+mod classify_tests {
+    use super::*;
+
+    fn finding(rule_id: &str, path: &str, line: usize, also: &[&str]) -> Finding {
+        Finding {
+            rule_id: rule_id.to_string(),
+            path: path.to_string(),
+            line,
+            also_matches: also.iter().map(|s| s.to_string()).collect(),
+            snippet: "x".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn waiver_against_a_demoted_sibling_suppresses_the_merged_row() {
+        // A merged finding's PRIMARY rule is R-PRIMARY, but the same site also matched
+        // R-SIBLING (demoted into also_matches by dedup). A waiver written for R-SIBLING must
+        // still suppress the merged row — otherwise dedup silently defeats a valid waiver.
+        let files = vec![(
+            "src/a.rs".to_string(),
+            "risky(); // camerata:allow R-SIBLING -- accepted here\n".to_string(),
+        )];
+        let mut findings = vec![finding("R-PRIMARY", "src/a.rs", 1, &["R-SIBLING"])];
+        classify_repo_findings(&mut findings, "o/r", &files);
+        assert_eq!(
+            findings[0].status, "suppressed-inline",
+            "waiver on a demoted sibling rule id must suppress the merged finding"
+        );
+    }
+
+    #[test]
+    fn waiver_matching_neither_primary_nor_sibling_leaves_finding_active() {
+        let files = vec![(
+            "src/a.rs".to_string(),
+            "risky(); // camerata:allow R-UNRELATED -- for something else\n".to_string(),
+        )];
+        let mut findings = vec![finding("R-PRIMARY", "src/a.rs", 1, &["R-SIBLING"])];
+        classify_repo_findings(&mut findings, "o/r", &files);
+        assert_eq!(findings[0].status, "active");
+    }
+
+    #[test]
+    fn primary_rule_waiver_still_suppresses_without_relying_on_siblings() {
+        let files = vec![(
+            "src/a.rs".to_string(),
+            "risky(); // camerata:allow R-PRIMARY -- accepted\n".to_string(),
+        )];
+        let mut findings = vec![finding("R-PRIMARY", "src/a.rs", 1, &[])];
+        classify_repo_findings(&mut findings, "o/r", &files);
+        assert_eq!(findings[0].status, "suppressed-inline");
     }
 }

@@ -115,6 +115,12 @@ pub(crate) enum Disposition {
     /// finding newly surfaced by this scan. Distinct from `Ignored` so the report never
     /// implies "the auditor just accepted this" when really "this was already accepted."
     BaselineAccepted,
+    /// Waived at the code site by an inline `camerata:allow -- reason` comment. A reviewable,
+    /// reasoned, in-diff acceptance — the linter-waiver equivalent of `BaselineAccepted`, kept
+    /// distinct so the report can honestly say "waived in code" vs "carried in the baseline
+    /// file". Lands in the Accepted matrix cell, NOT `Unresolved` (the bug this fixes: an
+    /// inline-suppressed finding was being reported as still-open).
+    WaivedInline,
 }
 
 /// Classify one finding's effective disposition: `Finding.status` (baseline suppression,
@@ -150,6 +156,7 @@ pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Dis
             _ => Disposition::Unresolved,
         },
         None if finding.status == "suppressed-baseline" => Disposition::BaselineAccepted,
+        None if finding.status == "suppressed-inline" => Disposition::WaivedInline,
         None => Disposition::Unresolved,
     }
 }
@@ -199,6 +206,7 @@ pub(crate) fn disposition_label(
         Disposition::BaselineAccepted => {
             "Pre-existing accepted debt (baseline suppression)".to_string()
         }
+        Disposition::WaivedInline => "Waived in code (inline camerata:allow)".to_string(),
     }
 }
 
@@ -692,7 +700,9 @@ pub(crate) fn matrix_bucket(
     effort: Option<&str>,
 ) -> &'static str {
     match disposition {
-        Disposition::Ignored | Disposition::BaselineAccepted => "accepted",
+        Disposition::Ignored | Disposition::BaselineAccepted | Disposition::WaivedInline => {
+            "accepted"
+        }
         Disposition::TechDebtNow => "do_now",
         Disposition::TechDebtLater => "plan",
         Disposition::Unresolved => {
@@ -1945,6 +1955,35 @@ mod tests {
         // fresh, explicit decision wins over the durable baseline status.
         let mut f = finding("SEC-1", "a.rs", 1, "high");
         f.status = "suppressed-baseline".to_string();
+        let mut dispositions = HashMap::new();
+        dispositions.insert(finding_key(&f), wire("TechDebt", "", "Now"));
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        assert_eq!(json.matrix.do_now.len(), 1);
+    }
+
+    // ── Suppressed-inline -> waived in code ────────────────────────────────────
+
+    #[test]
+    fn suppressed_inline_with_no_wire_disposition_is_waived_in_code() {
+        // An inline `camerata:allow` waiver must land in Accepted, not Unresolved/open —
+        // the bug: an inline-suppressed finding was reported as still-open.
+        let mut f = finding("SEC-1", "a.rs", 1, "high");
+        f.status = "suppressed-inline".to_string();
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(
+            json.curated_findings[0].sites[0].disposition,
+            "Waived in code (inline camerata:allow)"
+        );
+        assert_eq!(json.matrix.accepted.len(), 1);
+        assert_eq!(json.matrix.do_now.len(), 0);
+    }
+
+    #[test]
+    fn suppressed_inline_with_explicit_wire_disposition_defers_to_client() {
+        let mut f = finding("SEC-1", "a.rs", 1, "high");
+        f.status = "suppressed-inline".to_string();
         let mut dispositions = HashMap::new();
         dispositions.insert(finding_key(&f), wire("TechDebt", "", "Now"));
         let report = report_with(vec![f], vec![]);

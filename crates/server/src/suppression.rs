@@ -31,6 +31,13 @@ use serde::{Deserialize, Serialize};
 /// The inline waiver marker scanned out of source.
 const MARKER: &str = "camerata:allow";
 
+/// How far below its own line a standalone (own-line) waiver may reach. A reasoned
+/// `camerata:allow` on its own line annotates the contiguous non-blank line run that follows
+/// it (the statement/block it sits above), but no further than this many lines — the cap is
+/// what stops a stray comment silencing half a file. Trailing (same-line) markers are
+/// unaffected. See [`parse_inline_waivers`] / [`inline_applies`].
+const MAX_WAIVER_REACH: usize = 10;
+
 /// A per-line inline waiver parsed from a source comment.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct InlineWaiver {
@@ -42,6 +49,14 @@ pub struct InlineWaiver {
     pub path: String,
     /// 1-based line the marker is on.
     pub line: usize,
+    /// 1-based last line (inclusive) this waiver reaches BELOW its marker, computed at parse
+    /// time from the file's contiguous non-blank run under the marker, capped at
+    /// [`MAX_WAIVER_REACH`]. `0` (the value hand-built waivers leave unset) means "fall back
+    /// to the legacy same-line / directly-below rule" — see [`effective_reach`]. Reasoned
+    /// waivers above a multi-line construct rely on this to cover the whole annotated block,
+    /// not just the line directly below.
+    #[serde(default)]
+    pub reach_end: usize,
 }
 
 /// One entry in the central baseline (`.camerata/baseline.json`): a bulk/legacy/policy
@@ -186,8 +201,9 @@ fn extract_ticket(reason: &str) -> Option<String> {
 
 /// Parse inline `camerata:allow RULE-ID -- reason [, TICKET]` waivers from one file.
 pub fn parse_inline_waivers(path: &str, content: &str) -> Vec<InlineWaiver> {
+    let lines: Vec<&str> = content.lines().collect();
     let mut out = Vec::new();
-    for (i, line) in content.lines().enumerate() {
+    for (i, line) in lines.iter().enumerate() {
         let Some(idx) = line.find(MARKER) else {
             continue;
         };
@@ -203,23 +219,63 @@ pub fn parse_inline_waivers(path: &str, content: &str) -> Vec<InlineWaiver> {
             .map(|r| r.trim().to_string())
             .filter(|r| !r.is_empty());
         let ticket = reason.as_deref().and_then(extract_ticket);
+        let marker_line = i + 1;
         out.push(InlineWaiver {
             rule_id,
             reason,
             ticket,
             path: path.to_string(),
-            line: i + 1,
+            line: marker_line,
+            reach_end: waiver_reach_end(&lines, i),
         });
     }
     out
 }
 
+/// The last (1-based, inclusive) line a waiver on `marker_idx` (0-based) reaches below itself:
+/// the end of the contiguous run of non-blank lines directly under the marker, capped at
+/// [`MAX_WAIVER_REACH`] lines. A blank line immediately below terminates the run (the marker
+/// annotates nothing multi-line) and the result equals the marker's own line. This is the
+/// standard linter-directive convention generalized from "the line directly below" to "the
+/// block directly below", so a reasoned waiver above a multi-line construct covers all of it.
+fn waiver_reach_end(lines: &[&str], marker_idx: usize) -> usize {
+    let marker_line = marker_idx + 1;
+    let mut end = marker_line;
+    let cap = marker_line + MAX_WAIVER_REACH;
+    let mut j = marker_idx + 1;
+    while j < lines.len() {
+        let ln = j + 1;
+        if ln > cap || lines[j].trim().is_empty() {
+            break;
+        }
+        end = ln;
+        j += 1;
+    }
+    end
+}
+
 // ── classification ──────────────────────────────────────────────────────────
 
-/// An inline waiver applies to a finding when they share rule + file and the marker is
-/// on the offending line (trailing) or the line directly above it (the linter convention).
+/// The last (1-based, inclusive) line a waiver reaches. A parsed waiver carries a computed
+/// `reach_end` (the non-blank run under the marker, capped at [`MAX_WAIVER_REACH`]); a
+/// hand-built waiver leaves it `0`, which falls back to the legacy "directly below" line so
+/// existing callers keep their exact behavior.
+fn effective_reach(w: &InlineWaiver) -> usize {
+    if w.reach_end > w.line {
+        w.reach_end
+    } else {
+        w.line + 1
+    }
+}
+
+/// An inline waiver applies to a finding when they share rule + file and the finding sits on
+/// the marker's own line (trailing) or anywhere within the marker's reach below it — the
+/// contiguous block a reasoned waiver annotates, up to [`MAX_WAIVER_REACH`] lines.
 fn inline_applies(w: &InlineWaiver, f: &FindingRef) -> bool {
-    w.rule_id == f.rule_id && w.path == f.path && (f.line == w.line || f.line == w.line + 1)
+    w.rule_id == f.rule_id
+        && w.path == f.path
+        && f.line >= w.line
+        && f.line <= effective_reach(w)
 }
 
 /// Classify one finding against the inline waivers + baseline.
@@ -391,6 +447,7 @@ mod tests {
             ticket: None,
             path: "a.rs".into(),
             line: 5,
+            reach_end: 0,
         }];
         // trailing (same line)
         assert_eq!(
@@ -454,6 +511,7 @@ mod tests {
             ticket: None,
             path: "a.rs".into(),
             line: 5,
+            reach_end: 0,
         }];
         let findings: Vec<FindingRef> = vec![]; // no live violation
         assert_eq!(stale_inline(&waivers, &findings).len(), 1);
@@ -481,6 +539,7 @@ mod tests {
             ticket: Some("AB-9".into()),
             path: "a.rs".into(),
             line: 5,
+            reach_end: 0,
         }];
         let baseline = Baseline {
             entries: vec![BaselineEntry {
@@ -624,6 +683,7 @@ line3; // camerata:allow R2 -- reason two, GH-7\n";
             ticket: None,
             path: "a.rs".into(),
             line: 1,
+            reach_end: 0,
         }];
         // Same rule, same line, but DIFFERENT path — must not suppress.
         let finding = f("R", "b.rs", 1, "x");
@@ -644,6 +704,7 @@ line3; // camerata:allow R2 -- reason two, GH-7\n";
                 ticket: None,
                 path: "a.rs".into(),
                 line: 1,
+                reach_end: 0,
             },
             InlineWaiver {
                 rule_id: "B".into(),
@@ -651,6 +712,7 @@ line3; // camerata:allow R2 -- reason two, GH-7\n";
                 ticket: None,
                 path: "a.rs".into(),
                 line: 2,
+                reach_end: 0,
             },
         ];
         let bad = reasonless_waivers(&waivers);
@@ -687,6 +749,7 @@ line3; // camerata:allow R2 -- reason two, GH-7\n";
             ticket: None,
             path: "a.rs".into(),
             line: 5,
+            reach_end: 0,
         }];
         let finding = f("SEC-X", "a.rs", 5, "bad code");
         let status = classify_one(&finding, &waivers, &Baseline::default());
@@ -763,6 +826,7 @@ line3; // camerata:allow R2 -- reason two, GH-7\n";
                 ticket: None,
                 path: "a.rs".into(),
                 line: 1,
+                reach_end: 0,
             },
             InlineWaiver {
                 rule_id: "R".into(),
@@ -770,6 +834,7 @@ line3; // camerata:allow R2 -- reason two, GH-7\n";
                 ticket: None,
                 path: "a.rs".into(),
                 line: 2,
+                reach_end: 0,
             },
         ];
         let findings: Vec<FindingRef> = vec![]; // no findings
@@ -790,6 +855,7 @@ line3; // camerata:allow R2 -- reason two, GH-7\n";
                 ticket: None,
                 path: "a.rs".into(),
                 line: 1,
+                reach_end: 0,
             },
             InlineWaiver {
                 rule_id: "R2".into(),
@@ -797,6 +863,7 @@ line3; // camerata:allow R2 -- reason two, GH-7\n";
                 ticket: None,
                 path: "a.rs".into(),
                 line: 2,
+                reach_end: 0,
             },
         ];
         let baseline = Baseline::default();
@@ -878,6 +945,104 @@ line3; // camerata:allow R2 -- reason two, GH-7\n";
         assert_eq!(
             classify_one(&finding, &[], &baseline),
             Status::Active
+        );
+    }
+
+    #[test]
+    fn own_line_waiver_reaches_contiguous_block_below() {
+        // A reasoned own-line waiver annotates the whole non-blank construct beneath it,
+        // not just the line directly below.
+        let src = "\
+// camerata:allow R -- covers the block below\n\
+create table t (\n\
+  id int,\n\
+  name text\n\
+);\n";
+        let w = parse_inline_waivers("a.sql", src);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].line, 1);
+        assert_eq!(w[0].reach_end, 5, "the 4-line construct + marker line");
+        // A finding anywhere inside the block is suppressed.
+        for ln in 2..=5 {
+            assert_eq!(
+                classify_one(&f("R", "a.sql", ln, "x"), &w, &Baseline::default()),
+                Status::SuppressedInline,
+                "line {ln} within the reached block"
+            );
+        }
+        // The line after the block (blank-terminated run) is NOT reached.
+        assert_eq!(
+            classify_one(&f("R", "a.sql", 6, "x"), &w, &Baseline::default()),
+            Status::Active
+        );
+    }
+
+    #[test]
+    fn blank_line_immediately_below_terminates_reach() {
+        // A marker with a blank line under it annotates nothing multi-line: reach_end == line.
+        let src = "// camerata:allow R -- nothing below\n\ncode();\n";
+        let w = parse_inline_waivers("a.rs", src);
+        assert_eq!(w.len(), 1);
+        assert_eq!(w[0].reach_end, 1, "blank line terminates the run at the marker line");
+        // Legacy fallback still lets it reach the directly-below line (effective_reach).
+        assert_eq!(
+            classify_one(&f("R", "a.rs", 2, "x"), &w, &Baseline::default()),
+            Status::SuppressedInline
+        );
+        // But not two lines down.
+        assert_eq!(
+            classify_one(&f("R", "a.rs", 3, "x"), &w, &Baseline::default()),
+            Status::Active
+        );
+    }
+
+    #[test]
+    fn waiver_reach_is_capped_at_max() {
+        // A marker above a huge unbroken block only reaches MAX_WAIVER_REACH lines.
+        let mut src = String::from("// camerata:allow R -- big block\n");
+        for i in 0..30 {
+            src.push_str(&format!("line{i};\n"));
+        }
+        let w = parse_inline_waivers("a.rs", &src);
+        assert_eq!(w.len(), 1);
+        assert_eq!(
+            w[0].reach_end,
+            1 + MAX_WAIVER_REACH,
+            "reach stops at the cap"
+        );
+        // The last reached line is suppressed…
+        assert_eq!(
+            classify_one(
+                &f("R", "a.rs", 1 + MAX_WAIVER_REACH, "x"),
+                &w,
+                &Baseline::default()
+            ),
+            Status::SuppressedInline
+        );
+        // …the one past the cap is not.
+        assert_eq!(
+            classify_one(
+                &f("R", "a.rs", 2 + MAX_WAIVER_REACH, "x"),
+                &w,
+                &Baseline::default()
+            ),
+            Status::Active
+        );
+    }
+
+    #[test]
+    fn reasonless_own_line_waiver_still_does_not_suppress_within_reach() {
+        // Reach extension must not weaken the reason requirement: a reason-less waiver
+        // suppresses nothing, even inside its computed block.
+        let src = "// camerata:allow R\ncode_a();\ncode_b();\n";
+        let w = parse_inline_waivers("a.rs", src);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].reason.is_none());
+        assert!(w[0].reach_end >= 3, "block is computed regardless of reason");
+        assert_eq!(
+            classify_one(&f("R", "a.rs", 2, "x"), &w, &Baseline::default()),
+            Status::Active,
+            "reason-less waiver does not suppress even within reach"
         );
     }
 
