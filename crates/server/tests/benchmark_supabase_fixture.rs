@@ -37,13 +37,23 @@
 //!       correctly downgraded, not absent.
 //!     - I4 (billing_accounts, the clean RLS control) — a negative control: the checker must
 //!       emit zero findings for a correctly-scoped table.
-//!   D2, D3, D4, D5, D6 and the I3 decoy have NO deterministic path today (no native checker
-//!   answers RLS-permissive-USING(true), public storage buckets, edge-function JWT bypass,
-//!   `getSession()` trust, or the committed service_role secret — see the full-grade test's
-//!   own comments for exactly why each is AI-tier-only right now). Asserting them here would
-//!   make `cargo test` red on a clean checkout, which the task explicitly rules out — they are
-//!   graded ONLY in the `#[ignore]`d full-grade test below, where a currently-failing
-//!   assertion is expected and documents the gap rather than being hidden.
+//!     - D3 (committed `service_role`/`sb_secret_` value on a `NEXT_PUBLIC_` var in
+//!       `.env.production`) — as of the file-collector fix (`onboard::files::is_admissible_text`)
+//!       plus the `sb_secret_` match-set extension on `SEC-NO-VENDOR-TOKEN-1`,
+//!       `.env.production` is admitted into the scanned file list and its secret is matched by
+//!       the floor. Graded here as "found, high-or-critical, at the right file:line" rather
+//!       than pinned to a specific rule id — a DEDICATED `SUPABASE-KEY-SERVICE-ROLE-CLIENT-1`
+//!       floor rule (the NEXT_PUBLIC-prefix + secret-shape correlation as its own rule id,
+//!       matching the decision already recorded in
+//!       `crates/rules/principles/supabase/secrets/supabase-key-service-role-client-1.toml`)
+//!       is a separate, later port; see the full-grade test's D3 comment.
+//!   D2, D4, D5, D6 and the I3 decoy have NO deterministic path today (no native checker
+//!   answers RLS-permissive-USING(true), public storage buckets, edge-function JWT bypass, or
+//!   `getSession()` trust — see the full-grade test's own comments for exactly why each is
+//!   AI-tier-only right now). Asserting them here would make `cargo test` red on a clean
+//!   checkout, which the task explicitly rules out — they are graded ONLY in the `#[ignore]`d
+//!   full-grade test below, where a currently-failing assertion is expected and documents the
+//!   gap rather than being hidden.
 //!
 //! - **Full-grade test** (`full_grade_supabase_fixture_scan`, `#[ignore]`d) — runs the REAL
 //!   full scan (deterministic floor + architectural checkers + the AI semantic/architectural
@@ -63,20 +73,26 @@
 //!   Requires whatever `camerata_server::llm::Llm::from_env()` needs (a live model
 //!   credential) and, optionally, `CAMERATA_AUDIT_MODEL` to pin a specific model.
 //!
-//! # Baseline (recorded 2026-08-22, before any scan-quality fix lands)
+//! # Baseline (recorded 2026-08-22, before any scan-quality fix lands; updated same day once
+//! # the file-collector + `sb_secret_` fix landed)
 //!
-//! Deterministic-only pass over the real fixture today finds exactly 2 of the 7 defects at
-//! their exact GROUND_TRUTH file:line:severity (D1, D7), correctly downgrades I1, and is
-//! clean on I4 — matching this file's always-run assertions. It also currently produces a
-//! MEDIUM finding for `internal.audit_log` (I3) — a real false positive relative to
-//! GROUND_TRUTH's "must NOT be flagged" (the checker only demotes non-exposed-schema tables
-//! from critical to medium; it doesn't yet omit them), and it never sees `.env.production` at
-//! all: that filename's extension (`production`) isn't in `onboard::files::CODE_EXTS`, so the
-//! file is pruned before any content is read, by EITHER tier — D3 (the committed
-//! `NEXT_PUBLIC_...SERVICE_ROLE_KEY`) is invisible to today's scan regardless of AI review.
-//! D2, D4, D5, D6 have no deterministic path and depend entirely on the (not yet
-//! benchmarked-to-green) AI architectural review. This is the RED baseline the full-grade
-//! test documents; upcoming scan-quality passes are graded by how much of it turns green.
+//! Deterministic-only pass over the real fixture originally found exactly 2 of the 7 defects
+//! at their exact GROUND_TRUTH file:line:severity (D1, D7), correctly downgraded I1, and was
+//! clean on I4. It also produced (and still produces) a MEDIUM finding for
+//! `internal.audit_log` (I3) — a real false positive relative to GROUND_TRUTH's "must NOT be
+//! flagged" (the checker only demotes non-exposed-schema tables from critical to medium; it
+//! doesn't yet omit them) — and, before this fix, never saw `.env.production` at all: that
+//! filename's extension by naive last-dot splitting (`production`) wasn't in
+//! `onboard::files::CODE_EXTS`, so the file was pruned before any content was read, by EITHER
+//! tier. `onboard::files::is_admissible_text` (broadened file admission: non-code config
+//! extensions + a general dotfile rule that recognizes the WHOLE `.env.*` family, not just a
+//! literal `.env.production` carve-out) plus a `sb_secret_` match-set extension on
+//! `SEC-NO-VENDOR-TOKEN-1` together make D3 deterministically detectable — it now has its own
+//! always-run sub-test below (`deterministic_d3_env_production_service_role_secret_is_found`)
+//! rather than living only in the AI-tier-only bucket. D2, D4, D5, D6 still have no
+//! deterministic path and depend entirely on the (not yet benchmarked-to-green) AI
+//! architectural review. This is the baseline the full-grade test documents; upcoming
+//! scan-quality passes are graded by how much of the remainder turns green.
 
 use std::path::{Path, PathBuf};
 
@@ -328,6 +344,49 @@ async fn deterministic_i4_billing_accounts_control_produces_no_findings() {
     );
 }
 
+/// D3 (GROUND_TRUTH.md): `.env.production:9` commits a `service_role`/`sb_secret_` value on a
+/// `NEXT_PUBLIC_`-prefixed variable — a full RLS-bypassing credential inlined straight into
+/// the client bundle. Before this fix, `.env.production` was pruned before ANY tier read its
+/// content (its naive last-dot "extension" is `production`, not a recognized code extension —
+/// see the module doc's baseline note); now admitted via `onboard::files::is_admissible_text`
+/// and matched by the `sb_secret_`-extended `SEC-NO-VENDOR-TOKEN-1` floor arm. Asserted here
+/// as FOUND + high-or-critical (not pinned to a specific rule id) — a dedicated
+/// `SUPABASE-KEY-SERVICE-ROLE-CLIENT-1` floor rule correlating the `NEXT_PUBLIC_` prefix with
+/// the secret shape as its own rule id is a separate, later port (see the full-grade test's D3
+/// comment). The GROUND_TRUTH I2/anon-key pair is graded in the same test: the anon key on
+/// line 5 is correctly public and must never be flagged.
+#[tokio::test]
+async fn deterministic_d3_env_production_service_role_secret_is_found() {
+    let dir = require_fixture!();
+    let report = run_deterministic_scan(&dir).await;
+    assert!(!report.gated);
+
+    let path = ".env.production";
+    let hit = any_finding_in_range(&report.findings, path, 9, 9);
+    assert!(
+        hit.is_some_and(|f| f.severity == "critical" || f.severity == "high"),
+        "expected a high-or-critical finding at {path}:9 (the committed service_role/sb_secret_ \
+         value on a NEXT_PUBLIC_ var): {:?}",
+        report.findings.iter().filter(|f| f.path == path).collect::<Vec<_>>()
+    );
+    let f = hit.expect("checked above");
+    assert!(
+        f.snippet.contains("NEXT_PUBLIC") && f.snippet.contains("sb_secret_"),
+        "the finding must identify the NEXT_PUBLIC_ + sb_secret_ combination on the offending \
+         line: {f:?}"
+    );
+
+    // I2 (grader note on D3): the anon/publishable key on line 5 is correctly public and must
+    // NEVER be flagged, even though it shares the fixture's file and general vicinity.
+    let anon_key_flagged = any_finding_in_range(&report.findings, path, 4, 6);
+    assert!(
+        anon_key_flagged.is_none(),
+        "the anon/publishable key (.env.production:5) must NOT be flagged — only the \
+         service_role key on line 9 is a defect: {:?}",
+        anon_key_flagged
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────────────────
 // FULL-GRADE TEST — #[ignore]d. Runs the real deterministic + AI scan and grades every
 // GROUND_TRUTH.md defect/decoy/discrimination pair. RED today by design (see module doc's
@@ -401,11 +460,18 @@ async fn full_grade_supabase_fixture_scan() {
         format!("{d2:?}"),
     ));
 
-    // D3: NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY committed at .env.production:9. KNOWN CURRENT
-    // BLOCKER (not just "not yet AI-graded"): `.env.production`'s extension isn't in
-    // `onboard::files::CODE_EXTS`, so the file is pruned before ANY tier reads it — this can't
-    // pass until that filter (or a path-based .env.* carve-out) is fixed, independent of the
-    // AI review's judgment quality.
+    // D3: NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY committed at .env.production:9. The prior
+    // structural blocker (`.env.production` pruned before ANY tier read it, because its naive
+    // last-dot extension `production` wasn't in `onboard::files::CODE_EXTS`) is fixed —
+    // `onboard::files::is_admissible_text` admits the file, so it's visible to every tier now,
+    // including this one. What's assigned specifically to the AI tier (not yet built) is the
+    // DEDICATED `SUPABASE-KEY-SERVICE-ROLE-CLIENT-1` rule id — correlating the `NEXT_PUBLIC_`
+    // prefix with the secret shape as its own finding, distinct from the generic
+    // `SEC-NO-VENDOR-TOKEN-1` floor hit the always-run deterministic sub-test
+    // (`deterministic_d3_env_production_service_role_secret_is_found`) already asserts. A
+    // floor port of this exact rule id (per the decision already recorded in
+    // `crates/rules/principles/supabase/secrets/supabase-key-service-role-client-1.toml`) is a
+    // separate, later change.
     let d3 = find_one(f, "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1", ".env.production");
     scorecard.push(grade(
         "D3",

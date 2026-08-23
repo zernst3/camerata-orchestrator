@@ -55,7 +55,7 @@ pub(crate) use camerata_gateway::{
 // from root's perspective (the root orchestration functions call files::* directly via
 // the submodule). The re-export is needed so `use super::*` in the test module reaches them.
 #[allow(unused_imports)]
-pub(crate) use files::{extra_exclude_dirs, has_code_ext, is_noise_path, HARD_CAP_FILES};
+pub(crate) use files::{extra_exclude_dirs, has_code_ext, is_admissible_text, is_noise_path, HARD_CAP_FILES};
 pub(crate) use propose::domains_for_stack;
 pub(crate) use report::merge_deep_reports;
 
@@ -1167,8 +1167,34 @@ mod tests {
         assert!(has_code_ext("src/main.rs"));
         assert!(has_code_ext("a/b/config.YAML"));
         assert!(!has_code_ext("logo.png"));
-        assert!(!has_code_ext("Dockerfile"));
+        // Dockerfile is a CODE_BASENAMES match (like Jenkinsfile) — it commonly carries
+        // hardcoded ARG/ENV secrets, and its build steps are real audit signal.
+        assert!(has_code_ext("Dockerfile"));
         assert!(!has_code_ext("README"));
+    }
+
+    #[test]
+    fn admissible_text_covers_code_plus_config_plus_dotfiles() {
+        // Every has_code_ext path is still admissible.
+        assert!(is_admissible_text("src/main.rs"));
+        assert!(is_admissible_text("Dockerfile"));
+        // Newly-admitted non-code config extensions.
+        assert!(is_admissible_text("app.conf"));
+        assert!(is_admissible_text("config/app.properties"));
+        assert!(is_admissible_text("notes.txt"));
+        assert!(is_admissible_text("certs/server.pem"));
+        // The structural bug this fix targets: a dotenv VARIANT whose naive "extension" (the
+        // substring after the LAST dot) is the environment name, not `env`.
+        assert!(is_admissible_text(".env.production"));
+        assert!(is_admissible_text(".env.local"));
+        assert!(is_admissible_text(".env"));
+        // Other dotfiles that carry real committed-secret risk (npm/netrc auth tokens).
+        assert!(is_admissible_text(".npmrc"));
+        assert!(is_admissible_text(".netrc"));
+        // Still excluded: no extension AND not a dotfile AND not a CODE_BASENAMES match, or a
+        // genuinely non-text extension.
+        assert!(!is_admissible_text("logo.png"));
+        assert!(!is_admissible_text("bin/some-binary"));
     }
 
     #[test]
@@ -2796,6 +2822,21 @@ mod tests {
         assert!(status.success(), "git init must succeed");
     }
 
+    /// Helper: `git add` the given repo-relative paths in `dir` — stages them into the index
+    /// so `git ls-files` reports them as tracked WITHOUT requiring a commit (no `user.name`/
+    /// `user.email` config needed in a sandboxed test environment).
+    fn git_add(dir: &std::path::Path, paths: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("add")
+            .args(paths)
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git add failed");
+        assert!(status.success(), "git add must succeed for {paths:?}");
+    }
+
     #[test]
     fn gitignore_walk_skips_gitignored_file() {
         // A secrets.env listed in .gitignore must NOT appear in the extracted files.
@@ -2855,6 +2896,204 @@ mod tests {
         assert!(
             paths.iter().any(|p| *p == ".env"),
             "tracked .env must be scanned when not gitignored: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn gitignore_walk_still_scans_a_tracked_file_later_added_to_gitignore() {
+        // The highest-value case: a secret was committed, then someone tried to "fix" it by
+        // adding the file to .gitignore going forward — the file is STILL tracked (still in
+        // the index / git history), so the ignore-crate's gitignore-only walk would silently
+        // drop it. read_local_repo_files must union git_tracked_files back in.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        git_init(root);
+
+        let secret_content =
+            concat!("NEXT_PUBLIC_SUPABASE_SERVICE_ROLE_KEY=sb_secret_", "FAKE_DO_NOT_USE\n");
+        std::fs::write(root.join(".env.production"), secret_content)
+            .expect("write .env.production");
+        git_add(root, &[".env.production"]);
+
+        // NOW gitignore it — a real (if mistaken) attempt to stop tracking it going forward.
+        // The file remains in the index; git status would show it as still-tracked-but-
+        // matches-gitignore, not untracked.
+        std::fs::write(root.join(".gitignore"), ".env.production\n")
+            .expect("write .gitignore");
+
+        std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+        std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("write lib.rs");
+
+        let extracted = read_local_repo_files(root).expect("scan ok");
+        let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            paths.contains(&".env.production"),
+            "a git-tracked file must still be scanned even after being added to .gitignore: {paths:?}"
+        );
+        let (_, content) = extracted
+            .files
+            .iter()
+            .find(|(p, _)| p == ".env.production")
+            .expect("file present");
+        assert!(content.contains("sb_secret_"), "the union'd file must carry real content, not a stub");
+    }
+
+    #[test]
+    fn gitignore_walk_does_not_resurrect_an_untracked_gitignored_file() {
+        // Companion negative case to the test above: an UNTRACKED file that matches
+        // .gitignore must still be excluded — the union only pulls in git-TRACKED paths, it
+        // must never turn "ignored and never committed" into "scanned".
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        git_init(root);
+
+        std::fs::write(root.join(".gitignore"), "local-only.env\n").expect("write .gitignore");
+        std::fs::write(root.join("local-only.env"), "LOCAL_SECRET=whatever\n")
+            .expect("write local-only.env");
+        // Deliberately never `git add`ed — stays untracked.
+        std::fs::create_dir_all(root.join("src")).expect("mkdir src");
+        std::fs::write(root.join("src/lib.rs"), "pub fn lib() {}\n").expect("write lib.rs");
+
+        let extracted = read_local_repo_files(root).expect("scan ok");
+        let paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(
+            !paths.iter().any(|p| p.contains("local-only.env")),
+            "an untracked gitignored file must stay excluded: {paths:?}"
+        );
+    }
+
+    #[test]
+    fn collector_admits_and_finds_secrets_in_non_env_committed_config_files() {
+        // GENERAL regression guard (not fixture-specific): a committed secret in a `.yaml`,
+        // `.json`, or `.properties` file — none of them named `.env*` — must be found. Proves
+        // the fix is a genuine file-type-policy broadening, not a `.env.production` band-aid.
+        // Also covers `.env.staging` (a DIFFERENT dotenv variant than the benchmark fixture's
+        // `.env.production`) to prove the dotfile fix generalizes across the whole family.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        git_init(root);
+
+        // AKIA-shaped secret (matches SEC-NO-VENDOR-TOKEN-1 regardless of quoting/format), so
+        // this test is independent of the `.env`-specific sb_secret_ pattern extension.
+        let akia = concat!("AKIA", "IOSFODNN7EXAMPLE");
+
+        std::fs::create_dir_all(root.join("k8s")).expect("mkdir k8s");
+        std::fs::write(
+            root.join("k8s/deploy.yaml"),
+            format!("env:\n  - name: AWS_ACCESS_KEY_ID\n    value: \"{akia}\"\n"),
+        )
+        .expect("write deploy.yaml");
+
+        std::fs::write(
+            root.join("secrets.json"),
+            format!("{{\"awsAccessKeyId\": \"{akia}\"}}\n"),
+        )
+        .expect("write secrets.json");
+
+        std::fs::create_dir_all(root.join("config")).expect("mkdir config");
+        std::fs::write(
+            root.join("config/app.properties"),
+            format!("aws.access.key.id={akia}\n"),
+        )
+        .expect("write app.properties");
+
+        std::fs::write(
+            root.join(".env.staging"),
+            format!("AWS_ACCESS_KEY_ID={akia}\n"),
+        )
+        .expect("write .env.staging");
+
+        let extracted = read_local_repo_files(root).expect("scan ok");
+        let findings = audit_files("test/repo", &extracted.files);
+
+        for path in ["k8s/deploy.yaml", "secrets.json", "config/app.properties", ".env.staging"] {
+            assert!(
+                extracted.files.iter().any(|(p, _)| p == path),
+                "{path} must be admitted into the scanned file list: {:?}",
+                extracted.files.iter().map(|(p, _)| p).collect::<Vec<_>>()
+            );
+            assert!(
+                findings.iter().any(|f| f.path == path && f.rule_id == "SEC-NO-VENDOR-TOKEN-1"),
+                "expected a SEC-NO-VENDOR-TOKEN-1 finding in {path}: {:?}",
+                findings.iter().filter(|f| f.path == path).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    #[test]
+    fn collector_broadening_produces_no_noise_on_benign_config_files() {
+        // Negative control: a normal repo with ordinary, secret-free config/text files must
+        // produce ZERO findings from those files — neither from the deterministic secrets
+        // floor NOR from the architectural/style checkers (even maximally armed). This proves
+        // the broadening feeds the secrets floor WITHOUT flooding style-rule noise onto
+        // config files, and that ordinary config content isn't a false-positive magnet.
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        git_init(root);
+
+        std::fs::write(root.join(".editorconfig"), "root = true\n[*]\nindent_style = space\n")
+            .expect("write .editorconfig");
+        std::fs::write(
+            root.join("app.conf"),
+            "listen_port = 8080\nlog_level = info\n",
+        )
+        .expect("write app.conf");
+        std::fs::write(root.join("notes.txt"), "TODO: rename this module someday.\n")
+            .expect("write notes.txt");
+        std::fs::write(root.join(".npmrc"), "save-exact=true\nengine-strict=true\n")
+            .expect("write .npmrc");
+        std::fs::create_dir_all(root.join("config")).expect("mkdir config");
+        std::fs::write(
+            root.join("config/app.properties"),
+            "server.port=8080\nspring.application.name=demo\n",
+        )
+        .expect("write app.properties");
+
+        // Noise that must still be excluded even though the admission gate broadened.
+        let nm = root.join("node_modules/react");
+        std::fs::create_dir_all(&nm).expect("mkdir node_modules");
+        std::fs::write(nm.join("index.js"), "module.exports = {};\n").expect("write noise");
+
+        let extracted = read_local_repo_files(root).expect("scan ok");
+        let admitted_paths: Vec<&str> = extracted.files.iter().map(|(p, _)| p.as_str()).collect();
+
+        // File-count sanity: the benign config files WERE admitted (so an empty-findings
+        // result below is a genuine "scanned clean", not "silently skipped").
+        for path in [".editorconfig", "app.conf", "notes.txt", ".npmrc", "config/app.properties"] {
+            assert!(
+                admitted_paths.contains(&path),
+                "{path} must be admitted: {admitted_paths:?}"
+            );
+        }
+        // node_modules must still be excluded despite the broadened admission gate.
+        assert!(
+            !admitted_paths.iter().any(|p| p.contains("node_modules")),
+            "node_modules must remain excluded as noise: {admitted_paths:?}"
+        );
+
+        let floor_findings = audit_files("test/repo", &extracted.files);
+        let config_paths = [".editorconfig", "app.conf", "notes.txt", ".npmrc", "config/app.properties"];
+        let floor_noise: Vec<_> = floor_findings
+            .iter()
+            .filter(|f| config_paths.contains(&f.path.as_str()))
+            .collect();
+        assert!(
+            floor_noise.is_empty(),
+            "benign config files must produce zero secrets-floor findings: {floor_noise:?}"
+        );
+
+        // Maximally arm EVERY architectural/style checker rule id and confirm none of them
+        // fire on the config files either — proves the broadening doesn't leak into the
+        // AST/style tier, which self-scopes by interest_globs but is worth asserting directly.
+        let all_rule_ids = camerata_checks::arch_checker::all_checker_rule_ids();
+        let arch_findings = audit_architectural("test/repo", &extracted.files, &all_rule_ids);
+        let arch_noise: Vec<_> = arch_findings
+            .iter()
+            .filter(|f| config_paths.contains(&f.path.as_str()))
+            .collect();
+        assert!(
+            arch_noise.is_empty(),
+            "benign config files must produce zero architectural/style findings: {arch_noise:?}"
         );
     }
 

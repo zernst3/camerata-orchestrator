@@ -1,5 +1,9 @@
-//! Local repo file reading: walks a working tree, prunes noise, and returns
-//! auditable code files.
+//! Local repo file reading: walks a working tree, prunes noise, and returns auditable files —
+//! both code (full treatment: stack detection, architectural checkers, AI review) and
+//! non-code human-authored text/config where a committed secret is just as real a finding
+//! (`.env*`, `.yaml`/`.json`/`.toml`, `.conf`/`.properties`, key material, dotfiles). See
+//! `is_admissible_text` for the admission policy and why broadening it doesn't create noise
+//! elsewhere.
 
 /// Safety net for pathological monorepos so one scan can't exhaust memory. This
 /// is NOT a per-scan window that rotates: a single tarball download covers the
@@ -21,7 +25,20 @@ const CODE_EXTS: &[&str] = &[
 /// Extensionless basenames that still carry stack/CI signal and must be extracted so
 /// detection can see them (e.g. a Jenkins pipeline). Without this they'd be dropped as
 /// "no code extension" and the CI/CD domain would never be detected from them.
-const CODE_BASENAMES: &[&str] = &["Jenkinsfile"];
+const CODE_BASENAMES: &[&str] = &["Jenkinsfile", "Dockerfile"];
+
+/// Extensions that are not "code" in the AST/style sense, but are human-authored config/text
+/// files where a committed secret is exactly as real a finding as it is in a `.env`:
+/// connection strings in `.properties`/`.conf` files, PEM/PKCS12/JKS key material, and plain
+/// `.txt` notes (a `credentials.txt` committed by accident is precisely the mistake this list
+/// exists to catch). Deliberately does NOT include anything already covered by `CODE_EXTS`.
+///
+/// This list feeds `is_admissible_text` — see that function's doc for why admitting these
+/// extensions into the file list doesn't create noise on the architectural/style rules or the
+/// scan-tool previews: those consumers already self-scope by their own file-type interest.
+const CONFIG_TEXT_EXTS: &[&str] = &[
+    "conf", "properties", "txt", "pem", "crt", "cert", "p12", "pfx", "jks", "keystore", "pgpass",
+];
 
 /// Directory names that are build output, dependency trees, caches, or tool state — pure
 /// noise for an architecture audit, and the bulk of a repo's bytes/tokens. A real consumer
@@ -141,6 +158,44 @@ pub(crate) fn has_code_ext(path: &str) -> bool {
     }
 }
 
+/// True when `path` should be admitted into the scanned file list AT ALL: it's `has_code_ext`
+/// (full treatment), a `CONFIG_TEXT_EXTS` match, or a dotfile (basename starts with `.`).
+///
+/// This is the general fix for a structural gap: `has_code_ext` extracts a path's extension
+/// by splitting on the LAST `.`, which mishandles the entire class of Unix dotfiles that
+/// encode a variant as a second dot-segment — `.env.production`'s "extension" by that scheme
+/// is `production`, not `env`, so it (and `.env.local`, `.env.staging`, `.npmrc`, `.netrc`,
+/// `.pgpass`, ...) was silently dropped before a single byte of its content was ever read.
+/// Real-world committed-secret incidents concentrate in exactly this file class (dotenv
+/// variants, npm/netrc/pgpass credential files), which is why ANY dotfile is admitted here —
+/// gated only by the existing noise/size/UTF-8 checks the caller already applies, so a stray
+/// `.DS_Store` or oversized dotfile is still dropped exactly like any other file.
+///
+/// A `CONFIG_TEXT_EXTS`/dotfile admission does NOT widen anything else's scope: the
+/// architectural/AST checkers (`camerata_checks::arch_checker`) only look at files matching
+/// their own `interest_globs`, and the scan-tool previews (`scan_tools::run_scan_tools`) only
+/// run a tool against extensions that tool itself recognizes — so a `.conf` or `.env.staging`
+/// file admitted here is simply invisible to those, while remaining fully visible to the
+/// deterministic secrets floor (`onboard::audit::AUDIT_RULES`, run over every admitted file
+/// with no extension filter of its own — see `onboard::audit::audit_files`).
+pub(crate) fn is_admissible_text(path: &str) -> bool {
+    if has_code_ext(path) {
+        return true;
+    }
+    let basename = path.rsplit('/').next().unwrap_or(path);
+    if basename.starts_with('.') && basename.len() > 1 {
+        return true;
+    }
+    match path.rsplit_once('.') {
+        Some((_, ext)) => CONFIG_TEXT_EXTS.contains(&ext.to_ascii_lowercase().as_str()),
+        // Extensionless, non-dotfile basename (e.g. a bare `credentials`). Deliberately NOT
+        // broadened here — `CODE_BASENAMES` (checked above via `has_code_ext`) remains the
+        // explicit opt-in list for that narrower case; a blanket "any extensionless file"
+        // admission would sweep up compiled binaries and other noise with no extension at all.
+        None => false,
+    }
+}
+
 /// True when a path should be pruned BEFORE scanning: it lives under a build/dep/cache
 /// directory, or is a lockfile / minified bundle / source map. `extra_dirs` holds any
 /// project-specific dir names from `CAMERATA_SCAN_EXCLUDE_DIRS`.
@@ -182,7 +237,12 @@ pub struct ExtractedRepo {
 /// user's global gitignore are all honoured. A file that is gitignored is skipped; a file
 /// that is committed but unignored (e.g. a tracked `.env`) is still scanned — which is
 /// exactly correct. The noise denylist (`is_noise_path`) is applied on top as belt-and-
-/// suspenders for any project that has not gitignored its build artefacts yet.
+/// suspenders for any project that has not gitignored its build artefacts yet. The walk is
+/// then UNIONED with `git ls-files` (see `git_tracked_files`) so a file that is committed but
+/// LATER added to `.gitignore` — a common real-world mistake, and the highest-value case of
+/// all, since it's an already-leaked secret whose owner is actively (if unknowingly) hiding
+/// the fix — is still scanned; the `ignore` crate has no concept of the git index, so on its
+/// own it would treat "matches .gitignore" and "not tracked" as the same thing.
 ///
 /// When the directory is NOT a git repo, the function falls back to the original iterative
 /// DFS noise-denylist walk (same behaviour as before `ignore` was added) so that the
@@ -207,6 +267,7 @@ fn read_local_repo_files_gitignore(
     extra_dirs: &[String],
 ) -> anyhow::Result<ExtractedRepo> {
     let mut files = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut excluded_noise = 0usize;
     let mut truncated = false;
 
@@ -220,7 +281,7 @@ fn read_local_repo_files_gitignore(
         .hidden(false)
         .build();
 
-    for result in walker {
+    'walk: for result in walker {
         let entry = match result {
             Ok(e) => e,
             Err(_) => continue,
@@ -244,11 +305,11 @@ fn read_local_repo_files_gitignore(
         // Belt-and-suspenders: noise denylist on top of gitignore (catches projects whose
         // build artefacts are not yet gitignored, or repos where target/ was committed).
         let noise = is_noise_path(&rel, extra_dirs);
-        let code = has_code_ext(&rel);
-        if noise && code {
+        let admissible = is_admissible_text(&rel);
+        if noise && admissible {
             excluded_noise += 1;
         }
-        if noise || !code {
+        if noise || !admissible {
             continue;
         }
         if entry
@@ -262,17 +323,84 @@ fn read_local_repo_files_gitignore(
         let Ok(content) = std::fs::read_to_string(p) else {
             continue; // skip non-UTF-8 / unreadable
         };
+        seen.insert(rel.clone());
         files.push((rel, content));
         if files.len() >= HARD_CAP_FILES {
             truncated = true;
-            break;
+            break 'walk;
         }
     }
+
+    // Union in git-TRACKED files the ignore-aware walk above skipped because they match a
+    // `.gitignore` pattern. A committed secret doesn't stop being committed (or stop being
+    // reachable via `git show HEAD:<path>` / the full clone history) just because a later
+    // `.gitignore` edit tries to hide it going forward — that's the single highest-value case
+    // for this scan to catch, not a gap to leave open. `git_tracked_files` returns `None` on
+    // any failure (no `git` on PATH, etc.); the primary walk above already succeeded
+    // regardless, so this is purely additive and never turns a working scan into an error.
+    if !truncated {
+        if let Some(tracked) = git_tracked_files(root) {
+            for rel in tracked {
+                if seen.contains(&rel) {
+                    continue;
+                }
+                let noise = is_noise_path(&rel, extra_dirs);
+                let admissible = is_admissible_text(&rel);
+                if noise && admissible {
+                    excluded_noise += 1;
+                }
+                if noise || !admissible {
+                    continue;
+                }
+                let full = root.join(&rel);
+                let Ok(meta) = std::fs::metadata(&full) else {
+                    continue; // tracked in the index but not present on disk (rare edge case)
+                };
+                if !meta.is_file() || meta.len() as usize > MAX_FILE_BYTES {
+                    continue;
+                }
+                let Ok(content) = std::fs::read_to_string(&full) else {
+                    continue; // skip non-UTF-8 / unreadable
+                };
+                seen.insert(rel.clone());
+                files.push((rel, content));
+                if files.len() >= HARD_CAP_FILES {
+                    truncated = true;
+                    break;
+                }
+            }
+        }
+    }
+
     Ok(ExtractedRepo {
         files,
         truncated,
         excluded_noise,
     })
+}
+
+/// The full set of git-TRACKED file paths under `root` (relative, forward-slashed), via
+/// `git ls-files -z` (NUL-separated so paths with spaces/unicode parse unambiguously, and so
+/// a path itself can never be mistaken for the separator). Returns `None` on any failure (no
+/// `git` binary on PATH, non-zero exit, non-UTF-8 output, ...) — the caller treats that as "no
+/// union available," never a hard error: the primary gitignore-aware walk already ran and
+/// still stands on its own.
+fn git_tracked_files(root: &std::path::Path) -> Option<Vec<String>> {
+    let output = std::process::Command::new("git")
+        .args(["ls-files", "-z"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    Some(
+        text.split('\0')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.replace('\\', "/"))
+            .collect(),
+    )
 }
 
 /// Noise-denylist walk (fallback for non-git directories). Iterative DFS so a deep tree
@@ -312,11 +440,11 @@ fn read_local_repo_files_noise_denylist(
                 continue; // skip symlinks / fifos / etc.
             }
             let noise = is_noise_path(&rel, extra_dirs);
-            let code = has_code_ext(&rel);
-            if noise && code {
+            let admissible = is_admissible_text(&rel);
+            if noise && admissible {
                 excluded_noise += 1;
             }
-            if noise || !code {
+            if noise || !admissible {
                 continue;
             }
             if entry
