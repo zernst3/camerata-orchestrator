@@ -6,8 +6,9 @@
 //! end state is vendor-neutral: a user picks whatever model they want — Anthropic,
 //! OpenAI, Google, others. The request/response shapes here ([`LlmRequest`] /
 //! [`LlmResponse`]) are deliberately vendor-neutral; a new vendor is a new match arm in
-//! [`Llm::complete`] plus its entries in [`MODELS`], NOT a rewrite. Today only Anthropic
-//! is implemented; the other vendors are reserved knobs that return a clear
+//! [`Llm::complete`] plus its entries in [`crate::model_registry::CLAUDE_REGISTRY_MODELS`]
+//! (see [`models`]), NOT a rewrite. Today only Anthropic is implemented; the other vendors
+//! are reserved knobs that return a clear
 //! "not wired yet" message pointing at the seam.
 //!
 //! Two axes:
@@ -33,31 +34,28 @@ pub struct ModelInfo {
 }
 
 /// The models the UI offers. Anthropic today; add a vendor's models here when its arm
-/// is wired in [`Llm::complete`]. Latest/most capable first. Prices are $/Mtok and track
-/// the well-known tiering (Sonnet ~5× cheaper than Opus, Haiku ~15×).
-pub const MODELS: &[ModelInfo] = &[
-    ModelInfo {
-        vendor: "anthropic",
-        label: "Opus 4.8",
-        id: "claude-opus-4-8",
-        price_in: 15.0,
-        price_out: 75.0,
-    },
-    ModelInfo {
-        vendor: "anthropic",
-        label: "Sonnet 4.6",
-        id: "claude-sonnet-4-6",
-        price_in: 3.0,
-        price_out: 15.0,
-    },
-    ModelInfo {
-        vendor: "anthropic",
-        label: "Haiku 4.5",
-        id: "claude-haiku-4-5-20251001",
-        price_in: 1.0,
-        price_out: 5.0,
-    },
-];
+/// is wired in [`Llm::complete`].
+///
+/// PRICING SOURCE OF TRUTH: derived from [`crate::model_registry::CLAUDE_REGISTRY_MODELS`]
+/// (the same table `GET /api/models/registry` serves) rather than a second hardcoded price
+/// list. A prior version of this function duplicated the prices as literals here, and they
+/// drifted stale (Opus was listed at $15/$75 — a ~3x overcharge — while the registry had
+/// already moved to the correct $5/$25); every dollar figure this file computes
+/// (`compute_cost_usd`, and via it the "Actual cost" readout + the cumulative usage ledger)
+/// was inflated as a result. Sourcing from the registry means a future price update only
+/// has to happen in one place.
+pub fn models() -> Vec<ModelInfo> {
+    crate::model_registry::CLAUDE_REGISTRY_MODELS
+        .iter()
+        .map(|m| ModelInfo {
+            vendor: "anthropic",
+            label: m.display,
+            id: m.id,
+            price_in: m.price_in,
+            price_out: m.price_out,
+        })
+        .collect()
+}
 
 /// The model vendors Camerata knows about. Only `Anthropic` is wired today; the rest are
 /// reserved so the env knob + extension point are explicit (selecting them returns a
@@ -441,9 +439,11 @@ fn cli_result_text(v: &serde_json::Value) -> anyhow::Result<&str> {
     })
 }
 
-/// List price ($/Mtok input, $/Mtok output) for a model id, from [`MODELS`].
+/// List price ($/Mtok input, $/Mtok output) for a model id, from
+/// [`crate::model_registry::CLAUDE_REGISTRY_MODELS`] (the live registry — see [`models`]'s
+/// doc comment for why this must not be a second, independently-maintained price list).
 fn price_for(model_id: &str) -> Option<(f64, f64)> {
-    MODELS
+    crate::model_registry::CLAUDE_REGISTRY_MODELS
         .iter()
         .find(|m| m.id == model_id)
         .map(|m| (m.price_in, m.price_out))
@@ -648,7 +648,8 @@ impl Llm {
     }
 
     /// Run a completion through the selected vendor + transport. Adding a vendor is a new
-    /// match arm here plus its [`MODELS`] entries; the request/response shapes don't change.
+    /// match arm here plus its [`crate::model_registry::CLAUDE_REGISTRY_MODELS`] entries; the
+    /// request/response shapes don't change.
     pub async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
         let model = self.model_for(&req);
         // CHOKEPOINT: fold every completion into the cumulative ledger. Success records usage
@@ -660,7 +661,7 @@ impl Llm {
             },
             Vendor::OpenAi | Vendor::Google => anyhow::bail!(
                 "model vendor `{}` is not wired yet — the provider seam is ready (add an \
-                 arm in llm.rs::complete + its MODELS entries). Set CAMERATA_LLM_VENDOR=anthropic \
+                 arm in llm.rs::complete + its model_registry entries). Set CAMERATA_LLM_VENDOR=anthropic \
                  to use the wired vendor.",
                 self.vendor.label()
             ),
@@ -2035,25 +2036,43 @@ mod tests {
 
     #[test]
     fn compute_cost_prices_cache_components_separately() {
-        // opus: price_in 15, price_out 75 ($/Mtok). input folds cache fields (base 100,
-        // read 200, creation 30 -> 330); fresh input is 100.
+        // opus: price_in 5, price_out 25 ($/Mtok) — the registry's live Anthropic list price
+        // (see crate::model_registry::CLAUDE_REGISTRY_MODELS). input folds cache fields
+        // (base 100, read 200, creation 30 -> 330); fresh input is 100.
         let cost = compute_cost_usd("claude-opus-4-8", Some(330), Some(50), 200, 30)
             .expect("priced model");
-        // 100*15 (fresh) + 200*15*0.1 (read) + 30*15*1.25 (creation) + 50*75 (out) = 6112.5
-        let expected = (100.0 * 15.0 + 200.0 * 15.0 * 0.1 + 30.0 * 15.0 * 1.25 + 50.0 * 75.0)
+        // 100*5 (fresh) + 200*5*0.1 (read) + 30*5*1.25 (creation) + 50*25 (out) = 1837.5
+        let expected = (100.0 * 5.0 + 200.0 * 5.0 * 0.1 + 30.0 * 5.0 * 1.25 + 50.0 * 25.0)
             / 1_000_000.0;
         assert!((cost - expected).abs() < 1e-12, "cost={cost} expected={expected}");
         // The naive fold-everything-at-full-input rate would over-bill.
-        let naive = (330.0 * 15.0 + 50.0 * 75.0) / 1_000_000.0;
+        let naive = (330.0 * 5.0 + 50.0 * 25.0) / 1_000_000.0;
         assert!(cost < naive, "cached reads must not be billed at full input rate");
 
         // No cache tokens -> matches the plain input*price formula.
         let plain = compute_cost_usd("claude-opus-4-8", Some(100), Some(50), 0, 0).unwrap();
-        assert!((plain - (100.0 * 15.0 + 50.0 * 75.0) / 1_000_000.0).abs() < 1e-12);
+        assert!((plain - (100.0 * 5.0 + 50.0 * 25.0) / 1_000_000.0).abs() < 1e-12);
 
         // Unknown model or missing counts -> None.
         assert!(compute_cost_usd("nope", Some(1), Some(1), 0, 0).is_none());
         assert!(compute_cost_usd("claude-opus-4-8", None, Some(1), 0, 0).is_none());
+    }
+
+    // Regression for the stale-pricing bug: `price_for` (and everything built on it —
+    // `compute_cost_usd`, the usage ledger's cost fallback, and the legacy `/api/models`
+    // list) must agree EXACTLY with the live registry, never a second hand-maintained
+    // number. Locks Opus's price at the registry's $5/$25 rather than the old $15/$75.
+    #[test]
+    fn price_for_matches_the_live_model_registry_exactly() {
+        for reg in crate::model_registry::CLAUDE_REGISTRY_MODELS {
+            let (pin, pout) = price_for(reg.id).unwrap_or_else(|| {
+                panic!("price_for must resolve every registry model id, missing {}", reg.id)
+            });
+            assert_eq!(pin, reg.price_in, "{} price_in must match the registry", reg.id);
+            assert_eq!(pout, reg.price_out, "{} price_out must match the registry", reg.id);
+        }
+        let (opus_in, opus_out) = price_for("claude-opus-4-8").unwrap();
+        assert_eq!((opus_in, opus_out), (5.0, 25.0), "Opus must price at the current $5/$25, not the stale $15/$75");
     }
 
     #[test]
@@ -2071,10 +2090,11 @@ mod tests {
 
     #[test]
     fn models_list_has_known_ids() {
-        assert!(MODELS.iter().any(|m| m.id == "claude-opus-4-8"));
-        assert!(MODELS.iter().any(|m| m.id == DEFAULT_MODEL));
+        let list = models();
+        assert!(list.iter().any(|m| m.id == "claude-opus-4-8"));
+        assert!(list.iter().any(|m| m.id == DEFAULT_MODEL));
         // Every model is tagged with a vendor (the agent-agnostic axis).
-        assert!(MODELS.iter().all(|m| !m.vendor.is_empty()));
+        assert!(list.iter().all(|m| !m.vendor.is_empty()));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! (Phase A of the DTO extraction) from `camerata_server::llm`, which re-exports it so
 //! `crate::llm::LlmResponse` call sites resolve unchanged.
 //!
-//! `LlmRequest`, `Llm`, `Vendor`, `Backend`, `MODELS`, and `ModelInfo` all STAY in
+//! `LlmRequest`, `Llm`, `Vendor`, `Backend`, `models`, and `ModelInfo` all STAY in
 //! `camerata_server::llm` (a later phase relocates them); only the response shape and
 //! its inherent accounting method move here.
 
@@ -16,7 +16,8 @@ pub struct LlmResponse {
     /// `cli` | `api` — which backend served it (surfaced honestly in the UI).
     pub backend: String,
     /// Cost in USD when known: the CLI reports it directly; the API path computes it from
-    /// token usage × the model's list price (see `MODELS`).
+    /// token usage × the model's list price (see `camerata_llm::llm::models`, sourced from
+    /// the live model registry).
     pub cost_usd: Option<f64>,
     /// Real billed input tokens (folds in cache read/creation), when the backend reports
     /// usage. Drives the post-scan ACTUAL-vs-estimated readout.

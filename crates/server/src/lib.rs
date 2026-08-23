@@ -8466,7 +8466,7 @@ async fn delete_routine(
 
 /// The models the UI offers in its selector.
 async fn list_models() -> Json<serde_json::Value> {
-    let models: Vec<_> = crate::llm::MODELS
+    let models: Vec<_> = crate::llm::models()
         .iter()
         .map(|m| {
             serde_json::json!({

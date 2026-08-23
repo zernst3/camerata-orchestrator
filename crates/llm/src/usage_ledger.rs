@@ -13,9 +13,11 @@
 //!     is added verbatim.
 //!   - When `cost_usd` is `None` but tokens are present (the shape a future Gemini arm will
 //!     produce — Gemini reports tokens but no dollar field), the cost is DERIVED from
-//!     [`crate::llm::MODELS`] list pricing for that model id. So a Gemini call still yields a
-//!     `$` figure with zero changes here, the moment its `MODELS` entries + `complete` arm land.
-//!   - When the model id is absent from `MODELS`, tokens still accumulate at `$0` (never a panic).
+//!     [`crate::llm::models`] pricing (sourced from the live model registry) for that model
+//!     id. So a Gemini call still yields a `$` figure with zero changes here, the moment its
+//!     registry entries + `complete` arm land.
+//!   - When the model id is absent from the registry, tokens still accumulate at `$0` (never
+//!     a panic).
 //!
 //! **Rate-limited state.** The ledger also carries a transient "we are being rate-limited"
 //! flag. [`is_rate_limit_signal`] is the provider-agnostic detector: it recognizes the
@@ -32,7 +34,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::llm::{LlmResponse, MODELS};
+use crate::llm::{models, LlmResponse};
 
 /// Per-model accumulated usage, surfaced as the `by_model` breakdown.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -140,17 +142,19 @@ impl UsageLedger {
     ///
     /// PROVIDER-AGNOSTIC COST RULE:
     ///   1. If `cost_usd` is present (Anthropic CLI), use it verbatim.
-    ///   2. Else derive from [`MODELS`] list pricing for `model_id`:
-    ///      `input_tokens * price_in + output_tokens * price_out`, both `$/Mtok`. This is the
-    ///      Gemini-shape path (tokens reported, no cost field) — and the API path's own
-    ///      computation, recomputed here so the ledger is self-contained.
-    ///   3. Else (model id not in `MODELS`) -> `0.0`, so unknown models still accumulate
+    ///   2. Else derive from [`crate::llm::models`] pricing (sourced from the live model
+    ///      registry) for `model_id`: `input_tokens * price_in + output_tokens * price_out`,
+    ///      both `$/Mtok`. This is the Gemini-shape path (tokens reported, no cost field) —
+    ///      and the API path's own computation, recomputed here so the ledger is
+    ///      self-contained.
+    ///   3. Else (model id not in the registry) -> `0.0`, so unknown models still accumulate
     ///      tokens without crashing or poisoning the dollar total.
     fn cost_for(model_id: &str, r: &LlmResponse) -> f64 {
         if let Some(c) = r.cost_usd {
             return c;
         }
-        let Some(info) = MODELS.iter().find(|m| m.id == model_id) else {
+        let list = models();
+        let Some(info) = list.iter().find(|m| m.id == model_id) else {
             return 0.0;
         };
         let input = r.input_tokens.unwrap_or(0) as f64;
@@ -317,25 +321,27 @@ mod tests {
 
     #[test]
     fn cost_fallback_derives_from_pricing_for_known_model() {
-        // Gemini-shape: no cost_usd, but a model id present in MODELS -> derive cost.
-        // claude-opus-4-8 is $15/Mtok in, $75/Mtok out.
+        // Gemini-shape: no cost_usd, but a model id present in the registry -> derive cost.
+        // claude-opus-4-8 is $5/Mtok in, $25/Mtok out (the live registry price — see
+        // crate::model_registry::CLAUDE_REGISTRY_MODELS; NOT the stale $15/$75 a prior,
+        // independently-maintained price list used to carry).
         let l = UsageLedger::new();
         l.record(
             "claude-opus-4-8",
             &gemini_shape_resp("claude-opus-4-8", 1_000_000, 1_000_000),
         );
         let s = l.snapshot();
-        // 1M * 15 + 1M * 75 over 1M = 90.0.
-        assert!((s.total_cost_usd - 90.0).abs() < 1e-6, "got {}", s.total_cost_usd);
+        // 1M * 5 + 1M * 25 over 1M = 30.0.
+        assert!((s.total_cost_usd - 30.0).abs() < 1e-6, "got {}", s.total_cost_usd);
         assert_eq!(s.by_model.len(), 1);
-        assert!((s.by_model[0].cost - 90.0).abs() < 1e-6);
+        assert!((s.by_model[0].cost - 30.0).abs() < 1e-6);
         assert_eq!(s.by_model[0].tokens, 2_000_000);
     }
 
     #[test]
     fn cost_fallback_unknown_model_is_zero_no_panic() {
         let l = UsageLedger::new();
-        // No cost field, model id NOT in MODELS -> tokens accumulate, cost stays 0, no panic.
+        // No cost field, model id NOT in the registry -> tokens accumulate, cost stays 0, no panic.
         l.record(
             "gemini-3-pro",
             &gemini_shape_resp("gemini-3-pro", 500, 200),
