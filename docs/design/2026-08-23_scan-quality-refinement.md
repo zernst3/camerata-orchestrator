@@ -21,6 +21,21 @@ Grounding (verified against source):
 
 ---
 
+## Built (2026-08-23)
+
+All four items shipped on `feat/audit-report-export`, in the planned build order, each its own commit:
+
+- **Item 4 / I3** (`378c2a5`) — exposure-gate missing-RLS: a non-exposed schema with no RLS policy is an informational note, not a defect. RLS intent rules stay ungated (owner decision 7: only missing-RLS is exposure-gated).
+- **Item 3 / I1** (`046434f`) — inline waiver reach as a contiguous non-blank run capped at `MAX_WAIVER_REACH = 10`, `also_matches` waiver matching, and a `WaivedInline` disposition so a suppressed-inline finding lands in the Accepted cell instead of reading as still-open.
+- **Item 1 / Bug 3** (`3ec4554`) — cross-family semantic dedup: `Finding.category` (closed taxonomy) + `located` bool, a `category` field on the calibration verdict schema, and `merge_semantic_groups` (only same-category findings fuse; `None`-category never merges — fail-open to over-telling).
+- **Item 2 / Bug 4** (`626c7d3`) — informational bucketing: new `info` severity tier, a `MatrixJson.informational` appendix cell, and the `is_informational` predicate (info-severity, `testing-style` below `MIN_STYLE_CORPUS_FILES = 3`, `needs-review` at ≤medium, and absence-type `structured` stance rules in the universal/framework layer). Hard invariants: never a critical/high finding, never a dispositioned one; informational is excluded from `curated_total` so `do_now+do_next+plan+accepted == curated_total` still holds. Proportionality prompt is now **unconditional** (was thorough-only) with a real repo-shape sentence (detected stack + code-file count) instead of a hardcoded threshold.
+
+Owner decisions applied: dedup window ±5 / same-construct; informational findings and needs-review are **visible, never hidden** (decision 2 — the appendix is report-JSON-level; needs-review is re-bucketed, not excluded from what curation sees, softening 2c); `MIN_STYLE_CORPUS_FILES = 3` (4); `MAX_WAIVER_REACH = 10` (5). **Deferred:** the foreign-suppression recognizer (decision 6 — `camerata:allow`-only this pass) and any change to prose stance-rule I1 handling; RLS intent-rule exposure-gating (7) is confirmed out of scope.
+
+Verification: the deterministic sub-tests are green and `cargo test -p camerata-server -p camerata-checks -p camerata-rules` + `cargo check --workspace` pass; the `#[ignore]`d full-grade run (live model key) was not executed here.
+
+---
+
 ## 1. Bug 3 — Cross-family semantic dedup
 
 **Problem.** `merge_by_location` only collapses findings at the *identical* `(path, line)`. The same defect flagged by two rule families a few lines apart survives as two rows: `AI-RLS-PERMISSIVE-TRUE-POLICY` (AI attribution, line ~21) + `SUPABASE-RLS-PERMISSIVE-TRUE-1` (native checker, line 24); `SERVICE-ROLE-BYPASS` + `FETCH-THEN-AUTHORIZE` on the same handler body.
