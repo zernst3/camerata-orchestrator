@@ -18,6 +18,26 @@ struct AgentTranscript {
     status: String,
 }
 
+/// Label for the "no output yet" placeholder shown while an agent's `output` is still
+/// empty. `running` is the only status where "more is coming" framing is honest. Once an
+/// agent reaches a TERMINAL status (`done`/`blocked`, the only two the server ever
+/// transitions to — see `crates/server/src/ai_audit.rs`'s `set_status` call sites) with no
+/// captured output, saying "waiting…" is simply wrong: nothing further is coming. This is
+/// what kept the drawer reading "waiting…" forever after a scan finished when a pass
+/// produced no free-text output (e.g. a fast/no-finding pass, or a backend that doesn't
+/// stream per-agent deltas) — the old logic only special-cased `running` and fell through
+/// to "waiting…" for every other status, including the terminal ones.
+fn empty_output_label(status: &str) -> &'static str {
+    match status {
+        "running" => "thinking\u{2026}",
+        "done" => "finished \u{2014} no output captured",
+        "blocked" => "blocked \u{2014} no output",
+        // Not currently reachable (the server only ever sets running/done/blocked), but kept
+        // as the conservative fallback for a genuinely not-yet-started agent.
+        _ => "waiting\u{2026}",
+    }
+}
+
 async fn fetch_agents(run_id: &str) -> Option<Vec<AgentTranscript>> {
     let base = crate::bff_base();
     reqwest::get(format!("{base}/api/runs/{run_id}/agents"))
@@ -137,7 +157,7 @@ pub fn AgentActivity(run_id: String) -> Element {
                                     if a.output.is_empty() {
                                         div { class: "agent-thinking",
                                             span { class: "agent-thinking-label",
-                                                if a.status == "running" { "thinking\u{2026}" } else { "waiting\u{2026}" }
+                                                "{empty_output_label(&a.status)}"
                                             }
                                         }
                                     } else {
@@ -155,6 +175,33 @@ pub fn AgentActivity(run_id: String) -> Element {
 
 #[cfg(test)]
 mod tests {
+    use super::empty_output_label;
+
+    // Bug: the drawer got stuck reading "waiting…" forever after a scan finished, because
+    // the old label logic only special-cased `running` and fell through to "waiting…" for
+    // EVERY other status — including the terminal ones. `done`/`blocked` are the only two
+    // terminal statuses the server ever sets (see `ai_audit.rs`'s `set_status` calls); once
+    // an agent reaches either with no output, "waiting…" (implying more is coming) is wrong.
+    #[test]
+    fn terminal_statuses_never_render_waiting() {
+        assert_eq!(empty_output_label("running"), "thinking\u{2026}");
+        assert_ne!(empty_output_label("done"), "waiting\u{2026}");
+        assert_ne!(empty_output_label("blocked"), "waiting\u{2026}");
+    }
+
+    #[test]
+    fn done_and_blocked_get_distinct_terminal_labels() {
+        assert_eq!(empty_output_label("done"), "finished \u{2014} no output captured");
+        assert_eq!(empty_output_label("blocked"), "blocked \u{2014} no output");
+    }
+
+    // A genuinely unrecognized/not-yet-started status is the only case that still shows
+    // "waiting…" — kept as the conservative fallback (not currently reachable in practice).
+    #[test]
+    fn unknown_status_falls_back_to_waiting() {
+        assert_eq!(empty_output_label("queued"), "waiting\u{2026}");
+    }
+
     // ── Tier-2 UI test: the network helper against a MOCK BFF (wiremock) ─────────
     // Verifies fetch_agents' request CONTRACT: it GETs /api/runs/:id/agents and parses the JSON body
     // into Vec<AgentTranscript>. Points the helper at a fake server via the CAMERATA_BFF_URL seam.
