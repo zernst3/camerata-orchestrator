@@ -41,7 +41,7 @@
 //!       `.env.production`) — as of the file-collector fix (`onboard::files::is_admissible_text`)
 //!       plus the `sb_secret_` match-set extension on `SEC-NO-VENDOR-TOKEN-1`,
 //!       `.env.production` is admitted into the scanned file list and its secret is matched by
-//!       the floor. Graded here as "found, high-or-critical, at the right file:line" rather
+//!       the floor. Graded here as "found, critical, at the right file:line" rather
 //!       than pinned to a specific rule id — a DEDICATED `SUPABASE-KEY-SERVICE-ROLE-CLIENT-1`
 //!       floor rule (the NEXT_PUBLIC-prefix + secret-shape correlation as its own rule id,
 //!       matching the decision already recorded in
@@ -349,8 +349,10 @@ async fn deterministic_i4_billing_accounts_control_produces_no_findings() {
 /// the client bundle. Before this fix, `.env.production` was pruned before ANY tier read its
 /// content (its naive last-dot "extension" is `production`, not a recognized code extension —
 /// see the module doc's baseline note); now admitted via `onboard::files::is_admissible_text`
-/// and matched by the `sb_secret_`-extended `SEC-NO-VENDOR-TOKEN-1` floor arm. Asserted here
-/// as FOUND + high-or-critical (not pinned to a specific rule id) — a dedicated
+/// and matched by the `sb_secret_`-extended `SEC-NO-VENDOR-TOKEN-1` floor arm, which (per the
+/// "exposed high-privilege credential" escalation class — a committed/client-exposed
+/// service_role or vendor secret) fires at CRITICAL. Asserted here as FOUND + critical (not
+/// pinned to a specific rule id) — a dedicated
 /// `SUPABASE-KEY-SERVICE-ROLE-CLIENT-1` floor rule correlating the `NEXT_PUBLIC_` prefix with
 /// the secret shape as its own rule id is a separate, later port (see the full-grade test's D3
 /// comment). The GROUND_TRUTH I2/anon-key pair is graded in the same test: the anon key on
@@ -364,9 +366,10 @@ async fn deterministic_d3_env_production_service_role_secret_is_found() {
     let path = ".env.production";
     let hit = any_finding_in_range(&report.findings, path, 9, 9);
     assert!(
-        hit.is_some_and(|f| f.severity == "critical" || f.severity == "high"),
-        "expected a high-or-critical finding at {path}:9 (the committed service_role/sb_secret_ \
-         value on a NEXT_PUBLIC_ var): {:?}",
+        hit.is_some_and(|f| f.severity == "critical"),
+        "expected a CRITICAL finding at {path}:9 (a committed/client-exposed service_role \
+         credential is an exposed high-privilege secret — the general class the floor reserves \
+         for critical): {:?}",
         report.findings.iter().filter(|f| f.path == path).collect::<Vec<_>>()
     );
     let f = hit.expect("checked above");

@@ -204,6 +204,8 @@ Do not stop after the first violation of a rule, and do not stop after the first
 
 RECALL OVER PRECISION. This is a discovery audit and a human architect reviews every finding before anything is enforced, so the cost of a borderline false positive is tiny and the cost of a missed real violation is high. When you are unsure whether something violates a rule, REPORT IT (use severity "low" and say it's borderline in `detail`). Do not stay silent to seem precise. Do not cap yourself at a handful — if there are thirty violations, return thirty.
 
+SEVERITY. Use "low"/"medium"/"high" for the normal range (a debatable architectural preference is "low" or "medium"; a concrete, demonstrable security or correctness break is "high"). Reserve "critical" — it must stay RARE — for a violation that clears ALL of: (1) it is concretely exploitable, not theoretical, and (2) a competent attacker or a single bad input reaches real, serious impact quickly. Qualifying classes: unauthenticated (or unauthorized) access to a privileged, destructive, or financial operation; a credential or secret exposed to clients or committed to the repo; PII or equivalently sensitive data readable or writable with no access control on an internet-exposed surface; remote code execution or injection with a real, reachable path (not just an untrusted-input pattern that happens to be sanitized elsewhere). Do not use "critical" for a bad-but-contained bug, a missing best practice, or anything you would call "high" out of general alarm — when in doubt between "high" and "critical", use "high".
+
 CRITICAL — do NOT invent rule names that duplicate adopted rules. Before you set `rule`, check whether the violation is already covered by one of the adopted `[RULE-ID]`s above. If it is, you MUST use that exact adopted RULE-ID — even if you would have phrased the issue differently. A controller reaching into the database directly is `ARCH-STRICT-LAYERING-1`, not "controller-direct-db" or "handler-bypasses-repo"; a handler panicking on a DB error is `ARCH-STRUCTURED-ERRORS-1`, not "panic-on-db-error". Inventing a new name for a violation an adopted rule already covers is the single worst failure mode of this audit — it produces triplicate findings that all mean the same thing.
 
 Flagging novel issues (issues no adopted rule covers) is GATED by this pass's instruction line. ONLY when that line says to "ALSO flag any other genuine issues" may you report something outside the adopted rules — and then set `rule` to a short kebab name (e.g. "auth-on-write-paths"), reserved strictly for genuinely-novel issues (if any adopted rule fits, use the adopted id instead). When the instruction line says to check ONLY the listed rules, report nothing outside them.
@@ -224,7 +226,7 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
     {
       "path": "relative/file/path",
       "line": 0,
-      "severity": "high|medium|low",
+      "severity": "critical|high|medium|low",
       "rule": "EXACT adopted RULE-ID, or a short-kebab-name for an unlisted issue",
       "title": "one-line statement of the specific violation here",
       "code": "the EXACT offending source line, copied verbatim from the digest",
@@ -236,7 +238,7 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
       "name": "short-kebab-name (only for issues NOT covered by an adopted rule)",
       "title": "the rule to enforce going forward",
       "rationale": "why this rule, grounded in the findings",
-      "severity": "high|medium|low",
+      "severity": "critical|high|medium|low",
       "enforcement": "mechanical|review"
     }
   ],
@@ -325,6 +327,7 @@ pub fn parse_ai_findings(
                 format!("AI-{norm}")
             };
             let severity = match f["severity"].as_str().unwrap_or("medium") {
+                "critical" => "critical",
                 "high" => "high",
                 "low" => "low",
                 _ => "medium",
@@ -436,14 +439,24 @@ or assertive — that does NOT carry over. Calibration is where humility lives: 
 scan tends to over-assert on debatable points, and your job is to put the nuance back.
 
 For EACH finding, do two things:
-- Assign a CALIBRATED severity (high/medium/low) for this app's real-world context, using this
-  rubric:
-  * A concrete, demonstrable SECURITY or CORRECTNESS break (injection, missing auth on a write
-    path, data loss/corruption, a real exploit) can be "high".
+- Assign a CALIBRATED severity (critical/high/medium/low) for this app's real-world context,
+  using this rubric:
+  * "critical" is RARE. Only assign it when the finding clears ALL of: concretely (not
+    theoretically) exploitable, AND a competent attacker or a single bad input reaches serious
+    impact quickly. Qualifying classes: unauthenticated/unauthorized access to a privileged,
+    destructive, or financial operation; a credential/secret exposed to clients or committed to
+    the repo; PII or equivalently sensitive data readable/writable with no access control on an
+    internet-exposed surface; remote code execution or injection with a real, reachable path.
+    When in doubt between "high" and "critical", use "high" — do not inflate an ordinary high
+    into critical out of general alarm, and never assign "critical" to a debatable preference.
+  * A concrete, demonstrable SECURITY or CORRECTNESS break that does NOT clear the critical bar
+    above (injection needing extra steps to reach, missing auth on a write path with contained
+    blast radius, data loss/corruption, a real but non-catastrophic exploit) is "high".
   * A DEBATABLE ARCHITECTURAL PREFERENCE — a "valid pattern but not the one this rule prefers"
     call, a layering/structure/abstraction opinion, an over-engineering/YAGNI note on a small
-    codebase, a stylistic or convention preference — is NOT "high". Cap it at "medium", usually
-    "low". These are preferences a reasonable team could disagree on, not violations.
+    codebase, a stylistic or convention preference — is NEVER "critical" or "high". Cap it at
+    "medium", usually "low". These are preferences a reasonable team could disagree on, not
+    violations.
   * A real but low-impact issue is "low", not removed.
 - Set confidence: "low" when the finding is a debatable preference (per above), is theoretical,
   is likely over-flagged, or you cannot tell it is real without seeing more code; "high" only
@@ -462,7 +475,7 @@ Deduplication already happened upstream; your `reason` is one line about THIS fi
 severity/confidence only, with no reference to any other finding.
 
 Return ONLY JSON, no prose:
-{"verdicts":[{"index":0,"severity":"high|medium|low","confidence":"high|low","effort":"low|medium|high","reason":"one line"}]}
+{"verdicts":[{"index":0,"severity":"critical|high|medium|low","confidence":"high|low","effort":"low|medium|high","reason":"one line"}]}
 One verdict per finding, addressed by its [index]."#
         .to_string()
 }
@@ -568,6 +581,7 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
         if let Some(verdict) = arr.iter().find(|x| x["index"].as_u64() == Some(i as u64)) {
             if let Some(sev) = verdict["severity"].as_str() {
                 f.severity = match sev {
+                    "critical" => "critical",
                     "high" => "high",
                     "low" => "low",
                     _ => "medium",
@@ -693,13 +707,16 @@ pub async fn verify_findings(
 }
 
 /// Merge several calibration passes into one CONSERVATIVE consensus verdict set (#51 thorough
-/// mode). For each finding index: severity = the majority vote (ties break to the LOWER severity);
-/// confidence = "high" only when the passes AGREE (all "high" and a single agreed severity) —
-/// any disagreement means uncertainty, which is exactly what the architect should review, so it
-/// becomes "low" (needs review). effort = the majority vote (ties break to "medium" — a neutral
-/// default when the passes disagree, since over- and under-estimating effort are equally
-/// misleading, unlike severity's asymmetric humility rule). Returns a `{"verdicts":[…]}` JSON
-/// string for `apply_verdicts`.
+/// mode). For each finding index: severity = the majority vote across the four levels
+/// (low/medium/high/critical), ties break to the LOWER severity — so "critical" only wins when
+/// it is the sole vote or an outright majority, never a tie against "high" (the anti-over-
+/// rotation guard: disagreement about critical resolves down, not up); confidence = "high" only
+/// when EVERY pass agreed on the same severity AND none of them was itself low-confidence — any
+/// disagreement (on severity, or an individual pass's own confidence) means uncertainty, which
+/// is exactly what the architect should review, so it becomes "low" (needs review). effort = the
+/// majority vote (ties break to "medium" — a neutral default when the passes disagree, since
+/// over- and under-estimating effort are equally misleading, unlike severity's asymmetric
+/// humility rule). Returns a `{"verdicts":[…]}` JSON string for `apply_verdicts`.
 fn consensus_verdicts(votes: &[String], n: usize) -> String {
     use serde_json::Value;
     // Per index: collected (severity, confidence, reason, effort) across passes.
@@ -723,6 +740,7 @@ fn consensus_verdicts(votes: &[String], n: usize) -> String {
                 continue;
             }
             let sev = match verdict["severity"].as_str().unwrap_or("medium") {
+                "critical" => "critical",
                 "high" => "high",
                 "low" => "low",
                 _ => "medium",
@@ -744,7 +762,17 @@ fn consensus_verdicts(votes: &[String], n: usize) -> String {
             per[idx].push((sev, conf, reason, effort));
         }
     }
-    let rank = |s: &str| match s {
+    // Severity has FOUR levels now that "critical" is a real tier; effort still has three
+    // (low/medium/high — a calibration verdict never emits "critical" effort). Two separate
+    // rank functions rather than one shared one, so effort's 3-slot count array never has to
+    // reason about a severity-only value.
+    let sev_rank = |s: &str| match s {
+        "critical" => 3,
+        "high" => 2,
+        "medium" => 1,
+        _ => 0,
+    };
+    let effort_rank = |s: &str| match s {
         "high" => 2,
         "medium" => 1,
         _ => 0,
@@ -754,40 +782,40 @@ fn consensus_verdicts(votes: &[String], n: usize) -> String {
         if votes_for.is_empty() {
             continue;
         }
-        // Majority severity; tie breaks to the lower rank (humble).
-        let mut counts = [0u32; 3]; // [low, medium, high]
+        // Majority severity; tie breaks to the lower rank (humble). This is an ANTI-OVER-
+        // ROTATION guard too: "critical" only wins a tie when it is the SOLE or MAJORITY vote
+        // at the top rank — a single critical vote against an equal number of high votes
+        // resolves to "high", never silently promoted.
+        let mut counts = [0u32; 4]; // [low, medium, high, critical]
         for (s, _, _, _) in votes_for {
-            counts[rank(s)] += 1;
+            counts[sev_rank(s)] += 1;
         }
         let max = counts.iter().copied().max().unwrap_or(0);
         // Tie-breaks to the LOWER severity (humble / conservative design): low wins over
-        // medium wins over high when vote counts are equal. This is the correct behaviour
-        // documented in the comment at the top of this function; the previous ordering
-        // (high first) was the opposite of the spec. Fixed by BUG-5.
+        // medium wins over high wins over critical when vote counts are equal. This is the
+        // correct behaviour documented in the comment at the top of this function; the
+        // previous ordering (high first) was the opposite of the spec. Fixed by BUG-5;
+        // extended to the critical tier the same way.
         let sev = if counts[0] == max {
             "low"
         } else if counts[1] == max {
             "medium"
-        } else {
+        } else if counts[2] == max {
             "high"
+        } else {
+            "critical"
         };
         // Disagreement on severity, or any low-confidence vote → low confidence (needs review).
         let distinct_sevs = counts.iter().filter(|&&c| c > 0).count();
         let any_low_conf = votes_for.iter().any(|(_, c, _, _)| c == "low");
-        let agreed_high = sev == "high" && distinct_sevs == 1 && !any_low_conf;
-        let confidence = if agreed_high {
-            "high"
-        } else if distinct_sevs > 1 || any_low_conf {
-            "low"
-        } else {
-            "high"
-        };
+        let agreed = distinct_sevs == 1 && !any_low_conf;
+        let confidence = if agreed { "high" } else { "low" };
         // Majority effort; a tie among the top vote-getters breaks to "medium" (see the
         // function doc — effort has no humility direction the way severity does, so a
         // single clear winner is used as-is, but ANY tie among the leaders is neutral).
         let mut effort_counts = [0u32; 3]; // [low, medium, high]
         for (_, _, _, e) in votes_for {
-            effort_counts[rank(e)] += 1;
+            effort_counts[effort_rank(e)] += 1;
         }
         let effort_max = effort_counts.iter().copied().max().unwrap_or(0);
         let effort_winners: Vec<usize> =
@@ -2342,10 +2370,12 @@ You have the REPO MAP (every file + its public symbols) and SOME file bodies. Wh
 
 RECALL OVER PRECISION — a human triages every finding; report borderline issues at severity "low". Cite the exact offending line in `code` (copied verbatim) and `line` (the NNNN| number). For `rule`, use a short kebab security name (e.g. "missing-authz-on-write", "pii-in-logs", "ssrf-on-fetch").
 
+SEVERITY. Use "low"/"medium"/"high" for the normal range. Reserve "critical" — it must stay RARE — for a finding that clears ALL of: concretely (not theoretically) exploitable, AND a competent attacker or a single bad input reaches serious impact quickly. Qualifying classes for THIS lens: an entry point reachable with NO authentication or authorization that performs a privileged, destructive, or financial operation (e.g. a payment/charge/refund/balance-mutating endpoint callable by anyone, an admin action with no role check); a credential or secret that flows to a client or an untrusted sink; PII or equivalently sensitive data readable/writable with no access control on an internet-exposed surface; injection or deserialization with a real, reachable, unauthenticated path. When in doubt between "high" and "critical", use "high" — critical is not a synonym for "this is bad," it is reserved for "an attacker exploits this quickly for serious impact."
+
 Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 {
   "findings": [
-    {"path":"…","line":0,"severity":"high|medium|low","rule":"short-kebab-security-name","title":"…","code":"the exact offending line","detail":"why it's exploitable and the fix direction"}
+    {"path":"…","line":0,"severity":"critical|high|medium|low","rule":"short-kebab-security-name","title":"…","code":"the exact offending line","detail":"why it's exploitable and the fix direction"}
   ],
   "proposed_rules": [],
   "needs_files": []
@@ -2452,6 +2482,7 @@ pub fn parse_threats(raw: &str) -> (String, Vec<Threat>) {
             }
             .to_string();
             let severity = match t["severity"].as_str().unwrap_or("medium").trim() {
+                "critical" => "critical",
                 "high" => "high",
                 "low" => "low",
                 _ => "medium",
@@ -3199,6 +3230,32 @@ mod tests {
         assert_eq!(rules[0].finding_count, 1);
     }
 
+    /// The raw-audit parser must ACCEPT and PRESERVE an explicit `"critical"` severity from
+    /// the model — this is the emit-path half of the critical-severity fix (the schema now
+    /// offers it; this pins that the parser doesn't silently demote it to "medium" the way an
+    /// unrecognized string would).
+    #[test]
+    fn parse_ai_findings_accepts_and_preserves_critical_severity() {
+        let raw = r#"{"findings":[
+            {"path":"supabase/functions/charge/index.ts","line":30,"severity":"critical",
+             "rule":"unauthenticated-charge-endpoint",
+             "title":"charge handler has no auth check and holds a service_role key",
+             "code":"export default async function handler(req) {",
+             "detail":"any caller can trigger a real charge with the service_role key"},
+            {"path":"a.rs","line":1,"severity":"medium","rule":"y","title":"t","detail":"d"}
+        ],"proposed_rules":[]}"#;
+        let none = std::collections::HashSet::new();
+        let (findings, _) = parse_ai_findings("me/api", raw, &none);
+        assert_eq!(findings.len(), 2);
+        assert_eq!(
+            findings[0].severity, "critical",
+            "an explicit critical verdict from the model must survive parsing unchanged"
+        );
+        // Anti-over-rotation guard: the sibling medium finding must NOT be swept up into
+        // critical just because another finding in the same batch was critical.
+        assert_eq!(findings[1].severity, "medium");
+    }
+
     #[test]
     fn parse_uses_verbatim_code_as_snippet_and_keeps_title_in_detail() {
         let raw = r#"{"findings":[{"path":"a.rs","line":5,"severity":"high","rule":"x",
@@ -3297,6 +3354,42 @@ mod tests {
         );
         let authz = out.iter().find(|f| f.rule_id == "AI-AUTHZ").unwrap();
         assert_eq!(authz.severity, "low", "recalibrated down");
+    }
+
+    /// Calibration must ACCEPT an explicit `"critical"` verdict and apply it to the finding —
+    /// this is the D5-shaped case: an AI-tier finding starts at "high" from the raw audit pass,
+    /// and the calibration pass upgrades it to "critical" when it judges the finding clears the
+    /// bar (e.g. an unauthenticated privileged operation).
+    #[test]
+    fn apply_verdicts_accepts_explicit_critical_verdict() {
+        let findings = vec![finding("AI-UNAUTH-CHARGE", "high")];
+        let raw = r#"{"verdicts":[
+            {"index":0,"severity":"critical","confidence":"high","reason":"unauthenticated charge with service_role"}
+        ]}"#;
+        let out = apply_verdicts(raw, findings);
+        assert_eq!(out[0].severity, "critical", "an explicit critical verdict must be applied");
+    }
+
+    /// ANTI-OVER-ROTATION GUARD: ordinary findings must NEVER be auto-escalated to critical.
+    /// An explicit "high" verdict stays "high" (it is a recognized value, not funneled through
+    /// the "unknown -> medium" fallback into anything resembling critical), and a verdict that
+    /// omits `severity` entirely leaves the finding's prior severity untouched — neither path
+    /// can produce "critical" without the model saying so explicitly.
+    #[test]
+    fn apply_verdicts_does_not_auto_escalate_ordinary_findings_to_critical() {
+        let findings = vec![
+            finding("AI-ORDINARY-HIGH", "medium"), // index 0: explicit "high" verdict
+            finding("AI-UNTOUCHED", "high"),        // index 1: verdict omits severity
+        ];
+        let raw = r#"{"verdicts":[
+            {"index":0,"severity":"high","confidence":"high","reason":"a real but contained bug"},
+            {"index":1,"confidence":"high","reason":"no severity opinion given"}
+        ]}"#;
+        let out = apply_verdicts(raw, findings);
+        let ordinary = out.iter().find(|f| f.rule_id == "AI-ORDINARY-HIGH").unwrap();
+        assert_eq!(ordinary.severity, "high", "an explicit high verdict must stay high, never inflate to critical");
+        let untouched = out.iter().find(|f| f.rule_id == "AI-UNTOUCHED").unwrap();
+        assert_eq!(untouched.severity, "high", "no severity field in the verdict leaves the finding's prior severity as-is");
     }
 
     // ── Structured confidence + effort (Part 1 §3) ────────────────────────────
@@ -3473,6 +3566,31 @@ mod tests {
         let p = deep_security_system_prompt();
         assert!(p.contains("DO NOT re-report"));
         assert!(p.contains("authorization") || p.contains("AUTHORIZATION"));
+    }
+
+    /// The `critical` severity tier must be OFFERED (in the schema string) and CALIBRATED
+    /// (general escalation criteria in the prose) by every AI-tier prompt that emits a
+    /// severity — otherwise the model is vocabulary-constrained away from ever reporting a
+    /// critical finding no matter how severe, which was the original bug. This pins the wire
+    /// contract independent of any specific model call.
+    #[test]
+    fn every_ai_tier_prompt_offers_and_defines_critical_severity() {
+        for (name, prompt) in [
+            ("audit_system_prompt", audit_system_prompt()),
+            ("deep_security_system_prompt", deep_security_system_prompt()),
+            ("verify_system_prompt (calibration)", verify_system_prompt()),
+        ] {
+            assert!(
+                prompt.contains("critical|high|medium|low")
+                    || prompt.contains("critical/high/medium/low"),
+                "{name} must offer \"critical\" in its severity schema/rubric"
+            );
+            assert!(
+                prompt.to_lowercase().contains("rare") || prompt.contains("RARE"),
+                "{name} must define critical as a RARE, reserved tier (not a synonym for \
+                 high) so the model doesn't inflate ordinary findings"
+            );
+        }
     }
 
     #[test]
@@ -3783,6 +3901,44 @@ mod tests {
         let v0 = arr.iter().find(|x| x["index"] == 0).unwrap();
         assert_eq!(v0["severity"], "high", "unanimous high must stay high");
         assert_eq!(v0["confidence"], "high", "unanimous high → high confidence");
+    }
+
+    // ── critical severity tier: consensus tie-breaking + unanimity ───────────────────
+
+    /// ANTI-OVER-ROTATION GUARD (thorough/consensus mode): a tie between "critical" and "high"
+    /// (one pass votes each) must resolve to "high" — the SAME lower-wins tie-break BUG-5
+    /// established for high-vs-medium, extended one tier up. A single over-eager pass can never
+    /// unilaterally push a finding to critical against an equally-confident dissent.
+    #[test]
+    fn consensus_critical_vs_high_tie_resolves_to_high_not_critical() {
+        let votes = vec![
+            r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":"looks unauthenticated"}]}"#.to_string(),
+            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":"contained blast radius"}]}"#.to_string(),
+        ];
+        let out = consensus_verdicts(&votes, 1);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let v0 = v["verdicts"].as_array().unwrap().iter().find(|x| x["index"] == 0).unwrap();
+        assert_eq!(
+            v0["severity"], "high",
+            "a critical-vs-high tie must resolve to high (lower), not silently promote to critical: {v0}"
+        );
+        assert_eq!(v0["confidence"], "low", "disagreement forces low confidence (needs review)");
+    }
+
+    /// Unanimous "critical" across every pass must resolve to "critical" with high confidence —
+    /// the fix must not cap the new tier below its own unanimous vote.
+    #[test]
+    fn consensus_unanimous_critical_stays_critical() {
+        let votes = vec![
+            r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":"unauthenticated charge endpoint"}]}"#.to_string(),
+            r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":""}]}"#.to_string(),
+            r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":""}]}"#.to_string(),
+        ];
+        let out = consensus_verdicts(&votes, 1);
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let v0 = v["verdicts"].as_array().unwrap().iter().find(|x| x["index"] == 0).unwrap();
+        assert_eq!(v0["severity"], "critical", "unanimous critical must stay critical");
+        assert_eq!(v0["confidence"], "high", "unanimous critical → high confidence");
     }
 
     // ── BUG-4: resolution round add_total guard in Batch mode ────────────────────────
