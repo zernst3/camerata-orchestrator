@@ -2429,6 +2429,30 @@ textarea.ignore-reason { width: 100%; min-width: 220px; resize: vertical; font-f
 .audit-thorough-toggle input { width: 15px; height: 15px; cursor: pointer; accent-color: var(--accent); }
 .audit-mode-rec { font-size: 11.5px; font-weight: 700; color: var(--accent-ink); white-space: nowrap; }
 
+/* Product-export options (AuditReportExportPanel: client name / project title / prepared by /
+   executive-summary override). Each field is a `.audit-model-row` (the same label|value grid
+   the audit-config rows above it use) so the bottom of the panel aligns with the rest of the
+   form instead of drifting to its own look. These used to be bare `.addressee-input`s with no
+   layout wrapper — that class is a small chip-style input meant to sit inside ITS OWN flex row
+   (see `.pg-create-row .addressee-input` etc.), so naked here it rendered inconsistently
+   sized/positioned. */
+.audit-export-fields { margin: 10px 0; }
+.audit-export-input {
+  width: 100%; box-sizing: border-box;
+  border: 1px solid var(--line); background: var(--surface); color: var(--ink);
+  font: inherit; font-size: 13px; padding: 8px 11px; border-radius: 8px;
+}
+.audit-export-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
+/* The executive-summary override is a multi-sentence narrative that REPLACES a whole report
+   section, not a short label — it needs real room, not the 2-row box it used to get. Sized
+   like `.clarify-q`'s textarea treatment, just taller. */
+.audit-export-summary {
+  width: 100%; box-sizing: border-box; min-height: 170px;
+  border: 1px solid var(--line); border-radius: 9px; padding: 10px 12px;
+  font: inherit; font-size: 13.5px; color: var(--ink); line-height: 1.5; resize: vertical; background: var(--surface);
+}
+.audit-export-summary:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-wash); }
+
 /* Async-job live progress bar (Mode 3). */
 .job-progress { display: flex; align-items: center; gap: 11px; margin: 10px 0; }
 .job-progress-track {

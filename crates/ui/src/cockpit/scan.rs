@@ -3979,42 +3979,55 @@ pub(super) fn AuditReportExportPanel(
 
     rsx! {
         div { class: "audit-export-panel",
-            p { class: "section-label", "Export product (ZIP: PDF + Excel)" }
+            p { class: "section-label", "Export product (ZIP: PDF + Excel + JSON)" }
             p { class: "section-hint",
-                "One ZIP, two artifacts from the same scan: a board-forwardable PDF (cover, \
+                "One ZIP, three artifacts from the same scan: a board-forwardable PDF (cover, \
                  executive summary, category scorecard, severity\u{00d7}effort matrix, \
                  curated findings with citations and recommended fixes, what's healthy, \
-                 dependency/CVE snapshot, methodology) and a fully-formatted Excel \
-                 workbook — every finding, one row each, sortable and filterable, with a \
-                 per-category sheet and a False Positives sheet (nothing silently dropped). \
-                 Uses your CURRENT triage — a draft mid-engagement export (some findings \
-                 still Unresolved) is fine."
+                 dependency/CVE snapshot, methodology), a fully-formatted Excel workbook — \
+                 every finding, one row each, sortable and filterable, with a per-category \
+                 sheet and a False Positives sheet (nothing silently dropped) — and a raw \
+                 JSON export of the full report for machine consumption, plus a README \
+                 explaining each file. Uses your CURRENT triage — a draft mid-engagement \
+                 export (some findings still Unresolved) is fine."
             }
             div { class: "audit-export-fields",
-                input {
-                    class: "addressee-input",
-                    placeholder: "Client name (optional)",
-                    value: "{client_name}",
-                    oninput: move |e| client_name.set(e.value()),
+                div { class: "audit-model-row",
+                    label { class: "audit-model-label", "Client name" }
+                    input {
+                        class: "audit-export-input",
+                        placeholder: "optional",
+                        value: "{client_name}",
+                        oninput: move |e| client_name.set(e.value()),
+                    }
                 }
-                input {
-                    class: "addressee-input",
-                    placeholder: "Project title (optional)",
-                    value: "{project_title}",
-                    oninput: move |e| project_title.set(e.value()),
+                div { class: "audit-model-row",
+                    label { class: "audit-model-label", "Project title" }
+                    input {
+                        class: "audit-export-input",
+                        placeholder: "optional",
+                        value: "{project_title}",
+                        oninput: move |e| project_title.set(e.value()),
+                    }
                 }
-                input {
-                    class: "addressee-input",
-                    placeholder: "Prepared by (optional)",
-                    value: "{prepared_by}",
-                    oninput: move |e| prepared_by.set(e.value()),
+                div { class: "audit-model-row",
+                    label { class: "audit-model-label", "Prepared by" }
+                    input {
+                        class: "audit-export-input",
+                        placeholder: "optional",
+                        value: "{prepared_by}",
+                        oninput: move |e| prepared_by.set(e.value()),
+                    }
                 }
-                textarea {
-                    class: "addressee-input",
-                    rows: "2",
-                    placeholder: "Executive summary override (optional — leave blank for the auto-generated summary)",
-                    value: "{summary_override}",
-                    oninput: move |e| summary_override.set(e.value()),
+                div { class: "audit-model-row",
+                    label { class: "audit-model-label", "Executive summary override" }
+                    textarea {
+                        class: "audit-export-summary",
+                        rows: "8",
+                        placeholder: "Optional — leave blank for the auto-generated summary. A multi-sentence narrative that replaces the report's executive summary section verbatim.",
+                        value: "{summary_override}",
+                        oninput: move |e| summary_override.set(e.value()),
+                    }
                 }
             }
             button {
@@ -4042,7 +4055,7 @@ pub(super) fn AuditReportExportPanel(
                         loading.set(false);
                     });
                 },
-                if loading() { "Exporting\u{2026}" } else { "Export product (ZIP: PDF + Excel)" }
+                if loading() { "Exporting\u{2026}" } else { "Export product (ZIP: PDF + Excel + JSON)" }
             }
         }
     }
