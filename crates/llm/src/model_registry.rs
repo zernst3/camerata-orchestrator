@@ -41,8 +41,24 @@ pub use camerata_api_types::model_registry::{
 ///
 /// No list-models API exists for the Claude Code CLI, so this is data. Trivial to update
 /// when new models ship. Weights are relative subscription-quota cost: Haiku=1, Sonnet=3,
-/// Opus=10.
+/// Opus=10, Fable=15 (the priciest, most-capable tier — an option, never the default).
 pub const CLAUDE_REGISTRY_MODELS: &[RegistryEntryStatic] = &[
+    RegistryEntryStatic {
+        display: "Fable 5",
+        id: "claude-fable-5",
+        context: 1_000_000,
+        weight: 15,
+        // Anthropic list price: $10 / $50 per million tokens (input / output). NOT
+        // live-verified against the Anthropic /v1/models API (no key in this
+        // environment) — corroborated instead via the owner's own CLI default
+        // (`~/.claude/settings.json`) and a live OpenRouter pull of
+        // `anthropic/claude-fable-5` on 2026-08-06. Same caveat as the opus-5/sonnet-5
+        // refresh. This is the priciest, most-capable tier — an OPTION, never the
+        // default (see `camerata_api_types::project::DEFAULT_MODEL`, which stays
+        // `claude-sonnet-5`).
+        price_in: 10.0,
+        price_out: 50.0,
+    },
     RegistryEntryStatic {
         display: "Opus 5",
         id: "claude-opus-5",
@@ -756,9 +772,10 @@ mod tests {
     // ── Claude static catalog ─────────────────────────────────────────────────
 
     #[test]
-    fn claude_entries_has_all_three_tiers() {
+    fn claude_entries_has_all_four_tiers() {
         let entries = claude_entries();
-        assert_eq!(entries.len(), 3, "expect exactly 3 Claude tiers");
+        assert_eq!(entries.len(), 4, "expect exactly 4 Claude tiers");
+        assert!(entries.iter().any(|e| e.id == "claude-fable-5"));
         assert!(entries.iter().any(|e| e.id == "claude-opus-5"));
         assert!(entries.iter().any(|e| e.id == "claude-sonnet-5"));
         assert!(entries.iter().any(|e| e.id == "claude-haiku-4-5-20251001"));
@@ -786,11 +803,18 @@ mod tests {
     }
 
     #[test]
-    fn claude_opus_has_highest_weight() {
+    fn claude_fable_has_highest_weight() {
         let entries = claude_entries();
+        let fable = entries.iter().find(|e| e.id == "claude-fable-5").unwrap();
         let opus = entries.iter().find(|e| e.id == "claude-opus-5").unwrap();
         let sonnet = entries.iter().find(|e| e.id == "claude-sonnet-5").unwrap();
         let haiku = entries.iter().find(|e| e.id == "claude-haiku-4-5-20251001").unwrap();
+        assert!(
+            fable.weight > opus.weight,
+            "Fable weight must exceed Opus (got {} vs {})",
+            fable.weight,
+            opus.weight
+        );
         assert!(
             opus.weight > sonnet.weight,
             "Opus weight must exceed Sonnet (got {} vs {})",
@@ -820,6 +844,29 @@ mod tests {
     // that the onboarding cost estimator produces meaningful (non-zero) estimates.
     // If Anthropic changes list pricing, update CLAUDE_REGISTRY_MODELS AND these
     // tests together.
+
+    #[test]
+    fn claude_fable_carries_list_price_10_50() {
+        let entries = claude_entries();
+        let fable = entries.iter().find(|e| e.id == "claude-fable-5").unwrap();
+        assert!(
+            (fable.price_in - 10.0).abs() < f64::EPSILON,
+            "Fable 5 price_in must be $10/M, got {}",
+            fable.price_in
+        );
+        assert!(
+            (fable.price_out - 50.0).abs() < f64::EPSILON,
+            "Fable 5 price_out must be $50/M, got {}",
+            fable.price_out
+        );
+    }
+
+    #[test]
+    fn claude_fable_has_1m_context() {
+        let entries = claude_entries();
+        let fable = entries.iter().find(|e| e.id == "claude-fable-5").unwrap();
+        assert_eq!(fable.context, 1_000_000, "Fable 5 must carry a 1M-token context window");
+    }
 
     #[test]
     fn claude_opus_carries_list_price_5_25() {
@@ -1068,6 +1115,7 @@ mod tests {
     #[test]
     fn caching_heuristic_claude_provider_always_true() {
         // All claude-provider models are caching-capable (the subscription/CLI path).
+        assert!(caching_heuristic("claude", "claude-fable-5"));
         assert!(caching_heuristic("claude", "claude-opus-5"));
         assert!(caching_heuristic("claude", "claude-sonnet-5"));
         assert!(caching_heuristic("claude", "claude-haiku-4-5-20251001"));
@@ -1108,7 +1156,7 @@ mod tests {
 
     #[test]
     fn claude_4x_entries_all_have_vision_true() {
-        // All three Claude 4.x models in the static catalog are multimodal.
+        // All four Claude models in the static catalog are multimodal.
         for e in claude_entries() {
             assert!(
                 e.vision,
