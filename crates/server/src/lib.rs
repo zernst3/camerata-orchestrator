@@ -3156,13 +3156,32 @@ async fn sign_off_run(
     Ok(Json(uow).into_response())
 }
 
+/// Non-destructively stamp `run_id` on each clarification from the resume-context store (a
+/// plain `.get()`, NOT `.take()` — this must never consume the pause point; only actually
+/// answering does that). Lets a list response tell the client which open clarifications paused
+/// a governed run, so it can re-attach the Bombe polling loop on answer (see `ClarifyQuestion`'s
+/// `run_id` field doc in the UI). A free-standing (non-run) clarification is left `None`.
+fn with_resume_run_ids(
+    resume: &crate::clarify_resume::ClarifyResumeStore,
+    clars: Vec<Clarification>,
+) -> Vec<Clarification> {
+    clars
+        .into_iter()
+        .map(|mut c| {
+            c.run_id = resume.get(&c.id).map(|ctx| ctx.run_id);
+            c
+        })
+        .collect()
+}
+
 /// OPEN clarifications for the active project's stories (the NEEDS YOU queue).
 /// No active project → empty queue.
 async fn list_open_clarifications(State(state): State<AppState>) -> Json<Vec<Clarification>> {
     let Some(p) = state.projects.active() else {
         return Json(vec![]);
     };
-    Json(state.clarifications.all_open_for_project(&p.repos))
+    let clars = state.clarifications.all_open_for_project(&p.repos);
+    Json(with_resume_run_ids(&state.clarify_resume, clars))
 }
 
 /// All clarifications on a story (open and answered).
@@ -3170,7 +3189,8 @@ async fn list_clarifications(
     State(state): State<AppState>,
     Path(story_id): Path<String>,
 ) -> Json<Vec<Clarification>> {
-    Json(state.clarifications.for_story(&story_id))
+    let clars = state.clarifications.for_story(&story_id);
+    Json(with_resume_run_ids(&state.clarify_resume, clars))
 }
 
 /// Post a clarifying question on a story, addressed to the chosen recipient. When a
@@ -15984,6 +16004,98 @@ mod tests {
             uow.history.iter().any(|h| h.text.contains("REJECTED")),
             "reject records the abandonment on the UoW trail"
         );
+    }
+
+    // ── `run_id` stamped onto open clarifications (the client's other Bombe-blind-spot fix) ──
+    //
+    // A clarification that paused a governed investigation run is resumed via a DETACHED
+    // `tokio::spawn` (see `answer_clarification`) — the client never learns the resumed run's id
+    // from the answer response itself, because it's the SAME id the run always had. So the list
+    // endpoints stamp `run_id` onto each OPEN clarification up front (non-destructively, via
+    // `with_resume_run_ids`) so the UI already knows it before the human even answers, and can
+    // re-attach `poll_run_to_done` on it — keeping the Bombe animating through the resume even
+    // when answered from the app-wide NEEDS YOU queue, where no page was already polling it.
+
+    #[test]
+    fn with_resume_run_ids_stamps_only_the_paused_clarification() {
+        let resume = crate::clarify_resume::ClarifyResumeStore::new();
+        resume.put(
+            "clar-1",
+            crate::clarify_resume::ClarifyResumeContext {
+                run_id: "run-9".to_string(),
+                story_id: "me/api#3".to_string(),
+                story_title: "Add export".to_string(),
+                story_desc: "desc".to_string(),
+                model: "claude-opus-4-8".to_string(),
+                phase: crate::clarify_resume::PausedPhase::Investigation,
+                original_task: "Analyze the story.".to_string(),
+                asked_question: "Include archived rows?".to_string(),
+            },
+        );
+        let mk = |id: &str, story_id: &str| Clarification {
+            id: id.to_string(),
+            story_id: story_id.to_string(),
+            question: "Q".to_string(),
+            addressee: "you".to_string(),
+            options: vec![],
+            multi_select: false,
+            allow_free_text: true,
+            answer: None,
+            answer_selection: None,
+            answered_by: None,
+            state: crate::clarify::ClarifyState::Asked,
+            run_id: None,
+        };
+        let clars = vec![mk("clar-1", "me/api#3"), mk("clar-2", "me/api#4")];
+
+        let stamped = with_resume_run_ids(&resume, clars);
+
+        assert_eq!(
+            stamped.iter().find(|c| c.id == "clar-1").unwrap().run_id.as_deref(),
+            Some("run-9"),
+            "the clarification with a parked resume context gets its run_id"
+        );
+        assert!(
+            stamped.iter().find(|c| c.id == "clar-2").unwrap().run_id.is_none(),
+            "a free-standing clarification (no parked run) stays None"
+        );
+        // Non-destructive: a SECOND stamp still finds it (list endpoints must never consume the
+        // pause point — only actually answering does, via `ClarifyResumeStore::take`).
+        assert!(resume.get("clar-1").is_some(), "with_resume_run_ids used .get, not .take");
+    }
+
+    #[tokio::test]
+    async fn list_clarifications_handler_stamps_run_id_for_a_paused_investigation() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let posted = state.clarifications.post("me/api#5", "Which flag?", "you");
+        state.clarify_resume.put(
+            &posted.id,
+            crate::clarify_resume::ClarifyResumeContext {
+                run_id: "run-55".to_string(),
+                story_id: "me/api#5".to_string(),
+                story_title: "T".to_string(),
+                story_desc: "D".to_string(),
+                model: "claude-opus-4-8".to_string(),
+                phase: crate::clarify_resume::PausedPhase::Investigation,
+                original_task: "task".to_string(),
+                asked_question: "Which flag?".to_string(),
+            },
+        );
+
+        let Json(out) = list_clarifications(
+            axum::extract::State(state.clone()),
+            axum::extract::Path("me/api#5".to_string()),
+        )
+        .await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].run_id.as_deref(),
+            Some("run-55"),
+            "the handler stamps run_id from the resume-context store onto the list response"
+        );
+        // Still non-destructive at the HTTP layer too: answering later can still consume it.
+        assert!(state.clarify_resume.get(&posted.id).is_some());
     }
 
     /// Regression test for issue #106: `POST /api/projects/:id/emit-local` must run

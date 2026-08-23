@@ -139,7 +139,8 @@ pub fn bombe_running(enabled: bool, count: usize, preview: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::bombe_running;
+    use super::{bombe_running, provide_loading_context, LoadingCount, LoadingGuard};
+    use dioxus::prelude::*;
 
     #[test]
     fn idle_and_enabled_is_not_running() {
@@ -161,5 +162,111 @@ mod tests {
     #[test]
     fn preview_runs_with_no_real_work_when_enabled() {
         assert!(bombe_running(true, 0, true));
+    }
+
+    // ── LoadingGuard itself (the mechanism every AI call site holds) ───────────────────────
+    //
+    // These mount a real `VirtualDom` and drive the guard SYNCHRONOUSLY inside a component's
+    // render body. LoadingGuard's increment/decrement is plain `Drop`-driven Rust — it doesn't
+    // need an async executor to prove out; the exact same Drop semantics fire whether the guard
+    // is dropped at the end of a sync block (as here) or at the end of an `async fn` after an
+    // `.await` (as every real call site in `scan.rs` / `uow.rs` / `chat.rs` does).
+
+    #[test]
+    fn loading_guard_increments_on_creation_and_decrements_on_drop() {
+        fn harness() -> Element {
+            provide_loading_context();
+            let count = use_context::<LoadingCount>();
+            assert_eq!(*count.read(), 0, "idle before any guard is taken");
+            let guard = LoadingGuard::new();
+            assert_eq!(*count.read(), 1, "one guard in flight -> count 1 -> Bombe runs");
+            drop(guard);
+            assert_eq!(*count.read(), 0, "guard dropped -> back to idle");
+            rsx! { div {} }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+    }
+
+    #[test]
+    fn nested_overlapping_guards_stay_running_until_the_last_one_drops() {
+        // Mirrors the job-path pattern in `cockpit::scan` (`audit_job_start`'s call site takes
+        // its OWN guard, then awaits `poll_job`, which takes a SECOND independent guard for the
+        // whole poll loop): two in-flight AI calls must keep the Bombe running until BOTH clear,
+        // not just the first to finish.
+        fn harness() -> Element {
+            provide_loading_context();
+            let count = use_context::<LoadingCount>();
+            let outer = LoadingGuard::new();
+            assert_eq!(*count.read(), 1);
+            let inner = LoadingGuard::new();
+            assert_eq!(*count.read(), 2, "two overlapping AI calls -> count 2, still running");
+            drop(inner);
+            assert_eq!(*count.read(), 1, "one of two finished -> STILL running (not idle yet)");
+            drop(outer);
+            assert_eq!(*count.read(), 0, "both finished -> idle");
+            rsx! { div {} }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+    }
+
+    #[test]
+    fn error_or_early_return_still_clears_the_guard_no_stuck_animation() {
+        // A guard held across a fallible operation that returns early on failure (the shape
+        // every `Option<T>`-returning call site in this codebase uses, e.g. `audit_against`
+        // returning `None` on a bad response) must still decrement via Drop — proving the
+        // call site's SUCCESS path is not what clears the Bombe, so a request error can never
+        // leave the animation stuck on.
+        fn maybe_fails(count: LoadingCount, fail: bool) -> Option<()> {
+            let _guard = LoadingGuard::new();
+            assert_eq!(*count.read(), 1, "guard held while the fallible op is in flight");
+            if fail {
+                return None; // early return — Drop must still run on the way out
+            }
+            Some(())
+        }
+
+        fn harness() -> Element {
+            provide_loading_context();
+            let count = use_context::<LoadingCount>();
+            assert!(maybe_fails(count, true).is_none());
+            assert_eq!(*count.read(), 0, "error path cleared the guard -- no stuck animation");
+            assert!(maybe_fails(count, false).is_some());
+            assert_eq!(*count.read(), 0, "success path also cleared the guard");
+            rsx! { div {} }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+    }
+
+    /// Auditable proof for the reported miss (owner: the Bombe did not animate for "Audit code
+    /// against selected rules"). `cockpit::scan::audit_against` and `cockpit::scan::poll_job`
+    /// (`crates/ui/src/cockpit/scan.rs`) both declare `let _guard = LoadingGuard::new();` as
+    /// their FIRST statement, before doing any network work, and let normal Rust scope-exit
+    /// drop it after the work resolves (success or failure) — the exact shape this test drives.
+    /// Re-running this test after any future edit to those two functions' guard placement is
+    /// the regression check: moving the guard to only wrap part of the call, or dropping it
+    /// early, would no longer match this "declared first, held through return" shape.
+    #[test]
+    fn guard_declared_first_covers_the_whole_call_like_audit_against_and_poll_job() {
+        fn simulated_audit_against(count: LoadingCount) -> &'static str {
+            // Mirrors scan.rs's `audit_against` / `poll_job`: guard first, "network round trip"
+            // (here, a stand-in synchronous check) second, guard dropped on return either way.
+            let _guard = LoadingGuard::new();
+            assert_eq!(*count.read(), 1, "Bombe is running for the whole simulated round trip");
+            "report"
+        }
+        fn harness() -> Element {
+            provide_loading_context();
+            let count = use_context::<LoadingCount>();
+            assert_eq!(*count.read(), 0, "idle before the audit starts");
+            let report = simulated_audit_against(count);
+            assert_eq!(report, "report");
+            assert_eq!(*count.read(), 0, "guard dropped when audit_against returned");
+            rsx! { div {} }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
     }
 }

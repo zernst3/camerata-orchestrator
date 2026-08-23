@@ -277,6 +277,49 @@ mod render_tests {
         );
     }
 
+    // ── End-to-end through the REAL LoadingGuard (not a manually-set signal) ───────────────
+    //
+    // The tests above drive `LoadingCount` directly to prove `BombeBg`'s own class logic. This
+    // one instead goes through `crate::loading::provide_loading_context` +
+    // `crate::loading::LoadingGuard` — the exact mechanism every AI call site (`audit_against`,
+    // `poll_job`, chat sends, escalation/clarification answers, …) uses — so a regression that
+    // breaks the guard's wiring into the context `BombeBg` reads would fail HERE, not just in
+    // `loading::tests`. (There is deliberately no "while held" counterpart in a single-shot SSR
+    // render: `rsx! { BombeBg {} }` only builds a LAZY description — the child doesn't actually
+    // mount and read the context until `rebuild_in_place` walks the tree, which happens AFTER
+    // this harness function has returned. A guard held via a plain `let` local — or even
+    // `use_signal` — would already be gone by then, since both are torn down with this
+    // short-lived anonymous test root; the loop only holds a real guard across a mount in the
+    // full app because `spawn`'d tasks are independent of any one render's call stack, and the
+    // app root — unlike a test root — never itself unmounts. `loading::tests` already proves
+    // the increment/decrement RAII behavior directly and unaffected by that timing wrinkle; the
+    // "returns to idle" half below IS safe here because the guard is dropped before mount, not
+    // after.)
+
+    fn bombe_after_guard_dropped_harness() -> Element {
+        crate::loading::provide_loading_context();
+        // Created and dropped BEFORE render — stands in for the call site's guard falling out
+        // of scope once the (here, absent) `.await` resolves, success or failure alike.
+        drop(crate::loading::LoadingGuard::new());
+        rsx! { BombeBg {} }
+    }
+
+    #[test]
+    fn bombe_bg_returns_to_idle_once_the_real_loading_guard_drops() {
+        let mut vdom = VirtualDom::new(bombe_after_guard_dropped_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+
+        assert!(
+            !html.contains("bombe-running"),
+            "the guard already dropped -> no stuck animation; html=\n{html}"
+        );
+        assert!(
+            !html.contains("bombe-overlay-running"),
+            "the guard already dropped -> overlay back to idle; html=\n{html}"
+        );
+    }
+
     #[test]
     fn bombe_bg_disabled_stays_idle_even_with_preview() {
         // enabled=false short-circuits running to false regardless of preview/count.

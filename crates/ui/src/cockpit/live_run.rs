@@ -31,6 +31,14 @@ pub(super) struct ClarificationView {
     pub allow_free_text: bool,
     #[serde(default)]
     pub answer: Option<String>,
+    /// The id of the governed run PARKED on this clarification, if any (a free-standing
+    /// story-authoring question — not raised by a run — has none). Populated server-side from
+    /// the resume-context store (`clarify_resume::ClarifyResumeStore::get`) at LIST time; it is
+    /// NOT persisted on the clarification itself. Lets `ClarifyQuestion` re-attach the Bombe
+    /// polling loop on answer even when answered from the app-wide NEEDS YOU queue, where no
+    /// page was already polling this run (see the module-level Bombe-coverage note above).
+    #[serde(default)]
+    pub run_id: Option<String>,
 }
 
 /// Fetch the OPEN clarifications for a story (`GET /api/stories/:id/clarifications`,
@@ -123,6 +131,16 @@ pub(super) async fn chat_uow_escalation(
 
 /// Resolve a UoW review (free fn so each action button can call it without moving a shared
 /// closure). Fills a sensible default decision for a bare Approve/Reject; Amend requires text.
+///
+/// Approve/Amend RESUME the paused governed run from its checkpoint under a NEW run id — the
+/// server marks the OLD (paused) run `done` as part of the resume (see `answer_escalation` in
+/// `crates/server/src/lib.rs`), so a client that only guarded the answer POST itself would drop
+/// the Bombe loading indicator EXACTLY when the resumed run's real AI work begins. The server
+/// echoes the new id back as `resume_run_id`; when present we re-attach `poll_run_to_done` on it
+/// so the guard stays held through the resumed run to its OWN completion. `active_run` /
+/// `uow_refresh` are the caller's (usually throwaway, since `UowReviewPanel` is story-agnostic —
+/// see its doc comment) signals for that poll loop.
+#[allow(clippy::too_many_arguments)]
 fn submit_uow_review(
     esc_id: String,
     decision_text: String,
@@ -130,6 +148,8 @@ fn submit_uow_review(
     mut submitting: Signal<bool>,
     on_resolved: EventHandler<()>,
     toasts: Option<Signal<Vec<crate::toast::Toast>>>,
+    active_run: Signal<Option<RunView>>,
+    uow_refresh: Signal<u32>,
 ) {
     if submitting() {
         return;
@@ -149,16 +169,27 @@ fn submit_uow_review(
         } else {
             decision_text
         };
-        let ok = answer_uow_escalation(&esc_id, &answer, action).await.is_some();
+        let resolved = answer_uow_escalation(&esc_id, &answer, action).await;
         submitting.set(false);
-        if ok {
-            on_resolved.call(());
-        } else if let Some(t) = toasts {
-            crate::toast::push_toast(
-                t,
-                crate::toast::ToastKind::Error,
-                "Could not submit your review decision. Your text was kept.".to_string(),
-            );
+        match resolved {
+            Some(esc) => {
+                on_resolved.call(());
+                // Approve/Amend re-spawned a fresh run: keep the Bombe animating through it by
+                // re-attaching the same battle-tested poll loop every other governed-run start
+                // uses. Reject never sets `resume_run_id` (it stops the run, nothing resumes).
+                if let Some(rid) = esc.resume_run_id.clone() {
+                    super::uow::poll_run_to_done(rid, active_run, uow_refresh, toasts).await;
+                }
+            }
+            None => {
+                if let Some(t) = toasts {
+                    crate::toast::push_toast(
+                        t,
+                        crate::toast::ToastKind::Error,
+                        "Could not submit your review decision. Your text was kept.".to_string(),
+                    );
+                }
+            }
         }
     });
 }
@@ -184,6 +215,12 @@ pub(super) fn UowReviewPanel(
     let mut chatting = use_signal(|| false);
     // The app-wide chat-assistant model (the lead engineer the review chats with).
     let chat_model = use_resource(|| super::fetch_app_chat_model());
+    // Local, throwaway targets for the resumed-run poll loop (see `submit_uow_review`). This
+    // panel is story-agnostic (rendered from the app-wide NEEDS YOU queue, not a specific UoW
+    // page), so it doesn't feed a persistent UoW view — it exists solely so the Bombe loading
+    // guard stays held through the resumed run, same as every other governed-run start.
+    let review_active_run = use_signal(|| Option::<RunView>::None);
+    let review_uow_refresh = use_signal(|| 0u32);
 
     let e = esc_view();
     let id_approve = e.id.clone();
@@ -268,19 +305,19 @@ pub(super) fn UowReviewPanel(
                 button {
                     class: "btn-run uow-review-approve",
                     disabled: submitting(),
-                    onclick: move |_| submit_uow_review(id_approve.clone(), decision(), "approve", submitting, on_resolved, toasts),
+                    onclick: move |_| submit_uow_review(id_approve.clone(), decision(), "approve", submitting, on_resolved, toasts, review_active_run, review_uow_refresh),
                     "Approve & resume"
                 }
                 button {
                     class: "btn-run uow-review-amend",
                     disabled: submitting() || decision().trim().is_empty(),
-                    onclick: move |_| submit_uow_review(id_amend.clone(), decision(), "amend", submitting, on_resolved, toasts),
+                    onclick: move |_| submit_uow_review(id_amend.clone(), decision(), "amend", submitting, on_resolved, toasts, review_active_run, review_uow_refresh),
                     "Amend & resume"
                 }
                 button {
                     class: "btn-stop uow-review-reject",
                     disabled: submitting(),
-                    onclick: move |_| submit_uow_review(id_reject.clone(), decision(), "reject", submitting, on_resolved, toasts),
+                    onclick: move |_| submit_uow_review(id_reject.clone(), decision(), "reject", submitting, on_resolved, toasts, review_active_run, review_uow_refresh),
                     "Reject & revert"
                 }
             }
@@ -332,10 +369,16 @@ pub(super) fn ClarifyQuestion(clar: ClarificationView, on_answered: EventHandler
     let mut selected = use_signal(Vec::<String>::new);
     let mut other = use_signal(String::new);
     let mut submitting = use_signal(|| false);
+    // Local, throwaway targets for the resumed-run poll loop when this question paused a
+    // governed run (see the reattach note on the submit handler below). Unused (never set) for
+    // a free-standing story-authoring question, where `clar.run_id` is always `None`.
+    let clarify_active_run = use_signal(|| Option::<RunView>::None);
+    let clarify_uow_refresh = use_signal(|| 0u32);
 
     let multi = clar.multi_select;
     let allow_free_text = clar.allow_free_text;
     let cid = clar.id.clone();
+    let run_id = clar.run_id.clone();
 
     // A submit is valid once there's at least one selection or non-empty free-text.
     let can_submit = !selected().is_empty() || !other().trim().is_empty();
@@ -410,11 +453,13 @@ pub(super) fn ClarifyQuestion(clar: ClarificationView, on_answered: EventHandler
                     disabled: submitting() || !can_submit,
                     onclick: {
                         let cid = cid.clone();
+                        let run_id = run_id.clone();
                         move |_| {
                             // Lock IMMEDIATELY on click (synchronous, before the await) so a
                             // double-click can't fire a second submit and the inputs lock at once.
                             if submitting() { return; }
                             let cid = cid.clone();
+                            let run_id = run_id.clone();
                             let sel = selected();
                             let ft = {
                                 let t = other().trim().to_string();
@@ -428,6 +473,21 @@ pub(super) fn ClarifyQuestion(clar: ClarificationView, on_answered: EventHandler
                                 submitting.set(false);
                                 if ok {
                                     on_answered.call(());
+                                    // The server resumes the SAME run id (Executing again) as
+                                    // part of answering — NOT a fresh id like the escalation
+                                    // resume above. When we know it (the queue's list endpoint
+                                    // populates `run_id` from the resume-context store), keep
+                                    // the Bombe animating through the resumed investigation pass
+                                    // by polling it here, even if no page already had it open.
+                                    if let Some(rid) = run_id {
+                                        super::uow::poll_run_to_done(
+                                            rid,
+                                            clarify_active_run,
+                                            clarify_uow_refresh,
+                                            None,
+                                        )
+                                        .await;
+                                    }
                                 } else if let Some(t) = toasts {
                                     crate::toast::push_toast(
                                         t,
@@ -1185,6 +1245,47 @@ mod tests {
         assert_eq!(clars[1].id, "c2");
     }
 
+    // ── Tier-2: `run_id` wire field — the fix for the "answered from a different page" gap ──
+    //
+    // The server stamps `run_id` onto each OPEN clarification from the resume-context store
+    // (`with_resume_run_ids` in `crates/server/src/lib.rs`) — present only when the question
+    // paused a governed investigation run, absent for a free-standing story-authoring question.
+    // `ClarifyQuestion` reads it to re-attach `poll_run_to_done` after answering, so the Bombe
+    // keeps animating through the resumed pass even when answered from the app-wide NEEDS YOU
+    // queue rather than the story's own (possibly long-since-unmounted) live-run view.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn fetch_all_open_clarifications_parses_run_id_when_present_and_absent() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/clarifications"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                { "id": "c1", "question": "Paused a run", "run_id": "run-7" },
+                { "id": "c2", "question": "Free-standing authoring question" }
+            ])))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let clars = super::fetch_all_open_clarifications().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(clars.len(), 2);
+        assert_eq!(
+            clars[0].run_id.as_deref(),
+            Some("run-7"),
+            "a clarification that paused a run carries its run_id"
+        );
+        assert!(
+            clars[1].run_id.is_none(),
+            "a free-standing (non-run) clarification has no run_id"
+        );
+    }
+
     // ── Tier-2: fetch_open_uow_escalations — GET ?open=true, keep subject_kind=="uow" ──
     #[tokio::test]
     #[serial_test::serial(bff_env)]
@@ -1256,7 +1357,52 @@ mod tests {
         let out = out.expect("the resolved escalation parses");
         assert_eq!(out.id, "esc-7");
         assert_eq!(out.status, "resolved");
+        assert!(
+            out.resume_run_id.is_none(),
+            "no resume_run_id in the response -> field defaults to None"
+        );
         // `.expect(1)` asserts (on server drop) the exact {answer, action} body was posted.
+    }
+
+    // ── Tier-2: `resume_run_id` wire field — the fix for the resumed-run Bombe-blind spot ──
+    //
+    // `answer_escalation` (server) echoes the FRESH run id back on a successful Approve/Amend
+    // resume (see `crates/server/src/lib.rs`, asserted server-side by
+    // `uow_escalation_approve_resumes_and_consumes_checkpoint`). `submit_uow_review`
+    // (this module) reads `EscalationView::resume_run_id` to re-attach `poll_run_to_done` on
+    // it, so the Bombe keeps animating through the resumed run instead of dropping the guard
+    // the instant the OLD (now `done`) run's poll loop sees it finish. This test proves the
+    // wire field survives deserialization end to end.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn answer_uow_escalation_parses_the_resumed_run_id_on_approve() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _env = bff_env_guard();
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/escalations/esc-8/answer"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "esc-8", "routine_id": "r1", "routine_name": "dev",
+                "subject_kind": "uow", "reason": "TEST-TAMPER-1",
+                "stopped_for": "edited a test", "status": "resolved",
+                "created": "2026-06-30T00:00:00Z",
+                "resume_run_id": "run-42"
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::answer_uow_escalation("esc-8", "Approved: proceed.", "approve").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let out = out.expect("the resolved escalation parses");
+        assert_eq!(
+            out.resume_run_id.as_deref(),
+            Some("run-42"),
+            "the resumed run id survives deserialization so the caller can re-attach polling"
+        );
     }
 
     // ── Tier-2: chat_uow_escalation — POST {message, model}, parse the result ───

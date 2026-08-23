@@ -363,6 +363,13 @@ pub struct EscalationView {
     /// The human <-> lead-engineer review conversation.
     #[serde(default)]
     pub conversation: Vec<EscalationMsgView>,
+    /// Present ONLY on the POST /answer response to a UoW review resolved Approve/Amend: the id
+    /// of the FRESH governed run the server re-spawned from the checkpoint. The server marks the
+    /// paused run `done` as part of the same resume (see `answer_escalation` server-side), so the
+    /// client must poll THIS id — not the original — to keep the Bombe loading guard held through
+    /// the resumed run. `None` for Reject (nothing resumes) and for every other response shape.
+    #[serde(default)]
+    pub resume_run_id: Option<String>,
 }
 
 /// One turn in the escalation review conversation.

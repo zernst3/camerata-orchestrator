@@ -112,6 +112,18 @@ pub struct Clarification {
     /// `Answered` iff `answer.is_some()`. Serialized so clients can branch on it
     /// directly rather than re-deriving from the nullable `answer`.
     pub state: ClarifyState,
+    /// The id of the governed run PARKED on this clarification, if any. NOT part of this
+    /// struct's own persisted state (never set here, always `None` on a freshly-posted or
+    /// stored `Clarification`) — the list handlers (`list_open_clarifications` /
+    /// `list_clarifications` in `lib.rs`) populate it at SERVE time from
+    /// `AppState::clarify_resume` (keyed by clarification id), so the client can re-attach the
+    /// Bombe loading-guard poll loop to the resumed run on answer even when answered from the
+    /// app-wide NEEDS YOU queue rather than the story's own live-run view. `skip_deserializing`
+    /// (not `skip`) so this field is NEVER read back in from persisted-on-disk JSON (avoids a
+    /// stale run id surviving a restart) while still being INCLUDED when a handler serializes an
+    /// in-memory instance out to the client after populating it.
+    #[serde(skip_deserializing, default)]
+    pub run_id: Option<String>,
 }
 
 /// Serde default for `allow_free_text` (true = the "Other" escape is on by default).
@@ -304,6 +316,7 @@ impl ClarificationStore {
             answer_selection: None,
             answered_by: None,
             state: ClarifyState::Asked,
+            run_id: None,
         };
         if let Ok(mut guard) = self.items.lock() {
             guard.insert(c.id.clone(), c.clone());
