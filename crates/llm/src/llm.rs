@@ -293,17 +293,27 @@ pub struct LlmRequest {
     pub prompt: String,
     /// Token ceiling for the response (API path; the CLI manages its own).
     pub max_tokens: u32,
-    /// Prompt-caching breakpoint for the API path: number of BYTES (UTF-8) at the START of
-    /// `prompt` that form the STATIC cacheable prefix. When set, `complete_api` splits the
-    /// user message into two content blocks —
-    ///   `[{text: prefix, cache_control: {type: ephemeral}}, {text: suffix}]`
-    /// — so the provider caches the prefix once and re-reads it cheaply on every subsequent
-    /// call that shares the same prefix (same chunk digest + repo map across rule-batches).
+    /// Prompt-caching breakpoints for the API path: ascending byte (UTF-8) offsets into
+    /// `prompt`, each marking the END of one cacheable segment. The Anthropic API allows up
+    /// to 4 `cache_control` breakpoints per request; this holds however many the caller
+    /// wants (Camerata's audit pass uses up to 2 — see `ai_audit.rs`'s prompt builder).
+    ///
+    /// When non-empty, `complete_api` / `build_batch_item` / `count_tokens_body` split the
+    /// user message into `breakpoints.len() + 1` content blocks — one per segment between
+    /// consecutive offsets (and start/end) — and attach `cache_control: {type: ephemeral}`
+    /// to every block EXCEPT the last (the varying suffix that must never be cached). E.g.
+    /// two breakpoints `[a, b]` (`a < b < prompt.len()`) produce:
+    ///   `[{text: prompt[..a], cache_control}, {text: prompt[a..b], cache_control}, {text: prompt[b..]}]`
+    /// This lets an EARLIER, more-stable segment (e.g. a repo map shared across every chunk
+    /// in a scan) cache-hit independently of a LATER, less-stable one (e.g. a chunk's code
+    /// digest, stable only across that chunk's rule-batches) — ordering the prompt
+    /// stable-content-first is what makes the earlier breakpoint reusable at all.
+    ///
     /// Ignored by the CLI path (the CLI handles its own context management) and by
     /// non-Anthropic vendors (no-op until their caching protocol is wired).
     /// Min cacheable prefix: 1024 tokens (Sonnet/Opus) / 2048 tokens (Haiku). Our digests
-    /// far exceed this, so a valid `cache_prefix_len` always meets the floor.
-    pub cache_prefix_len: Option<usize>,
+    /// far exceed this, so a valid breakpoint always meets the floor.
+    pub cache_breakpoints: Vec<usize>,
     /// Optional local repo clone the model may READ on demand (THE INVARIANT: every
     /// in-project agent gets on-demand full-repo read, not just a digest). On the CLI
     /// backend this swaps the hardened `--tools ""` lockdown for the READ-ONLY built-ins
@@ -330,7 +340,7 @@ impl LlmRequest {
             system: None,
             prompt: prompt.into(),
             max_tokens: 4096,
-            cache_prefix_len: None,
+            cache_breakpoints: Vec::new(),
             repo_read_dir: None,
             repo_read_extra_dirs: Vec::new(),
         }
@@ -386,14 +396,44 @@ impl LlmRequest {
         self
     }
 
-    /// Mark the first `prefix_len` bytes of the prompt as the cacheable prefix (API path
-    /// only). The prefix must end on a valid UTF-8 character boundary; the builder clamps
-    /// it to the prompt length automatically so the caller can pass an oversized value safely.
-    /// Setting `prefix_len = 0` is a no-op (leaves caching disabled).
-    pub fn with_cache_prefix_len(mut self, prefix_len: usize) -> Self {
-        if prefix_len > 0 {
-            self.cache_prefix_len = Some(prefix_len.min(self.prompt.len()));
-        }
+    /// Mark the first `prefix_len` bytes of the prompt as a SINGLE cacheable prefix (API
+    /// path only) — a thin convenience wrapper over [`Self::with_cache_breakpoints`] for the
+    /// common one-breakpoint case. The prefix is clamped to the prompt length automatically
+    /// so the caller can pass an oversized value safely. `prefix_len = 0` is a no-op (leaves
+    /// caching disabled).
+    pub fn with_cache_prefix_len(self, prefix_len: usize) -> Self {
+        self.with_cache_breakpoints(vec![prefix_len])
+    }
+
+    /// Mark `breakpoints` (byte offsets into `prompt`, need not be pre-sorted or
+    /// deduplicated) as cache-control boundaries for the API path. Each offset is snapped
+    /// down to the nearest UTF-8 character boundary and any offset that is `0` or
+    /// `>= prompt.len()` is dropped (it would produce an empty content block, which the
+    /// Anthropic API rejects). The surviving offsets are sorted ascending and deduplicated.
+    /// Passing an empty slice (or one that fully degenerates after filtering) leaves caching
+    /// disabled. See the field doc on [`LlmRequest::cache_breakpoints`] for the resulting
+    /// content-block shape.
+    pub fn with_cache_breakpoints(mut self, breakpoints: impl IntoIterator<Item = usize>) -> Self {
+        let len = self.prompt.len();
+        // Filter out-of-range offsets FIRST, before snapping: an offset >= len must be
+        // dropped outright (it would produce an empty trailing block), not reinterpreted as
+        // some other in-range position by the char-boundary snap below.
+        let mut offsets: Vec<usize> = breakpoints
+            .into_iter()
+            .filter(|&b| b < len)
+            .map(|b| {
+                self.prompt
+                    .char_indices()
+                    .map(|(i, _)| i)
+                    .take_while(|&i| i <= b)
+                    .last()
+                    .unwrap_or(0)
+            })
+            .filter(|&o| o > 0)
+            .collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+        self.cache_breakpoints = offsets;
         self
     }
 }
@@ -548,6 +588,82 @@ impl CacheTtl {
     fn cache_control_json(self) -> serde_json::Value {
         serde_json::json!({"type": "ephemeral", "ttl": self.as_str()})
     }
+}
+
+/// Build the Anthropic `content` value for a user message that may carry MULTIPLE
+/// prompt-cache breakpoints — the single shared builder behind [`Llm::complete_api`],
+/// [`build_batch_item`], and `count_tokens_body`, so the three call sites can never drift on
+/// how a `cache_breakpoints` list turns into content blocks.
+///
+/// `breakpoints` is defensively re-filtered/sorted/deduped here even though
+/// [`LlmRequest::with_cache_breakpoints`] already does this on the way in (in case a caller
+/// sets the field directly): any offset that is `0` or `>= prompt.len()` is dropped so no
+/// resulting block is ever empty (the Anthropic API rejects empty text blocks). The
+/// surviving offsets split `prompt` into `N + 1` text blocks. When `with_cache_control` is
+/// true, every block EXCEPT THE LAST carries `cache_control: {type: ephemeral, ttl: ...}` —
+/// each breakpoint marks the end of one cacheable segment; the final (last) block is always
+/// left uncached since it's the per-call varying suffix. `count_tokens` doesn't need the
+/// `cache_control` tag (caching has no effect on that endpoint, only the block SPLIT
+/// matters for an accurate count) so it calls this with `with_cache_control = false`.
+///
+/// Falls back to a plain JSON string (no content-block array) when no valid breakpoint
+/// survives filtering — this covers both "caching not requested" (empty `breakpoints`) and
+/// "every offset given was degenerate" (e.g. all `>= prompt.len()`).
+fn cached_user_content(
+    prompt: &str,
+    breakpoints: &[usize],
+    with_cache_control: bool,
+    ttl: CacheTtl,
+) -> serde_json::Value {
+    let len = prompt.len();
+    let mut offsets: Vec<usize> = breakpoints
+        .iter()
+        .copied()
+        .filter(|&b| b < len)
+        .map(|b| {
+            // Snap down to the nearest valid UTF-8 char boundary <= b so a multi-byte
+            // sequence is never sliced in half.
+            prompt
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i <= b)
+                .last()
+                .unwrap_or(0)
+        })
+        .filter(|&o| o > 0)
+        .collect();
+    offsets.sort_unstable();
+    offsets.dedup();
+
+    if offsets.is_empty() {
+        return serde_json::json!(prompt);
+    }
+
+    let mut blocks: Vec<&str> = Vec::with_capacity(offsets.len() + 1);
+    let mut start = 0;
+    for &end in &offsets {
+        blocks.push(&prompt[start..end]);
+        start = end;
+    }
+    blocks.push(&prompt[start..]);
+
+    let n = blocks.len();
+    let arr: Vec<serde_json::Value> = blocks
+        .into_iter()
+        .enumerate()
+        .map(|(i, text)| {
+            if with_cache_control && i + 1 < n {
+                serde_json::json!({
+                    "type": "text",
+                    "text": text,
+                    "cache_control": ttl.cache_control_json()
+                })
+            } else {
+                serde_json::json!({ "type": "text", "text": text })
+            }
+        })
+        .collect();
+    serde_json::json!(arr)
 }
 
 /// Which backend, resolved from env. Pure so it's unit-testable without real calls.
@@ -985,17 +1101,16 @@ impl Llm {
 
     /// API path: POST the Anthropic Messages API with the key.
     ///
-    /// Prompt caching: when `req.cache_prefix_len` is set, the user message is sent as a
-    /// TWO-BLOCK content array instead of a plain string:
-    ///   1. `{type: "text", text: <prefix>, cache_control: {type: "ephemeral", ttl: ...}}` —
-    ///      the stable codebase context (repo map + chunk digest) that the provider caches
-    ///      for [`CacheTtl::from_env`]'s TTL (5m default, opt-in 1h).
-    ///   2. `{type: "text", text: <suffix>}` — the per-batch varying directive (task line +
-    ///      rules block) that differs across rule-batches and must never be part of the prefix.
+    /// Prompt caching: when `req.cache_breakpoints` is non-empty, the user message is sent
+    /// as a MULTI-BLOCK content array instead of a plain string — see
+    /// [`cached_user_content`] for the exact shape. Camerata's audit pass uses up to two
+    /// breakpoints: one after the shared repo map (re-reads across every chunk in a scan)
+    /// and one after a chunk's code digest (re-reads across that chunk's rule-batches).
+    /// Each cached block is cached for [`CacheTtl::from_env`]'s TTL (5m default, opt-in 1h).
     ///
-    /// Prompt caching is GA (no beta header needed) as of this writing. Without a
-    /// `cache_prefix_len` the request falls through to the plain-string path (no structural
-    /// change) so non-caching callers are unaffected.
+    /// Prompt caching is GA (no beta header needed) as of this writing. With no breakpoints
+    /// the request falls through to the plain-string path (no structural change) so
+    /// non-caching callers are unaffected.
     ///
     /// RETRY: the POST goes through [`crate::retry::execute_with_retry`], which re-sends
     /// this EXACT request (same model, same body) on 429/529/5xx/network errors — up to 3
@@ -1010,36 +1125,12 @@ impl Llm {
             anyhow::anyhow!("API backend selected but ANTHROPIC_API_KEY is unset")
         })?;
 
-        // Build the user content: a plain string when caching is not requested; a two-block
-        // array when it is (prefix block with cache_control, suffix block without).
-        let user_content = match req.cache_prefix_len {
-            Some(split_at) if split_at < req.prompt.len() => {
-                // Split on the byte boundary; clamp to a valid UTF-8 char boundary so we never
-                // slice a multi-byte sequence in half (the min clamp is the builder's job, but
-                // be defensive here too).
-                let safe_split = req.prompt
-                    .char_indices()
-                    .map(|(i, _)| i)
-                    .take_while(|&i| i <= split_at)
-                    .last()
-                    .unwrap_or(split_at)
-                    .min(req.prompt.len());
-                let prefix = &req.prompt[..safe_split];
-                let suffix = &req.prompt[safe_split..];
-                serde_json::json!([
-                    {
-                        "type": "text",
-                        "text": prefix,
-                        "cache_control": CacheTtl::from_env().cache_control_json()
-                    },
-                    {
-                        "type": "text",
-                        "text": suffix
-                    }
-                ])
-            }
-            _ => serde_json::json!(req.prompt),
-        };
+        let user_content = cached_user_content(
+            &req.prompt,
+            &req.cache_breakpoints,
+            true,
+            CacheTtl::from_env(),
+        );
 
         let mut body = serde_json::json!({
             "model": model,
@@ -1157,30 +1248,18 @@ pub struct BatchMessage {
 }
 
 /// Pure request-body builder for [`Llm::count_tokens`] — mirrors `complete_api`'s content
-/// shape (same `cache_prefix_len` prefix/suffix split, same `system` field) so the count
-/// reflects exactly what a real completion call for this `req` would send. No
-/// `cache_control` block: `count_tokens` only needs the split for an accurate count, not
-/// caching (caching has no effect on this endpoint). Kept separate from the HTTP call so
-/// the body-shape logic is unit-testable without a network call.
+/// shape (same `cache_breakpoints` block split, same `system` field) via
+/// [`cached_user_content`], so the count reflects exactly what a real completion call for
+/// this `req` would send. No `cache_control` block: `count_tokens` only needs the split for
+/// an accurate count, not caching (caching has no effect on this endpoint). Kept separate
+/// from the HTTP call so the body-shape logic is unit-testable without a network call.
 fn count_tokens_body(req: &LlmRequest, model: &str) -> serde_json::Value {
-    let user_content = match req.cache_prefix_len {
-        Some(split_at) if split_at < req.prompt.len() => {
-            let safe_split = req.prompt
-                .char_indices()
-                .map(|(i, _)| i)
-                .take_while(|&i| i <= split_at)
-                .last()
-                .unwrap_or(split_at)
-                .min(req.prompt.len());
-            let prefix = &req.prompt[..safe_split];
-            let suffix = &req.prompt[safe_split..];
-            serde_json::json!([
-                { "type": "text", "text": prefix },
-                { "type": "text", "text": suffix }
-            ])
-        }
-        _ => serde_json::json!(req.prompt),
-    };
+    let user_content = cached_user_content(
+        &req.prompt,
+        &req.cache_breakpoints,
+        false,
+        CacheTtl::from_env(),
+    );
     let mut body = serde_json::json!({
         "model": model,
         "messages": [{ "role": "user", "content": user_content }],
@@ -1211,36 +1290,18 @@ pub async fn exact_input_token_count(llm: &Llm, req: &LlmRequest, model: &str) -
 }
 
 /// Build a [`BatchItem`] from a [`LlmRequest`] and a deterministic `custom_id`.
-/// The content block handles prompt caching the same way `complete_api` does: when
-/// `req.cache_prefix_len` is set, the user content is split into a cached-prefix block
-/// plus a suffix block. The system prompt is forwarded verbatim (the batch API accepts
-/// the same `system` field as the messages API).
+/// The content block handles prompt caching the same way `complete_api` does (via
+/// [`cached_user_content`]): when `req.cache_breakpoints` is non-empty, the user content is
+/// split into cached segment blocks plus a final uncached suffix block. The system prompt
+/// is forwarded verbatim (the batch API accepts the same `system` field as the messages
+/// API).
 pub fn build_batch_item(custom_id: impl Into<String>, req: &LlmRequest, model: &str) -> BatchItem {
-    let content = match req.cache_prefix_len {
-        Some(split_at) if split_at < req.prompt.len() => {
-            let safe_split = req.prompt
-                .char_indices()
-                .map(|(i, _)| i)
-                .take_while(|&i| i <= split_at)
-                .last()
-                .unwrap_or(split_at)
-                .min(req.prompt.len());
-            let prefix = &req.prompt[..safe_split];
-            let suffix = &req.prompt[safe_split..];
-            serde_json::json!([
-                {
-                    "type": "text",
-                    "text": prefix,
-                    "cache_control": CacheTtl::from_env().cache_control_json()
-                },
-                {
-                    "type": "text",
-                    "text": suffix
-                }
-            ])
-        }
-        _ => serde_json::json!(req.prompt),
-    };
+    let content = cached_user_content(
+        &req.prompt,
+        &req.cache_breakpoints,
+        true,
+        CacheTtl::from_env(),
+    );
     BatchItem {
         custom_id: custom_id.into(),
         params: BatchItemParams {
@@ -1425,7 +1486,7 @@ impl Llm {
     /// heuristic-fallback wrapper callers should actually use.
     ///
     /// Mirrors [`Self::complete_api`]'s request shape (system + one user message, same
-    /// cache_prefix_len splitting) so the token count reflects exactly what a real
+    /// `cache_breakpoints` splitting) so the token count reflects exactly what a real
     /// completion call would send. Same retry policy as the rest of this API surface.
     pub async fn count_tokens(&self, req: &LlmRequest, model: &str) -> anyhow::Result<u64> {
         let key = self.api_key.as_ref().ok_or_else(|| {
@@ -2152,26 +2213,44 @@ mod tests {
         assert_eq!(r.system.as_deref(), Some("be terse"));
         assert_eq!(r.model, "claude-opus-5");
         assert_eq!(r.max_tokens, 100);
-        assert_eq!(r.cache_prefix_len, None, "caching off by default");
+        assert!(r.cache_breakpoints.is_empty(), "caching off by default");
     }
 
     #[test]
     fn cache_prefix_len_builder() {
-        // Normal case: prefix len < prompt len -> stored as-is (clamped to prompt len).
+        // Normal case: prefix len < prompt len -> stored as the single breakpoint.
         let r = LlmRequest::new("hello world").with_cache_prefix_len(5);
-        assert_eq!(r.cache_prefix_len, Some(5));
+        assert_eq!(r.cache_breakpoints, vec![5]);
 
-        // Oversized: clamped to the prompt length, not panicking.
+        // Oversized (>= prompt len): dropped entirely — a breakpoint at (or past) the end
+        // of the prompt would leave the trailing block empty, which the API rejects, so
+        // this must degenerate to "no caching" rather than silently rewriting the offset.
         let r2 = LlmRequest::new("hi").with_cache_prefix_len(999);
-        assert_eq!(r2.cache_prefix_len, Some(2), "clamped to prompt length");
+        assert!(r2.cache_breakpoints.is_empty(), "out-of-range breakpoint is dropped, not clamped");
 
         // Zero is a no-op: caching stays disabled.
         let r3 = LlmRequest::new("hi").with_cache_prefix_len(0);
-        assert_eq!(r3.cache_prefix_len, None, "zero prefix = no caching");
+        assert!(r3.cache_breakpoints.is_empty(), "zero prefix = no caching");
 
-        // Prefix == prompt length: stored as-is (whole prompt is the prefix, no suffix).
+        // Prefix == prompt length: also dropped (whole prompt as prefix leaves an empty
+        // suffix block) — same "no caching" degeneration as the oversized case.
         let r4 = LlmRequest::new("exact").with_cache_prefix_len(5);
-        assert_eq!(r4.cache_prefix_len, Some(5));
+        assert!(r4.cache_breakpoints.is_empty(), "prefix == prompt length is dropped, not stored");
+    }
+
+    #[test]
+    fn cache_breakpoints_builder_sorts_dedups_and_filters() {
+        // Unsorted, duplicate, and out-of-range (0 and >= len) inputs all get cleaned up.
+        let prompt = "0123456789"; // len 10
+        let r = LlmRequest::new(prompt).with_cache_breakpoints(vec![7, 3, 3, 0, 10, 999, 7]);
+        assert_eq!(r.cache_breakpoints, vec![3, 7], "sorted, deduped, degenerate offsets dropped");
+
+        // Multi-byte UTF-8: a breakpoint landing mid-character snaps down to the previous
+        // char boundary rather than panicking on a non-boundary slice.
+        let multibyte = "café123"; // 'é' is 2 bytes, starting at byte 3
+        // Byte 4 is inside 'é' (bytes 3-4); snapping down lands on byte 3.
+        let r2 = LlmRequest::new(multibyte).with_cache_breakpoints(vec![4]);
+        assert_eq!(r2.cache_breakpoints, vec![3], "mid-character offset snaps to the char boundary");
     }
 
     // `LlmResponse::cache_hit_ratio` tests moved to
@@ -2333,6 +2412,68 @@ mod tests {
         assert_eq!(arr[1]["type"], "text");
         assert_eq!(arr[1]["text"], "dynamic suffix");
         assert!(arr[1].get("cache_control").is_none());
+    }
+
+    /// TWO breakpoints (the Gap-3 fix): the audit prompt builder marks a boundary after the
+    /// shared repo map AND after the chunk digest — this produces THREE content blocks, with
+    /// `cache_control` on the first two (repo-map segment, digest segment) and none on the
+    /// final varying suffix (task line + rules). Mirrors the real shape
+    /// `ai_audit.rs::run_passes`/`run_passes_batch` build when `n_b > 1`.
+    #[test]
+    fn build_batch_item_with_two_cache_breakpoints() {
+        let repo_map_seg = "Repository: acme/widgets\n\nREPO MAP:\nfoo.rs: fn foo()\n";
+        let digest_seg = "(parallel 1/3)\n\nDIGEST:\nfn foo() { todo!() }\n\n";
+        let suffix = "── task line ──\n\nRULES";
+        let prompt = format!("{repo_map_seg}{digest_seg}{suffix}");
+        let bp1 = repo_map_seg.len();
+        let bp2 = repo_map_seg.len() + digest_seg.len();
+
+        let req = LlmRequest::new(&prompt)
+            .with_cache_breakpoints(vec![bp1, bp2])
+            .with_model("claude-sonnet-5");
+        let item = build_batch_item("c0-b0", &req, "claude-sonnet-5");
+        let content = serde_json::to_value(&item.params.messages[0].content).unwrap();
+        let arr = content.as_array().expect("cached content is an array");
+        assert_eq!(arr.len(), 3, "two breakpoints -> three blocks");
+
+        // Block 1: the repo map — cached (this is what lets it cache-hit ACROSS chunks).
+        assert_eq!(arr[0]["text"], repo_map_seg);
+        assert_eq!(arr[0]["cache_control"]["type"], "ephemeral");
+
+        // Block 2: the chunk digest — cached (re-reads across this chunk's rule-batches).
+        assert_eq!(arr[1]["text"], digest_seg);
+        assert_eq!(arr[1]["cache_control"]["type"], "ephemeral");
+
+        // Block 3: the varying task line + rules — never cached.
+        assert_eq!(arr[2]["text"], suffix);
+        assert!(arr[2].get("cache_control").is_none());
+    }
+
+    /// The SAME repo-map segment, unmodified, appears byte-for-byte across two prompts
+    /// built for different chunk indices — this identity is exactly what lets the
+    /// repo-map cache breakpoint hit across chunks. (Regression guard for the old prefix
+    /// ordering, which embedded the chunk index BEFORE the repo map and so could never
+    /// produce two byte-identical prefixes.)
+    #[test]
+    fn repo_map_segment_is_byte_identical_across_chunks() {
+        let repo = "acme/widgets";
+        let repo_map = "REPO MAP:\nfoo.rs: fn foo()\nbar.rs: fn bar()\n";
+        let repo_map_prefix = format!("Repository: {repo}\n\n{repo_map}");
+
+        // Build the same segment for two different chunk indices — must be byte-identical.
+        let ci1_chunk_seg = format!("(parallel {}/{})\n\n{}\n\n", 1, 5, "digest for chunk 0");
+        let ci2_chunk_seg = format!("(parallel {}/{})\n\n{}\n\n", 2, 5, "digest for chunk 1");
+        let prompt1 = format!("{repo_map_prefix}{ci1_chunk_seg}task+rules A");
+        let prompt2 = format!("{repo_map_prefix}{ci2_chunk_seg}task+rules B");
+
+        assert_eq!(
+            &prompt1[..repo_map_prefix.len()],
+            &prompt2[..repo_map_prefix.len()],
+            "the repo-map segment must be byte-identical regardless of chunk index"
+        );
+        // And the chunk-specific segments genuinely differ (sanity check the test fixture
+        // isn't accidentally testing two identical prompts).
+        assert_ne!(ci1_chunk_seg, ci2_chunk_seg);
     }
 
     /// System prompt is forwarded onto `params.system` and present in the serialized item.

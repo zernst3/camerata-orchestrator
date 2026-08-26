@@ -37,7 +37,7 @@ pub struct UsageMeter {
     calls: AtomicU64,
     cost_calls: AtomicU64,
     /// Tokens served from the prompt cache (billed at ~0.1× input rate). Populated only
-    /// when the API backend is in use with `cache_prefix_len` set on the request.
+    /// when the API backend is in use with `cache_breakpoints` set on the request.
     cache_read_input_tokens: AtomicU64,
     /// Tokens written to the prompt cache (billed at ~1.25× input rate, one-time per TTL).
     /// Populated only when the API backend is active with prompt caching enabled.
@@ -934,21 +934,89 @@ fn parse_needs_files(raw: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Compute the API cache-control breakpoints (byte offsets into the full prompt) for one
+/// audit pass, given where each of the two cacheable static segments ends.
+///
+/// GAP-3 (batch-mode cache cost): the audit prompt is built as
+/// `{repo_map_segment}{chunk_segment}{varying task_line + rules}` — see
+/// [`run_passes`]/[`run_passes_batch`]'s prompt builders, which are the only callers. The
+/// repo-map segment is now DELIBERATELY FIRST because it's byte-IDENTICAL across every
+/// chunk in the scan (it never embeds the chunk index or the chunk's digest), so caching it
+/// lets chunk 2, 3, ... of the SAME scan cache-HIT on it instead of re-billing the (often
+/// large) repo map on every chunk — something the OLD ordering (chunk index embedded before
+/// the repo map) could never do, since that made the "static" prefix differ at ~byte 30 on
+/// every chunk.
+///
+/// The chunk segment (label + digest) is stable across THIS chunk's rule-batches only, so
+/// its breakpoint is worth adding when there's more than one rule-batch (`n_b > 1`) — that's
+/// the existing parallel-mode win (a chunk's digest re-read across rule-batch 2, 3, ...).
+/// When `n_b <= 1` (batch mode's default: `BATCH_RULE_BATCH_SIZE = usize::MAX`, i.e. every
+/// rule in one rule-batch), that segment is written to the cache exactly once and NEVER
+/// read back — Anthropic bills a ~1.25x write premium on a 5m cache entry that buys
+/// nothing, so this drops the second breakpoint entirely and folds the chunk segment into
+/// the uncached suffix instead of paying to cache something that's read zero times.
+///
+/// The repo-map breakpoint is kept unconditionally (independent of `n_b`) since it re-reads
+/// across CHUNKS, a dimension `n_b` says nothing about.
+fn cache_breakpoints_for_pass(
+    repo_map_prefix_len: usize,
+    static_prefix_len: usize,
+    n_b: usize,
+) -> Vec<usize> {
+    let mut bp = vec![repo_map_prefix_len];
+    if n_b > 1 {
+        bp.push(static_prefix_len);
+    }
+    bp
+}
+
+/// Build the full prompt AND its API cache-control breakpoints for one (chunk, rule-batch)
+/// audit pass. Shared VERBATIM by `run_passes` (parallel mode) and `run_passes_batch` (batch
+/// mode) so the two scan modes structurally cannot drift on prompt shape or cache-breakpoint
+/// placement — see [`cache_breakpoints_for_pass`] for the caching rationale.
+///
+/// Prompt shape (cache-aware ordering, shared content first):
+///   `Repository: {repo}\n\n{repo_map}` (IDENTICAL across every chunk)
+///   + `({label} {ci+1}/{n_c})\n\n{digest}\n\n` (stable across this chunk's rule-batches)
+///   + `{task_line}\n\n{rules_block}` (varies every rule-batch, never cached)
+///
+/// Returns `(prompt, cache_breakpoints)`.
+#[allow(clippy::too_many_arguments)]
+fn build_pass_prompt(
+    repo: &str,
+    repo_map: &str,
+    label: &str,
+    ci: usize,
+    n_c: usize,
+    digest: &str,
+    n_b: usize,
+    task_line: &str,
+    rules_block: &str,
+) -> (String, Vec<usize>) {
+    let repo_map_prefix = format!("Repository: {repo}\n\n{repo_map}");
+    let chunk_segment = format!("({label} {}/{n_c})\n\n{digest}\n\n", ci + 1);
+    let static_prefix = format!("{repo_map_prefix}{chunk_segment}");
+    let cache_breakpoints =
+        cache_breakpoints_for_pass(repo_map_prefix.len(), static_prefix.len(), n_b);
+    let prompt = format!("{static_prefix}{task_line}\n\n{rules_block}");
+    (prompt, cache_breakpoints)
+}
+
 /// One audit pass: build the request, run it (streaming into the transcript when feedback
 /// is present), and parse out findings + proposed rules + any `needs_files` request. Shared
 /// by the primary chunk loop and the resolution round so neither duplicates the call logic.
 ///
-/// `cache_prefix_len` — when `Some(n)`, the first `n` bytes of the prompt (the static
-/// codebase context: repo map + chunk digest) are marked as the cacheable prefix via
-/// [`LlmRequest::with_cache_prefix_len`]. On the API backend this tells the provider to
-/// cache that prefix and re-read it cheaply for every subsequent rule-batch over the same
-/// chunk. The CLI backend ignores this (no-op). Pass `None` to disable caching (default).
+/// `cache_breakpoints` — byte offsets into `prompt` marking the end of each cacheable
+/// segment (see [`cache_breakpoints_for_pass`] for how callers compute these), forwarded to
+/// [`LlmRequest::with_cache_breakpoints`]. On the API backend this tells the provider to
+/// cache each segment and re-read it cheaply on every subsequent call that shares it. The
+/// CLI backend ignores this (no-op). Pass an empty slice to disable caching (default).
 #[allow(clippy::too_many_arguments)]
 async fn audit_pass(
     llm: &dyn LlmPort,
     audit_model: Option<&str>,
     prompt: String,
-    cache_prefix_len: Option<usize>,
+    cache_breakpoints: Vec<usize>,
     repo: &str,
     adopted: &std::collections::HashSet<String>,
     feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
@@ -961,8 +1029,8 @@ async fn audit_pass(
     if let Some(m) = audit_model {
         req = req.with_model(m.to_string());
     }
-    if let Some(prefix_len) = cache_prefix_len {
-        req = req.with_cache_prefix_len(prefix_len);
+    if !cache_breakpoints.is_empty() {
+        req = req.with_cache_breakpoints(cache_breakpoints);
     }
     let resp = if let Some((store, key)) = feedback {
         // Streaming: the idle/stall timeout lives inside the transport, so this scales with
@@ -1201,23 +1269,30 @@ async fn run_passes(
                 } else {
                     format!("── Check the code above against ONLY the ADOPTED rules below (batch {}/{n_b}). Do NOT report issues outside these rules — a separate pass already covers novel findings. Use the REPO MAP for cross-file context. ──", bi + 1)
                 };
-                // PROMPT ORDER IS CACHE-AWARE: the STABLE content (the per-chunk repo map +
-                // digest) leads, so it forms a reusable cached prefix across this chunk's
-                // rule-batches (and the system prompt before it). The VARYING content (the
-                // batch number + the rules) trails, so it never breaks the prefix. The
-                // opening line is deliberately free of the batch number for the same reason.
-                // Bonus: rules landing last = most recent context = strongest rule-following.
+                // PROMPT ORDER IS CACHE-AWARE, with the SHARED content leading, then the
+                // PER-CHUNK content, then the PER-BATCH (varying) content trailing — built by
+                // `build_pass_prompt` (shared verbatim with `run_passes_batch` so the two
+                // scan modes can't drift):
                 //
-                // CACHING: the static prefix ends at the double-newline after `digest` and
-                // before `task_line`. We compute its byte length here so `audit_pass` can
-                // mark it for the API backend's cache_control breakpoint. The CLI backend
-                // ignores this field entirely.
-                let static_prefix = format!(
-                    "Repository: {repo} ({label} {}/{n_c})\n\n{repo_map}{digest}\n\n",
-                    ci + 1,
-                );
-                let cache_prefix_len = static_prefix.len();
-                let prompt = format!("{static_prefix}{task_line}\n\n{rb}");
+                //   Repository: {repo}\n\n{repo_map}   <- IDENTICAL across every chunk in scan
+                //   ({label} n/n_c)\n\n{digest}\n\n     <- stable across this chunk's rule-batches
+                //   {task_line}\n\n{rb}                 <- varies every rule-batch, never cached
+                //
+                // The repo-map segment is deliberately free of the chunk index/label — that's
+                // what the OLD ordering got wrong (the label sat in front of the repo map, so
+                // the "static" prefix actually differed at ~byte 30 on every chunk and could
+                // never cache-hit across chunks). Leading with the byte-identical repo map
+                // instead means chunk 2, 3, ... of the SAME scan can cache-HIT it instead of
+                // re-billing the repo map on every chunk. Bonus: rules landing last = most
+                // recent context = strongest rule-following (unchanged).
+                //
+                // CACHING: `cache_breakpoints_for_pass` marks a breakpoint after the repo-map
+                // segment (re-reads across chunks) and, when there's more than one rule-batch,
+                // a second one after the chunk (label+digest) segment (re-reads across this
+                // chunk's rule-batches — the existing parallel-mode win). The CLI backend
+                // ignores these breakpoints entirely.
+                let (prompt, cache_bps) =
+                    build_pass_prompt(repo, repo_map, label, ci, n_c, digest, n_b, &task_line, &rb);
                 let session = format!("{session_prefix}-c{ci}-b{bi}");
                 if let Some((store, key)) = feedback {
                     store.register(
@@ -1231,7 +1306,7 @@ async fn run_passes(
                         },
                     );
                 }
-                let r = audit_pass(llm, audit_model, prompt, Some(cache_prefix_len), repo, adopted, feedback, &session, meter).await;
+                let r = audit_pass(llm, audit_model, prompt, cache_bps, repo, adopted, feedback, &session, meter).await;
                 if let Some((store, key)) = feedback {
                     store.set_status(key, &session, if r.is_ok() { "done" } else { "blocked" });
                 }
@@ -1410,8 +1485,8 @@ async fn run_passes_batch(
 
     // Build the full cartesian product of (chunk, rule-batch) items.
     let mut items = Vec::with_capacity(n_c * n_b);
-    // Retain the (ci, bi, prompt, cache_prefix_len) tuples so we can parse results.
-    let mut work_meta: Vec<(usize, usize, String, usize)> = Vec::with_capacity(n_c * n_b);
+    // Retain the (ci, bi, prompt, cache_breakpoints) tuples so we can parse results.
+    let mut work_meta: Vec<(usize, usize, String, Vec<usize>)> = Vec::with_capacity(n_c * n_b);
 
     for ci in 0..n_c {
         let digest = &digests[ci];
@@ -1429,12 +1504,16 @@ async fn run_passes_batch(
             } else {
                 format!("── Check the code above against ONLY the ADOPTED rules below (batch {}/{n_b}). Do NOT report issues outside these rules — a separate pass already covers novel findings. Use the REPO MAP for cross-file context. ──", bi + 1)
             };
-            let static_prefix = format!(
-                "Repository: {repo} ({label} {}/{n_c})\n\n{repo_map}{digest}\n\n",
-                ci + 1,
-            );
-            let cache_prefix_len = static_prefix.len();
-            let prompt = format!("{static_prefix}{task_line}\n\n{rb}");
+            // Same `build_pass_prompt` builder as `run_passes` — see the extensive comment
+            // there and on `cache_breakpoints_for_pass`. In BATCH mode this matters even
+            // more: the default `BATCH_RULE_BATCH_SIZE = usize::MAX` puts every rule in ONE
+            // rule-batch (`n_b == 1`), so `cache_breakpoints_for_pass` drops the
+            // chunk-segment breakpoint entirely (it would be written once and never
+            // re-read, paying a pure ~1.25x write premium for zero benefit) and keeps only
+            // the repo-map breakpoint, which DOES re-read across this batch submission's
+            // other chunks.
+            let (prompt, cache_bps) =
+                build_pass_prompt(repo, repo_map, label, ci, n_c, digest, n_b, &task_line, &rb);
 
             let custom_id = format!("c{ci}-b{bi}");
             let req = {
@@ -1442,13 +1521,13 @@ async fn run_passes_batch(
                     .with_system(audit_system_prompt())
                     .with_max_tokens(8192)
                     .with_model(model.clone())
-                    .with_cache_prefix_len(cache_prefix_len);
+                    .with_cache_breakpoints(cache_bps.clone());
                 // audit_model overrides the default; already folded into `model` above.
                 let _ = &mut r; // avoid unused_mut lint
                 r
             };
             items.push(build_batch_item(&custom_id, &req, &model));
-            work_meta.push((ci, bi, prompt, cache_prefix_len));
+            work_meta.push((ci, bi, prompt, cache_bps));
         }
     }
 
@@ -1460,10 +1539,10 @@ async fn run_passes_batch(
     // number) — gracefully skipped on ANY failure (no key, network error, non-2xx) via
     // `exact_input_token_count`'s `Option` return, since a precise quote is a nice-to-have,
     // never a reason to fail or stall the audit itself.
-    if let Some((ci0, bi0, prompt0, cache_prefix_len0)) = work_meta.first() {
+    if let Some((ci0, bi0, prompt0, cache_bps0)) = work_meta.first() {
         let sample_req = LlmRequest::new(prompt0.clone())
             .with_system(audit_system_prompt())
-            .with_cache_prefix_len(*cache_prefix_len0);
+            .with_cache_breakpoints(cache_bps0.clone());
         if let Some(exact) = crate::llm::exact_input_token_count(llm, &sample_req, &model).await {
             eprintln!(
                 "[camerata-server] batch mode: exact input-token count for chunk {ci0} rule-batch \
@@ -1544,7 +1623,7 @@ async fn run_passes_batch(
     let mut ok = 0usize;
     let mut last_err: Option<anyhow::Error> = None;
 
-    for (ci, bi, _prompt, _cache_prefix_len) in &work_meta {
+    for (ci, bi, _prompt, _cache_bps) in &work_meta {
         let custom_id = format!("c{ci}-b{bi}");
         match all_responses.get(&custom_id) {
             Some(resp) => {
@@ -3770,6 +3849,112 @@ mod tests {
         assert!(d2.contains("truncated"));
     }
 
+    // ── GAP-3: batch-mode prompt-cache cost fix ─────────────────────────────────────
+    //
+    // Two problems, one fix. (1) The OLD prefix embedded the chunk index BEFORE the repo
+    // map (`"Repository: {repo} ({label} {ci}/{n_c})\n\n{repo_map}{digest}"`), so the
+    // "static" prefix actually differed at ~byte 30 on every chunk — the repo map could
+    // NEVER cache-hit across chunks, in any mode. (2) Batch mode defaults to ONE rule-batch
+    // per chunk (`BATCH_RULE_BATCH_SIZE = usize::MAX`), so the single cache breakpoint was
+    // written once and never read back — pure ~1.25x cost, zero benefit.
+    //
+    // The fix: lead with `Repository: {repo}\n\n{repo_map}` (byte-identical across every
+    // chunk), then the chunk's `(label n/n_c)\n\n{digest}\n\n` segment, then the varying
+    // task line + rules. Two cache breakpoints — one after the repo map (re-reads across
+    // chunks), one after the chunk segment (re-reads across that chunk's rule-batches,
+    // dropped entirely when there's only one rule-batch).
+
+    #[test]
+    fn cache_breakpoints_for_pass_keeps_repo_map_bp_always_and_digest_bp_only_when_n_b_gt_1() {
+        // n_b > 1 (parallel mode's normal case, or a batch-mode run with a smaller
+        // BATCH_RULE_BATCH_SIZE): both breakpoints present, repo-map first.
+        let bps = cache_breakpoints_for_pass(100, 250, 3);
+        assert_eq!(bps, vec![100, 250], "both breakpoints present when n_b > 1");
+
+        // n_b == 1 (batch mode's default: BATCH_RULE_BATCH_SIZE = usize::MAX -> one
+        // rule-batch per chunk): the digest breakpoint is dropped — it would be written
+        // once and never re-read, paying a pure cache-write premium for zero benefit.
+        let bps_one = cache_breakpoints_for_pass(100, 250, 1);
+        assert_eq!(bps_one, vec![100], "digest breakpoint dropped when n_b == 1");
+
+        // n_b == 0 is a degenerate/defensive case (should never happen — there's always at
+        // least one rule-batch) but must not panic or add a spurious second breakpoint.
+        let bps_zero = cache_breakpoints_for_pass(100, 250, 0);
+        assert_eq!(bps_zero, vec![100]);
+    }
+
+    #[test]
+    fn build_pass_prompt_leads_with_the_shared_repo_map_not_the_chunk_label() {
+        let repo = "acme/widgets";
+        let repo_map = "REPO MAP:\nfoo.rs: fn foo()\n";
+        let (prompt, _bps) =
+            build_pass_prompt(repo, repo_map, "parallel", 0, 3, "DIGEST-0", 2, "TASK", "RULES");
+        // The prompt must START with the repo-map segment, not the chunk label — this is
+        // the exact ordering bug being fixed (old: "Repository: {repo} ({label} n/n_c)...").
+        assert!(
+            prompt.starts_with(&format!("Repository: {repo}\n\n{repo_map}")),
+            "prompt must lead with the shared repo-map segment: {prompt:?}"
+        );
+        // The chunk label + digest come AFTER the repo map now, not embedded in front of it.
+        let repo_map_prefix = format!("Repository: {repo}\n\n{repo_map}");
+        let rest = &prompt[repo_map_prefix.len()..];
+        assert!(rest.starts_with("(parallel 1/3)"), "chunk label trails the repo map: {rest:?}");
+    }
+
+    #[test]
+    fn build_pass_prompt_repo_map_segment_is_byte_identical_across_chunk_indices() {
+        let repo = "acme/widgets";
+        let repo_map = "REPO MAP:\nfoo.rs: fn foo()\nbar.rs: fn bar()\n";
+        let (prompt_c0, bps_c0) =
+            build_pass_prompt(repo, repo_map, "parallel", 0, 5, "digest for chunk 0", 2, "T", "R");
+        let (prompt_c1, bps_c1) =
+            build_pass_prompt(repo, repo_map, "parallel", 1, 5, "digest for chunk 1", 2, "T", "R");
+
+        // Both prompts carry the SAME first breakpoint offset...
+        assert_eq!(bps_c0[0], bps_c1[0], "the repo-map breakpoint offset must match across chunks");
+        // ...and the bytes up to that offset are IDENTICAL — this is what actually lets the
+        // provider cache-hit the repo map on chunk 2, 3, ... instead of re-billing it.
+        assert_eq!(
+            &prompt_c0[..bps_c0[0]],
+            &prompt_c1[..bps_c1[0]],
+            "the repo-map segment must be byte-identical regardless of chunk index"
+        );
+        // Sanity: the chunk-specific segments genuinely differ (each chunk's digest+label).
+        assert_ne!(&prompt_c0[bps_c0[0]..], &prompt_c1[bps_c1[0]..]);
+    }
+
+    #[test]
+    fn build_pass_prompt_two_breakpoints_when_n_b_gt_1_one_when_n_b_eq_1() {
+        let repo = "acme/widgets";
+        let repo_map = "REPO MAP:\nfoo.rs: fn foo()\n";
+
+        // n_b > 1 (parallel mode's normal case): two breakpoints, repo-map then digest.
+        let (prompt, bps) =
+            build_pass_prompt(repo, repo_map, "parallel", 2, 5, "DIGEST-2", 3, "TASK", "RULES");
+        assert_eq!(bps.len(), 2, "n_b > 1 keeps both breakpoints");
+        assert!(bps[0] < bps[1], "breakpoints are ascending");
+        // The segment between the two breakpoints is the chunk label + digest.
+        let digest_segment = &prompt[bps[0]..bps[1]];
+        assert!(digest_segment.contains("(parallel 3/5)"));
+        assert!(digest_segment.contains("DIGEST-2"));
+        // The suffix (after the last breakpoint) is the varying task line + rules — the
+        // rules must NEVER leak into a cached segment.
+        let suffix = &prompt[bps[1]..];
+        assert!(suffix.contains("TASK") && suffix.contains("RULES"));
+        assert!(!digest_segment.contains("RULES"), "rules must not leak into the cached prefix");
+
+        // n_b == 1 (batch mode's default rule-batch size): only the repo-map breakpoint
+        // survives; the chunk label + digest fold into the uncached suffix instead.
+        let (prompt_one, bps_one) =
+            build_pass_prompt(repo, repo_map, "batch", 2, 5, "DIGEST-2", 1, "TASK", "RULES");
+        assert_eq!(bps_one.len(), 1, "n_b == 1 drops the digest breakpoint");
+        let suffix_one = &prompt_one[bps_one[0]..];
+        assert!(
+            suffix_one.contains("DIGEST-2") && suffix_one.contains("TASK") && suffix_one.contains("RULES"),
+            "digest + task + rules all fold into the single uncached suffix: {suffix_one:?}"
+        );
+    }
+
     #[test]
     fn parse_valid_json_into_findings_and_rules() {
         let raw = r#"Here is the audit:
@@ -4937,6 +5122,188 @@ mod tests {
         }
         fn as_any(&self) -> &dyn std::any::Any {
             self
+        }
+    }
+
+    /// Records every `LlmRequest` it receives — used to inspect the ACTUAL prompt +
+    /// cache-breakpoint structure `run_passes` builds for a real multi-chunk,
+    /// multi-rule-batch scan (GAP-3 regression coverage), rather than only testing the pure
+    /// `build_pass_prompt` helper in isolation. Returns an empty-findings `"{}"` from every
+    /// call so `audit_pass`'s parse step is a harmless no-op.
+    #[derive(Default)]
+    struct CapturingCompleter {
+        seen: std::sync::Mutex<Vec<LlmRequest>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for CapturingCompleter {
+        async fn complete(&self, req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            self.seen.lock().unwrap().push(req);
+            Ok(LlmResponse {
+                text: "{}".to_string(),
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+            })
+        }
+        async fn complete_streaming(
+            &self,
+            req: LlmRequest,
+            on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            on_delta("{}");
+            self.complete(req).await
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// END-TO-END regression for GAP-3, exercising the REAL `run_passes` code path
+    /// (parallel mode) with 2 chunks × 2 rule-batches — not just the pure
+    /// `build_pass_prompt` helper. Confirms: (a) every request carries TWO cache
+    /// breakpoints (n_b == 2 > 1); (b) the bytes up to the FIRST breakpoint (the repo map)
+    /// are byte-identical across ALL FOUR requests, regardless of chunk or rule-batch —
+    /// this is what makes the repo map cache-hit across chunks, the core Gap-3 fix; (c) the
+    /// segment between the two breakpoints (chunk label + digest) is identical across a
+    /// chunk's two rule-batches but differs between chunks (the pre-existing parallel-mode
+    /// win, preserved); (d) rule content never leaks into a cached segment.
+    #[tokio::test]
+    async fn run_passes_produces_byte_identical_repo_map_prefix_across_chunks() {
+        let completer = CapturingCompleter::default();
+        let chunk0: Vec<(String, String)> =
+            vec![("chunk0.rs".to_string(), "// CHUNK0 marker\nfn chunk0() {}".to_string())];
+        let chunk1: Vec<(String, String)> =
+            vec![("chunk1.rs".to_string(), "// CHUNK1 marker\nfn chunk1() {}".to_string())];
+        let chunks: Vec<&[(String, String)]> = vec![&chunk0, &chunk1];
+
+        let batch0: Vec<(String, String)> = vec![("RULE-A".to_string(), "rule A desc".to_string())];
+        let batch1: Vec<(String, String)> = vec![("RULE-B".to_string(), "rule B desc".to_string())];
+        let batches: Vec<&[(String, String)]> = vec![&batch0, &batch1];
+
+        let repo_map = "REPO MAP:\nchunk0.rs: fn chunk0()\nchunk1.rs: fn chunk1()\n".to_string();
+        let adopted = std::collections::HashSet::new();
+
+        let (_findings, _proposed, _requested, ok, err) = run_passes(
+            &completer,
+            "acme/widgets",
+            &repo_map,
+            &adopted,
+            None,
+            None,
+            None,
+            &chunks,
+            &batches,
+            4,
+            "parallel",
+            "test-session",
+            None,
+            false,
+        )
+        .await;
+        assert!(err.is_none(), "no pass should fail: {err:?}");
+        assert_eq!(ok, 4, "2 chunks x 2 rule-batches = 4 passes");
+
+        let seen = completer.seen.lock().unwrap();
+        assert_eq!(seen.len(), 4);
+
+        // (a) Every request carries exactly two cache breakpoints (n_b == 2 > 1).
+        for req in seen.iter() {
+            assert_eq!(
+                req.cache_breakpoints.len(), 2,
+                "n_b==2 keeps both breakpoints: {:?}", req.cache_breakpoints
+            );
+        }
+
+        // (b) The repo-map segment (bytes up to the FIRST breakpoint) is byte-identical
+        // across every one of the 4 requests, regardless of chunk or rule-batch.
+        fn repo_map_segment(req: &LlmRequest) -> &str {
+            &req.prompt[..req.cache_breakpoints[0]]
+        }
+        let first_segment = repo_map_segment(&seen[0]).to_string();
+        for req in seen.iter() {
+            assert_eq!(
+                repo_map_segment(req), first_segment,
+                "the repo-map segment must be byte-identical across every chunk/rule-batch"
+            );
+        }
+
+        // (c) Bucket by chunk (via the CHUNK0/CHUNK1 marker in the digest segment) — within
+        // a chunk, the digest segment (between the two breakpoints) is identical across its
+        // two rule-batches; across chunks, it differs.
+        fn digest_segment(req: &LlmRequest) -> &str {
+            &req.prompt[req.cache_breakpoints[0]..req.cache_breakpoints[1]]
+        }
+        let chunk0_segs: Vec<&str> =
+            seen.iter().map(digest_segment).filter(|s| s.contains("CHUNK0")).collect();
+        let chunk1_segs: Vec<&str> =
+            seen.iter().map(digest_segment).filter(|s| s.contains("CHUNK1")).collect();
+        assert_eq!(chunk0_segs.len(), 2, "both rule-batches for chunk 0");
+        assert_eq!(chunk1_segs.len(), 2, "both rule-batches for chunk 1");
+        assert_eq!(chunk0_segs[0], chunk0_segs[1], "same chunk's digest segment is identical across rule-batches");
+        assert_eq!(chunk1_segs[0], chunk1_segs[1]);
+        assert_ne!(chunk0_segs[0], chunk1_segs[0], "different chunks' digest segments differ");
+
+        // (d) Rule content never leaks into a cached segment — only the uncached suffix.
+        for req in seen.iter() {
+            let suffix = &req.prompt[req.cache_breakpoints[1]..];
+            let cached = &req.prompt[..req.cache_breakpoints[1]];
+            assert!(suffix.contains("RULE-A") || suffix.contains("RULE-B"));
+            assert!(
+                !cached.contains("RULE-A") && !cached.contains("RULE-B"),
+                "rules must never sit inside a cached segment"
+            );
+        }
+    }
+
+    /// n_b == 1 (single rule-batch per chunk — batch mode's default
+    /// `BATCH_RULE_BATCH_SIZE`): only ONE cache breakpoint (the repo map) survives; the
+    /// chunk digest is folded into the uncached suffix rather than paying a cache-write
+    /// premium for a segment that's read back zero times.
+    #[tokio::test]
+    async fn run_passes_drops_the_digest_breakpoint_when_only_one_rule_batch() {
+        let completer = CapturingCompleter::default();
+        let chunk0: Vec<(String, String)> = vec![("chunk0.rs".to_string(), "fn chunk0() {}".to_string())];
+        let chunk1: Vec<(String, String)> = vec![("chunk1.rs".to_string(), "fn chunk1() {}".to_string())];
+        let chunks: Vec<&[(String, String)]> = vec![&chunk0, &chunk1];
+
+        let batch0: Vec<(String, String)> = vec![("RULE-A".to_string(), "rule A desc".to_string())];
+        let batches: Vec<&[(String, String)]> = vec![&batch0]; // n_b == 1
+
+        let repo_map = "REPO MAP:\nchunk0.rs: fn chunk0()\nchunk1.rs: fn chunk1()\n".to_string();
+        let adopted = std::collections::HashSet::new();
+
+        let (_findings, _proposed, _requested, ok, err) = run_passes(
+            &completer,
+            "acme/widgets",
+            &repo_map,
+            &adopted,
+            None,
+            None,
+            None,
+            &chunks,
+            &batches,
+            4,
+            "parallel",
+            "test-session",
+            None,
+            false,
+        )
+        .await;
+        assert!(err.is_none(), "no pass should fail: {err:?}");
+        assert_eq!(ok, 2, "2 chunks x 1 rule-batch = 2 passes");
+
+        let seen = completer.seen.lock().unwrap();
+        for req in seen.iter() {
+            assert_eq!(
+                req.cache_breakpoints.len(), 1,
+                "n_b==1 drops the digest breakpoint: {:?}", req.cache_breakpoints
+            );
         }
     }
 
