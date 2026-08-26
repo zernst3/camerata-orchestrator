@@ -301,7 +301,7 @@ pub struct LlmRequest {
     /// call that shares the same prefix (same chunk digest + repo map across rule-batches).
     /// Ignored by the CLI path (the CLI handles its own context management) and by
     /// non-Anthropic vendors (no-op until their caching protocol is wired).
-    /// Min cacheable prefix: 2048 tokens (Sonnet) / 4096 tokens (Opus/Haiku). Our digests
+    /// Min cacheable prefix: 1024 tokens (Sonnet/Opus) / 2048 tokens (Haiku). Our digests
     /// far exceed this, so a valid `cache_prefix_len` always meets the floor.
     pub cache_prefix_len: Option<usize>,
     /// Optional local repo clone the model may READ on demand (THE INVARIANT: every
@@ -471,6 +471,83 @@ fn compute_cost_usd(
         }
         _ => None,
     })
+}
+
+/// The shared `reqwest::Client` for every Anthropic API call (`complete_api` + the
+/// Message Batches path). Built ONCE, lazily, on first use.
+///
+/// Two problems this fixes: (1) `reqwest::Client::new()` has **no default timeout** — a
+/// stalled TCP connection or a server that accepts the connection but never responds hangs
+/// the call FOREVER. This is especially dangerous on the streaming completion path, which
+/// previously had no backstop at all (the 600s `total_backstop` in `ai_audit.rs` only
+/// wraps the NON-streaming branch). (2) building a fresh `Client` per call throws away
+/// connection pooling/keep-alive, forcing a new TCP+TLS handshake on every single request
+/// in what can be a scan with hundreds of calls.
+///
+/// `.timeout(600s)` bounds the whole request (connect + send + full response body,
+/// including a streamed one) — matching `total_backstop`'s ceiling so neither path can
+/// hang longer than the other. `.connect_timeout(10s)` fails fast when the TCP handshake
+/// itself can't complete (DNS black hole, firewall drop), well before the 600s ceiling.
+fn shared_http_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(600))
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .build()
+            // Building a `Client` only fails on TLS backend init / DNS resolver setup —
+            // an environment problem so fundamental that every other HTTP call in the
+            // process would also be broken. Panicking here (once, lazily, on first real
+            // use) surfaces that immediately rather than deferring to a confusing later
+            // failure inside `complete_api`.
+            .expect("failed to build the shared Anthropic API reqwest::Client")
+    })
+}
+
+/// The Anthropic prompt-cache TTL requested via `cache_control` on the API path (both the
+/// single-call `complete_api` path and the Message Batches path — see
+/// [`build_batch_item`]). Anthropic bills a 5-minute ephemeral cache at the normal
+/// cache-write rate (~1.25x input) and a 1-hour cache at ~2x input on write; both read back
+/// at ~0.1x. 1h only pays for itself when a chunk's rule-batches are spread more than 5
+/// minutes apart (large sequential scans, slow batch-mode turnaround) — the default stays
+/// at 5m so a typical fast-parallel scan isn't paying the 2x write premium for no benefit.
+///
+/// NEEDS LIVE-KEY VERIFICATION: confirm against the current Anthropic API docs that a bare
+/// `"ttl": "1h"` field (no beta header) is accepted now that extended cache TTL has GA'd —
+/// this was written from the compliance-audit brief's description, not a live call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheTtl {
+    FiveMinutes,
+    OneHour,
+}
+
+impl CacheTtl {
+    /// Resolve from `CAMERATA_ANTHROPIC_CACHE_TTL_1H` (truthy -> 1h; anything else,
+    /// including unset, -> the 5m default). Opt-in, not opt-out: the 2x write premium is a
+    /// real cost, so a caller must deliberately ask for the 1h cache.
+    pub fn from_env() -> Self {
+        let truthy = std::env::var("CAMERATA_ANTHROPIC_CACHE_TTL_1H")
+            .ok()
+            .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
+        if truthy {
+            CacheTtl::OneHour
+        } else {
+            CacheTtl::FiveMinutes
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            CacheTtl::FiveMinutes => "5m",
+            CacheTtl::OneHour => "1h",
+        }
+    }
+
+    /// The `cache_control` JSON object to attach to a cacheable content block.
+    fn cache_control_json(self) -> serde_json::Value {
+        serde_json::json!({"type": "ephemeral", "ttl": self.as_str()})
+    }
 }
 
 /// Which backend, resolved from env. Pure so it's unit-testable without real calls.
@@ -910,14 +987,24 @@ impl Llm {
     ///
     /// Prompt caching: when `req.cache_prefix_len` is set, the user message is sent as a
     /// TWO-BLOCK content array instead of a plain string:
-    ///   1. `{type: "text", text: <prefix>, cache_control: {type: "ephemeral"}}` — the stable
-    ///      codebase context (repo map + chunk digest) that the provider caches for 5 minutes.
+    ///   1. `{type: "text", text: <prefix>, cache_control: {type: "ephemeral", ttl: ...}}` —
+    ///      the stable codebase context (repo map + chunk digest) that the provider caches
+    ///      for [`CacheTtl::from_env`]'s TTL (5m default, opt-in 1h).
     ///   2. `{type: "text", text: <suffix>}` — the per-batch varying directive (task line +
     ///      rules block) that differs across rule-batches and must never be part of the prefix.
     ///
-    /// The `anthropic-beta: prompt-caching-2024-07-31` header enables the feature. Without a
-    /// `cache_prefix_len` the request falls through to the plain-string path (no beta header,
-    /// no structural change) so non-caching callers are unaffected.
+    /// Prompt caching is GA (no beta header needed) as of this writing. Without a
+    /// `cache_prefix_len` the request falls through to the plain-string path (no structural
+    /// change) so non-caching callers are unaffected.
+    ///
+    /// RETRY: the POST goes through [`crate::retry::execute_with_retry`], which re-sends
+    /// this EXACT request (same model, same body) on 429/529/5xx/network errors — up to 3
+    /// extra attempts with exponential backoff (2s/8s/30s), honoring the server's
+    /// `retry-after` header when present. 400/401/403 come back as a terminal
+    /// non-success status on the first attempt (never retried) and fall through to the
+    /// `bail!` below exactly as before. This never routes through
+    /// [`call_with_fallback`]/a different model — a transient limit on the CHOSEN model is
+    /// not a reason to silently answer from a different one.
     async fn complete_api(&self, req: &LlmRequest, model: &str) -> anyhow::Result<LlmResponse> {
         let key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!("API backend selected but ANTHROPIC_API_KEY is unset")
@@ -925,7 +1012,7 @@ impl Llm {
 
         // Build the user content: a plain string when caching is not requested; a two-block
         // array when it is (prefix block with cache_control, suffix block without).
-        let (user_content, use_caching) = match req.cache_prefix_len {
+        let user_content = match req.cache_prefix_len {
             Some(split_at) if split_at < req.prompt.len() => {
                 // Split on the byte boundary; clamp to a valid UTF-8 char boundary so we never
                 // slice a multi-byte sequence in half (the min clamp is the builder's job, but
@@ -939,20 +1026,19 @@ impl Llm {
                     .min(req.prompt.len());
                 let prefix = &req.prompt[..safe_split];
                 let suffix = &req.prompt[safe_split..];
-                let content = serde_json::json!([
+                serde_json::json!([
                     {
                         "type": "text",
                         "text": prefix,
-                        "cache_control": {"type": "ephemeral"}
+                        "cache_control": CacheTtl::from_env().cache_control_json()
                     },
                     {
                         "type": "text",
                         "text": suffix
                     }
-                ]);
-                (content, true)
+                ])
             }
-            _ => (serde_json::json!(req.prompt), false),
+            _ => serde_json::json!(req.prompt),
         };
 
         let mut body = serde_json::json!({
@@ -964,23 +1050,17 @@ impl Llm {
             body["system"] = serde_json::json!(system);
         }
 
-        let mut builder = reqwest::Client::new()
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json");
-        // The prompt-caching beta header is only sent when caching is active, so the
-        // non-caching path is byte-identical to the pre-caching implementation.
-        if use_caching {
-            builder = builder.header("anthropic-beta", "prompt-caching-2024-07-31");
-        }
-        let resp = builder
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("Anthropic API request failed: {e}"))?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        // NOTE: no `anthropic-beta` header — `prompt-caching-2024-07-31` is GA now (the
+        // feature activates whenever a `cache_control` block is present, beta or not).
+        let make_request = || {
+            shared_http_client()
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&body)
+        };
+        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
         if !status.is_success() {
             anyhow::bail!("Anthropic API HTTP {status}: {text}");
         }
@@ -1076,6 +1156,60 @@ pub struct BatchMessage {
     pub content: serde_json::Value,
 }
 
+/// Pure request-body builder for [`Llm::count_tokens`] — mirrors `complete_api`'s content
+/// shape (same `cache_prefix_len` prefix/suffix split, same `system` field) so the count
+/// reflects exactly what a real completion call for this `req` would send. No
+/// `cache_control` block: `count_tokens` only needs the split for an accurate count, not
+/// caching (caching has no effect on this endpoint). Kept separate from the HTTP call so
+/// the body-shape logic is unit-testable without a network call.
+fn count_tokens_body(req: &LlmRequest, model: &str) -> serde_json::Value {
+    let user_content = match req.cache_prefix_len {
+        Some(split_at) if split_at < req.prompt.len() => {
+            let safe_split = req.prompt
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i <= split_at)
+                .last()
+                .unwrap_or(split_at)
+                .min(req.prompt.len());
+            let prefix = &req.prompt[..safe_split];
+            let suffix = &req.prompt[safe_split..];
+            serde_json::json!([
+                { "type": "text", "text": prefix },
+                { "type": "text", "text": suffix }
+            ])
+        }
+        _ => serde_json::json!(req.prompt),
+    };
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": [{ "role": "user", "content": user_content }],
+    });
+    if let Some(system) = &req.system {
+        body["system"] = serde_json::json!(system);
+    }
+    body
+}
+
+/// Exact pre-audit input-token estimate via [`Llm::count_tokens`], falling back to `None`
+/// on ANY failure (no key, network/HTTP error, malformed response) — callers are expected
+/// to fall back to the existing heuristic estimate
+/// (`camerata_ui_core::scan::estimate_audit_cost`) when this returns `None`, rather than
+/// treating it as a hard failure. A free, exact number is a nice-to-have precision upgrade
+/// on top of the heuristic, not a new way for the audit (or its cost quote) to fail.
+pub async fn exact_input_token_count(llm: &Llm, req: &LlmRequest, model: &str) -> Option<u64> {
+    match llm.count_tokens(req, model).await {
+        Ok(n) => Some(n),
+        Err(e) => {
+            eprintln!(
+                "[camerata-llm] exact count_tokens estimate unavailable, falling back to the \
+                 heuristic estimate: {e}"
+            );
+            None
+        }
+    }
+}
+
 /// Build a [`BatchItem`] from a [`LlmRequest`] and a deterministic `custom_id`.
 /// The content block handles prompt caching the same way `complete_api` does: when
 /// `req.cache_prefix_len` is set, the user content is split into a cached-prefix block
@@ -1097,7 +1231,7 @@ pub fn build_batch_item(custom_id: impl Into<String>, req: &LlmRequest, model: &
                 {
                     "type": "text",
                     "text": prefix,
-                    "cache_control": {"type": "ephemeral"}
+                    "cache_control": CacheTtl::from_env().cache_control_json()
                 },
                 {
                     "type": "text",
@@ -1171,6 +1305,10 @@ impl Llm {
     /// the caller is responsible for splitting before calling this function. A 256MB POST
     /// body limit is not checked here (the average Camerata batch item is ~5-20KB, so
     /// 100k items is already the binding constraint in practice).
+    ///
+    /// RETRY: same policy as [`Self::complete_api`] — 429/529/5xx/network errors retry the
+    /// SAME submission (3 extra attempts, exponential backoff, `retry-after` honored);
+    /// 400/401/403 are terminal on the first attempt.
     pub async fn submit_batch(&self, items: Vec<BatchItem>) -> anyhow::Result<BatchSubmitResult> {
         let key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
@@ -1186,18 +1324,16 @@ impl Llm {
             );
         }
         let body = serde_json::json!({ "requests": items });
-        let resp = reqwest::Client::new()
-            .post("https://api.anthropic.com/v1/messages/batches")
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01")
-            .header("anthropic-beta", "message-batches-2024-09-24")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("Message Batches submit failed: {e}"))?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        // NOTE: no `anthropic-beta` header — `message-batches-2024-09-24` is GA now.
+        let make_request = || {
+            shared_http_client()
+                .post("https://api.anthropic.com/v1/messages/batches")
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&body)
+        };
+        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
         if !status.is_success() {
             anyhow::bail!("Message Batches API HTTP {status}: {text}");
         }
@@ -1214,20 +1350,23 @@ impl Llm {
     /// Poll the status of a submitted batch. Returns the `processing_status` and current
     /// item counts. When `processing_status == "ended"` the batch is complete and results
     /// can be fetched with [`fetch_batch_results`].
+    ///
+    /// RETRY: a single poll retries transient failures the same way [`Self::complete_api`]
+    /// does. The CALLER (`ai_audit::run_passes_batch`'s poll loop) additionally tolerates
+    /// several consecutive fully-exhausted polls before giving up entirely, since an
+    /// hours-long batch must not die because of one bad polling window after the tokens
+    /// are already spent — see that function's `poll_batch_until_ended` helper.
     pub async fn poll_batch_status(&self, batch_id: &str) -> anyhow::Result<BatchStatus> {
         let key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!("batch polling requires ANTHROPIC_API_KEY")
         })?;
-        let resp = reqwest::Client::new()
-            .get(format!("https://api.anthropic.com/v1/messages/batches/{batch_id}"))
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01")
-            .header("anthropic-beta", "message-batches-2024-09-24")
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("batch poll request failed: {e}"))?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let make_request = || {
+            shared_http_client()
+                .get(format!("https://api.anthropic.com/v1/messages/batches/{batch_id}"))
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+        };
+        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
         if !status.is_success() {
             anyhow::bail!("batch poll HTTP {status}: {text}");
         }
@@ -1247,6 +1386,10 @@ impl Llm {
     ///
     /// Results arrive UNORDERED — the caller must build a `custom_id -> response` map
     /// (see [`reassemble_batch_results`]) and not rely on line order.
+    ///
+    /// RETRY: same policy as [`Self::complete_api`] — losing the results fetch after a
+    /// batch has already run to completion (tokens spent) would be a pure waste, so this
+    /// retries transient failures rather than surfacing immediately.
     pub async fn fetch_batch_results(
         &self,
         batch_id: &str,
@@ -1254,18 +1397,15 @@ impl Llm {
         let key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!("batch result fetch requires ANTHROPIC_API_KEY")
         })?;
-        let resp = reqwest::Client::new()
-            .get(format!(
-                "https://api.anthropic.com/v1/messages/batches/{batch_id}/results"
-            ))
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01")
-            .header("anthropic-beta", "message-batches-2024-09-24")
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("batch results fetch failed: {e}"))?;
-        let status = resp.status();
-        let text = resp.text().await.unwrap_or_default();
+        let make_request = || {
+            shared_http_client()
+                .get(format!(
+                    "https://api.anthropic.com/v1/messages/batches/{batch_id}/results"
+                ))
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+        };
+        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
         if !status.is_success() {
             anyhow::bail!("batch results HTTP {status}: {text}");
         }
@@ -1276,6 +1416,39 @@ impl Llm {
     /// the backend is viable before submitting). Returns `None` for the CLI backend.
     pub fn api_key(&self) -> Option<&str> {
         self.api_key.as_deref()
+    }
+
+    /// Call `POST /v1/messages/count_tokens` for an EXACT input-token count, without
+    /// running (or billing for) a completion. Free on Anthropic's side. Used to replace
+    /// the heuristic char-based pre-audit cost estimate with an exact one when a key is
+    /// available — see [`crate::llm::exact_input_token_count`] for the graceful
+    /// heuristic-fallback wrapper callers should actually use.
+    ///
+    /// Mirrors [`Self::complete_api`]'s request shape (system + one user message, same
+    /// cache_prefix_len splitting) so the token count reflects exactly what a real
+    /// completion call would send. Same retry policy as the rest of this API surface.
+    pub async fn count_tokens(&self, req: &LlmRequest, model: &str) -> anyhow::Result<u64> {
+        let key = self.api_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!("count_tokens requires the `api` backend and ANTHROPIC_API_KEY")
+        })?;
+        let body = count_tokens_body(req, model);
+        let make_request = || {
+            shared_http_client()
+                .post("https://api.anthropic.com/v1/messages/count_tokens")
+                .header("x-api-key", key)
+                .header("anthropic-version", "2023-06-01")
+                .header("content-type", "application/json")
+                .json(&body)
+        };
+        let (status, text) = crate::retry::execute_with_retry(make_request).await?;
+        if !status.is_success() {
+            anyhow::bail!("count_tokens HTTP {status}: {text}");
+        }
+        let v: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("parse count_tokens JSON: {e}"))?;
+        v["input_tokens"]
+            .as_u64()
+            .ok_or_else(|| anyhow::anyhow!("count_tokens response missing `input_tokens`: {text}"))
     }
 }
 

@@ -1270,6 +1270,67 @@ async fn run_passes(
     (findings, proposed, requested, ok, last_err)
 }
 
+/// How many CONSECUTIVE poll failures `poll_batch_until_ended` tolerates before giving up.
+/// A single failed poll (transient network blip, a 5xx that outlasted `count_tokens`'s own
+/// retry budget, etc.) must never kill an hours-long batch after the tokens are already
+/// spent — see the function doc for the full rationale. Resets to 0 on any successful poll.
+const MAX_CONSECUTIVE_POLL_FAILURES: u32 = 5;
+
+/// Poll a submitted batch on a fixed interval until `processing_status == "ended"`,
+/// tolerating up to `max_consecutive_failures` CONSECUTIVE poll failures before giving up.
+/// Each individual `poll_once` call already retries transient HTTP failures internally
+/// (see `Llm::poll_batch_status` / `crate::retry`); this is the OUTER safety net for when
+/// even that budget is exhausted repeatedly — a batch can run for hours, so one bad polling
+/// window (a longer network outage, a burst of 5xx past the inner retry's 3-attempt cap)
+/// must not discard tokens that have already been spent. The counter resets to 0 on every
+/// successful poll, so it only fires on a genuine STREAK of failures, not a "few bad polls
+/// scattered across an otherwise-healthy multi-hour run."
+///
+/// `poll_once` is injected (rather than calling `Llm::poll_batch_status` directly) so this
+/// is unit-testable with a fake that fails a controlled number of times — no live batch, no
+/// network, no mock HTTP server required. `on_status` is called on every SUCCESSFUL poll
+/// (including the final `ended` one) so the caller can log/report progress without this
+/// function knowing anything about logging.
+async fn poll_batch_until_ended<F, Fut>(
+    mut poll_once: F,
+    poll_interval: std::time::Duration,
+    max_consecutive_failures: u32,
+    mut on_status: impl FnMut(&crate::llm::BatchStatus),
+) -> anyhow::Result<()>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = anyhow::Result<crate::llm::BatchStatus>>,
+{
+    let mut consecutive_failures = 0u32;
+    loop {
+        tokio::time::sleep(poll_interval).await;
+        match poll_once().await {
+            Ok(status) => {
+                consecutive_failures = 0;
+                let ended = status.processing_status == "ended";
+                on_status(&status);
+                if ended {
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                consecutive_failures += 1;
+                eprintln!(
+                    "[camerata-server] batch poll failed ({consecutive_failures}/\
+                     {max_consecutive_failures} consecutive failures): {e}"
+                );
+                if consecutive_failures >= max_consecutive_failures {
+                    return Err(e.context(format!(
+                        "batch poll failed {consecutive_failures} times consecutively — giving up \
+                         (the batch may still be running server-side; check its status via the \
+                         Anthropic console before resubmitting)"
+                    )));
+                }
+            }
+        }
+    }
+}
+
 /// Batch execution mode (#61): compile ALL (chunk × rule-batch) pairs into Anthropic Message
 /// Batch items, submit in ONE request, poll to completion, then reassemble by `custom_id`.
 ///
@@ -1391,6 +1452,27 @@ async fn run_passes_batch(
         }
     }
 
+    // GAP-4 (compliance-audit housekeeping): best-effort EXACT pre-audit input-token count
+    // for the first (chunk, rule-batch) pair, via `count_tokens` (free — Anthropic does not
+    // bill this endpoint). This is a precision upgrade over the char-based heuristic
+    // estimate (`camerata_ui_core::scan::estimate_audit_cost`) the UI shows before the scan
+    // starts. Logged only for now (the heuristic estimate remains the persisted/displayed
+    // number) — gracefully skipped on ANY failure (no key, network error, non-2xx) via
+    // `exact_input_token_count`'s `Option` return, since a precise quote is a nice-to-have,
+    // never a reason to fail or stall the audit itself.
+    if let Some((ci0, bi0, prompt0, cache_prefix_len0)) = work_meta.first() {
+        let sample_req = LlmRequest::new(prompt0.clone())
+            .with_system(audit_system_prompt())
+            .with_cache_prefix_len(*cache_prefix_len0);
+        if let Some(exact) = crate::llm::exact_input_token_count(llm, &sample_req, &model).await {
+            eprintln!(
+                "[camerata-server] batch mode: exact input-token count for chunk {ci0} rule-batch \
+                 {bi0} = {exact} tokens (via count_tokens; {} total (chunk,batch) pairs this run)",
+                work_meta.len()
+            );
+        }
+    }
+
     // Tell the job the total pass count so the progress bar can be pre-seeded.
     let total = items.len();
     if let Some((jstore, jid)) = job {
@@ -1433,20 +1515,21 @@ async fn run_passes_batch(
             .and_then(|s| s.trim().parse::<u64>().ok())
             .filter(|n| *n > 0)
             .unwrap_or(10);
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(poll_secs)).await;
-            let status = llm.poll_batch_status(&batch_id).await?;
-            eprintln!(
-                "[camerata-server] batch {batch_id}: status={} (processing={}, succeeded={}, errored={})",
-                status.processing_status,
-                status.request_counts.processing,
-                status.request_counts.succeeded,
-                status.request_counts.errored,
-            );
-            if status.processing_status == "ended" {
-                break;
-            }
-        }
+        poll_batch_until_ended(
+            || llm.poll_batch_status(&batch_id),
+            std::time::Duration::from_secs(poll_secs),
+            MAX_CONSECUTIVE_POLL_FAILURES,
+            |status| {
+                eprintln!(
+                    "[camerata-server] batch {batch_id}: status={} (processing={}, succeeded={}, errored={})",
+                    status.processing_status,
+                    status.request_counts.processing,
+                    status.request_counts.succeeded,
+                    status.request_counts.errored,
+                );
+            },
+        )
+        .await?;
 
         // Fetch + parse results.
         let rows = llm.fetch_batch_results(&batch_id).await?;
@@ -3212,6 +3295,123 @@ pub async fn run_deep_tier(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── poll_batch_until_ended: consecutive-failure tolerance (compliance-audit GAP 1) ──
+    //
+    // Before this, a single failed `poll_batch_status` call propagated straight out of the
+    // batch loop via `?`, killing an hours-long (and already-paid-for) batch run over one
+    // transient blip. These tests drive the extracted helper with a fake `poll_once` — no
+    // live batch, no network — to prove the tolerate-N-then-give-up / reset-on-success
+    // contract without depending on the real Anthropic API.
+
+    fn stub_status(ended: bool) -> crate::llm::BatchStatus {
+        crate::llm::BatchStatus {
+            processing_status: if ended { "ended" } else { "in_progress" }.to_string(),
+            request_counts: crate::llm::BatchRequestCounts::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_loop_succeeds_immediately_when_first_poll_reports_ended() {
+        let calls = std::cell::RefCell::new(0u32);
+        let statuses_seen = std::cell::RefCell::new(Vec::new());
+        let res = poll_batch_until_ended(
+            || {
+                *calls.borrow_mut() += 1;
+                std::future::ready(Ok(stub_status(true)))
+            },
+            std::time::Duration::from_millis(1),
+            5,
+            |s| statuses_seen.borrow_mut().push(s.processing_status.clone()),
+        )
+        .await;
+        assert!(res.is_ok());
+        assert_eq!(*calls.borrow(), 1);
+        assert_eq!(*statuses_seen.borrow(), vec!["ended".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn poll_loop_tolerates_failures_below_the_cap_then_succeeds() {
+        // Fails 4 times (below the cap of 5), then a successful in_progress poll, then ended.
+        // The counter must not carry over once a success resets it — this proves the whole
+        // budget of 5 is available again after any single success mid-run.
+        let call = std::cell::RefCell::new(0u32);
+        let res = poll_batch_until_ended(
+            || {
+                let mut c = call.borrow_mut();
+                *c += 1;
+                let n = *c;
+                async move {
+                    if n <= 4 {
+                        anyhow::bail!("simulated transient poll failure #{n}");
+                    } else if n == 5 {
+                        Ok(stub_status(false)) // success resets the failure counter
+                    } else if n <= 9 {
+                        anyhow::bail!("simulated transient poll failure #{n}")
+                    } else {
+                        Ok(stub_status(true))
+                    }
+                }
+            },
+            std::time::Duration::from_millis(1),
+            5,
+            |_| {},
+        )
+        .await;
+        assert!(
+            res.is_ok(),
+            "4 failures, then a success, then 4 more failures (all below the cap of 5 \
+             consecutive) must not exhaust the budget: {res:?}"
+        );
+        assert_eq!(*call.borrow(), 10);
+    }
+
+    #[tokio::test]
+    async fn poll_loop_gives_up_after_n_consecutive_failures() {
+        let call = std::cell::RefCell::new(0u32);
+        let res = poll_batch_until_ended(
+            || {
+                *call.borrow_mut() += 1;
+                std::future::ready(Err(anyhow::anyhow!("simulated persistent poll failure")))
+            },
+            std::time::Duration::from_millis(1),
+            3,
+            |_| {},
+        )
+        .await;
+        let err = res.expect_err("5 (here: 3-cap) consecutive failures must give up, not hang forever");
+        assert!(err.to_string().contains("3 times consecutively"));
+        assert_eq!(*call.borrow(), 3, "must stop AT the cap, not overshoot it");
+    }
+
+    #[tokio::test]
+    async fn poll_loop_never_calls_on_status_for_a_failed_poll() {
+        // on_status must only fire on SUCCESSFUL polls (it reads fields off BatchStatus,
+        // which doesn't exist for a failed attempt).
+        let seen = std::cell::RefCell::new(0u32);
+        let call = std::cell::RefCell::new(0u32);
+        let _ = poll_batch_until_ended(
+            || {
+                let mut c = call.borrow_mut();
+                *c += 1;
+                let n = *c;
+                async move {
+                    if n == 1 {
+                        anyhow::bail!("simulated failure")
+                    } else {
+                        Ok(stub_status(true))
+                    }
+                }
+            },
+            std::time::Duration::from_millis(1),
+            5,
+            |_| {
+                *seen.borrow_mut() += 1;
+            },
+        )
+        .await;
+        assert_eq!(*seen.borrow(), 1, "on_status fires exactly once, for the ended poll only");
+    }
 
     #[test]
     fn consensus_is_conservative_on_disagreement() {

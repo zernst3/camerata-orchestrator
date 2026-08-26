@@ -28,6 +28,9 @@ pub mod llm;
 pub mod model_registry;
 pub mod provider_policy;
 pub mod rate_limit;
+// Internal retry/backoff policy for the Anthropic API transport (`llm::complete_api` +
+// the Message Batches path). Not part of the public surface — `llm` is the only caller.
+pub(crate) mod retry;
 pub mod usage_ledger;
 
 // Flat crate-root re-exports for the most-referenced types, so cross-crate callers can
