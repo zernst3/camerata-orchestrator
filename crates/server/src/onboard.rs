@@ -429,6 +429,14 @@ pub struct ScanReport {
     pub proposed_rules: Vec<ProposedRule>,
     /// True when no scan was performed because GitHub is not connected.
     pub gated: bool,
+    /// True when the scan was REFUSED by the compliance backend gate — an API-only project
+    /// (`cli_active` OFF) with no Anthropic key, i.e. a [`crate::llm::BackendResolution::Blocked`].
+    /// Distinct from `gated` (the GitHub-connect gate): both mean "no scan ran", but this is the
+    /// compliance block, so the UI renders it under its own "Scan blocked" heading with a key/CLI
+    /// hint rather than inferring the state from the report's shape. See the backend-safety design
+    /// doc (`docs/design/2026-08-27_backend-safety-and-live-models.md`).
+    #[serde(default)]
+    pub blocked: bool,
     /// A human message (e.g. the connect-GitHub gate, a per-repo error, or a cap).
     pub message: Option<String>,
     /// REAL token usage + cost for the Phase-2 audit (every pass + calibration), when the
@@ -469,6 +477,7 @@ impl ScanReport {
             findings: Vec::new(),
             proposed_rules: Vec::new(),
             gated: true,
+            blocked: false,
             actual_usage: None,
             deep: None,
             message: Some(
@@ -650,15 +659,16 @@ pub async fn audit_repos(
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
     // THE GATE: resolved before anything else — no file read, no deterministic tool, no
     // model call — because a `Blocked` project must not scan AT ALL, not just skip the LLM
-    // call. Reuses the same `gated`/`message` shape the "GitHub not connected" gate already
-    // uses (`ScanReport::gated`), so the UI's existing gate-message rendering picks this up
-    // for free; `gated` itself is left `false` since this isn't the GitHub gate, only the
-    // message channel is shared. The prior manifest (if any) is preserved rather than wiped,
-    // so a later, unblocked scan can still go incremental.
+    // call. Reuses `ScanReport::gated`'s zero-stats shape for the empty report, but sets the
+    // EXPLICIT `blocked` flag (not `gated`, which means the GitHub-connect gate) so the UI
+    // renders the compliance block unambiguously — never inferring it from the report's shape,
+    // which would misfire on a legitimate empty-repo scan. The prior manifest (if any) is
+    // preserved rather than wiped, so a later, unblocked scan can still go incremental.
     if let crate::llm::BackendResolution::Blocked { message } = &backend_resolution {
         let repos: Vec<String> = sources.iter().map(|(spec, _)| spec.clone()).collect();
         let mut report = ScanReport::gated(&repos);
         report.gated = false;
+        report.blocked = true;
         report.message = Some(message.clone());
         return (report, incremental_prior.cloned().unwrap_or_default());
     }
@@ -2459,6 +2469,11 @@ mod tests {
         );
         assert_eq!(report.files_scanned, 0, "no file was read for a blocked scan");
         assert!(!report.gated, "Blocked is a distinct condition from the GitHub-not-connected gate");
+        assert!(
+            report.blocked,
+            "the explicit compliance-block flag must be set, so the UI renders the block \
+             unambiguously rather than inferring it from the report's shape"
+        );
         assert_eq!(
             report.message.as_deref(),
             Some("This project is API-only (CLI disabled). Add an Anthropic API key to run."),

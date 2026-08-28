@@ -605,6 +605,12 @@ pub(super) struct ScanReportView {
     pub findings: Vec<FindingView>,
     pub proposed_rules: Vec<ProposedRuleView>,
     pub gated: bool,
+    /// Feature B compliance block: the scan was REFUSED (API-only project, no Anthropic key).
+    /// Set explicitly by the server (a `BackendResolution::Blocked`) so we render the block
+    /// under its own heading rather than inferring it from the report's shape. `serde(default)`
+    /// so reports persisted before this field existed still deserialize (as `false`).
+    #[serde(default)]
+    pub blocked: bool,
     #[serde(default)]
     pub message: Option<String>,
     /// OPT-IN deep compliance & security tier output (#55). `None` unless the audit
@@ -2209,7 +2215,10 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
                 // Scan results: the audit findings + proposed-rules tables (chorale).
                 if let Some(report) = scan() {
                     {
-                        let looks_blocked = scan_report_looks_blocked(&report);
+                        // Prefer the explicit server-set `blocked` flag; the shape heuristic is
+                        // kept only as a back-compat fallback for any report serialized before the
+                        // flag existed (it never sets `blocked`, so `false || heuristic`).
+                        let looks_blocked = report.blocked || scan_report_looks_blocked(&report);
                         rsx! {
                             if report.gated || looks_blocked {
                                 div { class: "onboard-gate",
@@ -2505,22 +2514,23 @@ pub(super) fn GreenfieldResultView(result: GreenfieldScaffoldResult) -> Element 
     }
 }
 
-/// Feature B — the compliance-safety gate (backend-safety-and-live-models design doc): a
-/// `Blocked` resolution (API-only project, no Anthropic key) aborts the scan BEFORE any file
-/// is read and returns a report with `gated: false` (it isn't the GitHub-connect gate — only
-/// its `message` channel is reused) but `files_scanned`/`findings`/`proposed_rules` all empty.
-/// Left to fall into the `ScanResults` branch, that would render as a full report of all-zero
-/// stats — reading as "we scanned and found nothing," a materially different (and misleading)
-/// claim from "we refused to scan." This detects that shape so the caller can route it through
-/// the same gate box as the GitHub-connect gate instead. A factual (non-blocked) scan of a
-/// genuinely empty/unscannable repo with no message attached is NOT mistaken for this — the
-/// combination of a present `message` AND all-zero counts is what's distinctive.
+/// Feature B — the compliance-safety gate (backend-safety-and-live-models design doc):
+/// BACK-COMPAT FALLBACK ONLY. The server now sets an explicit `ScanReport.blocked` flag on a
+/// `Blocked` resolution (API-only project, no Anthropic key), which the caller keys off
+/// directly. This shape-inference remains solely for reports serialized before that flag
+/// existed. It detects the zero-stats-plus-message shape a block leaves behind — but excludes
+/// any `⚠ COMPLIANCE:`-prefixed message, since that marks a `CliFallbackWarn` scan (which DID
+/// run, just on the CLI) and could otherwise be mistaken for a block when it happened to scan
+/// an empty repo.
 fn scan_report_looks_blocked(report: &ScanReportView) -> bool {
     !report.gated
-        && report.message.is_some()
         && report.files_scanned == 0
         && report.findings.is_empty()
         && report.proposed_rules.is_empty()
+        && report
+            .message
+            .as_deref()
+            .is_some_and(|m| !m.trim().is_empty() && !m.contains(COMPLIANCE_NOTE_PREFIX))
 }
 
 /// The exact prefix `audit_repos` (crates/server/src/onboard.rs) attaches to a

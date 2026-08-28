@@ -23,6 +23,7 @@ pub fn build_report(
         findings,
         proposed_rules,
         gated: false,
+        blocked: false,
         message: None,
         actual_usage: None,
         deep: None,

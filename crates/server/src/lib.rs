@@ -21471,6 +21471,7 @@ mod tests {
             }],
             proposed_rules: Vec::new(),
             gated: false,
+            blocked: false,
             message: None,
             actual_usage: None,
             deep: None,
