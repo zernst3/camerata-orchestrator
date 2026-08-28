@@ -324,6 +324,11 @@ pub async fn execute_live_run_tiered(
     policy: crate::provider_policy::ProviderPolicy,
     creds: Arc<dyn crate::credentials::CredentialStore>,
     limiter: Arc<crate::rate_limit::ProviderRateLimiter>,
+    // Feature B — the compliance-safety gate (see
+    // `docs/design/2026-08-27_backend-safety-and-live-models.md`): the active project's
+    // `cli_active` flag, resolved by the caller (`state.projects.active()`) and threaded into
+    // the `ServerOrchestratorDriverFactory` this run builds for its lead/children.
+    cli_active: bool,
 ) {
     store.set_status(&run_id, RunStatus::Executing, false);
 
@@ -431,6 +436,7 @@ pub async fn execute_live_run_tiered(
                 Some(run_id.clone()),
                 // LIFECYCLE-10: the lead + its delegate children write to THIS run's sink.
                 Some(sink_path.clone()),
+                cli_active,
             ),
         ));
 

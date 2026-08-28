@@ -645,6 +645,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         false, // escalation
         None,  // on_activity heartbeat
         None, // governance — no log wired in this unit test
+        true, // cli_active — this test asserts routing, not Feature B's compliance gate
     );
     assert!(claude.is_ok(), "claude driver builds without a key");
 
@@ -665,6 +666,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         false, // escalation
         None,  // on_activity heartbeat
         None, // governance — no log wired in this unit test
+        true, // cli_active — irrelevant to the openrouter branch
     );
     assert!(or.is_ok(), "openrouter driver builds with a key");
 
@@ -684,6 +686,7 @@ fn scope5_build_agent_driver_routes_by_provider() {
         false, // escalation
         None,  // on_activity heartbeat
         None, // governance — no log wired in this unit test
+        true, // cli_active — irrelevant to the openrouter branch
     );
     let msg = match err {
         Err(e) => e.to_string(),
@@ -864,6 +867,7 @@ fn server_orch_factory(
         std::path::PathBuf::from("/bin/camerata-gateway"),
         Some("run-7".to_string()),
         None,
+        true, // cli_active — these routing tests aren't exercising Feature B's compliance gate
     )
 }
 
@@ -1004,6 +1008,7 @@ fn scope7_gate_lead_is_orchestrator_child_is_not() {
         vec![camerata_core::RuleId("GOV-1".to_string())],
         Some("run-7".to_string()),
         None,
+        true, // cli_active — this test isn't exercising Feature B's compliance gate
     );
     let tmp = tempfile::TempDir::new().unwrap();
     // build_child requires a real worktree dir for prepare_session; tmp suffices.

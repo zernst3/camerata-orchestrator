@@ -2276,6 +2276,11 @@ async fn start_governed_run(
                     let live_policy = state.settings.provider_policy();
                     let live_creds = state.credential_store.clone();
                     let live_limiter = state.rate_limiter.clone();
+                    // Feature B — the compliance-safety gate: the active project's `cli_active`
+                    // flag, threaded into the lead/child driver factory. No active project
+                    // floors to `cli_active=false` (as strict as a freshly-created project).
+                    let live_cli_active =
+                        state.projects.active().map(|p| p.cli_active).unwrap_or(false);
                     // LIFECYCLE-1: register the abort handle so a Stop reaps the greenfield
                     // fleet's live agent subprocesses (kill_on_drop). Cleared on finish.
                     let runs_for_clear = state.runs.clone();
@@ -2295,6 +2300,7 @@ async fn start_governed_run(
                             live_policy,
                             live_creds,
                             live_limiter,
+                            live_cli_active,
                         )
                         .await;
                         runs_for_clear.clear_abort(&rid_for_clear);

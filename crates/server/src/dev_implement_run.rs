@@ -1214,6 +1214,16 @@ pub async fn execute_dev_implement_run(
     let store_hb = runs.clone();
     let rid_hb = run_id.clone();
     let on_activity: HeartbeatFn = Arc::new(move || store_hb.touch_activity(&rid_hb, None));
+    // Feature B — the compliance-safety gate (see
+    // `docs/design/2026-08-27_backend-safety-and-live-models.md`): this run's project's own
+    // `cli_active` flag. `project_id` is already threaded into this function for the
+    // project-memory sink above; a project-less run (no active project) floors to
+    // `cli_active=false` — as strict as a freshly-created project, never more permissive.
+    let cli_active = project_id
+        .as_deref()
+        .and_then(|id| projects.get(id))
+        .map(|p| p.cli_active)
+        .unwrap_or(false);
     let driver: Arc<dyn AgentDriver> = match build_agent_driver(
         &model,
         &registry,
@@ -1236,6 +1246,7 @@ pub async fn execute_dev_implement_run(
         // priority deny site) — pairs the log with THIS run's id so every gated_write
         // allow/deny + agent_step this driver executes lands under `run_id`.
         governance_log.clone().map(|log| (log, run_id.clone())),
+        cli_active,
     ) {
         Ok(d) => d,
         Err(e) => {

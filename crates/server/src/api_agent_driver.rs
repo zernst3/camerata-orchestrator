@@ -2003,14 +2003,35 @@ impl LlmPort for AnthropicNoopCompleter {
 /// key still takes effect without a restart, with no process-env mutation. The backend signal
 /// is still read from `CAMERATA_LLM_BACKEND` env, which is hydrated ONCE at single-threaded
 /// startup from the persisted setting (see `run`), so it is never written after threads spawn.
+///
+/// SUPERSEDED for production driver selection by [`resolve_claude_backend`] (Feature B, the
+/// compliance-safety gate) — see `docs/design/2026-08-27_backend-safety-and-live-models.md`.
+/// The two signals this answers (`backend==api` AND key-present) are exactly the `has_api_key`
+/// and `app_backend` inputs `resolve_claude_backend` feeds into `resolve_backend`, but this
+/// function alone can't express `cli_active` forcing the API path even when `app_backend` says
+/// `cli`. Kept (test-only now) because the exhaustive routing tests below assert this exact
+/// legacy truth table directly, independent of the newer gate.
+#[cfg_attr(not(test), allow(dead_code))]
 fn anthropic_api_backend_key(creds: &dyn crate::credentials::CredentialStore) -> Option<String> {
     let backend = std::env::var("CAMERATA_LLM_BACKEND").ok();
     if backend.as_deref() != Some("api") {
         return None;
     }
-    // Store-first, env-fallback: mirrors `credentials::resolve` so a keychain-saved key wins
-    // and existing dotenv/CI setups keep working. A store read error must not silently degrade
-    // to env with no trace, so warn and fall back (matches the resolve() posture).
+    anthropic_key_from_store_or_env(creds)
+}
+
+/// The Anthropic API key from the credential STORE first (env fallback for back-compat) —
+/// decoupled from the `CAMERATA_LLM_BACKEND` preference check so it can be shared by both
+/// [`anthropic_api_backend_key`] (the legacy preference-gated lookup) and the Feature-B
+/// compliance-safety gate ([`build_claude_driver`]), which must be able to fetch the key even
+/// when the app-wide preference says `cli` — a project's `cli_active=false` FORCES the API
+/// path regardless of that preference (see
+/// `docs/design/2026-08-27_backend-safety-and-live-models.md`).
+///
+/// ROUTES-9: store-first, env-fallback: mirrors `credentials::resolve` so a keychain-saved key
+/// wins and existing dotenv/CI setups keep working. A store read error must not silently
+/// degrade to env with no trace, so warn and fall back (matches the resolve() posture).
+fn anthropic_key_from_store_or_env(creds: &dyn crate::credentials::CredentialStore) -> Option<String> {
     match creds.get(crate::credentials::ANTHROPIC_API_KEY) {
         Ok(Some(k)) if !k.trim().is_empty() => return Some(k),
         Ok(_) => {}
@@ -2024,6 +2045,23 @@ fn anthropic_api_backend_key(creds: &dyn crate::credentials::CredentialStore) ->
         .filter(|k| !k.trim().is_empty())
 }
 
+/// Resolve the Feature-B compliance-safety [`crate::llm::BackendResolution`] for the `claude`
+/// provider (see `docs/design/2026-08-27_backend-safety-and-live-models.md`), given the
+/// caller-supplied PROJECT `cli_active` flag. Gathers the same shape of inputs as the audit
+/// seam's `resolve_backend_for_project` (in `lib.rs`), but reads `app_backend` directly from
+/// `CAMERATA_LLM_BACKEND` env rather than through a `SettingsStore` — this module's call sites
+/// (the gov-dev agent driver factories) don't carry a `SettingsStore` reference, and the env
+/// var is already the EFFECTIVE value here: it's hydrated once at single-threaded startup from
+/// the persisted setting (see `anthropic_api_backend_key`'s doc) and never mutated afterward.
+fn resolve_claude_backend(
+    creds: &dyn crate::credentials::CredentialStore,
+    cli_active: bool,
+) -> crate::llm::BackendResolution {
+    let app_backend = std::env::var("CAMERATA_LLM_BACKEND").unwrap_or_default();
+    let has_api_key = crate::anthropic_api_key_present(creds);
+    crate::llm::resolve_backend(&app_backend, has_api_key, cli_active)
+}
+
 /// Build a `claude`-provider driver: an Anthropic-shape [`ApiAgentDriver`] when
 /// `CAMERATA_LLM_BACKEND=api` + `ANTHROPIC_API_KEY` are set, else the [`ClaudeCliDriver`].
 ///
@@ -2032,6 +2070,21 @@ fn anthropic_api_backend_key(creds: &dyn crate::credentials::CredentialStore) ->
 /// coupling everywhere: under backend=api it uses the Anthropic API agent; under cli it
 /// uses the CLI. Either way the result is gated identically (same `evaluate_call`, same
 /// worktree jail, same orchestrator gating).
+///
+/// Feature B — the compliance-safety gate (see
+/// `docs/design/2026-08-27_backend-safety-and-live-models.md`): `cli_active` is the calling
+/// PROJECT's master switch for whether the CLI transport may be used at all. Resolved via
+/// [`resolve_claude_backend`] BEFORE any driver is built:
+/// - `Blocked` -> refuse to build ANYTHING; returns `Err` (the caller must not start the run).
+/// - `CliFallbackWarn` -> proceeds on the CLI, but the warning is logged loudly (prefixed
+///   `⚠ COMPLIANCE:`) so it's never a silent downgrade.
+/// - `Api` / `Cli` -> proceeds normally, exactly as before this gate existed.
+///
+/// NOTE: `cli_active=false` can FORCE the API path even when the app-wide `CAMERATA_LLM_BACKEND`
+/// preference says `cli` (see the truth table in the design doc) — so the API-vs-CLI choice
+/// below is driven by the RESOLUTION, not by re-deriving it from `anthropic_api_backend_key`
+/// (which only ever answers "does the app-wide preference say api+key", not "does this
+/// project's compliance posture require api").
 fn build_claude_driver(
     model_id: &str,
     // ROUTES-9: credential store, consulted store-first (env fallback) for the Anthropic key
@@ -2052,8 +2105,23 @@ fn build_claude_driver(
     // the module-level Phase H2 note). `None` for callers with no governance log wired (tests) or
     // for a caller that intentionally skips this instrumentation (delegated/fanned-out children).
     governance: Option<(Arc<camerata_persistence::GovernanceLog>, String)>,
-) -> Arc<dyn AgentDriver> {
-    if let Some(key) = anthropic_api_backend_key(creds) {
+    // Feature B: the calling project's `cli_active` compliance flag. See the fn doc.
+    cli_active: bool,
+) -> anyhow::Result<Arc<dyn AgentDriver>> {
+    let (key, fallback_warning) = match resolve_claude_backend(creds, cli_active) {
+        crate::llm::BackendResolution::Blocked { message } => {
+            anyhow::bail!(message);
+        }
+        crate::llm::BackendResolution::Api => (anthropic_key_from_store_or_env(creds), None),
+        crate::llm::BackendResolution::CliFallbackWarn { message } => (None, Some(message)),
+        crate::llm::BackendResolution::Cli => (None, None),
+    };
+    if let Some(message) = &fallback_warning {
+        // Never silent: this is the exact scenario the gate exists to catch — an api-only
+        // preference silently sliding onto the operator's personal CLI subscription.
+        eprintln!("[camerata-server] ⚠ COMPLIANCE: {message}");
+    }
+    if let Some(key) = key {
         // Anthropic Messages API agent. Same gate surface as every other ApiAgentDriver:
         // gated_write-only, worktree-jailed, delegate/fan_out only when orchestrator=true.
         let mut driver = ApiAgentDriver::new(Arc::new(AnthropicNoopCompleter), model_id)
@@ -2070,7 +2138,7 @@ fn build_claude_driver(
         if let Some((log, run_id)) = governance {
             driver = driver.with_governance(log, run_id);
         }
-        Arc::new(driver)
+        Ok(Arc::new(driver))
     } else {
         let mut cli_driver = camerata_agent::ClaudeCliDriver::new(mcp_config_path)
             .as_orchestrator(orchestrator)
@@ -2084,7 +2152,7 @@ fn build_claude_driver(
         if let Some(cb) = on_activity {
             cli_driver = cli_driver.with_on_activity(cb);
         }
-        Arc::new(cli_driver)
+        Ok(Arc::new(cli_driver))
     }
 }
 
@@ -2147,6 +2215,12 @@ pub fn build_agent_driver(
     // path (OpenRouter, or Anthropic-API-backend); the CLI path ignores it (see
     // `build_claude_driver`).
     governance: Option<(Arc<camerata_persistence::GovernanceLog>, String)>,
+    // Feature B — the compliance-safety gate (see
+    // `docs/design/2026-08-27_backend-safety-and-live-models.md`): the calling project's
+    // `cli_active` flag. Only meaningful on the `claude` provider path (`build_claude_driver`
+    // enforces it); ignored for `openrouter`, which has its own independent
+    // key-presence-or-error gate above and no CLI transport to guard against.
+    cli_active: bool,
 ) -> anyhow::Result<Arc<dyn AgentDriver>> {
     let provider = registry
         .all_entries()
@@ -2193,8 +2267,10 @@ pub fn build_agent_driver(
             Ok(Arc::new(driver))
         }
         // "claude" or any unrecognised provider: CLI by default, or the Anthropic Messages
-        // API agent when CAMERATA_LLM_BACKEND=api + ANTHROPIC_API_KEY are set.
-        _ => Ok(build_claude_driver(
+        // API agent when CAMERATA_LLM_BACKEND=api + ANTHROPIC_API_KEY are set. `build_claude_driver`
+        // now returns a `Result` (Feature B: `Blocked` refuses to build anything), so this arm
+        // no longer wraps it in an extra `Ok(...)`.
+        _ => build_claude_driver(
             model_id,
             creds,
             mcp_config_path,
@@ -2204,7 +2280,8 @@ pub fn build_agent_driver(
             escalation,
             on_activity,
             governance,
-        )),
+            cli_active,
+        ),
     }
 }
 
@@ -2257,6 +2334,11 @@ pub struct ServerChildDriverFactory {
     /// child's gateway mcp-config env (never the shared parent process env). `None` = no
     /// live gate-events capture for children.
     gate_events_file: Option<PathBuf>,
+    /// Feature B — the compliance-safety gate: the PARENT run's project `cli_active` flag,
+    /// inherited by every delegated/fanned-out child (a child never gets its own, independent
+    /// compliance posture — same principle as `policy` above for the OpenRouter safety
+    /// policy). See `docs/design/2026-08-27_backend-safety-and-live-models.md`.
+    cli_active: bool,
 }
 
 impl ServerChildDriverFactory {
@@ -2271,6 +2353,7 @@ impl ServerChildDriverFactory {
         rule_subset: Vec<RuleId>,
         run_session_id: Option<String>,
         gate_events_file: Option<PathBuf>,
+        cli_active: bool,
     ) -> Self {
         Self {
             registry,
@@ -2281,6 +2364,7 @@ impl ServerChildDriverFactory {
             rule_subset,
             run_session_id,
             gate_events_file,
+            cli_active,
         }
     }
 }
@@ -2356,6 +2440,8 @@ impl camerata_gateway::delegate::ChildDriverFactory for ServerChildDriverFactory
             // (visible to the parent's own agent_step trail). Documented skip; the top-level
             // implementer driver (built directly in `dev_implement_run.rs`) IS wired.
             None,
+            // Feature B: children inherit the parent run's project cli_active flag.
+            self.cli_active,
         )
         .map_err(|e| std::io::Error::other(format!("build child driver for `{model}`: {e}")))?;
 
@@ -2409,6 +2495,11 @@ pub struct ServerOrchestratorDriverFactory {
     /// LIFECYCLE-10: the run's OWN gate-events sink, threaded per-spawn into the lead's and
     /// its delegate children's gateway mcp-config env (never the shared parent process env).
     gate_events_file: Option<PathBuf>,
+    /// Feature B — the compliance-safety gate: this run's project `cli_active` flag, applied
+    /// to the lead's own claude-provider routing AND inherited by every embedded
+    /// [`ServerChildDriverFactory`] this builds for delegated/fanned-out children. See
+    /// `docs/design/2026-08-27_backend-safety-and-live-models.md`.
+    cli_active: bool,
 }
 
 impl ServerOrchestratorDriverFactory {
@@ -2422,6 +2513,7 @@ impl ServerOrchestratorDriverFactory {
         gateway_bin: PathBuf,
         run_session_id: Option<String>,
         gate_events_file: Option<PathBuf>,
+        cli_active: bool,
     ) -> Self {
         Self {
             registry,
@@ -2431,6 +2523,7 @@ impl ServerOrchestratorDriverFactory {
             gateway_bin,
             run_session_id,
             gate_events_file,
+            cli_active,
         }
     }
 
@@ -2519,6 +2612,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                     rule_subset.clone(),
                     self.run_session_id.clone(),
                     self.gate_events_file.clone(),
+                    self.cli_active,
                 );
 
                 let orch_config = camerata_gateway::delegate::OrchestratorConfig {
@@ -2539,12 +2633,33 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                 Ok(Box::new(driver))
             }
             // "claude" or any unrecognised provider: the Anthropic Messages API native
-            // orchestrator when CAMERATA_LLM_BACKEND=api + ANTHROPIC_API_KEY are set, else
-            // the CLI orchestrator path (unchanged). Either way the lead is the ONLY stage
-            // this factory builds, so only the lead can carry delegate/fan_out; its children
-            // are built per-model + gated by the embedded ServerChildDriverFactory.
+            // orchestrator when the Feature-B resolution says `Api`, else the CLI orchestrator
+            // path. Either way the lead is the ONLY stage this factory builds, so only the lead
+            // can carry delegate/fan_out; its children are built per-model + gated by the
+            // embedded ServerChildDriverFactory.
+            //
+            // Feature B — the compliance-safety gate (see
+            // `docs/design/2026-08-27_backend-safety-and-live-models.md`): resolved from THIS
+            // run's project `cli_active` flag BEFORE any driver is built. `Blocked` refuses to
+            // build the lead at all (propagates as `Err`, so the run never starts);
+            // `CliFallbackWarn` logs loudly and falls through to the CLI orchestrator below —
+            // it must NOT take the Anthropic-API branch with no key.
             _ => {
-                if let Some(key) = anthropic_api_backend_key(self.creds.as_ref()) {
+                let resolution = resolve_claude_backend(self.creds.as_ref(), self.cli_active);
+                let key = match resolution {
+                    crate::llm::BackendResolution::Blocked { message } => {
+                        return Err(anyhow::anyhow!(message));
+                    }
+                    crate::llm::BackendResolution::Api => {
+                        anthropic_key_from_store_or_env(self.creds.as_ref())
+                    }
+                    crate::llm::BackendResolution::CliFallbackWarn { message } => {
+                        eprintln!("[camerata-server] ⚠ COMPLIANCE: {message}");
+                        None
+                    }
+                    crate::llm::BackendResolution::Cli => None,
+                };
+                if let Some(key) = key {
                     // Native Anthropic-shape orchestrator. Mirrors the OpenRouter arm: a
                     // ServerChildDriverFactory resolves each delegate/fan_out child to ITS
                     // model's provider (CLI / Anthropic API / OpenRouter), gated.
@@ -2559,6 +2674,7 @@ impl camerata_fleet::orchestrator::OrchestratorDriverFactory for ServerOrchestra
                         rule_subset.clone(),
                         self.run_session_id.clone(),
                         self.gate_events_file.clone(),
+                        self.cli_active,
                     );
 
                     let orch_config = camerata_gateway::delegate::OrchestratorConfig {
@@ -3367,6 +3483,7 @@ mod tests {
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
             None, // governance — no log wired in this unit test
+            true, // cli_active — this test exercises routing, not Feature B's gate
         );
         assert!(
             result.is_ok(),
@@ -3422,6 +3539,7 @@ mod tests {
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
             None, // governance — no log wired in this unit test
+            true, // cli_active — irrelevant to the openrouter branch
         );
         assert!(
             result.is_ok(),
@@ -3454,6 +3572,7 @@ mod tests {
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
             None, // governance — no log wired in this unit test
+            true, // cli_active — irrelevant to the openrouter branch
         );
         assert!(
             result.is_err(),
@@ -3755,6 +3874,7 @@ mod tests {
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
             None, // governance — no log wired in this unit test
+            true, // cli_active — irrelevant to the openrouter branch
         )
         .expect("build must succeed");
 
@@ -3804,6 +3924,7 @@ mod tests {
             vec![gov1_rule()],
             None,
             None,
+            true, // cli_active — these routing tests aren't exercising Feature B's gate
         )
     }
 
@@ -4437,9 +4558,14 @@ mod tests {
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
             None, // governance — no log wired in this unit test
-        ); // building must not panic / spawn
+            true, // cli_active — key present forces Api regardless; not exercising the gate
+        )
+        .expect("building must not panic / spawn"); // Result now — Feature B can fail-closed
 
-        // default cli: routing helper does not fire, CLI driver builds.
+        // default cli: routing helper does not fire, CLI driver builds. cli_active=true here
+        // (a personal/non-compliance-gated scenario) because with the new secure default
+        // (cli_active=false) + no key this would now correctly BLOCK — see the dedicated
+        // Feature-B gate tests below for that behavior.
         std::env::remove_var("CAMERATA_LLM_BACKEND");
         std::env::remove_var("ANTHROPIC_API_KEY");
         assert!(anthropic_api_backend_key(&creds).is_none());
@@ -4453,6 +4579,99 @@ mod tests {
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
             None, // governance — no log wired in this unit test
+            true, // cli_active — see comment above
+        )
+        .expect("building must not panic / spawn");
+    }
+
+    // ── Feature B: the compliance-safety backend gate ─────────────────────────
+
+    /// `cli_active=false` (the secure default) + no key -> `build_claude_driver` must refuse
+    /// to build ANYTHING, returning `Err` with the block message. No driver, no fallback.
+    #[test]
+    fn build_claude_driver_blocks_when_cli_inactive_and_no_key() {
+        let _g = env_lock();
+        let _snap = EnvSnapshot::capture();
+        std::env::remove_var("CAMERATA_LLM_BACKEND");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        let creds = empty_creds();
+
+        let result = build_claude_driver(
+            "claude-opus-5",
+            &creds,
+            "/tmp/fake-mcp.json",
+            vec![gov1_rule()],
+            None,
+            false,
+            false, // escalation
+            None,  // on_activity
+            None,  // governance
+            false, // cli_active — API-only, and no key is configured
+        );
+        let err = result.err().expect("a cli_active=false, no-key project must be blocked");
+        assert!(
+            err.to_string().contains("API-only"),
+            "block message must be user-visible: {err}"
+        );
+    }
+
+    /// `cli_active=false` FORCES the API path even when `CAMERATA_LLM_BACKEND=cli` explicitly
+    /// — the truth table's key invariant — as long as a key IS present.
+    #[test]
+    fn build_claude_driver_cli_inactive_forces_api_even_with_explicit_cli_preference() {
+        let _g = env_lock();
+        let _snap = EnvSnapshot::capture();
+        std::env::set_var("CAMERATA_LLM_BACKEND", "cli");
+        std::env::set_var("ANTHROPIC_API_KEY", "sk-ant-forced");
+        let creds = empty_creds();
+
+        // The LEGACY helper would say "no" (backend isn't "api"), proving this really is a
+        // NEW behavior the old routing check could never express.
+        assert!(anthropic_api_backend_key(&creds).is_none());
+
+        let driver = build_claude_driver(
+            "claude-opus-5",
+            &creds,
+            "/tmp/fake-mcp.json",
+            vec![gov1_rule()],
+            None,
+            false,
+            false,
+            None,
+            None,
+            false, // cli_active=false forces API despite the explicit "cli" preference
+        )
+        .expect("a project with cli_active=false and a key present must build the API driver");
+        let _ = driver; // AgentDriver isn't downcastable; build succeeding IS the assertion.
+    }
+
+    /// `cli_active=true` + `app_backend=api` + no key -> builds the CLI driver (never errors)
+    /// but logs the loud fallback warning. We can't capture stderr here, so this asserts the
+    /// OBSERVABLE half of the contract: it builds successfully rather than blocking.
+    #[test]
+    fn build_claude_driver_cli_fallback_warn_still_builds() {
+        let _g = env_lock();
+        let _snap = EnvSnapshot::capture();
+        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        let creds = empty_creds();
+
+        let result = build_claude_driver(
+            "claude-opus-5",
+            &creds,
+            "/tmp/fake-mcp.json",
+            vec![gov1_rule()],
+            None,
+            false,
+            false,
+            None,
+            None,
+            true, // cli_active=true -> fallback warn, not a block
+        );
+        assert!(
+            result.is_ok(),
+            "CliFallbackWarn must still build (never a silent hard failure): {:?}",
+            result.err().map(|e| e.to_string())
         );
     }
 
@@ -4484,6 +4703,7 @@ mod tests {
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
             None, // governance — no log wired in this unit test
+            true, // cli_active — key present forces Api regardless; not exercising the gate
         );
         assert!(result.is_ok(), "claude+api+key must build: {:?}", result.err().map(|e| e.to_string()));
     }
@@ -4514,6 +4734,11 @@ mod tests {
             false, // escalation
             None,  // on_activity — no heartbeat in this unit test
             None, // governance — no log wired in this unit test
+            // cli_active=true: this test asserts the CLI-DEFAULT ROUTING still works, which is
+            // a personal/non-compliance-gated scenario. With cli_active=false (the new secure
+            // default) + no key this would correctly BLOCK instead — see the dedicated
+            // Feature-B gate tests.
+            true,
         );
         assert!(result.is_ok(), "claude+cli must build: {:?}", result.err().map(|e| e.to_string()));
     }
