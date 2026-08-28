@@ -686,6 +686,88 @@ pub fn select_backend(pref: Option<&str>, has_api_key: bool) -> Backend {
     }
 }
 
+/// The richer, PER-PROJECT-AWARE backend decision — the compliance-safety gate.
+///
+/// The CLI-vs-API choice is an auth/billing/compliance axis, not a model-quality axis:
+/// the CLI transport shells the operator's PERSONAL Claude Code subscription (personal
+/// account, consumer terms), while the API transport is commercial/metered/single-party.
+/// [`select_backend`] silently falls back to the CLI when an explicit API preference has
+/// no key — fine for the operator's own use, but a silent compliance downgrade for a
+/// client project: pick API, forget the key, and the client's code quietly flows through
+/// the operator's personal subscription. `resolve_backend` closes that gap with a second,
+/// independent guard — the project's `cli_active` flag — that must be explicitly ON before
+/// the CLI transport may be used AT ALL for that project, and it never falls back quietly:
+/// a fallback becomes a loud [`BackendResolution::CliFallbackWarn`], and a project that may
+/// only use the API hard-[`BackendResolution::Blocked`]s rather than downgrading.
+///
+/// `select_backend` is kept as-is (and still exercised by [`Llm::from_env`]) for the
+/// existing env-driven, single-operator path where there is no per-project flag to check;
+/// `resolve_backend` is the new, richer entry the enforcement seams (audit, gov-dev agent)
+/// call once a project is in scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendResolution {
+    /// API selected, key present. Good — the client-safe chain.
+    Api,
+    /// CLI selected, and the project has explicitly opted in (`cli_active == true`) with
+    /// `app_backend == "cli"`. Quiet — this is the intended personal-use path.
+    Cli,
+    /// The project wanted the API (`app_backend == "api"`) and has `cli_active == true`,
+    /// but no key is configured, so the call falls through to the CLI. NEVER silent: the
+    /// message must be surfaced to the human running the scan.
+    CliFallbackWarn { message: String },
+    /// The project is API-only (`cli_active == false`, the default) and no key is
+    /// configured. Hard stop — the caller must not start any model call.
+    Blocked { message: String },
+}
+
+/// Resolve the compliance-safety backend decision for one project, given:
+/// - `app_backend`: the configured preference (`"api"` / `"cli"` / anything else, from
+///   `effective_llm_backend` or the `CAMERATA_LLM_BACKEND` env at the call seam),
+/// - `has_api_key`: whether an Anthropic API key is present for this call,
+/// - `cli_active`: the PROJECT's `cli_active` flag — the master switch for whether the CLI
+///   transport may be used for this project at all.
+///
+/// Implements EXACTLY the truth table in
+/// `docs/design/2026-08-27_backend-safety-and-live-models.md` (Feature B):
+///
+/// | `cli_active` | `app_backend` | key? | resolution |
+/// |---|---|---|---|
+/// | false (default) | any | yes | `Api` |
+/// | false (default) | any | no  | `Blocked` |
+/// | true | `api` | yes | `Api` |
+/// | true | `api` | no  | `CliFallbackWarn` |
+/// | true | `cli` (or anything else) | – | `Cli` |
+///
+/// `cli_active == false` FORCES API-only regardless of `app_backend` — even an explicit
+/// global `cli` preference is refused for that project: the client project can never touch
+/// the CLI transport, not as a fallback and not as an explicit choice.
+pub fn resolve_backend(app_backend: &str, has_api_key: bool, cli_active: bool) -> BackendResolution {
+    if !cli_active {
+        // The project has never opted into the CLI transport: API-only, no matter what
+        // `app_backend` asks for.
+        return if has_api_key {
+            BackendResolution::Api
+        } else {
+            BackendResolution::Blocked {
+                message: "This project is API-only (CLI disabled). Add an Anthropic API key to run."
+                    .to_string(),
+            }
+        };
+    }
+
+    // cli_active == true: the project has opted into the CLI transport, so the CLI is a
+    // legitimate destination — the remaining question is just what `app_backend` asked for.
+    match app_backend.trim().to_ascii_lowercase().as_str() {
+        "api" if has_api_key => BackendResolution::Api,
+        "api" => BackendResolution::CliFallbackWarn {
+            message: "Anthropic API key missing — falling back to the Claude CLI (your \
+                      personal subscription). Do not use for client code."
+                .to_string(),
+        },
+        _ => BackendResolution::Cli,
+    }
+}
+
 /// The configured provider: a vendor + transport + model.
 ///
 /// Optionally carries a process-global [`crate::usage_ledger::UsageLedger`] (set via
@@ -2183,6 +2265,57 @@ mod tests {
         assert_eq!(select_backend(None, false), Backend::Cli);
         // Case / whitespace tolerant.
         assert_eq!(select_backend(Some(" API "), true), Backend::Api);
+    }
+
+    #[test]
+    fn resolve_backend_cli_inactive_forces_api_only_regardless_of_app_backend() {
+        // cli_active == false (default, secure-by-default): API-only, no matter what
+        // app_backend asks for — even an explicit "cli" preference is refused.
+        assert_eq!(resolve_backend("api", true, false), BackendResolution::Api);
+        assert_eq!(resolve_backend("cli", true, false), BackendResolution::Api);
+        assert_eq!(resolve_backend("", true, false), BackendResolution::Api);
+
+        for pref in ["api", "cli", "", "bogus"] {
+            match resolve_backend(pref, false, false) {
+                BackendResolution::Blocked { message } => {
+                    assert_eq!(
+                        message,
+                        "This project is API-only (CLI disabled). Add an Anthropic API key to run."
+                    );
+                }
+                other => panic!("expected Blocked for app_backend={pref:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_backend_cli_active_api_preference() {
+        // cli_active == true, app_backend == "api", key present -> Api.
+        assert_eq!(resolve_backend("api", true, true), BackendResolution::Api);
+        // Case / whitespace tolerant on app_backend.
+        assert_eq!(resolve_backend(" API ", true, true), BackendResolution::Api);
+
+        // cli_active == true, app_backend == "api", no key -> loud CliFallbackWarn.
+        match resolve_backend("api", false, true) {
+            BackendResolution::CliFallbackWarn { message } => {
+                assert_eq!(
+                    message,
+                    "Anthropic API key missing — falling back to the Claude CLI (your \
+                     personal subscription). Do not use for client code."
+                );
+            }
+            other => panic!("expected CliFallbackWarn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_backend_cli_active_cli_preference_is_quiet() {
+        // cli_active == true, app_backend == "cli" -> quiet Cli, regardless of key.
+        assert_eq!(resolve_backend("cli", true, true), BackendResolution::Cli);
+        assert_eq!(resolve_backend("cli", false, true), BackendResolution::Cli);
+        // Anything other than exactly "api" behaves like "cli" once cli_active is on.
+        assert_eq!(resolve_backend("", true, true), BackendResolution::Cli);
+        assert_eq!(resolve_backend("bogus", false, true), BackendResolution::Cli);
     }
 
     #[test]
