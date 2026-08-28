@@ -100,6 +100,7 @@ async fn run_fixture_scan(repo_dir: &Path, repo_spec: &str) -> onboard::ScanRepo
         false, // run_ai_review — zero API spend
         true,  // run_deterministic
         None,
+        camerata_server::llm::BackendResolution::Api, // backend gate: not under test here
     )
     .await;
     report

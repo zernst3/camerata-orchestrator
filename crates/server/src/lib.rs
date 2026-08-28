@@ -4732,7 +4732,8 @@ async fn onboard_audit(
     // Fresh transcript for this audit run so the live feedback panel starts clean.
     state.transcripts.clear(SCAN_AUDIT_KEY);
     // Incremental scan: load this project's prior manifest unless the user forced a full scan.
-    let project_id = state.projects.active().map(|p| p.id);
+    let active_project = state.projects.active();
+    let project_id = active_project.as_ref().map(|p| p.id.clone());
     let prior = if req.incremental {
         project_id
             .as_deref()
@@ -4740,6 +4741,10 @@ async fn onboard_audit(
     } else {
         None
     };
+    // Feature B — the compliance-safety gate: resolve BEFORE the scan runs, from the app's
+    // configured backend, whether an Anthropic key is present, and this project's own
+    // `cli_active` flag. See `resolve_backend_for_project`'s doc comment.
+    let backend_resolution = resolve_backend_for_project(&state, active_project.as_ref());
     let (mut report, manifest) = crate::onboard::audit_repos(
         &sources,
         &selected,
@@ -4756,6 +4761,7 @@ async fn onboard_audit(
         run_ai_review,
         run_deterministic,
         Some(state.usage_ledger.clone()),
+        backend_resolution,
     )
     .await;
     // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
@@ -5148,9 +5154,14 @@ async fn onboard_audit_start(
     // Capture the active project up front: the job is stamped with it (ROUTES-5, so a
     // project's deep-report export finds ITS OWN latest deep report) AND it seeds the
     // incremental-scan manifest lookup below.
-    let project_id = state.projects.active().map(|p| p.id);
+    let active_project = state.projects.active();
+    let project_id = active_project.as_ref().map(|p| p.id.clone());
     let job_id = state.jobs.create("audit", project_id.clone());
     state.transcripts.clear(SCAN_AUDIT_KEY);
+    // Feature B — the compliance-safety gate: resolved up front (same as the synchronous
+    // `onboard_audit` handler) from the app's configured backend, key presence, and this
+    // project's `cli_active` flag, then moved into the spawned task below.
+    let backend_resolution = resolve_backend_for_project(&state, active_project.as_ref());
 
     let jobs = state.jobs.clone();
     let transcripts = state.transcripts.clone();
@@ -5244,6 +5255,7 @@ async fn onboard_audit_start(
             run_ai_review,
             run_deterministic,
             Some(usage_ledger.clone()),
+            backend_resolution,
         )
         .await;
         // Persist the fresh manifest so the next scan can be incremental.
@@ -8833,6 +8845,24 @@ fn effective_llm_backend(settings: &crate::settings::SettingsStore) -> String {
                 .filter(|b| !b.trim().is_empty())
         })
         .unwrap_or_else(|| "cli".to_string())
+}
+
+/// Resolve the Feature-B compliance-safety backend decision (see
+/// `docs/design/2026-08-27_backend-safety-and-live-models.md`) for `project`. Centralizes the
+/// three-input gather — `effective_llm_backend` (the app's configured preference),
+/// `anthropic_api_key_present` (keychain or env), and the PROJECT's own `cli_active` flag —
+/// so every enforcement seam (the audit, the gov-dev agent driver) assembles the resolution
+/// identically and can't drift. `project = None` (no active/target project) is treated as
+/// `cli_active = false` — the same secure-by-default floor as a freshly-created project, so a
+/// project-less call is never accidentally more permissive than a real one.
+fn resolve_backend_for_project(
+    state: &AppState,
+    project: Option<&crate::project::Project>,
+) -> crate::llm::BackendResolution {
+    let app_backend = effective_llm_backend(&state.settings);
+    let has_api_key = anthropic_api_key_present(state.credential_store.as_ref());
+    let cli_active = project.map(|p| p.cli_active).unwrap_or(false);
+    crate::llm::resolve_backend(&app_backend, has_api_key, cli_active)
 }
 
 /// The `GET /api/settings` response: the persisted [`crate::settings::Settings`] fields, plus
@@ -22549,6 +22579,57 @@ mod tests {
         let present = anthropic_api_key_present(&store);
         std::env::remove_var("ANTHROPIC_API_KEY");
         assert!(present, "env var alone makes the key present");
+    }
+
+    /// `resolve_backend_for_project` — Feature B's per-seam glue — must gather
+    /// `effective_llm_backend`, `anthropic_api_key_present`, and the PROJECT's OWN
+    /// `cli_active` (never a global) into one resolution. Exercises the two extremes of the
+    /// truth table plus the "no project" floor, using the keychain path for the key (not the
+    /// env var) so this test can't race the env-var-based tests around it.
+    #[test]
+    fn resolve_backend_for_project_gathers_the_three_inputs_correctly() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+
+        // No project at all, no key -> Blocked. The project-less floor must be exactly as
+        // strict as a freshly-created project's default (cli_active=false), never more
+        // permissive. This uses a FRESH MemoryCredentialStore (never touched by any other
+        // test) for the "no key" side, and defensively clears the env var too, so this
+        // assertion can't be poisoned by another test's ANTHROPIC_API_KEY mutation running
+        // concurrently (the known env-var race noted on
+        // `credentials::tests::resolve_falls_back_to_env_when_store_empty`).
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        assert_eq!(
+            resolve_backend_for_project(&state, None),
+            crate::llm::BackendResolution::Blocked {
+                message: "This project is API-only (CLI disabled). Add an Anthropic API key to run."
+                    .to_string(),
+            }
+        );
+
+        // A key in the credential store (keychain path), a project with cli_active=false
+        // (the create() default) -> Api.
+        crate::credentials::CredentialStore::set(
+            state.credential_store.as_ref(),
+            crate::credentials::ANTHROPIC_API_KEY,
+            "sk-ant-test",
+        )
+        .expect("set must succeed");
+        let api_only_project = state.projects.create("ApiOnly", vec![]).unwrap();
+        assert!(!api_only_project.cli_active, "fresh project defaults to API-only");
+        assert_eq!(
+            resolve_backend_for_project(&state, Some(&api_only_project)),
+            crate::llm::BackendResolution::Api
+        );
+
+        // cli_active=true + app_backend="cli" (an explicit stored setting) -> quiet Cli,
+        // regardless of the key already present from the step above.
+        let personal_id = state.projects.create("Personal", vec![]).unwrap().id;
+        let personal_project = state.projects.set_cli_active(&personal_id, true).unwrap();
+        state.settings.set_llm_backend(Some("cli".to_string()));
+        assert_eq!(
+            resolve_backend_for_project(&state, Some(&personal_project)),
+            crate::llm::BackendResolution::Cli
+        );
     }
 
     // ── Attachment tests ──────────────────────────────────────────────────────

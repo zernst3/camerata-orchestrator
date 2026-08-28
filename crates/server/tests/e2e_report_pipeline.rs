@@ -134,6 +134,7 @@ async fn e2e_deterministic_scan_to_pdf_report_pipeline() {
         false,        // run_ai_review — THE zero-spend switch: no model calls at all
         true,         // run_deterministic — the always-on security floor DOES run
         None,         // ledger
+        camerata_server::llm::BackendResolution::Api, // backend gate: not under test here
     )
     .await;
 

@@ -641,7 +641,37 @@ pub async fn audit_repos(
     // session-wide usage meter (in addition to the per-audit `UsageMeter` below). `None` in
     // tests / non-cockpit callers — recording is then simply skipped. Observability only.
     ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
+    // Feature B — the compliance-safety backend gate (see
+    // `docs/design/2026-08-27_backend-safety-and-live-models.md`). The caller resolves this
+    // from `(effective app_backend, has_api_key, the project's cli_active flag)` via
+    // `crate::llm::resolve_backend` BEFORE calling in, so this function never has to reach
+    // for settings/credentials itself — it only has to ACT on the resolution.
+    backend_resolution: crate::llm::BackendResolution,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
+    // THE GATE: resolved before anything else — no file read, no deterministic tool, no
+    // model call — because a `Blocked` project must not scan AT ALL, not just skip the LLM
+    // call. Reuses the same `gated`/`message` shape the "GitHub not connected" gate already
+    // uses (`ScanReport::gated`), so the UI's existing gate-message rendering picks this up
+    // for free; `gated` itself is left `false` since this isn't the GitHub gate, only the
+    // message channel is shared. The prior manifest (if any) is preserved rather than wiped,
+    // so a later, unblocked scan can still go incremental.
+    if let crate::llm::BackendResolution::Blocked { message } = &backend_resolution {
+        let repos: Vec<String> = sources.iter().map(|(spec, _)| spec.clone()).collect();
+        let mut report = ScanReport::gated(&repos);
+        report.gated = false;
+        report.message = Some(message.clone());
+        return (report, incremental_prior.cloned().unwrap_or_default());
+    }
+    // CliFallbackWarn does NOT abort — the scan proceeds on the CLI (the underlying `Llm`
+    // below resolves to the CLI transport on its own via `select_backend`'s env path, since
+    // an "api" preference with no key already falls back there) — but the warning must be
+    // LOUD, never silent: fold it into `extra_notes` so it survives into `report.message`
+    // with the rest of this run's notes, clearly prefixed so it can't be mistaken for a
+    // routine coverage note.
+    let mut extra_notes = extra_notes;
+    if let crate::llm::BackendResolution::CliFallbackWarn { message } = &backend_resolution {
+        extra_notes.push(format!("⚠ COMPLIANCE: {message}"));
+    }
     // Provenance (P1): stamp the start time now, before any I/O, so `finished_at -
     // started_at` reflects the whole run including the git-ref capture below.
     let started_at = chrono::Utc::now().to_rfc3339();
@@ -2271,6 +2301,7 @@ mod tests {
             false,          // run_ai_review  -> AI path fully skipped (no model call)
             true,           // run_deterministic -> floor runs
             None,           // usage_ledger
+            crate::llm::BackendResolution::Api, // backend gate: not under test here
         )
         .await;
         // The floor caught the secret.
@@ -2314,6 +2345,7 @@ mod tests {
             false, // run_ai_review off (token-free)
             false, // run_deterministic off -> floor skipped
             None,  // usage_ledger
+            crate::llm::BackendResolution::Api, // backend gate: not under test here
         )
         .await;
         assert!(
@@ -2362,6 +2394,7 @@ mod tests {
             false, // run_ai_review off
             true,  // run_deterministic on → floor runs
             None,
+            crate::llm::BackendResolution::Api, // backend gate: not under test here
         )
         .await;
         let progress = jobs.det_progress(&jid).unwrap();
@@ -2384,6 +2417,142 @@ mod tests {
         assert!(
             !progress.tools.iter().any(|t| t.tool == "dep-audit"),
             "dep-audit must NOT appear inside audit_repos tool list; it runs in the caller"
+        );
+    }
+
+    // ── Feature B: the compliance-safety backend gate ─────────────────────────
+
+    /// A `Blocked` resolution must abort the WHOLE scan — no file read, no deterministic
+    /// floor, no model call — and surface the block message on `report.message` (the same
+    /// channel the "GitHub not connected" gate uses), with `gated` left false (this isn't
+    /// that gate). `run_deterministic: true` is passed deliberately, so if the gate check
+    /// weren't first, the floor would still fire on the planted secret.
+    #[tokio::test]
+    async fn blocked_resolution_aborts_the_whole_scan_before_any_work() {
+        let (_dir, sources) = scratch_repo_with_secret();
+        let (report, manifest) = audit_repos(
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            true, // run_ai_review requested...
+            true, // ...and run_deterministic requested — the gate must still short-circuit both
+            None,
+            crate::llm::BackendResolution::Blocked {
+                message: "This project is API-only (CLI disabled). Add an Anthropic API key to run."
+                    .to_string(),
+            },
+        )
+        .await;
+        assert!(
+            report.findings.is_empty(),
+            "a blocked project must produce zero findings — no scan ran at all: {:?}",
+            report.findings
+        );
+        assert_eq!(report.files_scanned, 0, "no file was read for a blocked scan");
+        assert!(!report.gated, "Blocked is a distinct condition from the GitHub-not-connected gate");
+        assert_eq!(
+            report.message.as_deref(),
+            Some("This project is API-only (CLI disabled). Add an Anthropic API key to run."),
+            "the block message must be user-visible on the report"
+        );
+        // No manifest churn: an empty/default manifest, not a fingerprint stamped as if a
+        // real scan had run (this also means a PRIOR manifest, if any, must be preserved by
+        // the caller rather than clobbered — audit_repos itself just returns it unchanged).
+        assert!(manifest.rules_fingerprint.is_empty());
+    }
+
+    /// A `Blocked` resolution preserves a PRIOR incremental manifest unchanged (rather than
+    /// wiping it), so a later, unblocked scan can still go incremental.
+    #[tokio::test]
+    async fn blocked_resolution_preserves_the_prior_manifest() {
+        let (_dir, sources) = scratch_repo_with_secret();
+        let mut prior = crate::scan_cache::ManifestBuilder::new()
+            .with_rules_fingerprint("prior-fp".to_string())
+            .finish();
+        prior.version = 1;
+        let (_, manifest) = audit_repos(
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            Some(&prior),
+            false,
+            true,
+            false,
+            false,
+            None,
+            crate::llm::BackendResolution::Blocked {
+                message: "blocked".to_string(),
+            },
+        )
+        .await;
+        assert_eq!(
+            manifest.rules_fingerprint, "prior-fp",
+            "the prior manifest must survive a Blocked scan untouched"
+        );
+    }
+
+    /// A `CliFallbackWarn` resolution does NOT abort the scan — the deterministic floor still
+    /// runs — but the warning is folded into `report.message`, clearly prefixed so it can't be
+    /// mistaken for a routine coverage note.
+    #[tokio::test]
+    async fn cli_fallback_warn_proceeds_but_surfaces_the_warning() {
+        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (_dir, sources) = scratch_repo_with_secret();
+        let (report, _manifest) = audit_repos(
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false, // run_ai_review off — stay token-free; the warning path is independent of it
+            true,  // run_deterministic on — the floor still runs under a fallback warning
+            None,
+            crate::llm::BackendResolution::CliFallbackWarn {
+                message: "Anthropic API key missing — falling back to the Claude CLI (your \
+                          personal subscription). Do not use for client code."
+                    .to_string(),
+            },
+        )
+        .await;
+        // The scan was NOT aborted: the floor still caught the secret.
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
+            "CliFallbackWarn must not abort the scan: {:?}",
+            report.findings
+        );
+        let message = report.message.expect("a fallback-warn scan must carry a message");
+        assert!(
+            message.contains("⚠ COMPLIANCE:"),
+            "the warning must be clearly prefixed so it can't be mistaken for a routine note: {message}"
+        );
+        assert!(
+            message.contains("personal subscription"),
+            "the full warning text must be present: {message}"
         );
     }
 

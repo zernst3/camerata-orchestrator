@@ -193,6 +193,7 @@ async fn run_deterministic_scan(dir: &Path) -> onboard::ScanReport {
         false, // run_ai_review — zero API spend
         true,  // run_deterministic — the floor AND the architectural checkers both run
         None,  // ledger
+        camerata_server::llm::BackendResolution::Api, // backend gate: not under test here
     )
     .await;
     report
@@ -220,6 +221,7 @@ async fn run_full_scan(dir: &Path) -> onboard::ScanReport {
         true,  // run_ai_review — THE real-money switch
         true,  // run_deterministic — floor + architectural checkers also run
         None,  // ledger
+        camerata_server::llm::BackendResolution::Api, // backend gate: real-spend test, always allowed
     )
     .await;
     report
