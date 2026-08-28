@@ -365,6 +365,27 @@ pub struct Project {
     /// `docs/plans/2026-06-30_epic-design-page.md`.
     #[serde(default = "default_hierarchy_schema")]
     pub hierarchy_schema: HierarchySchema,
+    /// The compliance-safety master switch for the CLI transport (Feature B, the
+    /// backend-safety gate — see `docs/design/2026-08-27_backend-safety-and-live-models.md`).
+    ///
+    /// **OFF (the default, serde-default `false`)** means this project is API-ONLY: every
+    /// AI call (audit, gov-dev agent) must ride the Anthropic API — a missing key is a hard
+    /// block, never a silent fallback to the CLI. This is the client-safe default, because
+    /// the CLI transport shells the operator's PERSONAL Claude Code subscription (personal
+    /// account, consumer terms) — not a chain nameable in a client contract.
+    ///
+    /// **ON** permits the personal-subscription CLI for this project: an explicit `cli`
+    /// preference runs quietly, and an `api` preference with no key falls back to the CLI
+    /// with a loud, visible warning rather than blocking. Intended for the operator's own,
+    /// non-client repos only.
+    ///
+    /// Serde default fills in `false` for every project persisted before this field existed
+    /// — no migration required, but this IS a live behavior change: an existing project that
+    /// was previously running scans on the CLI default with no key will now block until the
+    /// operator either adds an Anthropic key or flips this ON. See
+    /// `camerata_llm::resolve_backend` for the resolution logic this flag feeds.
+    #[serde(default)]
+    pub cli_active: bool,
 }
 
 /// One agent operating principle: a single imperative line the governed agent is held to (about
@@ -830,6 +851,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            cli_active: false,
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -878,6 +900,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            cli_active: false,
             ruleset: ProjectRuleset {
                 selections: vec![],
                 cross_repo: vec![],
@@ -958,6 +981,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            cli_active: false,
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -999,6 +1023,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            cli_active: false,
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -1033,6 +1058,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            cli_active: false,
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -1058,6 +1084,35 @@ mod tests {
     }
 
     #[test]
+    fn cli_active_defaults_to_false_when_absent_from_persisted_json() {
+        // A project JSON written before this field existed (or any project export that
+        // doesn't carry it) must deserialize as `cli_active: false` — the secure-by-default,
+        // API-only posture (Feature B, the backend-safety gate). Mirrors the
+        // max_iterations/step_models/tier_map back-compat tests above.
+        let json = r#"{
+            "id": "proj-1",
+            "name": "Legacy",
+            "repos": [],
+            "ruleset": {},
+            "onboarded": []
+        }"#;
+        let p: Project = serde_json::from_str(json).unwrap();
+        assert!(!p.cli_active, "cli_active must default to false (API-only) when absent");
+
+        // An explicit `true` in the JSON round-trips correctly.
+        let json_on = r#"{
+            "id": "proj-2",
+            "name": "Personal",
+            "repos": [],
+            "ruleset": {},
+            "onboarded": [],
+            "cli_active": true
+        }"#;
+        let p_on: Project = serde_json::from_str(json_on).unwrap();
+        assert!(p_on.cli_active);
+    }
+
+    #[test]
     fn export_import_round_trip() {
         let project = Project {
             id: "p".into(),
@@ -1076,6 +1131,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            cli_active: false,
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
@@ -1142,6 +1198,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            cli_active: false,
             ruleset: ProjectRuleset::default(),
         };
         original.set_model_for_step(StepKind::Decomposition, "claude-opus-5".into());
@@ -1227,6 +1284,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
+            cli_active: false,
             ruleset: ProjectRuleset::default(),
         };
         let json = serde_json::to_string(&original).unwrap();
