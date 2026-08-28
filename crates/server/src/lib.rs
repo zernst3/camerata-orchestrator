@@ -981,6 +981,8 @@ pub fn router(state: AppState) -> Router {
         )
         // Per-step model config: set the model for one NON-FLEET AI step on this project.
         .route("/api/projects/:id/step-models", post(set_step_model))
+        // Compliance-safety gate: per-project CLI-transport master switch (Feature B).
+        .route("/api/projects/:id/cli-active", post(set_cli_active_handler))
         // Stall-detection thresholds: per-project idle timeout config.
         .route("/api/projects/:id/stall-thresholds", post(set_stall_thresholds_handler))
         // L3 agentic code-review gate: per-project opt-in (R7).
@@ -4019,6 +4021,30 @@ async fn set_step_model(
         return Json(serde_json::json!({ "ok": false, "message": "model must not be empty" }));
     }
     match state.projects.set_step_model(&id, step, model) {
+        Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
+/// Body for `POST /api/projects/:id/cli-active`: the new value of the project's
+/// compliance-safety `cli_active` master switch (Feature B, the backend-safety gate).
+#[derive(serde::Deserialize)]
+struct SetCliActiveReq {
+    /// `false` (the default) = API-only for this project, missing key hard-blocks.
+    /// `true` = the operator's personal-subscription CLI may be used for this project.
+    active: bool,
+}
+
+/// `POST /api/projects/:id/cli-active` — flip the per-project `cli_active` compliance
+/// switch. Mirrors `set_step_model`'s shape exactly: same `State`/`Path`/`Json` extraction,
+/// same `{ ok, project }` / `{ ok: false, message }` response shape, no HTTP-status
+/// signaling — the UI reads `ok` + `message`.
+async fn set_cli_active_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SetCliActiveReq>,
+) -> Json<serde_json::Value> {
+    match state.projects.set_cli_active(&id, req.active) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
     }
@@ -15028,6 +15054,77 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         // The store was left untouched (still None).
         assert!(state.settings.llm_backend().is_none());
+    }
+
+    /// `POST /api/projects/:id/cli-active` — Feature B, the backend-safety gate. A fresh
+    /// project defaults to `cli_active: false` (API-only); the endpoint flips it and echoes
+    /// the updated project. Mirrors `post_llm_backend_persists_valid_value`'s shape.
+    #[tokio::test]
+    async fn post_cli_active_persists_valid_value() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Compliance", vec![]).unwrap();
+        assert!(!p.cli_active, "fresh project defaults to API-only");
+        let app = router(state.clone());
+
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/cli-active", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"active":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["project"]["cli_active"], true);
+        // Persisted on the store.
+        assert!(state.projects.get(&p.id).unwrap().cli_active);
+
+        // Flipping it back off round-trips too.
+        let resp2 = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/cli-active", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"active":false}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+        let json2 = body_json(resp2).await;
+        assert_eq!(json2["project"]["cli_active"], false);
+    }
+
+    /// `POST /api/projects/:id/cli-active` against an unknown project id: no HTTP-status
+    /// signaling (mirrors `set_step_model`'s shape) — a 200 response with `ok: false` and a
+    /// human-readable `message` the UI can display.
+    #[tokio::test]
+    async fn post_cli_active_reports_error_for_unknown_project() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/does-not-exist/cli-active")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"active":true}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+        assert!(json["message"].as_str().is_some(), "message field present for the UI");
     }
 
     /// GAP-2: the git-commit chokepoint HARD-BLOCKS a commit whose message violates the

@@ -142,6 +142,9 @@ impl ProjectStore {
                 operating_principles: default_operating_principles(),
                 memory: Vec::new(),
                 hierarchy_schema: default_hierarchy_schema(),
+                // Secure-by-default: a brand-new project is API-only until the operator
+                // explicitly opts it into the personal-subscription CLI transport.
+                cli_active: false,
             };
             s.projects.push(project.clone());
             s.active = Some(id);
@@ -244,6 +247,11 @@ impl ProjectStore {
                     // Seed the default ladder when the import omitted a schema (empty), but keep
                     // an intentionally-provided non-empty imported schema untouched.
                     hierarchy_schema: import.hierarchy_schema.resolve_effective(),
+                    // `cli_active` is deliberately NOT part of `ProjectImport` (not
+                    // transferable): importing another project's export must never grant this
+                    // machine's personal-subscription CLI permission by inheritance. A freshly
+                    // imported project is always API-only until the operator explicitly opts in.
+                    cli_active: false,
                 };
                 s.projects.push(project.clone());
                 s.active = Some(id);
@@ -330,6 +338,16 @@ impl ProjectStore {
     /// updated project, or `None` if no project has that id.
     pub fn set_hierarchy_schema(&self, id: &str, schema: HierarchySchema) -> Option<Project> {
         self.update(id, |p| p.hierarchy_schema = schema)
+    }
+
+    /// Flip the compliance-safety `cli_active` master switch for a single project by id
+    /// (Feature B, the backend-safety gate). `active = false` (the default) forces the
+    /// project to be API-only — a missing key hard-blocks rather than silently falling
+    /// back to the operator's personal-subscription CLI. `active = true` permits the CLI
+    /// transport for this project. Returns the updated project, or `None` when no project
+    /// has that id. Persisted to disk like every other per-project mutator.
+    pub fn set_cli_active(&self, project_id: &str, active: bool) -> Option<Project> {
+        self.update(project_id, |p| p.cli_active = active)
     }
 
     /// Mutate a project in place by id, returning the updated copy.
@@ -832,6 +850,72 @@ mod tests {
         );
         // Untouched steps reloaded at the default.
         assert_eq!(p.model_for_step(StepKind::Audit), DEFAULT_MODEL);
+
+        // Cleanup (best-effort).
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn new_project_defaults_cli_active_to_false() {
+        // Secure-by-default: a freshly-created project is API-only until the operator
+        // explicitly opts it into the personal-subscription CLI transport.
+        let store = ProjectStore::new();
+        let p = store.create("Fresh", vec![]).unwrap();
+        assert!(!p.cli_active);
+    }
+
+    #[test]
+    fn set_cli_active_is_per_project_isolated() {
+        // Mirrors set_step_model_is_per_project_isolated: flipping A's flag must not leak
+        // to B.
+        let store = ProjectStore::new();
+        let a = store.create("A", vec![]).unwrap();
+        let b = store.create("B", vec![]).unwrap();
+
+        let updated_a = store.set_cli_active(&a.id, true).unwrap();
+        assert!(updated_a.cli_active);
+
+        assert!(store.get(&a.id).unwrap().cli_active, "project A was flipped ON");
+        assert!(
+            !store.get(&b.id).unwrap().cli_active,
+            "project B must be untouched by A's change"
+        );
+
+        // Flipping it back OFF works too.
+        let updated_a = store.set_cli_active(&a.id, false).unwrap();
+        assert!(!updated_a.cli_active);
+    }
+
+    #[test]
+    fn set_cli_active_returns_none_for_unknown_project() {
+        let store = ProjectStore::new();
+        assert!(store.set_cli_active("does-not-exist", true).is_none());
+    }
+
+    #[test]
+    fn set_cli_active_persists_to_disk_and_survives_reload() {
+        // Mirrors set_step_model_persists_to_disk_and_survives_reload.
+        let dir = std::env::temp_dir().join(format!(
+            "camerata-cliactive-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = dir.join("projects.json");
+
+        let id = {
+            let store = ProjectStore::load_or_new(path.clone());
+            let p = store.create("Persisted", vec![]).unwrap();
+            store.set_cli_active(&p.id, true).unwrap();
+            p.id
+        };
+
+        // Fresh store from the SAME file: the change must have been written through.
+        let reloaded = ProjectStore::load_or_new(path.clone());
+        let p = reloaded.get(&id).expect("project survived reload");
+        assert!(p.cli_active, "cli_active survived persistence + reload");
 
         // Cleanup (best-effort).
         let _ = std::fs::remove_dir_all(&dir);
