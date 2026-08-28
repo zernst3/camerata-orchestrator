@@ -3507,6 +3507,7 @@ mod tests {
             weight: 0,
             caching: false,
             vision: false,
+            price_known: true,
         }
     }
 

@@ -528,7 +528,7 @@ fn compute_cost_usd(
 /// including a streamed one) — matching `total_backstop`'s ceiling so neither path can
 /// hang longer than the other. `.connect_timeout(10s)` fails fast when the TCP handshake
 /// itself can't complete (DNS black hole, firewall drop), well before the 600s ceiling.
-fn shared_http_client() -> &'static reqwest::Client {
+pub(crate) fn shared_http_client() -> &'static reqwest::Client {
     static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
@@ -2857,6 +2857,7 @@ malformed line, not json
             weight: 0,
             caching: false,
             vision: false,
+            price_known: true,
         }]);
         let creds = crate::credentials::MemoryCredentialStore::new();
         // No key set → error.
@@ -2893,6 +2894,7 @@ malformed line, not json
             weight: 0,
             caching: false,
             vision: false,
+            price_known: true,
         }]);
         let creds = crate::credentials::MemoryCredentialStore::new();
         creds

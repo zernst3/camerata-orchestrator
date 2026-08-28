@@ -61,6 +61,26 @@ pub struct RegistryEntry {
     /// only vision-capable models are offered.
     #[serde(default)]
     pub vision: bool,
+    /// Whether `price_in` / `price_out` are real, known prices vs. a `0.0` placeholder.
+    ///
+    /// Added for the live Anthropic `/v1/models` fetch (Feature A, see
+    /// `docs/design/2026-08-27_backend-safety-and-live-models.md`): that endpoint returns
+    /// id + display name + created-at, NOT pricing, so a live-fetched model id absent from
+    /// the hardcoded `CLAUDE_REGISTRY_MODELS` price map has no known price. `false` in that
+    /// case (with `price_in`/`price_out` left at `0.0`) so the UI can show "price unknown"
+    /// rather than a wrong ($0, i.e. apparently-free) number. `#[serde(default = "default_price_known")]`
+    /// so every pre-existing producer/consumer (OpenRouter, the static Claude catalog, and
+    /// any JSON captured before this field existed) deserializes as `true` — prices were
+    /// always known before this feature shipped.
+    #[serde(default = "default_price_known")]
+    pub price_known: bool,
+}
+
+/// `serde(default)` helper: absent `price_known` in JSON means "written before this field
+/// existed", which always carried a known price — so the correct default is `true`, not
+/// the bool default of `false`.
+fn default_price_known() -> bool {
+    true
 }
 
 /// A compile-time-only helper for the Claude static list. Converted to [`RegistryEntry`]
@@ -94,6 +114,7 @@ impl RegistryEntryStatic {
             weight: self.weight,
             caching: true, // All Claude (subscription/CLI) models support prompt caching.
             vision,
+            price_known: true, // The static catalog's whole reason to exist is known prices.
         }
     }
 }
@@ -103,11 +124,22 @@ impl RegistryEntryStatic {
 /// Response for `GET /api/models/registry`.
 #[derive(Serialize)]
 pub struct RegistryResp {
-    /// All known models (Claude static + OpenRouter cached).
+    /// All known models. The Claude portion is backend-aware (Feature A, see
+    /// `docs/design/2026-08-27_backend-safety-and-live-models.md`): the live Anthropic
+    /// `/v1/models` list when the API backend is active with a key AND that fetch has
+    /// succeeded at least once, else the hardcoded `CLAUDE_REGISTRY_MODELS` catalog. Plus
+    /// any cached OpenRouter entries.
     pub models: Vec<RegistryEntry>,
     /// Whether the OpenRouter portion has been fetched yet. `false` = call
     /// `POST /api/models/registry/refresh` to populate it.
     pub openrouter_fetched: bool,
+    /// Whether a live Anthropic `/v1/models` fetch has ever completed in this process
+    /// (success or failure — a failed fetch still marks this `true` so the UI doesn't loop
+    /// showing "never tried"). Independent of whether `models` is CURRENTLY serving the
+    /// live list — that also depends on the active backend at request time. `false` on a
+    /// fresh install / CLI-only setup that has never attempted the fetch.
+    #[serde(default)]
+    pub anthropic_fetched: bool,
 }
 
 /// Response for `POST /api/models/registry/refresh`.
@@ -118,6 +150,19 @@ pub struct RefreshResp {
     /// Whether the key was present and the fetch was attempted.
     pub attempted: bool,
     /// The full registry after refresh.
+    pub models: Vec<RegistryEntry>,
+}
+
+/// Response for `POST /api/models/registry/refresh/anthropic` — the Feature-A sibling of
+/// [`RefreshResp`], for the live Anthropic `/v1/models` catalog rather than OpenRouter's.
+#[derive(Serialize)]
+pub struct AnthropicRefreshResp {
+    /// How many live Anthropic models were fetched (0 = key absent or fetch error).
+    pub anthropic_count: usize,
+    /// Whether the Anthropic key was present and the fetch was attempted.
+    pub attempted: bool,
+    /// The full registry after refresh (Claude portion reflects whichever source —
+    /// live or hardcoded — the active backend currently selects; see [`RegistryResp`]).
     pub models: Vec<RegistryEntry>,
 }
 
@@ -142,9 +187,33 @@ mod tests {
             weight: 3,
             caching: true,
             vision: true,
+            price_known: true,
         };
         let json = serde_json::to_string(&entry).unwrap();
         let back: RegistryEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(entry, back);
+    }
+
+    /// JSON captured before `price_known` existed (every RegistryEntry the wire ever
+    /// carried, prior to Feature A) must still deserialize — and must default to `true`,
+    /// not the bool default of `false`, since every one of those prices WAS known.
+    #[test]
+    fn registry_entry_deserializes_pre_price_known_json_as_known() {
+        let json = r#"{
+            "provider": "claude",
+            "display": "Sonnet 5",
+            "id": "claude-sonnet-5",
+            "free": false,
+            "tool_use": true,
+            "context": 200000,
+            "coding": 1.0,
+            "price_in": 3.0,
+            "price_out": 15.0,
+            "weight": 3,
+            "caching": true,
+            "vision": true
+        }"#;
+        let entry: RegistryEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.price_known, "pre-existing JSON with no price_known field must default to true");
     }
 }

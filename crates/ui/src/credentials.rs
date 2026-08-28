@@ -244,6 +244,125 @@ fn OpenRouterModelsRefresh() -> Element {
     }
 }
 
+// ── Live Anthropic model-registry refresh (Feature A manual UI trigger, 3 of 3) ──
+//
+// The Anthropic sibling of [`OpenRouterModelsRefresh`] above — see
+// `docs/design/2026-08-27_backend-safety-and-live-models.md`'s Feature A section. The
+// other two triggers (server startup, and right after `POST /api/credentials/
+// anthropic_api_key` succeeds) are wired server-side in `crates/server/src/lib.rs`
+// (`spawn_startup_anthropic_refresh`, `trigger_anthropic_refresh_if_needed`). This is the
+// manual escape hatch: hit it after rotating the key, or just to force the latest live
+// model list without waiting for a restart.
+
+/// Subset of `POST /api/models/registry/refresh/anthropic`'s response body this control
+/// reads. Mirrors [`RefreshRegistryResp`].
+#[derive(serde::Deserialize)]
+struct AnthropicRefreshRegistryResp {
+    #[serde(default)]
+    anthropic_count: usize,
+    #[serde(default)]
+    attempted: bool,
+}
+
+/// `POST /api/models/registry/refresh/anthropic` — (re-)fetch the live Anthropic model
+/// list using whatever Anthropic key is currently saved. `None` only on a transport/parse
+/// failure; the endpoint itself always returns 200 (fail-soft), so a missing key is a
+/// normal `Some(AnthropicRefreshRegistryResp { attempted: false, anthropic_count: 0 })`.
+async fn refresh_anthropic_registry() -> Option<AnthropicRefreshRegistryResp> {
+    reqwest::Client::new()
+        .post(format!("{}/api/models/registry/refresh/anthropic", crate::bff_base()))
+        .send()
+        .await
+        .ok()?
+        .json::<AnthropicRefreshRegistryResp>()
+        .await
+        .ok()
+}
+
+/// Mirrors [`RefreshStatus`] for the Anthropic live-model refresh control.
+#[derive(Clone, Copy, PartialEq)]
+enum AnthropicRefreshStatus {
+    Idle,
+    Loading,
+    Done { count: usize, attempted: bool },
+    Failed,
+}
+
+/// Manual "Refresh models" control for the live Anthropic `/v1/models` catalog. Rendered
+/// only while the `api` Claude backend is selected (see [`ModelBackendSettings`]) —
+/// refreshing it while on the CLI backend would populate a cache the picker isn't reading
+/// from anyway. Mirrors [`OpenRouterModelsRefresh`]'s Idle → Loading → Done/Failed shape.
+#[component]
+fn AnthropicModelsRefresh() -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let mut status = use_signal(|| AnthropicRefreshStatus::Idle);
+    let is_loading = status() == AnthropicRefreshStatus::Loading;
+
+    let (status_text, status_is_warn): (Option<String>, bool) = match status() {
+        AnthropicRefreshStatus::Idle => (None, false),
+        AnthropicRefreshStatus::Loading => (Some("Refreshing…".to_string()), false),
+        AnthropicRefreshStatus::Done { count: 0, attempted: false } => (
+            Some("Add an Anthropic API key above to load the live model list.".to_string()),
+            true,
+        ),
+        AnthropicRefreshStatus::Done { count: 0, attempted: true } => (
+            Some("Anthropic returned 0 models — double-check the key.".to_string()),
+            true,
+        ),
+        AnthropicRefreshStatus::Done { count, .. } => {
+            (Some(format!("{count} live Anthropic models loaded.")), false)
+        }
+        AnthropicRefreshStatus::Failed => {
+            (Some("Refresh failed — check the server connection.".to_string()), true)
+        }
+    };
+
+    rsx! {
+        div { class: "credentials-field-section",
+            div { class: "credentials-field-header",
+                label { class: "credentials-label", "Anthropic Models" }
+            }
+            p { class: "credentials-intro",
+                "Pulls the live model list from your Anthropic account (refreshes automatically on startup and right after you save the key above). On any error the picker falls back to the built-in Claude list, so it's never empty."
+            }
+            div { class: "credentials-input-row",
+                button {
+                    class: "credentials-save-btn btn-primary",
+                    disabled: is_loading,
+                    onclick: move |_| {
+                        status.set(AnthropicRefreshStatus::Loading);
+                        spawn(async move {
+                            match refresh_anthropic_registry().await {
+                                Some(resp) => {
+                                    status.set(AnthropicRefreshStatus::Done {
+                                        count: resp.anthropic_count,
+                                        attempted: resp.attempted,
+                                    });
+                                }
+                                None => {
+                                    status.set(AnthropicRefreshStatus::Failed);
+                                    push_toast(
+                                        toasts,
+                                        ToastKind::Error,
+                                        "Could not reach the server to refresh Anthropic models.".to_string(),
+                                    );
+                                }
+                            }
+                        });
+                    },
+                    if is_loading { "Refreshing…" } else { "Refresh models" }
+                }
+                if let Some(text) = status_text {
+                    span {
+                        class: if status_is_warn { "ink-soft warn" } else { "ink-soft" },
+                        "{text}"
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 /// The "Settings → Credentials" panel. Renders one row per known credential:
@@ -445,6 +564,9 @@ fn ModelBackendSettings() -> Element {
                                 settings_res.restart();
                             },
                         }
+                        // Feature A: live Anthropic `/v1/models` manual refresh, shown only
+                        // while the API backend is selected (see the module doc above).
+                        AnthropicModelsRefresh {}
                     }
                 }
             }
@@ -900,6 +1022,78 @@ mod tests {
         assert!(out.is_none(), "an unreachable server collapses to None");
     }
 
+    // POST /api/models/registry/refresh/anthropic (Feature A manual "Refresh models"
+    // trigger, 3 of 3 — see crates/server/src/lib.rs for triggers 1 and 2). Mirrors the
+    // three OpenRouter refresh-helper tests immediately above, one for one.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn refresh_anthropic_registry_posts_and_parses_count_and_attempted() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/models/registry/refresh/anthropic"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "anthropic_count": 4,
+                "attempted": true,
+                "models": [],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::refresh_anthropic_registry().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let resp = out.expect("refresh response parsed");
+        assert_eq!(resp.anthropic_count, 4);
+        assert!(resp.attempted);
+    }
+
+    // The no-key case: the endpoint still returns 200 with attempted:false and count:0 —
+    // NOT an error. `refresh_anthropic_registry` must surface that as `Some(..)`, not
+    // collapse it to `None` (which would incorrectly toast "could not reach the server").
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn refresh_anthropic_registry_no_key_is_some_not_none() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/models/registry/refresh/anthropic"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "anthropic_count": 4, // hardcoded catalog count — still served, no key needed to fall back
+                "attempted": false,
+                "models": [],
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let out = super::refresh_anthropic_registry().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let resp = out.expect("a 200 with attempted:false must still parse as Some");
+        assert!(!resp.attempted);
+    }
+
+    // Transport failure (server unreachable) collapses to None — the UI shows the "could
+    // not reach the server" toast rather than misreporting a fetch attempt.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn refresh_anthropic_registry_returns_none_when_server_unreachable() {
+        // An address nothing is listening on — no MockServer mounted.
+        std::env::set_var("CAMERATA_BFF_URL", "http://127.0.0.1:1");
+        let out = super::refresh_anthropic_registry().await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(out.is_none(), "an unreachable server collapses to None");
+    }
+
     // ── Tier 1: render tests (dioxus-ssr) ───────────────────────────────────────
     // Render components headlessly to an HTML string and assert KEY static
     // structure. SSR is static (no clicks, no async-loaded data): use_resource is
@@ -1094,6 +1288,38 @@ mod tests {
         );
         assert!(
             !html.contains("OpenRouter models loaded"),
+            "no stale count must render before any refresh attempt; html=\n{html}"
+        );
+    }
+
+    // AnthropicModelsRefresh mirrors OpenRouterModelsRefresh exactly — same "only consumes
+    // toasts, no resource" shape, so SSR renders its real Idle state directly too.
+    fn anthropic_refresh_harness() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        rsx! {
+            AnthropicModelsRefresh {}
+        }
+    }
+
+    #[test]
+    fn anthropic_models_refresh_renders_label_and_button_idle_with_no_status_line() {
+        let mut vdom = VirtualDom::new(anthropic_refresh_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("Anthropic Models"),
+            "the section label renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("Refresh models"),
+            "the idle-state button label renders (not \"Refreshing…\"); html=\n{html}"
+        );
+        assert!(
+            !html.contains("Add an Anthropic API key"),
+            "the no-key hint must not render before any refresh attempt; html=\n{html}"
+        );
+        assert!(
+            !html.contains("live Anthropic models loaded"),
             "no stale count must render before any refresh attempt; html=\n{html}"
         );
     }

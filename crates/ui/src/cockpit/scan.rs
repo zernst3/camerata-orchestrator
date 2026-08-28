@@ -807,6 +807,17 @@ pub(super) struct AuditModelOption {
     /// Used to filter the Designer (vision) band model selector.
     #[serde(default)]
     pub vision: bool,
+    /// Whether `price_in`/`price_out` are a real, known price. `false` for a live-fetched
+    /// Anthropic model (Feature A) whose id isn't in the hardcoded price table yet —
+    /// `model_badge_label` shows "price unknown" instead of a `$0`/`M` badge in that case,
+    /// so an un-priced model never LOOKS free. Absent in older/mocked JSON defaults to
+    /// `true` (every price this endpoint ever served before Feature A was known).
+    #[serde(default = "default_price_known")]
+    pub price_known: bool,
+}
+
+fn default_price_known() -> bool {
+    true
 }
 
 /// Build a badge-enriched display label from registry entry fields.
@@ -814,7 +825,9 @@ pub(super) struct AuditModelOption {
 /// Format: "<display>  FREE · tool-use · 200K · cache"
 /// Or for paid: "<display>  $0.55/M · tool-use · 64K · cache"
 ///
-/// - Price: `FREE` if free, else `$<price_out>/M` (output price, compact).
+/// - Price: `FREE` if free, `price unknown` if `!price_known` (a live-fetched model absent
+///   from the hardcoded price table — see [`AuditModelOption::price_known`]), else
+///   `$<price_out>/M` (output price, compact).
 /// - `tool-use`: always shown (absence as `no-tools` for OpenRouter models lacking it).
 /// - Context: `<N>K` (e.g. `200K`, `64K`).
 /// - `cache`: shown only when `caching` is true.
@@ -827,12 +840,15 @@ fn model_badge_label(
     context: u64,
     price_out: f64,
     caching: bool,
+    price_known: bool,
 ) -> String {
     let mut parts = Vec::<String>::new();
 
-    // Price badge: FREE or $<price>/M (output price).
+    // Price badge: FREE, "price unknown" (never a misleading $0), or $<price>/M.
     if free {
         parts.push("FREE".to_string());
+    } else if !price_known {
+        parts.push("price unknown".to_string());
     } else if price_out > 0.0 {
         // Compact price: show 2 sig figs but strip trailing zeros.
         // e.g. 15.0 → "$15/M", 0.55 → "$0.55/M", 3.0 → "$3/M"
@@ -904,6 +920,10 @@ struct RegistryEntryWire {
     /// Whether the model supports vision / multimodal input (images).
     #[serde(default)]
     vision: bool,
+    /// Whether `price_in`/`price_out` are a real, known price. See
+    /// [`AuditModelOption::price_known`].
+    #[serde(default = "default_price_known")]
+    price_known: bool,
 }
 
 impl RegistryEntryWire {
@@ -916,6 +936,7 @@ impl RegistryEntryWire {
                 self.context,
                 self.price_out,
                 self.caching,
+                self.price_known,
             ),
             id: self.id.clone(),
             provider: self.provider.clone(),
@@ -926,6 +947,7 @@ impl RegistryEntryWire {
             price_out: self.price_out,
             caching: self.caching,
             vision: self.vision,
+            price_known: self.price_known,
         }
     }
 }
@@ -4213,7 +4235,7 @@ mod tests {
 
     #[test]
     fn badge_free_model_shows_free_not_price() {
-        let label = super::model_badge_label("DeepSeek R1", true, true, 64_000, 0.0, false);
+        let label = super::model_badge_label("DeepSeek R1", true, true, 64_000, 0.0, false, true);
         assert!(label.contains("FREE"), "free model must show FREE: {label}");
         assert!(!label.contains('$'), "free model must not show a price: {label}");
     }
@@ -4221,7 +4243,7 @@ mod tests {
     #[test]
     fn badge_paid_model_shows_price_per_million() {
         // $0.55/M output
-        let label = super::model_badge_label("DeepSeek R1", false, true, 64_000, 0.55, false);
+        let label = super::model_badge_label("DeepSeek R1", false, true, 64_000, 0.55, false, true);
         assert!(label.contains("$0.55/M"), "paid model must show output price: {label}");
         assert!(!label.contains("FREE"), "paid model must not show FREE: {label}");
     }
@@ -4229,34 +4251,55 @@ mod tests {
     #[test]
     fn badge_round_price_strips_trailing_decimal() {
         // $15.0/M → "$15/M" (no trailing zero)
-        let label = super::model_badge_label("Opus", false, true, 200_000, 15.0, false);
+        let label = super::model_badge_label("Opus", false, true, 200_000, 15.0, false, true);
         assert!(label.contains("$15/M"), "round price must strip decimal: {label}");
     }
 
     #[test]
     fn badge_caching_true_shows_cache_tag() {
-        let label = super::model_badge_label("DeepSeek R1", false, true, 64_000, 0.55, true);
+        let label = super::model_badge_label("DeepSeek R1", false, true, 64_000, 0.55, true, true);
         assert!(label.contains("cache"), "caching model must show cache tag: {label}");
     }
 
     #[test]
     fn badge_caching_false_omits_cache_tag() {
-        let label = super::model_badge_label("Llama 3.1", false, true, 128_000, 0.10, false);
+        let label = super::model_badge_label("Llama 3.1", false, true, 128_000, 0.10, false, true);
         assert!(!label.contains("cache"), "non-caching model must not show cache tag: {label}");
     }
 
     #[test]
     fn badge_full_format_example() {
         // "DeepSeek R1  $0.55/M · tool-use · 64K · cache"
-        let label = super::model_badge_label("DeepSeek R1", false, true, 64_000, 0.55, true);
+        let label = super::model_badge_label("DeepSeek R1", false, true, 64_000, 0.55, true, true);
         assert_eq!(label, "DeepSeek R1  $0.55/M · tool-use · 64K · cache");
     }
 
     #[test]
     fn badge_free_with_cache() {
-        let label = super::model_badge_label("DeepSeek R1 Free", true, true, 64_000, 0.0, true);
+        let label = super::model_badge_label("DeepSeek R1 Free", true, true, 64_000, 0.0, true, true);
         assert!(label.contains("FREE"), "free label: {label}");
         assert!(label.contains("cache"), "free+cache label: {label}");
+    }
+
+    /// Feature A: a live-fetched Claude model absent from the hardcoded price table
+    /// (`price_known: false`) must show "price unknown", NEVER a bare `$0/M` or nothing at
+    /// all that could read as free. This is the whole reason `price_known` exists — see
+    /// `docs/design/2026-08-27_backend-safety-and-live-models.md`'s Feature A section.
+    #[test]
+    fn badge_unknown_price_shows_price_unknown_not_zero_or_free() {
+        let label = super::model_badge_label("Claude Brand New", false, true, 0, 0.0, true, false);
+        assert!(label.contains("price unknown"), "unknown price must be labeled: {label}");
+        assert!(!label.contains("FREE"), "unknown price must NOT be shown as FREE: {label}");
+        assert!(!label.contains('$'), "unknown price must not show a dollar figure: {label}");
+    }
+
+    /// A free model (price_known irrelevant) must still show FREE even if `price_known`
+    /// happens to be `false` — `free` takes priority in the badge-selection order.
+    #[test]
+    fn badge_free_wins_over_unknown_price() {
+        let label = super::model_badge_label("Some Free Model", true, true, 64_000, 0.0, false, false);
+        assert!(label.contains("FREE"));
+        assert!(!label.contains("price unknown"));
     }
 
     // ── AuditModelsResp::grouped / vision_grouped ─────────────────────────────

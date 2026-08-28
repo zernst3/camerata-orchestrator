@@ -1086,6 +1086,12 @@ pub fn router(state: AppState) -> Router {
         .route("/api/models", get(list_models))
         .route("/api/models/registry", get(get_model_registry))
         .route("/api/models/registry/refresh", post(refresh_model_registry))
+        // Feature A (live Anthropic `/v1/models`) manual refresh — the Anthropic sibling
+        // of the OpenRouter refresh route above. See `refresh_anthropic_registry`.
+        .route(
+            "/api/models/registry/refresh/anthropic",
+            post(refresh_anthropic_registry),
+        )
         // Pass 2 (provider-safety UI): the picker's data source — per-provider
         // pricing + data-policy for one model, lazily fetched on first request.
         .route("/api/models/providers", get(get_model_providers))
@@ -1315,6 +1321,61 @@ fn trigger_openrouter_refresh_if_needed(
     true
 }
 
+// ── Live Anthropic model-registry refresh triggers (Feature A) ──────────────────
+//
+// Mirrors the OpenRouter trigger trio immediately above, one-for-one, for the live
+// Anthropic `/v1/models` catalog. See `docs/design/2026-08-27_backend-safety-and-live-
+// models.md`'s Feature A section.
+//   1. Startup — `spawn_startup_anthropic_refresh`, called from `serve()`.
+//   2. Credential save — `trigger_anthropic_refresh_if_needed`, called from
+//      `set_credential` below, gated on the saved credential being `anthropic_api_key`.
+//   3. Manual — `POST /api/models/registry/refresh/anthropic`
+//      (`refresh_anthropic_registry`), reachable from the "Refresh models" button beside
+//      the Anthropic key field in `crates/ui/src/credentials.rs`.
+
+/// Startup trigger (1 of 3). Fire-and-forget a best-effort live-Anthropic registry
+/// refresh at boot so a previously-saved key populates the picker without a manual POST.
+/// Spawned so it never blocks server start; graceful when no key is configured because
+/// `ModelRegistry::try_refresh_anthropic_from_store` itself no-ops (no HTTP call, no
+/// error) in that case.
+fn spawn_startup_anthropic_refresh(state: &AppState) {
+    let model_registry = state.model_registry.clone();
+    let credential_store = state.credential_store.clone();
+    tokio::spawn(async move {
+        model_registry
+            .try_refresh_anthropic_from_store(credential_store.as_ref())
+            .await;
+    });
+}
+
+/// True when saving credential `name` should trigger a live-Anthropic model-registry
+/// refresh. Mirrors [`is_openrouter_credential`].
+fn is_anthropic_credential(name: &str) -> bool {
+    name == crate::credentials::ANTHROPIC_API_KEY
+}
+
+/// Credential-save trigger (2 of 3). Call after a credential write succeeds in
+/// `set_credential`. When `name` is `anthropic_api_key`, fire-and-forget a live-Anthropic
+/// registry refresh so the picker's model list populates immediately without a restart;
+/// any other credential name is a no-op. Returns whether a refresh was scheduled, mirroring
+/// [`trigger_openrouter_refresh_if_needed`]'s synchronous-assert-friendly contract.
+fn trigger_anthropic_refresh_if_needed(
+    name: &str,
+    model_registry: &crate::model_registry::ModelRegistry,
+    credential_store: Arc<dyn crate::credentials::CredentialStore>,
+) -> bool {
+    if !is_anthropic_credential(name) {
+        return false;
+    }
+    let registry = model_registry.clone();
+    tokio::spawn(async move {
+        registry
+            .try_refresh_anthropic_from_store(credential_store.as_ref())
+            .await;
+    });
+    true
+}
+
 /// Bind `addr` and serve. The same entry point runs locally and in the cloud. The
 /// provider is selected from the environment, so setting the GitHub vars switches the
 /// whole BFF onto a real repo with no code change.
@@ -1331,6 +1392,12 @@ pub async fn serve(addr: &str) -> anyhow::Result<()> {
     // spams logs. See `try_refresh_from_store_is_a_graceful_noop_with_no_key_configured`
     // in `crates/llm/src/model_registry.rs` for the direct, non-racy test of that contract.
     spawn_startup_openrouter_refresh(&state);
+
+    // Live Anthropic model-registry refresh (Feature A), trigger 1 of 3 (startup) — the
+    // one-for-one Anthropic sibling of the OpenRouter startup refresh directly above. See
+    // the block above `serve()` and `docs/design/2026-08-27_backend-safety-and-live-
+    // models.md`. Graceful when no Anthropic key is configured (no-op, no HTTP call).
+    spawn_startup_anthropic_refresh(&state);
 
     // Background event-ingest pollers (tracker events -> notification feed -> UI
     // toasts). Cadences are env-configurable; see crate::notify. Spawned here, not
@@ -8529,17 +8596,25 @@ async fn list_models() -> Json<serde_json::Value> {
     }))
 }
 
-/// `GET /api/models/registry` — return the full model registry (Claude static + cached
-/// OpenRouter entries). The response carries an `openrouter_fetched` flag; when `false`
-/// the client can prompt the user to add an OpenRouter key and call the refresh endpoint.
+/// `GET /api/models/registry` — return the full model registry: OpenRouter cached
+/// entries plus a Claude portion that is BACKEND-AWARE (Feature A, see
+/// `docs/design/2026-08-27_backend-safety-and-live-models.md`) — the live Anthropic
+/// `/v1/models` list when the API backend is active with a key and that fetch has
+/// succeeded, else the hardcoded `CLAUDE_REGISTRY_MODELS` catalog (which is also what the
+/// CLI backend always gets, since the CLI/subscription model set is not the API's).
+/// `openrouter_fetched`/`anthropic_fetched` flags let the client prompt for a key + call
+/// the matching refresh endpoint when a portion has never been populated.
 async fn get_model_registry(
     State(state): State<AppState>,
 ) -> Json<crate::model_registry::RegistryResp> {
-    let models = state.model_registry.all_entries();
+    let use_live_anthropic = use_live_anthropic_models(&state);
+    let models = state.model_registry.entries_for_backend(use_live_anthropic);
     let openrouter_fetched = state.model_registry.openrouter_fetched();
+    let anthropic_fetched = state.model_registry.anthropic_fetched();
     Json(crate::model_registry::RegistryResp {
         models,
         openrouter_fetched,
+        anthropic_fetched,
     })
 }
 
@@ -8554,10 +8629,40 @@ async fn refresh_model_registry(
         .model_registry
         .try_refresh_from_store(state.credential_store.as_ref())
         .await;
-    let models = state.model_registry.all_entries();
+    let use_live_anthropic = use_live_anthropic_models(&state);
+    let models = state.model_registry.entries_for_backend(use_live_anthropic);
     let openrouter_count = models.iter().filter(|e| e.provider == "openrouter").count();
     Json(crate::model_registry::RefreshResp {
         openrouter_count,
+        attempted,
+        models,
+    })
+}
+
+/// `POST /api/models/registry/refresh/anthropic` — (re-)fetch the LIVE Anthropic
+/// `/v1/models` catalog using the Anthropic key stored in the OS keychain (or its
+/// `ANTHROPIC_API_KEY` env fallback — see `try_refresh_anthropic_from_store` /
+/// `crate::credentials::ANTHROPIC_API_KEY`). Feature A's manual refresh trigger, mirroring
+/// [`refresh_model_registry`] for OpenRouter. Returns `{ attempted: false,
+/// anthropic_count: 0 }` when no Anthropic key is present; on any fetch error the cache is
+/// set to empty (fail-soft) and the returned registry falls back to the hardcoded
+/// catalog — this endpoint never returns a 5xx for an upstream Anthropic failure.
+async fn refresh_anthropic_registry(
+    State(state): State<AppState>,
+) -> Json<crate::model_registry::AnthropicRefreshResp> {
+    let attempted = state
+        .model_registry
+        .try_refresh_anthropic_from_store(state.credential_store.as_ref())
+        .await;
+    let use_live_anthropic = use_live_anthropic_models(&state);
+    let models = state.model_registry.entries_for_backend(use_live_anthropic);
+    // Count the Claude portion actually being served post-refresh (live if the backend
+    // picked it up, else the hardcoded fallback count) — mirrors how
+    // `refresh_model_registry`'s `openrouter_count` reflects the post-refresh state, not
+    // just the raw fetch size.
+    let anthropic_count = models.iter().filter(|e| e.provider == "claude").count();
+    Json(crate::model_registry::AnthropicRefreshResp {
+        anthropic_count,
         attempted,
         models,
     })
@@ -8853,6 +8958,19 @@ fn effective_llm_backend(settings: &crate::settings::SettingsStore) -> String {
         .unwrap_or_else(|| "cli".to_string())
 }
 
+/// Whether the model-registry picker should be served the LIVE Anthropic `/v1/models`
+/// list (Feature A, see `docs/design/2026-08-27_backend-safety-and-live-models.md`)
+/// rather than the hardcoded `CLAUDE_REGISTRY_MODELS` catalog. `true` exactly when the
+/// effective LLM backend is `"api"` AND an Anthropic key is present — the CLI backend
+/// always gets the hardcoded list regardless of this check (the CLI/subscription model
+/// set is not the API `/v1/models` set), and `ModelRegistry::claude_entries_for_backend`
+/// separately fails soft to hardcoded even when this returns `true`, if the live cache
+/// hasn't been populated yet or the last fetch failed.
+fn use_live_anthropic_models(state: &AppState) -> bool {
+    effective_llm_backend(&state.settings) == "api"
+        && anthropic_api_key_present(state.credential_store.as_ref())
+}
+
 /// Resolve the Feature-B compliance-safety backend decision (see
 /// `docs/design/2026-08-27_backend-safety-and-live-models.md`) for `project`. Centralizes the
 /// three-input gather — `effective_llm_backend` (the app's configured preference),
@@ -9046,6 +9164,11 @@ async fn set_credential(
     // OpenRouter key should populate the model picker immediately, not after a restart or
     // a manual refresh-endpoint POST. No-op for every other credential name.
     trigger_openrouter_refresh_if_needed(&name, &state.model_registry, state.credential_store.clone());
+    // Live Anthropic model-registry refresh (Feature A), trigger 2 of 3 (credential-save):
+    // a freshly-saved Anthropic key should populate the LIVE `/v1/models` picker list
+    // immediately, not after a restart or a manual refresh-endpoint POST. No-op for every
+    // other credential name.
+    trigger_anthropic_refresh_if_needed(&name, &state.model_registry, state.credential_store.clone());
     // ROUTES-9: this handler used to `std::env::set_var("ANTHROPIC_API_KEY", ...)` so a
     // freshly-saved key took effect for the `api` backend without a restart. That mutated
     // process-global env from a request-handler thread while worker threads read the same var
@@ -22473,6 +22596,273 @@ mod tests {
             !state.model_registry.openrouter_fetched(),
             "a non-OpenRouter credential save must never trigger a registry refresh"
         );
+    }
+
+    // ── Live Anthropic model-registry refresh triggers (Feature A) ─────────────────
+    //
+    // Mirrors the OpenRouter registry-refresh trigger tests immediately above, one for
+    // one. See `docs/design/2026-08-27_backend-safety-and-live-models.md`'s Feature A
+    // section and the doc comments on `is_anthropic_credential` /
+    // `trigger_anthropic_refresh_if_needed` above `serve()`.
+
+    /// Pure name-matching predicate: only the Anthropic credential name matches.
+    #[test]
+    fn is_anthropic_credential_matches_only_the_anthropic_key_name() {
+        assert!(is_anthropic_credential(crate::credentials::ANTHROPIC_API_KEY));
+        assert!(!is_anthropic_credential(crate::credentials::GITHUB_TOKEN));
+        assert!(!is_anthropic_credential(crate::credentials::OPENROUTER_API_KEY));
+        assert!(!is_anthropic_credential(""));
+    }
+
+    /// Saving the Anthropic credential schedules a refresh (return value `true`). The
+    /// credential store passed in has NO key set, so even if the spawned task happens to
+    /// be polled before this test function returns, `try_refresh_anthropic_from_store`'s
+    /// own guard no-ops immediately — this test can never make a live HTTP call, by
+    /// construction (mirrors `trigger_openrouter_refresh_if_needed_schedules_for_the_
+    /// openrouter_key`'s exact same discipline).
+    #[tokio::test]
+    async fn trigger_anthropic_refresh_if_needed_schedules_for_the_anthropic_key() {
+        let model_registry = crate::model_registry::ModelRegistry::new();
+        let credential_store: Arc<dyn crate::credentials::CredentialStore> =
+            Arc::new(crate::credentials::MemoryCredentialStore::new());
+        let scheduled = trigger_anthropic_refresh_if_needed(
+            crate::credentials::ANTHROPIC_API_KEY,
+            &model_registry,
+            credential_store,
+        );
+        assert!(scheduled, "saving the Anthropic key must schedule a refresh");
+    }
+
+    /// Saving any OTHER credential must NOT schedule a refresh.
+    #[tokio::test]
+    async fn trigger_anthropic_refresh_if_needed_ignores_other_credentials() {
+        let model_registry = crate::model_registry::ModelRegistry::new();
+        let credential_store: Arc<dyn crate::credentials::CredentialStore> =
+            Arc::new(crate::credentials::MemoryCredentialStore::new());
+        let scheduled = trigger_anthropic_refresh_if_needed(
+            crate::credentials::GITHUB_TOKEN,
+            &model_registry,
+            credential_store,
+        );
+        assert!(!scheduled, "saving a non-Anthropic credential must not schedule a refresh");
+    }
+
+    /// End-to-end through the real HTTP handler: saving a DIFFERENT credential
+    /// (github_token) must leave the Anthropic live-registry cache untouched
+    /// (`anthropic_fetched` stays false). Mirrors
+    /// `set_credential_for_non_openrouter_name_does_not_touch_the_registry_cache`; the
+    /// anthropic_api_key case itself is covered at the function level above instead of
+    /// here, to avoid any chance of the request handler's spawned task making a live call
+    /// to api.anthropic.com mid-test.
+    #[tokio::test]
+    async fn set_credential_for_non_anthropic_name_does_not_touch_the_anthropic_cache() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(!state.model_registry.anthropic_fetched());
+        let app = router(state.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/credentials/github_token")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"value":"ghp_unrelated_token"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(
+            !state.model_registry.anthropic_fetched(),
+            "a non-Anthropic credential save must never trigger a live-Anthropic refresh"
+        );
+    }
+
+    // ── GET /api/models/registry — backend-aware Claude portion (Feature A) ────────
+
+    /// `use_live_anthropic_models`: the pure decision `get_model_registry` /
+    /// `refresh_model_registry` / `refresh_anthropic_registry` all consult. False on a
+    /// fresh CLI-default install (no backend setting, no key).
+    #[test]
+    fn use_live_anthropic_models_false_by_default() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        assert!(!use_live_anthropic_models(&state));
+    }
+
+    /// True only once BOTH conditions hold: effective backend is `api` AND a key is
+    /// present. Neither alone is enough — this is the exact two-input gate the design doc
+    /// describes for Feature A ("the picker's available Claude models become a function
+    /// of the active backend").
+    #[test]
+    fn use_live_anthropic_models_requires_both_api_backend_and_key() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        // API backend selected, but no key yet.
+        state.settings.set_llm_backend(Some("api".to_string()));
+        assert!(!use_live_anthropic_models(&state), "api backend alone, no key, must stay false");
+
+        // Key present, but backend still `api` — now both hold.
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test-key")
+            .unwrap();
+        assert!(use_live_anthropic_models(&state), "api backend + key present must be true");
+
+        // Flip back to CLI: even with the key present, must be false.
+        state.settings.set_llm_backend(Some("cli".to_string()));
+        assert!(!use_live_anthropic_models(&state), "cli backend must stay false even with a key");
+    }
+
+    /// `GET /api/models/registry` on the CLI backend (the default) serves the hardcoded
+    /// Claude catalog, even when a live Anthropic cache happens to be populated (e.g. left
+    /// over from a prior API-backend session) — the CLI backend must never see the live
+    /// list.
+    #[tokio::test]
+    async fn get_model_registry_serves_hardcoded_claude_on_cli_backend() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        state.model_registry.seed_anthropic_entries(vec![crate::model_registry::RegistryEntry {
+            provider: "claude".to_string(),
+            display: "Live-Only Model".to_string(),
+            id: "claude-live-only".to_string(),
+            free: false,
+            tool_use: true,
+            context: 0,
+            coding: 1.0,
+            price_in: 0.0,
+            price_out: 0.0,
+            weight: 0,
+            caching: true,
+            vision: true,
+            price_known: false,
+        }]);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/models/registry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let models = json["models"].as_array().expect("models array");
+        assert!(
+            models.iter().any(|m| m["id"] == "claude-opus-5"),
+            "CLI backend must serve the hardcoded catalog: {models:?}"
+        );
+        assert!(
+            !models.iter().any(|m| m["id"] == "claude-live-only"),
+            "CLI backend must NOT leak the live cache even when populated: {models:?}"
+        );
+    }
+
+    /// `GET /api/models/registry` on the API backend with a key present AND a populated
+    /// live cache serves the LIVE list instead of the hardcoded catalog — this is Feature
+    /// A's whole point (a model like `claude-fable-5` shows up in the picker iff the
+    /// account is actually served it, which the live fetch — not the hardcoded list —
+    /// determines).
+    #[tokio::test]
+    async fn get_model_registry_serves_live_list_on_api_backend_with_key_and_cache() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        state.settings.set_llm_backend(Some("api".to_string()));
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test-key")
+            .unwrap();
+        state.model_registry.seed_anthropic_entries(vec![crate::model_registry::RegistryEntry {
+            provider: "claude".to_string(),
+            display: "Live-Only Model".to_string(),
+            id: "claude-live-only".to_string(),
+            free: false,
+            tool_use: true,
+            context: 0,
+            coding: 1.0,
+            price_in: 0.0,
+            price_out: 0.0,
+            weight: 0,
+            caching: true,
+            vision: true,
+            price_known: false,
+        }]);
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/models/registry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let models = json["models"].as_array().expect("models array");
+        assert!(
+            models.iter().any(|m| m["id"] == "claude-live-only"),
+            "API backend with key + populated cache must serve the LIVE list: {models:?}"
+        );
+        assert!(
+            !models.iter().any(|m| m["id"] == "claude-opus-5"),
+            "the live list REPLACES the hardcoded catalog, it doesn't union with it: {models:?}"
+        );
+        assert!(json["anthropic_fetched"].as_bool().unwrap_or(false));
+    }
+
+    /// `GET /api/models/registry` on the API backend WITH a key but a cache that was never
+    /// populated (fresh install, or the live fetch failed) must still serve the hardcoded
+    /// catalog — the fail-soft floor from `ModelRegistry::claude_entries_for_backend`
+    /// surfaced all the way through the HTTP handler.
+    #[tokio::test]
+    async fn get_model_registry_falls_back_to_hardcoded_when_api_backend_but_no_live_cache() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        state.settings.set_llm_backend(Some("api".to_string()));
+        state
+            .credential_store
+            .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test-key")
+            .unwrap();
+        // No seed_anthropic_entries call: cache stays unpopulated.
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/models/registry")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        let models = json["models"].as_array().expect("models array");
+        assert!(
+            models.iter().any(|m| m["id"] == "claude-opus-5"),
+            "no live cache yet: must fall back to the hardcoded catalog: {models:?}"
+        );
+        assert!(!json["anthropic_fetched"].as_bool().unwrap_or(true));
+    }
+
+    /// `POST /api/models/registry/refresh/anthropic` with no Anthropic key present
+    /// returns 200 with `attempted: false` (never a 5xx for a missing key) and the
+    /// registry it echoes back still serves the hardcoded catalog.
+    #[tokio::test]
+    async fn refresh_anthropic_registry_endpoint_no_key_is_a_graceful_noop() {
+        let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/models/registry/refresh/anthropic")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["attempted"], false);
+        let models = json["models"].as_array().expect("models array");
+        assert!(models.iter().any(|m| m["id"] == "claude-opus-5"));
     }
 
     /// ROUTES-9: saving the Anthropic key via `POST /api/credentials/anthropic_api_key`

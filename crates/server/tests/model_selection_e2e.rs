@@ -120,6 +120,7 @@ fn registry_with_openrouter(id: &str) -> ModelRegistry {
         weight: 0,
         caching: false,
         vision: false,
+        price_known: true,
     }]);
     reg
 }
@@ -532,6 +533,7 @@ fn scope4_max_efficiency_profile_picks_free_models() {
         weight: 0,
         caching: false,
         vision: false,
+        price_known: true,
     }]);
     let p = store.create("ME", vec![]).unwrap();
 
