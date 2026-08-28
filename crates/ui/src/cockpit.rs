@@ -115,6 +115,14 @@ struct ProjectView {
     /// the drag-and-drop builder. Absent → empty (the server seeds a default on the project side).
     #[serde(default)]
     hierarchy_schema: HierarchySchemaView,
+    /// The compliance-safety master switch (Feature B,
+    /// `docs/design/2026-08-27_backend-safety-and-live-models.md`): whether this project may
+    /// EVER use the operator's personal Claude CLI subscription as a transport. Defaults to
+    /// `false` (API-only, client-safe) so a project written before this field existed — or a
+    /// freshly-created one — is never more permissive than the secure default. `#[serde(default)]`
+    /// is the field's ONLY source of that default; there is no separate "new project" path here.
+    #[serde(default)]
+    cli_active: bool,
 }
 
 /// One project-memory entry as the BFF reports it (mirrors the server's `MemoryEntry`). Enum-ish
@@ -476,6 +484,38 @@ pub(super) async fn set_project_vision_enabled(id: &str, enabled: bool) -> bool 
         .await
         .map(|r| r.status().is_success())
         .unwrap_or(false)
+}
+
+/// Flip a project's `cli_active` compliance-safety master switch (Feature B — the
+/// backend-safety gate, `docs/design/2026-08-27_backend-safety-and-live-models.md`). OFF
+/// (the default) forces every scan/run on this project onto the API backend and HARD-BLOCKS
+/// when no Anthropic key is present, rather than silently falling back to the operator's
+/// personal Claude CLI subscription. ON permits that fallback (and an explicit `cli` choice)
+/// for this project only.
+///
+/// Uses `POST /api/projects/:id/cli-active { active }`, mirroring `set_step_model`'s response
+/// shape exactly: `{ "ok": true, "project": {...} }` on success, `{ "ok": false, "message":
+/// "..." }` on failure — see `set_cli_active_handler` in `crates/server/src/lib.rs`. Unlike the
+/// sibling mutators above (which only check the HTTP status), this one PARSES the response and
+/// hands back the server's own echoed `cli_active`, not the value the caller asked for: this is
+/// a compliance flag, so the UI must reflect what the server actually persisted, never an
+/// optimistic guess that silently drifted from it. Returns `None` on any failure (network,
+/// non-2xx, unparseable body, unknown project, or an explicit `ok: false`).
+pub(super) async fn set_project_cli_active(id: &str, active: bool) -> Option<bool> {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/api/projects/{}/cli-active", crate::bff_base(), id))
+        .json(&serde_json::json!({ "active": active }))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+    body.get("project")?.get("cli_active")?.as_bool()
 }
 
 /// Set the model for ONE non-fleet AI step on a project. Uses the
@@ -2857,6 +2897,13 @@ fn SettingsView(global_only: bool) -> Element {
                 Some(p) => {
                     let p_owned = p.clone();
                     rsx! {
+                        // ── Backend safety (Feature B, compliance gate) ────────
+                        // Placed first: this is the auth/billing/compliance switch that governs
+                        // which chain (API vs. personal-subscription CLI) every other setting on
+                        // this project runs on. See docs/design/2026-08-27_backend-safety-and-live-models.md.
+                        p { class: "section-label settings-label", "Backend safety" }
+                        rules::CliActiveEditor { project: p_owned.clone() }
+
                         // ── Loop guard ────────────────────────────────────────
                         LoopGuardControl {}
 
@@ -4385,6 +4432,76 @@ mod tests {
         std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(ok);
+    }
+
+    /// `set_project_cli_active` POSTs {active} and, on `{ ok: true, project: {..., cli_active} }`,
+    /// hands back the server's ECHOED `cli_active` — not the value the caller asked for. This
+    /// locks that the toggle trusts what the server actually persisted rather than assuming
+    /// its own request succeeded verbatim.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_project_cli_active_posts_flag_and_returns_echoed_value() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/p-1/cli-active"))
+            .and(body_json(serde_json::json!({ "active": true })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "project": { "id": "p-1", "name": "Acme", "cli_active": true }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let result = super::set_project_cli_active("p-1", true).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(result, Some(true));
+    }
+
+    /// An `{ ok: false, message: "..." }` response (e.g. unknown project id) must NOT be read
+    /// as success just because the HTTP status is 200 — `set_project_cli_active` checks the
+    /// `ok` field, not only the status code.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_project_cli_active_returns_none_on_ok_false() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/does-not-exist/cli-active"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": false,
+                "message": "no such project"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let result = super::set_project_cli_active("does-not-exist", true).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(result, None);
+    }
+
+    /// A hard network/transport failure (no mock mounted, connection refused) must also come
+    /// back as `None`, not a panic.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn set_project_cli_active_returns_none_on_network_failure() {
+        // Port 9 is the discard service; nothing answers HTTP there, so the request fails
+        // at the transport layer without needing a mock server at all.
+        std::env::set_var("CAMERATA_BFF_URL", "http://127.0.0.1:9");
+        let result = super::set_project_cli_active("p-1", true).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(result, None);
     }
 
     /// `set_project_step_model` POSTs {step, model} (patch semantics: one step per call).

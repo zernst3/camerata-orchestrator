@@ -2713,6 +2713,88 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
     }
 }
 
+/// Per-project **"Allow Claude CLI (personal subscription)"** toggle (Feature B — the
+/// backend-safety gate, `docs/design/2026-08-27_backend-safety-and-live-models.md`). This is
+/// an auth/billing/compliance switch, not a model-quality one: OFF (the default) means this
+/// project is API-only — every scan/run rides the commercial, metered Anthropic API, and a
+/// missing key HARD-BLOCKS rather than silently falling back to the operator's personal Claude
+/// subscription. ON permits that fallback (and an explicit `cli` backend choice) for this
+/// project only.
+///
+/// Auto-saves on change (same idiom as the Designer/vision toggle in `TierMapEditor`), except
+/// the local signal is reconciled from the server's ECHOED value — `set_project_cli_active`
+/// returns `Option<bool>`, not a bare success flag — since a compliance flag must never
+/// silently drift from what the server actually persisted. A failed save reverts the checkbox
+/// to its pre-click state rather than leaving it showing an unconfirmed value.
+#[component]
+pub(super) fn CliActiveEditor(project: ProjectView) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    let pid = project.id.clone();
+    let mut cli_active = use_signal(|| project.cli_active);
+    let mut saving = use_signal(|| false);
+
+    rsx! {
+        div { class: "tier-map-editor cli-active-editor",
+            p { class: "tier-map-heading", "Backend safety" }
+            p { class: "section-hint tier-map-hint",
+                "OFF = API-only (client-safe): scans require an Anthropic API key and will \
+                 never use your personal Claude subscription. ON = permits the personal-\
+                 subscription CLI as a transport for this project \u{2014} not for client code."
+            }
+            div { class: "tier-map-row cli-active-toggle-row",
+                label { class: "tier-map-band-label", "Allow Claude CLI (personal subscription)" }
+                input {
+                    r#type: "checkbox",
+                    class: "l3-review-checkbox cli-active-checkbox",
+                    checked: cli_active(),
+                    disabled: saving(),
+                    onchange: move |e| {
+                        let requested = e.checked();
+                        let previous = cli_active();
+                        // Optimistic flip so the checkbox responds immediately; reconciled (or
+                        // reverted) below once the server confirms what it actually persisted.
+                        cli_active.set(requested);
+                        let pid = pid.clone();
+                        saving.set(true);
+                        spawn(async move {
+                            match set_project_cli_active(&pid, requested).await {
+                                Some(confirmed) => {
+                                    cli_active.set(confirmed);
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Info,
+                                        if confirmed {
+                                            "Claude CLI (personal subscription) allowed for this project."
+                                        } else {
+                                            "Project is API-only \u{2014} the Claude CLI is disabled for it."
+                                        },
+                                    );
+                                }
+                                None => {
+                                    cli_active.set(previous);
+                                    crate::toast::push_toast(
+                                        toasts,
+                                        crate::toast::ToastKind::Error,
+                                        "Could not update the Allow Claude CLI setting.",
+                                    );
+                                }
+                            }
+                            saving.set(false);
+                        });
+                    },
+                }
+                span { class: "l3-review-toggle-hint cli-active-toggle-hint",
+                    if cli_active() {
+                        "On \u{2014} the personal-subscription CLI may be used for this project. Not for client code."
+                    } else {
+                        "Off \u{2014} API-only. A missing Anthropic key blocks scans instead of falling back to the CLI."
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 pub(super) fn RulesView() -> Element {
     let mut refresh = use_signal(|| 0u32);
@@ -7201,6 +7283,62 @@ mod render_tests {
         assert!(
             cell.matches_filter(&partial),
             "a case-insensitive substring of the rule id also finds the row; cell={cell:?}"
+        );
+    }
+
+    // CliActiveEditor (Feature B — the backend-safety gate): reads only `project.cli_active`
+    // via use_signal and the toast context, no use_resource — so both the OFF (default) and ON
+    // seed states render deterministically under SSR with no async gap to account for.
+    fn project_with_cli_active(active: bool) -> ProjectView {
+        serde_json::from_value(serde_json::json!({
+            "id": "proj-cli-1",
+            "name": "Acme",
+            "cli_active": active,
+        }))
+        .expect("valid ProjectView fixture")
+    }
+
+    #[test]
+    fn cli_active_editor_renders_label_and_off_state_by_default() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            rsx! {
+                CliActiveEditor { project: project_with_cli_active(false) }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("cli-active-editor"), "wrapper class; html=\n{html}");
+        assert!(
+            html.contains("Allow Claude CLI (personal subscription)"),
+            "the exact label text; html=\n{html}"
+        );
+        // Backend-safety copy: OFF means API-only / client-safe.
+        assert!(html.contains("API-only"), "the API-only explanation; html=\n{html}");
+        assert!(
+            html.contains("blocks scans instead of falling back to the CLI"),
+            "the off-state hint; html=\n{html}"
+        );
+        // The checkbox itself is unchecked when cli_active is false.
+        assert!(!html.contains("checked=true"), "unchecked when OFF; html=\n{html}");
+    }
+
+    #[test]
+    fn cli_active_editor_renders_checked_when_project_cli_active_is_true() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            rsx! {
+                CliActiveEditor { project: project_with_cli_active(true) }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("checked=true"), "checked when ON; html=\n{html}");
+        assert!(
+            html.contains("the personal-subscription CLI may be used for this project"),
+            "the on-state hint; html=\n{html}"
         );
     }
 }

@@ -1046,6 +1046,8 @@ html, body {
 .onboard-gate-dot { width: 8px; height: 8px; border-radius: 50%; background: #ca8a04; margin-top: 5px; flex: none; }
 .onboard-gate-h { font-weight: 700; font-size: 13px; color: #fbbf24; }
 .onboard-gate-b { font-size: 12px; color: var(--ink-soft); margin-top: 3px; line-height: 1.5; }
+/* Feature B (backend-safety gate): the "add a key or enable CLI" hint on a `Blocked` scan. */
+.onboard-gate-hint { font-size: 12px; color: var(--ink-soft); margin-top: 6px; line-height: 1.5; font-style: italic; }
 .mono { font-family: "Courier Prime", ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .92em; }
 .onboard-repo-block { display: flex; flex-direction: column; gap: 6px; margin-bottom: 22px; }
 .onboard-repo-label { font-size: 12px; color: var(--ink-soft); }
@@ -1094,6 +1096,14 @@ html, body {
 .onboard-step-b { font-size: 12px; color: var(--ink-soft); margin-top: 2px; line-height: 1.5; }
 .scan-results { margin-top: 18px; }
 .scan-note { font-size: 12px; color: #fbbf24; background: rgba(202,138,4,0.10); border: 1px solid rgba(202,138,4,0.4); border-radius: 8px; padding: 8px 11px; margin-bottom: 12px; }
+/* Feature B (backend-safety gate): a `⚠ COMPLIANCE:` note (CliFallbackWarn — the scan ran on
+   the operator's personal Claude subscription, not the API) pulled out of the routine
+   `.scan-note` line into its own higher-alarm banner. Reuses the `.scan-stat-n.high` red so a
+   compliance event reads at a different severity than an ordinary amber coverage note. */
+.compliance-warning-banner { display: flex; gap: 10px; align-items: flex-start; background: rgba(154,53,38,0.12); border: 1px solid rgba(154,53,38,0.45); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+.compliance-warning-icon { font-size: 15px; line-height: 1; color: #9a3526; flex: none; margin-top: 1px; }
+.compliance-warning-title { font-size: 12px; font-weight: 700; color: #9a3526; margin: 0; }
+.compliance-warning-text { font-size: 12px; color: var(--ink); margin: 3px 0 0; line-height: 1.5; }
 .scan-summary { display: flex; gap: 18px; margin-bottom: 16px; }
 .scan-stat { font-size: 12px; color: var(--ink-soft); }
 .scan-stat-n { font-size: 16px; font-weight: 700; color: var(--ink); margin-right: 4px; }

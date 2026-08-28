@@ -2208,25 +2208,37 @@ pub(super) fn OnboardView(connection: Option<ProviderView>) -> Element {
             if path() == OnboardPath::Brownfield {
                 // Scan results: the audit findings + proposed-rules tables (chorale).
                 if let Some(report) = scan() {
-                    if report.gated {
-                        div { class: "onboard-gate",
-                            span { class: "onboard-gate-dot" }
-                            div {
-                                p { class: "onboard-gate-h", "Scan not run" }
-                                p { class: "onboard-gate-b", "{report.message.clone().unwrap_or_default()}" }
+                    {
+                        let looks_blocked = scan_report_looks_blocked(&report);
+                        rsx! {
+                            if report.gated || looks_blocked {
+                                div { class: "onboard-gate",
+                                    span { class: "onboard-gate-dot" }
+                                    div {
+                                        p { class: "onboard-gate-h",
+                                            if report.gated { "Scan not run" } else { "Scan blocked" }
+                                        }
+                                        p { class: "onboard-gate-b", "{report.message.clone().unwrap_or_default()}" }
+                                        if looks_blocked {
+                                            p { class: "onboard-gate-hint",
+                                                "Add an Anthropic API key in Settings, or enable \u{201c}Allow Claude CLI (personal subscription)\u{201d} for this project, to run this scan."
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                {
+                                    // Key by the SCAN's identity (repo set + proposed-rule count) so a
+                                    // RE-SCAN remounts ScanResults/ProposedRulesTable with fresh rows and
+                                    // a fresh "recommended -> selected" pass.
+                                    let scan_key = format!(
+                                        "{}|{}",
+                                        report.repos.join(","),
+                                        report.proposed_rules.len()
+                                    );
+                                    rsx! { ScanResults { key: "{scan_key}", report } }
+                                }
                             }
-                        }
-                    } else {
-                        {
-                            // Key by the SCAN's identity (repo set + proposed-rule count) so a
-                            // RE-SCAN remounts ScanResults/ProposedRulesTable with fresh rows and
-                            // a fresh "recommended -> selected" pass.
-                            let scan_key = format!(
-                                "{}|{}",
-                                report.repos.join(","),
-                                report.proposed_rules.len()
-                            );
-                            rsx! { ScanResults { key: "{scan_key}", report } }
                         }
                     }
                 }
@@ -2491,6 +2503,57 @@ pub(super) fn GreenfieldResultView(result: GreenfieldScaffoldResult) -> Element 
             }
         }
     }
+}
+
+/// Feature B — the compliance-safety gate (backend-safety-and-live-models design doc): a
+/// `Blocked` resolution (API-only project, no Anthropic key) aborts the scan BEFORE any file
+/// is read and returns a report with `gated: false` (it isn't the GitHub-connect gate — only
+/// its `message` channel is reused) but `files_scanned`/`findings`/`proposed_rules` all empty.
+/// Left to fall into the `ScanResults` branch, that would render as a full report of all-zero
+/// stats — reading as "we scanned and found nothing," a materially different (and misleading)
+/// claim from "we refused to scan." This detects that shape so the caller can route it through
+/// the same gate box as the GitHub-connect gate instead. A factual (non-blocked) scan of a
+/// genuinely empty/unscannable repo with no message attached is NOT mistaken for this — the
+/// combination of a present `message` AND all-zero counts is what's distinctive.
+fn scan_report_looks_blocked(report: &ScanReportView) -> bool {
+    !report.gated
+        && report.message.is_some()
+        && report.files_scanned == 0
+        && report.findings.is_empty()
+        && report.proposed_rules.is_empty()
+}
+
+/// The exact prefix `audit_repos` (crates/server/src/onboard.rs) attaches to a
+/// `CliFallbackWarn` resolution's message before folding it into the report's joined-by-
+/// " · " `notes` -> `message`. Kept as a single constant so the UI-side split below and any
+/// future match stay byte-for-byte in sync with the server string.
+const COMPLIANCE_NOTE_PREFIX: &str = "\u{26a0} COMPLIANCE:";
+
+/// Split a `ScanReport::message` into `(compliance-warning notes, remaining notes)`.
+///
+/// `audit_repos` joins every note for the run with `" · "` into one string (see
+/// crates/server/src/onboard.rs ~line 600), so a `⚠ COMPLIANCE:`-prefixed `CliFallbackWarn`
+/// warning can arrive interleaved with ordinary per-repo scan notes ("AI review deselected",
+/// "audit failed", etc). This pulls the compliance-prefixed segments out (prefix stripped,
+/// trimmed) so the caller can render them in a dedicated, higher-alarm banner instead of
+/// letting them blend into the routine note line. Returns `other` as `None` when nothing is
+/// left over, so the caller can skip rendering an empty `.scan-note` box.
+fn split_compliance_notes(message: &str) -> (Vec<String>, Option<String>) {
+    let mut compliance = Vec::new();
+    let mut other = Vec::new();
+    for part in message.split(" · ") {
+        let trimmed = part.trim();
+        match trimmed.strip_prefix(COMPLIANCE_NOTE_PREFIX) {
+            Some(rest) => compliance.push(rest.trim().to_string()),
+            None => {
+                if !trimmed.is_empty() {
+                    other.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+    let other = if other.is_empty() { None } else { Some(other.join(" · ")) };
+    (compliance, other)
 }
 
 /// Renders one brownfield scan's results: the audit summary, the findings table,
@@ -2918,7 +2981,31 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
         }
         div { class: "scan-results",
             if let Some(msg) = report.message.clone() {
-                p { class: "scan-note", "{msg}" }
+                {
+                    // Feature B — the compliance-safety gate: a `CliFallbackWarn` resolution
+                    // (API-required, no key, but the project's "Allow Claude CLI" toggle is ON)
+                    // doesn't abort the scan — it proceeds on the operator's personal-subscription
+                    // CLI and folds a `⚠ COMPLIANCE:`-prefixed warning into this same joined-by-
+                    // " · " message alongside routine scan notes (see `audit_repos` in
+                    // crates/server/src/onboard.rs). Split those parts out into a dedicated,
+                    // higher-alarm banner so a compliance-relevant event can never be mistaken
+                    // for routine scan trivia buried in the plain note line.
+                    let (compliance_notes, other_notes) = split_compliance_notes(&msg);
+                    rsx! {
+                        for note in compliance_notes.iter() {
+                            div { class: "compliance-warning-banner",
+                                span { class: "compliance-warning-icon", "\u{26a0}" }
+                                div {
+                                    p { class: "compliance-warning-title", "Compliance warning" }
+                                    p { class: "compliance-warning-text", "{note}" }
+                                }
+                            }
+                        }
+                        if let Some(rest) = other_notes {
+                            p { class: "scan-note", "{rest}" }
+                        }
+                    }
+                }
             }
             div { class: "scan-summary",
                 span { class: "scan-stat",
@@ -4090,6 +4177,101 @@ mod tests {
 
     fn minimal_scan_json() -> &'static str {
         r#"{"files_scanned":0,"findings":[],"proposed_rules":[],"gated":false}"#
+    }
+
+    // ── Feature B (backend-safety gate): `scan_report_looks_blocked` ───────────
+    // Distinguishes a `Blocked` compliance resolution (aborted before any file was read,
+    // `gated: false` but a message + all-zero counts) from a completed scan.
+
+    fn scan_report_fixture(overrides: serde_json::Value) -> super::ScanReportView {
+        let mut base = serde_json::json!({
+            "repos": ["me/api"],
+            "files_scanned": 0,
+            "findings": [],
+            "proposed_rules": [],
+            "gated": false,
+        });
+        for (k, v) in overrides.as_object().expect("overrides must be a JSON object") {
+            base[k] = v.clone();
+        }
+        serde_json::from_value(base).expect("valid ScanReportView fixture")
+    }
+
+    #[test]
+    fn looks_blocked_true_for_blocked_shape() {
+        // gated:false + a message + files_scanned/findings/proposed_rules all empty is exactly
+        // the shape `audit_repos` returns for a `BackendResolution::Blocked` project.
+        let report = scan_report_fixture(serde_json::json!({
+            "message": "This project is API-only (CLI disabled). Add an Anthropic API key to run."
+        }));
+        assert!(super::scan_report_looks_blocked(&report));
+    }
+
+    #[test]
+    fn looks_blocked_false_when_gated() {
+        // The GitHub-connect gate already sets gated:true and is routed separately — it must
+        // not ALSO trip the Blocked heuristic (though the outer `if` ORs the two, this keeps
+        // the predicate itself precise).
+        let report = scan_report_fixture(serde_json::json!({
+            "gated": true,
+            "message": "Connect GitHub so Camerata can read the repo(s)."
+        }));
+        assert!(!super::scan_report_looks_blocked(&report));
+    }
+
+    #[test]
+    fn looks_blocked_false_when_no_message() {
+        // All-zero counts with NO message is just an empty/unscannable repo, not a block.
+        let report = scan_report_fixture(serde_json::json!({}));
+        assert!(!super::scan_report_looks_blocked(&report));
+    }
+
+    #[test]
+    fn looks_blocked_false_when_scan_actually_ran() {
+        // A completed scan that happens to carry a routine note (e.g. a CliFallbackWarn
+        // compliance note) but DID read files must render as a normal report, not the gate box.
+        let report = scan_report_fixture(serde_json::json!({
+            "message": "\u{26a0} COMPLIANCE: falling back to the Claude CLI.",
+            "files_scanned": 42
+        }));
+        assert!(!super::scan_report_looks_blocked(&report));
+    }
+
+    // ── Feature B: `split_compliance_notes` ─────────────────────────────────────
+
+    #[test]
+    fn split_compliance_notes_extracts_prefixed_segment() {
+        let (compliance, other) = super::split_compliance_notes(
+            "\u{26a0} COMPLIANCE: Anthropic API key missing — falling back to the Claude CLI.",
+        );
+        assert_eq!(
+            compliance,
+            vec!["Anthropic API key missing — falling back to the Claude CLI.".to_string()]
+        );
+        assert_eq!(other, None);
+    }
+
+    #[test]
+    fn split_compliance_notes_separates_from_routine_notes() {
+        // `audit_repos` joins every note with " · "; a compliance warning can arrive
+        // interleaved with ordinary per-repo notes.
+        let msg = "me/api: AI review deselected — deterministic only · \u{26a0} COMPLIANCE: falling back to the Claude CLI. · me/web: audit failed (timeout)";
+        let (compliance, other) = super::split_compliance_notes(msg);
+        assert_eq!(compliance, vec!["falling back to the Claude CLI.".to_string()]);
+        assert_eq!(
+            other,
+            Some(
+                "me/api: AI review deselected — deterministic only · me/web: audit failed (timeout)"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn split_compliance_notes_no_compliance_segment_returns_all_as_other() {
+        let (compliance, other) = super::split_compliance_notes("me/api: audit failed (timeout)");
+        assert!(compliance.is_empty());
+        assert_eq!(other, Some("me/api: audit failed (timeout)".to_string()));
     }
 
     /// Old drafts that predate the `dispositions` or `triage_view` fields must still
