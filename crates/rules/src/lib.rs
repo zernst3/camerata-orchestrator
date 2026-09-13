@@ -384,6 +384,14 @@ struct OptionToml {
     directive: String,
     #[serde(default)]
     why: String,
+    /// Authored client-facing remediation text (2-4 imperative sentences: what to change,
+    /// WHERE, and HOW TO VERIFY it's closed). Distinct from `directive`, which is the
+    /// detection/enforcement recipe an agent reads — `remediation` is what a client-facing
+    /// report's "Fix:" line binds to. `None`/absent when not yet authored for this rule; the
+    /// report NEVER falls back to `directive` when this is absent (see
+    /// `report_export::resolve_fix`).
+    #[serde(default)]
+    remediation: Option<String>,
     /// Optional `escalation = { condition = "…", severity = "…" }` inline table: present when
     /// choosing this option calls for escalation. Absent → this option does not escalate.
     #[serde(default)]
@@ -405,6 +413,13 @@ pub struct RuleOption {
     pub directive: String,
     /// Why this alternative (the rationale; the default option says so).
     pub why: String,
+    /// Authored client-facing remediation text (2-4 imperative sentences: what to change,
+    /// WHERE, and HOW TO VERIFY it's closed). `None` when not yet authored — the report's
+    /// "Fix:" block is OMITTED entirely in that case, never backfilled from `directive`.
+    /// May contain the same placeholder tokens `directive` uses (e.g. `<table>`,
+    /// `<function-name>`, `<bucket>`, `<path>`); the report layer substitutes those from the
+    /// finding at render time (see `report_export::resolve_fix`).
+    pub remediation: Option<String>,
     /// Present when CHOOSING this option calls for escalation: it carries a condition the agent
     /// watches for + a severity. `None` means this option does NOT escalate (the agent proceeds, or
     /// the gate denies + bounces as normal). Option-scoped so a rule can offer an escalating option
@@ -862,6 +877,7 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
             label: o.label,
             directive: o.directive,
             why: o.why,
+            remediation: o.remediation.filter(|s| !s.trim().is_empty()),
             escalation: o.escalation,
         })
         .collect();
@@ -1179,6 +1195,7 @@ mod tests {
                     label: o.label,
                     directive: o.directive,
                     why: o.why,
+                    remediation: o.remediation.filter(|s| !s.trim().is_empty()),
                     escalation: o.escalation,
                 })
                 .collect(),
