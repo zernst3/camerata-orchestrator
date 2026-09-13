@@ -72,6 +72,10 @@ async fn regenerate_sample_report() {
     );
     rls_enabled.effort = Some("low".to_string());
     rls_enabled.confidence = Some("high".to_string());
+    // Detector-supplied placeholder binding (Fix 1): a real scan's RLS checker sets this via
+    // `arch_violation_to_finding`; the fixture sets it explicitly so the remediation names the
+    // actual object ("ALTER TABLE profiles ...") instead of the generic fallback.
+    rls_enabled.captures = std::collections::BTreeMap::from([("table".to_string(), "profiles".to_string())]);
     rls_enabled.snippet = "create table public.profiles (\n  id uuid primary key references auth.users,\n  full_name text,\n  email text,\n  phone text\n);".to_string();
     // Item 1: `detail`'s FIRST SENTENCE is the punchy, defect-first headline the report's
     // serializer mechanically lifts out (`defect_headline`) — the owner's own target voice
@@ -100,6 +104,8 @@ async fn regenerate_sample_report() {
     );
     auth_edge_jwt.effort = Some("medium".to_string());
     auth_edge_jwt.confidence = Some("needs-review".to_string());
+    auth_edge_jwt.captures =
+        std::collections::BTreeMap::from([("function-name".to_string(), "charge-membership".to_string())]);
     auth_edge_jwt.snippet = "[functions.charge-membership]\nverify_jwt = false".to_string();
     auth_edge_jwt.detail = "The charge-membership edge function has JWT verification disabled: any anonymous caller on the internet can invoke the payment path. Its body does not perform its own authorization check either. Re-enable verify_jwt, or add an explicit authenticated-user check inside the handler before any privileged work.".to_string();
 
@@ -117,6 +123,8 @@ async fn regenerate_sample_report() {
     // which draws on all three.
     storage_public.effort = Some("low".to_string());
     storage_public.confidence = Some("high".to_string());
+    storage_public.captures =
+        std::collections::BTreeMap::from([("bucket".to_string(), "member-documents".to_string())]);
     storage_public.snippet = "insert into storage.buckets (id, name, public)\nvalues ('member-documents', 'member-documents', true);".to_string();
     storage_public.detail = "The member-documents storage bucket is public: every uploaded document is downloadable by anyone with, or guessing, the URL. No authentication and no access policy gate object retrieval. If this bucket holds private member documents, make it private and add owner-scoped access policies.".to_string();
 
@@ -128,7 +136,17 @@ async fn regenerate_sample_report() {
         "medium",
     );
     rls_permissive.effort = Some("low".to_string());
-    rls_permissive.confidence = Some("needs-review".to_string());
+    // `high`, not `needs-review`: a `using (true)` policy is unambiguous (it literally grants
+    // every caller access), so the calibrator would not flag it debatable. This also keeps it
+    // in the `plan` action bucket rather than the informational appendix — `is_informational`
+    // §2c correctly diverts any needs-review finding at <= medium severity, and this fixture
+    // is the sole `plan` item, so leaving it needs-review empties the plan bucket + the 2-D
+    // grid's plan row. `auth_edge_jwt` (high, needs-review) still exercises the "needs client
+    // confirmation" voice. (This was a latent fixture drift vs the Bug-4 informational rule
+    // that shipped after the sample was last regenerated; the is_informational code is correct.)
+    rls_permissive.confidence = Some("high".to_string());
+    rls_permissive.captures =
+        std::collections::BTreeMap::from([("table".to_string(), "messages".to_string())]);
     rls_permissive.snippet = "create policy \"messages are readable\"\n  on public.messages for select\n  using (true);".to_string();
     rls_permissive.detail = "The messages table's read policy grants access to everyone: using (true) lets every anon and authenticated caller read every row. If messages are meant to be private between members, scope the policy to the owning user, for example using (auth.uid() = sender_id).".to_string();
 
@@ -298,7 +316,7 @@ async fn regenerate_sample_report() {
                     dirty: true,
                 },
             ],
-            audit_model: Some("anthropic/claude-opus-4.8".to_string()),
+            audit_model: Some("anthropic/claude-opus-5".to_string()),
             calibration_model: Some("anthropic/claude-sonnet-5".to_string()),
             mode: "parallel".to_string(),
             thorough: false,
@@ -325,10 +343,13 @@ async fn regenerate_sample_report() {
         project_title: "Harbor Member Portal".to_string(),
         prepared_by: "Zachary Ernst".to_string(),
         executive_summary_override: None,
-        // No `brand` here on purpose: this fixture exercises the NEUTRAL branding fallback
-        // (no agency name, no "Camerata" on the cover) — see the Branding section of
-        // docs/design/2026-09-13_audit-deliverable-review-fixes.md. A future regeneration that
-        // wants to demo a branded cover should set this explicitly.
+        // The sample demonstrates the BRANDED cover for the practice (Cantus Works), so a
+        // prospective buyer sees the real deliverable. Camerata-the-instrument is never on the
+        // cover — it appears only in the Methodology provenance ("Scanned with Camerata v..").
+        // Set explicitly here because this test calls `build_report_json` directly, bypassing the
+        // HTTP boundary where `apply_env_defaults` would read CAMERATA_REPORT_BRAND. The neutral
+        // no-brand fallback is covered by report_export unit tests, not this fixture.
+        brand: "Cantus Works".to_string(),
         ..Default::default()
     };
 
