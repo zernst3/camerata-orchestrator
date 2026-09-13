@@ -14413,7 +14413,7 @@ struct AuditReportReq {
 async fn export_audit_report(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<AuditReportReq>,
+    Json(mut req): Json<AuditReportReq>,
 ) -> Response {
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
@@ -14446,6 +14446,11 @@ async fn export_audit_report(
     } else {
         None
     };
+
+    // Branding (2026-09-13 review): fold CAMERATA_REPORT_BRAND/CAMERATA_REPORT_PREPARED_BY into
+    // any blank fields the export dialog didn't POST, BEFORE build_report_json — which stays
+    // pure/no-I/O itself (see `ReportOptions::apply_env_defaults`'s doc comment).
+    req.options.apply_env_defaults();
 
     let json = crate::report_export::build_report_json(
         &report,
@@ -14517,7 +14522,7 @@ fn report_filename_stem(report: &crate::onboard::ScanReport) -> String {
 async fn export_product(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<AuditReportReq>,
+    Json(mut req): Json<AuditReportReq>,
 ) -> Response {
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
@@ -14547,6 +14552,11 @@ async fn export_product(
     } else {
         None
     };
+
+    // Branding (2026-09-13 review): same env-default fold as `export_audit_report` — the
+    // xlsx/findings.json siblings this handler also builds read `opts.prepared_by` directly
+    // (`xlsx_export.rs`), so resolving it here once covers all three artifacts.
+    req.options.apply_env_defaults();
 
     let json = crate::report_export::build_report_json(
         &report,

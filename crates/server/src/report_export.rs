@@ -72,6 +72,76 @@ pub struct ReportOptions {
     pub prepared_by: String,
     #[serde(default)]
     pub executive_summary_override: Option<String>,
+    /// The AUDITING AGENCY's own brand (e.g. "Cantus Works") — distinct from `client_name`
+    /// (who the report is prepared FOR). Owner's hard constraint (2026-09-13 branding pass):
+    /// Camerata is the licensable application; the agency running it is not Camerata's to
+    /// name. Blank here falls through to the `CAMERATA_REPORT_BRAND` env var
+    /// ([`apply_env_defaults`]), then to no brand at all — never a baked-in literal. See
+    /// [`resolve_brand`].
+    #[serde(default)]
+    pub brand: String,
+}
+
+/// Env var carrying the STANDING default for [`ReportOptions::brand`] when the export dialog
+/// doesn't POST one. Brand-neutral name (not `CANTUS_*`) so a future Camerata licensee sets
+/// their OWN agency's value here without touching Camerata source — see the "Branding" section
+/// of `docs/design/2026-09-13_audit-deliverable-review-fixes.md`.
+pub const REPORT_BRAND_ENV: &str = "CAMERATA_REPORT_BRAND";
+
+/// Env var carrying the standing default for [`ReportOptions::prepared_by`]. Same precedence
+/// and neutrality rationale as [`REPORT_BRAND_ENV`].
+pub const REPORT_PREPARED_BY_ENV: &str = "CAMERATA_REPORT_PREPARED_BY";
+
+/// The cover title (and PDF metadata title) when no brand resolves at all — no agency name,
+/// and NEVER the word "Camerata" (Camerata is the instrument, named only in Methodology; see
+/// the Branding section of the design doc). Exported so the template-generation site and any
+/// test asserting on the exact fallback string share one literal.
+pub const NEUTRAL_COVER_TITLE: &str = "Codebase Audit Report";
+
+/// Precedence resolver: the per-report field wins when non-blank, else the env value when
+/// non-blank, else `None`/empty. Pure — takes the env value as an explicit `Option<&str>`
+/// rather than calling `std::env::var` itself, so it stays unit-testable without mutating real
+/// process env state (which parallel `cargo test` threads would otherwise race on). Shared by
+/// [`resolve_brand`] and [`resolve_prepared_by`].
+fn resolve_with_env_default(field: &str, env: Option<&str>) -> Option<String> {
+    let field = field.trim();
+    if !field.is_empty() {
+        return Some(field.to_string());
+    }
+    env.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Resolve the report's brand per the owner's precedence: per-report `ReportOptions::brand` >
+/// `CAMERATA_REPORT_BRAND` env var > no brand (`None`). `None` means the cover/footer/PDF
+/// title must render the brand-neutral fallback ([`NEUTRAL_COVER_TITLE`]) with no agency name
+/// and no "Camerata" literal — never a fabricated brand.
+pub(crate) fn resolve_brand(opts: &ReportOptions, env_brand: Option<&str>) -> Option<String> {
+    resolve_with_env_default(&opts.brand, env_brand)
+}
+
+/// Resolve the report's "prepared by" line: per-report `ReportOptions::prepared_by` >
+/// `CAMERATA_REPORT_PREPARED_BY` env var > empty (the cover table's `or_na` already renders an
+/// empty string as "N/A").
+pub(crate) fn resolve_prepared_by(opts: &ReportOptions, env_prepared_by: Option<&str>) -> String {
+    resolve_with_env_default(&opts.prepared_by, env_prepared_by).unwrap_or_default()
+}
+
+impl ReportOptions {
+    /// Fold the `CAMERATA_REPORT_BRAND`/`CAMERATA_REPORT_PREPARED_BY` env vars into this
+    /// struct's blank fields, IN PLACE. Call this exactly ONCE, at the HTTP boundary (the
+    /// `/audit-report` and `/product-export` handlers in `lib.rs`), BEFORE `build_report_json`
+    /// — that keeps `build_report_json` itself free of direct env access (pure, no I/O, per
+    /// its own doc comment) while still honoring the env-default precedence end to end. Real
+    /// `std::env::var` reads live here, not in [`resolve_brand`]/[`resolve_prepared_by`], so
+    /// those stay unit-testable with explicit values.
+    pub fn apply_env_defaults(&mut self) {
+        self.brand = resolve_brand(self, std::env::var(REPORT_BRAND_ENV).ok().as_deref())
+            .unwrap_or_default();
+        self.prepared_by =
+            resolve_prepared_by(self, std::env::var(REPORT_PREPARED_BY_ENV).ok().as_deref());
+    }
 }
 
 /// Stable identity for a `Finding`, matching `camerata_ui_core::triage::finding_key`'s
@@ -320,6 +390,12 @@ pub struct CoverJson {
     pub client_name: String,
     pub project_title: String,
     pub prepared_by: String,
+    /// The resolved auditing-agency brand ([`resolve_brand`]'s output, already folded through
+    /// `ReportOptions::apply_env_defaults` by the time this JSON is built) — `None` means no
+    /// brand resolved at all; the template must render [`NEUTRAL_COVER_TITLE`] with no agency
+    /// name and no "Camerata" literal on the cover. See the Branding section of
+    /// `docs/design/2026-09-13_audit-deliverable-review-fixes.md`.
+    pub brand: Option<String>,
     pub stats: CoverStatsJson,
 }
 
@@ -337,9 +413,6 @@ pub struct ExecutiveSummaryJson {
     pub plan: usize,
     pub accepted: usize,
     pub open: usize,
-    /// Up to 3 one-liners: `"{headline} ({repo}/{path}:{line}, {rule_id})"` (S3 + S7 +
-    /// item 1: defect-first, not the rule's invariant title).
-    pub top_do_now: Vec<String>,
 }
 
 /// Item 7: "If you only do three things this week" — a half-page box right after the
@@ -357,6 +430,12 @@ pub struct ThreeThingsItemJson {
     /// A rough, LABELED-as-rough hour estimate (e.g. `"2 to 4 hours"`), never a bare number
     /// dressed up as precise — see `effort_hours_bounds`.
     pub hours_label: String,
+    /// FIX 7 (2026-09-13 review): one FACTUAL sentence of what this exposure MEANS in plain
+    /// business terms (e.g. "A public bucket serves any object to anyone who has, or can
+    /// guess, its URL..."), never fear-selling. `None` when no impact sentence is authored yet
+    /// for this rule — the template must omit the line gracefully rather than render a blank
+    /// one. See [`business_impact_for_rule`].
+    pub impact: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -425,6 +504,136 @@ pub struct MatrixJson {
     /// `is_informational`).
     #[serde(default)]
     pub informational: Vec<FindingRefJson>,
+}
+
+// ── FIX 6: the real severity x effort priority grid ─────────────────────────────
+
+/// One finding placed in a [`GridCellJson`] — just enough to render a short, readable tag in a
+/// crowded cell (never the full curated-findings prose; that lives in its own section).
+#[derive(Debug, Clone, Serialize)]
+pub struct GridTagJson {
+    pub rule_id: String,
+    pub repo: String,
+    pub path: String,
+    pub line: usize,
+    pub headline: String,
+}
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct GridCellJson {
+    pub findings: Vec<GridTagJson>,
+}
+
+/// One severity row of the grid, with one cell per [`PriorityGridJson::columns`] entry
+/// (same length, same order — the template zips them positionally rather than looking a
+/// column up by name).
+#[derive(Debug, Clone, Serialize)]
+pub struct GridRowJson {
+    pub severity: String,
+    pub cells: Vec<GridCellJson>,
+}
+
+/// FIX 6 (2026-09-13 review) — the ACTUAL severity-rows x effort-columns priority grid,
+/// replacing the old 4-bucket list ("Do now" / "Do next" / "Plan" / "Accepted" rendered as 4
+/// unrelated boxes, not a 2-D placement) that used to live under this section's heading. Built
+/// by [`build_priority_grid`] from the SAME `do_now`/`do_next`/`plan` partition
+/// `MatrixJson` already computed — never a second, independent bucketing pass. Accepted and
+/// Informational findings are explicitly OUT OF SCOPE for this grid (an accepted-risk item or
+/// an appendix note isn't a prioritization decision); their counts are surfaced as a footnote
+/// instead of silently vanishing.
+#[derive(Debug, Clone, Serialize)]
+pub struct PriorityGridJson {
+    /// Effort column keys present this run (`"low"` | `"medium"` | `"high"` | `"unscoped"`),
+    /// in that fixed order, filtered to the ones at least one row actually uses.
+    pub columns: Vec<String>,
+    /// Severity rows present this run (`"critical"` | `"high"` | `"medium"` | `"low"`), in
+    /// that fixed order, filtered to the ones with at least one finding.
+    pub rows: Vec<GridRowJson>,
+    pub accepted_count: usize,
+    pub informational_count: usize,
+}
+
+/// Normalize an OPTIONAL calibrated effort into one of the grid's 4 fixed column keys. `None`
+/// (a deterministic-floor/preview finding never gets a calibrated effort estimate — see
+/// `effort_hours_bounds`) and any value outside `low`/`medium`/`high` both land in
+/// `"unscoped"` rather than silently dropping the finding from the grid.
+fn grid_effort_key(effort: Option<&str>) -> &'static str {
+    match effort {
+        Some("low") => "low",
+        Some("medium") => "medium",
+        Some("high") => "high",
+        _ => "unscoped",
+    }
+}
+
+/// FIX 6 — project the `do_now`/`do_next`/`plan` findings (Accepted and Informational are OUT
+/// OF SCOPE, see [`PriorityGridJson`]'s doc comment) into the real 2-D grid. Rows/columns are
+/// fixed orderings but only emitted when at least one finding uses them, so a small scan's
+/// grid stays small instead of always rendering a fixed 4x4 of mostly-empty cells.
+pub(crate) fn build_priority_grid(matrix: &MatrixJson) -> PriorityGridJson {
+    const SEVERITY_ORDER: [&str; 4] = ["critical", "high", "medium", "low"];
+    const EFFORT_ORDER: [&str; 4] = ["low", "medium", "high", "unscoped"];
+
+    let action_findings: Vec<&FindingRefJson> = matrix
+        .do_now
+        .iter()
+        .chain(matrix.do_next.iter())
+        .chain(matrix.plan.iter())
+        .collect();
+
+    let present_severities: Vec<&str> = SEVERITY_ORDER
+        .iter()
+        .copied()
+        .filter(|sev| action_findings.iter().any(|f| f.severity == *sev))
+        .collect();
+    let present_efforts: Vec<&str> = EFFORT_ORDER
+        .iter()
+        .copied()
+        .filter(|eff| {
+            action_findings
+                .iter()
+                .any(|f| grid_effort_key(f.effort.as_deref()) == *eff)
+        })
+        .collect();
+
+    let rows = present_severities
+        .iter()
+        .map(|sev| {
+            let cells = present_efforts
+                .iter()
+                .map(|eff| {
+                    let mut findings: Vec<GridTagJson> = action_findings
+                        .iter()
+                        .filter(|f| {
+                            f.severity == *sev && grid_effort_key(f.effort.as_deref()) == *eff
+                        })
+                        .map(|f| GridTagJson {
+                            rule_id: f.rule_id.clone(),
+                            repo: f.repo.clone(),
+                            path: f.path.clone(),
+                            line: f.line,
+                            headline: f.headline.clone(),
+                        })
+                        .collect();
+                    findings.sort_by(|a, b| {
+                        (&a.repo, &a.path, a.line).cmp(&(&b.repo, &b.path, b.line))
+                    });
+                    GridCellJson { findings }
+                })
+                .collect();
+            GridRowJson {
+                severity: sev.to_string(),
+                cells,
+            }
+        })
+        .collect();
+
+    PriorityGridJson {
+        columns: present_efforts.into_iter().map(String::from).collect(),
+        rows,
+        accepted_count: matrix.accepted.len(),
+        informational_count: matrix.informational.len(),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -529,6 +738,11 @@ pub struct DependencySnapshotJson {
 pub struct MethodologyJson {
     pub candidates_reviewed: usize,
     pub excluded_false_positive: usize,
+    /// FIX 3 (2026-09-13 review): a short, FACTUAL "what happens next" paragraph, rendered in
+    /// its own section right before Methodology (`typ:397`'s heading). Authored prose, same
+    /// pattern as `deterministic_note`/`ai_tier_note` below — never an LLM call, never
+    /// pitch-toned framing (no urgency language, no pricing claims beyond "the rate herein").
+    pub next_steps: String,
     pub deterministic_note: String,
     pub ai_tier_note: String,
     pub not_done: Vec<String>,
@@ -544,6 +758,12 @@ pub struct AuditReportJson {
     pub three_things: ThreeThingsJson,
     pub scorecard: ScorecardJson,
     pub matrix: MatrixJson,
+    /// FIX 6 (2026-09-13 review): the real severity x effort grid the template renders under
+    /// the "Severity x effort" heading — derived from `matrix` (see [`build_priority_grid`]),
+    /// not an independent bucketing. `matrix` itself is kept (still backs the exec-summary
+    /// counts and the "Three things this week" box's `do_now` selection); the template no
+    /// longer reads `matrix` directly for its own section.
+    pub priority_grid: PriorityGridJson,
     pub curated_findings: Vec<CuratedGroupJson>,
     pub whats_healthy: WhatsHealthyJson,
     pub dependency_snapshot: DependencySnapshotJson,
@@ -563,6 +783,148 @@ pub const AUDIT_REPORT_DISCLAIMER: &str =
      remediation should be validated by the client's engineering team against the live \
      environment. The preparing auditor accepts no liability for actions taken on the basis \
      of this report.";
+
+/// FIX 3 (2026-09-13 review) — a short, FACTUAL "what happens next" paragraph, rendered in a
+/// new section before Methodology. Deliberately non-pitch: no urgency language, no claim about
+/// price beyond "the rate set out in the engagement" (a specific number lives in the
+/// engagement paperwork, never fabricated here). Three factual steps, one paragraph, no em/en
+/// dashes (house style for this client deliverable — see `AUDIT_REPORT_DISCLAIMER`'s doc
+/// comment).
+pub const NEXT_STEPS_NOTE: &str =
+    "There are three steps from here. First, the do-now items above get fixed, by your own \
+     team, an outside contractor, or the auditor, at the rate set out in the engagement. \
+     Second, a retest: the auditor re-scans the repository once the fixes are in and signs a \
+     short addendum confirming each item is closed. Third, ongoing coverage: a monthly delta \
+     rescan plus on-call architect availability for anything new the codebase introduces \
+     between engagements.";
+
+// ── FIX 7 business-impact map (§"If you only do three things this week") ───────────
+
+/// FIX 7 (2026-09-13 review) — one FACTUAL, non-fear-selling sentence of what a rule's
+/// exposure MEANS in plain business terms, authored per `rule_id`. Deliberately a small Rust
+/// map, NOT a corpus TOML field: the corpus-wide `remediation` authoring pass (FIX 1, Phase
+/// 2a) runs in parallel against these same TOML files, and folding a second authored-prose
+/// field into that same parallel-editable surface risks a merge collision over the same lines
+/// for no benefit — this is a small, independently-owned map instead. Covers the Supabase
+/// pack (the corpus currently backing the do-now items the flagship sample exercises) plus the
+/// handful of universal/deterministic-floor rules most likely to land in "do now" on a typical
+/// scan. Returns `None` for anything not yet authored — the template must omit the line
+/// gracefully in that case, never fabricate one. NOTE: this could migrate to a corpus `impact`
+/// field alongside `remediation` once the two authoring passes are no longer running in
+/// parallel; deliberately not done in this pass.
+pub(crate) fn business_impact_for_rule(rule_id: &str) -> Option<&'static str> {
+    match rule_id {
+        // ── Supabase: RLS ──────────────────────────────────────────────────────────
+        "SUPABASE-RLS-ENABLED-1" => Some(
+            "No RLS on this table means every row is readable and writable by anyone holding \
+             the public anon key, with no login required.",
+        ),
+        "SUPABASE-RLS-NO-POLICY-1" => Some(
+            "RLS enabled with zero policies denies all access by default, which typically \
+             breaks the feature for real users rather than exposing data, and often gets \
+             patched with an overly permissive policy under deadline pressure.",
+        ),
+        "SUPABASE-RLS-POLICY-DISABLED-1" => Some(
+            "A policy exists but RLS itself is off, so the policy is decorative: every row is \
+             exposed exactly as if no policy had ever been written.",
+        ),
+        "SUPABASE-RLS-PERMISSIVE-TRUE-1" => Some(
+            "A policy that always evaluates to true grants every anon or authenticated caller \
+             full access to the table, which is functionally the same exposure as having no \
+             RLS at all.",
+        ),
+        "SUPABASE-RLS-USER-METADATA-1" => Some(
+            "Authorizing against user-editable metadata lets any authenticated user grant \
+             themselves elevated access by editing their own profile fields.",
+        ),
+        "SUPABASE-RLS-VIEW-INVOKER-1" => Some(
+            "A view without security_invoker runs with the view creator's privileges, so it \
+             can silently bypass the Row Level Security policies protecting the underlying \
+             tables.",
+        ),
+        "SUPABASE-RLS-INITPLAN-1" => Some(
+            "This is a performance defect, not an access hole: unwrapped auth calls \
+             re-evaluate once per row and can make an otherwise-correct RLS policy time out \
+             under real load.",
+        ),
+        // ── Supabase: auth ─────────────────────────────────────────────────────────
+        "SUPABASE-AUTH-EDGE-JWT-1" => Some(
+            "An edge function reachable with no authentication check can be invoked by anyone \
+             on the internet, including for state-changing operations like a payment.",
+        ),
+        "SUPABASE-AUTH-GETSESSION-SERVER-1" => Some(
+            "Trusting an unverified session cookie on the server lets a forged cookie \
+             impersonate any user at that code path.",
+        ),
+        "SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1" => Some(
+            "A service-role client bypasses Row Level Security entirely, so a request handler \
+             using it without its own authorization check grants full database access to \
+             whoever can reach that endpoint.",
+        ),
+        "SUPABASE-AUTH-USERS-EXPOSED-1" => Some(
+            "Exposing auth.users through a view or grant leaks every user's email, phone, and \
+             identity metadata to anyone who can query it.",
+        ),
+        // ── Supabase: secrets, storage, exposure, functions ───────────────────────────
+        "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1" => Some(
+            "A service-role key shipped to the browser bypasses Row Level Security and grants \
+             full read and write access to every table to anyone who opens developer tools.",
+        ),
+        "SUPABASE-STORAGE-PUBLIC-BUCKET-1" => Some(
+            "A public bucket serves any object to anyone who has, or can guess, its URL, with \
+             no login and no access policy involved.",
+        ),
+        "SUPABASE-STORAGE-OBJECT-POLICY-1" => Some(
+            "Unscoped write or delete access on storage objects lets any caller overwrite or \
+             delete files that belong to other users.",
+        ),
+        "SUPABASE-EXPOSURE-MATVIEW-1" => Some(
+            "A materialized view cannot carry row-level policies, so exposing it in the API \
+             makes it all-or-nothing: every row is visible to anyone who can query it.",
+        ),
+        "SUPABASE-EXPOSURE-SCHEMAS-1" => Some(
+            "Every schema added to the exposed-schemas list becomes reachable over the API, \
+             including any table in it that was never reviewed for Row Level Security.",
+        ),
+        "SUPABASE-FUNC-SEARCH-PATH-1" => Some(
+            "A SECURITY DEFINER function without a fixed search_path can be hijacked into \
+             running an attacker-created function with the function owner's elevated \
+             privileges.",
+        ),
+        // ── Universal / deterministic-floor ────────────────────────────────────────
+        "ARCH-NO-SECRETS-IN-URL-1" => Some(
+            "A credential carried in a URL is written into proxy logs, browser history, and \
+             server access logs by default, which is a durable exposure even after the \
+             credential is rotated.",
+        ),
+        "SEC-NO-PRIVATE-KEY-1" => Some(
+            "A private key committed to the repository is exposed to everyone with repository \
+             access, past and future, and stays readable in git history even after the file \
+             is deleted.",
+        ),
+        "SEC-NO-SECRET-FILE-1" => Some(
+            "A committed secret-bearing file (a private key, keystore, or real .env) is \
+             exposed to everyone with repository access, past and future.",
+        ),
+        "SEC-NO-HARDCODED-SECRETS-1" => Some(
+            "A hardcoded credential in source is exposed to everyone with repository access, \
+             and to anyone who ever receives a copy of the build.",
+        ),
+        "SEC-NO-DISABLED-TLS-1" => Some(
+            "Disabled certificate verification lets any network position between the client \
+             and server intercept or alter traffic without detection.",
+        ),
+        "SEC-NO-UNSAFE-DESERIALIZATION-1" => Some(
+            "Deserializing untrusted input without safeguards can let an attacker execute \
+             arbitrary code on the server simply by controlling the input.",
+        ),
+        "SEC-NO-RAW-SQL-CONCAT-1" => Some(
+            "String-concatenated SQL lets an attacker who controls any part of the input \
+             read, modify, or delete arbitrary rows in the database.",
+        ),
+        _ => None,
+    }
+}
 
 // ── Citation join (§4.4) ─────────────────────────────────────────────────────────
 
@@ -949,16 +1311,19 @@ pub(crate) fn defect_headline(detail: &str, fallback: &str) -> String {
 /// `ReportOptions::executive_summary_override` when the client supplies one. Special-cases
 /// zero candidates (a plain "0 candidate finding(s) were reviewed..." reads as broken, not
 /// clean) and uses real pluralization throughout (`noun`) rather than the "(s)" CLI-ism.
-/// Item 2: LEAD with blast radius in plain English (composed from the top do-now findings'
-/// own defect headlines — never a separately hand-written sentence that could drift from what
-/// the report actually found), THEN the counts. The counts sentence is a single, ONE-PASS
-/// partition: `do_now + do_next + plan + accepted == curated_total` ALWAYS (every code finding
-/// lands in exactly one matrix bucket by construction — see `matrix_bucket`), so listing all
-/// four counts once is a complete, self-checking picture. The previous wording additionally
-/// tacked on "and N still open" — a SUBSET of the very counts just listed (do_now/do_next/plan
-/// are inherently the still-open ones; only `accepted` is closed out) — which forced the reader
-/// to do arithmetic to figure out whether that was new information or a restatement. Dropped
-/// entirely rather than reworded, because the four-bucket partition already says it once.
+///
+/// FIX 4 (2026-09-13 review, "page 3 states the top-3 three times"): this used to LEAD with a
+/// blast-radius sentence composed from the top do-now findings' own headlines — the SAME 3
+/// findings the "If you only do three things this week" box (immediately below, on the same
+/// page) already names in full. Between that box and the (also-dropped) "Top priority items"
+/// bullet list, the top 3 were stated three separate times on one page. The exec summary is
+/// now curation-and-counts ONLY: the false-positive triage line, then the single one-pass
+/// bucket-count partition. `do_now + do_next + plan + accepted == curated_total` ALWAYS (every
+/// code finding lands in exactly one matrix bucket by construction — see `matrix_bucket`), so
+/// listing all four counts once is a complete, self-checking picture; there is deliberately no
+/// "and N still open" tacked on (a SUBSET of those same four counts) and, as of this pass, no
+/// restated finding headline either — the "Three things this week" box is now the ONE place on
+/// the page that names the top items.
 fn default_narrative(
     candidates_reviewed: usize,
     excluded_fp: usize,
@@ -967,23 +1332,11 @@ fn default_narrative(
     do_next: usize,
     plan: usize,
     accepted: usize,
-    blast_radius_headlines: &[String],
 ) -> String {
     if candidates_reviewed == 0 {
         return "The scan surfaced no candidate findings to review in this run.".to_string();
     }
-    let mut s = String::new();
-    if !blast_radius_headlines.is_empty() {
-        s.push_str("As shipped: ");
-        s.push_str(&blast_radius_headlines.join(" "));
-        s.push(' ');
-    }
-    // Deliberately ONE prose paragraph after the blast-radius lead, no embedded list —
-    // `top_do_now` / `three_things` are separate structured fields the template renders as
-    // their own bulleted lists (a Typst string value doesn't reliably turn embedded "\n"s into
-    // paragraph/list breaks, so mixing prose and list markup into one opaque string would
-    // render as a flat run-on in the PDF).
-    s.push_str(&format!(
+    format!(
         "{} were reviewed; {} {} dispositioned as false positives by the auditor and excluded \
          entirely from this report. Of the remaining {}: {do_now} do now, {do_next} do next, \
          {plan} planned, and {accepted} accepted as risk.",
@@ -991,8 +1344,7 @@ fn default_narrative(
         excluded_fp,
         if excluded_fp == 1 { "was" } else { "were" },
         noun(curated_total, "curated finding", "curated findings"),
-    ));
-    s
+    )
 }
 
 /// Item 7's effort -> rough-hour mapping (a judgment call, documented here rather than buried
@@ -1367,19 +1719,11 @@ pub fn build_report_json(
         "medium" => 2,
         _ => 3,
     });
+    // FIX 4 (2026-09-13 review): `top3_do_now` still feeds the "Three things this week" box
+    // below (the ONE place these findings are now named) — the exec-summary's own
+    // `top_do_now` bullet list and blast-radius lead sentence are gone (see
+    // `default_narrative`'s doc comment).
     let top3_do_now: Vec<&FindingRefJson> = do_now_sorted.iter().take(3).collect();
-    // S3 + S7 + item 1: lead with the DEFECT headline (already computed per finding, never the
-    // rule's own invariant title), not just a bare rule id + path — ambiguous in a multi-repo
-    // audit, and a rule id alone means nothing to a board reader.
-    let top_do_now: Vec<String> = top3_do_now
-        .iter()
-        .map(|f| format!("{} ({}/{}:{}, {})", f.headline, f.repo, f.path, f.line, f.rule_id))
-        .collect();
-    // Item 2: the blast-radius lead sentence(s) are composed straight from these SAME top
-    // do-now findings' own headlines — never a separately hand-written sentence that could
-    // drift from what the report actually found.
-    let blast_radius_headlines: Vec<String> =
-        top3_do_now.iter().map(|f| f.headline.clone()).collect();
     let (narrative, is_override) = match &opts.executive_summary_override {
         Some(text) if !text.trim().is_empty() => (text.clone(), true),
         _ => (
@@ -1391,7 +1735,6 @@ pub fn build_report_json(
                 do_next,
                 plan,
                 accepted,
-                &blast_radius_headlines,
             ),
             false,
         ),
@@ -1407,7 +1750,6 @@ pub fn build_report_json(
         plan,
         accepted,
         open,
-        top_do_now,
     };
 
     // ── Item 7: "If you only do three things this week" ───────────────────────
@@ -1425,6 +1767,7 @@ pub fn build_report_json(
                 rule_id: f.rule_id.clone(),
                 severity: f.severity.clone(),
                 hours_label,
+                impact: business_impact_for_rule(&f.rule_id).map(str::to_string),
             }
         })
         .collect();
@@ -1467,7 +1810,16 @@ pub fn build_report_json(
         generated_at: chrono::Utc::now().format("%Y-%m-%d %H:%M UTC").to_string(),
         client_name: opts.client_name.clone(),
         project_title: opts.project_title.clone(),
-        prepared_by: opts.prepared_by.clone(),
+        // `build_report_json` stays pure/no-I/O (per its own doc comment): it does NOT read
+        // `CAMERATA_REPORT_BRAND`/`CAMERATA_REPORT_PREPARED_BY` itself. By the time `opts`
+        // reaches here the HTTP handler has already called `ReportOptions::apply_env_defaults`
+        // (which does the real env read), so `opts.brand`/`opts.prepared_by` already carry the
+        // resolved precedence. Re-running them through the resolver here with `env: None` is
+        // just the same blank/non-blank -> `Option<String>` normalization, not a second env
+        // lookup, so a direct unit test (which never calls `apply_env_defaults`) still gets
+        // correct precedence semantics by setting `opts.brand`/`opts.prepared_by` directly.
+        prepared_by: resolve_prepared_by(opts, None),
+        brand: resolve_brand(opts, None),
         stats,
     };
 
@@ -1475,6 +1827,7 @@ pub fn build_report_json(
     let methodology = MethodologyJson {
         candidates_reviewed,
         excluded_false_positive: excluded_fp,
+        next_steps: NEXT_STEPS_NOTE.to_string(),
         deterministic_note:
             "Camerata runs a two-tier engine. A deterministic security floor (proven-defect \
              SAST rules plus a migration-timeline replay for Supabase Row Level Security) \
@@ -1509,6 +1862,8 @@ pub fn build_report_json(
                 .to_string(),
     };
 
+    let priority_grid = build_priority_grid(&matrix);
+
     AuditReportJson {
         cover,
         executive_summary,
@@ -1517,6 +1872,7 @@ pub fn build_report_json(
             rows: scorecard_rows,
         },
         matrix,
+        priority_grid,
         curated_findings,
         whats_healthy: WhatsHealthyJson {
             rules: healthy_rules,
@@ -1826,8 +2182,8 @@ mod tests {
         assert_eq!(json.matrix.do_now.len(), 1, "{:?}", json.matrix);
         assert_eq!(json.matrix.do_next.len(), 0);
         assert!(
-            !json.executive_summary.top_do_now.is_empty(),
-            "top_do_now must not be empty when a critical do_now finding exists"
+            !json.three_things.items.is_empty(),
+            "the three-things box must not be empty when a critical do_now finding exists"
         );
     }
 
@@ -1922,21 +2278,35 @@ mod tests {
         );
         // The rule's own title/id is still carried separately, for registry traceability.
         assert_eq!(json.curated_findings[0].rule_id, "SEC-1");
-        // top_do_now leads with the headline, not the rule id.
-        assert!(json.executive_summary.top_do_now[0].starts_with("A service_role key ships"));
+        // FIX 4 (2026-09-13 review): the "Three things this week" box leads with the headline,
+        // not the rule id — this is now the ONE place the exec-summary page names a do-now
+        // finding (see `narrative_does_not_restate_the_top_do_now_headline` below).
+        assert!(json.three_things.items[0].headline.starts_with("A service_role key ships"));
     }
 
-    // ── Item 2: exec-summary blast radius + one-pass counts ────────────────────
+    // ── Item 2 / FIX 4: exec-summary is counts-only, no restated top-3 ─────────
 
     #[test]
-    fn narrative_leads_with_blast_radius_composed_from_top_do_now_headlines() {
+    fn narrative_does_not_restate_the_top_do_now_headline() {
+        // FIX 4 (2026-09-13 review, "page 3 states the top-3 three times"): the narrative used
+        // to LEAD with "As shipped: {top do-now headline}" — the same finding the "Three
+        // things this week" box (and, before this fix, a "Top priority items" bullet list)
+        // already names on the same page. The exec summary is now curation + counts only.
         let mut f = finding("SEC-1", "a.rs", 1, "critical");
         f.detail = "The profiles table has no RLS.".to_string();
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
         assert!(
-            json.executive_summary.narrative.starts_with("As shipped: The profiles table has no RLS."),
+            !json.executive_summary.narrative.contains("As shipped"),
             "{}",
+            json.executive_summary.narrative
+        );
+        assert!(
+            !json
+                .executive_summary
+                .narrative
+                .contains("The profiles table has no RLS."),
+            "the narrative must not restate the do-now finding's own headline: {}",
             json.executive_summary.narrative
         );
     }
@@ -2858,5 +3228,328 @@ mod tests {
             + json.matrix.accepted.len();
         assert_eq!(summed, curated, "do_now+do_next+plan+accepted must equal curated_total");
         assert_eq!(curated, 1, "only the critical is curated; the info note is appendix-only");
+    }
+
+    // ── Branding (2026-09-13 review): precedence + neutral fallback ────────────────
+
+    #[test]
+    fn resolve_brand_prefers_the_per_report_field_over_env() {
+        let mut opts = empty_opts();
+        opts.brand = "Cantus Works".to_string();
+        assert_eq!(
+            resolve_brand(&opts, Some("Some Other Agency")),
+            Some("Cantus Works".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_brand_falls_back_to_env_when_the_report_field_is_blank() {
+        let opts = empty_opts();
+        assert_eq!(
+            resolve_brand(&opts, Some("Cantus Works")),
+            Some("Cantus Works".to_string())
+        );
+        // Whitespace-only counts as "not supplied" too.
+        let mut whitespace_opts = empty_opts();
+        whitespace_opts.brand = "   ".to_string();
+        assert_eq!(
+            resolve_brand(&whitespace_opts, Some("Cantus Works")),
+            Some("Cantus Works".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_brand_is_none_when_neither_the_field_nor_env_is_set() {
+        let opts = empty_opts();
+        assert_eq!(resolve_brand(&opts, None), None);
+        assert_eq!(resolve_brand(&opts, Some("")), None);
+        assert_eq!(resolve_brand(&opts, Some("   ")), None);
+    }
+
+    #[test]
+    fn resolve_prepared_by_follows_the_same_precedence() {
+        let mut opts = empty_opts();
+        opts.prepared_by = "Zachary Ernst".to_string();
+        assert_eq!(
+            resolve_prepared_by(&opts, Some("Someone Else")),
+            "Zachary Ernst"
+        );
+        let empty = empty_opts();
+        assert_eq!(resolve_prepared_by(&empty, Some("Someone Else")), "Someone Else");
+        assert_eq!(resolve_prepared_by(&empty, None), "");
+    }
+
+    #[test]
+    fn cover_brand_is_some_when_report_options_brand_is_set() {
+        let f = finding("SEC-1", "a.rs", 1, "low");
+        let report = report_with(vec![f], vec![]);
+        let mut opts = empty_opts();
+        opts.brand = "Cantus Works".to_string();
+        let json = build_report_json(&report, &HashMap::new(), None, &opts);
+        assert_eq!(json.cover.brand, Some("Cantus Works".to_string()));
+    }
+
+    #[test]
+    fn cover_brand_is_none_with_no_brand_option_set_the_neutral_fallback_case() {
+        // `build_report_json` never reads the `CAMERATA_REPORT_BRAND` env var itself (see
+        // `ReportOptions::apply_env_defaults`'s doc comment) — with a blank `opts.brand` (the
+        // state an un-mutated `ReportOptions` is always in), `cover.brand` must be `None`, the
+        // exact case the template renders as `NEUTRAL_COVER_TITLE` with no agency name and no
+        // "Camerata" on the cover.
+        let f = finding("SEC-1", "a.rs", 1, "low");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.cover.brand, None);
+    }
+
+    #[test]
+    fn neutral_cover_title_constant_matches_the_documented_fallback_string() {
+        assert_eq!(NEUTRAL_COVER_TITLE, "Codebase Audit Report");
+    }
+
+    #[test]
+    fn apply_env_defaults_fills_blank_fields_only() {
+        // Real env mutation, scoped to this one test and cleaned up immediately after — every
+        // other precedence case above goes through the pure `resolve_brand`/`resolve_prepared_by`
+        // helpers instead specifically to avoid relying on process-global env state.
+        // SAFETY-ish note: `cargo test` runs this crate's tests in threads within one process;
+        // if this ever becomes flaky under parallel execution, these var names are unique
+        // enough (`CAMERATA_REPORT_BRAND`/`_PREPARED_BY`) that no other test should collide.
+        std::env::set_var(REPORT_BRAND_ENV, "Env Agency");
+        std::env::set_var(REPORT_PREPARED_BY_ENV, "Env Preparer");
+
+        let mut blank = ReportOptions::default();
+        blank.apply_env_defaults();
+        assert_eq!(blank.brand, "Env Agency");
+        assert_eq!(blank.prepared_by, "Env Preparer");
+
+        let mut already_set = ReportOptions {
+            brand: "Cantus Works".to_string(),
+            prepared_by: "Zachary Ernst".to_string(),
+            ..Default::default()
+        };
+        already_set.apply_env_defaults();
+        assert_eq!(already_set.brand, "Cantus Works");
+        assert_eq!(already_set.prepared_by, "Zachary Ernst");
+
+        std::env::remove_var(REPORT_BRAND_ENV);
+        std::env::remove_var(REPORT_PREPARED_BY_ENV);
+    }
+
+    // ── FIX 6: the real severity x effort priority grid ─────────────────────────
+
+    #[test]
+    fn priority_grid_places_findings_in_the_right_severity_by_effort_cell() {
+        let mut critical_low = finding("SUPABASE-RLS-ENABLED-1", "a.sql", 1, "critical");
+        critical_low.effort = Some("low".to_string());
+        let mut high_medium = finding("SUPABASE-AUTH-EDGE-JWT-1", "b.toml", 2, "high");
+        high_medium.effort = Some("medium".to_string());
+        let mut high_uncalibrated = finding("ARCH-1", "c.rs", 3, "high");
+        high_uncalibrated.effort = None; // deterministic-floor: never calibrated
+        let mut low_sev = finding("STYLE-1", "d.rs", 4, "low");
+        low_sev.effort = Some("low".to_string());
+
+        let report = report_with(
+            vec![critical_low, high_medium, high_uncalibrated, low_sev],
+            vec![],
+        );
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let grid = &json.priority_grid;
+
+        // Row/column presence: critical, high, low severities all appear (all land in an
+        // action tier); low/medium/unscoped effort columns all appear.
+        assert!(grid.rows.iter().any(|r| r.severity == "critical"));
+        assert!(grid.rows.iter().any(|r| r.severity == "high"));
+        assert!(grid.rows.iter().any(|r| r.severity == "low"));
+        assert!(grid.columns.contains(&"low".to_string()));
+        assert!(grid.columns.contains(&"medium".to_string()));
+        assert!(grid.columns.contains(&"unscoped".to_string()));
+
+        let cell = |sev: &str, eff: &str| -> &GridCellJson {
+            let row = grid.rows.iter().find(|r| r.severity == sev).unwrap();
+            let col_idx = grid.columns.iter().position(|c| c == eff).unwrap();
+            &row.cells[col_idx]
+        };
+
+        assert_eq!(cell("critical", "low").findings.len(), 1);
+        assert_eq!(cell("critical", "low").findings[0].rule_id, "SUPABASE-RLS-ENABLED-1");
+        // `high_medium` is do_next (high severity, medium effort is not "low"); still an
+        // ACTION-tier finding, so it must still land in the grid.
+        assert_eq!(cell("high", "medium").findings.len(), 1);
+        assert_eq!(cell("high", "medium").findings[0].rule_id, "SUPABASE-AUTH-EDGE-JWT-1");
+        // An uncalibrated effort normalizes to the "unscoped" column, never dropped.
+        assert_eq!(cell("high", "unscoped").findings.len(), 1);
+        assert_eq!(cell("high", "unscoped").findings[0].rule_id, "ARCH-1");
+        assert_eq!(cell("low", "low").findings.len(), 1);
+        assert_eq!(cell("low", "low").findings[0].rule_id, "STYLE-1");
+    }
+
+    #[test]
+    fn priority_grid_excludes_accepted_and_informational_but_counts_them() {
+        let mut accepted = finding("SEC-1", "a.rs", 1, "high");
+        accepted.effort = Some("low".to_string());
+        let info = finding("SOME-RULE-1", "b.rs", 2, "info");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(finding_key(&accepted), wire("Ignored", "accepted for now", ""));
+        let report = report_with(vec![accepted, info], vec![]);
+        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+
+        // Neither finding appears in any grid cell.
+        for row in &json.priority_grid.rows {
+            for cell in &row.cells {
+                assert!(
+                    cell.findings.iter().all(|f| f.rule_id != "SEC-1" && f.rule_id != "SOME-RULE-1"),
+                    "accepted/informational findings must never appear in the priority grid"
+                );
+            }
+        }
+        assert_eq!(json.priority_grid.accepted_count, 1);
+        assert_eq!(json.priority_grid.informational_count, 1);
+    }
+
+    #[test]
+    fn priority_grid_is_empty_when_no_action_tier_findings_exist() {
+        let report = report_with(vec![], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert!(json.priority_grid.rows.is_empty());
+        assert!(json.priority_grid.columns.is_empty());
+    }
+
+    // ── FIX 7: business-impact map ───────────────────────────────────────────────
+
+    #[test]
+    fn business_impact_is_authored_for_the_sample_fixture_do_now_rules() {
+        for rule_id in [
+            "SUPABASE-RLS-ENABLED-1",
+            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
+            "SUPABASE-STORAGE-PUBLIC-BUCKET-1",
+        ] {
+            assert!(
+                business_impact_for_rule(rule_id).is_some(),
+                "{rule_id} should have an authored business-impact sentence"
+            );
+        }
+    }
+
+    #[test]
+    fn business_impact_is_none_for_an_unauthored_rule_never_fabricated() {
+        assert_eq!(business_impact_for_rule("SOME-RULE-NEVER-AUTHORED-1"), None);
+    }
+
+    #[test]
+    fn three_things_items_carry_the_authored_impact_when_present() {
+        let mut f = finding("SUPABASE-RLS-ENABLED-1", "a.sql", 1, "critical");
+        f.effort = Some("low".to_string());
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(
+            json.three_things.items[0].impact,
+            business_impact_for_rule("SUPABASE-RLS-ENABLED-1").map(str::to_string)
+        );
+    }
+
+    #[test]
+    fn three_things_items_impact_is_none_for_an_unauthored_rule() {
+        let f = finding("ARCH-1", "a.rs", 1, "critical");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.three_things.items[0].impact, None);
+    }
+
+    // ── FIX 3: Next steps ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn methodology_next_steps_is_the_authored_constant() {
+        let report = report_with(vec![], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.methodology.next_steps, NEXT_STEPS_NOTE);
+        assert!(!json.methodology.next_steps.is_empty());
+    }
+
+    // ── Template regressions (2026-09-13 review) ────────────────────────────────
+
+    /// FIX 1 rendering bug this pass fixes: `CuratedSiteJson.fix`/`fix_for_this_finding` are
+    /// `Option<String>`, which serialize to JSON `null` and parse in Typst as `none` — NOT an
+    /// empty string. A `!= ""` guard would let `none` fall into the render branch and print a
+    /// bare "Fix:" label with nothing after it. Pins the correct `!= none` guard in the shipped
+    /// template so this can't regress silently.
+    #[test]
+    fn shipped_template_gates_the_fix_block_on_none_not_empty_string() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(
+            template.contains("if site.fix != none"),
+            "the Fix block must be gated on `!= none` (Option<String> -> JSON null -> Typst \
+             none), not `!= \"\"` — see report_export::CuratedSiteJson::fix's doc comment"
+        );
+        assert!(
+            !template.contains("if site.fix != \"\""),
+            "the old `!= \"\"` gate must not come back"
+        );
+        assert!(
+            template.contains("site.fix_for_this_finding != none"),
+            "the template must be wired to render `fix_for_this_finding` under the Fix block \
+             once it's ever populated"
+        );
+    }
+
+    /// FIX 4 regression: the exec summary's own "Top priority items" bullet list (and its
+    /// `top_do_now` feed) must not come back — the "Three things this week" box is the one
+    /// place page 3 names the top do-now findings.
+    #[test]
+    fn shipped_template_has_no_top_priority_items_bullet_list() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(!template.contains("Top priority items"));
+        assert!(!template.contains("executive_summary.top_do_now"));
+    }
+
+    /// FIX 5 regression: the scorecard's "checked/clean" column must read as words, not a bare
+    /// numeric fraction that reads like a grade.
+    #[test]
+    fn shipped_template_scorecard_spells_out_checked_and_clean() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(template.contains("Rules checked"));
+        assert!(template.contains("Rules clean"));
+        assert!(
+            !template.contains("row.audited_rules)/#str(row.clean_rules"),
+            "the scorecard must not render a bare N/M fraction"
+        );
+    }
+
+    /// FIX 6 regression: the severity x effort section must render the real 2-D
+    /// `d.priority_grid` table, not the old 4-box bucket list keyed off `d.matrix`.
+    #[test]
+    fn shipped_template_renders_the_priority_grid_not_the_old_bucket_list() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(template.contains("d.priority_grid"));
+        assert!(
+            !template.contains("d.matrix.do_now") && !template.contains("d.matrix.accepted"),
+            "the severity x effort section must read from d.priority_grid, not d.matrix directly"
+        );
+    }
+
+    /// Branding regression: no hardcoded agency/"Camerata" cover title, no "Brownfield".
+    #[test]
+    fn shipped_template_has_no_hardcoded_cover_title() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(!template.contains("Camerata Brownfield Audit Report"));
+        assert!(!template.contains("Brownfield"));
+        assert!(template.contains("brand_title"));
+        assert!(template.contains(NEUTRAL_COVER_TITLE));
+    }
+
+    /// Branding regression: Audit model / Calibration model must not render on the cover table
+    /// anymore (they moved into Methodology, alongside the Camerata version line).
+    #[test]
+    fn shipped_template_cover_table_omits_audit_and_calibration_model() {
+        let template = include_str!("../templates/audit_report.typ");
+        let cover_start = template.find("── 1. Cover").expect("cover section marker");
+        let cover_end = template.find("── ToC").expect("ToC section marker");
+        let cover_section = &template[cover_start..cover_end];
+        assert!(!cover_section.contains("Audit model"));
+        assert!(!cover_section.contains("Calibration model"));
+        assert!(
+            template.contains("Scanned with Camerata v"),
+            "the model/version provenance line must still render, just in Methodology"
+        );
     }
 }

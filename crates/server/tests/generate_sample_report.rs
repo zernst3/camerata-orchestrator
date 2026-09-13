@@ -325,6 +325,11 @@ async fn regenerate_sample_report() {
         project_title: "Harbor Member Portal".to_string(),
         prepared_by: "Zachary Ernst".to_string(),
         executive_summary_override: None,
+        // No `brand` here on purpose: this fixture exercises the NEUTRAL branding fallback
+        // (no agency name, no "Camerata" on the cover) — see the Branding section of
+        // docs/design/2026-09-13_audit-deliverable-review-fixes.md. A future regeneration that
+        // wants to demo a branded cover should set this explicitly.
+        ..Default::default()
     };
 
     let json = report_export::build_report_json(&report, &dispositions, Some(&corpus), &opts);

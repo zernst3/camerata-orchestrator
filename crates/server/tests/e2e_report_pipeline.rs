@@ -229,6 +229,7 @@ async fn e2e_deterministic_scan_to_pdf_report_pipeline() {
         project_title: "E2E Report Pipeline Fixture Audit".to_string(),
         prepared_by: "Camerata (automated e2e test)".to_string(),
         executive_summary_override: None,
+        ..Default::default()
     };
     let json = report_export::build_report_json(&report, &dispositions, Some(&corpus), &opts);
 
