@@ -51,12 +51,59 @@ pub fn audit_architectural(repo: &str, files: &[(String, String)], armed_rule_id
     findings
 }
 
+/// Which placeholder TOKEN NAME (no angle brackets — matches a rule's own
+/// `directive`/`remediation` text, see `report_export::resolve_fix`) a given rule id's
+/// `ArchViolation::object` should be captured under, when that checker names a schema-qualified
+/// object we understand. `None` for a rule id whose checker doesn't name an object in a shape
+/// this function knows how to map (including every non-Supabase arch checker) — those findings
+/// simply carry empty `captures`, and the report's generic-fallback wording covers them; this is
+/// deliberately a small, explicit allowlist rather than a guess, so a capture is only ever wired
+/// when we're sure it names the same kind of object the rule's authored text expects.
+fn capture_token_for(rule_id: &str) -> Option<&'static str> {
+    use camerata_checks::supabase::{rls_checker, search_path_checker};
+    match rule_id {
+        id if id == rls_checker::RULE_RLS_ENABLED
+            || id == rls_checker::RULE_RLS_NO_POLICY
+            || id == rls_checker::RULE_RLS_POLICY_DISABLED =>
+        {
+            Some("table")
+        }
+        id if id == search_path_checker::RULE_FUNC_SEARCH_PATH => Some("function-name"),
+        _ => None,
+    }
+}
+
+/// The buyer-facing bare object name from a checker's schema-qualified `"schema.object"`
+/// violation object string: the bare name in the (overwhelmingly common) `public` schema,
+/// schema-qualified otherwise — mirrors `SupabaseRlsChecker::display_name`'s own framing
+/// (without the backticks the authored remediation text already supplies around the
+/// placeholder token itself, e.g. `` "`<table>`" ``).
+fn bare_object_name(object: &str) -> String {
+    match object.split_once('.') {
+        Some(("public", rest)) if !rest.is_empty() => rest.to_string(),
+        _ => object.to_string(),
+    }
+}
+
 /// Convert one [`ArchViolation`] into a `Finding`, tagged so the UI/CSV/report can
 /// distinguish it from every other finding source. `status` defaults to `active`
 /// (`Finding::default()`) — the caller (`audit_repos`) still runs `classify_repo_findings`
 /// over the combined finding set afterward, so an architectural finding is just as
 /// waivable via `camerata:allow` / the baseline as a floor finding.
+///
+/// Also populates `Finding.captures` (Fix 1's placeholder-instantiation input, see
+/// `report_export::resolve_fix`) from `violation.object` when this rule id's checker names an
+/// object in a shape [`capture_token_for`] understands — e.g. `SUPABASE-RLS-ENABLED-1`'s
+/// `"public.profiles"` becomes `{"table": "profiles"}`, so the rule's authored `<table>`
+/// remediation token names the actual table in THIS codebase instead of falling back to the
+/// generic "the affected table".
 pub fn arch_violation_to_finding(repo: &str, violation: &ArchViolation) -> Finding {
+    let mut captures = std::collections::BTreeMap::new();
+    if let (Some(token), Some(object)) =
+        (capture_token_for(&violation.rule_id), violation.object.as_deref())
+    {
+        captures.insert(token.to_string(), bare_object_name(object));
+    }
     Finding {
         repo: repo.to_string(),
         path: violation.file.clone(),
@@ -67,6 +114,7 @@ pub fn arch_violation_to_finding(repo: &str, violation: &ArchViolation) -> Findi
         detail: violation.message.clone(),
         preview: true,
         preview_tool: Some(ARCH_PREVIEW_TOOL.to_string()),
+        captures,
         ..Finding::default()
     }
 }
@@ -100,6 +148,68 @@ mod tests {
         assert!(f.preview);
         assert_eq!(f.preview_tool.as_deref(), Some(ARCH_PREVIEW_TOOL));
         assert_eq!(f.status, "active");
+    }
+
+    #[test]
+    fn arch_violation_to_finding_captures_the_bare_table_name_for_public_schema() {
+        let v = ArchViolation {
+            rule_id: "SUPABASE-RLS-ENABLED-1".to_string(),
+            file: "supabase/migrations/20240101000000_init.sql".to_string(),
+            line: 3,
+            object: Some("public.profiles".to_string()),
+            message: "no RLS".to_string(),
+            severity: "critical",
+        };
+        let f = arch_violation_to_finding("acme/app", &v);
+        assert_eq!(f.captures.get("table").map(String::as_str), Some("profiles"));
+    }
+
+    #[test]
+    fn arch_violation_to_finding_captures_a_schema_qualified_table_name_for_non_public_schema() {
+        let v = ArchViolation {
+            rule_id: "SUPABASE-RLS-NO-POLICY-1".to_string(),
+            file: "supabase/migrations/20240101000000_init.sql".to_string(),
+            line: 3,
+            object: Some("billing.invoices".to_string()),
+            message: "zero policies".to_string(),
+            severity: "medium",
+        };
+        let f = arch_violation_to_finding("acme/app", &v);
+        assert_eq!(
+            f.captures.get("table").map(String::as_str),
+            Some("billing.invoices")
+        );
+    }
+
+    #[test]
+    fn arch_violation_to_finding_captures_the_function_name_for_search_path() {
+        let v = ArchViolation {
+            rule_id: "SUPABASE-FUNC-SEARCH-PATH-1".to_string(),
+            file: "supabase/migrations/20240101000000_init.sql".to_string(),
+            line: 8,
+            object: Some("public.charge_membership".to_string()),
+            message: "no search_path".to_string(),
+            severity: "high",
+        };
+        let f = arch_violation_to_finding("acme/app", &v);
+        assert_eq!(
+            f.captures.get("function-name").map(String::as_str),
+            Some("charge_membership")
+        );
+    }
+
+    #[test]
+    fn arch_violation_to_finding_leaves_captures_empty_for_an_unmapped_rule() {
+        let v = ArchViolation {
+            rule_id: "UI-UTC-DATES-1".to_string(),
+            file: "src/lib.rs".to_string(),
+            line: 1,
+            object: Some("some_fn".to_string()),
+            message: "uses local time".to_string(),
+            severity: "low",
+        };
+        let f = arch_violation_to_finding("acme/app", &v);
+        assert!(f.captures.is_empty());
     }
 
     #[test]
