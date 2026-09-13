@@ -51,6 +51,13 @@ no such check is found: "One of your API routes uses the master key on behalf of
 Your database security does not apply on that path." When a check is found, report it as
 informational (what the check validates), not a finding.
 """
+remediation = """
+In `<file>`, add an explicit authorization check before the service_role client performs its
+privileged operation — confirm the caller's session identifies a specific user, then verify that
+user is entitled to the exact row/action being requested (RLS will not do this for you on a
+service_role connection). Verify by confirming a request from a legitimate but unentitled user
+(e.g. one user trying to act on another user's data) is now rejected.
+"""
 why = "service_role bypassing RLS means the handler itself IS the entire access-control layer for that request; a missing check there is not a lesser version of an RLS gap, it is a complete absence of authorization on that path."
 
 [[option]]

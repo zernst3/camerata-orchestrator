@@ -55,6 +55,13 @@ Remediation: replace the identity check with `getClaims()` (local signature veri
 current default recommendation) or `getUser()` (network-verified, when full freshness is required).
 Paths that do not clearly resolve as server-only are flagged `needs_review` instead of asserted.
 """
+remediation = """
+In `<file>`, replace the `getSession()` call used for the identity/authorization check with
+`getClaims()` (verifies the JWT signature locally; the current default recommendation) or
+`getUser()` (round-trips to the auth server for a fully fresh record, when that freshness
+matters). Verify by confirming a request carrying a forged or expired session cookie is now
+rejected rather than treated as a valid, logged-in user.
+"""
 why = "getSession() explicitly does not revalidate the token per Supabase's own docs; server code making an authorization decision on an unrevalidated value is the textbook CWE-345 shape, and the path scoping keeps the legitimate client-side usage out of the finding set."
 
 [[option]]

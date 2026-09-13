@@ -49,6 +49,13 @@ upload into — or delete from — your `<bucket>` bucket, not just the file's o
 unscoped policies are medium with `needs_review`, mirroring SUPABASE-RLS-PERMISSIVE-TRUE-1's
 read/write severity split.
 """
+remediation = """
+Rewrite the `storage.objects` policy scoped to the `<bucket>` bucket so writes/deletes require
+matching the uploader, for example `using (bucket_id = '<bucket>' and owner = auth.uid())` (or a
+folder-prefix check keyed to the user's id) instead of an unconditional `true`. Verify by
+confirming one authenticated user can no longer upload into or delete another user's objects in
+`<bucket>`.
+"""
 why = "Storage authorization is RLS on storage.objects in every respect that matters for this check; naming the bucket from the policy's own bucket_id predicate is what turns a generic 'a policy is too permissive' finding into an actionable, buyer-legible one."
 
 [[option]]

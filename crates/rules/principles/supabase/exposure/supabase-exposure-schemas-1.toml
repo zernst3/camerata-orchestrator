@@ -50,6 +50,13 @@ expose the full parsed schema list as the canonical 'exposed schemas' input cons
 supabase/rls/* and supabase/exposure/* rule, replacing any hardcoded assumption that `public` is
 the only exposed schema.
 """
+remediation = """
+Either remove `<schema>` from the `[api] schemas` list in `supabase/config.toml` if it was
+exposed unintentionally, or, if it needs to stay exposed, review every table in `<schema>` and
+confirm each has Row Level Security enabled with policies that match the same standard as your
+`public` schema tables. Verify by re-checking `supabase/config.toml`'s `[api] schemas` list
+reflects only the schemas you intend PostgREST to serve.
+"""
 why = "A widened API surface via extra exposed schemas is a real, repo-detectable risk in its own right, and using this rule's parse as the single source of truth for 'what counts as exposed' keeps every other rule in the group correctly scoped instead of each independently (and inconsistently) assuming public is the only exposed schema."
 
 [[option]]

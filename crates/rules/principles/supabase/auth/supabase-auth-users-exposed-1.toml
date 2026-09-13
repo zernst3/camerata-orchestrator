@@ -44,6 +44,13 @@ API-exposed for any reference to auth.users. Any match is a critical, unconditio
 replace the view with an application-owned profiles table populated via an auth.users insert
 trigger, exposing only the specific non-sensitive columns the app needs.
 """
+remediation = """
+Drop or restrict the exposed-schema object referencing `auth.users` in `<file>`. Replace it with
+an application-owned `public.profiles` table, populated by a trigger on `auth.users` inserts,
+that exposes only the specific non-sensitive columns your app actually needs (never email or
+other identifying fields unless the feature requires them). Verify by confirming no exposed-schema
+view, materialized view, or grant references `auth.users` directly anymore.
+"""
 why = "There is no legitimate reason for an exposed-schema object to reference auth.users directly — the correct pattern (a curated profiles table) exists precisely to avoid this, so an unconditional critical with no carve-out is the right severity."
 
 [[option]]

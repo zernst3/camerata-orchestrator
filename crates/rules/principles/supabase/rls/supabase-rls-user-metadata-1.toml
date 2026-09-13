@@ -49,6 +49,14 @@ check reads a field any user can edit about themselves. Anyone can promote thems
 with one API call." Remediation: move the authorization-relevant claim to `app_metadata` (settable
 only by a service_role client / admin) or to a dedicated, RLS-protected roles table.
 """
+remediation = """
+Rewrite the policy predicate to read `auth.jwt() -> 'app_metadata' ->> 'role'` (or an equivalent
+`app_metadata` claim) instead of `user_metadata` / `raw_user_meta_data` — `app_metadata` can only
+be written by a service_role client or the Supabase dashboard, never by the user themselves. If
+you need richer role logic, move it to a dedicated roles table with its own RLS policy instead.
+Verify by confirming that editing your own profile's metadata through the normal client SDK no
+longer changes what the policy grants you.
+"""
 why = "user_metadata / raw_user_meta_data are user-writable by design; using either as an authorization input is a structural privilege-escalation vector with no legitimate counter-example, so an unconditional flag is correct rather than a needs_review carve-out."
 
 [[option]]

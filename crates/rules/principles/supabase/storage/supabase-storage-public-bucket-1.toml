@@ -54,6 +54,14 @@ private content, note that signal explicitly in the finding to help the reader p
 the name suggests intentional public use (avatars, public-assets, media), note that too, without
 downgrading the review requirement.
 """
+remediation = """
+Confirm whether every file in the `<bucket>` bucket is meant to be publicly downloadable by
+anyone with the link. If not, set it to private (`update storage.buckets set public = false
+where id = '<bucket>'`) and add owner-scoped storage policies for the operations your app
+actually needs. If the bucket is genuinely public by design (e.g. avatars, public assets), no
+change is needed beyond confirming that intentionally. Verify by confirming an unauthenticated
+request for a file in `<bucket>` is rejected once the bucket is private.
+"""
 why = "Public buckets are a legitimate, common Supabase pattern; naming every one and asking rather than asserting keeps the report honest and prevents an avatar bucket from being reported with the same alarm as an exposed documents bucket, while still surfacing every case for the human reviewer to judge."
 
 [[option]]

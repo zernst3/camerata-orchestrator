@@ -60,6 +60,14 @@ elevated privileges, switch to SECURITY INVOKER (the Postgres default) and remov
 (2) if DEFINER is genuinely required, add `SET search_path = <trusted_schema(s)>, pg_temp` — with
 pg_temp listed last so the temporary schema is searched last, per Postgres's own guidance.
 """
+remediation = """
+For `<function-name>`, first check whether it actually needs elevated privileges: if not, remove
+`SECURITY DEFINER` entirely (Postgres functions are `SECURITY INVOKER` by default). If it
+genuinely needs DEFINER, add `SET search_path = public, pg_temp` (or your specific trusted
+schemas, with `pg_temp` listed last) to the function definition in a new migration. Verify by
+re-running `\\df+ <function-name>` in `psql` (or the equivalent Supabase SQL editor query) and
+confirming the function's config now shows a pinned `search_path`.
+"""
 why = "search_path hijacking against a SECURITY DEFINER function is a well-documented, well-understood Postgres attack with a known, low-cost fix (SET search_path); folding the SECURITY INVOKER preference into this rule's remediation gives the report one clear finding instead of two overlapping, lower-value ones."
 
 [[option]]

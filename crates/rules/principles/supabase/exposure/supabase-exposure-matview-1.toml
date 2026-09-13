@@ -44,6 +44,14 @@ public API." Remediation: move the materialized view to a non-exposed schema and
 through a security_invoker view or a SECURITY DEFINER function that applies its own row-scoping
 logic before returning data, or confirm the view's full contents are intentionally public.
 """
+remediation = """
+Move `<matview>` to a schema that is NOT listed in `supabase/config.toml`'s `[api] schemas`, then
+create a thin `security_invoker` view (or a SECURITY DEFINER function with its own row-scoping
+check) in an exposed schema that reads from it, so RLS applies at that layer. If every row in
+`<matview>` is genuinely meant to be public, no change is needed beyond confirming that
+intentionally. Verify by confirming `<matview>` itself is no longer directly reachable through
+the PostgREST API (only the wrapping view/function is).
+"""
 why = "The finding is unconditional given the exposure fact — there is no RLS mechanism a materialized view could adopt — so naming every instance and explaining the structural limitation is the correct, honest framing rather than a probabilistic guess."
 
 [[option]]

@@ -46,6 +46,13 @@ identity on every single row. Works today; melts the first time a table gets lar
 rewrite the call as `(select auth.uid())` (or `(select auth.jwt())`), which the planner then
 evaluates once per query via its initplan mechanism instead of once per row.
 """
+remediation = """
+In the affected policy on `<table>`, replace bare `auth.uid()` / `auth.jwt()` calls in the
+`USING`/`WITH CHECK` clause with the scalar-subselect form `(select auth.uid())` /
+`(select auth.jwt())`. This is a same-day, purely mechanical rewrite with no behavior change.
+Verify by re-running `EXPLAIN ANALYZE` on a representative query against `<table>` and confirming
+the auth function no longer appears once per row in the plan.
+"""
 why = "The rewrite is a zero-risk, purely mechanical performance win with a real (if scale-dependent) cost when skipped; opt-in-only keeps it from crowding an audit report's security findings with a non-security item the architect may not yet care about."
 
 [[option]]

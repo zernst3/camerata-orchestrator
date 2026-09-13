@@ -45,6 +45,13 @@ remediation at checking (a) whether the anon/authenticated roles need policies a
 whether a service_role client reads this table, in which case SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1
 covers the actual risk.
 """
+remediation = """
+Add a `CREATE POLICY` for `<table>` scoping exactly which anon/authenticated requests may read
+or write it. If the app instead reads `<table>` through a service_role (master-key) client and
+does not need per-row access rules, leave RLS enabled with no policy and instead add an explicit
+authorization check in the server code that uses that client. Verify by confirming a normal
+(anon or authenticated-role) request can perform the operations the feature actually needs.
+"""
 why = "The finding is a genuine repo-detectable signal (deny-by-default RLS) but its root cause is ambiguous from static analysis alone; medium severity plus a two-branch remediation is the honest framing rather than guessing which branch applies."
 
 [[option]]

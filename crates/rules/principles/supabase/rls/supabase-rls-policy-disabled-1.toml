@@ -49,6 +49,13 @@ migration file(s) that defined the policy and the one that (dis)established RLS.
 "You wrote access rules for `<table>`, but they are switched off. The table looks protected in your
 code and is fully open in production." Include the repo-vs-production honesty caveat.
 """
+remediation = """
+Add `ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` in a new migration — the policies already
+defined for `<table>` do not take effect until RLS itself is turned on, so this is usually the
+entire fix; no new policy needs writing. Verify by confirming the Supabase dashboard's
+Authentication > Policies page shows `<table>` as RLS-enabled, and that an anon-key request
+outside the existing policies' scope is now rejected.
+"""
 why = "Policies-with-RLS-off is a distinct failure mode from bare missing-RLS: it indicates a developer BELIEVES the table is protected, which changes both the remediation message (enable RLS; the policies are likely already correct) and the report's credibility (naming the exact gap between intent and reality is the paid-audit value)."
 
 [[option]]

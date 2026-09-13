@@ -54,6 +54,14 @@ public), `anon`, or `public`: if the policy covers INSERT/UPDATE/DELETE or carri
 SELECT-only with USING (true) and no WITH CHECK, emit a medium-severity finding with
 `needs_review`, naming the table and asking whether public read access is intentional.
 """
+remediation = """
+Rewrite the policy's `USING`/`WITH CHECK` clause on `<table>` to scope it to the actual owner or
+role, for example `using (auth.uid() = user_id)` instead of `using (true)` — or, if every row on
+`<table>` is genuinely meant to be public (a catalog, published content), keep `true` for SELECT
+only and make sure no INSERT/UPDATE/DELETE policy also carries an unconditional `true`. Verify by
+confirming an authenticated request for another user's row is rejected, and that only the
+intended public data remains readable by anon.
+"""
 why = "Write access under an unconditional true predicate has no legitimate justification and warrants an unqualified high-severity finding; read access under the same predicate is routinely intentional (public catalogs, reference data), so it is downgraded and routed to human review rather than asserted as a vulnerability."
 
 [[option]]

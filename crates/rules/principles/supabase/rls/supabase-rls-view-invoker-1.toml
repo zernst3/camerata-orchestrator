@@ -50,6 +50,12 @@ underneath it. The tables are locked, and the window next to them is open." Reme
 Postgres 15+) restructure the view's access via a SECURITY DEFINER function with an explicit,
 audited grant.
 """
+remediation = """
+Add `ALTER VIEW <view> SET (security_invoker = true);` (or recreate the view with
+`WITH (security_invoker = true)`) in a new migration, so it re-checks the RLS policies of the
+tables it reads instead of running with the view owner's privileges. Verify by confirming a
+request that RLS would deny on the underlying table is now also denied through `<view>`.
+"""
 why = "A view with no security_invoker executes as its owner by default and is the single most common way an otherwise-correct RLS setup is silently bypassed — the base tables are locked, the view reading them is not, and nothing in the migration diff signals that to a reviewer."
 
 [[option]]

@@ -67,6 +67,14 @@ against the live database, since dashboard-only changes are invisible to a repo 
 schemas not exposed via SUPABASE-EXPOSURE-SCHEMAS-1's config parse are demoted to a
 defense-in-depth note rather than a critical.
 """
+remediation = """
+Add `ALTER TABLE <table> ENABLE ROW LEVEL SECURITY;` in a new migration (or update your
+declarative schema snapshot), then add at least one `CREATE POLICY` scoping exactly who can
+read and write it — RLS with zero policies still denies everyone by default, which is safer
+but usually not what the feature needs. Verify by checking the Supabase dashboard's
+Authentication > Policies page shows `<table>` as RLS-enabled with the policy you intended, and
+by confirming an anon-key request without the right credentials is rejected.
+"""
 why = "RLS is the only access-control layer between an anonymous PostgREST request (using the public anon key) and a table's rows. The end-state replay is the only mechanically-correct way to determine the CURRENT RLS state across an ordered migration history without both FP and FN failure modes."
 
 [[option]]

@@ -56,6 +56,11 @@ severity: "Your `<function-name>` function accepts requests from anyone on the i
 or not." If a compensating check is found (webhook signature validation, a checked shared secret),
 downgrade to informational and name what the check does.
 """
+remediation = """
+Re-enable `verify_jwt` for `<function-name>` in supabase/config.toml, or add an explicit
+authenticated-user check (e.g. verify `auth.uid()` is present) at the top of the handler. Verify
+by confirming the function rejects an unauthenticated request with 401.
+"""
 why = "Splitting mechanical evidence-gathering (the flag, which is deterministic and cheap) from the semantic judgment (does the body compensate, which needs an LLM reading real control flow) gives the report both completeness (every disabled-verification function is looked at) and precision (only genuinely uncompensated functions get the high-severity framing)."
 
 [[option]]
