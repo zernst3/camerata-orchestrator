@@ -216,6 +216,11 @@ pub fn parse_osv_json(
                     effort: None,
                     category: None,
                     located: true,
+                    // Dependency findings never flow through `report_export::resolve_fix` (they
+                    // are partitioned into their own dependency-snapshot lane before the
+                    // curated-findings loop runs), so there is no rule remediation text for a
+                    // capture to instantiate here.
+                    captures: Default::default(),
                 });
             }
         }

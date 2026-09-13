@@ -414,6 +414,7 @@ mod tests {
             effort: None,
             category: None,
             located: true,
+            captures: Default::default(),
         }
     }
 

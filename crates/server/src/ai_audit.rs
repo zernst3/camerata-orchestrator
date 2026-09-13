@@ -371,6 +371,11 @@ pub fn parse_ai_findings(
                 // `located` is set by merge_by_location once snippets are anchored to files.
                 category: None,
                 located: true,
+                // AI/semantic findings have no cheaply-known structured object at match time
+                // (the model narrates the defect in prose, not a parsed table/function/bucket
+                // name) — empty captures means the report layer falls back to a readable
+                // generic when instantiating a rule's remediation text for this finding.
+                captures: Default::default(),
             });
         }
     }
@@ -3564,6 +3569,7 @@ mod tests {
             effort: None,
             category: None,
             located: true,
+            captures: Default::default(),
         }
     }
 
@@ -4084,6 +4090,7 @@ mod tests {
             effort: None,
             category: None,
             located: true,
+            captures: Default::default(),
         }
     }
 
@@ -4791,6 +4798,7 @@ mod tests {
             effort: None,
             category: None,
             located: true,
+            captures: Default::default(),
         };
         // Three AI- findings with equal severity — earliest (index 0) must win.
         let group = vec![

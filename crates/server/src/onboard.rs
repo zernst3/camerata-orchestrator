@@ -167,6 +167,17 @@ pub struct Finding {
     /// findings cite real lines, so this defaults to `true` (back-compatible serde default).
     #[serde(default = "default_located")]
     pub located: bool,
+    /// Detector-supplied placeholder bindings used to instantiate the rule's authored
+    /// `RuleOption::remediation` text for THIS specific finding: token name WITHOUT angle
+    /// brackets (e.g. `"table"`, `"function-name"`, `"bucket"`) → the concrete object name the
+    /// detector matched (e.g. `"profiles"`, `"send-invite"`, `"avatars"`). Consumed by
+    /// `report_export::resolve_fix`, which substitutes `<table>` etc. in the remediation text
+    /// from this map and falls back to a readable generic ("the affected table") for any token
+    /// not present here. Empty for findings whose detector doesn't cheaply know the object
+    /// (most AI/semantic findings) — those simply get the generic fallback throughout; this is
+    /// NOT a required field to populate, only an enrichment.
+    #[serde(default)]
+    pub captures: std::collections::BTreeMap<String, String>,
 }
 
 /// A finding is presumed presence-type (`located = true`) unless the AI merge pass proves its
@@ -204,6 +215,7 @@ impl Default for Finding {
             effort: None,
             category: None,
             located: default_located(),
+            captures: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -1831,6 +1843,7 @@ mod tests {
             effort: None,
             category: None,
             located: true,
+            captures: Default::default(),
         };
         let mut findings = vec![
             mk("a.rs", 5, "SEC-NO-HARDCODED-SECRETS-1", snippet), // baselined
@@ -1866,6 +1879,7 @@ mod tests {
                 effort: None,
                 category: None,
                 located: true,
+                captures: Default::default(),
             },
             Finding {
                 repo: "me/web".into(),
@@ -1885,6 +1899,7 @@ mod tests {
                 effort: None,
                 category: None,
                 located: true,
+                captures: Default::default(),
             },
         ];
         let body = tech_debt_issue_body(&findings);
@@ -1925,6 +1940,7 @@ mod tests {
             effort: None,
             category: None,
             located: true,
+            captures: Default::default(),
         }
     }
 
@@ -2068,6 +2084,7 @@ mod tests {
             effort: None,
             category: None,
             located: true,
+            captures: Default::default(),
         };
         let csv = tech_debt_csv(&[f]);
         let data_row = csv.lines().nth(1).expect("expected data row");

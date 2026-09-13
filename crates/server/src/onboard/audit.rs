@@ -74,6 +74,11 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                         effort: None,
                         category: None,
                         located: true,
+                        // These universal (non-Supabase) rules have no domain object (table/
+                        // function/bucket) for a capture to name — the finding's own `path` is
+                        // already the only object-identifying detail, and `resolve_fix` reads
+                        // that straight off `Finding.path` for `<path>`/`<file>` tokens.
+                        captures: Default::default(),
                     });
                 }
             }
@@ -122,6 +127,7 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                 effort: None,
                 category: None,
                 located: true,
+                captures: Default::default(),
             });
         }
     }
@@ -227,6 +233,7 @@ pub(crate) fn classify_repo_findings(
             effort: None,
             category: None,
             located: true,
+            captures: Default::default(),
         });
     }
 }
