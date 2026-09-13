@@ -89,9 +89,16 @@ pub struct FindingRow {
     status: String,
     snippet: String,
     detail: String,
-    /// The rule's corpus-default directive (see [`resolve_fix`]) — empty, never fabricated,
-    /// when the corpus has no entry/option/directive for this rule.
-    fix: String,
+    /// The rule's AUTHORED, client-facing remediation text (see [`resolve_fix`]), with this
+    /// finding's placeholder tokens already substituted. `None` — rendered as a blank cell /
+    /// JSON `null`, never fabricated and never `directive` — when the rule's default option has
+    /// no authored `remediation` yet.
+    fix: Option<String>,
+    /// Reserved for a future finding-specific "For this finding: …" line (see
+    /// `report_export::CuratedSiteJson::fix_for_this_finding`'s doc comment) — always `None` as
+    /// of this pass; the field exists so `findings.json`'s wire shape doesn't need to change
+    /// again once that extraction is built.
+    fix_specific: Option<String>,
     is_fp: bool,
     /// The auditor's FP reason (`DispositionWire.reason`), populated only when `is_fp`.
     fp_reason: String,
@@ -179,7 +186,7 @@ fn partition_rows(
             .map(|s| s.url.clone())
             .collect::<Vec<_>>()
             .join("\n");
-        let fix = resolve_fix(&f.rule_id, corpus);
+        let fix = resolve_fix(&f.rule_id, corpus, f);
         let (_, est_hours) = effort_hours_bounds(f.effort.as_deref());
 
         let (bucket, disposition_kind, disposition_label_str, fp_reason) = if is_fp {
@@ -224,6 +231,7 @@ fn partition_rows(
             snippet: cap_snippet_for_workbook(&f.snippet),
             detail: f.detail.clone(),
             fix,
+            fix_specific: None,
             is_fp,
             fp_reason,
         });
@@ -551,7 +559,12 @@ fn write_finding_row(
     ws.write_string_with_format(r, 18, &row.status, &fmts.cell(bg, false, false))?;
     ws.write_string_with_format(r, SNIPPET_COL, &row.snippet, &fmts.cell(bg, true, true))?;
     ws.write_string_with_format(r, 20, &row.detail, &fmts.cell(bg, true, false))?;
-    ws.write_string_with_format(r, 21, &row.fix, &fmts.cell(bg, true, false))?;
+    ws.write_string_with_format(
+        r,
+        21,
+        row.fix.as_deref().unwrap_or(""),
+        &fmts.cell(bg, true, false),
+    )?;
 
     Ok(())
 }
@@ -1337,28 +1350,46 @@ mod tests {
         );
     }
 
-    // ── Recommended-Fix corpus-directive join ──────────────────────────────────
+    // ── Recommended-Fix: binds to authored `remediation`, NEVER `directive` (Fix 1) ─────
 
     #[tokio::test]
-    async fn recommended_fix_is_populated_from_the_corpus_directive() {
+    async fn recommended_fix_is_populated_from_authored_remediation() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
-        let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
+        let mut f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "critical");
+        f.captures.insert("table".to_string(), "profiles".to_string());
         let report = report_with(vec![f], vec![]);
         let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus));
         assert!(
-            !rows[0].fix.is_empty(),
-            "the Recommended Fix column must be populated from the corpus directive"
+            rows[0].fix.as_deref().is_some_and(|s| s.contains("profiles")),
+            "the Recommended Fix column must be populated from authored remediation, got: {:?}",
+            rows[0].fix
         );
     }
 
     #[test]
-    fn recommended_fix_is_empty_not_fabricated_without_a_corpus() {
+    fn recommended_fix_is_none_not_fabricated_without_a_corpus() {
         let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
         let report = report_with(vec![f], vec![]);
         let (rows, _) = partition_rows(&report, &HashMap::new(), None);
-        assert_eq!(rows[0].fix, "", "must not fabricate a fix when the corpus is absent");
+        assert_eq!(rows[0].fix, None, "must not fabricate a fix when the corpus is absent");
+    }
+
+    #[tokio::test]
+    async fn recommended_fix_is_none_when_remediation_is_unauthored() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        // SEC-NO-UNSAFE-DESERIALIZATION-1 has a real `directive` but no authored `remediation`
+        // as of this pass (only the Supabase pack is authored) — pins the fail-safe.
+        let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
+        let report = report_with(vec![f], vec![]);
+        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus));
+        assert_eq!(
+            rows[0].fix, None,
+            "must omit the fix, never fall back to directive, when remediation is unauthored"
+        );
     }
 
     // ── `findings.json` (product export, machine-readable sibling of the workbook) ─────
@@ -1398,9 +1429,30 @@ mod tests {
     }
 
     /// A finding's `fix` field in `findings.json` is exactly `resolve_fix`'s output for the
-    /// same rule id + corpus — the same guarantee the xlsx's Recommended Fix column has.
+    /// same rule id + corpus + finding — the same guarantee the xlsx's Recommended Fix column
+    /// has, and `null` (never a string), never `directive`, for a rule with no `fix` at all.
     #[tokio::test]
     async fn findings_export_fix_field_matches_resolve_fix() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let mut f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "critical");
+        f.captures.insert("table".to_string(), "profiles".to_string());
+        let report = report_with(vec![f.clone()], vec![]);
+        let json = crate::report_export::build_report_json(
+            &report,
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let findings_export = build_findings_export(&report, &HashMap::new(), Some(&corpus), &json);
+        let expected = crate::report_export::resolve_fix("SUPABASE-RLS-ENABLED-1", Some(&corpus), &f);
+        assert!(expected.is_some(), "fixture rule must have authored remediation");
+        assert_eq!(findings_export.findings[0].fix, expected);
+    }
+
+    #[tokio::test]
+    async fn findings_export_fix_field_is_null_when_remediation_is_unauthored() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
@@ -1413,10 +1465,13 @@ mod tests {
             &empty_opts(),
         );
         let findings_export = build_findings_export(&report, &HashMap::new(), Some(&corpus), &json);
-        let expected =
-            crate::report_export::resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", Some(&corpus));
-        assert!(!expected.is_empty(), "fixture rule must have a real corpus directive");
-        assert_eq!(findings_export.findings[0].fix, expected);
+        assert_eq!(findings_export.findings[0].fix, None);
+        let serialized = serde_json::to_value(&findings_export.findings[0]).unwrap();
+        assert_eq!(
+            serialized.get("fix"),
+            Some(&serde_json::Value::Null),
+            "an unauthored fix must serialize as JSON null, not be dropped from the object"
+        );
     }
 
     /// The top-level JSON object has exactly the documented shape: `provenance`, `summary`,

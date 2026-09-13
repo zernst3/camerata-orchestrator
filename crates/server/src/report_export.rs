@@ -460,11 +460,23 @@ pub struct CuratedSiteJson {
     /// bold per-finding heading; the group's own rule id + invariant title (`CuratedGroupJson`)
     /// is demoted to a smaller subtitle line for registry traceability.
     pub headline: String,
-    /// The rule's corpus-default remediation directive (see [`resolve_fix`]), rendered as its
-    /// own "Fix:" line in the template — distinct from `detail`'s explanation of the
-    /// violation. Empty string (never fabricated) when the rule has no corpus entry, no
-    /// options, or no default option/directive.
-    pub fix: String,
+    /// The rule's AUTHORED, client-facing remediation text (see [`resolve_fix`]) — rendered as
+    /// its own "Fix:" line in the template, distinct from `detail`'s explanation of the
+    /// violation. Placeholder tokens (`<table>`, `<function-name>`, `<bucket>`, …) have already
+    /// been substituted with this finding's own `path`/`captures` (or a readable generic when
+    /// unfilled) — nothing downstream needs to re-resolve tokens. `None` (never a fabricated
+    /// sentence, and NEVER the rule's `directive` — see [`resolve_fix`]'s doc comment) when the
+    /// rule's default option has no authored `remediation` yet: the template must omit the Fix
+    /// block entirely in that case rather than render an empty line.
+    pub fix: Option<String>,
+    /// An optional, SINGLE labeled line to render UNDER the authored `fix` block ("For this
+    /// finding: …") when the model-written `detail` carries a finding-specific remediation
+    /// sentence distinct from both `fix` and the body `detail` text. `None` in every case as of
+    /// this pass (see [`resolve_fix`]'s module doc for why: a reliable distinct-sentence
+    /// extractor was judged not worth the risk of rendering duplicated/low-quality text) — the
+    /// field exists so the template layer has a stable place to read from once/if that
+    /// extraction is built. Never rendered in place of `fix`; only ever alongside it.
+    pub fix_for_this_finding: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -614,32 +626,120 @@ pub(crate) fn resolve_citation(
     }
 }
 
-/// Join `rule_id` against the loaded corpus to recover its DEFAULT option's `directive` — the
-/// rule's own canonical prescribed remediation action (e.g. "Enable Row Level Security on
-/// every table exposed via the anon/authenticated Supabase API roles."). This is a
-/// serialization-time join exactly like [`resolve_citation`] — computed here, not stored on
-/// [`Finding`] — because the directive is a property of the RULE, not of any one finding site.
+/// Join `rule_id` against the loaded corpus to recover its DEFAULT option's AUTHORED
+/// `remediation` text, then instantiate that text's placeholder tokens (`<table>`,
+/// `<function-name>`, `<bucket>`, `<path>`, …) from `finding`'s own `path`/`captures`. This is a
+/// serialization-time join exactly like [`resolve_citation`] for the RULE-level lookup, plus a
+/// per-FINDING instantiation step — the authored text is a property of the rule, but naming the
+/// specific table/function/bucket in THIS codebase is a property of the finding.
 ///
-/// Returns an empty string (never a fabricated sentence) when: the corpus is absent, the rule
-/// id has no corpus entry, the rule has no options at all (a mechanical rule with no
-/// alternatives to codify), the rule has no adopted DEFAULT option (the architect must choose
-/// one and hasn't), or the resolved option's `directive` field is itself blank in the TOML.
-/// Surfaced as the PDF's "Fix:" line (`CuratedSiteJson::fix`, rendered by `render_site` in
-/// `audit_report.typ`) and the workbook's "Recommended Fix" column — same join, both places,
-/// so an absent directive reads as honestly blank in both artifacts rather than one inventing
-/// text the other doesn't have.
-pub(crate) fn resolve_fix(rule_id: &str, corpus: Option<&camerata_rules::RuleSet>) -> String {
-    let Some(rule) = corpus.and_then(|c| c.get_by_id(rule_id)) else {
-        return String::new();
-    };
+/// # `remediation`, never `directive` (2026-09-13 product-review Fix 1)
+/// `directive` is the rule's DETECTION/enforcement recipe — internal, agent-facing instructions
+/// for how Camerata itself finds this defect (e.g. "Regex-scan supabase/config.toml for
+/// `verify_jwt=false`… feed the matched source to the prose tier…"). It leaks internals and
+/// confuses a paying client. `remediation` is a SEPARATE, authored field: 2-4 imperative
+/// sentences telling the CLIENT what to change, where, and how to verify the fix. This function
+/// binds ONLY to `remediation` and must NEVER fall back to `directive` (or any other rule field)
+/// when `remediation` is absent — fail-safe here means silently omitting the Fix block, not
+/// leaking the recipe. See `docs/design/2026-09-13_audit-deliverable-review-fixes.md` Fix 1.
+///
+/// Returns `None` (never a fabricated sentence, never `directive`) when: the corpus is absent,
+/// the rule id has no corpus entry, the rule has no options at all, the rule has no adopted
+/// DEFAULT option, or the resolved option's `remediation` field is itself absent/blank in the
+/// TOML (not yet authored — the common case until the corpus-wide authoring pass in Phase 2a
+/// lands). Surfaced as the PDF's "Fix:" line (`CuratedSiteJson::fix`) and the workbook's
+/// "Recommended Fix" column / `findings.json`'s `fix` field (`FindingRow::fix`) — same join, all
+/// three, so an absent remediation reads as an honestly OMITTED Fix block everywhere rather than
+/// one artifact inventing text the others don't have.
+pub(crate) fn resolve_fix(
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    finding: &Finding,
+) -> Option<String> {
+    let rule = corpus.and_then(|c| c.get_by_id(rule_id))?;
     // `chosen_option = None`: the report has no notion of a per-project chosen option today
     // (that lives in onboarding's `SelectedRule` binding, not in a `Finding`/`ScanReport`), so
     // this always resolves the rule's own DEFAULT — matching the design doc's "the corpus
-    // rule's default `[[option]].directive`" wording exactly, not a project-specific choice.
-    match rule.resolved_option(None) {
-        Some(option) if !option.directive.trim().is_empty() => option.directive.clone(),
-        _ => String::new(),
+    // rule's default `[[option]].remediation`" wording exactly, not a project-specific choice.
+    let option = rule.resolved_option(None)?;
+    let remediation = option.remediation.as_deref()?.trim();
+    if remediation.is_empty() {
+        return None;
     }
+    Some(instantiate_remediation(
+        remediation,
+        &finding.path,
+        &finding.captures,
+    ))
+}
+
+/// The readable, never-internal-sounding generic noun phrase substituted for a placeholder
+/// token when the finding carries no captured value for it. Keyed by the token's bare name
+/// (angle brackets stripped) exactly as it appears in authored `remediation` (and, before it,
+/// the corpus rules' own `directive`) text — extend this map when a new rule introduces a new
+/// domain token, so its remediation can still render something readable before a detector is
+/// wired to capture the real object. `<path>`/`<file>` are handled separately in
+/// [`instantiate_remediation`] (filled from the finding's own `path`, which is always present),
+/// so they are not listed here; the catch-all arm below is still a safe fallback for them too if
+/// `path` is ever empty.
+fn generic_placeholder_filler(token: &str) -> &'static str {
+    match token {
+        "table" => "the affected table",
+        "function-name" | "function" => "the affected function",
+        "bucket" => "the affected bucket",
+        "view" => "the affected view",
+        "matview" => "the affected materialized view",
+        "schema" => "the affected schema",
+        "policy" => "the affected policy",
+        "path" | "file" => "the affected file",
+        _ => "the affected resource",
+    }
+}
+
+/// Substitute every `<token>` placeholder in authored `remediation` text with a concrete value,
+/// so the same authored sentence names the actual object in THIS codebase. Resolution order per
+/// token: (1) `<path>`/`<file>` always resolve to `path` (the finding's own path) when it is
+/// non-empty; (2) any other token resolves to `captures.get(token)` when the detector populated
+/// one; (3) otherwise a readable generic from [`generic_placeholder_filler`]. This function is
+/// the SOLE gate between authored text and the client, so it is deliberately exhaustive: EVERY
+/// well-formed `<...>` span found in `remediation` is replaced by construction — there is no
+/// code path that can leave a raw `<token>` in the returned string. A malformed span (a bare `<`
+/// with no matching `>` anywhere after it) is passed through unmodified rather than guessed at,
+/// since that is prose, not a token — this can only happen if a rule author literally types an
+/// unmatched `<` in remediation copy, not from anything a detector or the finding data supplies.
+pub(crate) fn instantiate_remediation(
+    remediation: &str,
+    path: &str,
+    captures: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let mut out = String::with_capacity(remediation.len());
+    let mut rest = remediation;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let after_open = &rest[start + 1..];
+        let Some(end) = after_open.find('>') else {
+            // No closing bracket anywhere ahead — not a well-formed token. Emit the remainder
+            // verbatim rather than treating a stray `<` as something to defend against.
+            out.push_str(&rest[start..]);
+            rest = "";
+            break;
+        };
+        let token = after_open[..end].trim();
+        let filled = if matches!(token, "path" | "file") && !path.trim().is_empty() {
+            path.to_string()
+        } else {
+            captures
+                .get(token)
+                .map(|v| v.trim())
+                .filter(|v| !v.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| generic_placeholder_filler(token).to_string())
+        };
+        out.push_str(&filled);
+        rest = &after_open[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// A small, generic technical-acronym allowlist for cosmetic title-casing — NOT a rule
@@ -1077,7 +1177,10 @@ pub fn build_report_json(
                     disposition: disposition_label(*disposition, reason, bucket, confirmed_by_client),
                     also_matches: f.also_matches.clone(),
                     headline: defect_headline(&f.detail, &title),
-                    fix: resolve_fix(&rule_id, corpus),
+                    fix: resolve_fix(&rule_id, corpus, f),
+                    // See `CuratedSiteJson::fix_for_this_finding`'s doc comment: deliberately
+                    // never populated in this pass.
+                    fix_for_this_finding: None,
                 }
             })
             .collect();
@@ -2127,53 +2230,155 @@ mod tests {
         );
     }
 
-    // ── Recommended-Fix corpus-directive join ──────────────────────────────────
+    // ── Recommended-Fix: binds to authored `remediation`, NEVER `directive` (Fix 1) ─────
 
     #[tokio::test]
-    async fn resolve_fix_joins_the_default_option_directive_from_the_corpus() {
+    async fn resolve_fix_binds_to_the_authored_remediation_and_substitutes_captures() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
-        let fix = resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", Some(&corpus));
+        let mut f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "critical");
+        f.captures.insert("table".to_string(), "profiles".to_string());
+        let fix = resolve_fix("SUPABASE-RLS-ENABLED-1", Some(&corpus), &f)
+            .expect("SUPABASE-RLS-ENABLED-1 must have authored remediation");
         assert!(
-            fix.contains("yaml.safe_load") || fix.contains("SafeLoader"),
-            "expected the rule's default-option directive (safe-deserialization guidance), got: {fix:?}"
+            fix.contains("`profiles`") || fix.contains("profiles"),
+            "expected the captured table name substituted into the authored remediation, got: {fix:?}"
+        );
+        assert!(
+            !fix.to_lowercase().contains("timeline replay") && !fix.contains("emit a critical finding"),
+            "must bind to the client-facing `remediation` text, never the detection-recipe \
+             `directive` (which mentions the replay mechanism), got: {fix:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_fix_never_falls_back_to_directive_when_remediation_is_unauthored() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        // SEC-NO-UNSAFE-DESERIALIZATION-1 is a UNIVERSAL rule with a real `directive` but (as of
+        // this pass) no authored `remediation` — Phase 1 only authors the Supabase pack. This
+        // pins the fail-safe: absent remediation means an omitted Fix, never the directive text.
+        let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
+        let fix = resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", Some(&corpus), &f);
+        assert_eq!(
+            fix, None,
+            "must omit the Fix block, not fall back to the rule's directive, when remediation is unauthored"
         );
     }
 
     #[test]
-    fn resolve_fix_is_empty_not_fabricated_when_corpus_is_absent() {
-        assert_eq!(resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", None), "");
+    fn resolve_fix_is_none_not_fabricated_when_corpus_is_absent() {
+        let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
+        assert_eq!(resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", None, &f), None);
     }
 
     #[tokio::test]
-    async fn resolve_fix_is_empty_when_rule_id_is_unknown_to_the_corpus() {
+    async fn resolve_fix_is_none_when_rule_id_is_unknown_to_the_corpus() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
-        assert_eq!(resolve_fix("AI-CUSTOM-ARCH-RULE-1", Some(&corpus)), "");
+        let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+        assert_eq!(resolve_fix("AI-CUSTOM-ARCH-RULE-1", Some(&corpus), &f), None);
     }
 
     #[tokio::test]
-    async fn curated_finding_site_carries_the_fix_line_populated_from_the_corpus() {
+    async fn curated_finding_site_carries_the_fix_line_populated_from_authored_remediation() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        let mut f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "critical");
+        f.captures.insert("table".to_string(), "profiles".to_string());
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let fix = json.curated_findings[0].sites[0]
+            .fix
+            .as_deref()
+            .expect("curated site's fix line must be populated from authored remediation");
+        assert!(fix.contains("profiles"));
+    }
+
+    #[test]
+    fn curated_finding_site_fix_is_none_not_fabricated_without_a_corpus() {
+        let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.curated_findings[0].sites[0].fix, None);
+    }
+
+    #[tokio::test]
+    async fn curated_finding_site_fix_is_none_when_remediation_is_unauthored() {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
         let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
-        assert!(
-            !json.curated_findings[0].sites[0].fix.is_empty(),
-            "curated site's fix line must be populated from the corpus directive"
+        assert_eq!(
+            json.curated_findings[0].sites[0].fix, None,
+            "an unauthored rule's Fix block must be omitted (None), never backfilled from directive"
+        );
+    }
+
+    // ── Placeholder substitution helper ─────────────────────────────────────────
+
+    #[test]
+    fn instantiate_remediation_fills_known_tokens_from_captures() {
+        let mut captures = std::collections::BTreeMap::new();
+        captures.insert("table".to_string(), "profiles".to_string());
+        captures.insert("bucket".to_string(), "avatars".to_string());
+        let text = instantiate_remediation(
+            "Enable RLS on `<table>` and lock down the `<bucket>` bucket.",
+            "supabase/migrations/1.sql",
+            &captures,
+        );
+        assert_eq!(text, "Enable RLS on `profiles` and lock down the `avatars` bucket.");
+    }
+
+    #[test]
+    fn instantiate_remediation_fills_path_and_file_tokens_from_the_finding_path() {
+        let captures = std::collections::BTreeMap::new();
+        let text = instantiate_remediation(
+            "Fix the issue in <path> (also see <file>).",
+            "apps/web/lib/analytics.ts",
+            &captures,
+        );
+        assert_eq!(
+            text,
+            "Fix the issue in apps/web/lib/analytics.ts (also see apps/web/lib/analytics.ts)."
         );
     }
 
     #[test]
-    fn curated_finding_site_fix_is_empty_not_fabricated_without_a_corpus() {
-        let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
-        let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
-        assert_eq!(json.curated_findings[0].sites[0].fix, "");
+    fn instantiate_remediation_falls_back_to_a_readable_generic_for_unfilled_known_tokens() {
+        let captures = std::collections::BTreeMap::new();
+        let text = instantiate_remediation(
+            "Re-enable verify_jwt for <function-name>.",
+            "supabase/config.toml",
+            &captures,
+        );
+        assert_eq!(text, "Re-enable verify_jwt for the affected function.");
+    }
+
+    #[test]
+    fn instantiate_remediation_never_emits_a_raw_token_for_an_unknown_placeholder() {
+        let captures = std::collections::BTreeMap::new();
+        let text = instantiate_remediation(
+            "Check <some-totally-unmapped-token> before shipping.",
+            "a.rs",
+            &captures,
+        );
+        assert!(!text.contains('<') && !text.contains('>'), "raw token escaped: {text:?}");
+        assert_eq!(text, "Check the affected resource before shipping.");
+    }
+
+    #[test]
+    fn instantiate_remediation_prefers_a_capture_over_the_generic_even_when_both_available() {
+        let mut captures = std::collections::BTreeMap::new();
+        captures.insert("table".to_string(), "orders".to_string());
+        let text = instantiate_remediation("Review <table> now.", "a.sql", &captures);
+        assert_eq!(text, "Review orders now.");
     }
 
     // ── Item 3: what's-healthy / curated-finding citations are EXTERNAL authorities only ──

@@ -5530,11 +5530,16 @@ struct FindingFixQuery {
 /// byte-identical output across all three surfaces: one function, three callers, never a
 /// second divergent computation.
 ///
-/// Always 200; body is `{ "fix": "..." }`, empty (never fabricated) when the corpus is
-/// absent, the rule id has no corpus entry, or the rule has no adopted default option/
-/// directive — same degrade-soft contract as `resolve_fix` itself. No project/repo
-/// resolution needed (the corpus is global, not per-project), so unlike
-/// `onboard_finding_context` this handler takes no `State`.
+/// Always 200; body is `{ "fix": "..." }` or `{ "fix": null }` — `null` (never a fabricated
+/// sentence, and never the rule's `directive`) when the corpus is absent, the rule id has no
+/// corpus entry, or the rule has no adopted default option/authored `remediation` — same
+/// degrade-soft contract as `resolve_fix` itself. No project/repo resolution needed (the corpus
+/// is global, not per-project), so unlike `onboard_finding_context` this handler takes no
+/// `State`. This is a RULE-level lookup (this modal has only a `rule_id`, no specific finding),
+/// so it resolves `resolve_fix` against `Finding::default()` — an authored remediation's
+/// placeholder tokens render with their readable generic filler (e.g. "the affected table")
+/// rather than naming a real object, exactly like any other finding whose detector didn't
+/// capture one.
 async fn onboard_finding_fix(
     axum::extract::Query(q): axum::extract::Query<FindingFixQuery>,
 ) -> impl IntoResponse {
@@ -5544,7 +5549,11 @@ async fn onboard_finding_fix(
     } else {
         None
     };
-    let fix = crate::report_export::resolve_fix(&q.rule_id, corpus.as_ref());
+    let fix = crate::report_export::resolve_fix(
+        &q.rule_id,
+        corpus.as_ref(),
+        &crate::onboard::Finding::default(),
+    );
     Json(serde_json::json!({ "fix": fix }))
 }
 
@@ -21468,6 +21477,7 @@ mod tests {
                 effort: None,
                 category: None,
                 located: true,
+                captures: Default::default(),
             }],
             proposed_rules: Vec::new(),
             gated: false,
@@ -24434,9 +24444,11 @@ mod tests {
 
     // ── `GET /api/onboard/finding-fix` (recommended-fix-in-modal feature) ──────────
 
-    /// A rule with a real corpus entry + adopted default option's directive returns that
-    /// directive verbatim — the SAME string `resolve_fix` (and therefore the PDF's "Fix:"
-    /// line and the xlsx "Recommended Fix" column) would produce for the same rule id.
+    /// A rule with a real corpus entry + adopted default option's AUTHORED `remediation`
+    /// returns that text (placeholder tokens filled with the readable generic, since this
+    /// endpoint has no specific finding to substitute from) — the SAME string `resolve_fix`
+    /// (and therefore the PDF's "Fix:" line and the xlsx "Recommended Fix" column) would
+    /// produce for the same rule id + a default `Finding`.
     #[tokio::test]
     async fn finding_fix_returns_resolve_fix_output_for_a_known_rule() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
@@ -24444,7 +24456,7 @@ mod tests {
         let resp = app
             .oneshot(
                 Request::builder()
-                    .uri("/api/onboard/finding-fix?rule_id=SEC-NO-UNSAFE-DESERIALIZATION-1")
+                    .uri("/api/onboard/finding-fix?rule_id=SUPABASE-RLS-ENABLED-1")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -24455,16 +24467,17 @@ mod tests {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         let expected = crate::report_export::resolve_fix(
-            "SEC-NO-UNSAFE-DESERIALIZATION-1",
+            "SUPABASE-RLS-ENABLED-1",
             Some(&corpus),
+            &crate::onboard::Finding::default(),
         );
-        assert!(!expected.is_empty(), "fixture rule must have a real corpus directive");
-        assert_eq!(json["fix"], expected);
+        assert!(expected.is_some(), "fixture rule must have authored remediation");
+        assert_eq!(json["fix"], expected.unwrap());
     }
 
-    /// A rule id absent from the corpus returns an EMPTY fix — never a fabricated sentence.
+    /// A rule id absent from the corpus returns a NULL fix — never a fabricated sentence.
     #[tokio::test]
-    async fn finding_fix_is_empty_for_an_unknown_rule() {
+    async fn finding_fix_is_null_for_an_unknown_rule() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let app = router(state);
         let resp = app
@@ -24478,6 +24491,27 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["fix"], "");
+        assert_eq!(json["fix"], serde_json::Value::Null);
+    }
+
+    /// A rule id WITH a real corpus entry but no authored `remediation` also returns a NULL
+    /// fix — never falls back to the rule's `directive` (the detection-recipe leak Fix 1
+    /// closed). Pins the fail-safe at the API layer, not just in `resolve_fix` directly.
+    #[tokio::test]
+    async fn finding_fix_is_null_when_remediation_is_unauthored() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/onboard/finding-fix?rule_id=SEC-NO-UNSAFE-DESERIALIZATION-1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["fix"], serde_json::Value::Null);
     }
 }
