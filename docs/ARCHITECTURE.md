@@ -21,6 +21,34 @@ boundary moved.
 > events readable after the fact. See
 > [`docs/decisions/2026-07-08_adapter-ladder-and-headless-core.md`](decisions/2026-07-08_adapter-ladder-and-headless-core.md).
 
+> **Update (2026-09-22, audit-integrated alternative recommendation):** many corpus rules carry
+> multiple `[[option]]` alternatives, and a project's `chosen_option` selects one. The main audit's
+> AI pass (`ai_audit.rs`, `audit_repo`) now folds in recommendation instead of running it as a
+> separate scan: for each multi-option **semantic** rule with no operator-forced choice, one
+> dedicated recommendation call (`recommend_alternatives`) is fed every alternative for that rule
+> (marked with which is currently selected) and returns a `recommended_option_id` plus
+> `recommendation_reasoning`, validated against the rule's real option ids (a hallucinated id falls
+> back to the selected/default option and is flagged). That decided option's directive then
+> **rewrites** the rule's entry in `effective_selected` before the existing chunk/violation pipeline
+> runs, completely unchanged, so every finding for a given rule is judged against exactly one option,
+> never against every option at once. Each `Finding` is tagged `evaluated_option_id` with the option
+> it was judged under, and `report_export::resolve_fix` now resolves remediation by
+> `finding.evaluated_option_id`, falling back to the project's `chosen_option` and then the corpus
+> `default_option` (`Rule::resolved_option`), so an accepted recommendation's Fix text matches the
+> option actually evaluated. Deterministic-floor and single-option rules are untouched.
+>
+> Two endpoints extend the same AI path: `POST /api/projects/:id/rescan-alternatives` (body
+> `{ overrides: [{ rule_id, chosen_option_id }] }`, re-runs the audit for only the named rules with
+> the operator's option forced, merges the results into the project's stored last scan) and
+> `POST /api/projects/:id/accept-alternatives` (body `{}` or `{ rule_ids: [...] }`, persists the
+> current selection into `RuleSelection.chosen_option`, no model call). Both route through the same
+> `resolve_backend_for_project` compliance gate and `from_env_with_ledger` usage ledger as the main
+> audit. The old "must choose an alternative before arming" block was **UI-only**
+> (`crates/ui/src/cockpit/rules.rs`), never a server-side check: `onboard::audit_repos` has always
+> accepted a selected rule with no default and no chosen option, so removing it was a UI change
+> (the highlight and hint stay, the disabling behavior does not). See
+> [`docs/design/2026-09-22_audit-integrated-alternatives.md`](design/2026-09-22_audit-integrated-alternatives.md).
+
 ---
 
 ## The layer separation (post-#116/#117)

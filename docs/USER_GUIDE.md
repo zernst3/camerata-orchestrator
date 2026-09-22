@@ -195,7 +195,9 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    options, the default, and each option's rationale, and to choose an alternative. **Option choices
    are also per repo** — adopting an alternative for a rule while viewing one repo does not change
    another repo's choice. A recommended rule that still needs an alternative chosen is **highlighted
-   amber and blocks Audit / Add-rules** until you pick one (or deselect it).
+   amber**, with a "Needs option" filter to find them and an informational hint naming them, but it
+   no longer blocks Audit or Add-rules. You can leave it unresolved and proceed: the audit itself
+   recommends an alternative for it (see step 4).
 
    **Opt-in CI security rules are never pre-checked.** The two security-scan rules
    (`CICD-SEMGREP-SECURITY-SCAN-1`, `CICD-CODEQL-SECURITY-SCAN-1`) appear in the list as
@@ -340,6 +342,37 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
    amber **"No progress — possible stall"** warning appears above the progress indicator. The warning
    is informational; the scan continues until you click Stop or it finishes normally.
 
+   **Rule alternatives: the audit recommends, you can disagree.** For every rule with more than one
+   adopted alternative, the same AI pass that finds violations also decides which alternative best
+   fits this codebase and evaluates the codebase against that one option (not against every option at
+   once, since an alternative the codebase doesn't follow would otherwise look like violations
+   everywhere). This is why a no-default rule no longer blocks you in step 3: the audit picks one for
+   you.
+
+   A **"Rule alternatives" panel** renders directly above the violations table, listing every
+   multi-option rule the audit evaluated, including rules with zero violations (so you can still
+   review and override them). Each row shows the rule id, its title, its finding count, and
+   **"Evaluated against: \<option\>"** with a badge: **AI recommended**, **Your choice** (you already
+   overrode it), **Override, pending rescan** (staged but not yet rescanned), or **Accepted** (the
+   selection is saved to the ruleset).
+
+   - **Why?** opens a modal with the model's reasoning for that recommendation (grounded in what it
+     saw in your code). If the model returned an option id that wasn't real for that rule, the modal
+     says so and names the fallback option shown instead, rather than hiding the problem.
+   - **Change** is a dropdown of that rule's alternatives. Picking a different option does **not**
+     rescan immediately: it **stages** an override (the row's badge switches to "Override, pending
+     rescan"). Stage as many rules as you like; they accumulate.
+   - Once at least one override is staged, a sticky **"Rescan N overridden rule(s)"** bar appears.
+     Pressing it fires **one** batched rescan covering exactly those rules, forced to your chosen
+     options (the same model, ledger, and loading animation as the main audit, just scoped to the
+     rules you changed). The violations table and the panel update in place with the new findings and
+     badges once it completes.
+   - **Accept alternatives** persists the current selection for every rule in the panel (the AI's
+     recommendation where you never overrode it, your choice where you did) into the project's
+     `chosen_option`, the same field step 3's alternative picker writes to. It's disabled while an
+     override is staged but not yet rescanned, so you can't accept a selection whose findings haven't
+     caught up with it yet.
+
 5. **Add rules to repo(s)** — writes the governance files onto a `camerata/onboard-governance` branch
    in each repo's **local clone AND pushes that branch to origin — no pull request is opened.** Each
    repo's local clone is resolved from its recorded path (or, as a fallback, a workspace folder). The
@@ -404,8 +437,9 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      database build is heavy, so CodeQL is **CI / layer-4 ONLY** — it never runs at the scan preview
      or in the dev loop (which is also why CodeQL never appears in the scan-time preview).
 
-   Both rules have **no default option** — selecting one immediately shows the amber "must choose"
-   state until you pick a tier explicitly.
+   Both rules have **no default option**, so selecting one immediately shows the amber "needs option"
+   highlight, though (as above) it is informational only: pick a tier explicitly if you want to
+   decide now, or leave it and let the audit recommend one.
 
 **Greenfield (a new repo):** name → pick starter ruleset → scaffold the repo with the rules baked in
 from commit zero.
