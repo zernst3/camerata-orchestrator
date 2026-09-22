@@ -24,6 +24,9 @@ why = "Decisions made only in conversation evaporate; agents cannot cite them an
 id = "document-decisions-immediately"
 label = "Document decisions immediately"
 directive = "Every decision (architectural, process, convention, even small) is written to a persistent artifact the moment it is made: a conventions file with a rule ID for code, a dated decision doc for process."
+remediation = """
+Write the decision to a persistent artifact (a conventions file with a rule ID for code, a dated decision doc for process) at the moment it's made, rather than letting it sit in conversation for a later batched documentation pass. Verify by confirming a recent architectural or process decision has a corresponding artifact dated the same day it was made, not weeks later in a batch.
+"""
 why = "Decisions made only in conversation evaporate; agents cannot cite them and humans re-derive them."
 
 [[option]]

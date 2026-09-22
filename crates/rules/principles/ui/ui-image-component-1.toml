@@ -26,6 +26,9 @@ why = "Image delivery carries several policy decisions baked in: which CDN URL p
 id = "images-render-through-a-single-project-level-com"
 label = "Images render through a single project-level component, not framework primitives directly"
 directive = "All images in feature code render through a single project-level image component that wires the CDN's variants (format negotiation, no upscaling, responsive sizes), lazy-loading defaults, fallback handling, and any A11Y defaults. Direct use of framework image primitives (next/image, Image from Vue, raw <img>, platform-native Image widgets) in feature code is forbidden and enforced with a no-restricted-imports or equivalent lint rule. The project-level component is the one place image-delivery policy lives."
+remediation = """
+Replace the direct framework image primitive or raw HTML img element with the project-level image component, which wires the CDN's variants, lazy-loading defaults, fallback handling, and accessibility defaults in one place. Verify by confirming this call site imports the project-level image component rather than the framework primitive or a raw img tag.
+"""
 why = "Image delivery carries several policy decisions baked in: which CDN URL pattern, which transform parameters, which formats to negotiate, default sizes and breakpoints, lazy-loading thresholds, fallback behavior, accessibility defaults."
 
 [[option]]

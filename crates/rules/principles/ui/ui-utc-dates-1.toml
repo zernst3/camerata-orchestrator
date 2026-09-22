@@ -16,6 +16,9 @@ why = "Two separate decisions are easy to conflate here: (1) where formatting lo
 id = "store-utc-render-local-centralized-formatting"
 label = "Store timestamps in UTC; centralize rendering in one helper; display in the user's local timezone"
 directive = "Timestamps are stored and transmitted in UTC everywhere (database columns, API payloads) as the single unambiguous source of truth. All date and time rendering in the UI goes through one project-level helper/module; that helper is the only place timezone conversion happens. The helper converts the stored UTC value to the viewing user's local timezone (the browser's resolved timezone, or an explicit user preference) before display, so users see times in their own clock (e.g. '3:00 PM'), not the raw stored UTC value. Direct calls to the platform's locale-aware formatting (toLocaleString, strftime with no tz, Intl.DateTimeFormat with no timeZone resolution) in feature code are forbidden and lint-enforced; every call site goes through the helper."
+remediation = """
+Change the timestamp's storage and API representation to UTC, and route its display through the single project-level date-formatting helper instead of formatting it inline at the call site with locale-aware APIs or a post-mount client effect. Verify by confirming the stored/transmitted value is UTC and every rendering of it goes through the one helper, which converts to the viewer's local timezone.
+"""
 why = "Storing in UTC keeps the source of truth unambiguous across services and regions, while rendering in the user's local timezone matches what a consumer-facing user actually expects to see. Centralizing the conversion in one helper means the storage format and the display policy can each evolve independently without touching call sites, and gives SSR/CSR a single place to agree on timezone resolution instead of drifting per call site."
 
 [[option]]

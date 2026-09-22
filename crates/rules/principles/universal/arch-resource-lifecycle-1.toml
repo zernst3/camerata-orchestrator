@@ -29,6 +29,9 @@ why = "An app that spawns helper processes (scanners, linters, build tools, CLIs
 id = "the-app-owns-the-lifecycle-of-its-subprocesses-a"
 label = "The app owns the lifecycle of its subprocesses and temp artifacts — reaped and RAII-cleaned"
 directive = "Every spawned subprocess carries a kill-on-drop / kill-on-cancel disposition (Rust/tokio: `Command::kill_on_drop(true)`, or the stack equivalent) so a dropped, timed-out, or cancelled operation terminates the child instead of orphaning it. Children that outlive a single await, or the host process itself, are tracked and killed on shutdown. Every temporary file or directory uses RAII auto-cleanup (e.g. `tempfile`'s `TempDir`/`NamedTempFile`) or is explicitly removed when its operation ends. After a timeout or an app close, no spawned child survives and no scratch is left on disk."
+remediation = """
+Add a kill-on-drop (or kill-on-cancel) disposition to the spawned subprocess so a dropped, timed-out, or cancelled operation terminates the child instead of orphaning it, and wrap any temp file or directory creation in an RAII cleanup guard instead of leaving it to the OS or manual cleanup. Verify by cancelling or timing out the operation and confirming the child process and any temp artifacts it created are gone afterward, checkable via the process list and the temp directory.
+"""
 why = "The app, not the OS, owns what it spawns and writes; reaping on drop/cancel/shutdown and RAII-cleaning temp artifacts is the only way orphaned processes and leaked scratch do not accumulate across runs."
 
 [[option]]

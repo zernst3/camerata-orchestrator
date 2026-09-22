@@ -85,6 +85,9 @@ YAML; json / protobuf / msgpack for structured data that does not require arbitr
 reconstruction. When a test must call an unsafe deserialiser on a controlled fixture, suppress
 with a camerata:allow comment that explains why the input is trusted.
 """
+remediation = """
+Replace the unsafe deserializer call (yaml.load without a safe loader, pickle.load, PHP unserialize(), Ruby Marshal.load, .NET BinaryFormatter, or similar) on untrusted input with its safe equivalent (SafeLoader, a schema-validated parser, or a format that doesn't execute arbitrary code on load). If the input is genuinely from a fully trusted, sandboxed source, keep the unsafe call only behind an explicit suppression comment documenting that trust boundary. Verify by feeding the deserializer a crafted malicious payload and confirming it is rejected or safely parsed rather than executing arbitrary code.
+"""
 why = """
 Every unsafe deserialiser in the match-set reconstructs an arbitrary object graph from the
 byte stream, executing code during reconstruction. There is no safe way to call them on

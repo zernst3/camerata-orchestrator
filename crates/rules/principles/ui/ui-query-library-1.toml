@@ -19,22 +19,34 @@ why = "Modern query libraries solve a list of problems that components otherwise
 id = "all-ui-data-fetches-go-through-a-query-library-n"
 label = "All UI data fetches go through a query library, never ad-hoc fetch and store"
 directive = "Read paths in components go through a query library (TanStack Query, SWR, dioxus-query, Vue Query, or equivalent for the framework). Mutations explicitly invalidate the cache keys they affect. Ad-hoc fetch-and-store inside each component (manual useState plus useEffect plus fetch) is forbidden. The query library owns request de-duplication, response caching, stale-while-revalidate behavior, refetch on focus or reconnect, and the single point of invalidation."
+remediation = """
+Replace the ad-hoc useState/useEffect/fetch cycle (or global store with imperative loaders, or SSR-only reliance) with a call through the project's query library (TanStack Query, SWR, dioxus-query, Vue Query, or the framework equivalent), and have the corresponding mutation explicitly invalidate the cache keys it affects. Verify by confirming the same query key is de-duplicated across components requesting it and a mutation triggers an automatic refetch instead of a manual reload.
+"""
 why = "Modern query libraries solve a list of problems that components otherwise re-solve inconsistently per call site: stale data, double-fired requests, no revalidation policy, manual invalidation after every mutation, no shared cache across components reading the same key."
 
 [[option]]
 id = "each-component-manages-its-own-fetch-and-store-c"
 label = "Each component manages its own fetch cycle"
 directive = "each component manages its own fetch-and-store cycle (useState, useEffect, fetch, manual error handling) with no shared cache, no de-duplication, and no library-provided invalidation"
+remediation = """
+Move the fetch cycle currently going through the shared query library back into this component's own useState/useEffect/fetch handling, with its own loading and error state, so this component's fetch is independent of the shared cache. Verify by confirming this component no longer imports or depends on the query library's hooks for this fetch.
+"""
 why = "Ad-hoc fetch-and-store has no de-dup, no shared cache between components reading the same data, manual invalidation everywhere, and subtle bugs around effect dependencies and race conditions on remounts."
 
 [[option]]
 id = "data-lives-in-a-global-store-with-imperative-loa"
 label = "Global store with imperative loaders"
 directive = "data lives in a global store with imperative loaders that components call to populate the store, with no library-provided cache, revalidation, or per-key invalidation"
+remediation = """
+Move the data fetch out of the query library and into a global store with an imperative loader function components call to populate it, removing reliance on library-provided caching, revalidation, or per-key invalidation. Verify by confirming the data is read from the global store and populated by an explicit loader call rather than a query-library hook.
+"""
 why = "A global store with imperative loaders works for slow-moving data but requires every component that reads to subscribe explicitly, and invalidation and refetch policy bolt on awkwardly and are easy to get wrong."
 
 [[option]]
 id = "the-ui-relies-on-server-side-rendering-for-all-d"
 label = "Rely on SSR with no client-side cache"
 directive = "the UI relies on server-side rendering for all data and maintains no client-side cache, so any value that needs to update after the initial render triggers a full re-render or a separate ad-hoc fetch"
+remediation = """
+Remove the client-side query library call and rely on server-side rendering to supply this data, refetching the whole page (or issuing a separate ad-hoc fetch) when the value needs to update after the initial render. Verify by confirming this data has no client-side cache entry and updates require a full re-render or a distinct fetch.
+"""
 why = "SSR-only is acceptable for fully-static or fully-streamed UIs but falls over the moment a single interaction needs to re-read a value without a full page render."

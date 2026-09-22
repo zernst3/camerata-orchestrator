@@ -24,6 +24,9 @@ why = "A committed private key is a catastrophic and irreversible secret leak: g
 id = "secrets-manager-or-generated"
 label = "Private keys live in a secrets manager or are generated at test runtime"
 directive = "Private key material (RSA, EC, DSA, OPENSSH, PGP, PKCS#8) is never committed to the repository in any branch or file. Tests that require a key generate it at runtime using the appropriate crypto library; integration tests retrieve it from a secrets manager or environment variable at test startup. Public keys and certificates may be committed. The gate enforces this by denying any file content containing a PEM private-key block header."
+remediation = """
+Remove the committed private-key file (or PEM block) from the repository and its git history, and change the test that needs a key to generate one at runtime with the appropriate crypto library, or fetch it from a secrets manager or environment variable at test startup. Rotate the key if it was ever a real credential rather than a clearly-fake test fixture. Verify by confirming a repository-wide secret scan finds no private-key material and the test still passes using a runtime-generated or externally-fetched key.
+"""
 why = "Git history is permanent: a committed private key is immediately mirrored to forks, pull-request caches, and CI artifact stores. Revocation after a commit is harder than preventing the commit. Runtime key generation is a one-liner in every major crypto library."
 
 [[option]]

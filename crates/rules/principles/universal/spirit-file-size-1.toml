@@ -20,6 +20,9 @@ why = "Pre-AI, splitting had a real writing cost (boilerplate, imports, naming) 
 id = "files-are-sized-for-human-reading-not-for-ai-wri"
 label = "Files are sized for human reading, not for AI write-cost"
 directive = "Hand-maintained files are split at sizes a human can navigate without losing their place. AI can generate and read a 2000-line file at no cost; every human who reviews, debugs, or maintains it pays full attention price. Auto-generated files (schema dumps, generated entity files, ORM-emitted models, lockfiles) are exempt: a tool maintains them, not a person."
+remediation = """
+Split the oversized hand-maintained file into smaller files sized for a human to navigate without losing their place, leaving auto-generated files (schema dumps, ORM-emitted models, lockfiles) exempt from the same threshold. Verify by confirming the file's line count now falls under the project's human-reading guideline and each resulting file has a coherent, single responsibility.
+"""
 why = "Pre-AI, splitting had a real writing cost (boilerplate, imports, naming) that made monolithic files a defensible tradeoff."
 
 [[option]]

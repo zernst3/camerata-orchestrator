@@ -20,6 +20,9 @@ why = "When AI carries the cost of writing the performant version, the Knuth-era
 id = "optimization-by-default"
 label = "Optimization by default"
 directive = "Bake performant patterns (parallel async, caching, indexing, no N+1) into conventions from day one, as the default shape of new code, not a reactive fix after profiling."
+remediation = """
+Bake the performant pattern (parallel async calls, caching, indexing, batched queries instead of N+1) into this code's default shape now, rather than shipping the naive version and waiting for profiling to justify fixing it later. Verify by confirming the new code already uses the performant pattern before it ships, not as a follow-up fix after a production slowdown.
+"""
 why = "When AI carries the cost of writing the performant version, the Knuth-era 'premature optimization' calculus flips: the optimization is now nearly free and prevents the firefighting that reactive perf work costs later (5x+)."
 
 [[option]]

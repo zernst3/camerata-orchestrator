@@ -20,6 +20,9 @@ why = "Makes drift detection and review fast. A reviewer reading a PR sees immed
 id = "cite-the-convention-id-in-commit-messages-and-pr"
 label = "Cite the convention ID in commit messages and PR descriptions"
 directive = "A commit (or PR description) that applies a documented convention cites its ID in the body, for example 'per ENTITIES-4' or 'follows RUST-DOMAIN-2'. The citation lives in the commit body, not the subject line, so the convention reference does not crowd the headline."
+remediation = """
+Add the convention's ID to the commit body (not the subject line) when the change applies a documented convention, for example "per ENTITIES-4" or "follows RUST-DOMAIN-2", instead of leaving the citation out or only in the PR description or a code comment. Verify by confirming the commit body names the convention ID for any change that applies one.
+"""
 why = "Makes drift detection and review fast."
 
 [[option]]

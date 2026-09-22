@@ -24,6 +24,9 @@ why = "Without a regression test, the bug is gone today and free to recur tomorr
 id = "every-bug-fix-ships-with-a-regression-test-that"
 label = "Every bug fix ships with a regression test that fails before the fix and passes after"
 directive = "A change that fixes a bug includes, in the same change, a test that fails on the pre-fix code and passes on the post-fix code. The test lives at whichever layer of the test pyramid naturally exercises the bug (unit if the bug is in pure logic, integration if it is in component wiring, end-to-end if it is in a user-visible flow). The author confirms the failing-then-passing behavior before submitting the change. A bug-fix change with no accompanying test, or with a test that passes on the pre-fix code as well, is incomplete regardless of whether the surrounding suite goes green."
+remediation = """
+Add a test in the same change as the bug fix that fails against the pre-fix code and passes against the post-fix code, placed at whichever test-pyramid layer naturally exercises the bug, instead of shipping the fix alone or only documenting repro steps. Verify by temporarily reverting the fix and confirming the new test fails, then reapplying the fix and confirming it passes.
+"""
 why = "Without a regression test, the bug is gone today and free to recur tomorrow because nothing in CI is watching for it."
 
 [[option]]

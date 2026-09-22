@@ -23,6 +23,9 @@ why = "Two-part calculus. (1) Explicitness is near-free under AI because the AI 
 id = "robustness-over-terseness-but-buy-complexity-onl"
 label = "Robustness over terseness, but buy complexity only against a named threat"
 directive = "When two correct implementations differ, robustness (not verbosity) is the deciding axis. Choose the more explicit version. AI bears the boilerplate cost, and explicitness gives future AI more context to debug and extend. When the more robust option is also more complex (not just more explicit), name the specific failure mode the complexity is buying you protection against. Do not harden throwaway, internal, or fully-encapsulated code where nothing is at stake."
+remediation = """
+Change the implementation from the more terse (or unconditionally more defensive) version to the more explicit, robust one, and if that robust version is also meaningfully more complex, name the specific failure mode it defends against in a comment or commit message rather than adding the complexity unjustified. Verify by confirming the chosen implementation's extra explicitness or defensiveness maps to a concrete, named failure mode, not complexity added on principle alone.
+"""
 why = "Two-part calculus."
 
 [[option]]
