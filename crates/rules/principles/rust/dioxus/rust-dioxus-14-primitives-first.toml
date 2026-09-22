@@ -19,22 +19,34 @@ why = "All of these are legitimate sources for common UI elements, and the right
 id = "common-ui-elements-have-one-canonical-implementa"
 label = "Common UI elements have one canonical implementation in a primitives layer; views compose primitives"
 directive = "The UI crate has two distinct kinds of components: primitives (Button, Modal, Toast, Card, Input, and similar reusable elements) and views (page-level components that compose primitives to express a feature). Every primitive has exactly one canonical implementation in a shared components directory. Views compose those primitives; views never reimplement a primitive inline or fork one for local convenience. Design-system decisions (color palette, corner radii, type system, focus rings, motion) live in the primitive component, so every view that composes the primitive inherits those decisions for free. A view that needs behavior a primitive does not yet expose extends the primitive's API rather than copying the primitive."
+remediation = """
+Move the duplicated button/modal/toast/input implementation out of the feature folder (or out of inline utility-class markup, or off a wholesale third-party library) and into a single canonical primitive in the shared components directory, then have the view compose that primitive instead of reimplementing it. Verify by confirming only one implementation of this UI element exists in the codebase and every view that needs it imports the shared primitive.
+"""
 why = "Gives each common element one canonical implementation that every view composes, so design decisions live in a single home and a change to the palette, radii, focus rings, or motion propagates everywhere at once. The strongest fit when one team owns the UI and visual consistency across it matters — and the shape automated agents apply most reliably, since they reach for an existing primitive rather than inlining a hand-rolled element; its trade-off is the cost of building and maintaining the primitives layer."
 
 [[option]]
 id = "the-ui-is-organized-into-feature-folders-where-e"
 label = "Each feature owns bespoke UI elements"
 directive = "the UI is organized into feature folders where each feature owns its own bespoke buttons, modals, toasts, and other UI elements, rather than sharing a single primitives layer"
+remediation = """
+Move the shared primitive out of the common components directory and into the feature folder that owns it, so each feature maintains its own bespoke version of the UI element rather than depending on a cross-feature shared primitive. Verify by confirming the feature's UI elements are self-contained within its own folder with no import from a shared primitives directory.
+"""
 why = "Keeps a feature's UI elements co-located with the feature, so a feature can be built, changed, or owned by a team without coordinating on a shared layer. The fit for a large UI with strong feature-team ownership boundaries; its trade-off is visual drift across features as each independently implements its own button or modal, and design-system changes that become a feature-by-feature edit rather than a single change."
 
 [[option]]
 id = "the-ui-adopts-a-pre-existing-third-party-compone"
 label = "Adopt a third-party component library wholesale"
 directive = "the UI adopts a pre-existing third-party component library wholesale and composes views directly from that library's components, rather than maintaining its own primitives"
+remediation = """
+Replace the hand-built primitive or inline markup with the equivalent component from the adopted third-party library, and remove the now-redundant custom implementation. Verify by confirming the view imports and composes the third-party library's component directly rather than a custom-built equivalent.
+"""
 why = "Gives a complete, maintained, accessible element set immediately, with no primitives to build and upstream improvements arriving for free. The fastest path when a standard look is acceptable and design identity is not a differentiator; its trade-off is that visual identity is constrained to what the library exposes, and any decision outside its surface means fighting its styles or forking its components."
 
 [[option]]
 id = "the-ui-has-no-primitives-layer-views-inline-util"
 label = "No primitives layer; inline utility classes"
 directive = "the UI has no primitives layer; views inline utility classes and raw element markup for common UI elements rather than composing shared primitive components"
+remediation = """
+Replace the shared primitive component reference with inline utility classes and raw element markup directly in the view, removing the dependency on a primitives layer. Verify by confirming the view no longer imports a shared primitive component for this UI element.
+"""
 why = "The most direct approach: a view writes the markup it needs with no primitives layer to build or indirection to follow. The fit for a small UI with no design-system ambitions, where the overhead of shared primitives would not pay back; its trade-off is that visual consistency degrades as each view interprets the design tokens independently and a design change becomes a codebase-wide search-and-replace as the UI grows."

@@ -24,6 +24,9 @@ why = "Duplicating validation rules between the domain layer and the UI is the l
 id = "forms-display-errors-from-the-domain-newtype-con"
 label = "Forms display errors from the domain newtype constructors; the UI never re-implements validation rules"
 directive = "Form fields bind to signals holding raw user text. On submit (or on blur for live-validation), the form constructs the relevant domain newtype through its fallible constructor and displays whatever validation error the constructor returns. The UI does NOT re-implement validation rules: no inline regex for email format, no max-length check duplicated in the component, no decimal parser repeated per form. The domain newtype is the rule; the UI's job is to call the constructor and render whatever the domain says is wrong. Multi-field forms compose a form-level type that exposes its own fallible constructor in turn."
+remediation = """
+Remove the inline regex or length-check validation logic from the form component, and construct the relevant domain newtype through its fallible constructor on submit (or blur), displaying whatever validation error the constructor returns. Verify by entering invalid input and confirming the error message shown comes from the domain newtype's own validation, not a duplicate rule defined in the UI.
+"""
 why = "Duplicating validation rules between the domain layer and the UI is the largest single source of bugs of the shape 'the form let me submit but the backend rejected it.' The domain layer is the only correct place for validation rules; the UI presents them and never re-states them."
 
 [[option]]

@@ -28,6 +28,9 @@ why = "Typed errors give callers compile-time knowledge of failure modes and kee
 id = "errors-via-thiserror-enums-per-crate"
 label = "Errors via thiserror enums per crate"
 directive = "Each layer's crate defines its own thiserror enum (DomainError, RepositoryError, ServiceError, …) with explicit From impls at boundaries. anyhow is reserved for application edges (binaries)."
+remediation = """
+Replace the single global error enum (or ad-hoc anyhow use inside a library layer) with a thiserror enum owned by this crate, with explicit From impls converting errors at the boundary where they cross into this layer. Reserve anyhow for the application-edge binaries, not library crates. Verify by confirming this crate's public error type is a thiserror enum specific to it, not a workspace-wide shared enum or a bare anyhow::Error.
+"""
 why = "Typed errors give callers compile-time knowledge of failure modes and keep each layer's failure vocabulary self-contained."
 
 [[option]]

@@ -16,6 +16,9 @@ why = "Public-content pages need server-rendered HTML for indexability: search-e
 id = "single-binary-serves-server-rendered-html-the-cl"
 label = "Single binary serves server-rendered HTML, the client bundle, and server-function endpoints"
 directive = "The Dioxus project enables the framework's fullstack feature so that one server binary handles three concerns in one process. It renders the initial HTML on the server (so public content is indexable and first paint is fast). It serves the client bundle, which hydrates the server-rendered HTML on the client. And it mounts the server-function endpoints (per the server-function rule) and any remaining first-class HTTP endpoints (webhooks, health checks, authentication) on the same router. A separate frontend process running a different framework is forbidden. A client-only single-page application with no server-rendered initial paint is permitted only for fully-behind-login products where indexability has no value."
+remediation = """
+Enable the framework's fullstack feature so a single server binary renders the initial HTML, serves the client bundle, and exposes server-function endpoints, instead of splitting these across separate processes or binaries. Verify by loading a page with JavaScript disabled and confirming meaningful content is already present in the server-rendered HTML.
+"""
 why = "Public-content pages need server-rendered HTML for indexability: search-engine rendering of JavaScript-only pages has improved over the years but server-rendered HTML remains the dominant signal, and the cost of being wrong is silent loss of organic traffic."
 
 [[option]]

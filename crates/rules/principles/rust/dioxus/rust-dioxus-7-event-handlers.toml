@@ -16,6 +16,9 @@ why = "Bare closure types in props break the equality derive that the framework 
 id = "event-handlers-are-move-closures-in-templates-ca"
 label = "Event handlers are move closures in templates; callback props use the framework EventHandler type"
 directive = "Inline event handlers in the template are move closures, because the closure outlives the template expression and must own any state it captures. The framework's signal type is copyable, so capture is cheap. When a component exposes a callback as a prop, the prop is typed as the framework's EventHandler type parameterized by the value the callback delivers; the parent receives it as part of the props derive. The child invokes it through the call method. Bare function-trait closures, boxed function-trait objects, and bare function pointers in props are forbidden because they break the prop derives that the diffing pipeline depends on."
+remediation = """
+Change the callback prop's type from a boxed function-trait object, a function pointer, or an ID looked up in a handler-registration table to the framework's EventHandler type, and make inline template event handlers move closures so they own the state they capture. Verify by confirming the callback prop's type signature uses EventHandler and the component compiles without a separate handler-registration table.
+"""
 why = "Bare closure types in props break the equality derive that the framework uses for component diffing, because closures are not comparable."
 
 [[option]]

@@ -16,6 +16,9 @@ why = "sqlx::query! is a compile-time macro that checks SQL syntax and column na
 id = "use-sqlx-query-macro"
 label = "Use sqlx::query! for compile-time SQL validation"
 directive = "SQL queries are written using sqlx::query! (or sqlx::query_as!, sqlx::query_scalar!, etc.) which validates the SQL against the database schema at compile time. Parameters are bound using placeholders (?) and macro arguments. SQL strings are never built with format!, string concatenation, or string interpolation."
+remediation = """
+Replace the format!-built or string-concatenated SQL with sqlx::query! (or query_as!/query_scalar! as appropriate), binding parameters through the macro's placeholders instead of interpolating them into the string. Verify by running cargo build and confirming the macro validates the query against the database schema at compile time, and that a value with a SQL metacharacter is bound as a parameter rather than concatenated.
+"""
 why = "Compile-time validation and parameterized binding prevent SQL errors and injection vulnerabilities."
 
 [[option]]

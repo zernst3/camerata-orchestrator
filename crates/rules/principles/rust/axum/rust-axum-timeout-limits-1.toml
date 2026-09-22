@@ -16,6 +16,9 @@ why = "Axum allows configuration of request timeouts (how long a handler can run
 id = "configure-timeouts-and-body-limits"
 label = "Configure request timeouts and body size limits"
 directive = "The Axum application configures a request timeout (via middleware or by wrapping handlers in tokio::time::timeout) and a body size limit (via the axum::extract::DefaultBodyLimit layer, which has applied a 2 MB default since axum 0.6, or custom extractors that reject bodies above a threshold). Where the default 2 MB limit is not appropriate, it is overridden explicitly with DefaultBodyLimit::max(n) rather than left unconsidered. The timeouts and limits are documented and chosen based on the application's expected use patterns."
+remediation = """
+Add a request timeout (via middleware or tokio::time::timeout) and a body size limit (via axum::extract::DefaultBodyLimit or a custom extractor) to the application, instead of relying on the OS or network layer to eventually close slow or oversized requests. Verify by sending an oversized request body or a request that hangs past the timeout and confirming the server rejects it rather than holding the connection indefinitely.
+"""
 why = "Timeouts and limits protect against resource exhaustion and cascading failures."
 
 [[option]]

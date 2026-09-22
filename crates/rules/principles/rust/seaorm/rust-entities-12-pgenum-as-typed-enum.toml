@@ -16,6 +16,9 @@ why = "Compile-time exhaustive match on the variants and a hard stop on unknown 
 id = "postgres-pgenum-columns-map-to-typed-rust-enums"
 label = "Postgres pgEnum columns map to typed Rust enums via DeriveActiveEnum"
 directive = "Columns backed by a Postgres pgEnum are typed as a Rust enum with DeriveActiveEnum, with explicit rs_type, db_type, enum_name, and a string_value per variant. Where the enum type lives (in the entity file, or in a shared module once multiple entities consume it) is a per-project file-organization convention, not dictated by this rule. NOTE: some projects colocate multi-consumer enum types in a dedicated module (e.g. an _enums/ directory) under the most-conceptual-parent entity for discoverability; treat this as one project convention, not a universal requirement."
+remediation = """
+Change the column's Rust type from a plain String to a typed enum deriving DeriveActiveEnum, with explicit rs_type, db_type, enum_name, and a string_value per variant matching the Postgres pgEnum. Verify by confirming the compiler rejects an invalid variant value at this column and the entity's column type is the typed enum, not String.
+"""
 why = "Compile-time exhaustive match on the variants and a hard stop on unknown values at the boundary."
 
 [[option]]

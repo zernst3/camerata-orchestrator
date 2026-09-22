@@ -16,6 +16,9 @@ why = "tokio::select! waits on multiple branches (futures) and runs whichever co
 id = "ensure-select-cancellation-safe"
 label = "Ensure select! branches are cancellation-safe"
 directive = "Before using tokio::select!, reason through what happens if a branch is cancelled mid-execution (e.g., due to timeout, shutdown signal, or another branch completing). If cancellation would leave a resource, transaction, or shared state in an inconsistent state, either refactor to use a safe pattern (transactions, atomic updates, oneshot channels) or document the known risk and add explicit cleanup code that runs even after cancellation."
+remediation = """
+Review each branch of the tokio::select! for what happens if it is cancelled mid-execution, and refactor any branch that would leave a resource, transaction, or shared state inconsistent (for example by making the operation atomic or restructuring so cancellation only discards fully-owned local state). Verify by forcing cancellation at the point of concern (a timeout or a competing branch completing first) and confirming the shared state remains consistent afterward.
+"""
 why = "Cancellation-safe code prevents resource leaks and inconsistent state."
 
 [[option]]

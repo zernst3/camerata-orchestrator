@@ -16,6 +16,9 @@ why = "Axum extractors run before the handler and convert raw HTTP data into typ
 id = "use-extractors-for-validation"
 label = "Use extractors for request validation; reject invalid requests at the boundary"
 directive = "Request validation happens in two steps, both at the extractor layer, before the handler runs. Custom extractors or built-in Axum extractors (Path, Query, Json, RawBody) first parse wire shape (valid JSON, correct primitive types, required fields present). The extractor then constructs the relevant domain newtype or value object through its fallible constructor and returns the extractor's own error (mapped to 400/422) if construction fails. Invalid requests are rejected by the extractor before the handler is invoked. The handler receives only already-validated domain types, never raw strings/primitives it would need to re-check. Business-rule validation logic (format, range, invariants) is never duplicated inside the extractor itself — it lives exactly once, in the domain newtype's constructor, and the extractor's only job is to call it."
+remediation = """
+Move the field-presence and constraint validation out of the handler body and into the extractor layer, using a custom extractor or the built-in Axum extractors so a malformed request is rejected before the handler runs. Verify by sending a request with a missing field or wrong type and confirming it is rejected at the extractor stage with no handler code executing.
+"""
 why = "Extractors enforce validation at the HTTP boundary by parsing wire shape and then invoking the domain's own constructors, so the handler assumes valid input and the business rule is never duplicated outside the domain layer."
 
 [[option]]

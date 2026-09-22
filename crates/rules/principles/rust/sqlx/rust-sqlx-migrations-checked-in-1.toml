@@ -16,6 +16,9 @@ why = "sqlx::migrate! allows migrations to be written as SQL files, checked into
 id = "version-control-migrations-on-startup"
 label = "Check in migrations; run at startup"
 directive = "Database migrations are written as SQL files in a migrations/ directory, checked into the repository, and executed at application startup via sqlx::migrate!().run() or an explicit migration runner. A missing or failed migration causes the application to fail to start."
+remediation = """
+Write the schema change as a SQL migration file under migrations/, commit it to the repository, and confirm sqlx::migrate!().run() (or the project's migration runner) executes it at application startup rather than applying it manually against the database. Verify by starting the application against a fresh database and confirming it applies the migration automatically and fails to start if a migration fails.
+"""
 why = "Version-controlled migrations keep schema changes paired with code and ensure consistency at deployment."
 
 [[option]]

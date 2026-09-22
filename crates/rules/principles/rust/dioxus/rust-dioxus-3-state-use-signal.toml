@@ -16,6 +16,9 @@ why = "Signals are the framework's reactivity primitive: they automatically subs
 id = "local-component-state-is-a-signal-read-via-call"
 label = "Local component state is a Signal, read via call or read, written via set or with_mut"
 directive = "Local component state uses the framework's signal primitive. Display interpolation reads the signal directly via call syntax or the read accessor. Replacing a value uses the set method; in-place mutation of a contained collection uses with_mut. Legacy state hooks from earlier framework versions are forbidden. Threading mutable state through props as a borrowed reference is forbidden. When state is shared across siblings, lift it to a common ancestor; when state is genuinely app-wide, use the cross-tree context pattern rather than passing signals through every layer."
+remediation = """
+Replace the legacy hook-based state, the lock-protected shared state in props, or the manually-incremented dummy signal with the framework's signal primitive, reading it via call/read and writing via set/with_mut. Verify by confirming the component re-renders automatically when the signal changes, with no manual increment-a-dummy-value workaround.
+"""
 why = "Signals are the framework's reactivity primitive: they automatically subscribe components that read them and integrate with template interpolation."
 
 [[option]]

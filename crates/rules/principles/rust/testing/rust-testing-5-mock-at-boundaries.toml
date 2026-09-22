@@ -24,6 +24,9 @@ why = "Rust's ownership and type system make monkey-patching and global-function
 id = "mock-at-trait-boundaries-inject-via-generic-or-dyn"
 label = "Trait boundary injection: mock via #[automock] or hand-written test double, confined to #[cfg(test)]"
 directive = "Production code depends on traits, not concrete types, for any dependency that must be replaced in tests (external services, file system, clocks, random sources). Unit tests inject mock implementations of those traits. For simple mocks, write a struct inside #[cfg(test)] that implements the trait manually. For complex expectations (call counts, argument matchers, return sequences), use mockall::automock to generate a MockFoo type. Mock types and their impl blocks must be inside #[cfg(test)] or in a test-only module gated by #[cfg(test)]; mock structs must not appear in the production binary."
+remediation = """
+Change the dependency being replaced in the test from a concrete type substituted via a cfg feature flag to a trait the production code depends on, and inject a mock implementation of that trait (via #[automock] or a hand-written #[cfg(test)] double) instead. Verify by confirming the production code's dependency is expressed as a trait bound or trait object, not a concrete type swapped at compile time.
+"""
 why = "The only idiomatic Rust substitution point at the type level is a trait. This is the pattern the ecosystem converges on (mockall, double, faux, and hand-written doubles all assume trait boundaries)."
 
 [[option]]

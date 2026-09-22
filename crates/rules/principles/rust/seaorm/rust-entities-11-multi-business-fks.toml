@@ -16,6 +16,9 @@ why = "Both directions get type-checked, self-documenting Rust-side traversal, a
 id = "two-or-more-business-fks-to-the-same-parent-both"
 label = "Two or more business FKs to the same parent: both belongs_to + role-named reverse has_many; one impl Related on the primary direction"
 directive = "When an entity has multiple business FKs to the same parent (e.g. requester_id, reviewer_id), declare both belongs_to plus disambiguated reverse has_many variants (…AsRequester, …AsReviewer). Add impl Related on the principal semantic direction (the creator or initiator); secondary directions use filtered queries. The pattern generalizes to N business FKs."
+remediation = """
+Add the missing belongs_to and role-named reverse has_many variant for the business FK role that's currently a plain Uuid column or missing its reverse relation, and route impl Related to the principal semantic direction (the creator or initiator), not a secondary role. Verify by confirming find_related from the parent traverses the principal role by default and each business FK role has its own disambiguated relation variant.
+"""
 why = "Both directions get compile-time validation and self-document the roles."
 
 [[option]]

@@ -16,6 +16,9 @@ why = "tokio::task::JoinSet holds a set of spawned tasks and ensures they are jo
 id = "use-joinset-for-structured-concurrency"
 label = "Use JoinSet for structured concurrency"
 directive = "Tasks are spawned via a JoinSet, and the code joins all tasks (awaits or cancels them) before the scope exits. Unstructured tokio::spawn calls that can outlive their scope are avoided. JoinSet::join_all() or iteration over the JoinSet ensures all tasks complete or are cancelled."
+remediation = """
+Replace the unstructured tokio::spawn calls with a JoinSet, spawning tasks onto it and joining or cancelling all of them before the enclosing scope exits, instead of letting spawned tasks potentially outlive their scope. Verify by confirming the function does not return until every task in the JoinSet has completed or been explicitly cancelled.
+"""
 why = "JoinSet ensures spawned tasks are joined and prevents orphaned tasks and resource leaks."
 
 [[option]]

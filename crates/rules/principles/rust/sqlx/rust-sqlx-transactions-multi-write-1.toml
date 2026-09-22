@@ -16,6 +16,9 @@ why = "A transaction groups multiple SQL statements and ensures all succeed or a
 id = "use-explicit-transactions"
 label = "Wrap multiple writes in explicit transactions"
 directive = "Any operation that performs multiple database writes (inserts, updates, or deletes across one or more tables) is wrapped in a transaction via sqlx::Transaction or connection.begin(). If any write fails, the transaction is rolled back. A single write that does not require atomicity with other writes does not require an explicit transaction."
+remediation = """
+Wrap the multiple related writes in an explicit sqlx::Transaction (via connection.begin()), committing on success and rolling back on any failure, instead of letting each write run as its own implicit transaction. Verify by forcing one of the writes to fail and confirming none of the other writes in the same operation are persisted.
+"""
 why = "Explicit transactions ensure consistency and prevent partial state corruption."
 
 [[option]]

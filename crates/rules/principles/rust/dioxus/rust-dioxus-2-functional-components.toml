@@ -16,6 +16,9 @@ why = "Functional components are the canonical shape the framework actively main
 id = "components-are-free-functions-returning-element"
 label = "Components are free functions returning Element; multi-prop components derive Props, Clone, and PartialEq"
 directive = "Every component is a free function whose body returns Element, annotated with the component attribute. Struct-based components implementing a component trait, trait-object wrappers, the legacy Scope-bearing signature from earlier framework versions, and untyped value bags as props are forbidden — these are the load-bearing constraints and the only ones a finding should treat as more than a style note. Declaring props inline as function arguments is acceptable at any prop count: the component-attribute macro generates the backing Props struct and its Clone + PartialEq derives either way, so diffing is correct regardless. A dedicated Props struct is PREFERRED once a component has three or more props purely because the function signature gets long; flag its absence only as a low-severity readability suggestion, never as a correctness or performance defect."
+remediation = """
+Convert the struct-based component (or one using an untyped value bag or inline function-argument props) into a free function annotated with the component attribute that returns Element, with a dedicated Props struct deriving Props, Clone, and PartialEq when it takes more than a couple of arguments. Verify by confirming the component compiles as a plain annotated function with a typed Props struct, not a struct implementing a component trait.
+"""
 why = "Functional components with derived Props are the canonical shape the framework actively maintains, and the only shape its tooling produces good error messages for."
 
 [[option]]

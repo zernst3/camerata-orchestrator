@@ -15,18 +15,27 @@ why = "All three are coherent positions on where an aggregate's internal write-a
 id = "repository-owns-intra-aggregate-transaction"
 label = "Repository opens and commits its own transaction"
 directive = "Repository methods that require multiple writes to be atomic within a single aggregate open and commit their own database transaction inside the method, rather than requiring callers to supply a unit-of-work handle. The unit-of-work parameter on the repository trait is reserved for cross-aggregate coordination owned by the service layer; intra-aggregate atomicity is the repository's own responsibility and does not appear in the method signature."
+remediation = """
+Move the transaction open/commit for this multi-write, intra-aggregate operation inside the repository method itself, rather than requiring the caller to supply a unit-of-work handle or leaving the writes uncoordinated. Reserve the unit-of-work parameter for genuinely cross-aggregate operations. Verify by confirming the repository method opens and commits its own transaction and a caller does not need to pass a UnitOfWork handle for this single-aggregate operation.
+"""
 why = "Treats atomicity inside one aggregate as an implementation detail of that aggregate: the transaction stays where the invariant lives, the service never has to know about it, and the unit-of-work parameter is reserved for genuine cross-aggregate coordination. The fit when the project separates persistence-side invariants from business-process coordination; its trade-off is that two transaction mechanisms coexist (repository-internal for one aggregate, unit-of-work for several)."
 
 [[option]]
 id = "uniform-unit-of-work-parameter"
 label = "One unit-of-work parameter for intra- and cross-aggregate writes alike"
 directive = "Even intra-aggregate atomicity is expressed through the same unit-of-work parameter the cross-aggregate writes use, so every repository method that needs to land multiple writes atomically exposes a transaction-handle parameter in its trait signature and refuses to open its own transaction."
+remediation = """
+Add a unit-of-work parameter to the repository method's trait signature for this intra-aggregate write, matching the same parameter cross-aggregate writes use, instead of letting the method open its own transaction internally. Verify by confirming the method's signature exposes a transaction-handle parameter and it refuses to open its own transaction when one isn't supplied.
+"""
 why = "Gives every transactional method one uniform signature, so there is a single transaction mechanism to learn, reason about, and test rather than two. The fit when signature uniformity and a single transaction story are valued; its trade-off is that the service must construct a unit of work even for an operation it does not actually coordinate, pushing a transaction detail across the aggregate boundary."
 
 [[option]]
 id = "no-repository-transaction-boundaries"
 label = "No repository transaction boundaries at all"
 directive = "Repository methods do not provide transaction boundaries at all; intra-aggregate operations are redesigned as single writes, or callers are allowed to observe intermediate states between writes and reconcile after the fact."
+remediation = """
+Redesign the multi-write intra-aggregate operation as a single write where possible, or explicitly document that callers may observe intermediate states between writes and must reconcile after the fact, rather than silently assuming atomicity the repository doesn't provide. Verify by confirming the repository method's documentation or signature makes clear it provides no transaction boundary, so callers don't wrongly assume atomicity.
+"""
 why = "Keeps repositories entirely free of transaction concerns, with no transaction parameter or internal boundary anywhere — the simplest repository surface. The fit when operations can be redesigned as single writes, or when the system is already built to observe and reconcile intermediate states; its trade-off is that partial-write states become a normal mode the rest of the system has to defend against."
 
 [[sources]]

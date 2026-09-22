@@ -20,6 +20,9 @@ why = "Inline SVG is the smallest-bundle, fastest-first-paint approach. It has n
 id = "icons-render-as-inline-svg-from-static-string-co"
 label = "Icons render as inline SVG from static string constants; no runtime icon-library fetches"
 directive = "Icons live in a single icons module as static SVG string constants. A single Icon component takes a name (an enum variant) and a class string, looks up the corresponding SVG, and renders it inline through the framework's raw-inner-html attribute. Sources for the SVG strings are extracted once from whichever icon set the design system uses, stripped of any framework wrapper, and stored as the raw inner SVG. Runtime fetching of an icon library, icon-font web fonts, and large icon-set crates that pull every icon into the binary are all forbidden."
+remediation = """
+Move the icon out of a runtime-fetched web font, sprite sheet, or full icon-library crate and into a static SVG string constant in the icons module, rendered inline through a single Icon component. Verify by confirming the icon renders with no network request and no dependency on a bundled icon-library crate beyond what's actually used.
+"""
 why = "Inline SVG is the smallest-bundle, fastest-first-paint approach."
 
 [[option]]

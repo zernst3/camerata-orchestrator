@@ -23,16 +23,25 @@ why = "A UI's logic (its state, its computations, its interaction rules) is inde
 id = "headless-core-plus-adapters"
 label = "framework-agnostic core crate plus thin per-framework adapter crate(s)"
 directive = "A UI's logic, state, and computation live in a framework-agnostic core that carries NO dependency on any rendering framework, with the rendering framework confined to a thin adapter that wires the core's state and behavior to that framework's primitives. This applies to BOTH a reusable component/UI library AND a first-party application UI. The enforceable form is a separate core crate, which the compiler then guarantees stays renderer-free: a reusable library MUST use separate core plus per-framework adapter crates, and an application SHOULD too (a strict, dependency-enforced internal module boundary is the weaker minimum, since nothing stops a plain module from importing the renderer). Framework-specific code lives only in the adapter. Pairs with RUST-PURE-STATE-TRANSITIONS-1, which constrains the form of the core's transitions."
+remediation = """
+Extract the UI's logic, state, and computation out of the framework-coupled crate and into a framework-agnostic core crate with no dependency on any rendering framework, and confine the rendering framework to a thin adapter crate that wires the core's state to that framework's primitives. Verify by confirming the core crate compiles with no rendering-framework dependency in its Cargo.toml.
+"""
 why = "The adopted default. Keeping logic in a renderer-free core lets it be written and tested once (no virtual DOM) and reused by every adapter, with framework-specific code confined to the thin adapter. Applies to applications too, not just shipped libraries: the point is a testable, renderer-independent logic/state layer. The cost is the core/adapter boundary, which is real work to design and uphold."
 
 [[option]]
 id = "single-framework-build"
 label = "build the whole library against one framework"
 directive = "The library is built directly against a single rendering framework, with logic and rendering in the same crate."
+remediation = """
+Consolidate the framework-agnostic core and its adapter back into a single crate built directly against one rendering framework, removing the core/adapter split. Verify by confirming the library has one crate mixing logic and rendering, with no separate framework-agnostic core crate.
+"""
 why = "The simplest, most direct structure: with only one framework in scope there is no core/adapter boundary to design or maintain, and the code can use that framework's primitives freely. The right fit when the library targets exactly one framework and that is not expected to change; its trade-off is that supporting a second framework later means first disentangling the logic from the rendering."
 
 [[option]]
 id = "duplicate-per-framework"
 label = "reimplement the library per framework"
 directive = "Each supported framework gets its own complete implementation of the library, with the logic implemented independently in each."
+remediation = """
+Give the newly-supported framework its own complete, independent implementation of the library's logic, rather than sharing a framework-agnostic core. Verify by confirming each supported framework's implementation is self-contained with no shared core crate between them.
+"""
 why = "Keeps each implementation fully self-contained and idiomatic to its framework, with no shared abstraction to constrain it. Worth considering when the target frameworks differ enough that a shared core would be an awkward lowest common denominator; the trade-off it accepts is that every fix and feature is written in each implementation and the copies tend to drift over time."

@@ -28,6 +28,9 @@ why = "The Rust Book (Ch 11.3) and Rust By Example codify the inline #[cfg(test)
 id = "cfg-test-mod-tests-inline-in-source-file"
 label = "Inline #[cfg(test)] mod tests block in the same source file"
 directive = "Unit tests live in a #[cfg(test)] mod tests { ... } block at the bottom of the same .rs file as the code being tested. The module uses 'use super::*;' to bring production items (including private ones) into scope. No #[cfg(test)] annotation is required on individual #[test] functions — only the enclosing module needs it."
+remediation = """
+Move the unit test into a #[cfg(test)] mod tests block at the bottom of the same source file as the code under test, using `use super::*;` to bring the production items into scope, out of a separate file or the top-level tests/ directory. Verify by confirming the test can reference private items in the module without needing them to be pub.
+"""
 why = "Endorsed by The Rust Book (Ch 11.3) and Rust By Example as the canonical Rust idiom. Colocating tests with code gives access to private items and matches ecosystem expectations."
 
 [[option]]

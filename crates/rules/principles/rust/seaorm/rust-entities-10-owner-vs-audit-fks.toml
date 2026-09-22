@@ -16,6 +16,9 @@ why = "Audit-direction reverse traversal is rare in practice and would balloon t
 id = "owner-audit-fks-to-the-same-parent-belongs-to-on"
 label = "Owner + audit FKs to the same parent: belongs_to on child only; no reverse has_many for audit FKs"
 directive = "When an entity has an owner FK plus audit FKs (e.g. created_by, modified_by) all pointing at the same parent, declare the reverse has_many on the parent for the OWNER only. Reverse traversal for audit FKs goes through filtered queries or an audit_log table."
+remediation = """
+Remove the reverse has_many variant declared for an audit FK (created_by, modified_by) on the parent entity, keeping the reverse has_many only for the owner FK, and route audit-FK reverse traversal through a filtered query or an audit_log table instead. Verify by confirming the parent entity's relation enum has exactly one reverse has_many variant for this child, corresponding to the owner FK.
+"""
 why = "Audit-direction reverse traversal is rare in practice and would balloon the parent entity file with near-identical variants."
 
 [[option]]

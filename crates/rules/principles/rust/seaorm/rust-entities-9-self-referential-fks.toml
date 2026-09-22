@@ -16,6 +16,9 @@ why = "DeriveRelation cannot disambiguate a has_many pointing at the same Entity
 id = "self-referential-fks-single-belongs-to-impl-rela"
 label = "Self-referential FKs: single belongs_to + impl Related<Entity> for Entity"
 directive = "Declare only the belongs_to (with explicit from/to) and add impl Related<Entity> for Entity. Reverse traversal is done via find().filter(...). Use role-based variant naming (e.g. Inviter, not User)."
+remediation = """
+Reduce the self-referential relation to a single belongs_to with explicit from/to, add an impl of the Related trait for the entity itself, and do reverse traversal via find().filter(...) rather than a second has_many variant on the same pair or omitting the Related impl entirely. Use role-based variant naming (Inviter, not User). Verify by confirming the entity declares exactly one belongs_to for the self-reference and callers use find_related rather than spelling out the join inline.
+"""
 why = "DeriveRelation cannot disambiguate a has_many pointing at the same Entity as the inverse belongs_to; both directions can't coexist for a self-relation."
 
 [[option]]

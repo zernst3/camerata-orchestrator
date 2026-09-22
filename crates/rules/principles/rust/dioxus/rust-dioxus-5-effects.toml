@@ -16,6 +16,9 @@ why = "Auto-tracking from signal reads is more correct than the manual dependenc
 id = "side-effects-run-inside-use-effect-dependencies"
 label = "Side effects run inside use_effect; dependencies auto-track from signal reads in the closure"
 directive = "Side effects (telemetry emission, scroll-to-top on route change, manual DOM measurement, third-party widget initialization) run inside the framework's effect hook. Dependencies are tracked automatically from the signals the closure reads; there is no manual dependency array. Data fetching does NOT belong in an effect; use the resource hook for that. Cleanup runs through the drop implementation of state captured by the closure, the same way the framework cleans up any other state when a tracked signal changes."
+remediation = """
+Move the side effect currently running directly in the component body (or driven by a manually-maintained dependency array) into the framework's effect hook, relying on automatic dependency tracking from the signals the closure reads. Move any data fetching currently done inside an effect hook to the resource hook instead. Verify by confirming the side effect no longer runs on every render, only when its actual signal dependencies change.
+"""
 why = "Auto-tracking from signal reads is more correct than the manual dependency arrays seen in other frameworks because a contributor cannot forget to list a dependency: the effect simply does not re-run if the value was not read."
 
 [[option]]

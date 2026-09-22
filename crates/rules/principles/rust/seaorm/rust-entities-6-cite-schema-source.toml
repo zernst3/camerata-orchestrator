@@ -16,6 +16,9 @@ why = "Makes drift detection a one-click trace: from the entity to the schema au
 id = "module-level-doc-comment-citing-the-schema-sourc"
 label = "Module-level doc comment citing the schema source"
 directive = "Each entity file opens with a //! doc comment citing the source-of-truth schema location (e.g. the migration path or schema doc reference)."
+remediation = """
+Add a //! doc comment at the top of the entity file citing the source-of-truth schema location (the migration path or schema doc reference), instead of leaving the authority undocumented, in a separate docs file, or traceable only through git history. Verify by confirming a reader can find the schema's authoritative source directly from the entity file's own doc comment.
+"""
 why = "Makes drift detection a one-click trace: from the entity to the schema authority that defines it."
 
 [[option]]

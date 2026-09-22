@@ -16,6 +16,9 @@ why = "Compile-time validation of the full FK graph, plus find_related working i
 id = "fk-relations-declared-on-both-sides"
 label = "FK relations declared on BOTH sides"
 directive = "Declare each foreign-key relation on both entities: belongs_to on the child plus has_one or has_many on the parent. Variant naming: belongs_to uses the parent singular; has_one uses the child singular; has_many uses the child plural."
+remediation = """
+Add the missing side of the FK relation: a belongs_to on the child if only the parent side (or neither side) is declared, and a has_one/has_many on the parent if only the child side is declared, following the standard parent-singular/child-singular/child-plural naming. Verify by confirming find_related works in both directions between the two entities, not just one.
+"""
 why = "Compile-time validation of the full FK graph, plus find_related working in both directions."
 
 [[option]]

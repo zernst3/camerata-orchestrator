@@ -16,6 +16,9 @@ why = "std::sync::Mutex is designed for synchronous code. Its lock() call is a b
 id = "use-tokio-mutex-for-async-code"
 label = "Use tokio::sync::Mutex in async code"
 directive = "Any lock held across an await point uses tokio::sync::Mutex (or tokio::sync::RwLock), not std::sync::Mutex. std::sync::Mutex is only used in synchronous code that does not await. If a critical section must use std::sync::Mutex, all await points are moved outside the locked region."
+remediation = """
+Replace the std::sync::Mutex (or RwLock) held across an await point with tokio::sync::Mutex/RwLock, or restructure the code so all await points sit outside the locked section if you keep the std lock. Verify by confirming no lock guard from std::sync is held across an .await in this code path, for example by running clippy's await_holding_lock lint.
+"""
 why = "tokio::sync::Mutex's lock().await yields the executor thread while waiting to acquire a contended lock instead of blocking it, which prevents lock starvation and deadlocks in async code. The guard it returns is still held across await points exactly like a std guard; only the wait-to-acquire step is async-aware."
 
 [[option]]

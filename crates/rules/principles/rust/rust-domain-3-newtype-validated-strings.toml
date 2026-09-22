@@ -23,22 +23,34 @@ why = "All of these are ways to handle text that must satisfy a constraint, and 
 id = "newtype-validated-strings-email-url-slug"
 label = "Newtype validated strings (Email, Url, Slug, …)"
 directive = "Constrained string types are newtypes with a fallible constructor (Email::try_new); the type itself is proof of validation. Free-form text stays as String."
+remediation = """
+Wrap the constrained string in a newtype with a fallible constructor (Email::try_new, and similar), so the type itself proves the value has been validated, instead of validating inline at each call site, tagging it at runtime, or leaving it as a plain String. Verify by confirming the compiler rejects passing an unvalidated String where the newtype is expected, and the constructor is the only way to obtain a valid instance.
+"""
 why = "Makes the type itself proof that validation ran, so a value of the type cannot exist without having passed its constructor and 'is this validated?' stops being a question at every call site. The strongest fit when a project wants the type system to carry the invariant; its trade-off is a newtype and fallible constructor per constrained kind, with free-form text left as plain String."
 
 [[option]]
 id = "every-call-site-that-needs-a-validated-string-ru"
 label = "Inline validation at each call site"
 directive = "every call site that needs a validated string runs the validation inline at the call site, and the type system carries no distinction between validated and raw text"
+remediation = """
+Remove the newtype (or runtime tag) and instead run the validation inline at each call site that needs a validated string, accepting that the type system will no longer distinguish validated from raw text. Verify by confirming each call site that requires validation now performs its own inline check rather than relying on a constructor-enforced type.
+"""
 why = "The lightest representation: every value stays a plain String and validation runs only where it is actually needed, with no types or constructors to define. The fit when constrained values are few and their validation is centralized; its trade-off is that correctness becomes a discipline check at each consumer, so a forgotten check at any one call site is a silent invalid-state bug rather than a build failure."
 
 [[option]]
 id = "validation-status-is-recorded-as-a-metadata-tag"
 label = "Runtime metadata tag on plain String"
 directive = "validation status is recorded as a metadata tag attached to a plain String value at runtime, rather than as a distinct compile-time type"
+remediation = """
+Replace the newtype's compile-time validation guarantee with a runtime metadata tag attached to the plain String value, tracking validation status outside the type system. Verify by confirming the validation status is queryable at runtime via the tag rather than encoded in the value's type.
+"""
 why = "Lets validation status travel with a value without introducing a distinct type per constrained kind, so a single String-plus-tag shape can represent checked and unchecked text. The fit when the project wants the status available at runtime but does not want a newtype taxonomy; its trade-off is that the status lives at runtime only, so the compiler does not enforce it and a forgotten check still produces an invalid-state bug rather than a build failure."
 
 [[option]]
 id = "the-codebase-makes-no-distinction-between-valida"
 label = "No type distinction between validated and raw text"
 directive = "the codebase makes no distinction between validated and raw text; all string-shaped values use the same String type regardless of whether they have been checked"
+remediation = """
+Remove the newtype and any runtime validation tag, and use a plain String for this value with no distinction from unvalidated text. Verify by confirming the value's type is a bare String with no wrapper or tag indicating validation status.
+"""
 why = "The simplest possible representation: one String type for all text, with no types, tags, or constructors to define and no conversions anywhere. The fit when constraints are weak or are enforced entirely at the system boundary so internal code can trust its inputs; its trade-off is that the type carries no signal that a value was ever validated, so downstream code must re-check or trust, which is the widest surface for invalid-data bugs."

@@ -16,6 +16,9 @@ why = "The compiler then enforces the hexagonal boundary at compile time: code p
 id = "no-serde-derives-on-the-seaorm-model-load-bearin"
 label = "No serde derives on the SeaORM Model (load-bearing)"
 directive = "Entity Models do not derive Serialize/Deserialize, which forces every API response through an explicit DTO plus mapper."
+remediation = """
+Remove the Serialize/Deserialize derive from the SeaORM entity Model, and add an explicit DTO plus mapper for any API response that currently serializes the Model directly. Verify by confirming the entity Model no longer derives Serialize/Deserialize and the API response is built from a separate DTO type.
+"""
 why = "The compiler then enforces the hexagonal boundary at compile time: code physically cannot JSON-encode a Model directly."
 
 [[option]]

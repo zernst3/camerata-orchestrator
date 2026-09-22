@@ -21,22 +21,34 @@ label = "Explicit UnitOfWork parameter on transactional repository methods"
 directive = """
 Repository write methods that may participate in a multi-write transaction take an explicit Option of UnitOfWork (a marker trait defined in the domain crate so the trait surface carries no concrete ORM or database type). Infrastructure implements UnitOfWork on its concrete transaction wrapper and downcasts internally via Any to access the underlying ORM transaction. Services wrap multi-write operations in a closure run on the unit of work and pass Some(uow) to each participating repo call.
 """
+remediation = """
+Change the repository write method's transactional parameter from a generic Tx, an ambient task-local context, or a concrete ORM transaction type to an explicit Option of the domain-crate-defined UnitOfWork marker trait, with infrastructure implementing it on the concrete transaction wrapper. Verify by confirming the domain trait's method signature carries no concrete ORM type and callers pass the UnitOfWork handle explicitly when they need transactional behavior.
+"""
 why = "Makes transactional posture visible at every call site — save(item, None) reads differently from save(item, Some(uow)), so review, refactoring tools, and grep all catch a method silently dropping out of a transaction — while keeping the trait surface free of any concrete ORM type via a domain-defined marker that infrastructure downcasts internally. The strongest fit when the project weights loud, visible transaction boundaries and a framework-free domain highly; its trade-off is a parameter on every transactional method and the internal downcast in the implementation."
 
 [[option]]
 id = "repository-write-methods-take-a-generic-tx-param"
 label = "Generic Tx parameter threaded through consumers"
 directive = "Repository write methods take a generic Tx parameter, and every consumer of the repository must carry that generic through its type graph"
+remediation = """
+Change the repository write method's transactional parameter from an explicit UnitOfWork, an ambient context, or a concrete ORM type to a generic Tx parameter, and update every consumer to carry that generic through its own type signature. Verify by confirming the repository trait is generic over Tx and every caller propagates the same type parameter.
+"""
 why = "Fully compile-time-correct with no runtime downcast: the transaction type stays abstract and the compiler proves every participant uses the same one. The right fit when a project wants maximal static guarantees and is willing to pay for them in signatures; its trade-off is that every consumer must carry the generic through its type graph, so the ceremony compounds across each layer of service composition."
 
 [[option]]
 id = "transactional-context-is-provided-as-a-closure-b"
 label = "Ambient transaction via task-local storage"
 directive = "Transactional context is provided as a closure-based ambient via task-local storage, so the repository trait carries no transaction parameter and the transaction is read from task-local state at call time"
+remediation = """
+Remove the explicit transaction parameter from the repository trait and instead read the transaction from task-local storage set up by a closure-based ambient context at the call site. Verify by confirming the repository trait's method signature carries no transaction parameter and the active transaction is read from task-local state at call time.
+"""
 why = "Keeps the repository trait signatures clean — no transaction parameter to thread anywhere — and reads naturally for teams coming from ecosystems where ambient request/transaction context is idiomatic. Its trade-off is that posture is invisible at the call site and a service that forgets to establish the context produces a silent partial commit rather than a loud error; in Rust it also contends with the owned, non-Clone transaction, which the task-local design must work around."
 
 [[option]]
 id = "repository-write-methods-take-a-parameter-typed"
 label = "Concrete ORM transaction type in domain trait"
 directive = "Repository write methods take a parameter typed as the concrete ORM transaction type directly, with the ORM type appearing in the domain trait surface"
+remediation = """
+Change the repository write method's transactional parameter to the concrete ORM transaction type directly, accepting that the ORM type now appears in the domain trait's public surface. Verify by confirming the domain trait's method signature names the concrete ORM transaction type explicitly.
+"""
 why = "The simplest to write: no marker trait, no generic, no downcast — the method just takes the transaction type it actually uses, and the type is visible at the call site. The right fit when the project does not separate domain from persistence (no hexagonal boundary to protect) and is committed to one ORM; its trade-off is that the domain trait then carries a framework type, so the domain depends on the ORM and a driver swap becomes a domain-signature change rather than an infrastructure-only one."

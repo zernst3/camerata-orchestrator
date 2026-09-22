@@ -16,6 +16,9 @@ why = "Conflating data fetching with side effects is the largest single source o
 id = "async-ui-data-goes-through-the-resource-hook-fir"
 label = "Async UI data goes through the resource hook; fire-and-forget work goes through spawn"
 directive = "Two patterns, two helpers. Data that the UI displays (a profile fetched from the server, a list rendered after a query) is acquired through the framework's resource hook. The hook tracks dependencies the same way an effect does: signals read inside the async closure auto-subscribe, and the resource re-fetches when those signals change. The result is a three-state value (loading, success, failure) that the UI matches on directly. Fire-and-forget work that has no UI consumer (analytics, audit log entry, send-and-forget mutation) uses the spawn primitive. The two patterns are not interchangeable: spawning from an effect for data that the UI needs to display is the legacy effect-plus-fetch pattern this rule exists to replace."
+remediation = """
+Move the UI data fetch currently done as a manual effect with hand-written loading/error signals (or directly in the component body) into the framework's resource hook, which tracks its own loading/error/success state automatically. Reserve a global request-cache library for when an actual caching need has surfaced, not adopted by default. Verify by confirming the resource hook's built-in state replaces any hand-maintained loading/error signal for this fetch.
+"""
 why = "Conflating data fetching with side effects is the largest single source of state-synchronization bugs in component-based UIs."
 
 [[option]]

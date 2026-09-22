@@ -19,16 +19,25 @@ why = "All three place the same translation code somewhere it can see both the d
 id = "mappers-live-in-their-own-crate"
 label = "Mappers live in their own crate"
 directive = "A dedicated mappers crate depends on both the domain crate and the persistence-entities crate; neither of those depends on the other."
+remediation = """
+Move the mapper out of the persistence-entities crate or the domain crate and into a dedicated mappers crate that depends on both, with neither the domain nor the entities crate depending on the other. Verify by confirming the mapper's crate is a separate compilation unit with a dependency edge to both domain and persistence-entities crates.
+"""
 why = "Keeps the domain and entity crates ignorant of each other: only the mapper crate sees both shapes, so each side absorbs churn independently and translation has exactly one home. The strongest fit when strict hexagonal layering is a goal and a driver or domain change must not ripple across the boundary; its trade-off is a third crate to define and build."
 
 [[option]]
 id = "the-project-s-mappers-live-in-the-persistence-en"
 label = "Mappers live in the persistence-entities crate"
 directive = "the project's mappers live in the persistence-entities crate alongside the entity types, rather than in a dedicated mappers crate"
+remediation = """
+Move the mapper out of a dedicated mappers crate (or the domain crate) and into the persistence-entities crate alongside the entity types it maps. Verify by confirming the mapper's code lives in the same crate as the entity type definitions.
+"""
 why = "Keeps translation next to the data it maps and avoids a separate mapper crate, which is a reasonable simplification when the persistence layer is already permitted to know the domain. Its trade-off is that the entity crate then depends on the domain and recompiles whenever the domain evolves, so the two are coupled rather than independent."
 
 [[option]]
 id = "the-project-s-mappers-live-in-the-domain-crate-a"
 label = "Mappers live in the domain crate"
 directive = "the project's mappers live in the domain crate alongside the domain types, rather than in a dedicated mappers crate"
+remediation = """
+Move the mapper out of a dedicated mappers crate (or the persistence-entities crate) and into the domain crate alongside the domain types it maps. Verify by confirming the mapper's code lives in the same crate as the domain type definitions.
+"""
 why = "Co-locates translation with the domain types and avoids a separate mapper crate, which suits a project that does not enforce a domain-has-no-persistence-dependencies boundary. Its trade-off is that the domain crate then knows the entity shapes and gains a transitive dependency on the persistence layer, so the domain is no longer framework-free."

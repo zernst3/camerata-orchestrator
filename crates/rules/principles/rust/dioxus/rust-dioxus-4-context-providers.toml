@@ -16,6 +16,9 @@ why = "Threading state through props (prop drilling) kills review-ability after 
 id = "cross-tree-state-lives-in-named-per-concern-cont"
 label = "Cross-tree state lives in named per-concern contexts, provided at or near the app root"
 directive = "App-wide state (current user and session, modal stack, consent state, theme) is exposed through the framework's context system. Each concern gets its own context, named for what it is (AuthContext, ModalStackContext, ConsentContext). Providers are mounted at or near the app root. Contexts that own reactive state expose it as a signal so that consumers participate in subscription tracking. A single mega-context that holds every concern at once is forbidden because it forces every reader to re-render on every change, regardless of which concern actually moved."
+remediation = """
+Move the cross-tree state out of a global static, a single super-context struct, or manually-threaded props and into its own named context (for example AuthContext, ModalStackContext) provided at or near the app root. Verify by confirming a component several levels deep can read the state directly from its named context, with no intermediate component re-passing it as a prop.
+"""
 why = "Threading state through props (prop drilling) kills review-ability after two or three layers of pass-through; contributors start violating the rule out of frustration as soon as the chain gets deep enough."
 
 [[option]]

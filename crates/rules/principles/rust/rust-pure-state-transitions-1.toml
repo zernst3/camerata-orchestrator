@@ -24,6 +24,9 @@ why = "A state transition expressed as a pure function (it takes the current sta
 id = "pure-transitions"
 label = "pure transition functions; effects at the edges"
 directive = "Core state changes are expressed as pure functions that take the current state and an input and return the next state, with no input-output, no scheduling, and no mutation of anything outside the returned value. Side effects (rendering, persistence, network, logging) are performed by the caller at the edges after applying the returned state, never inside the transition. The core's transition functions are deterministic and testable in isolation with no environment."
+remediation = """
+Rewrite the state-changing function to take the current state and an input and return the next state, with no input-output, scheduling, or mutation of anything outside the returned value, and move the side effect (rendering, persistence, network, logging) to a caller at the edge. Verify by confirming the transition function can be called repeatedly with the same inputs and always returns the same output, with no observable side effect during the call.
+"""
 why = "Pure transitions are deterministic, testable without a runtime, and reusable by any caller holding a state value."
 
 [[option]]

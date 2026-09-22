@@ -16,6 +16,9 @@ why = "Matches code-generator output, is the most googleable shape, and avoids v
 id = "use-the-deriveentitymodel-macro-path"
 label = "Use the DeriveEntityModel macro path"
 directive = "Entities are defined with the DeriveEntityModel macro, not hand-rolled Entity/Column/PrimaryKey impls."
+remediation = """
+Replace the hand-rolled Entity/Column/PrimaryKey impls (or the project-specific wrapper macro) with the standard DeriveEntityModel macro on the entity struct. Verify by confirming the entity compiles using #[derive(DeriveEntityModel)] with no hand-written trait impl for Entity, Column, or PrimaryKey.
+"""
 why = "Matches code-generator output, is the most googleable shape, and avoids verbose boilerplate that offers no benefit unless you are deliberately deviating."
 
 [[option]]

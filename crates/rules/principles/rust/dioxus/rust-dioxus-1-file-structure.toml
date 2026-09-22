@@ -14,22 +14,34 @@ why = "All of these are legitimate ways to lay out a UI crate, and the right one
 id = "ui-crate-is-organized-by-file-role-views-compone"
 label = "UI crate is organized by file role: views, components, hooks, contexts, services"
 directive = "The UI crate splits source by what a file does, not by what feature it belongs to. Page-level components (one folder per route) live under views. Reusable primitives and composites (Button, Modal, Toast and similar) live under components. Custom hooks live under hooks. Cross-tree context providers live under contexts. Server-call wrappers live under services. Pure helpers (formatting, validation, class composition) live under lib. A central Routable enum lives at the top of the crate. Page-level views compose primitives; primitives never compose views. Per-folder rules (no rsx in lib, no service calls in components, and similar) attach to the folder names, so the role of any file is obvious from its path."
+remediation = """
+Move the file into the directory matching what it does (views for page-level components, components for reusable primitives, hooks for custom hooks, contexts for providers), rather than grouping it with everything else belonging to the same feature or leaving it flat at the crate root. Verify by confirming the crate's top-level folders are role names (views/, components/, hooks/, contexts/), not feature names, and this file lives under the one matching its role.
+"""
 why = "Gives a predictable file-path-to-role mapping that every other UI convention can sit on: per-folder rules apply mechanically, reusable primitives have one obvious home so they are easy to discover and hard to duplicate, and the role of any file is clear from its path. The strongest fit when one team owns the whole UI and primitive reuse across the app matters more than co-locating a single feature's code; its trade-off is that all of one feature's files are spread across role folders rather than gathered in one place."
 
 [[option]]
 id = "the-ui-crate-is-organized-into-feature-folders-w"
 label = "Feature folders group everything by feature"
 directive = "the UI crate is organized into feature folders where everything related to feature X (views, components, hooks, services, helpers) lives under a single feature-X folder, rather than being split by file role across views, components, hooks, contexts, services, and lib"
+remediation = """
+Move the file into a single folder named for its feature, alongside that feature's other views, components, hooks, and helpers, rather than splitting it by file role across the crate. Verify by confirming everything related to one feature lives under one feature folder rather than being scattered across separate views/components/hooks folders.
+"""
 why = "Co-locates everything a feature needs in one place, so a feature can be understood, changed, or owned by a team without touching the rest of the tree. The natural fit for a large UI with strong feature-team ownership boundaries; its trade-off is that shared primitives are harder to discover and tend to be duplicated across features or hidden inside whichever feature first authored them, so cross-feature reuse needs deliberate attention."
 
 [[option]]
 id = "the-ui-crate-uses-a-flat-module-structure-with-e"
 label = "Flat module structure at crate root"
 directive = "the UI crate uses a flat module structure with every file directly at the crate root, with no folder-level partitioning by role or feature"
+remediation = """
+Move the file to the crate root alongside every other source file, removing any folder-level partitioning by role or feature. Verify by confirming the crate has no subdirectories splitting files by role or feature, with every module declared directly at the root.
+"""
 why = "The simplest possible layout: no folder taxonomy to learn or maintain, and every file is one hop from the crate root. The right fit for a small UI that is not expected to grow much, where the overhead of a folder structure would outweigh its benefit; its trade-off is that past roughly fifty files file role has to be inferred from naming and 'where does this go' becomes a judgment call rather than a rule."
 
 [[option]]
 id = "the-ui-crate-adopts-a-file-based-routing-convent"
 label = "File-based routing with custom build scripts"
 directive = "the UI crate adopts a file-based routing convention under a single src tree, with custom build scripts wiring the routes from the file layout rather than declaring routes through a central Routable enum"
+remediation = """
+Move the route's file into the file-based routing convention's expected location so the build script picks it up automatically, rather than declaring the route through a central Routable enum. Verify by confirming the route is reachable after only adding the file, with no corresponding entry needed in a central routing enum.
+"""
 why = "Makes the route tree a direct reflection of the file layout, so route-equals-path and adding a page is adding a file, with no central enum to keep in sync. Worth it for teams that prefer that directness and value convention over explicit declaration; its trade-off is that a framework which does not provide file-based routing natively requires custom build tooling to wire it, and a framework upgrade that touches routing can break that tooling."

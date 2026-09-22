@@ -15,24 +15,36 @@ why = "These are all workable file layouts for an entities crate, and the right 
 id = "one-file-per-entity-under-entities-named-for-the"
 label = "One file per entity under entities/, named for the table"
 directive = "Inside the entities crate, every entity lives in its own file under entities/<table_name>.rs. No prelude module that re-exports many entities under one name, no grouping by domain concept inside the crate. The flat shape matches SeaORM's code-generator output and lets a reader find an entity by its table name without learning a project-specific organization."
+remediation = """
+Move the entity out of a domain-concept subdirectory, a prelude re-export module, or a file with multiple inlined entities, and into its own file directly under entities/, named for its table. Verify by confirming the entities crate has one file per entity at a flat path, with no grouping subdirectory or prelude re-export in between.
+"""
 why = "Matches SeaORM's generator output, which emits one file per table, so generated and hand-written entities read the same way and a reader finds an entity by its table name with no project-specific lookup. The strongest fit when entities are generator-driven; its trade-off is that the crate root holds one file per table with no higher-level grouping, which is flat by design rather than organized by concept."
 
 [[option]]
 id = "entities-are-grouped-by-domain-concept-inside-th"
 label = "Group entities by domain concept in subdirectories"
 directive = "entities are grouped by domain concept inside the entities crate, so each domain concept has its own subdirectory or module containing the entities related to it"
+remediation = """
+Move the entity into a subdirectory or module named for its domain concept, alongside the other entities related to that concept, instead of a flat per-entity file at the crate root. Verify by confirming entities related to the same domain concept share a subdirectory rather than sitting flat alongside unrelated entities.
+"""
 why = "Mirrors how a reader who thinks in domain concepts reasons about the data, so related entities are gathered and the crate's structure carries meaning. The fit when navigation is concept-driven rather than table-driven; its trade-off is that finding an entity by table name requires knowing the project's grouping, and the grouping diverges from generator output, making a single-table regeneration a merge rather than a file replacement."
 
 [[option]]
 id = "the-entities-crate-exposes-a-prelude-module-that"
 label = "Prelude module re-exporting entities under short paths"
 directive = "the entities crate exposes a prelude module that re-exports many entities under shorter paths, and consumers import from the prelude rather than from per-entity modules"
+remediation = """
+Add the entity's re-export to the entities crate's prelude module under a shorter path, and update consumers to import from the prelude rather than the per-entity module directly. Verify by confirming a consumer can import this entity from the prelude path rather than its original per-entity module path.
+"""
 why = "Gives consumers concise, stable import paths and a curated public surface, which is worth it for a crate whose API is meant to be presented as more than a raw entity list. Its trade-off is the indirection of the prelude and the need to keep it in sync as entities are added or removed, which is maintenance an internal entities crate may not earn back."
 
 [[option]]
 id = "multiple-small-related-entities-are-inlined-into"
 label = "Inline multiple small entities into one file"
 directive = "multiple small related entities are inlined into a single file rather than each entity living in its own file under entities/"
+remediation = """
+Move the small, closely-related entity into the shared file with the other entities it's inlined alongside, rather than giving it its own file under entities/. Verify by confirming the related small entities are declared together in one file rather than split one-per-file.
+"""
 why = "Reduces file count and keeps closely-related definitions side by side, so a small cluster of entities that are always read together lives in one place. Its trade-off is that the table-name-to-file-name lookup no longer holds, so navigating to an entity requires knowing which multi-entity file it lives in rather than opening the file named for the table."
 
 [[sources]]

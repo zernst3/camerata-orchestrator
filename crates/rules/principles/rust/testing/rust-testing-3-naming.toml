@@ -32,6 +32,9 @@ why = "Rust enforces snake_case for function names via the built-in non_snake_ca
 id = "snake-case-scenario-description"
 label = "snake_case names that describe the scenario and expected outcome"
 directive = "Test function names use snake_case (enforced by rustc non_snake_case lint) and describe the scenario under test and the expected outcome, e.g., 'returns_none_when_key_absent', 'panics_on_empty_input', 'applies_discount_for_member_users'. Generic prefixes like 'test_' are allowed but the scenario suffix must still be meaningful. Module-level grouping (e.g., a nested mod for a specific function or struct) may shorten individual test names by providing shared context."
+remediation = """
+Rename the test function to a snake_case name that describes the scenario and expected outcome (for example returns_none_when_key_absent), instead of a bare test_/it_/should_ prefix with no scenario description. Verify by confirming the test's name alone communicates what's being tested and what the expected outcome is.
+"""
 why = "snake_case is mechanically enforced by the compiler; scenario-description names make cargo test failure output self-documenting."
 
 [[option]]

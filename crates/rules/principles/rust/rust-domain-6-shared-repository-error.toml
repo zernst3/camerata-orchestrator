@@ -23,28 +23,43 @@ why = "This rule assumes `rust-domain-4-errors-via-thiserror`'s default (a typed
 id = "errors-are-category-scoped-one-shared-enum-per-f"
 label = "Errors are organized by failure category, one shared enum per category"
 directive = "Each Rust crate exposes errors organized by failure category at its public boundary, with one shared enum per category. The categories are whatever distinct failure surfaces the crate exposes; examples include persistence and IO failures, input validation, business rule violations, parsing, and networking, but the actual set depends on what the crate does. Variants within an enum enumerate the distinct failure modes for that category. Driver-specific or framework-specific errors map into the appropriate category enum at the boundary; they do not leak through the public API directly."
+remediation = """
+Split the crate's single mixed error enum (or per-aggregate error, re-exported driver error, or Box-of-dyn-Error/anyhow return type) into category-scoped enums at the crate's public boundary, one per distinct failure surface (persistence, validation, business rule, and so on). Verify by confirming callers can match on a specific failure category's enum rather than a single catch-all type or an opaque boxed error.
+"""
 why = "Keeps callers matching a small, stable set of category enums even as the crate grows: failure modes that recur across many operations (a NotFound, a constraint violation) are defined once per category rather than restated per operation. The natural fit for larger crates whose failure surfaces are shared across many entry points."
 
 [[option]]
 id = "each-function-or-aggregate-defines-its-own-error"
 label = "Errors are organized by module or aggregate, one enum per aggregate"
 directive = "Each module or aggregate owns its error enum, so an error type lives next to the code whose failures it describes, rather than being centralized into a small number of shared per-category enums. Driver-specific or framework-specific errors still map into the aggregate's own enum at the boundary; they do not leak through the public API directly."
+remediation = """
+Move the error type currently centralized in a shared per-category enum (or a single mixed enum) into an error enum owned by the specific module or aggregate whose failures it describes, mapping any driver-specific error into that aggregate's own enum at the boundary. Verify by confirming each aggregate's error type lives next to its own code rather than in a shared category enum.
+"""
 why = "Keeps each error type local to its aggregate: the failures of one bounded context are defined and evolve alongside that context, so a change to one aggregate's failure modes stays contained rather than touching a shared type. The natural fit for crates organized around independent aggregates whose failure surfaces do not heavily overlap."
 
 [[option]]
 id = "the-crate-exposes-a-single-error-enum-that-mixes"
 label = "Single error enum mixing every failure category"
 directive = "the crate exposes a single error enum that mixes every failure category (persistence, validation, business rule, parsing, networking) into one type, rather than splitting failures into category enums or per-aggregate enums"
+remediation = """
+Consolidate the crate's category-scoped or per-aggregate error enums into a single enum that mixes every failure category, rather than splitting them by category or aggregate. Verify by confirming the crate's public API surfaces exactly one error type covering persistence, validation, business rule, and other failures.
+"""
 why = "Collapses orthogonal concerns regardless of how the rest of the crate is organized: callers cannot distinguish a validation failure from a persistence failure without inspecting the variant, the single enum's arms accumulate without bound as the crate grows, and a match that handles only one failure surface must either wildcard or exhaustively name unrelated variants."
 
 [[option]]
 id = "the-crate-re-exports-the-underlying-framework-s"
 label = "Re-export the underlying driver's error type"
 directive = "the crate re-exports the underlying framework's or driver's error type from its public API directly, rather than mapping framework errors into a crate-owned enum at the boundary"
+remediation = """
+Remove the crate-owned error enum and re-export the underlying framework's or driver's error type directly from the crate's public API instead of mapping it at the boundary. Verify by confirming callers match on the driver's own error type, not a crate-specific wrapper.
+"""
 why = "Breaks the boundary entirely: the crate's public surface inherits the framework's error semantics and breaks every caller every time the framework upgrades, defeating the purpose of having a crate boundary between them — a problem under any error organization."
 
 [[option]]
 id = "the-crate-s-public-functions-return-box-of-dyn-e"
 label = "Public functions return Box-dyn-Error or anyhow"
 directive = "the crate's public functions return Box of dyn Error or anyhow Error as their error type, rather than typed enums callers can match on"
+remediation = """
+Change the crate's public functions to return Box of dyn Error or anyhow::Error instead of a typed enum, removing the caller's ability to match on specific error variants. Verify by confirming the function signatures return the boxed/anyhow error type rather than a crate-specific typed enum.
+"""
 why = "Eliminates exhaustive matching: consumers cannot recover specific failure modes and the type system stops helping with error handling, which is the entire reason a typed error enum exists at the boundary — independent of whether errors are grouped by category or by aggregate."

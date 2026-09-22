@@ -16,6 +16,9 @@ why = "Tower middleware wraps request/response processing and runs before and af
 id = "tower-middleware-for-cross-cutting-concerns"
 label = "Implement cross-cutting concerns as tower middleware"
 directive = "Logging, tracing, authentication, rate limiting, CORS, compression, and other concerns that span multiple routes are implemented as tower middleware components and registered on the router or on specific routes. Handlers do not contain inline implementations of these concerns. Middleware runs in a defined order, before the handler or after the response is produced."
+remediation = """
+Move the logging, auth, rate-limiting, or other cross-cutting logic duplicated inline in the handler into a tower middleware component registered on the router, and remove the inline copy from the handler. Verify by confirming the handler body no longer contains that logic and the concern still applies after moving it to middleware.
+"""
 why = "Middleware centralizes cross-cutting logic, avoids duplication, and ensures consistent application across all routes."
 
 [[option]]

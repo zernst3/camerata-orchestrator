@@ -24,6 +24,9 @@ why = "The Rust Book (Ch 11.1) describes the canonical three-phase test body —
 id = "arrange-act-assert-in-order"
 label = "Arrange then Act then Assert, three distinct phases in sequence"
 directive = "Each #[test] function body is organized into three sequential phases with no interleaving. Arrange: declare and initialize all inputs, expected values, and test doubles. Act: invoke the unit under test exactly once. Assert: verify the outcome with assert!, assert_eq!, assert_ne!, or by checking an Err/Ok result. A single blank line between phases makes the structure visible. A test that requires more than one Act phase should be split into separate #[test] functions. Inline // Arrange / // Act / // Assert comments are encouraged in longer tests."
+remediation = """
+Restructure the test body into three sequential, non-interleaved phases: Arrange (declare inputs and expected values), Act (invoke the unit under test exactly once), and Assert (verify the outcome). Verify by confirming the test has one Act call and its Arrange/Act/Assert phases don't interleave.
+"""
 why = "Mirrors the three-phase structure the Rust Book describes for test function bodies. One Act per test keeps failures attributable to a single cause."
 
 [[option]]

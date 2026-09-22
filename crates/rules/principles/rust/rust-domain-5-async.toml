@@ -24,6 +24,9 @@ why = "The Rust I/O ecosystem (SeaORM, Axum, tokio) is async-first; mixing sync 
 id = "async-all-the-way-down"
 label = "Async all the way down"
 directive = "I/O functions, repo traits, service methods, and handlers are async; no block_on in layered code."
+remediation = """
+Change the sync I/O function, repository trait method, service method, or handler to async, removing any block_on call that bridges sync code to the async runtime at a layer boundary. Verify by confirming no block_on call remains in the layered code path and the function signature is async end to end.
+"""
 why = "The Rust I/O ecosystem (SeaORM, Axum, tokio) is async-first; mixing sync wrappers around async runtimes is friction and a perf loss."
 
 [[option]]
