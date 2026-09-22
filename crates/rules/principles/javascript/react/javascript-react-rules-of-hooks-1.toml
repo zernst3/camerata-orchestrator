@@ -26,6 +26,9 @@ why = "React identifies hook state by call order, not by name: on every render i
 id = "hooks-are-called-only-at-the-top-level-of-compon"
 label = "Hooks are called only at the top level of components or other hooks"
 directive = "Every hook (useState, useEffect, useMemo, useContext, custom hooks, and the rest) is called at the top level of a function component or a custom hook, unconditionally and in the same order on every render. Hooks are never called inside conditionals, loops, nested functions, or after an early return. Conditional logic goes inside the hook or around the value it returns, not around the hook call itself."
+remediation = """
+Move the conditionally-called hook to the top level of the component or custom hook, calling it unconditionally on every render, and move the condition inside the hook's body instead. Verify by confirming the eslint-plugin-react-hooks rules-of-hooks lint rule passes and the hook is called in the same order on every render.
+"""
 why = "React identifies hook state by call order, so a hook inside a condition, loop, or early return changes that order between renders and silently associates state with the wrong slot, corrupting component state in ways that are hard to trace."
 
 [[option]]

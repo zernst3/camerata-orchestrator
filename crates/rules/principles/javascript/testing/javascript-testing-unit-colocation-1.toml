@@ -27,6 +27,9 @@ why = "Co-locating a test file with its source module eliminates the navigation 
 id = "unit-test-files-live-next-to-source-named-test-ts"
 label = "Unit test files live next to the source file they test, named <module>.test.ts"
 directive = "Unit test files are placed in the same directory as the module under test and named <module>.test.ts (or .test.tsx for components). The file tests/foo.test.ts lives at src/foo.test.ts, not at tests/foo.test.ts. A parallel __tests__/ subdirectory within a feature directory is acceptable when the feature owns many test utilities, but the rule of thumb is: test file next to source file."
+remediation = """
+Move the test file out of the parallel tests/ or __tests__/ tree and place it next to the source file it tests, named after that module with a .test.ts suffix (or .test.tsx for components). Verify by confirming the test file's directory matches its source file's directory exactly.
+"""
 why = "Co-location makes navigation trivial, keeps renames synchronised, and makes coverage gaps visible without tooling."
 
 [[option]]

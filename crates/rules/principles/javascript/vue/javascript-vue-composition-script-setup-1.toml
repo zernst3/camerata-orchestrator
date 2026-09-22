@@ -28,10 +28,16 @@ why = "Both are first-class, officially-supported Vue APIs, and the right one fo
 id = "composition-api-script-setup"
 label = "use the Composition API with <script setup>"
 directive = "Component logic uses the Composition API (ref, computed, watch, onMounted, etc.) and is written in a <script setup> block."
+remediation = """
+Rewrite the component's logic using the Composition API (ref, computed, watch, onMounted, and the rest) inside a script-setup block, moving it off the Options API's data()/methods/lifecycle-hook sections. Verify by confirming the component behaves the same after the rewrite and no Options API section remains.
+"""
 why = "Co-locates a feature's state, derived values, and handlers in one place and lets shared logic be lifted into composables, so a reviewer reads a feature without jumping between sections and reuse across components is straightforward. The strongest fit for components with non-trivial or reusable logic and teams fluent in Vue's reactivity primitives; it asks more familiarity with those primitives than the Options API does."
 
 [[option]]
 id = "options-api"
 label = "use the Options API"
 directive = "Component logic is organized using the Options API: data(), computed, methods, lifecycle hooks (mounted, created, etc.). Component state, derived values, and handlers live in their respective option sections."
+remediation = """
+Rewrite the component's logic using the Options API (data(), computed, methods, and lifecycle hooks like mounted/created), moving it off a script-setup Composition API block. Verify by confirming the component behaves the same after the rewrite and its state, derived values, and handlers are organized into the corresponding option sections.
+"""
 why = "Gives every component the same predictable, low-ceremony shape — state in data(), derived values in computed, behaviour in methods — which many developers find easier to learn and read at a glance. The fit for simple components, teams already fluent in it, or codebases standardized on it; its trade-off is that a single feature's code is spread across the fixed sections, so it scales less gracefully than the Composition API for large components with heavily reused logic."

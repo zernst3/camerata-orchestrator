@@ -20,6 +20,9 @@ why = "NestJS interceptors are functions that run before and after a controller 
 id = "interceptors-for-cross-cutting"
 label = "Use interceptors for cross-cutting concerns"
 directive = "Logging, tracing, response transformation, caching, and other cross-cutting concerns that span multiple routes are implemented as NestJS interceptors. Interceptors are applied via @UseInterceptors() decorators or registered globally. Centralized exception-to-HTTP-response mapping is implemented as Exception Filters (@Catch(), ExceptionFilter, @UseFilters() or a global APP_FILTER), not as interceptor logic. Controllers and services do not contain duplicate logging, transformation, or ad hoc exception-to-response mapping logic."
+remediation = """
+Move the logging, tracing, or response-transformation logic duplicated in the controller method into a NestJS interceptor applied via @UseInterceptors() or registered globally, and remove the inline copy from the controller. Verify by confirming the controller method no longer contains that logic and the concern still applies after moving it to the interceptor.
+"""
 why = "Interceptors centralize cross-cutting logic (logging, tracing, response shaping, caching) and ensure consistent application; exception-to-response mapping is a related but distinct concern owned by Nest's Exception Filter mechanism."
 
 [[option]]

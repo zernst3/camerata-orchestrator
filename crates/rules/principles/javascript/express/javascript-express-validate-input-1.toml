@@ -20,6 +20,9 @@ why = "Everything on the request object that comes from the client (req.body, re
 id = "request-input-is-validated-at-the-boundary-befor"
 label = "Request input is validated at the boundary before use"
 directive = "Every route that reads req.body, req.params, or req.query validates and parses that input against an explicit schema (zod, joi, express-validator, or equivalent) at the boundary, before any business logic runs, and rejects a malformed request with a 400. Handler and downstream code consume the validated, typed result, never the raw request fields. Reaching directly into unvalidated request input and passing it downstream is forbidden."
+remediation = """
+Add a schema (zod, joi, express-validator, or equivalent) that validates req.body/req.params/req.query at the top of the route, before any business logic runs, and have it reject a malformed request with a 400. Remove any downstream code that assumes the shape without having validated it. Verify by sending a request with a missing or malformed field and confirming it is rejected at the boundary rather than reaching the handler's business logic.
+"""
 why = "Request fields are untrusted client-controlled input; validating against a schema at the edge converts them into a known typed shape once and rejects malformed requests with a 400 before they reach business logic, a database, or a template."
 
 [[option]]

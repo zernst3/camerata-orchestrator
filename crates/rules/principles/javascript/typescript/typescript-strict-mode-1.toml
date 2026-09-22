@@ -21,6 +21,9 @@ why = "The single most consequential of the strict flags is strictNullChecks: wi
 id = "the-compiler-runs-in-strict-mode"
 label = "The compiler runs in strict mode"
 directive = "tsconfig sets \"strict\": true at the root, enabling the full strict family (strictNullChecks, noImplicitAny, strictFunctionTypes, strictBindCallApply, and the rest). A tsc type-check (tsc --noEmit or equivalent) is a required build/CI gate. Disabling individual strict flags to silence errors is forbidden; the error is fixed at its source instead."
+remediation = """
+Set "strict": true at the root of tsconfig, and fix the type errors that surface (implicit any, possibly-null values used without a check) rather than disabling individual strict flags to suppress them. Make tsc --noEmit a required CI gate. Verify by confirming the project builds clean under full strict mode with no per-file or per-flag suppressions.
+"""
 why = "With strictNullChecks off, null and undefined are assignable to every type, so the type system silently tolerates exactly the null-dereference bugs that are most common and most expensive at runtime."
 
 [[option]]

@@ -25,6 +25,9 @@ why = "A template's job is to render the view; it should be a declarative map of
 id = "templates-are-simple-and-logic-free-complex-cond"
 label = "Templates are simple and logic-free; complex conditions and computations live in the component"
 directive = "Templates contain only simple property bindings, *ngIf on single boolean conditions, and *ngFor on arrays. Complex conditions (AND/OR chains, ternary operators, comparisons), computations, method calls with side effects, and derived values are moved to the component class and exposed as properties or getter methods. A template that contains logic beyond simple bindings and single conditions is refactored to move the logic to the component."
+remediation = """
+Move the inline conditional, computation, or method call currently in the template into a component property or method, and have the template bind to that simple property instead of evaluating logic itself. Verify by confirming the template contains only property bindings, single-condition *ngIf, and *ngFor, with no ternaries, AND/OR chains, or method calls with side effects.
+"""
 why = "Simple templates are readable, testable, and performant. Logic belongs in the component class, where it can be unit-tested, reused, and cached."
 
 [[option]]

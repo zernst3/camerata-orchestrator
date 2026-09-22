@@ -25,6 +25,9 @@ why = "Vue's scoped styles (a <style scoped> tag) automatically add a unique att
 id = "use-scoped-styles"
 label = "Use scoped styles"
 directive = "Each component's <style> tag includes the scoped attribute, so CSS rules apply only to that component. Global styles (resets, typography, app theme) are in a separate global stylesheet."
+remediation = """
+Add the scoped attribute to the component's style block so its CSS rules apply only to that component, and move any rule meant to apply globally (resets, typography, theme) into a separate global stylesheet. Verify by confirming a class name reused in another component no longer picks up this component's styles.
+"""
 why = "Scoped styles prevent CSS leaks and make components more reusable."
 
 [[option]]

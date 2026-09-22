@@ -19,10 +19,16 @@ why = "Both are first-class Angular form APIs, and the right one follows from a 
 id = "complex-forms-use-reactive-forms-formbuilder-forma"
 label = "build forms with reactive forms (FormBuilder, FormGroup)"
 directive = "Forms are created with FormBuilder to build a FormGroup, with validators and dynamic field logic in the component class. The template binds to the FormGroup's controls via formGroup and formControl directives; form state, validation, and changes are managed in the component rather than through two-way template bindings."
+remediation = """
+Rebuild the form using FormBuilder to construct a FormGroup, moving validators and dynamic field logic into the component class, and bind the template to the FormGroup via formGroup/formControl directives instead of ngModel two-way bindings. Verify by confirming the form's validation state and value are readable from the component class's FormGroup, not only from the template.
+"""
 why = "Represents the form as an explicit, code-level data structure, so its state is auditable, its validators are composable, and it can be unit-tested without rendering a template. The strongest fit for complex forms — conditional fields, cross-field or dynamic validation, programmatically added controls; its cost is more upfront wiring than a simple form needs."
 
 [[option]]
 id = "all-forms-use-template-driven-two-way-bindings-wi"
 label = "build forms with template-driven two-way bindings (ngModel)"
 directive = "Forms are created with ngModel two-way bindings, with form state and validation expressed declaratively in the template via ngForm and validation directives."
+remediation = """
+Rebuild the form using ngModel two-way bindings with form state and validation expressed declaratively in the template via ngForm and validation directives, instead of a FormBuilder-constructed FormGroup. Verify by confirming the template's ngForm reflects the form's validity and the component class holds no FormGroup for this form.
+"""
 why = "The lighter, more declarative shape: a form is described directly in the template with ngModel and built-in validation directives, with no FormGroup to assemble in code. The fit for simple, mostly-static forms (a handful of fields, basic validation) where that directness is a feature; its trade-off is that as a form grows conditional fields, cross-field rules, and dynamic controls, its logic spreads across the template and becomes harder to test and audit, which is the cue to reach for reactive forms instead."

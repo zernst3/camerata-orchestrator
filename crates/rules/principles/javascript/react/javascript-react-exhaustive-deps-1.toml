@@ -26,6 +26,9 @@ why = "The dependency array is React's declaration of what the effect (or memoiz
 id = "effect-and-memo-dependency-arrays-list-every-rea"
 label = "Effect and memo dependency arrays list every reactive value the body reads"
 directive = "Every useEffect, useCallback, and useMemo declares in its dependency array every reactive value (props, state, context, and values derived from them) that its body reads. When an effect re-runs too often, the fix keeps the array complete (functional state updaters, useCallback-wrapped functions, moving values out of the effect, or splitting it), never trimming a real dependency or blanket-disabling the exhaustive-deps lint."
+remediation = """
+Add the missing reactive value to the hook's dependency array instead of omitting it or suppressing the exhaustive-deps lint rule, and if the effect re-runs too often as a result, fix that by adjusting the logic (a functional state update, a ref for a value that shouldn't trigger a re-run) rather than shrinking the dependency list. Verify by confirming the exhaustive-deps lint rule passes on this hook with no suppression comment.
+"""
 why = "The dependency array declares what the effect depends on; omitting a value the body reads makes the effect close over a stale copy and operate on outdated data indefinitely, with no error and no obvious cause."
 
 [[option]]

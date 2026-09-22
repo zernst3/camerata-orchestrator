@@ -24,6 +24,9 @@ why = "Route groups in App Router are how layout composition is opt-in: pages ne
 id = "app-router-pages-live-under-the-gated-route-grou"
 label = "App Router pages are grouped by access tier, with auth enforced in middleware/data layer"
 directive = "Pages are organized into route groups by access tier, for example app/(authenticated)/dashboard/page.tsx for pages that share authenticated chrome, versus app/(public)/... for pages that don't. This is illustrative, not a mandated path: the specific group names and nesting are a per-project convention. Whatever the grouping, actual authorization is enforced independently of file placement: via middleware.ts matching the relevant route patterns, and/or an explicit session/auth check inside the page's server component or data-loading function. A page placed in the wrong group is a layout/UX bug (missing chrome), not a security hole, because the auth check does not depend on which group the file sits in."
+remediation = """
+Move this page under the route group matching its access tier (for example app/(authenticated)/... for pages that require a logged-in user), and add or confirm an explicit auth check in middleware or the data layer rather than relying on folder placement alone to keep it protected. Verify by requesting the page's URL directly as an unauthenticated user and confirming middleware or the data layer rejects it, not just the route group's naming convention.
+"""
 why = "Route groups in App Router are how layout composition is opt-in, but only middleware and explicit data-layer checks that run on every matching request give an actual authorization guarantee; folder placement alone is bypassable and gives no compile-time or runtime signal that a page is protected."
 
 [[option]]

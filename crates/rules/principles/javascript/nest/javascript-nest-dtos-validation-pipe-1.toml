@@ -24,6 +24,9 @@ why = "NestJS allows defining Data Transfer Objects (DTOs) with validation decor
 id = "dtos-with-validation-pipe"
 label = "Use DTOs with ValidationPipe"
 directive = "Request DTOs are defined as classes with validation decorators (@IsString, @Min, etc.). The global ValidationPipe (or route-specific pipes) validates incoming payloads against the DTO. Invalid requests are rejected at the framework boundary before the controller is invoked."
+remediation = """
+Define a DTO class with class-validator decorators for this request shape, and let the global (or route-specific) ValidationPipe validate the incoming payload against it instead of checking fields manually inside the controller. Verify by sending a request with an invalid field and confirming it is rejected before the controller method body runs.
+"""
 why = "DTOs and ValidationPipe centralize input validation and ensure consistency."
 
 [[option]]

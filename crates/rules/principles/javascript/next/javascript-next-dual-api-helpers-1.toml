@@ -26,6 +26,9 @@ why = "Browser fetches and server-side fetches (RSC, metadata, route handlers) h
 id = "two-sanctioned-api-helpers-client-vs-server-only"
 label = "Client-side calls go through a shared client helper; Server Components fetch directly"
 directive = "Client-side code (client components, hooks, event handlers) makes API calls through a shared client-side helper (browser context, attaches credentials, handles auth redirects). Direct fetch calls in client components are forbidden; call the shared helper instead. Server Components, route handlers, and other server-side rendering paths may call fetch directly — this is the documented App Router pattern and does not need to route through a shared helper. A separate server-only helper marked 'server-only' remains available (and is used) for server-side calls that need private-network hostnames or centralized secret handling, and is never bundled to the client."
+remediation = """
+Replace the raw fetch call in this client component, hook, or event handler with a call through the shared client-side API helper, which attaches credentials and handles auth redirects consistently. Leave Server Components free to fetch directly, since they run in a different context. Verify by confirming no client component issues a raw fetch call and each instead goes through the shared helper.
+"""
 why = "Client-side code doesn't get Next's automatic fetch memoization/caching, so centralizing credentials, base URLs, and error handling in one client helper avoids re-deriving those rules at every call site. Server Components get equivalent caching and dedup for free from Next's extended fetch, so forcing every server-side fetch through a shared helper adds indirection without the benefit that justifies it on the client."
 
 [[option]]

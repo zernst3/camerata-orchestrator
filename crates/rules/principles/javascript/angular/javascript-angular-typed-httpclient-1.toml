@@ -20,6 +20,9 @@ why = "HTTP requests are a data-access concern; making them directly from a comp
 id = "http-requests-are-made-through-typed-services"
 label = "HTTP requests are made through typed services, not directly from components"
 directive = "All HTTP requests (GET, POST, PUT, DELETE) are made through typed services that wrap HttpClient. Services inject HttpClient, define methods that call it (with proper return types and error handling), and expose Observables of typed domain objects to components. Components never inject HttpClient or call it directly; they call service methods. A component that needs to fetch data injects a data service and subscribes to its Observable, or uses the async pipe. Direct HttpClient.get() or HttpClient.post() calls from within a component are forbidden."
+remediation = """
+Move the direct HttpClient call out of the component and into a typed service method that returns an Observable of a typed domain object, and have the component call the service instead. Verify by confirming the component no longer injects HttpClient directly and the service's method signature declares its return type.
+"""
 why = "Services decouple the HTTP layer from presentation, making the logic reusable and testable. The component becomes a thin view layer."
 
 [[option]]

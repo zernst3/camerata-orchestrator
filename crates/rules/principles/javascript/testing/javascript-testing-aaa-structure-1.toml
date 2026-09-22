@@ -26,6 +26,9 @@ why = "The Arrange-Act-Assert (AAA) pattern structures each test into three clea
 id = "every-test-follows-arrange-act-assert-one-act-per-test"
 label = "Every test body follows Arrange-Act-Assert structure with one act per test"
 directive = "Each test (it/test block) is divided into three phases in order: (1) Arrange — set up state, inputs, and mock return values; (2) Act — call the function or trigger the event under test exactly once; (3) Assert — make all expect() calls for this test. A blank line separates the three phases. A test that requires two distinct Act invocations is split into two tests. Conditional logic inside a test body is forbidden (see jest/no-conditional-expect); if the tested outcome depends on a condition, that condition is a fixture variation handled by separate test cases or a parameterised describe.each / test.each block."
+remediation = """
+Restructure the test body into three ordered phases: Arrange (set up state and mocks), Act (call the function or trigger the event under test exactly once), and Assert (make all expect() calls). Split a test currently mixing setup, action, and assertion out of order, or exercising multiple actions, into separate tests. Verify by confirming each test has exactly one Act step and fails for exactly one reason when it fails.
+"""
 why = "AAA makes the intent of each test readable at a glance, the single-act constraint keeps failure attribution unambiguous, and the blank-line visual delimiter communicates structure without comments."
 
 [[option]]

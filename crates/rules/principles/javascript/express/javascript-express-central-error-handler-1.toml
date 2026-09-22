@@ -24,6 +24,9 @@ why = "Express has one built-in mechanism for handling errors: the error-handlin
 id = "errors-flow-to-one-central-error-handling-middle"
 label = "Errors flow to one central error-handling middleware; async handlers forward via next"
 directive = "The app registers a single error-handling middleware with the (err, req, res, next) signature, last in the middleware chain, which owns the error response shape, status-code mapping, and error logging. Route handlers signal failure by throwing (sync) or forwarding to next(err) (async), never by formatting and sending error responses ad hoc. On Express 5, an async handler's rejected promise is forwarded to the central handler automatically — no wrapper needed. On Express 4 and earlier, async handlers must be wrapped so their rejections reach the central handler (an asyncHandler wrapper, the express-async-errors package, or manual try/catch + next(err)); a bare async route whose rejection can escape is forbidden on that version."
+remediation = """
+Remove the route's local try/catch error formatting and instead forward the error via next(err) (or let it throw, for a wrapped async handler) so it reaches the single central error-handling middleware. Confirm that middleware is registered last in the chain and owns the response shape and status-code mapping. Verify by triggering the error in this route and confirming the response matches the shape the central handler produces for other routes.
+"""
 why = "Express routes thrown and next(err) errors to the four-argument error middleware. Express 5 auto-catches async rejections and forwards them there directly; Express 4 does not, and needs an explicit wrapper. Either way, one central handler gives uniform error responses and guarantees rejections are not lost to a hung request."
 
 [[option]]

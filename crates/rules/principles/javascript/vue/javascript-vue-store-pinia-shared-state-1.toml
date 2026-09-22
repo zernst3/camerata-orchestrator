@@ -23,10 +23,16 @@ why = "The right mechanism follows from how widely the state is shared and how d
 id = "use-pinia-for-shared-state"
 label = "hold shared state in a Pinia store"
 directive = "State that multiple components across the tree need is held in Pinia stores. Components access stores via useStore() (or const userStore = useUserStore(), etc.). State used by only one component or its immediate children stays local to the component."
+remediation = """
+Move the state currently passed through props across multiple components into a Pinia store, and have each component that needs it call useStore() directly instead of receiving it through a chain of props. Verify by confirming a component several levels deep in the tree can read or update the shared state without every intermediate component re-passing it as a prop.
+"""
 why = "Holds shared state outside the component tree so any consumer reads it directly and reactively, without intermediate components forwarding it; a store also instantiates without a component tree, which keeps its logic unit-testable. The strongest fit for state shared broadly or deeply (current user, theme, app-wide selections); its cost is a piece of global state to name and reason about, which is overkill for state that only travels parent-to-near-child."
 
 [[option]]
 id = "prop-drilling-for-shared-state"
 label = "pass shared state through props and events"
 directive = "State is passed from a parent component to children as props, and children that need to change it emit events back to the parent; the parent owns the state and the data flow between it and its children is explicit."
+remediation = """
+Move the state currently held in a Pinia store back into the owning parent component, passing it down to children as props and having children emit events back up to change it, rather than accessing it through a store. Verify by confirming the state's single owner is the parent component and children communicate changes only through emitted events.
+"""
 why = "Keeps data flow explicit and local with no global state to reason about: the owning component and the path the data takes are visible in the props and events themselves. The right fit when the state is shared only between a parent and its near children, where the path is short; its known trade-off is that across a deep tree every intermediate component must forward props it does not use, so it stops fitting once the state must reach distant or many components."

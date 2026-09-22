@@ -19,10 +19,16 @@ why = "Both are supported ways to write React components, and the right one foll
 id = "components-are-functions-using-hooks-not-classes"
 label = "write components as functions using hooks"
 directive = "Components are written as functions that use hooks for state and lifecycle. The one structural exception is an error boundary, which currently requires a class; it is isolated as a small, single-purpose wrapper rather than becoming a pattern that pulls other logic back into class form."
+remediation = """
+Convert the class component to a function component using hooks for state and lifecycle (useState, useEffect, and the rest), keeping only a genuinely required error boundary as a small, isolated class. Verify by confirming the component's state and lifecycle behavior are unchanged after the conversion and no this.state or lifecycle method remains outside the error boundary.
+"""
 why = "Keeps a component's state and effect logic inline and lets reusable logic be lifted into custom hooks, and it is the shape React's tooling and newer APIs are built around, so a reviewer reads every component the same way. The strongest fit for new code on modern React; the one form it still cannot express is an error boundary, which remains a small class wrapper until an official hook equivalent ships."
 
 [[option]]
 id = "class-components-are-written-alongside-function"
 label = "write components as classes with lifecycle methods"
 directive = "Components are written as classes that extend React.Component, holding state in this.state and reacting to changes through lifecycle methods (componentDidMount, componentDidUpdate, componentWillUnmount). The codebase stays on this idiom consistently rather than mixing it with hook-based components for the same concerns."
+remediation = """
+Convert the function component to a class component extending React.Component, moving state into this.state and lifecycle logic into componentDidMount/componentDidUpdate/componentWillUnmount as appropriate. Verify by confirming the component's behavior is unchanged and consistently uses the class-based idiom rather than mixing it with hooks.
+"""
 why = "Organizes a component into lifecycle methods and this.state, the established shape for codebases already built on classes and the required form for the APIs that still need a class (such as error boundaries). The fit for an existing class-based codebase where the structure is settled and a wholesale conversion to hooks would be a large migration for little immediate gain; its trade-off is that reusable stateful logic cannot be packaged as a custom hook, so sharing it across components takes heavier patterns (HOCs, render props)."

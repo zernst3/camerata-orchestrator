@@ -22,6 +22,9 @@ why = "A const binding tells the reader, in one keyword at the declaration site,
 id = "const-is-the-default-binding-let-only-when-the-b"
 label = "const is the default binding; let only when the binding is reassigned"
 directive = "Declarations default to const. let is used only for a binding that is genuinely reassigned after initialization. A let that is never reassigned is rewritten as const."
+remediation = """
+Change the declaration from let to const, since the binding is never reassigned after initialization. Reserve let only for bindings that are genuinely reassigned. Verify by confirming the linter's prefer-const rule passes on this file.
+"""
 why = "A const binding tells the reader at the declaration site that the name will never be reassigned, so they can reason about the scope without scanning for a later mutation."
 
 [[option]]

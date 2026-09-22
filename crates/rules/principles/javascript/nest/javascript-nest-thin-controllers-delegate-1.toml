@@ -24,6 +24,9 @@ why = "A controller's job is to handle an HTTP request: extract parameters and b
 id = "thin-controllers-delegate-to-services"
 label = "Controllers stay thin; delegate to services"
 directive = "Controllers are limited to HTTP concerns: extract the request, call a service, and map the result to a response. Business rules, data access (database queries, ORM calls), and external API calls live in services or repositories that the controller calls. A database query, computation, or API call inside a controller is forbidden; it moves behind the service layer."
+remediation = """
+Move the business logic and data access out of the controller method and into a service the controller calls, leaving the controller limited to extracting the request and mapping the service's result to a response. Verify by confirming the controller method contains no direct database or external API call.
+"""
 why = "Thin controllers keep transport concerns separate from domain logic, enable reuse, and improve testability."
 
 [[option]]

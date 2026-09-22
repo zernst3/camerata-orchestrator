@@ -29,6 +29,9 @@ why = "An integration test exercises multiple modules working together (e.g. a s
 id = "integration-tests-live-in-dedicated-integration-directory"
 label = "Integration tests live in a dedicated __tests__/integration/ or tests/integration/ directory"
 directive = "Integration tests — tests that span more than one real module and may require a database, HTTP server, or message queue — are placed in a dedicated tests/integration/ (or __tests__/integration/) directory at the project root or the package root. They are excluded from the default unit-test Jest/Vitest run via testPathIgnorePatterns or a separate project config entry. A separate CI step or npm script (test:integration) invokes them explicitly."
+remediation = """
+Move the integration test (one that spans more than one real module or needs a database, HTTP server, or queue) into the dedicated tests/integration/ (or __tests__/integration/) directory, out of the unit-test tree. Verify by confirming the fast unit-test run excludes this file and a separate integration-test command picks it up.
+"""
 why = "Integration tests have a different cost model (slower, require infra), need to be runnable independently, and cannot be owned by a single source file."
 
 [[option]]

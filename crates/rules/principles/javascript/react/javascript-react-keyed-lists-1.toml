@@ -25,6 +25,9 @@ why = "React reconciles a list by matching the key of each child to the key it s
 id = "rendered-lists-carry-a-stable-key-from-the-data"
 label = "Rendered lists carry a stable key from the data, never the array index"
 directive = "Every child rendered from an array carries a key prop derived from a stable identity in the underlying data (a record id or other unique field), not the array index and not a freshly generated value. The array index is acceptable as a key only when the list is provably static: never reordered, never filtered, and only ever appended to at the end."
+remediation = """
+Change the key prop on this rendered list from the array index to a stable identifier from the underlying data (a record id or other unique field). Verify by reordering, inserting, or removing an item in the list and confirming component state and DOM elements track the correct underlying item rather than the position.
+"""
 why = "React reconciles a list by key; an index key reassigns existing component state and DOM to the wrong rows on the first reorder or front-insertion, so position-bound state like focus or in-progress input silently jumps rows while the list still renders."
 
 [[option]]

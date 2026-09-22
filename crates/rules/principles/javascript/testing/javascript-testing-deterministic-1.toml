@@ -37,6 +37,9 @@ why = "A test is only valuable if it produces the same result on every run. A te
 id = "tests-are-deterministic-clocks-timers-and-randoms-are-controlled"
 label = "Tests are deterministic: clocks, timers, and random values are controlled; no real I/O or network calls in unit tests"
 directive = "Unit tests call jest.useFakeTimers() (optionally with a fixed { now } anchor to avoid epoch-0 side effects) whenever the module under test references Date, setTimeout, setInterval, or setImmediate. jest.useRealTimers() is called in afterEach to prevent timer-fake leakage across tests. Math.random() calls in the module under test are replaced by a jest.spyOn(Math, 'random').mockReturnValue(fixed) when the test needs deterministic random output. No unit test makes a real HTTP request, reads from a real database, or reads from the real filesystem; those calls are mocked (see JAVASCRIPT-TESTING-MOCK-AT-BOUNDARIES-1). The eslint-plugin-jest rules expect-expect and no-conditional-expect (both in the recommended config) are configured at error severity."
+remediation = """
+Add jest.useFakeTimers() (with a fixed now anchor) to this test if the module under test reads Date, setTimeout, setInterval, or setImmediate, and call jest.useRealTimers() in afterEach. Remove any real network call or busy-wait from the unit test. Verify by running the test repeatedly and confirming its outcome does not depend on wall-clock timing.
+"""
 why = "Deterministic tests produce reliable CI signal; flaky tests erode trust in the entire test suite and are more expensive to fix later than to prevent upfront."
 
 [[option]]
