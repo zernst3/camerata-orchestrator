@@ -26,6 +26,9 @@ linter = "PMD: UnitTestShouldIncludeAssert"
 id = "assertj-fluent"
 label = "AssertJ assertThat() fluent assertions"
 directive = "All assertions use AssertJ: import static org.assertj.core.api.Assertions.assertThat; (or BDDAssertions.then for BDD style). Never use org.junit.jupiter.api.Assertions.assertEquals, assertTrue, assertFalse, assertNull, or assertNotNull in new test code. For exception assertions, use assertThatThrownBy(() -> ...).isInstanceOf(X.class).hasMessageContaining('...'). For soft assertions (check all conditions before reporting), use SoftAssertions.assertSoftly(softly -> { ... })."
+remediation = """
+Replace the JUnit or Hamcrest assertion call with AssertJ's fluent assertThat() API in this test method. Verify by confirming the test file's imports no longer include org.junit.jupiter.api.Assertions or org.hamcrest, and the assertion still fails with a clear message when the expected value doesn't match.
+"""
 why = "AssertJ failure messages are self-describing; the fluent API composes complex structural assertions without custom message strings."
 
 [[option]]

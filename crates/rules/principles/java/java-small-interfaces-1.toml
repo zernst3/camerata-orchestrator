@@ -22,6 +22,9 @@ linter = "PMD: ExcessivePublicCount"
 id = "small-focused-interfaces"
 label = "define small, focused interfaces sized by cohesion, not a fixed method count"
 directive = "Each interface has a single responsibility and the set of methods that responsibility actually requires — judge size by cohesion (does every method belong to the same capability/role?), not by a fixed cap. If a service needs to read from a data store and also write metrics, it takes (DataStore, MetricsWriter), not a monolithic Service interface with every method. Larger abstractions are built by composing small interfaces. Common patterns: Reader, Writer, Validator, Listener, Factory — typically small, but a cohesive single-purpose interface (e.g. a callback SPI) is fine with more methods when they all belong to the one role it represents."
+remediation = """
+Split the large interface into smaller interfaces grouped by cohesive capability, and change the class or method depending on it to depend on only the interface(s) it actually needs. Have a caller depend on an interface rather than a concrete class where that dependency crosses an architectural boundary. Verify by confirming an implementation no longer needs to provide methods unrelated to its actual responsibility.
+"""
 why = "Small, cohesive interfaces are easy to implement and reason about; they compose well and follow the Interface Segregation Principle. Sizing by cohesion rather than a numeric cap avoids splitting a genuinely single-purpose interface just to hit a method count, and avoids treating an artificially small interface as correct when its methods don't actually belong together."
 
 [[option]]

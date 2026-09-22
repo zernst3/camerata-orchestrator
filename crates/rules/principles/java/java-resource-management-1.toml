@@ -32,6 +32,9 @@ linter = "Error Prone: StreamResourceLeak"
 id = "try-with-resources-or-finally"
 label = "close resources via try-with-resources or explicit finally block"
 directive = "Every resource that implements AutoCloseable (java.sql.Connection, java.nio.file.Files, java.io.Reader, etc.) is instantiated inside a try-with-resources statement or explicitly closed in a finally block. Code in a try block is guaranteed to have the resource closed if an exception is thrown. For resources that must outlive the try block, they are explicitly closed in a finally block or wrapped in a lifecycle manager."
+remediation = """
+Move the resource's instantiation into a try-with-resources statement (or an explicit finally block that closes it) so it is guaranteed to close even if an exception is thrown, rather than relying on an explicit close() call at the end of the method or on garbage collection. Verify by forcing an exception partway through the method and confirming the resource's close() still runs, for example by checking a connection pool does not leak connections under a fault-injection test.
+"""
 why = "Try-with-resources is concise, reliable, and guarantees cleanup even if an exception is thrown."
 
 [[option]]

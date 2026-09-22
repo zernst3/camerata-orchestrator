@@ -27,6 +27,9 @@ linter = "Checkstyle: VisibilityModifier"
 id = "final-by-default"
 label = "mark classes and fields final unless mutability is required"
 directive = "Classes are marked final unless explicitly designed as base classes for extension. Fields are marked final unless they must be reassigned. Collections are immutable (unmodifiableList, ImmutableList) by default. Mutable fields are clearly documented with a reason (e.g., /* mutable because concurrent updates are required */)."
+remediation = """
+Mark the class final unless it is explicitly designed as a base class for extension, and mark its fields final unless they must be reassigned after construction. Replace a mutable collection field with an immutable wrapper (unmodifiableList, ImmutableList) unless the class genuinely needs to mutate it, in which case document why. Verify by confirming an attempt to subclass or reassign the field fails to compile.
+"""
 why = "Immutable-by-default prevents bugs, is thread-safe, and makes code easier to reason about."
 
 [[option]]

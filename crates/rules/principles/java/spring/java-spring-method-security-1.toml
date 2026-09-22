@@ -20,6 +20,9 @@ title = "Spring Security Reference — Method Security (@PreAuthorize, @EnableMe
 id = "preauthorize-on-service-methods"
 label = "@PreAuthorize on service methods that require specific roles or permissions"
 directive = "@EnableMethodSecurity(prePostEnabled = true) is active. Service methods that require specific roles or permissions carry @PreAuthorize('hasRole(\"ROLE_ADMIN\")') or @PreAuthorize('hasAuthority(\"permission:name\")') annotations. Controllers do not perform manual role checks (SecurityContextHolder.getContext().getAuthentication().getAuthorities() inspection) as a substitute for @PreAuthorize on the service. @PostAuthorize and @PostFilter are used where the authorization decision depends on the returned value. @Secured is not used (it is less expressive than @PreAuthorize's SpEL)."
+remediation = """
+Move the authorization check from the controller (or a manual SecurityContextHolder check) onto the service method with @PreAuthorize, and enable @EnableMethodSecurity(prePostEnabled = true) if it isn't already. Remove the now-redundant manual check from the controller. Verify by calling the service method from a second entry point (a background job or another controller) and confirming the authorization check still applies without the caller having to re-implement it.
+"""
 why = "@PreAuthorize on service methods protects every entry point to the method, not only the HTTP handler that was wired at the time the annotation was added."
 
 [[option]]

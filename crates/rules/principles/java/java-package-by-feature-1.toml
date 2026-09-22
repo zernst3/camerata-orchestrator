@@ -21,16 +21,25 @@ linter = "PMD: LoosePackageCoupling"
 id = "package-by-feature"
 label = "organize packages by feature (domain); each feature contains its own layers"
 directive = "Packages are named by domain or feature (com.example.users, com.example.organizations, com.example.reports). Each feature package contains its own controller, service, repository, and domain model classes. Dependencies flow between features explicitly (com.example.users depends on com.example.organizations, not the reverse). Common/shared code lives in a separate package (com.example.common or com.example.shared)."
+remediation = """
+Move the class into a package named for its domain or feature (for example com.example.orders) that also contains that feature's own controller, service, repository, and model classes, rather than a package named for a generic layer or a flat namespace. Update the feature's explicit dependencies on other features to be visible in the import structure. Verify by confirming a reader can find every class related to one feature under a single feature package, without hunting across parallel layer packages.
+"""
 why = "Groups all of a feature's code in one package, so a feature can be read, owned, or extracted as a unit, and cross-feature dependencies show up as explicit package imports rather than hidden coupling. The strongest fit for a codebase with several distinct features and an eye toward feature-level ownership or later extraction into a service; it asks that feature boundaries be drawn deliberately and shared code factored out."
 
 [[option]]
 id = "package-by-layer"
 label = "organize packages by layer (presentation, business, data)"
 directive = "Packages are named by layer (com.example.controllers, com.example.services, com.example.repositories). Each controller, service, or repository class is placed in its corresponding layer package."
+remediation = """
+Move the class into the package named for its architectural layer (controllers, services, or repositories), grouping it with other classes that play the same structural role rather than with other classes from the same feature. Verify by confirming the package structure has one top-level package per layer, each containing classes from every feature that has a class of that role.
+"""
 why = "Groups code by technical role, so a layer's conventions and shared infrastructure sit together and the structure matches how many Spring tutorials and layer-oriented teams already think. A familiar fit for smaller apps and teams organized around layers; its trade-off is that a single feature's code is spread across the layer packages, which makes feature-level boundaries and dependencies harder to see as the feature set grows."
 
 [[option]]
 id = "no-hierarchy"
 label = "keep all classes in a single package or a flat namespace"
 directive = "Classes are not partitioned into a package hierarchy; they live in com.example (or com.example.* with no role/feature split)."
+remediation = """
+Move the class out of any layer or feature package into the project's single flat package, removing the hierarchical structure. Verify by confirming the class now lives alongside every other class in the same flat namespace with no sub-package split by role or feature.
+"""
 why = "The right amount of structure for a genuinely tiny project or a prototype, where any package hierarchy would be premature ceremony over a handful of classes. It depends on the codebase staying small: once it grows, the absence of feature or layer boundaries makes it hard to navigate, which is the cue to graduate to a feature or layer structure."

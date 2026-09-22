@@ -26,6 +26,9 @@ linter = "Maven Surefire: default *Test.java inclusion pattern"
 id = "mirror-package-in-src-test-java"
 label = "src/test/java/<package>/ProductionClassTest.java, same package as production"
 directive = "Place every unit test class under src/test/java, in the identical package as the class under test (e.g., com/example/service/UserServiceTest.java tests com/example/service/UserService.java). Name test classes <ProductionClass>Test.java. Use src/test/resources for test-only resource files. Do not create a separate top-level test package hierarchy that diverges from production."
+remediation = """
+Move the test class into src/test/java under the identical package as the class under test, and rename it to ProductionClassTest.java, named after the production class. Verify by confirming the test class's package declaration matches the production class's package exactly, with no separate test-only package.
+"""
 why = "Mirrors Maven conventions, enables Surefire auto-discovery, and gives tests package-private visibility without leaking internals."
 
 [[option]]

@@ -25,6 +25,9 @@ why = "Event wiring is a cross-agent invariant: the emitter agent and the subscr
 id = "reconcile-event-emit-vs-consume"
 label = "Reconcile emitted events against subscriptions (both directions, deterministic)"
 directive = "On the assembled tree, run the integration gate's event reconciliation for this rule. A per-stack extractor normalizes each repo's source into PRODUCED events (emit / publish / dispatch) and CONSUMED events (subscribe / on / listen). Every produced event must have at least one consumer across the agents, and every consumed event must have at least one emitter. A dangling emit or a dangling subscription fails deterministically and bounces to the responsible agent with the event name and location. Where a stack has no event extractor, the event seam is reported review-tier, never a faked green. Intentional exceptions (e.g. an event published for an external subscriber outside the fleet) are waived with an inline `camerata:allow INTEGRATION-EVENT-WIRING-1 -- <reason>` or a baseline entry."
+remediation = """
+Add the missing consumer for an event that is emitted but never subscribed to, or add the missing producer/emit call for a subscription that is waiting on an event nothing ever publishes. Remove the dead emit or dead subscription instead if it turns out to be leftover from removed functionality. Verify by re-running the integration gate's event reconciliation on the assembled tree and confirming every emitted event now has at least one matching consumer and every subscription has a matching emitter.
+"""
 why = "The wiring-completeness check runs on the integrated whole — the only place both the emit and the subscribe are visible at once — as a deterministic comparison of neutral event records, not an LLM guessing whether the ends connect."
 
 [[option]]
