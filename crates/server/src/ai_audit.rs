@@ -23,7 +23,64 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::llm::{LlmPort, Llm, LlmRequest};
-use crate::onboard::{Finding, ProposedRule};
+use crate::onboard::{Finding, ProposedRule, RuleOptionView};
+
+// ════════════════════════════════════════════════════════════════════════════════════
+// AUDIT-INTEGRATED ALTERNATIVE RECOMMENDATION (docs/design/2026-09-22_audit-integrated-
+// alternatives.md)
+// ════════════════════════════════════════════════════════════════════════════════════
+//
+// For each MULTI-OPTION semantic rule (>= 2 `[[option]]`s, AI-judged tier — never the
+// deterministic floor, never a single-option/mechanical rule), the audit feeds the model
+// EVERY option instead of one pre-resolved directive, and asks it to (a) recommend the
+// option that best fits this codebase and (b) report violations AGAINST that recommended
+// option. See `recommend_alternatives` (the dedicated pass that decides this ONCE per rule,
+// grounded in real code) and `audit_repo`'s use of it.
+
+/// One multi-option semantic rule's full alternative set, fed to the recommendation pass.
+/// Built by the caller (`onboard::audit_repos` for the main scan, the `rescan-alternatives`
+/// endpoint for a targeted re-check) by joining the project's selected rule ids against the
+/// loaded corpus.
+#[derive(Debug, Clone)]
+pub struct RuleAlternatives {
+    /// The rule id (uppercased, matching the `adopted` normalization used throughout this
+    /// module).
+    pub rule_id: String,
+    /// Every option this rule defines — id, label, directive, and rationale.
+    pub options: Vec<RuleOptionView>,
+    /// The option currently selected for this project: the project's `chosen_option` for
+    /// this rule if one was made, else the corpus `default_option`, else `None` (nothing
+    /// selected yet — a rule with no default that the architect never chose an alternative
+    /// for). Used both as the "currently selected" marker shown to the model and as the
+    /// fail-soft fallback when the model's answer can't be trusted.
+    pub selected_option_id: Option<String>,
+}
+
+/// One rule's recommendation: which option the AI judged best-fitting for this codebase (or
+/// the operator's forced choice for a targeted rescan), plus the reasoning, plus whether the
+/// raw model answer had to be corrected.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RuleRecommendation {
+    /// The rule id this recommendation is for (uppercased).
+    pub rule_id: String,
+    /// The option id violations were (or will be) reported against.
+    pub recommended_option_id: String,
+    /// 1-3 sentences explaining the pick, grounded in the codebase evidence the model saw.
+    /// For an operator-forced pick this is a short fixed note, not a model explanation.
+    pub recommendation_reasoning: String,
+    /// True when the model's raw `recommended_option_id` was not a real option on this rule
+    /// (or was missing/unparseable) and this entry's `recommended_option_id` is therefore the
+    /// FALLBACK (the project's selected/default option), not what the model actually said.
+    /// Surfaced so the UI can flag "the model's answer was corrected" rather than silently
+    /// presenting a fallback as if it were a genuine recommendation.
+    #[serde(default)]
+    pub hallucinated: bool,
+    /// True when this entry reflects the OPERATOR's explicit choice (via `rescan-alternatives`
+    /// or `accept-alternatives`), not the AI's own pick. The UI's per-rule state machine uses
+    /// this to render "your choice" (locked) instead of "AI recommended".
+    #[serde(default)]
+    pub operator_chosen: bool,
+}
 
 /// Aggregated REAL usage across every LLM call in one audit — all chunk×rule passes, the
 /// resolution round, and the calibration pass. Lets the UI show ACTUAL vs the pre-scan
@@ -442,6 +499,10 @@ pub fn parse_ai_findings(
                 // report can name the real object instead of falling back to a generic
                 // placeholder. Empty (the common case) falls back exactly as before.
                 captures: parse_finding_captures(f),
+                // Set by `audit_repo` in a blanket post-pass once the recommendation (or
+                // operator-forced pick) for this finding's rule is known — see its doc
+                // comment. `None` here is the correct pre-tag state, not a gap.
+                evaluated_option_id: None,
             });
         }
     }
@@ -946,6 +1007,267 @@ fn build_rules_block(selected: &[(String, String)]) -> String {
     }
     b.push('\n');
     b
+}
+
+/// The system prompt for the dedicated alternative-recommendation pass. Separate from
+/// [`audit_system_prompt`] (which checks code against ONE resolved directive per rule) —
+/// this pass's only job is to PICK, per multi-option rule, the option that best fits the
+/// codebase, grounded in real code evidence. It does not report violations; the main audit
+/// passes do that afterward, against whichever option this pass decided (see `audit_repo`).
+pub fn alternatives_system_prompt() -> String {
+    r#"You are a senior software architect helping a team decide, for THIS codebase, which
+alternative implementation of each adopted rule best matches its existing (or best-practice)
+pattern.
+
+The user message lists one or more rules. Each rule shows EVERY alternative option it offers
+— an option id, a human label, the concrete directive that option codifies, and the rationale
+for it — plus a marker for whichever option is CURRENTLY selected (the project's own choice,
+the corpus default, or "none selected" when neither exists).
+
+For EACH rule listed, pick EXACTLY ONE option id: the one that best matches how this codebase
+already does things, or — if the codebase is inconsistent or does not do the thing at all —
+the one that is the best-practice fit given the stack and code you can see. You are free to
+keep the currently-selected option, or pick a different one; ground the choice in the actual
+code, not a coin flip. Cite what you observed in the reasoning.
+
+Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
+{
+  "recommendations": [
+    {
+      "rule_id": "EXACT rule id as given, copied verbatim",
+      "recommended_option_id": "EXACT option id from THAT rule's own list, copied verbatim",
+      "recommendation_reasoning": "1-3 sentences grounded in the codebase evidence you saw"
+    }
+  ]
+}
+Include exactly one entry per rule listed, even when you are keeping the currently-selected
+option. NEVER invent an option id that was not listed for that specific rule."#
+        .to_string()
+}
+
+/// The per-rule "every option, plus which is currently selected" block the recommendation
+/// pass reads. Shared shape with what a human reviewer would see in the rule-detail modal —
+/// id, label, directive, why — so the model's grounds for picking match what an architect
+/// would weigh.
+fn build_alternatives_block(alternatives: &[RuleAlternatives]) -> String {
+    let mut b = String::from("Rules to decide (pick ONE option id per rule):\n\n");
+    for a in alternatives {
+        b.push_str(&format!("- [{}]\n", a.rule_id));
+        for o in &a.options {
+            let marker = if a.selected_option_id.as_deref() == Some(o.id.as_str()) {
+                " [CURRENTLY SELECTED]"
+            } else {
+                ""
+            };
+            b.push_str(&format!(
+                "    * option id \"{}\" — {}: {}{}\n      why: {}\n",
+                o.id, o.label, o.directive, marker, o.why
+            ));
+        }
+        if a.selected_option_id.is_none() {
+            b.push_str("    (no option currently selected for this rule)\n");
+        }
+        b.push('\n');
+    }
+    b
+}
+
+/// Fail-soft recommendations for every listed rule, all pointing at the currently-selected
+/// (or, absent that, the first-listed) option and flagged `hallucinated` so the caller can
+/// tell this was a fallback rather than a genuine model answer. Used when the model's raw
+/// output for the recommendation pass could not be parsed at all.
+fn fallback_recommendations(alternatives: &[RuleAlternatives], reason: &str) -> Vec<RuleRecommendation> {
+    alternatives
+        .iter()
+        .filter_map(|a| {
+            let id = a
+                .selected_option_id
+                .clone()
+                .or_else(|| a.options.first().map(|o| o.id.clone()))?;
+            Some(RuleRecommendation {
+                rule_id: a.rule_id.clone(),
+                recommended_option_id: id,
+                recommendation_reasoning: reason.to_string(),
+                hallucinated: true,
+                operator_chosen: false,
+            })
+        })
+        .collect()
+}
+
+/// Parse the recommendation pass's raw model output into one [`RuleRecommendation`] per
+/// listed rule. Robust by construction: EVERY rule in `alternatives` gets exactly one
+/// output entry, whether or not the model answered it validly —
+/// - malformed/unparseable JSON -> every rule falls back (see [`fallback_recommendations`]);
+/// - a rule missing from the model's `recommendations` array -> that rule falls back;
+/// - a `recommended_option_id` that is not a real option id on that specific rule (a
+///   hallucination) -> that rule falls back, flagged `hallucinated: true`;
+/// - otherwise the model's pick is used as-is, `hallucinated: false`.
+///
+/// The fallback target is the rule's OWN `selected_option_id` (the project's chosen option,
+/// else the corpus default) — never a hardcoded/arbitrary id — so a fallback still resolves
+/// to something the architect already considered reasonable.
+pub fn parse_alternative_recommendations(
+    raw: &str,
+    alternatives: &[RuleAlternatives],
+) -> Vec<RuleRecommendation> {
+    let Some(json) = extract_json_object(raw) else {
+        return fallback_recommendations(
+            alternatives,
+            "The model returned no parseable JSON for the recommendation pass; keeping the \
+             currently selected option.",
+        );
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return fallback_recommendations(
+            alternatives,
+            "The model returned malformed JSON for the recommendation pass; keeping the \
+             currently selected option.",
+        );
+    };
+    let arr = v["recommendations"].as_array().cloned().unwrap_or_default();
+    let mut out = Vec::with_capacity(alternatives.len());
+    for a in alternatives {
+        let entry = arr
+            .iter()
+            .find(|r| r["rule_id"].as_str().map(str::trim) == Some(a.rule_id.as_str()));
+        let real_ids: std::collections::HashSet<&str> =
+            a.options.iter().map(|o| o.id.as_str()).collect();
+        let fallback_id = || {
+            a.selected_option_id
+                .clone()
+                .or_else(|| a.options.first().map(|o| o.id.clone()))
+                .unwrap_or_default()
+        };
+        let rec = match entry {
+            Some(r) => {
+                let raw_id = r["recommended_option_id"].as_str().unwrap_or("").trim().to_string();
+                let reasoning = r["recommendation_reasoning"]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if !raw_id.is_empty() && real_ids.contains(raw_id.as_str()) {
+                    RuleRecommendation {
+                        rule_id: a.rule_id.clone(),
+                        recommended_option_id: raw_id,
+                        recommendation_reasoning: reasoning,
+                        hallucinated: false,
+                        operator_chosen: false,
+                    }
+                } else if raw_id.is_empty() {
+                    RuleRecommendation {
+                        rule_id: a.rule_id.clone(),
+                        recommended_option_id: fallback_id(),
+                        recommendation_reasoning: "The model did not return a valid option id \
+                             for this rule; keeping the currently selected option."
+                            .to_string(),
+                        hallucinated: true,
+                        operator_chosen: false,
+                    }
+                } else {
+                    RuleRecommendation {
+                        rule_id: a.rule_id.clone(),
+                        recommended_option_id: fallback_id(),
+                        recommendation_reasoning: format!(
+                            "The model returned option id \"{raw_id}\", which is not one of \
+                             this rule's real alternatives; keeping the currently selected \
+                             option."
+                        ),
+                        hallucinated: true,
+                        operator_chosen: false,
+                    }
+                }
+            }
+            None => RuleRecommendation {
+                rule_id: a.rule_id.clone(),
+                recommended_option_id: fallback_id(),
+                recommendation_reasoning: "The model did not return a recommendation for this \
+                     rule; keeping the currently selected option."
+                    .to_string(),
+                hallucinated: true,
+                operator_chosen: false,
+            },
+        };
+        out.push(rec);
+    }
+    out
+}
+
+/// Run the dedicated recommendation pass: ONE LLM call deciding `recommended_option_id` +
+/// `recommendation_reasoning` for every rule in `alternatives`, grounded in the repo map plus
+/// a representative code digest. Deciding this ONCE (rather than once per file-chunk, as the
+/// violation passes do) keeps every later violation-check for a given rule coherent — they
+/// all check against the SAME option (see the design doc's "violations are always relative to
+/// ONE chosen alternative" coherence principle) — and avoids re-litigating the same pick N
+/// times at N times the cost.
+///
+/// KNOWN LIMIT: for a repo too large for one chunk, this pass sees only the FIRST size-capped
+/// chunk's digest (plus the whole-repo map, which is cheap cross-file symbol context but not
+/// full bodies). This is the same chunk-0 tradeoff the existing advisory ("flag novel issues")
+/// pass already makes for the identical reason — see `run_passes`'s `bi == 0` gating. A rule
+/// whose defining pattern lives entirely in a later chunk may get a less-informed pick; this
+/// is a disclosed limitation, not a silent one.
+///
+/// Returns `Ok(vec![])` when `alternatives` is empty (nothing to decide — no call made).
+#[allow(clippy::too_many_arguments)]
+async fn recommend_alternatives(
+    llm: &dyn LlmPort,
+    repo: &str,
+    files: &[(String, String)],
+    map_files: &[(String, String)],
+    alternatives: &[RuleAlternatives],
+    audit_model: Option<&str>,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
+    meter: Option<&UsageMeter>,
+) -> anyhow::Result<Vec<RuleRecommendation>> {
+    if alternatives.is_empty() {
+        return Ok(Vec::new());
+    }
+    let repo_map = build_repo_map(map_files);
+    let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
+    let digest = chunks.first().map(|c| build_digest(c)).unwrap_or_default();
+    let prompt = format!(
+        "Repository: {repo}\n\n{repo_map}{digest}\n\n{}",
+        build_alternatives_block(alternatives)
+    );
+    let session = format!("audit-{repo}-alternatives");
+    if let Some((store, key)) = feedback {
+        store.register(
+            key,
+            crate::transcript::AgentTranscript {
+                session_id: session.clone(),
+                role: format!(
+                    "recommending {} alternative(s) — {repo}",
+                    alternatives.len()
+                ),
+                prompt: prompt.clone(),
+                output: String::new(),
+                status: "running".to_string(),
+            },
+        );
+    }
+    let mut req = LlmRequest::new(prompt).with_system(alternatives_system_prompt()).with_max_tokens(4096);
+    if let Some(m) = audit_model {
+        req = req.with_model(m.to_string());
+    }
+    let resp_result = if let Some((store, key)) = feedback {
+        let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
+        llm.complete_streaming(req, &mut on_delta).await
+    } else {
+        let cap = total_backstop();
+        tokio::time::timeout(cap, llm.complete(req))
+            .await
+            .map_err(|_| anyhow::anyhow!("LLM call exceeded the {}s backstop", cap.as_secs()))?
+    };
+    if let Some((store, key)) = feedback {
+        store.set_status(key, &session, if resp_result.is_ok() { "done" } else { "blocked" });
+    }
+    let resp = resp_result?;
+    if let Some(m) = meter {
+        m.record(&resp);
+    }
+    Ok(parse_alternative_recommendations(&resp.text, alternatives))
 }
 
 /// Partition `files` into contiguous chunks each whose RAW size is at most `budget` bytes,
@@ -2435,6 +2757,16 @@ pub async fn audit_repo(
     repo: &str,
     files: &[(String, String)],
     selected: &[(String, String)],
+    // MULTI-OPTION semantic rules present in `selected` for this repo (built by the caller
+    // from the loaded corpus — see `onboard::build_rule_alternatives`). Empty when this
+    // project/repo has no multi-option semantic rules selected, or when the caller is a
+    // context (deep-tier, resolution round) that doesn't apply this feature.
+    alternatives: &[RuleAlternatives],
+    // Operator-forced picks for a targeted `rescan-alternatives` call: rule id (uppercased)
+    // -> the option id the operator chose. A rule id present here SKIPS the model
+    // recommendation pass entirely (the operator already decided) and its directive is
+    // rewritten straight to the forced option's directive. Empty for a normal full scan.
+    forced: &std::collections::HashMap<String, String>,
     model: Option<&str>,
     calibration_model: Option<&str>,
     mode: ScanMode,
@@ -2446,9 +2778,9 @@ pub async fn audit_repo(
     // incremental scan `files` is only the CHANGED bodies, but the repo map should still cover
     // the WHOLE repo so cross-file rules keep their architectural view. `None` → use `files`.
     map_files: Option<&[(String, String)]>,
-) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>)> {
+) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<RuleRecommendation>)> {
     if files.is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new()));
     }
     // Cross-file context for every chunk (which dirs are which layer, where types live). On an
     // incremental scan this is built from the whole repo, not just the changed files.
@@ -2486,22 +2818,117 @@ pub async fn audit_repo(
         })
         .or_else(|| audit_model.clone());
 
+    // ── Multi-option semantic rules: decide (or accept the operator's forced choice of) ONE
+    // option per rule, then REWRITE that rule's entry in `effective_selected` to the decided
+    // option's directive. Downstream (routing, chunking, the per-chunk violation passes) is
+    // then COMPLETELY UNCHANGED from the pre-existing single-directive pipeline — every chunk
+    // checks the SAME directive for a given rule, which is what guarantees "violations are
+    // always relative to ONE chosen alternative" (the design doc's coherence principle) without
+    // any cross-chunk coordination. See `recommend_alternatives`'s doc comment for the chunk-0
+    // grounding tradeoff.
+    let mut effective_selected: Vec<(String, String)> = selected.to_vec();
+    let mut recommendations: Vec<RuleRecommendation> = Vec::new();
+    if !alternatives.is_empty() {
+        let (forced_alts, ask_alts): (Vec<RuleAlternatives>, Vec<RuleAlternatives>) = alternatives
+            .iter()
+            .cloned()
+            .partition(|a| forced.contains_key(&a.rule_id));
+        // Operator-forced picks: no model call, validate the forced id is real, fall back to
+        // the currently-selected/default option (flagged) when it is not.
+        for a in &forced_alts {
+            let requested_id = forced.get(&a.rule_id).cloned().unwrap_or_default();
+            let (final_id, hallucinated) = if a.options.iter().any(|o| o.id == requested_id) {
+                (requested_id, false)
+            } else {
+                let fb = a
+                    .selected_option_id
+                    .clone()
+                    .or_else(|| a.options.first().map(|o| o.id.clone()))
+                    .unwrap_or_default();
+                (fb, true)
+            };
+            recommendations.push(RuleRecommendation {
+                rule_id: a.rule_id.clone(),
+                recommended_option_id: final_id.clone(),
+                recommendation_reasoning: if hallucinated {
+                    "The requested option id is not valid for this rule; kept the previously \
+                     selected option instead."
+                        .to_string()
+                } else {
+                    "Operator-selected option for a targeted rescan.".to_string()
+                },
+                hallucinated,
+                operator_chosen: true,
+            });
+            if let Some(opt) = a.options.iter().find(|o| o.id == final_id) {
+                if let Some(entry) = effective_selected
+                    .iter_mut()
+                    .find(|(id, _)| id.eq_ignore_ascii_case(&a.rule_id))
+                {
+                    entry.1 = opt.directive.clone();
+                }
+            }
+        }
+        // Everything else: ask the model to recommend, in ONE dedicated pass covering every
+        // rule left. Fail-soft — a failed recommendation pass leaves those rules at their
+        // pre-existing (project-selected/default) directive, exactly today's behavior, rather
+        // than aborting the whole audit.
+        if !ask_alts.is_empty() {
+            match recommend_alternatives(
+                llm,
+                repo,
+                files,
+                map_files.unwrap_or(files),
+                &ask_alts,
+                audit_model.as_deref(),
+                feedback,
+                meter,
+            )
+            .await
+            {
+                Ok(recs) => {
+                    for rec in &recs {
+                        let Some(a) = ask_alts.iter().find(|a| a.rule_id == rec.rule_id) else {
+                            continue;
+                        };
+                        if let Some(opt) =
+                            a.options.iter().find(|o| o.id == rec.recommended_option_id)
+                        {
+                            if let Some(entry) = effective_selected
+                                .iter_mut()
+                                .find(|(id, _)| id.eq_ignore_ascii_case(&a.rule_id))
+                            {
+                                entry.1 = opt.directive.clone();
+                            }
+                        }
+                    }
+                    recommendations.extend(recs);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[camerata-server] alternative-recommendation pass failed for {repo}: {e}"
+                    );
+                }
+            }
+        }
+    }
+
     // Mode is the speed/scale knob: Sequential = 1 call per chunk with all rules; Parallel =
     // rule-batches × file-chunks run concurrently; Batch = one Anthropic Message Batch at
     // 50% discount, reassembled by custom_id.
     let (concurrency, batch_size) = mode.tuning();
 
     // ── Rule-routing plan ───────────────────────────────────────────────────────────
-    // Group `selected` rules by scope so each language group only audits its own files.
-    // The plan is computed even for Batch mode (so the savings estimate is available),
+    // Group `effective_selected` rules by scope so each language group only audits its own
+    // files. The plan is computed even for Batch mode (so the savings estimate is available),
     // but the Batch execution path does not yet apply the routing (see doc comment above).
-    let route_plan = crate::scan_routing::plan_routes(selected, files);
+    let route_plan = crate::scan_routing::plan_routes(&effective_selected, files);
     if route_plan.saved_fraction() > 0.0 {
         eprintln!(
             "[camerata-server] rule-routing: {:.0}% input reduction for {repo} ({} groups, {} rules routed)",
             route_plan.saved_fraction() * 100.0,
             route_plan.groups.len(),
-            selected.len(),
+            effective_selected.len(),
         );
     }
 
@@ -2514,10 +2941,10 @@ pub async fn audit_repo(
         // run_passes_batch (it knows the full item count before any network I/O).
         // NOTE: the Batch path audits every rule against every file (no per-rule routing yet).
         let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
-        let batches: Vec<&[(String, String)]> = if selected.is_empty() {
-            vec![selected]
+        let batches: Vec<&[(String, String)]> = if effective_selected.is_empty() {
+            vec![&effective_selected]
         } else {
-            selected.chunks(batch_size.max(1)).collect()
+            effective_selected.chunks(batch_size.max(1)).collect()
         };
         // The Message-Batches path is concrete-only (API-key-gated; `submit_batch` et al.
         // are not part of the minimal `LlmPort` seam), so recover the concrete `&Llm` via
@@ -2558,7 +2985,7 @@ pub async fn audit_repo(
             llm,
             repo,
             files,
-            selected,
+            &effective_selected,
             &route_plan,
             &repo_map,
             &adopted,
@@ -2597,10 +3024,10 @@ pub async fn audit_repo(
         .cloned()
         .collect();
     if !resolution.is_empty() {
-        let batches_res: Vec<&[(String, String)]> = if selected.is_empty() {
-            vec![selected]
+        let batches_res: Vec<&[(String, String)]> = if effective_selected.is_empty() {
+            vec![&effective_selected]
         } else {
-            selected.chunks(batch_size.max(1)).collect()
+            effective_selected.chunks(batch_size.max(1)).collect()
         };
         let res_chunks = chunk_files(&resolution, CHUNK_DIGEST_CHARS);
         // BUG-4 fix: in Batch mode, run_passes_batch already called add_total with the
@@ -2725,7 +3152,24 @@ pub async fn audit_repo(
         }
         out
     };
-    Ok((verified, all_proposed))
+    // Tag every finding under a multi-option rule with the option it was actually judged
+    // against — the report layer (`report_export::resolve_fix`) reads this so the Fix text
+    // matches the evaluated option, never a stale default. Every finding for a given rule_id
+    // in THIS response was checked against the SAME directive (the rewrite above), so this is
+    // a safe blanket tag, not a per-finding guess.
+    let mut verified = verified;
+    if !recommendations.is_empty() {
+        let by_rule: std::collections::HashMap<&str, &str> = recommendations
+            .iter()
+            .map(|r| (r.rule_id.as_str(), r.recommended_option_id.as_str()))
+            .collect();
+        for f in verified.iter_mut() {
+            if let Some(id) = by_rule.get(f.rule_id.to_ascii_uppercase().as_str()) {
+                f.evaluated_option_id = Some((*id).to_string());
+            }
+        }
+    }
+    Ok((verified, all_proposed, recommendations))
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -3636,6 +4080,7 @@ mod tests {
             category: None,
             located: true,
             captures: Default::default(),
+            evaluated_option_id: None,
         }
     }
 
@@ -4253,6 +4698,7 @@ mod tests {
             category: None,
             located: true,
             captures: Default::default(),
+            evaluated_option_id: None,
         }
     }
 
@@ -4961,6 +5407,7 @@ mod tests {
             category: None,
             located: true,
             captures: Default::default(),
+            evaluated_option_id: None,
         };
         // Three AI- findings with equal severity — earliest (index 0) must win.
         let group = vec![
@@ -5500,6 +5947,8 @@ mod tests {
             "me/api",
             &files,
             &selected,
+            &[],                    // alternatives (none — no multi-option rules in this test)
+            &std::collections::HashMap::new(), // forced
             None,                  // model
             None,                  // calibration model
             ScanMode::Parallel,    // real-time path (the "both" AI-review path)
@@ -5538,6 +5987,8 @@ mod tests {
             "me/api",
             &files,
             &selected,
+            &[],
+            &std::collections::HashMap::new(),
             None,
             None,
             ScanMode::Parallel,
@@ -5571,11 +6022,13 @@ mod tests {
             "ARCH-NO-DIRECT-DB-1".to_string(),
             "Controllers must not call the database directly.".to_string(),
         )];
-        let (findings, _proposed) = audit_repo(
+        let (findings, _proposed, _recs) = audit_repo(
             &llm,
             "me/api",
             &files,
             &selected,
+            &[],
+            &std::collections::HashMap::new(),
             None,
             None,
             ScanMode::Parallel,
@@ -5592,6 +6045,357 @@ mod tests {
             findings.iter().any(|f| f.rule_id == "ARCH-NO-DIRECT-DB-1"),
             "stub-served finding must survive the audit pipeline: {findings:?}"
         );
+    }
+
+    // ---- Audit-integrated alternative recommendation (2026-09-22 design) ----------------
+
+    fn two_option_alternatives(rule_id: &str, selected: Option<&str>) -> RuleAlternatives {
+        RuleAlternatives {
+            rule_id: rule_id.to_string(),
+            options: vec![
+                RuleOptionView {
+                    id: "opt-a".to_string(),
+                    label: "Option A".to_string(),
+                    directive: "Do it the A way.".to_string(),
+                    why: "A is simple.".to_string(),
+                },
+                RuleOptionView {
+                    id: "opt-b".to_string(),
+                    label: "Option B".to_string(),
+                    directive: "Do it the B way.".to_string(),
+                    why: "B is scalable.".to_string(),
+                },
+            ],
+            selected_option_id: selected.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn build_alternatives_block_includes_every_option_and_marks_the_selected_one() {
+        let alt = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
+        let block = build_alternatives_block(&[alt]);
+        assert!(block.contains("MULTI-RULE-1"));
+        assert!(block.contains("opt-a"), "every option id must be present: {block}");
+        assert!(block.contains("opt-b"), "every option id must be present: {block}");
+        assert!(block.contains("Do it the A way."), "every directive must be present: {block}");
+        assert!(block.contains("Do it the B way."), "every directive must be present: {block}");
+        assert!(block.contains("why: A is simple."), "every rationale must be present: {block}");
+        // The marker sits on the SELECTED option's line, not the other one.
+        let a_line = block.lines().find(|l| l.contains("opt-a")).unwrap();
+        let b_line = block.lines().find(|l| l.contains("opt-b")).unwrap();
+        assert!(a_line.contains("CURRENTLY SELECTED"), "selected option must be marked: {a_line}");
+        assert!(!b_line.contains("CURRENTLY SELECTED"), "unselected option must not be marked: {b_line}");
+    }
+
+    #[test]
+    fn build_alternatives_block_marks_none_selected_when_nothing_is_chosen() {
+        let alt = two_option_alternatives("MULTI-RULE-1", None);
+        let block = build_alternatives_block(&[alt]);
+        assert!(
+            block.contains("no option currently selected"),
+            "must state explicitly that nothing is selected: {block}"
+        );
+        assert!(!block.contains("CURRENTLY SELECTED"));
+    }
+
+    #[test]
+    fn parse_alternative_recommendations_accepts_a_real_option_id() {
+        let alt = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
+        let raw = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","recommended_option_id":"opt-b","recommendation_reasoning":"the codebase already does it the B way"}]}"#;
+        let recs = parse_alternative_recommendations(raw, &[alt]);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].rule_id, "MULTI-RULE-1");
+        assert_eq!(recs[0].recommended_option_id, "opt-b");
+        assert_eq!(recs[0].recommendation_reasoning, "the codebase already does it the B way");
+        assert!(!recs[0].hallucinated);
+        assert!(!recs[0].operator_chosen);
+    }
+
+    #[test]
+    fn parse_alternative_recommendations_rejects_a_hallucinated_option_id() {
+        let alt = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
+        let raw = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","recommended_option_id":"opt-does-not-exist","recommendation_reasoning":"bogus"}]}"#;
+        let recs = parse_alternative_recommendations(raw, &[alt]);
+        assert_eq!(recs.len(), 1);
+        // Falls back to the currently-selected option, never the hallucinated id.
+        assert_eq!(recs[0].recommended_option_id, "opt-a");
+        assert!(recs[0].hallucinated, "a non-real option id must be flagged hallucinated");
+        assert!(
+            recs[0].recommendation_reasoning.contains("opt-does-not-exist"),
+            "the correction note should name the bogus id: {}",
+            recs[0].recommendation_reasoning
+        );
+    }
+
+    #[test]
+    fn parse_alternative_recommendations_falls_back_to_the_first_option_when_nothing_is_selected() {
+        let alt = two_option_alternatives("MULTI-RULE-1", None);
+        let raw = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","recommended_option_id":"nonsense","recommendation_reasoning":""}]}"#;
+        let recs = parse_alternative_recommendations(raw, &[alt]);
+        assert_eq!(recs[0].recommended_option_id, "opt-a", "first option is the last-resort fallback");
+        assert!(recs[0].hallucinated);
+    }
+
+    #[test]
+    fn parse_alternative_recommendations_falls_back_when_a_rule_is_missing_from_the_response() {
+        let alts = vec![
+            two_option_alternatives("MULTI-RULE-1", Some("opt-a")),
+            two_option_alternatives("MULTI-RULE-2", Some("opt-b")),
+        ];
+        // The model only answered rule 1 — rule 2 must still get a fallback entry, never be
+        // silently dropped (every listed rule gets exactly one output entry).
+        let raw = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","recommended_option_id":"opt-a","recommendation_reasoning":"fine as-is"}]}"#;
+        let recs = parse_alternative_recommendations(raw, &alts);
+        assert_eq!(recs.len(), 2, "every listed rule must get exactly one entry");
+        let r2 = recs.iter().find(|r| r.rule_id == "MULTI-RULE-2").unwrap();
+        assert_eq!(r2.recommended_option_id, "opt-b", "falls back to its own selected option");
+        assert!(r2.hallucinated);
+    }
+
+    #[test]
+    fn parse_alternative_recommendations_degrades_on_malformed_json_without_panicking() {
+        let alts = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
+        for raw in ["not json at all", "", "{ not valid json ]"] {
+            let recs = parse_alternative_recommendations(raw, &alts);
+            assert_eq!(recs.len(), 1);
+            assert_eq!(recs[0].recommended_option_id, "opt-a");
+            assert!(recs[0].hallucinated);
+        }
+    }
+
+    /// HAPPY PATH end-to-end: `audit_repo` fed one multi-option rule (via `alternatives`)
+    /// recommends an option AND tags the finding under that rule with `evaluated_option_id`
+    /// — one scan, two outputs per rule, per the design doc. The `StubCompleter` serves the
+    /// SAME canned JSON to every call (the recommendation pass, the violation pass, and the
+    /// no-op calibration pass); the response carries both a `recommendations` array (read by
+    /// the recommendation pass) and a `findings` array (read by the violation pass) — each
+    /// pass reads only the key it cares about, so one canned response drives the whole
+    /// pipeline deterministically.
+    #[tokio::test]
+    async fn audit_repo_tags_findings_with_the_recommended_option_for_a_multi_option_rule() {
+        let canned = r#"{
+            "recommendations": [
+                {"rule_id": "MULTI-RULE-1", "recommended_option_id": "opt-b", "recommendation_reasoning": "the repo already does it the B way"}
+            ],
+            "findings": [
+                {"rule": "MULTI-RULE-1", "severity": "medium", "path": "src/lib.rs", "code": "old pattern here", "title": "does it the A way", "detail": "should be B"}
+            ],
+            "proposed_rules": []
+        }"#;
+        let llm = StubCompleter { text: canned.to_string() };
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "fn handler() { old pattern here; }\n".to_string(),
+        )];
+        let selected = vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
+        let alternatives = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
+        let (findings, _proposed, recs) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            &alternatives,
+            &std::collections::HashMap::new(), // forced — none, this is the "ask the model" path
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("stub completer never errors");
+
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].rule_id, "MULTI-RULE-1");
+        assert_eq!(recs[0].recommended_option_id, "opt-b");
+        assert!(!recs[0].operator_chosen);
+
+        let f = findings
+            .iter()
+            .find(|f| f.rule_id == "MULTI-RULE-1")
+            .expect("the stub's canned finding must survive the pipeline");
+        assert_eq!(
+            f.evaluated_option_id.as_deref(),
+            Some("opt-b"),
+            "the finding must be tagged with the option it was actually judged under: {f:?}"
+        );
+    }
+
+    /// FORCED (operator-chosen) mode, the `rescan-alternatives` path: when the rule id is
+    /// present in `forced`, `audit_repo` does NOT ask the model to recommend — it rewrites the
+    /// rule's directive straight to the forced option and tags findings with that id, marking
+    /// the recommendation `operator_chosen: true`. The stub's response has NO `recommendations`
+    /// key at all, proving the recommendation pass genuinely never ran (there is nothing for it
+    /// to parse) — if it had run, the fallback path would still produce a result, so the
+    /// stronger assertion here is `operator_chosen: true` with the EXACT forced id, unmodified.
+    #[tokio::test]
+    async fn audit_repo_forced_mode_skips_recommendation_and_tags_the_operator_choice() {
+        let canned = r#"{
+            "findings": [
+                {"rule": "MULTI-RULE-1", "severity": "medium", "path": "src/lib.rs", "code": "old pattern here", "title": "does it the A way", "detail": "should be B"}
+            ],
+            "proposed_rules": []
+        }"#;
+        let llm = StubCompleter { text: canned.to_string() };
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "fn handler() { old pattern here; }\n".to_string(),
+        )];
+        let selected = vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
+        let alternatives = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
+        let mut forced = std::collections::HashMap::new();
+        forced.insert("MULTI-RULE-1".to_string(), "opt-b".to_string());
+
+        let (findings, _proposed, recs) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            &alternatives,
+            &forced,
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("stub completer never errors");
+
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].recommended_option_id, "opt-b");
+        assert!(recs[0].operator_chosen, "a forced pick must be marked operator_chosen");
+        assert!(!recs[0].hallucinated, "a real forced option id is not a hallucination");
+
+        let f = findings.iter().find(|f| f.rule_id == "MULTI-RULE-1").unwrap();
+        assert_eq!(f.evaluated_option_id.as_deref(), Some("opt-b"));
+    }
+
+    /// A forced option id that is NOT real on the rule is rejected (never silently trusted) —
+    /// falls back to the rule's currently-selected option and is flagged `hallucinated`.
+    #[tokio::test]
+    async fn audit_repo_forced_mode_rejects_an_invalid_forced_option_id() {
+        let canned = r#"{"findings": [], "proposed_rules": []}"#;
+        let llm = StubCompleter { text: canned.to_string() };
+        let files = vec![("src/lib.rs".to_string(), "fn handler() {}\n".to_string())];
+        let selected = vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
+        let alternatives = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
+        let mut forced = std::collections::HashMap::new();
+        forced.insert("MULTI-RULE-1".to_string(), "opt-does-not-exist".to_string());
+
+        let (_findings, _proposed, recs) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            &alternatives,
+            &forced,
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("stub completer never errors");
+
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].recommended_option_id, "opt-a", "falls back to the selected option");
+        assert!(recs[0].hallucinated);
+        assert!(recs[0].operator_chosen);
+    }
+
+    /// e2e-style (design doc §Testing): a scan over a fixture with TWO multi-option rules —
+    /// one WITH a currently-selected/default option, one WITHOUT (the "no default, architect
+    /// never chose" case the removed gate used to block on) — yields a recommendation AND
+    /// violations-under-the-recommended-option for BOTH, in one pass. Proves the no-default
+    /// rule is handled identically to the with-default one: it simply gets a recommendation
+    /// instead of blocking.
+    #[tokio::test]
+    async fn audit_repo_e2e_two_multi_option_rules_one_with_default_one_without() {
+        let canned = r#"{
+            "recommendations": [
+                {"rule_id": "MULTI-WITH-DEFAULT-1", "recommended_option_id": "opt-a", "recommendation_reasoning": "matches existing pattern"},
+                {"rule_id": "MULTI-NO-DEFAULT-1", "recommended_option_id": "opt-b", "recommendation_reasoning": "best fit despite no prior default"}
+            ],
+            "findings": [
+                {"rule": "MULTI-WITH-DEFAULT-1", "severity": "medium", "path": "src/lib.rs", "line": 2, "code": "thing one;", "title": "t1", "detail": "d1"},
+                {"rule": "MULTI-NO-DEFAULT-1", "severity": "low", "path": "src/lib.rs", "line": 3, "code": "thing two;", "title": "t2", "detail": "d2"}
+            ],
+            "proposed_rules": []
+        }"#;
+        let llm = StubCompleter { text: canned.to_string() };
+        // The two findings sit on DIFFERENT lines so the cross-rule location-merge pass
+        // (`merge_by_location`, which fuses same-(path,line) findings into one row) doesn't
+        // collapse them into a single finding — this test wants two distinct rows to assert
+        // each one's own `evaluated_option_id` independently.
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "fn handler() {\n    thing one;\n    thing two;\n}\n".to_string(),
+        )];
+        let selected = vec![
+            ("MULTI-WITH-DEFAULT-1".to_string(), "Do it the A way.".to_string()),
+            ("MULTI-NO-DEFAULT-1".to_string(), "Do it the A way.".to_string()),
+        ];
+        let alternatives = vec![
+            // Has a currently-selected option (the corpus default, in the real pipeline).
+            two_option_alternatives("MULTI-WITH-DEFAULT-1", Some("opt-a")),
+            // No default and never chosen — `selected_option_id: None` is exactly the state
+            // the removed "must choose an alternative" gate used to block on.
+            two_option_alternatives("MULTI-NO-DEFAULT-1", None),
+        ];
+        let (findings, _proposed, recs) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            &alternatives,
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("no-default rule must not block or error the scan");
+
+        assert_eq!(recs.len(), 2, "both rules must get a recommendation");
+        let with_default = recs.iter().find(|r| r.rule_id == "MULTI-WITH-DEFAULT-1").unwrap();
+        let no_default = recs.iter().find(|r| r.rule_id == "MULTI-NO-DEFAULT-1").unwrap();
+        assert_eq!(with_default.recommended_option_id, "opt-a");
+        assert_eq!(
+            no_default.recommended_option_id, "opt-b",
+            "a rule with no prior default must still get a real recommendation, not block"
+        );
+        assert!(!with_default.hallucinated);
+        assert!(!no_default.hallucinated);
+
+        for (rule_id, expected_option) in
+            [("MULTI-WITH-DEFAULT-1", "opt-a"), ("MULTI-NO-DEFAULT-1", "opt-b")]
+        {
+            let f = findings
+                .iter()
+                .find(|f| f.rule_id == rule_id)
+                .unwrap_or_else(|| panic!("missing finding for {rule_id}: {findings:?}"));
+            assert_eq!(
+                f.evaluated_option_id.as_deref(),
+                Some(expected_option),
+                "{rule_id}'s finding must be tagged under its recommended option"
+            );
+        }
     }
 
     // ---- Semantic dedup (design §1d) ----------------------------------------------------

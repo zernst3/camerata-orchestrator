@@ -29,6 +29,7 @@ pub fn build_report(
         deep: None,
         coverage_notes: Vec::new(),
         provenance: ScanProvenance::default(),
+        recommendations: std::collections::HashMap::new(),
     }
 }
 

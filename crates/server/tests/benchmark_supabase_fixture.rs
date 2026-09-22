@@ -194,6 +194,8 @@ async fn run_deterministic_scan(dir: &Path) -> onboard::ScanReport {
         true,  // run_deterministic — the floor AND the architectural checkers both run
         None,  // ledger
         camerata_server::llm::BackendResolution::Api, // backend gate: not under test here
+        None, // corpus
+        &std::collections::HashMap::new(), // chosen_options
     )
     .await;
     report
@@ -222,6 +224,8 @@ async fn run_full_scan(dir: &Path) -> onboard::ScanReport {
         true,  // run_deterministic — floor + architectural checkers also run
         None,  // ledger
         camerata_server::llm::BackendResolution::Api, // backend gate: real-spend test, always allowed
+        None, // corpus
+        &std::collections::HashMap::new(), // chosen_options
     )
     .await;
     report

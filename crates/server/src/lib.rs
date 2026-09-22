@@ -985,6 +985,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/:id/cli-active", post(set_cli_active_handler))
         // Stall-detection thresholds: per-project idle timeout config.
         .route("/api/projects/:id/stall-thresholds", post(set_stall_thresholds_handler))
+        // Audit-integrated alternative recommendation (docs/design/2026-09-22_audit-
+        // integrated-alternatives.md): batched targeted rescan of operator-overridden
+        // multi-option rules, and persisting the current per-rule selection.
+        .route("/api/projects/:id/rescan-alternatives", post(rescan_alternatives_handler))
+        .route("/api/projects/:id/accept-alternatives", post(accept_alternatives_handler))
         // L3 agentic code-review gate: per-project opt-in (R7).
         .route("/api/projects/:id/l3-review", post(set_l3_review_handler))
         // Work hierarchy schema (design-page work-type graph): read (GET) + replace (POST).
@@ -4150,6 +4155,326 @@ async fn set_stall_thresholds_handler(
     }
 }
 
+// ── Audit-integrated alternative recommendation ───────────────────────────────
+// (docs/design/2026-09-22_audit-integrated-alternatives.md)
+
+/// One rule the operator wants forced to a specific option for a targeted rescan.
+#[derive(serde::Deserialize)]
+struct AlternativeOverride {
+    rule_id: String,
+    chosen_option_id: String,
+}
+
+/// Body for `POST /api/projects/:id/rescan-alternatives`.
+#[derive(serde::Deserialize)]
+struct RescanAlternativesReq {
+    #[serde(default)]
+    overrides: Vec<AlternativeOverride>,
+}
+
+/// `POST /api/projects/:id/rescan-alternatives` — re-run the AI audit for ONLY the given
+/// rules, FORCED to the operator's chosen option each (never asking the model to re-pick —
+/// the operator already decided). Returns the updated findings for exactly those rules,
+/// tagged `evaluated_option_id = chosen_option_id`, so the caller can merge them in place
+/// over the existing findings table.
+///
+/// Validates every `rule_id` resolves to a real multi-option semantic rule in the corpus and
+/// every `chosen_option_id` is a real option on it BEFORE any model call — an invalid
+/// override is reported in `message` and simply excluded from the batch (the valid ones still
+/// run). Routes through the SAME compliance-safety gate as the main audit
+/// (`resolve_backend_for_project` -> `Blocked` refuses with the message, `CliFallbackWarn`
+/// proceeds on the CLI with a loud warning folded into `message`) and builds its `Llm` via
+/// `from_env_with_ledger`, so this endpoint's spend folds into the same cumulative ledger as
+/// every other model call.
+///
+/// Also updates this project's stored `last_scan` in place: the rescanned rules' findings
+/// replace their previous entries and `recommendations` is updated for those rule ids
+/// (marked `operator_chosen: true`) — so an immediate `accept-alternatives` call sees the
+/// operator's override without requiring the caller to round-trip anything back to the server.
+async fn rescan_alternatives_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<RescanAlternativesReq>,
+) -> Json<serde_json::Value> {
+    let Some(project) = state.projects.get(&id) else {
+        return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
+    };
+
+    // Dedup by rule id (uppercased) — last override for a given rule wins. Blank ids/options
+    // are dropped rather than causing a hard error (defensive against a malformed request).
+    let mut forced: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for o in &req.overrides {
+        let rid = o.rule_id.trim();
+        let opt = o.chosen_option_id.trim();
+        if rid.is_empty() || opt.is_empty() {
+            continue;
+        }
+        forced.insert(rid.to_ascii_uppercase(), opt.to_string());
+    }
+    if forced.is_empty() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": "No valid overrides supplied — each entry needs a non-empty rule_id and chosen_option_id."
+        }));
+    }
+
+    let corpus_path = camerata_rules::corpus_path();
+    if !corpus_path.exists() {
+        return Json(serde_json::json!({ "ok": false, "message": "Rule corpus unavailable." }));
+    }
+    let (corpus, _errs) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+
+    // Validate every override AGAINST the corpus before any model call. A rule id that isn't a
+    // real multi-option semantic rule, or an option id that isn't real on that rule, is
+    // reported and excluded — the remaining valid overrides still run.
+    let chosen_options = project_chosen_options(&project);
+    let mut alternatives_by_rule: std::collections::HashMap<String, crate::ai_audit::RuleAlternatives> =
+        std::collections::HashMap::new();
+    let mut invalid: Vec<String> = Vec::new();
+    for (rid, opt_id) in &forced {
+        match corpus.get_by_id(rid) {
+            Some(rule) if crate::onboard::is_semantic_multi_option_rule(rule) => {
+                let options: Vec<crate::onboard::RuleOptionView> = rule
+                    .options
+                    .iter()
+                    .map(|o| crate::onboard::RuleOptionView {
+                        id: o.id.clone(),
+                        label: o.label.clone(),
+                        directive: o.directive.clone(),
+                        why: o.why.clone(),
+                    })
+                    .collect();
+                if !options.iter().any(|o| &o.id == opt_id) {
+                    invalid.push(format!(
+                        "{rid}: \"{opt_id}\" is not a real option on this rule"
+                    ));
+                    continue;
+                }
+                let selected_option_id = chosen_options
+                    .get(rid)
+                    .cloned()
+                    .or_else(|| rule.default_option.clone());
+                alternatives_by_rule.insert(
+                    rid.clone(),
+                    crate::ai_audit::RuleAlternatives {
+                        rule_id: rid.clone(),
+                        options,
+                        selected_option_id,
+                    },
+                );
+            }
+            Some(_) => invalid.push(format!("{rid}: not a multi-option semantic rule")),
+            None => invalid.push(format!("{rid}: unknown rule id")),
+        }
+    }
+    if alternatives_by_rule.is_empty() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": format!("No valid rule overrides: {}", invalid.join("; "))
+        }));
+    }
+    // Only the validated subset of `forced` drives the audit (an invalid override must never
+    // reach `audit_repo`, which would otherwise fall back silently — reject it here instead).
+    let forced: std::collections::HashMap<String, String> = forced
+        .into_iter()
+        .filter(|(rid, _)| alternatives_by_rule.contains_key(rid))
+        .collect();
+
+    // Feature B — the SAME compliance-safety gate the main audit uses.
+    let backend_resolution = resolve_backend_for_project(&state, Some(&project));
+    if let crate::llm::BackendResolution::Blocked { message } = &backend_resolution {
+        return Json(serde_json::json!({ "ok": false, "message": message }));
+    }
+    let mut run_notes: Vec<String> = invalid
+        .iter()
+        .map(|m| format!("skipped invalid override — {m}"))
+        .collect();
+    if let crate::llm::BackendResolution::CliFallbackWarn { message } = &backend_resolution {
+        run_notes.push(format!("⚠ COMPLIANCE: {message}"));
+    }
+
+    let llm = crate::llm::Llm::from_env_with_ledger(state.usage_ledger.clone());
+    let (sources, source_notes) = resolve_local_sources(&state, &project.repos);
+    run_notes.extend(source_notes);
+
+    let audit_model = Some(step_model_or(&state, crate::project::StepKind::Audit, None));
+    let calibration_model = Some(step_model_or(
+        &state,
+        crate::project::StepKind::Calibration,
+        None,
+    ));
+
+    // Which rule ids apply to a given repo, per the project's own per-rule `repos` binding
+    // (empty `repos` on a `RuleSelection` = project-level = applies to every repo).
+    let applies_to_repo = |rid: &str, repo: &str| -> bool {
+        [&project.ruleset.selections, &project.ruleset.cross_repo, &project.ruleset.process]
+            .iter()
+            .flat_map(|list| list.iter())
+            .find(|s| s.rule_id.trim().to_ascii_uppercase() == *rid)
+            .map(|s| s.repos.is_empty() || s.repos.iter().any(|r| r == repo))
+            // A rule not found in the ruleset at all (shouldn't happen — it was already
+            // audited once to have surfaced as an override candidate) defaults to
+            // project-level so a rescan is never silently dropped.
+            .unwrap_or(true)
+    };
+
+    let mut all_findings: Vec<crate::onboard::Finding> = Vec::new();
+    let mut all_recs: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation> =
+        std::collections::HashMap::new();
+    for (spec, dir) in &sources {
+        let applicable_ids: Vec<String> = alternatives_by_rule
+            .keys()
+            .filter(|rid| applies_to_repo(rid, spec))
+            .cloned()
+            .collect();
+        if applicable_ids.is_empty() {
+            continue;
+        }
+        let dir = dir.clone();
+        let files = match tokio::task::spawn_blocking(move || {
+            crate::onboard::read_local_repo_files(&dir)
+        })
+        .await
+        {
+            Ok(Ok(extracted)) => extracted.files,
+            Ok(Err(e)) => {
+                run_notes.push(format!("{spec}: {e}"));
+                continue;
+            }
+            Err(e) => {
+                run_notes.push(format!("{spec}: rescan task failed ({e})"));
+                continue;
+            }
+        };
+        let alt_slice: Vec<crate::ai_audit::RuleAlternatives> = applicable_ids
+            .iter()
+            .filter_map(|rid| alternatives_by_rule.get(rid).cloned())
+            .collect();
+        let selected_pairs: Vec<(String, String)> = alt_slice
+            .iter()
+            .map(|a| {
+                let forced_id = forced.get(&a.rule_id).cloned().unwrap_or_default();
+                let directive = a
+                    .options
+                    .iter()
+                    .find(|o| o.id == forced_id)
+                    .map(|o| o.directive.clone())
+                    .unwrap_or_default();
+                (a.rule_id.clone(), directive)
+            })
+            .collect();
+        match crate::ai_audit::audit_repo(
+            &llm,
+            spec,
+            &files,
+            &selected_pairs,
+            &alt_slice,
+            &forced,
+            audit_model.as_deref(),
+            calibration_model.as_deref(),
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            Some((&state.transcripts, SCAN_AUDIT_KEY)),
+            None,
+            None,
+            None,
+        )
+        .await
+        {
+            Ok((findings, _proposed, recs)) => {
+                all_findings.extend(findings);
+                for r in recs {
+                    all_recs.insert(r.rule_id.clone(), r);
+                }
+            }
+            Err(e) => run_notes.push(format!("{spec}: rescan failed ({e})")),
+        }
+    }
+
+    // Merge into the project's stored last_scan so an immediate accept-alternatives call
+    // (or a UI reload) sees the operator's override without any client round-trip.
+    if let Some(mut report) = state.get_last_scan(&id) {
+        let rescanned_ids: std::collections::HashSet<String> =
+            alternatives_by_rule.keys().cloned().collect();
+        report
+            .findings
+            .retain(|f| !rescanned_ids.contains(&f.rule_id.to_ascii_uppercase()));
+        report.findings.extend(all_findings.clone());
+        for (rid, rec) in &all_recs {
+            report.recommendations.insert(rid.clone(), rec.clone());
+        }
+        state.set_last_scan(id.clone(), report);
+    }
+
+    Json(serde_json::json!({
+        "ok": true,
+        "message": (!run_notes.is_empty()).then(|| run_notes.join(" · ")),
+        "findings": all_findings,
+        "recommendations": all_recs,
+    }))
+}
+
+/// Body for `POST /api/projects/:id/accept-alternatives`. Empty `rule_ids` (or an absent
+/// field, `{}`) means "accept all" — every rule in the last scan's `recommendations` map.
+#[derive(serde::Deserialize, Default)]
+struct AcceptAlternativesReq {
+    #[serde(default)]
+    rule_ids: Vec<String>,
+}
+
+/// `POST /api/projects/:id/accept-alternatives` — persist the CURRENT per-rule selection (the
+/// AI's recommendation where the operator never overrode it, the operator's forced choice
+/// where a `rescan-alternatives` call already updated it) into `RuleSelection.chosen_option`,
+/// via the existing `ProjectStore` mutator path. Body `{}` accepts every rule in the last
+/// scan's `recommendations` map; `{ "rule_ids": [...] }` accepts only the named subset.
+/// Returns the updated ruleset. 404s (via `ok: false`, no HTTP-status signaling — matching
+/// every other per-project mutator in this file) when the project has no completed scan to
+/// read recommendations from.
+async fn accept_alternatives_handler(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<AcceptAlternativesReq>,
+) -> Json<serde_json::Value> {
+    if state.projects.get(&id).is_none() {
+        return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
+    }
+    let Some(report) = state.get_last_scan(&id) else {
+        return Json(serde_json::json!({
+            "ok": false,
+            "message": "No scan results available for this project. Run an audit first."
+        }));
+    };
+    let target_ids: Option<std::collections::HashSet<String>> = (!req.rule_ids.is_empty())
+        .then(|| req.rule_ids.iter().map(|s| s.trim().to_ascii_uppercase()).collect());
+
+    let mut accepted = 0usize;
+    let mut skipped: Vec<String> = Vec::new();
+    for (rid, rec) in &report.recommendations {
+        if let Some(ids) = &target_ids {
+            if !ids.contains(rid) {
+                continue;
+            }
+        }
+        match state.projects.set_rule_chosen_option(&id, rid, &rec.recommended_option_id) {
+            Some(true) => accepted += 1,
+            Some(false) => skipped.push(rid.clone()),
+            None => {
+                return Json(serde_json::json!({ "ok": false, "message": "no such project" }));
+            }
+        }
+    }
+
+    match state.projects.get(&id) {
+        Some(p) => Json(serde_json::json!({
+            "ok": true,
+            "accepted": accepted,
+            "skipped": skipped,
+            "ruleset": p.ruleset,
+        })),
+        None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
+    }
+}
+
 // ── L3 agentic code-review gate configuration (R7) ────────────────────────────
 
 /// Body for `POST /api/projects/:id/l3-review`.
@@ -4835,6 +5160,11 @@ async fn onboard_audit(
         run_deterministic,
         Some(state.usage_ledger.clone()),
         backend_resolution,
+        corpus.as_ref(),
+        &active_project
+            .as_ref()
+            .map(project_chosen_options)
+            .unwrap_or_default(),
     )
     .await;
     // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
@@ -5235,6 +5565,12 @@ async fn onboard_audit_start(
     // `onboard_audit` handler) from the app's configured backend, key presence, and this
     // project's `cli_active` flag, then moved into the spawned task below.
     let backend_resolution = resolve_backend_for_project(&state, active_project.as_ref());
+    // Audit-integrated alternative recommendation: this project's persisted chosen options,
+    // computed up front (like `backend_resolution`) and moved into the spawned task below.
+    let chosen_options = active_project
+        .as_ref()
+        .map(project_chosen_options)
+        .unwrap_or_default();
 
     let jobs = state.jobs.clone();
     let transcripts = state.transcripts.clone();
@@ -5329,6 +5665,8 @@ async fn onboard_audit_start(
             run_deterministic,
             Some(usage_ledger.clone()),
             backend_resolution,
+            corpus.as_ref(),
+            &chosen_options,
         )
         .await;
         // Persist the fresh manifest so the next scan can be incremental.
@@ -5553,6 +5891,7 @@ async fn onboard_finding_fix(
         &q.rule_id,
         corpus.as_ref(),
         &crate::onboard::Finding::default(),
+        None,
     );
     Json(serde_json::json!({ "fix": fix }))
 }
@@ -8996,6 +9335,31 @@ fn resolve_backend_for_project(
     let has_api_key = anthropic_api_key_present(state.credential_store.as_ref());
     let cli_active = project.map(|p| p.cli_active).unwrap_or(false);
     crate::llm::resolve_backend(&app_backend, has_api_key, cli_active)
+}
+
+/// Every rule's PROJECT-level chosen alternative option, keyed by uppercased rule id —
+/// gathered across `project.ruleset`'s three rule lists (repo-local `selections`, the
+/// `cross_repo` set, and `process`). Feeds the audit-integrated alternative-recommendation
+/// feature (`onboard::build_rule_alternatives`, `resolve_fix`'s chosen-option fallback) so
+/// the "currently selected" marker and the Fix-text join both read the SAME source of truth
+/// as everything else that resolves a rule's directive (`Rule::resolved_option`). A rule with
+/// no persisted `chosen_option` is simply absent from the map — callers fall back to the
+/// corpus rule's own `default_option` from there.
+fn project_chosen_options(
+    project: &crate::project::Project,
+) -> std::collections::HashMap<String, String> {
+    project
+        .ruleset
+        .selections
+        .iter()
+        .chain(&project.ruleset.cross_repo)
+        .chain(&project.ruleset.process)
+        .filter_map(|s| {
+            s.chosen_option
+                .as_ref()
+                .map(|opt| (s.rule_id.trim().to_ascii_uppercase(), opt.clone()))
+        })
+        .collect()
 }
 
 /// The `GET /api/settings` response: the persisted [`crate::settings::Settings`] fields, plus
@@ -14418,13 +14782,13 @@ async fn export_audit_report(
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
-    if state.projects.get(&id).is_none() {
+    let Some(project) = state.projects.get(&id) else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "ok": false, "message": "no such project" })),
         )
             .into_response();
-    }
+    };
 
     let Some(report) = state.get_last_scan(&id) else {
         return (
@@ -14451,6 +14815,9 @@ async fn export_audit_report(
     // any blank fields the export dialog didn't POST, BEFORE build_report_json — which stays
     // pure/no-I/O itself (see `ReportOptions::apply_env_defaults`'s doc comment).
     req.options.apply_env_defaults();
+    // `resolve_fix`'s chosen-option fallback (audit-integrated alternatives) — server-
+    // populated, never client-supplied (see `ReportOptions::chosen_options`'s doc comment).
+    req.options.chosen_options = project_chosen_options(&project);
 
     let json = crate::report_export::build_report_json(
         &report,
@@ -14527,13 +14894,13 @@ async fn export_product(
     use axum::http::{header, StatusCode};
     use axum::response::IntoResponse;
 
-    if state.projects.get(&id).is_none() {
+    let Some(project) = state.projects.get(&id) else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({ "ok": false, "message": "no such project" })),
         )
             .into_response();
-    }
+    };
 
     let Some(report) = state.get_last_scan(&id) else {
         return (
@@ -14557,6 +14924,9 @@ async fn export_product(
     // xlsx/findings.json siblings this handler also builds read `opts.prepared_by` directly
     // (`xlsx_export.rs`), so resolving it here once covers all three artifacts.
     req.options.apply_env_defaults();
+    // `resolve_fix`'s chosen-option fallback (audit-integrated alternatives) — server-
+    // populated, never client-supplied. Covers all three artifacts built below.
+    req.options.chosen_options = project_chosen_options(&project);
 
     let json = crate::report_export::build_report_json(
         &report,
@@ -14602,6 +14972,7 @@ async fn export_product(
         &req.dispositions,
         corpus.as_ref(),
         &json,
+        &req.options.chosen_options,
     );
     let findings_json_bytes = match serde_json::to_vec_pretty(&findings_export) {
         Ok(bytes) => bytes,
@@ -15303,6 +15674,321 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["ok"], false);
         assert!(json["message"].as_str().is_some(), "message field present for the UI");
+    }
+
+    // ── Audit-integrated alternative recommendation endpoints ─────────────────────────
+    // (docs/design/2026-09-22_audit-integrated-alternatives.md)
+
+    /// `rescan-alternatives` validates every override AGAINST the corpus BEFORE any model
+    /// call (and before the compliance gate — validation is cheaper and more specific than
+    /// the gate, so it runs first): an unknown rule id and a real rule with a bogus option id
+    /// are both rejected, and since NEITHER override is valid, the whole request is refused
+    /// with `ok: false` naming both problems. This assertion holds regardless of the test
+    /// environment's key/backend state, since validation never reaches that far.
+    #[tokio::test]
+    async fn rescan_alternatives_rejects_invalid_overrides_before_any_model_call() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec!["me/api".to_string()]).unwrap();
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/rescan-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"overrides":[
+                            {"rule_id":"NO-SUCH-RULE-EVER-1","chosen_option_id":"whatever"},
+                            {"rule_id":"RUST-DOMAIN-7","chosen_option_id":"not-a-real-option-id"}
+                        ]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+        let message = json["message"].as_str().unwrap_or_default();
+        assert!(message.contains("NO-SUCH-RULE-EVER-1"), "message: {message}");
+        assert!(message.contains("RUST-DOMAIN-7"), "message: {message}");
+    }
+
+    /// A rescan request with at least one VALID override reaches the compliance-safety gate,
+    /// and a `Blocked` resolution (a fresh project defaults to `cli_active: false`, API-only,
+    /// and this test guarantees no Anthropic key is present) refuses the whole batch with the
+    /// gate's own message — no model call, no findings. Mirrors the main audit's
+    /// `blocked_resolution_aborts_the_whole_scan_before_any_work` guard, at the endpoint layer.
+    #[tokio::test]
+    async fn rescan_alternatives_blocked_when_project_is_api_only_with_no_key() {
+        // Defensive against the known cross-test env-var race (see
+        // `resolve_backend_for_project_gathers_the_three_inputs_correctly`'s doc comment).
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec!["me/api".to_string()]).unwrap();
+        assert!(!p.cli_active, "fresh project defaults to API-only");
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/rescan-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-r"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+        assert!(
+            json["message"].as_str().unwrap_or_default().contains("API-only"),
+            "message: {:?}",
+            json["message"]
+        );
+    }
+
+    /// `CliFallbackWarn` does not abort a rescan — but with no real Anthropic key/CLI
+    /// available in the test environment, the eventual model call fails; the resulting
+    /// `{ ok: true, message }` response still carries the loud compliance warning (folded in
+    /// BEFORE the call attempt, per the main audit's own contract), proving the warning path
+    /// is reached and surfaced rather than silently skipped. This does not assert findings
+    /// content — no live model runs in this test suite — only that the gate resolution itself
+    /// is honored and disclosed, mirroring `onboard::cli_fallback_warn_proceeds_but_surfaces_the_warning`.
+    #[tokio::test]
+    async fn rescan_alternatives_surfaces_the_cli_fallback_warning() {
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec!["me/api".to_string()]).unwrap();
+        state.projects.set_cli_active(&p.id, true);
+        state.settings.set_llm_backend(Some("api".to_string()));
+        let app = router(state);
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/rescan-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"explicit-unitofwork-parameter-on-transactional-r"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        // Not Blocked: the request proceeds (ok: true) rather than being refused outright.
+        assert_eq!(json["ok"], true);
+        let message = json["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains("⚠ COMPLIANCE:"),
+            "the fallback warning must be surfaced, clearly prefixed: {message}"
+        );
+    }
+
+    /// `rescan-alternatives` against an unknown project id reports the same `{ ok: false,
+    /// message }` shape as every other per-project mutator (no HTTP-status signaling).
+    #[tokio::test]
+    async fn rescan_alternatives_reports_error_for_unknown_project() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/projects/does-not-exist/rescan-alternatives")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        r#"{"overrides":[{"rule_id":"RUST-DOMAIN-7","chosen_option_id":"x"}]}"#,
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+    }
+
+    fn seeded_scan_report_with_recommendations(
+        repo: &str,
+        recs: Vec<(&str, &str)>,
+    ) -> crate::onboard::ScanReport {
+        let mut report = crate::onboard::ScanReport::gated(&[repo.to_string()]);
+        report.gated = false;
+        report.recommendations = recs
+            .into_iter()
+            .map(|(rule_id, option_id)| {
+                (
+                    rule_id.to_string(),
+                    crate::ai_audit::RuleRecommendation {
+                        rule_id: rule_id.to_string(),
+                        recommended_option_id: option_id.to_string(),
+                        recommendation_reasoning: "test reasoning".to_string(),
+                        hallucinated: false,
+                        operator_chosen: false,
+                    },
+                )
+            })
+            .collect();
+        report
+    }
+
+    /// `accept-alternatives` with no scan on record refuses (never fabricates a ruleset).
+    #[tokio::test]
+    async fn accept_alternatives_reports_error_without_a_scan() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec!["me/api".to_string()]).unwrap();
+        let app = router(state);
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/accept-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+    }
+
+    /// `accept-alternatives` with an empty body (`{}`) accepts EVERY rule in the last scan's
+    /// `recommendations` map, writing each `recommended_option_id` into that rule's
+    /// `RuleSelection.chosen_option`.
+    #[tokio::test]
+    async fn accept_alternatives_persists_every_recommendation_by_default() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec!["me/api".to_string()]).unwrap();
+        state.projects.update(&p.id, |proj| {
+            proj.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: "TESTING-PYRAMID-1".to_string(),
+                ..Default::default()
+            });
+            proj.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: "RUST-DOMAIN-7".to_string(),
+                ..Default::default()
+            });
+        });
+        state.set_last_scan(
+            p.id.clone(),
+            seeded_scan_report_with_recommendations(
+                "me/api",
+                vec![
+                    ("TESTING-PYRAMID-1", "pyramid-many-unit-fewer-integration-few-e2e"),
+                    ("RUST-DOMAIN-7", "explicit-unitofwork-parameter-on-transactional-r"),
+                ],
+            ),
+        );
+        let app = router(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/accept-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["accepted"], 2);
+
+        let updated = state.projects.get(&p.id).unwrap();
+        let sel = |rid: &str| {
+            updated
+                .ruleset
+                .selections
+                .iter()
+                .find(|s| s.rule_id == rid)
+                .unwrap()
+                .chosen_option
+                .clone()
+        };
+        assert_eq!(
+            sel("TESTING-PYRAMID-1"),
+            Some("pyramid-many-unit-fewer-integration-few-e2e".to_string())
+        );
+        assert_eq!(
+            sel("RUST-DOMAIN-7"),
+            Some("explicit-unitofwork-parameter-on-transactional-r".to_string())
+        );
+    }
+
+    /// `accept-alternatives` with `{ "rule_ids": [...] }` accepts ONLY the named subset,
+    /// leaving every other rule's recommendation un-persisted.
+    #[tokio::test]
+    async fn accept_alternatives_scopes_to_the_requested_rule_ids() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Acme", vec!["me/api".to_string()]).unwrap();
+        state.projects.update(&p.id, |proj| {
+            proj.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: "TESTING-PYRAMID-1".to_string(),
+                ..Default::default()
+            });
+            proj.ruleset.selections.push(crate::project::RuleSelection {
+                rule_id: "RUST-DOMAIN-7".to_string(),
+                ..Default::default()
+            });
+        });
+        state.set_last_scan(
+            p.id.clone(),
+            seeded_scan_report_with_recommendations(
+                "me/api",
+                vec![
+                    ("TESTING-PYRAMID-1", "pyramid-many-unit-fewer-integration-few-e2e"),
+                    ("RUST-DOMAIN-7", "explicit-unitofwork-parameter-on-transactional-r"),
+                ],
+            ),
+        );
+        let app = router(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/accept-alternatives", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"rule_ids":["TESTING-PYRAMID-1"]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], true);
+        assert_eq!(json["accepted"], 1);
+
+        let updated = state.projects.get(&p.id).unwrap();
+        let sel = |rid: &str| {
+            updated
+                .ruleset
+                .selections
+                .iter()
+                .find(|s| s.rule_id == rid)
+                .unwrap()
+                .chosen_option
+                .clone()
+        };
+        assert_eq!(
+            sel("TESTING-PYRAMID-1"),
+            Some("pyramid-many-unit-fewer-integration-few-e2e".to_string())
+        );
+        assert_eq!(sel("RUST-DOMAIN-7"), None, "un-requested rule must be left untouched");
     }
 
     /// GAP-2: the git-commit chokepoint HARD-BLOCKS a commit whose message violates the
@@ -21488,6 +22174,7 @@ mod tests {
                 category: None,
                 located: true,
                 captures: Default::default(),
+                evaluated_option_id: None,
             }],
             proposed_rules: Vec::new(),
             gated: false,
@@ -21497,6 +22184,7 @@ mod tests {
             deep: None,
             coverage_notes: Vec::new(),
             provenance: crate::onboard::ScanProvenance::default(),
+            recommendations: std::collections::HashMap::new(),
         }
     }
 
@@ -24480,6 +25168,7 @@ mod tests {
             "SUPABASE-RLS-ENABLED-1",
             Some(&corpus),
             &crate::onboard::Finding::default(),
+            None,
         );
         assert!(expected.is_some(), "fixture rule must have authored remediation");
         assert_eq!(json["fix"], expected.unwrap());
@@ -24527,6 +25216,7 @@ mod tests {
             "SEC-TEST-UNAUTHORED-1",
             Some(&corpus),
             &crate::onboard::Finding::default(),
+            None,
         );
         let json = serde_json::json!({ "fix": fix });
         assert_eq!(json["fix"], serde_json::Value::Null);

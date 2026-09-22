@@ -79,6 +79,8 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                         // already the only object-identifying detail, and `resolve_fix` reads
                         // that straight off `Finding.path` for `<path>`/`<file>` tokens.
                         captures: Default::default(),
+                        // Deterministic floor rules are never multi-option.
+                        evaluated_option_id: None,
                     });
                 }
             }
@@ -128,6 +130,7 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                 category: None,
                 located: true,
                 captures: Default::default(),
+                evaluated_option_id: None,
             });
         }
     }
@@ -150,6 +153,75 @@ pub fn audit_files(repo: &str, files: &[(String, String)]) -> Vec<Finding> {
 /// are governance/process; everything else (ARCH-/RUST-/SQL-/UI-/SEC-/…) is code.
 pub(crate) fn is_code_auditable_rule(id: &str) -> bool {
     !(id.starts_with("ORCH-") || id.starts_with("SPIRIT-") || id.starts_with("PROC-"))
+}
+
+/// Whether `rule` is a MULTI-OPTION SEMANTIC rule eligible for the audit-integrated
+/// alternative-recommendation feature (see
+/// `docs/design/2026-09-22_audit-integrated-alternatives.md`): AI-judged (NOT CI-tier
+/// mechanical/architectural — those are enforced by a deterministic CI gate, never scanned by
+/// the LLM), NOT gate-armed (a deterministic detector already answers it exactly, so feeding
+/// it to the model would be strictly worse), code-auditable (not a governance/process rule),
+/// and offers two or more `[[option]]` alternatives — a single-option rule keeps today's
+/// one-directive behavior untouched. Shared by the main scan's per-repo alternative-set
+/// construction ([`build_rule_alternatives`]) and the `rescan-alternatives` endpoint, so the
+/// two paths can never drift on which rules are eligible.
+pub(crate) fn is_semantic_multi_option_rule(rule: &camerata_rules::Rule) -> bool {
+    let id = rule.id.0.as_str();
+    rule.options.len() >= 2
+        && !rule.enforcement.is_ci_enforced()
+        && camerata_gateway::lookup_arm(id).is_none()
+        && is_code_auditable_rule(id)
+}
+
+/// Build the [`crate::ai_audit::RuleAlternatives`] set for every id in `ids` that resolves, in
+/// `corpus`, to a [`is_semantic_multi_option_rule`]. Ids that don't resolve (unknown to the
+/// corpus, or not eligible) are simply skipped — this is a best-effort JOIN, never a hard
+/// requirement that every selected id have alternatives. Duplicate ids collapse to one entry.
+///
+/// `chosen_options` supplies each rule's PROJECT-level chosen option (uppercased rule id ->
+/// option id, as persisted on `RuleSelection.chosen_option`); a rule absent from that map (or
+/// with no persisted choice) falls back to the corpus rule's own `default_option` — matching
+/// `Rule::resolved_option`'s own fallback order, just computed ahead of the LLM call so the
+/// prompt can mark "currently selected" honestly.
+pub(crate) fn build_rule_alternatives<'a>(
+    corpus: &camerata_rules::RuleSet,
+    ids: impl Iterator<Item = &'a str>,
+    chosen_options: &std::collections::HashMap<String, String>,
+) -> Vec<crate::ai_audit::RuleAlternatives> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for id in ids {
+        let upper = id.trim().to_ascii_uppercase();
+        if upper.is_empty() || !seen.insert(upper.clone()) {
+            continue;
+        }
+        let Some(rule) = corpus.get_by_id(id) else {
+            continue;
+        };
+        if !is_semantic_multi_option_rule(rule) {
+            continue;
+        }
+        let options: Vec<crate::onboard::RuleOptionView> = rule
+            .options
+            .iter()
+            .map(|o| crate::onboard::RuleOptionView {
+                id: o.id.clone(),
+                label: o.label.clone(),
+                directive: o.directive.clone(),
+                why: o.why.clone(),
+            })
+            .collect();
+        let selected_option_id = chosen_options
+            .get(&upper)
+            .cloned()
+            .or_else(|| rule.default_option.clone());
+        out.push(crate::ai_audit::RuleAlternatives {
+            rule_id: upper,
+            options,
+            selected_option_id,
+        });
+    }
+    out
 }
 
 /// Classify a repo's findings against its suppressions (inline `camerata:allow` waivers
@@ -234,6 +306,7 @@ pub(crate) fn classify_repo_findings(
             category: None,
             located: true,
             captures: Default::default(),
+            evaluated_option_id: None,
         });
     }
 }

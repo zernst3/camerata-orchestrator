@@ -345,6 +345,7 @@ mod tests {
             category: None,
             located: true,
             captures: Default::default(),
+            evaluated_option_id: None,
         }
     }
 

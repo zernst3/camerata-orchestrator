@@ -328,6 +328,7 @@ async fn regenerate_sample_report() {
             started_at: "2026-07-26T15:30:00Z".to_string(),
             finished_at: "2026-07-26T15:42:00Z".to_string(),
         },
+        recommendations: std::collections::HashMap::new(),
     };
 
     // ═══ Load the REAL bundled rule corpus so citations/domains/titles resolve for real ═══
@@ -410,8 +411,13 @@ async fn regenerate_sample_report() {
     // `json` (`AuditReportJson`) for provenance/summary reuse — see
     // `xlsx_export::build_findings_export`'s doc comment. Both a standalone file (for Zach
     // to eyeball) and the zip entry below come from this one call.
-    let findings_export =
-        xlsx_export::build_findings_export(&report, &dispositions, Some(&corpus), &json);
+    let findings_export = xlsx_export::build_findings_export(
+        &report,
+        &dispositions,
+        Some(&corpus),
+        &json,
+        &std::collections::HashMap::new(),
+    );
     assert_eq!(
         findings_export.findings.len(),
         6,

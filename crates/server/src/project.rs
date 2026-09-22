@@ -350,6 +350,24 @@ impl ProjectStore {
         self.update(project_id, |p| p.cli_active = active)
     }
 
+    /// Write `chosen_option` onto `rule_id`'s selection for a single project by id — the
+    /// `accept-alternatives` persistence step (see `Project::set_rule_chosen_option`).
+    /// Returns `None` when no project has that id; `Some(true)` when a matching selection was
+    /// found and updated; `Some(false)` when the project exists but `rule_id` is not part of
+    /// its ruleset (a no-op, not an error).
+    pub fn set_rule_chosen_option(
+        &self,
+        project_id: &str,
+        rule_id: &str,
+        chosen_option: &str,
+    ) -> Option<bool> {
+        let mut matched = false;
+        self.update(project_id, |p| {
+            matched = p.set_rule_chosen_option(rule_id, chosen_option);
+        })?;
+        Some(matched)
+    }
+
     /// Mutate a project in place by id, returning the updated copy.
     pub fn update<F: FnOnce(&mut Project)>(&self, id: &str, f: F) -> Option<Project> {
         let updated = {
@@ -919,6 +937,59 @@ mod tests {
 
         // Cleanup (best-effort).
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── set_rule_chosen_option (audit-integrated alternative recommendation) ──────────
+
+    #[test]
+    fn set_rule_chosen_option_persists_and_is_per_project_isolated() {
+        let store = ProjectStore::new();
+        let a = store.create("A", vec![]).unwrap();
+        let b = store.create("B", vec![]).unwrap();
+        store.update(&a.id, |p| {
+            p.ruleset.selections.push(RuleSelection {
+                rule_id: "RUST-DOMAIN-7".to_string(),
+                ..Default::default()
+            });
+        });
+        store.update(&b.id, |p| {
+            p.ruleset.selections.push(RuleSelection {
+                rule_id: "RUST-DOMAIN-7".to_string(),
+                ..Default::default()
+            });
+        });
+
+        let matched = store
+            .set_rule_chosen_option(
+                &a.id,
+                "RUST-DOMAIN-7",
+                "explicit-unitofwork-parameter-on-transactional-r",
+            )
+            .expect("project A exists");
+        assert!(matched, "A's selection for this rule must be found and updated");
+        assert_eq!(
+            store.get(&a.id).unwrap().ruleset.selections[0].chosen_option.as_deref(),
+            Some("explicit-unitofwork-parameter-on-transactional-r")
+        );
+        // B must be untouched.
+        assert!(store.get(&b.id).unwrap().ruleset.selections[0].chosen_option.is_none());
+    }
+
+    #[test]
+    fn set_rule_chosen_option_returns_none_for_unknown_project() {
+        let store = ProjectStore::new();
+        assert!(store.set_rule_chosen_option("does-not-exist", "RUST-DOMAIN-7", "opt-x").is_none());
+    }
+
+    #[test]
+    fn set_rule_chosen_option_returns_some_false_for_a_rule_not_in_the_ruleset() {
+        let store = ProjectStore::new();
+        let p = store.create("A", vec![]).unwrap();
+        assert_eq!(
+            store.set_rule_chosen_option(&p.id, "NO-SUCH-RULE-1", "opt-x"),
+            Some(false),
+            "the project exists but the rule id is not part of its ruleset — a no-op, not an error"
+        );
     }
 
     #[test]

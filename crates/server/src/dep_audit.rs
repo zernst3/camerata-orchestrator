@@ -221,6 +221,9 @@ pub fn parse_osv_json(
                     // curated-findings loop runs), so there is no rule remediation text for a
                     // capture to instantiate here.
                     captures: Default::default(),
+                    // Not a multi-option semantic rule finding — never evaluated under an
+                    // alternative option.
+                    evaluated_option_id: None,
                 });
             }
         }

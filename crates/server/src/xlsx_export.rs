@@ -147,6 +147,7 @@ fn partition_rows(
     report: &ScanReport,
     dispositions: &HashMap<String, DispositionWire>,
     corpus: Option<&camerata_rules::RuleSet>,
+    chosen_options: &HashMap<String, String>,
 ) -> (Vec<FindingRow>, Vec<DepRow>) {
     let mut rows = Vec::new();
     let mut dep_rows = Vec::new();
@@ -186,7 +187,12 @@ fn partition_rows(
             .map(|s| s.url.clone())
             .collect::<Vec<_>>()
             .join("\n");
-        let fix = resolve_fix(&f.rule_id, corpus, f);
+        let fix = resolve_fix(
+            &f.rule_id,
+            corpus,
+            f,
+            chosen_options.get(&f.rule_id.to_ascii_uppercase()).map(String::as_str),
+        );
         let (_, est_hours) = effort_hours_bounds(f.effort.as_deref());
 
         let (bucket, disposition_kind, disposition_label_str, fp_reason) = if is_fp {
@@ -991,7 +997,7 @@ pub fn build_workbook(
     corpus: Option<&camerata_rules::RuleSet>,
     opts: &ReportOptions,
 ) -> anyhow::Result<Vec<u8>> {
-    let (rows, dep_rows) = partition_rows(report, dispositions, corpus);
+    let (rows, dep_rows) = partition_rows(report, dispositions, corpus, &opts.chosen_options);
 
     let live_rows: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
     let fp_rows: Vec<&FindingRow> = rows.iter().filter(|r| r.is_fp).collect();
@@ -1144,8 +1150,9 @@ pub fn build_findings_export(
     dispositions: &HashMap<String, DispositionWire>,
     corpus: Option<&camerata_rules::RuleSet>,
     report_json: &crate::report_export::AuditReportJson,
+    chosen_options: &HashMap<String, String>,
 ) -> FindingsExport {
-    let (rows, _dep_rows) = partition_rows(report, dispositions, corpus);
+    let (rows, _dep_rows) = partition_rows(report, dispositions, corpus, chosen_options);
     let findings: Vec<FindingRow> = rows.into_iter().filter(|r| !r.is_fp).collect();
     FindingsExport {
         provenance: report_json.cover.clone(),
@@ -1209,6 +1216,7 @@ mod tests {
                 started_at: "2026-07-23T00:00:00Z".to_string(),
                 finished_at: "2026-07-23T00:05:00Z".to_string(),
             },
+            recommendations: std::collections::HashMap::new(),
         }
     }
 
@@ -1360,7 +1368,7 @@ mod tests {
         let mut f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "critical");
         f.captures.insert("table".to_string(), "profiles".to_string());
         let report = report_with(vec![f], vec![]);
-        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus));
+        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
         assert!(
             rows[0].fix.as_deref().is_some_and(|s| s.contains("profiles")),
             "the Recommended Fix column must be populated from authored remediation, got: {:?}",
@@ -1372,7 +1380,7 @@ mod tests {
     fn recommended_fix_is_none_not_fabricated_without_a_corpus() {
         let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
         let report = report_with(vec![f], vec![]);
-        let (rows, _) = partition_rows(&report, &HashMap::new(), None);
+        let (rows, _) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
         assert_eq!(rows[0].fix, None, "must not fabricate a fix when the corpus is absent");
     }
 
@@ -1386,7 +1394,7 @@ mod tests {
         let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
         let f = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
         let report = report_with(vec![f], vec![]);
-        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus));
+        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
         assert_eq!(
             rows[0].fix, None,
             "must omit the fix, never fall back to directive, when remediation is unauthored"
@@ -1410,7 +1418,7 @@ mod tests {
         let json =
             crate::report_export::build_report_json(&report, &dispositions, None, &empty_opts());
         let xlsx_bytes = build_workbook(&report, &dispositions, None, &empty_opts()).unwrap();
-        let findings_export = build_findings_export(&report, &dispositions, None, &json);
+        let findings_export = build_findings_export(&report, &dispositions, None, &json, &HashMap::new());
 
         assert_eq!(
             findings_export.findings.len(),
@@ -1446,8 +1454,8 @@ mod tests {
             Some(&corpus),
             &empty_opts(),
         );
-        let findings_export = build_findings_export(&report, &HashMap::new(), Some(&corpus), &json);
-        let expected = crate::report_export::resolve_fix("SUPABASE-RLS-ENABLED-1", Some(&corpus), &f);
+        let findings_export = build_findings_export(&report, &HashMap::new(), Some(&corpus), &json, &HashMap::new());
+        let expected = crate::report_export::resolve_fix("SUPABASE-RLS-ENABLED-1", Some(&corpus), &f, None);
         assert!(expected.is_some(), "fixture rule must have authored remediation");
         assert_eq!(findings_export.findings[0].fix, expected);
     }
@@ -1467,7 +1475,7 @@ mod tests {
             Some(&corpus),
             &empty_opts(),
         );
-        let findings_export = build_findings_export(&report, &HashMap::new(), Some(&corpus), &json);
+        let findings_export = build_findings_export(&report, &HashMap::new(), Some(&corpus), &json, &HashMap::new());
         assert_eq!(findings_export.findings[0].fix, None);
         let serialized = serde_json::to_value(&findings_export.findings[0]).unwrap();
         assert_eq!(
@@ -1485,7 +1493,7 @@ mod tests {
         let report = report_with(vec![f], vec![]);
         let json =
             crate::report_export::build_report_json(&report, &HashMap::new(), None, &empty_opts());
-        let findings_export = build_findings_export(&report, &HashMap::new(), None, &json);
+        let findings_export = build_findings_export(&report, &HashMap::new(), None, &json, &HashMap::new());
         let v = serde_json::to_value(&findings_export).expect("must serialize");
         assert!(v.get("provenance").is_some(), "{v:?}");
         assert!(v.get("summary").is_some(), "{v:?}");
@@ -1499,7 +1507,7 @@ mod tests {
         let report = report_with(vec![], vec![]);
         let json =
             crate::report_export::build_report_json(&report, &HashMap::new(), None, &empty_opts());
-        let findings_export = build_findings_export(&report, &HashMap::new(), None, &json);
+        let findings_export = build_findings_export(&report, &HashMap::new(), None, &json, &HashMap::new());
         assert!(findings_export.findings.is_empty());
         let bytes = serde_json::to_vec_pretty(&findings_export)
             .expect("zero findings must still serialize to valid JSON");
@@ -1516,7 +1524,7 @@ mod tests {
         let report = report_with(vec![f1, f2], vec![]);
         let json =
             crate::report_export::build_report_json(&report, &dispositions, None, &empty_opts());
-        let findings_export = build_findings_export(&report, &dispositions, None, &json);
+        let findings_export = build_findings_export(&report, &dispositions, None, &json, &HashMap::new());
         assert!(
             findings_export.findings.is_empty(),
             "all-FP input must yield an empty findings array, not panic"

@@ -500,6 +500,7 @@ mod tests {
             category: None,
             located: true,
             captures: Default::default(),
+            evaluated_option_id: None,
         }];
         // Must not panic or error.
         capture_scan_findings(&ledger, &findings).await;
@@ -564,6 +565,7 @@ mod tests {
                 category: None,
                 located: true,
                 captures: Default::default(),
+                evaluated_option_id: None,
             },
             // Suppressed finding → skipped silently (no panic).
             crate::onboard::Finding {
@@ -585,6 +587,7 @@ mod tests {
                 category: None,
                 located: true,
                 captures: Default::default(),
+                evaluated_option_id: None,
             },
             // Non-floor rule → skipped silently (no panic).
             crate::onboard::Finding {
@@ -606,6 +609,7 @@ mod tests {
                 category: None,
                 located: true,
                 captures: Default::default(),
+                evaluated_option_id: None,
             },
         ];
 

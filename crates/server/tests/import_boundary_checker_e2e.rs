@@ -99,6 +99,8 @@ async fn run_fixture_scan(repo_dir: &Path, repo_spec: &str) -> onboard::ScanRepo
         true,  // run_deterministic — the floor AND the architectural engine both run
         None,  // ledger
         camerata_server::llm::BackendResolution::Api, // backend gate: not under test here
+        None, // corpus
+        &std::collections::HashMap::new(), // chosen_options
     )
     .await;
     report

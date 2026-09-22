@@ -550,6 +550,33 @@ impl Project {
         }
     }
 
+    /// Write `chosen_option` onto whichever ruleset list (`selections` / `cross_repo` /
+    /// `process`) contains `rule_id` — the persistence step for the audit-integrated
+    /// alternative-recommendation feature (`accept-alternatives`): the operator (or the AI's
+    /// own recommendation, when accepted as-is) becomes the project's durable choice for that
+    /// rule, exactly the same field `Rule::resolved_option` reads everywhere else. Matching is
+    /// case-insensitive (rule ids are conventionally uppercase, but this is defensive).
+    /// Returns `true` if a matching selection was found and updated, `false` if `rule_id` is
+    /// not part of this project's ruleset at all — a no-op, never an error (the caller decides
+    /// whether that's worth reporting).
+    pub fn set_rule_chosen_option(&mut self, rule_id: &str, chosen_option: &str) -> bool {
+        let id_upper = rule_id.trim().to_ascii_uppercase();
+        for list in [
+            &mut self.ruleset.selections,
+            &mut self.ruleset.cross_repo,
+            &mut self.ruleset.process,
+        ] {
+            if let Some(sel) = list
+                .iter_mut()
+                .find(|s| s.rule_id.trim().to_ascii_uppercase() == id_upper)
+            {
+                sel.chosen_option = Some(chosen_option.to_string());
+                return true;
+            }
+        }
+        false
+    }
+
     /// Mark `repos` as onboarded (union, deduped). Repos not already in the project's `repos`
     /// list are added there too, so onboarding a repo also brings it into scope.
     pub fn mark_onboarded(&mut self, repos: &[String]) {
@@ -871,6 +898,86 @@ mod tests {
         // Custom rule survived the base upsert.
         assert_eq!(p.ruleset.custom.len(), 1);
         assert_eq!(p.ruleset.custom[0].name, "house-style");
+    }
+
+    fn project_with_selections(selections: Vec<RuleSelection>) -> Project {
+        Project {
+            id: "p1".into(),
+            name: "Proj".into(),
+            repos: vec!["me/api".into()],
+            onboarded: vec![],
+            max_iterations: default_max_iterations(),
+            tier_map: TierMap::default(),
+            process_rule_config: ProcessRuleConfig::default(),
+            step_models: StepModels::default(),
+            stall_thresholds: StallThresholds::default(),
+            l3_review: L3ReviewConfig::default(),
+            model_profile: ModelProfile::default(),
+            vision_enabled: false,
+            product_brief: String::new(),
+            operating_principles: Vec::new(),
+            memory: Vec::new(),
+            hierarchy_schema: HierarchySchema::default(),
+            cli_active: false,
+            ruleset: ProjectRuleset {
+                selections,
+                cross_repo: vec![],
+                process: vec![],
+                custom: vec![],
+            },
+        }
+    }
+
+    /// `set_rule_chosen_option` writes onto the repo-local `selections` list when the rule
+    /// lives there — the common case (the audit-integrated alternative-recommendation
+    /// `accept-alternatives` persistence step).
+    #[test]
+    fn set_rule_chosen_option_updates_a_repo_local_selection() {
+        let mut p = project_with_selections(vec![sel("RUST-DOMAIN-7")]);
+        assert!(p.ruleset.selections[0].chosen_option.is_none());
+        let ok = p.set_rule_chosen_option(
+            "RUST-DOMAIN-7",
+            "explicit-unitofwork-parameter-on-transactional-r",
+        );
+        assert!(ok, "a matching selection must be found and updated");
+        assert_eq!(
+            p.ruleset.selections[0].chosen_option.as_deref(),
+            Some("explicit-unitofwork-parameter-on-transactional-r")
+        );
+    }
+
+    /// `set_rule_chosen_option` also finds a rule living in `cross_repo` or `process`, not
+    /// just `selections` — the accept-alternatives contract makes no assumption about which
+    /// list a given rule id lives in.
+    #[test]
+    fn set_rule_chosen_option_searches_cross_repo_and_process_too() {
+        let mut p = project_with_selections(vec![]);
+        p.ruleset.cross_repo.push(sel("CROSS-RULE-1"));
+        p.ruleset.process.push(sel("PROC-RULE-1"));
+        assert!(p.set_rule_chosen_option("CROSS-RULE-1", "opt-x"));
+        assert_eq!(p.ruleset.cross_repo[0].chosen_option.as_deref(), Some("opt-x"));
+        assert!(p.set_rule_chosen_option("PROC-RULE-1", "opt-y"));
+        assert_eq!(p.ruleset.process[0].chosen_option.as_deref(), Some("opt-y"));
+    }
+
+    /// A rule id absent from EVERY list is a no-op — `false`, never a panic or a fabricated
+    /// insertion (accept-alternatives only ever writes onto a rule the project already knows
+    /// about; a stale/removed id must be reported, not silently created).
+    #[test]
+    fn set_rule_chosen_option_returns_false_for_an_unknown_rule_id() {
+        let mut p = project_with_selections(vec![sel("RUST-DOMAIN-7")]);
+        assert!(!p.set_rule_chosen_option("NO-SUCH-RULE-1", "opt-x"));
+        // The existing selection is untouched.
+        assert!(p.ruleset.selections[0].chosen_option.is_none());
+    }
+
+    /// Matching is case-insensitive on the rule id (defensive — ids are conventionally
+    /// uppercase already, but the caller's normalization must not be load-bearing here).
+    #[test]
+    fn set_rule_chosen_option_matches_case_insensitively() {
+        let mut p = project_with_selections(vec![sel("RUST-DOMAIN-7")]);
+        assert!(p.set_rule_chosen_option("rust-domain-7", "opt-x"));
+        assert_eq!(p.ruleset.selections[0].chosen_option.as_deref(), Some("opt-x"));
     }
 
     fn custom(name: &str, body: &str) -> CustomRule {

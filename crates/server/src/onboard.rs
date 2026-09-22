@@ -43,7 +43,10 @@ pub use self_ref::{
 
 // Pull private/crate-internal helpers into scope for the orchestration functions and
 // test module (via `use super::*`).
-pub(crate) use audit::{classify_repo_findings, is_code_auditable_rule};
+pub(crate) use audit::{
+    build_rule_alternatives, classify_repo_findings, is_code_auditable_rule,
+    is_semantic_multi_option_rule,
+};
 // Re-export camerata_gateway test-scope primitives so the test module's `use super::*`
 // can reach them directly (they're used in inline test assertions).
 #[allow(unused_imports)]
@@ -178,6 +181,15 @@ pub struct Finding {
     /// NOT a required field to populate, only an enrichment.
     #[serde(default)]
     pub captures: std::collections::BTreeMap<String, String>,
+    /// For a MULTI-OPTION semantic rule (see `docs/design/2026-09-22_audit-integrated-
+    /// alternatives.md`), the option id this finding's violation was judged AGAINST — the
+    /// AI's recommended option for the main scan, or the operator's forced choice for a
+    /// targeted `rescan-alternatives` call. `None` for a single-option rule, a mechanical/
+    /// deterministic-floor finding, or any finding predating this field (back-compatible
+    /// serde default). Consumed by `report_export::resolve_fix` so the report's Fix text
+    /// matches the option the finding was actually evaluated under, never a stale default.
+    #[serde(default)]
+    pub evaluated_option_id: Option<String>,
 }
 
 /// A finding is presumed presence-type (`located = true`) unless the AI merge pass proves its
@@ -216,6 +228,7 @@ impl Default for Finding {
             category: None,
             located: default_located(),
             captures: std::collections::BTreeMap::new(),
+            evaluated_option_id: None,
         }
     }
 }
@@ -473,6 +486,18 @@ pub struct ScanReport {
     /// with an empty/default stamp.
     #[serde(default)]
     pub provenance: ScanProvenance,
+    /// Per-rule recommendation for every MULTI-OPTION semantic rule this scan evaluated —
+    /// keyed by rule id (uppercased). Surfaced alongside `findings` so the UI can render the
+    /// "Evaluated against: <option> (AI recommended) · Why? · Change" control per rule group,
+    /// including rules with zero violations (the review panel lists every multi-option rule
+    /// in scope, not just the ones with findings). Populated across ALL scanned repos; when a
+    /// project-level rule is scanned in more than one repo the LAST repo processed wins (a
+    /// rule's recommendation is expected to converge across repos in the common case — this
+    /// is a documented simplification, not a per-repo store). A targeted `rescan-alternatives`
+    /// call updates the entries for exactly the rules it re-evaluated, marking them
+    /// `operator_chosen`. See `docs/design/2026-09-22_audit-integrated-alternatives.md`.
+    #[serde(default)]
+    pub recommendations: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation>,
 }
 
 impl ScanReport {
@@ -498,6 +523,7 @@ impl ScanReport {
             ),
             coverage_notes: Vec::new(),
             provenance: ScanProvenance::default(),
+            recommendations: std::collections::HashMap::new(),
         }
     }
 }
@@ -668,6 +694,16 @@ pub async fn audit_repos(
     // `crate::llm::resolve_backend` BEFORE calling in, so this function never has to reach
     // for settings/credentials itself — it only has to ACT on the resolution.
     backend_resolution: crate::llm::BackendResolution,
+    // The loaded rule corpus, when available — joined against each repo's `semantic` rule ids
+    // to build the multi-option [`crate::ai_audit::RuleAlternatives`] set for the audit-
+    // integrated alternative-recommendation feature (see `build_rule_alternatives`). `None`
+    // degrades to today's behavior (no recommendations — every rule keeps its pre-resolved
+    // directive), exactly like every other corpus-optional join in this module.
+    corpus: Option<&camerata_rules::RuleSet>,
+    // Each rule's PROJECT-level chosen option (uppercased rule id -> option id), read from
+    // `RuleSelection.chosen_option` by the caller. Used as the "currently selected" marker in
+    // the recommendation prompt and as the fallback when the model's answer can't be trusted.
+    chosen_options: &std::collections::HashMap<String, String>,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
     // THE GATE: resolved before anything else — no file read, no deterministic tool, no
     // model call — because a `Blocked` project must not scan AT ALL, not just skip the LLM
@@ -716,6 +752,11 @@ pub async fn audit_repos(
     let mut test_files_total = 0usize;
     let mut repos_ok = Vec::new();
     let mut notes = extra_notes;
+    // Per-rule alternative recommendations, accumulated across every repo this scan touches
+    // (see `ScanReport::recommendations`'s doc comment for the last-repo-wins simplification
+    // when a project-level rule is scanned in more than one repo).
+    let mut recommendations: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation> =
+        std::collections::HashMap::new();
     // Provenance (P1): the git identity of every source dir this run touched (sha/branch/
     // dirty), captured unconditionally per source — even a repo whose file-read later fails
     // still gets its ref recorded, since the dir is what was attempted. A dirty tree never
@@ -821,6 +862,19 @@ pub async fn audit_repos(
                     .filter(|r| is_code_auditable_rule(&r.id))
                     .map(|r| (r.id.clone(), r.directive.clone()))
                     .collect();
+                // Multi-option semantic rules in THIS repo's `semantic` set (audit-integrated
+                // alternative recommendation — see `build_rule_alternatives`'s doc comment).
+                // Empty when the corpus isn't loaded or none of this repo's semantic rules
+                // offer alternatives; `audit_repo` treats that as a no-op (today's behavior).
+                let alternatives: Vec<crate::ai_audit::RuleAlternatives> = corpus
+                    .map(|c| {
+                        build_rule_alternatives(
+                            c,
+                            semantic.iter().map(|(id, _)| id.as_str()),
+                            chosen_options,
+                        )
+                    })
+                    .unwrap_or_default();
                 // Capture the WHOLE file set for the deep tier (it reads the full repo, not the
                 // incremental subset). Only when the deep tier is on, to avoid the clone otherwise.
                 if deep && run_ai_review {
@@ -918,6 +972,11 @@ pub async fn audit_repos(
                             spec,
                             &part.changed,
                             &semantic,
+                            &alternatives,
+                            // `forced` is always empty on the main scan — nothing is
+                            // operator-forced here; that's exclusively the targeted
+                            // `rescan-alternatives` endpoint's job.
+                            &std::collections::HashMap::new(),
                             model,
                             calibration_model,
                             mode,
@@ -929,7 +988,12 @@ pub async fn audit_repos(
                         )
                         .await
                         {
-                            Ok((ai_findings, _ai_rules)) => ai_for_repo.extend(ai_findings),
+                            Ok((ai_findings, _ai_rules, repo_recs)) => {
+                                ai_for_repo.extend(ai_findings);
+                                for rec in repo_recs {
+                                    recommendations.insert(rec.rule_id.clone(), rec);
+                                }
+                            }
                             Err(e) => notes.push(format!("{spec}: AI audit skipped ({e})")),
                         }
                     }
@@ -994,6 +1058,7 @@ pub async fn audit_repos(
     report.test_file_count = test_files_total;
     report.actual_usage = Some(meter.snapshot());
     report.deep = deep_report;
+    report.recommendations = recommendations;
     // Fold the always-on dep-audit coverage notes into the report.  The scan-tools
     // preview notes are merged separately (via `merge_scan_preview` in lib.rs); both
     // sets land in `coverage_notes` so the UI sees them in one place.
@@ -1844,6 +1909,7 @@ mod tests {
             category: None,
             located: true,
             captures: Default::default(),
+            evaluated_option_id: None,
         };
         let mut findings = vec![
             mk("a.rs", 5, "SEC-NO-HARDCODED-SECRETS-1", snippet), // baselined
@@ -1880,6 +1946,7 @@ mod tests {
                 category: None,
                 located: true,
                 captures: Default::default(),
+                evaluated_option_id: None,
             },
             Finding {
                 repo: "me/web".into(),
@@ -1900,6 +1967,7 @@ mod tests {
                 category: None,
                 located: true,
                 captures: Default::default(),
+                evaluated_option_id: None,
             },
         ];
         let body = tech_debt_issue_body(&findings);
@@ -1941,6 +2009,7 @@ mod tests {
             category: None,
             located: true,
             captures: Default::default(),
+            evaluated_option_id: None,
         }
     }
 
@@ -2085,6 +2154,7 @@ mod tests {
             category: None,
             located: true,
             captures: Default::default(),
+            evaluated_option_id: None,
         };
         let csv = tech_debt_csv(&[f]);
         let data_row = csv.lines().nth(1).expect("expected data row");
@@ -2300,6 +2370,55 @@ mod tests {
         (dir, sources)
     }
 
+    /// The removed "must choose an alternative before arming" gate (2026-09-22 design,
+    /// §The four changes/1): `audit_repos` accepts a SELECTED rule that has NO default option
+    /// and NO project-persisted `chosen_option` — the exact state that used to block onboarding
+    /// — and the scan simply proceeds (the AI audit recommends one instead; deterministic-only
+    /// here to stay token-free and prove there is no SERVER-side block independent of the LLM
+    /// path at all). `RUST-DOMAIN-7` is a real corpus rule with `default = false`.
+    #[tokio::test]
+    async fn no_default_rule_with_no_chosen_option_does_not_block_the_scan() {
+        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (_dir, sources) = scratch_repo_with_secret();
+        let selected = vec![SelectedRule {
+            id: "RUST-DOMAIN-7".to_string(),
+            directive: "How transactional posture reaches the repository.".to_string(),
+            repos: Vec::new(),
+        }];
+        let (report, _manifest) = audit_repos(
+            &sources,
+            &selected,
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false, // run_ai_review off — stay token-free; this asserts the SERVER never blocks
+            true,  // run_deterministic on
+            None,
+            crate::llm::BackendResolution::Api,
+            None, // corpus
+            &std::collections::HashMap::new(), // chosen_options — no project-level choice made
+        )
+        .await;
+        assert!(!report.gated, "a no-default, unchosen rule must not trip the GitHub gate");
+        assert!(!report.blocked, "a no-default, unchosen rule must not trip the compliance gate");
+        assert_eq!(
+            report.files_scanned, 1,
+            "the scan must actually run over the repo, not short-circuit"
+        );
+        let msg = report.message.unwrap_or_default();
+        assert!(
+            !msg.to_lowercase().contains("must choose"),
+            "no 'must choose an alternative' block message may appear: {msg}"
+        );
+    }
+
     /// Scan-type selector: with deterministic ON and AI review OFF, the audit runs the
     /// always-on floor (catching the secret) and makes NO model call — a token-free assertion
     /// that the AI passes are bypassed. (`run_ai_review = false` is exactly the path that skips
@@ -2329,6 +2448,8 @@ mod tests {
             true,           // run_deterministic -> floor runs
             None,           // usage_ledger
             crate::llm::BackendResolution::Api, // backend gate: not under test here
+            None,           // corpus
+            &std::collections::HashMap::new(), // chosen_options
         )
         .await;
         // The floor caught the secret.
@@ -2373,6 +2494,8 @@ mod tests {
             false, // run_deterministic off -> floor skipped
             None,  // usage_ledger
             crate::llm::BackendResolution::Api, // backend gate: not under test here
+            None,  // corpus
+            &std::collections::HashMap::new(), // chosen_options
         )
         .await;
         assert!(
@@ -2422,6 +2545,8 @@ mod tests {
             true,  // run_deterministic on → floor runs
             None,
             crate::llm::BackendResolution::Api, // backend gate: not under test here
+            None, // corpus
+            &std::collections::HashMap::new(), // chosen_options
         )
         .await;
         let progress = jobs.det_progress(&jid).unwrap();
@@ -2477,6 +2602,8 @@ mod tests {
                 message: "This project is API-only (CLI disabled). Add an Anthropic API key to run."
                     .to_string(),
             },
+            None, // corpus
+            &std::collections::HashMap::new(), // chosen_options
         )
         .await;
         assert!(
@@ -2530,6 +2657,8 @@ mod tests {
             crate::llm::BackendResolution::Blocked {
                 message: "blocked".to_string(),
             },
+            None, // corpus
+            &std::collections::HashMap::new(), // chosen_options
         )
         .await;
         assert_eq!(
@@ -2566,6 +2695,8 @@ mod tests {
                           personal subscription). Do not use for client code."
                     .to_string(),
             },
+            None, // corpus
+            &std::collections::HashMap::new(), // chosen_options
         )
         .await;
         // The scan was NOT aborted: the floor still caught the secret.

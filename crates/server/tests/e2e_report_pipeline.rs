@@ -135,6 +135,8 @@ async fn e2e_deterministic_scan_to_pdf_report_pipeline() {
         true,         // run_deterministic — the always-on security floor DOES run
         None,         // ledger
         camerata_server::llm::BackendResolution::Api, // backend gate: not under test here
+        None, // corpus
+        &std::collections::HashMap::new(), // chosen_options
     )
     .await;
 

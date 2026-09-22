@@ -80,6 +80,16 @@ pub struct ReportOptions {
     /// [`resolve_brand`].
     #[serde(default)]
     pub brand: String,
+    /// Every rule's PROJECT-level chosen alternative option (uppercased rule id -> option
+    /// id) — the `resolve_fix` fallback source for a finding with no `evaluated_option_id`
+    /// (see its doc comment). NEVER sent by the export dialog client-side (the client has no
+    /// business knowing this); the export handlers populate it server-side from the project's
+    /// `ruleset` before calling `build_report_json`/`build_workbook`/`build_findings_export`.
+    /// `#[serde(default)]` so a client that omits it (every real client) degrades to an empty
+    /// map, i.e. `resolve_fix` falls straight through to the corpus default — today's exact
+    /// behavior for any project this feature hasn't touched.
+    #[serde(default)]
+    pub chosen_options: std::collections::HashMap<String, String>,
 }
 
 /// Env var carrying the STANDING default for [`ReportOptions::brand`] when the export dialog
@@ -1013,17 +1023,28 @@ pub(crate) fn resolve_citation(
 /// "Recommended Fix" column / `findings.json`'s `fix` field (`FindingRow::fix`) — same join, all
 /// three, so an absent remediation reads as an honestly OMITTED Fix block everywhere rather than
 /// one artifact inventing text the others don't have.
+/// Resolve for the option this finding was ACTUALLY evaluated under, so the report's Fix
+/// text matches what was judged, never a stale default (2026-09-22 audit-integrated
+/// alternatives, extending the 2026-09-13 Fix-1 mechanism below). Resolution order, via
+/// [`camerata_rules::Rule::resolved_option`]:
+/// 1. `finding.evaluated_option_id` — the option the audit (or a targeted
+///    `rescan-alternatives` call) actually judged this specific finding against, when the
+///    rule is multi-option and semantic;
+/// 2. `chosen_option` — the project's persisted `RuleSelection.chosen_option` for this rule,
+///    passed in by the caller (`ReportOptions::chosen_options`), when the finding predates
+///    this field or belongs to a rule the AI audit never tagged (e.g. a legacy persisted
+///    finding);
+/// 3. the corpus rule's own `default_option` — `resolved_option`'s own fallback, unchanged
+///    from before this feature.
 pub(crate) fn resolve_fix(
     rule_id: &str,
     corpus: Option<&camerata_rules::RuleSet>,
     finding: &Finding,
+    chosen_option: Option<&str>,
 ) -> Option<String> {
     let rule = corpus.and_then(|c| c.get_by_id(rule_id))?;
-    // `chosen_option = None`: the report has no notion of a per-project chosen option today
-    // (that lives in onboarding's `SelectedRule` binding, not in a `Finding`/`ScanReport`), so
-    // this always resolves the rule's own DEFAULT — matching the design doc's "the corpus
-    // rule's default `[[option]].remediation`" wording exactly, not a project-specific choice.
-    let option = rule.resolved_option(None)?;
+    let evaluated = finding.evaluated_option_id.as_deref().or(chosen_option);
+    let option = rule.resolved_option(evaluated)?;
     let remediation = option.remediation.as_deref()?.trim();
     if remediation.is_empty() {
         return None;
@@ -1529,7 +1550,12 @@ pub fn build_report_json(
                     disposition: disposition_label(*disposition, reason, bucket, confirmed_by_client),
                     also_matches: f.also_matches.clone(),
                     headline: defect_headline(&f.detail, &title),
-                    fix: resolve_fix(&rule_id, corpus, f),
+                    fix: resolve_fix(
+                        &rule_id,
+                        corpus,
+                        f,
+                        opts.chosen_options.get(&rule_id.to_ascii_uppercase()).map(String::as_str),
+                    ),
                     // See `CuratedSiteJson::fix_for_this_finding`'s doc comment: deliberately
                     // never populated in this pass.
                     fix_for_this_finding: None,
@@ -1995,6 +2021,7 @@ mod tests {
                 started_at: "2026-07-23T00:00:00Z".to_string(),
                 finished_at: "2026-07-23T00:05:00Z".to_string(),
             },
+            recommendations: std::collections::HashMap::new(),
         }
     }
 
@@ -2609,7 +2636,7 @@ mod tests {
         assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
         let mut f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "critical");
         f.captures.insert("table".to_string(), "profiles".to_string());
-        let fix = resolve_fix("SUPABASE-RLS-ENABLED-1", Some(&corpus), &f)
+        let fix = resolve_fix("SUPABASE-RLS-ENABLED-1", Some(&corpus), &f, None)
             .expect("SUPABASE-RLS-ENABLED-1 must have authored remediation");
         assert!(
             fix.contains("`profiles`") || fix.contains("profiles"),
@@ -2633,7 +2660,7 @@ mod tests {
         // state: absent remediation means an omitted Fix, never the directive text.
         let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
         let f = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
-        let fix = resolve_fix("SEC-TEST-UNAUTHORED-1", Some(&corpus), &f);
+        let fix = resolve_fix("SEC-TEST-UNAUTHORED-1", Some(&corpus), &f, None);
         assert_eq!(
             fix, None,
             "must omit the Fix block, not fall back to the rule's directive, when remediation is unauthored"
@@ -2643,7 +2670,7 @@ mod tests {
     #[test]
     fn resolve_fix_is_none_not_fabricated_when_corpus_is_absent() {
         let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
-        assert_eq!(resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", None, &f), None);
+        assert_eq!(resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", None, &f, None), None);
     }
 
     #[tokio::test]
@@ -2652,7 +2679,74 @@ mod tests {
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
         let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
-        assert_eq!(resolve_fix("AI-CUSTOM-ARCH-RULE-1", Some(&corpus), &f), None);
+        assert_eq!(resolve_fix("AI-CUSTOM-ARCH-RULE-1", Some(&corpus), &f, None), None);
+    }
+
+    // ── resolve_fix honors the evaluated/chosen option (2026-09-22 audit-integrated
+    // alternatives), not always the rule's default ──────────────────────────────────
+
+    /// `SUPABASE-RLS-ENABLED-1` has two options: the default
+    /// `enforce-rls-enabled-replayed-end-state` (authored remediation) and
+    /// `regex-grep-each-migration-independently` (NO authored remediation — a deliberately
+    /// rejected alternative in the corpus). This makes it a real fixture for proving
+    /// `evaluated_option_id` genuinely changes which option's remediation renders, not just
+    /// which rule's default happens to be picked.
+    #[tokio::test]
+    async fn resolve_fix_uses_the_finding_evaluated_option_id_over_the_project_chosen_option() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        let mut f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "critical");
+        f.evaluated_option_id = Some("enforce-rls-enabled-replayed-end-state".to_string());
+        // The chosen_option PARAMETER disagrees with the finding's evaluated_option_id — the
+        // finding's tag must win (it's what this SPECIFIC finding was actually judged under).
+        let fix = resolve_fix(
+            "SUPABASE-RLS-ENABLED-1",
+            Some(&corpus),
+            &f,
+            Some("regex-grep-each-migration-independently"),
+        );
+        assert!(
+            fix.is_some(),
+            "the evaluated option has authored remediation and must win over the chosen_option param"
+        );
+    }
+
+    /// When the finding carries no `evaluated_option_id` (a legacy finding, or a rule the AI
+    /// tier never tagged), `resolve_fix` falls back to the project's `chosen_option` parameter
+    /// — and correctly OMITS the Fix block when that specific option has no authored
+    /// remediation, proving the per-option (not just per-rule) omit-if-unauthored contract.
+    #[tokio::test]
+    async fn resolve_fix_falls_back_to_the_chosen_option_param_when_the_finding_has_none() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        let f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "critical");
+        assert!(f.evaluated_option_id.is_none());
+        let fix = resolve_fix(
+            "SUPABASE-RLS-ENABLED-1",
+            Some(&corpus),
+            &f,
+            Some("regex-grep-each-migration-independently"),
+        );
+        assert_eq!(
+            fix, None,
+            "the chosen (non-default) option has no authored remediation — must omit, not \
+             fall back to the default option's remediation or the directive"
+        );
+    }
+
+    /// With neither `evaluated_option_id` nor a `chosen_option` param, resolution falls all the
+    /// way through to the corpus rule's own default — today's exact pre-feature behavior,
+    /// unchanged.
+    #[tokio::test]
+    async fn resolve_fix_falls_back_to_the_corpus_default_when_nothing_else_is_set() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        let f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "critical");
+        let fix = resolve_fix("SUPABASE-RLS-ENABLED-1", Some(&corpus), &f, None);
+        assert!(fix.is_some(), "the corpus default option has authored remediation");
     }
 
     #[tokio::test]
