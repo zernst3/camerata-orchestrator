@@ -220,6 +220,8 @@ Cross-file context: you have the REPO MAP (every file + its public symbols) but 
 
 For `code`, copy the offending source text VERBATIM from the digest — the exact characters of the line you're flagging, not a paraphrase. A deterministic post-step locates the true line by finding this text in the file, so an exact copy gives an exact line; a paraphrase makes the line approximate. Keep it to the single most relevant line (or short span). Still set `line` to your best estimate as a fallback.
 
+CAPTURES (optional, only when applicable). Some adopted directives above name a placeholder in angle brackets — e.g. "...naming the bucket: your `<bucket>` bucket is public" or "...your `<table>` table has no Row Level Security". When the directive you matched contains such a placeholder AND you can identify the concrete real-world object this specific violation is about, add an optional `"captures"` object to that finding mapping the BARE token name (no angle brackets, e.g. `"bucket"`, `"table"`, `"function-name"`, `"view"`, `"matview"`, `"schema"`) to the actual object name (e.g. `"invoices"`, `"profiles"`, `"charge_membership"`) — so the report can name the real object instead of a generic placeholder. Omit `captures` entirely (or leave it empty) whenever the directive has no such placeholder, or you cannot pin down the concrete object — never guess a name you are not confident is correct.
+
 Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 {
   "findings": [
@@ -230,7 +232,8 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
       "rule": "EXACT adopted RULE-ID, or a short-kebab-name for an unlisted issue",
       "title": "one-line statement of the specific violation here",
       "code": "the EXACT offending source line, copied verbatim from the digest",
-      "detail": "why it's a problem and what the fix direction is"
+      "detail": "why it's a problem and what the fix direction is",
+      "captures": {"bucket": "the-real-object-name"}
     }
   ],
   "proposed_rules": [
@@ -293,6 +296,66 @@ fn canonical_adopted_rule(
         return None;
     };
     adopted.contains(candidate).then(|| candidate.to_string())
+}
+
+/// Placeholder token names an AI-emitted finding's optional `captures` object may map to —
+/// the same finite domain-token vocabulary the corpus's authored `directive`/`remediation`
+/// text uses (see `onboard::architectural::capture_token_for` and
+/// `report_export::generic_placeholder_filler` for the deterministic-checker and
+/// report-rendering sides of the same vocabulary), minus `path`/`file` — those two are always
+/// filled from `Finding.path` (see `report_export::instantiate_remediation`'s resolution
+/// order) and never need a model-supplied override. Restricting to this allowlist means a
+/// model that emits a garbage or hallucinated key just has that key silently dropped — it can
+/// never smuggle an arbitrary token into the report's `Finding` wire type via `captures`.
+const KNOWN_AI_CAPTURE_TOKENS: &[&str] =
+    &["table", "function-name", "function", "bucket", "view", "matview", "schema", "policy"];
+
+/// A capture value's length cap: a token should be a bare object name (a table, bucket, or
+/// function name), never a paragraph. Generous enough that it never clips a real identifier;
+/// this only exists as defense against a model that stuffs prose into the value.
+const MAX_CAPTURE_VALUE_LEN: usize = 200;
+
+/// How many captures a single finding may carry. A rule's remediation text never uses more
+/// than one or two domain tokens — this is a ceiling against a malformed/adversarial blob,
+/// not a realistic limit any well-formed response would ever approach.
+const MAX_CAPTURES_PER_FINDING: usize = 8;
+
+/// Parse one finding's OPTIONAL `captures` object from the model's raw JSON — e.g.
+/// `{"bucket": "invoices"}` maps the corpus rule's `<bucket>` remediation token to the real
+/// object this finding is about (see `report_export::instantiate_remediation`, the consumer).
+///
+/// Deliberately fail-soft at every step, since `captures` is pure enrichment (an empty map
+/// just means the report's generic fallback wording is used, per `generic_placeholder_filler`)
+/// and must never cost the finding itself:
+/// - `captures` absent, `null`, or not a JSON object -> empty map.
+/// - a key outside [`KNOWN_AI_CAPTURE_TOKENS`] -> that entry is skipped, not fatal.
+/// - a value that isn't a JSON string -> that entry is skipped, not fatal.
+/// - an empty/whitespace-only value, or one longer than [`MAX_CAPTURE_VALUE_LEN`] -> skipped.
+/// - more than [`MAX_CAPTURES_PER_FINDING`] well-formed entries -> extras beyond the cap are
+///   dropped (this can only matter for adversarial/malformed input; a real rule directive
+///   never uses more than a couple of tokens).
+fn parse_finding_captures(f: &serde_json::Value) -> std::collections::BTreeMap<String, String> {
+    let mut out = std::collections::BTreeMap::new();
+    let Some(obj) = f["captures"].as_object() else {
+        return out;
+    };
+    for (key, value) in obj {
+        if out.len() >= MAX_CAPTURES_PER_FINDING {
+            break;
+        }
+        if !KNOWN_AI_CAPTURE_TOKENS.contains(&key.as_str()) {
+            continue;
+        }
+        let Some(s) = value.as_str() else {
+            continue;
+        };
+        let trimmed = s.trim();
+        if trimmed.is_empty() || trimmed.chars().count() > MAX_CAPTURE_VALUE_LEN {
+            continue;
+        }
+        out.insert(key.clone(), trimmed.to_string());
+    }
+    out
 }
 
 /// Parse a model audit response into Findings + ProposedRules in the scan's shapes.
@@ -371,11 +434,14 @@ pub fn parse_ai_findings(
                 // `located` is set by merge_by_location once snippets are anchored to files.
                 category: None,
                 located: true,
-                // AI/semantic findings have no cheaply-known structured object at match time
-                // (the model narrates the defect in prose, not a parsed table/function/bucket
-                // name) — empty captures means the report layer falls back to a readable
-                // generic when instantiating a rule's remediation text for this finding.
-                captures: Default::default(),
+                // AI/semantic findings usually have no cheaply-known structured object at
+                // match time (the model narrates the defect in prose, not a parsed
+                // table/function/bucket name) — but when the model DID identify one and
+                // supplied an optional `captures` object (see the CAPTURES section of
+                // `audit_system_prompt`), `parse_finding_captures` maps it through so the
+                // report can name the real object instead of falling back to a generic
+                // placeholder. Empty (the common case) falls back exactly as before.
+                captures: parse_finding_captures(f),
             });
         }
     }
@@ -3987,6 +4053,102 @@ mod tests {
         assert_eq!(rules[0].enforcement_point, "integration");
         // The rule's finding_count picks up its matching finding.
         assert_eq!(rules[0].finding_count, 1);
+    }
+
+    /// A well-formed, allowlisted `captures` object on a model finding maps straight through
+    /// to `Finding.captures` — the general path that lets an AI-emitted finding (e.g. a
+    /// public-bucket or exposed-schema finding, which has no deterministic checker) still
+    /// name the real object in the report instead of falling back to the generic wording.
+    #[test]
+    fn parse_ai_findings_maps_a_well_formed_captures_object_through() {
+        let raw = r#"{"findings":[
+            {"path":"supabase/migrations/1.sql","line":5,"severity":"high",
+             "rule":"public-bucket-not-reviewed",
+             "title":"the invoices bucket is public",
+             "detail":"anyone with the link can download every file in it",
+             "captures":{"bucket":"invoices"}}
+        ],"proposed_rules":[]}"#;
+        let none = std::collections::HashSet::new();
+        let (findings, _) = parse_ai_findings("me/api", raw, &none);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(
+            findings[0].captures.get("bucket").map(String::as_str),
+            Some("invoices")
+        );
+    }
+
+    /// `captures` is optional enrichment: absence must never affect parsing of the rest of the
+    /// finding, and the resulting map must simply be empty (the report's generic fallback
+    /// covers it) rather than the finding being dropped or erroring.
+    #[test]
+    fn parse_ai_findings_defaults_to_empty_captures_when_the_field_is_absent() {
+        let raw = r#"{"findings":[
+            {"path":"a.rs","line":1,"severity":"medium","rule":"y","title":"t","detail":"d"}
+        ],"proposed_rules":[]}"#;
+        let none = std::collections::HashSet::new();
+        let (findings, _) = parse_ai_findings("me/api", raw, &none);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].captures.is_empty());
+    }
+
+    /// A malformed `captures` blob — wrong JSON type, an unknown/hallucinated token key, a
+    /// non-string value, and an oversized value all mixed together — must degrade to "skip the
+    /// bad entries" rather than panicking or dropping the finding. This is the adversarial
+    /// half of Step 2's defensiveness requirement: the model's output is untrusted input.
+    #[test]
+    fn parse_ai_findings_degrades_a_malformed_captures_blob_without_panicking() {
+        let huge = "x".repeat(500);
+        let raw = format!(
+            r#"{{"findings":[
+                {{"path":"a.rs","line":1,"severity":"medium","rule":"y","title":"t","detail":"d",
+                  "captures":{{
+                    "bucket":"avatars",
+                    "not-a-real-token":"whatever",
+                    "table":42,
+                    "schema":"   ",
+                    "view":"{huge}"
+                  }}}}
+            ],"proposed_rules":[]}}"#
+        );
+        let none = std::collections::HashSet::new();
+        let (findings, _) = parse_ai_findings("me/api", &raw, &none);
+        assert_eq!(findings.len(), 1, "the finding itself must survive a malformed captures blob");
+        assert_eq!(
+            findings[0].captures.get("bucket").map(String::as_str),
+            Some("avatars"),
+            "the one well-formed entry must still come through"
+        );
+        assert!(
+            !findings[0].captures.contains_key("not-a-real-token"),
+            "a key outside the known token allowlist must be dropped"
+        );
+        assert!(
+            !findings[0].captures.contains_key("table"),
+            "a non-string value must be dropped, not coerced or panicking"
+        );
+        assert!(
+            !findings[0].captures.contains_key("schema"),
+            "a whitespace-only value must be dropped"
+        );
+        assert!(
+            !findings[0].captures.contains_key("view"),
+            "a value over the length cap must be dropped"
+        );
+        assert_eq!(findings[0].captures.len(), 1);
+    }
+
+    /// `captures` being an entirely wrong JSON shape (a string, not an object) must also
+    /// degrade to empty rather than erroring or panicking.
+    #[test]
+    fn parse_ai_findings_degrades_a_non_object_captures_value_to_empty() {
+        let raw = r#"{"findings":[
+            {"path":"a.rs","line":1,"severity":"medium","rule":"y","title":"t","detail":"d",
+             "captures":"not an object"}
+        ],"proposed_rules":[]}"#;
+        let none = std::collections::HashSet::new();
+        let (findings, _) = parse_ai_findings("me/api", raw, &none);
+        assert_eq!(findings.len(), 1);
+        assert!(findings[0].captures.is_empty());
     }
 
     /// The raw-audit parser must ACCEPT and PRESERVE an explicit `"critical"` severity from

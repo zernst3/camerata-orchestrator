@@ -198,6 +198,56 @@ mod tests {
         );
     }
 
+    /// Every Supabase corpus rule whose authored remediation text uses a domain placeholder
+    /// (`<table>`, `<view>`, `<bucket>`, `<matview>`, `<schema>`, `<function-name>`) OTHER than
+    /// the four `capture_token_for` already maps is NOT answered by any deterministic
+    /// `ArchChecker` today (verified against `crates/checks/src/supabase/`: only
+    /// `SupabaseRlsChecker` and `SupabaseFnSearchPathChecker` exist, and between them they only
+    /// answer RLS-ENABLED / RLS-NO-POLICY / RLS-POLICY-DISABLED / FUNC-SEARCH-PATH). Wiring a
+    /// deterministic-checker token for one of these would be a lie about provenance — they are
+    /// AI-audit findings (see `ai_audit::parse_finding_captures` for that path instead) or, for
+    /// `SUPABASE-RLS-INITPLAN-1`/`SUPABASE-RLS-PERMISSIVE-TRUE-1`/`SUPABASE-RLS-VIEW-INVOKER-1`,
+    /// facets `SupabaseRlsChecker` genuinely does not inspect (policy predicate content /
+    /// `security_invoker`). This test pins `capture_token_for` to `None` for all of them so a
+    /// future edit that "helpfully" wires one without also adding a real checker fails loudly.
+    #[test]
+    fn capture_token_for_stays_none_for_rules_with_no_deterministic_checker() {
+        let no_deterministic_checker_yet = [
+            "SUPABASE-RLS-INITPLAN-1",
+            "SUPABASE-RLS-PERMISSIVE-TRUE-1",
+            "SUPABASE-RLS-VIEW-INVOKER-1",
+            "SUPABASE-AUTH-EDGE-JWT-1",
+            "SUPABASE-STORAGE-OBJECT-POLICY-1",
+            "SUPABASE-STORAGE-PUBLIC-BUCKET-1",
+            "SUPABASE-EXPOSURE-MATVIEW-1",
+            "SUPABASE-EXPOSURE-SCHEMAS-1",
+        ];
+        for id in no_deterministic_checker_yet {
+            assert_eq!(
+                capture_token_for(id),
+                None,
+                "{id} has no deterministic ArchChecker — capture_token_for must not claim one"
+            );
+        }
+    }
+
+    /// Pins the FULL currently-known-deterministic set to its exact token — the flip side of
+    /// the `_stays_none_` test above. If a new `ArchChecker` starts answering one of the
+    /// currently-AI-only rule ids above, this pair of tests is where that migration shows up:
+    /// the id moves from the `None` list to this list with its real token.
+    #[test]
+    fn capture_token_for_maps_every_currently_deterministic_rule() {
+        let expected = [
+            ("SUPABASE-RLS-ENABLED-1", "table"),
+            ("SUPABASE-RLS-NO-POLICY-1", "table"),
+            ("SUPABASE-RLS-POLICY-DISABLED-1", "table"),
+            ("SUPABASE-FUNC-SEARCH-PATH-1", "function-name"),
+        ];
+        for (id, token) in expected {
+            assert_eq!(capture_token_for(id), Some(token), "rule id: {id}");
+        }
+    }
+
     #[test]
     fn arch_violation_to_finding_leaves_captures_empty_for_an_unmapped_rule() {
         let v = ArchViolation {
