@@ -31,6 +31,9 @@ why = "A branch-prefix convention (`feature/`, `release/`, `hotfix/`, …) lets 
 id = "enforce-branch-prefix"
 label = "Require an allowed branch-name prefix"
 directive = "Every new branch name must begin with one of the project's configured allowed prefixes (e.g. `feature/`, `release/`, `hotfix/`; see project Settings → VCS gate → branch naming). Enforced at layer 4 (CI) via a wired branch-name metadata check (inspecting the ref) and at Camerata's VCS-action gate when Camerata creates the branch. A branch name with no allowed prefix is rejected pending correction or an auditable bypass. NOT enforced at the layer-2 code gate — the rule validates branch metadata, not the diff. The allowed prefix list lives in project Settings."
+remediation = """
+Rename the branch to start with one of the project's configured allowed prefixes (such as feature/, release/, or hotfix/), and confirm the CI branch-name check is wired to reject a future branch that doesn't. Verify by attempting to push a branch with a disallowed prefix and confirming it is rejected.
+"""
 why = "A branch-prefix convention makes a branch's purpose self-describing and lets CI route behavior off the prefix; enforcing it at the metadata gate (CI + the VCS-action gate) is the only place the branch name is visible, since no code gate sees the ref."
 
 [[option]]

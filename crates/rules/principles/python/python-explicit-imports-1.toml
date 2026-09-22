@@ -16,6 +16,9 @@ why = "A wildcard `from module import *` pulls an unknown set of names into the 
 id = "explicit-imports"
 label = "explicit imports; intentional, curated module surface"
 directive = "Imports name the specific symbols (or the module) they use; `from module import *` is avoided. Each package exposes a deliberate public surface and keeps internals private by convention, so cross-module dependencies are on intended exports rather than on whatever is importable. Treat module boundaries as a design choice, not an accident of file layout."
+remediation = """
+Replace the wildcard import (`from module import *`) with explicit named imports of the symbols actually used, and confirm the module's public surface is deliberate (documented exports) rather than everything defined at the top level. Verify by confirming the file's imports name specific symbols and a linter rule against wildcard imports passes.
+"""
 why = "Explicit imports keep symbol origins obvious and tooling accurate; a curated surface makes dependencies intentional."
 
 [[option]]

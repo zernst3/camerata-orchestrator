@@ -20,6 +20,9 @@ why = "A permission with no grants is a no-op. The feature gated on it silently 
 id = "adding-a-permission-seeds-its-role-grants-in-the"
 label = "Adding a permission seeds its role grants in the same migration"
 directive = "When a migration introduces a new permission, the same migration also writes the role-permission grants for every role that should have it. The permission row and its grant rows ship together, idempotently, in one atomic change. Roles whose grants are intentionally left for post-deploy configuration are exempt, but the migration declares that intent explicitly so a reviewer can tell the difference between a missing grant and a deliberate one."
+remediation = """
+Add the role-permission grant rows for every role that should have the new permission into the same migration that creates the permission row, rather than deferring the grant to a later migration, a seed script, or runtime configuration. Verify by running the migration against a fresh database and confirming the intended roles already have the permission granted immediately after migration, with no follow-up step required.
+"""
 why = "A permission with no grants is a no-op."
 
 [[option]]

@@ -16,6 +16,9 @@ why = "Putting the auth check in the handler body makes protection opt-in per ha
 id = "auth-dependency"
 label = "enforce auth via a Depends dependency"
 directive = "Authentication and authorization are enforced through a `Depends` dependency that resolves the current principal and raises 401/403 before the handler runs, applied at the route or router level. Every mutating endpoint (POST/PUT/PATCH/DELETE) carries an auth dependency by default; a route is unauthenticated only by an explicit, reviewed opt-out. Handlers do not perform ad hoc auth checks in their bodies."
+remediation = """
+Move the in-handler authentication or authorization check into a Depends dependency applied at the route or router level, so it resolves the principal and raises 401/403 before the handler body runs. Apply it to every mutating endpoint (POST/PUT/PATCH/DELETE), not just this one. Verify by calling the endpoint without valid credentials and confirming it is rejected before the handler's own logic executes.
+"""
 why = "A declared dependency makes protection visible and a missing one a reviewable omission, instead of an invisible gap on a new write route."
 
 [[option]]

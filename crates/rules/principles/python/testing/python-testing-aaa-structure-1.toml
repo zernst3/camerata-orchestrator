@@ -17,6 +17,9 @@ why = "pytest's own anatomy documentation names the four phases of a test: Arran
 id = "aaa-one-act"
 label = "Arrange-Act-Assert with a single act per test"
 directive = "Each test function body is organized in three phases. Arrange: prepare all preconditions (create objects, set up fakes, seed data) using fixtures or local setup; this phase may be empty when fixtures cover it entirely. Act: a single call that exercises the behavior under test (one function call, one method invocation, one HTTP request). Assert: verify the outcome of the act; a test may have multiple assert statements as long as they all check the same behavior — use pytest.approx() for floats and pytest.raises() for expected exceptions. If two unrelated behaviors need testing, write two test functions. Never put a second act+assert cycle inside the same test body."
+remediation = """
+Restructure the test function into three phases: Arrange (set up preconditions via fixtures or local setup), Act (a single call exercising the behavior under test), and Assert (assertions focused on that one outcome). Split a test currently checking intermediate state after multiple steps into separate test functions, one per behavior. Verify by confirming each test has exactly one Act call and fails for exactly one reason when it fails.
+"""
 why = "A single act makes failures unambiguous; self-documenting test names map one-to-one with behaviors; fits pytest's phase model precisely."
 
 [[option]]

@@ -20,6 +20,9 @@ why = "The two failure modes look identical to the person filing the report ('I 
 id = "a-missing-grant-is-configuration-a-missing-permi"
 label = "A missing grant is configuration; a missing permission is code"
 directive = "When an access gap is reported, classify it before reaching for code. If the underlying permission already exists in the schema and the gap is that the role or user does not have it granted, the fix is a configuration change. The tool for making the grant varies by system (an admin UI when one exists, configuration-as-code, a role-seed migration, or a direct write to the role-permission table when no higher-level tool is available); the principle is just that this is configuration, not engineering work. If the underlying permission does not exist in the schema at all, the fix is code: the permission has to be defined and the migration that adds it has to seed grants for applicable roles."
+remediation = """
+Check whether the underlying permission already exists in the schema before opening a code change. If it exists and the gap is only that a role or user lacks the grant, make the grant through the admin UI or configuration tool instead of filing a PR; only write code when the permission itself doesn't exist yet. Verify by confirming the access gap is closed through a configuration change with no deploy, when the permission was already defined.
+"""
 why = "The two failure modes look identical to the person filing the report ('I cannot do X'), but they have different fixes and different reviewers."
 
 [[option]]

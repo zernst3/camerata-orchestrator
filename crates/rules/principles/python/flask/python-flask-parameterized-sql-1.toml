@@ -17,6 +17,9 @@ why = "Flask itself is database-agnostic, but Flask applications almost always u
 id = "orm-or-text-with-bindparams"
 label = "SQLAlchemy ORM query API or text() with :named bind parameters"
 directive = "All database queries use the SQLAlchemy ORM query API (`.filter()`, `.filter_by()`, `select()` with `.where()`, etc.) or, when raw SQL is required, `sqlalchemy.text(sql_string)` with bind parameters passed as a dict (`:named` style) to `session.execute()` or `connection.execute()`. f-strings, `%`-formatting, `.format()`, and string concatenation inside any SQL string passed to an execute method are forbidden. Dynamic column or table names come from a fixed allow-list, never from request input."
+remediation = """
+Replace the f-string or %-formatted SQL with the SQLAlchemy ORM query API where possible, or with sqlalchemy.text() using named bind parameters passed as a dict when raw SQL is required. Verify by passing a value containing a SQL metacharacter as a bound parameter and confirming it is treated as data, not executable SQL.
+"""
 why = "The ORM parameterizes automatically; `text()` with bind parameters sends SQL and values separately so a value can never be parsed as SQL."
 
 [[option]]

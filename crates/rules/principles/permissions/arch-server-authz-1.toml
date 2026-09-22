@@ -25,6 +25,9 @@ why = "UI can't drift from server enforcement when both read the same server-com
 id = "authorization-on-the-server-ui-renders-permissio"
 label = "Authorization on the server; UI renders permission hints"
 directive = "Each resource response carries server-computed permission flags (e.g. _can: { manage: true }); the UI gates affordances on those flags and never recomputes permission logic client-side. Block client-side permission introspection with lint."
+remediation = """
+Add server-computed permission flags (for example _can: { manage: true }) to the resource response, and change the UI to gate the affordance on that flag instead of inspecting raw permission codes or role membership client-side. Add a lint rule blocking client-side permission introspection so it doesn't reappear. Verify by confirming the UI's gating logic reads only the server-provided flag and the same decision, if bypassed, is still enforced by the server endpoint.
+"""
 why = "UI can't drift from server enforcement when both read the same server-computed truth; avoids leaking RBAC internals to the browser."
 
 [[option]]

@@ -28,6 +28,9 @@ why = "Many authorization decisions depend on the resource itself: who owns it, 
 id = "fetch-then-authorize"
 label = "fetch the resource, authorize against it, pass an authorized value"
 directive = "Per-resource authorization runs after the resource is fetched and before business logic runs. A dedicated authorization step reads the fetched resource, applies the policy, and on success produces a value whose type marks it as authorized. Business logic accepts only that authorized-typed value, so an unauthorized resource cannot reach it. The fetch-authorize-act order is fixed; business logic never re-checks and never receives an unchecked resource."
+remediation = """
+Move the authorization check to run after the resource is fetched and before the business logic that acts on it, producing a value whose type marks it as authorized, and have the business logic accept only that authorized value rather than checking permissions inline wherever it happens to need a decision. Verify by confirming the business logic function's signature cannot be called with an unauthorized value, and that a request for a resource the caller can't access is rejected before any business logic runs.
+"""
 why = "Resource-level policy can only be evaluated once the resource is loaded, and encoding the passed check in the type makes authorization a precondition the rest of the code can rely on."
 
 [[option]]

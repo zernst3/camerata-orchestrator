@@ -20,6 +20,9 @@ why = "A Flask or FastAPI route handler exists to translate HTTP into a call and
 id = "service-layer"
 label = "keep handlers thin; business logic in a service layer"
 directive = "Views and route handlers only parse and validate input, call a service-layer function, and shape the response. All business rules, multi-step workflows, and persistence orchestration live in service functions or classes that take plain arguments (not request objects) and return plain values or domain objects, so they are callable from commands, tasks, and other endpoints and unit-testable without the web stack."
+remediation = """
+Move the business logic and persistence orchestration out of the view or route handler and into a service function or class that takes plain arguments, leaving the handler to parse input, call the service, and shape the response. Verify by confirming the service function can be called and tested without an HTTP request object.
+"""
 why = "A service layer makes business logic reusable and testable in isolation and keeps handlers thin and obvious."
 
 [[option]]

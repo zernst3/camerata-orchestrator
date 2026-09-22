@@ -33,6 +33,9 @@ why = "A work-item reference in the commit subject and PR title is what lets the
 id = "require-work-item-reference"
 label = "Require a work-item reference in the commit subject / PR title"
 directive = "Every commit subject — and, when PR coverage is enabled, every PR title — must contain a work-item reference of the form `<prefix>#<id>` (e.g. `AB#123` for Azure Boards; the prefix is configured in project Settings → VCS gate → ADO link). Enforced at layer 4 (CI) via a wired commit-message / PR-title metadata check and at Camerata's VCS-action gate when Camerata authors the commit or opens the PR. A commit or PR with no reference is rejected pending correction or an auditable bypass. NOT enforced at the layer-2 code gate — the rule validates commit/PR metadata, not the diff. The ticket prefix and PR-title application live in project Settings."
+remediation = """
+Add the project's configured ticket prefix (for example AB#123 for Azure Boards) to the end of the commit subject, and to the PR title when PR coverage is enabled. Verify by attempting to commit or open a PR without the reference and confirming the CI check rejects it.
+"""
 why = "A work-item reference auto-links the change to its tracked item, giving requirement-to-code traceability; enforcing it at the metadata gate (CI + the VCS-action gate) is the only place the subject/title is visible, since no code gate sees the commit or PR metadata."
 
 [[option]]

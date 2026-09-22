@@ -16,6 +16,9 @@ why = "Django includes `CsrfViewMiddleware` in the default `MIDDLEWARE` setting;
 id = "login-required-plus-csrf-middleware"
 label = "CsrfViewMiddleware globally; @login_required / LoginRequiredMixin on protected views"
 directive = "`django.middleware.csrf.CsrfViewMiddleware` remains in `MIDDLEWARE` and is not removed or bypassed globally. Views that require authentication use `@login_required` (FBV) or `LoginRequiredMixin` (CBV) explicitly. `@csrf_exempt` is permitted only on views authenticated exclusively by a non-cookie mechanism (HMAC signature, Bearer token with no session cookie) and must carry an inline comment identifying the authentication substitute. Any view that neither declares `@login_required` / `LoginRequiredMixin` nor is explicitly intended to be public must be treated as a missing gate and corrected."
+remediation = """
+Add @login_required (function-based view) or LoginRequiredMixin (class-based view) to the protected view, and confirm CsrfViewMiddleware remains in MIDDLEWARE rather than removed or globally bypassed. Reserve @csrf_exempt only for views that authenticate by a mechanism other than session cookies. Verify by requesting the view without an authenticated session and confirming it redirects or rejects, and by submitting a same-origin form without a CSRF token and confirming it is rejected.
+"""
 why = "CSRF middleware protects all cookie-session state-changing requests globally; explicit authentication decorators/mixins make the protected vs. public distinction visible in code."
 
 [[option]]

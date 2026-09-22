@@ -24,6 +24,9 @@ why = "The logical extension of 'a missing permission is a config task': the cod
 id = "hide-dead-end-affordances"
 label = "Hide dead-end affordances"
 directive = "For permission-gated UIs: never render a UI action the user's permissions can't execute. Gate each affordance's render on the same permission its endpoint requires. A button that 403s drives the user to an error page; that redirect IS the bug."
+remediation = """
+Gate the rendering of this UI action on the same permission its endpoint requires, so a user who cannot perform the action never sees the button, instead of showing it and letting the click 403. Verify by loading the page as a user without the permission and confirming the affordance does not render at all, rather than rendering and failing on click.
+"""
 why = "The logical extension of 'a missing permission is a config task': the code's job is to not offer what the user can't do."
 
 [[option]]

@@ -24,6 +24,9 @@ why = "Typing a request body as a Pydantic model gives FastAPI a validated bound
 id = "explicit-pydantic-schemas"
 label = "use explicit Pydantic request and response models"
 directive = "Every endpoint that accepts a body types it as a Pydantic model so FastAPI validates and coerces input at the boundary, and every endpoint that returns data declares a `response_model` Pydantic schema that filters the output to exactly the intended fields. ORM objects and raw dicts are never accepted as request bodies. Prefer a dedicated response schema distinct from the persistence model for anything with sensitive fields or fields that need renaming, computing, or hiding — returning an ORM object directly under a compatible `response_model` (`from_attributes=True`) is an accepted, documented FastAPI pattern for simple pass-through cases, not something to blanket-forbid, but it only stays safe as long as the declared response_model schema (not the ORM model's own field set) is what's actually filtering the output."
+remediation = """
+Type the endpoint's request body as an explicit Pydantic model so FastAPI validates and coerces input at the boundary, and declare a response_model that filters the output to exactly the intended fields instead of returning an ORM object or raw dict directly. Verify by sending a request with an invalid field and confirming FastAPI rejects it before the handler runs, and by confirming the response body contains only the fields the response_model declares.
+"""
 why = "Pydantic schemas validate input at the boundary and filter output, preventing both malformed input and accidental field leakage; a compatible response_model still provides that filtering even when the underlying returned object is an ORM instance rather than a hand-built schema instance."
 
 [[option]]

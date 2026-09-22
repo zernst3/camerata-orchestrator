@@ -16,6 +16,9 @@ why = "Django's migration system is the authoritative record of the database sch
 id = "makemigrations-committed"
 label = "makemigrations generates migrations; files are committed and applied with migrate"
 directive = "Every model change is accompanied by a migration generated with `python manage.py makemigrations` in the same commit or pull request. Migration files under `app/migrations/` are committed to version control and never listed in `.gitignore`. CI runs `python manage.py makemigrations --check --dry-run` (available since Django 3.1), which exits nonzero if any model change would produce a new migration, failing the build if a migration was left ungenerated. Direct DDL changes to the database schema outside of Django migrations (via psql, a GUI tool, or raw SQL) are forbidden except in explicitly approved emergency hotfix procedures with a compensating migration committed immediately after."
+remediation = """
+Generate a migration for the model change with python manage.py makemigrations, and commit the migration file under app/migrations/ in the same PR as the model change, rather than applying schema changes by hand or excluding migrations from version control. Add a CI check that fails if makemigrations would produce a new, uncommitted migration. Verify by running makemigrations --check in CI and confirming it reports no missing migrations.
+"""
 why = "Committed migrations make the schema evolution history deterministic and reviewable; CI can validate that no model change was left without a migration."
 
 [[option]]

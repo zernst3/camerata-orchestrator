@@ -33,6 +33,9 @@ why = "A commit body is where the WHY of a change is recorded — the reasoning 
 id = "require-substantive-commit-body"
 label = "Require a substantive commit body (and optional story-id)"
 directive = "Every commit must carry a body (the lines after the subject) that is substantive — at least the configured minimum characters — and, when the project requires it, a story-id reference in the configured format (e.g. bare `#42`, `AB#123`, or `PROJ-42`). When PR coverage is enabled the same body/id requirement applies to the PR description and title. Enforced at layer 4 (CI) via a wired commit/PR metadata check and at Camerata's VCS-action gate when Camerata authors the commit. An empty or token body is rejected pending correction or an auditable bypass. NOT enforced at the layer-2 code gate — the rule validates commit metadata, not the diff. Parameters (minimum length, story-id requirement and format, PR coverage) live in project Settings."
+remediation = """
+Add a substantive body to the commit (the lines after the subject) that meets the project's configured minimum length, and include the story-id reference in the configured format if the project requires one. Verify by attempting to commit with only a subject line and no body and confirming the CI check rejects it.
+"""
 why = "The commit body is the only durable record of WHY a change was made; requiring it at the metadata gate (CI + the VCS-action gate) keeps the rationale and the work-item link attached to the history, where no code gate would ever see them."
 
 [[option]]
