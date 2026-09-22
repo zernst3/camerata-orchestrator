@@ -2622,16 +2622,18 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn resolve_fix_never_falls_back_to_directive_when_remediation_is_unauthored() {
-        let corpus_path = camerata_rules::corpus_path();
-        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
-        // SEC-NO-UNSAFE-DESERIALIZATION-1 is a UNIVERSAL rule with a real `directive` but (as of
-        // this pass) no authored `remediation` — Phase 1 only authors the Supabase pack. This
-        // pins the fail-safe: absent remediation means an omitted Fix, never the directive text.
-        let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
-        let fix = resolve_fix("SEC-NO-UNSAFE-DESERIALIZATION-1", Some(&corpus), &f);
+    #[test]
+    fn resolve_fix_never_falls_back_to_directive_when_remediation_is_unauthored() {
+        // Every real corpus rule's default option now has authored `remediation` (the corpus-wide
+        // authoring passes closed that gap), so no REAL rule id can demonstrate the "unauthored"
+        // path anymore — hardcoding one here would silently start asserting nothing the moment the
+        // next rule got authored. Instead build a synthetic single-rule corpus via
+        // `ruleset_with_unauthored_rule`: a real, resolvable default option with a real `directive`,
+        // but `remediation: None`. This pins the fail-safe permanently, independent of authoring
+        // state: absent remediation means an omitted Fix, never the directive text.
+        let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
+        let f = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
+        let fix = resolve_fix("SEC-TEST-UNAUTHORED-1", Some(&corpus), &f);
         assert_eq!(
             fix, None,
             "must omit the Fix block, not fall back to the rule's directive, when remediation is unauthored"
@@ -2677,12 +2679,14 @@ mod tests {
         assert_eq!(json.curated_findings[0].sites[0].fix, None);
     }
 
-    #[tokio::test]
-    async fn curated_finding_site_fix_is_none_when_remediation_is_unauthored() {
-        let corpus_path = camerata_rules::corpus_path();
-        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
-        let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
+    #[test]
+    fn curated_finding_site_fix_is_none_when_remediation_is_unauthored() {
+        // Same rationale as `resolve_fix_never_falls_back_to_directive_when_remediation_is_unauthored`
+        // above: every real corpus rule is now authored, so a synthetic single-rule corpus (via
+        // `ruleset_with_unauthored_rule`) is the only way to permanently pin the "unauthored
+        // remediation omits the Fix line" fail-safe, independent of corpus authoring state.
+        let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
+        let f = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
         assert_eq!(

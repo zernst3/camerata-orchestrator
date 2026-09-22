@@ -1376,14 +1376,15 @@ mod tests {
         assert_eq!(rows[0].fix, None, "must not fabricate a fix when the corpus is absent");
     }
 
-    #[tokio::test]
-    async fn recommended_fix_is_none_when_remediation_is_unauthored() {
-        let corpus_path = camerata_rules::corpus_path();
-        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
-        // SEC-NO-UNSAFE-DESERIALIZATION-1 has a real `directive` but no authored `remediation`
-        // as of this pass (only the Supabase pack is authored) — pins the fail-safe.
-        let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
+    #[test]
+    fn recommended_fix_is_none_when_remediation_is_unauthored() {
+        // Every real corpus rule's default option now has authored `remediation` (the corpus-wide
+        // authoring passes closed that gap), so hardcoding a real rule id here would stop proving
+        // anything the moment that rule got authored. `ruleset_with_unauthored_rule` builds a
+        // synthetic single-rule corpus with a real `directive` but `remediation: None`, pinning the
+        // fail-safe permanently and independent of corpus authoring state.
+        let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
+        let f = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
         let report = report_with(vec![f], vec![]);
         let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus));
         assert_eq!(
@@ -1451,12 +1452,14 @@ mod tests {
         assert_eq!(findings_export.findings[0].fix, expected);
     }
 
-    #[tokio::test]
-    async fn findings_export_fix_field_is_null_when_remediation_is_unauthored() {
-        let corpus_path = camerata_rules::corpus_path();
-        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
-        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
-        let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
+    #[test]
+    fn findings_export_fix_field_is_null_when_remediation_is_unauthored() {
+        // Same rationale as `recommended_fix_is_none_when_remediation_is_unauthored` above: every
+        // real corpus rule is now authored, so a synthetic single-rule corpus (via
+        // `ruleset_with_unauthored_rule`) is the only way to permanently pin the "unauthored
+        // remediation serializes as JSON null" fail-safe, independent of corpus authoring state.
+        let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
+        let f = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
         let report = report_with(vec![f], vec![]);
         let json = crate::report_export::build_report_json(
             &report,

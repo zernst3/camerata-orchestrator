@@ -661,6 +661,54 @@ impl RuleSet {
     }
 }
 
+/// Test-support constructor: build a single-rule [`RuleSet`] whose one [`Rule`] has `rule_id`,
+/// a real non-empty `directive` on its (default) option, and `remediation: None` on that same
+/// option — i.e. a rule with a real, resolvable default option but NO authored client-facing
+/// remediation.
+///
+/// Exists so callers that need to exercise the "remediation is unauthored" fail-safe
+/// (`report_export::resolve_fix` in `camerata-server` must OMIT the Fix block rather than
+/// falling back to `directive` when `remediation` is absent) are not coupled to the real
+/// corpus's authoring state. As of the corpus-wide remediation-authoring passes, every real
+/// corpus rule's default option now HAS authored remediation, so no real rule id can
+/// demonstrate the unauthored path anymore — a test that hardcodes a real rule id to prove
+/// this behavior breaks every time authoring coverage grows. This constructor decouples that
+/// assertion from authoring state permanently.
+///
+/// `#[doc(hidden)]`: this is test scaffolding, not a production API — production code always
+/// goes through [`load_corpus`] / [`load_corpus_lenient`] against the real bundled corpus.
+#[doc(hidden)]
+pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
+    const OPTION_ID: &str = "default";
+    let option = RuleOption {
+        id: OPTION_ID.to_owned(),
+        label: "Default".to_owned(),
+        directive: format!("Test-fixture detection directive for {rule_id}."),
+        why: "Test-fixture rationale.".to_owned(),
+        remediation: None,
+        escalation: None,
+    };
+    let rule = Rule {
+        id: RuleId(rule_id.to_owned()),
+        title: format!("Test-fixture rule {rule_id}"),
+        enforcement: EnforcementKind::Mechanical,
+        domain: "test-fixture".to_owned(),
+        summary: format!("Synthetic test-only rule ({rule_id}) with an unauthored remediation."),
+        decision_question: None,
+        decision_why: None,
+        options: vec![option],
+        default_option: Some(OPTION_ID.to_owned()),
+        verification: Verification::Draft,
+        sources: Vec::new(),
+        verified: None,
+        opt_in_only: false,
+        layer3_only: false,
+    };
+    let mut set = RuleSet::default();
+    set.push(rule);
+    set
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Loader (async I/O — RUST-DOMAIN-5)
 // ────────────────────────────────────────────────────────────────────────────
@@ -1497,6 +1545,27 @@ mod tests {
     fn ruleset_get_by_domain_missing_returns_empty() {
         let set = populated_set();
         assert!(set.get_by_domain("nonexistent-domain").is_empty());
+    }
+
+    // ── ruleset_with_unauthored_rule (test-support constructor) ────────────────
+
+    #[test]
+    fn ruleset_with_unauthored_rule_resolves_directive_but_no_remediation() {
+        let set = ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
+        let rule = set
+            .get_by_id("SEC-TEST-UNAUTHORED-1")
+            .expect("synthetic rule must be indexed by id");
+        let option = rule
+            .resolved_option(None)
+            .expect("synthetic rule must ship a resolvable default option");
+        assert!(
+            !option.directive.trim().is_empty(),
+            "synthetic option must carry a real, non-empty directive"
+        );
+        assert_eq!(
+            option.remediation, None,
+            "synthetic option's remediation must be unauthored (None)"
+        );
     }
 
     #[test]

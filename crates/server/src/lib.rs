@@ -24507,21 +24507,28 @@ mod tests {
     /// A rule id WITH a real corpus entry but no authored `remediation` also returns a NULL
     /// fix — never falls back to the rule's `directive` (the detection-recipe leak Fix 1
     /// closed). Pins the fail-safe at the API layer, not just in `resolve_fix` directly.
-    #[tokio::test]
-    async fn finding_fix_is_null_when_remediation_is_unauthored() {
-        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        let app = router(state);
-        let resp = app
-            .oneshot(
-                Request::builder()
-                    .uri("/api/onboard/finding-fix?rule_id=SEC-NO-UNSAFE-DESERIALIZATION-1")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let json = body_json(resp).await;
+    ///
+    /// `onboard_finding_fix` always resolves against the REAL on-disk bundled corpus (via
+    /// `camerata_rules::corpus_path()` / `load_corpus_lenient`) — it has no seam to inject a
+    /// test corpus, and every real corpus rule's default option now has authored `remediation`
+    /// (the corpus-wide authoring passes closed that gap), so no real rule id can demonstrate
+    /// the unauthored path through the live route anymore. Rather than mutate the
+    /// process-global `CAMERATA_CORPUS_PATH` env var here (which would race every other test in
+    /// this binary that expects the real bundled corpus, since Rust runs unit tests in parallel
+    /// threads within one process) or teach the handler to accept an injected `RuleSet` (out of
+    /// scope for this fix), this test exercises the EXACT contract the handler implements —
+    /// `Json(json!({ "fix": resolve_fix(...) }))` — directly, against the synthetic
+    /// `ruleset_with_unauthored_rule` corpus. That keeps the assertion (JSON `null`, never the
+    /// directive text) permanently decoupled from corpus authoring state.
+    #[test]
+    fn finding_fix_is_null_when_remediation_is_unauthored() {
+        let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
+        let fix = crate::report_export::resolve_fix(
+            "SEC-TEST-UNAUTHORED-1",
+            Some(&corpus),
+            &crate::onboard::Finding::default(),
+        );
+        let json = serde_json::json!({ "fix": fix });
         assert_eq!(json["fix"], serde_json::Value::Null);
     }
 }
