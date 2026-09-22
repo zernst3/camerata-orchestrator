@@ -17,6 +17,9 @@ why = "When spec/models/user_spec.rb mirrors app/models/user.rb (and test/models
 id = "mirror-source-tree"
 label = "Mirror source tree under spec/ or test/; name files <subject>_spec.rb or <subject>_test.rb"
 directive = "Each spec file lives at spec/<path-relative-to-app-or-lib>/<subject>_spec.rb, exactly mirroring the source. For RSpec: app/models/user.rb → spec/models/user_spec.rb; app/services/payment_processor.rb → spec/services/payment_processor_spec.rb; lib/importers/csv_importer.rb → spec/lib/importers/csv_importer_spec.rb. For Minitest: app/models/user.rb → test/models/user_test.rb. New generators must place files in the mirror path. RuboCop RSpec/SpecFilePathFormat enforces this automatically; add it to .rubocop.yml."
+remediation = """
+Move the spec file into spec/ (or test/) mirroring the exact path of the source file it tests, named after the subject with a _spec.rb or _test.rb suffix, out of a flat spec directory. Verify by confirming the spec file's path matches the source file's path one-to-one under the spec/ or test/ root.
+"""
 why = "O(1) file discovery, consistent scaffolding, and enforced by rubocop-rspec."
 
 [[option]]

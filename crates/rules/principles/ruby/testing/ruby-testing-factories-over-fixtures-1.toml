@@ -16,6 +16,9 @@ why = "Rails fixtures are YAML files that are loaded as a bulk INSERT before the
 id = "factorybot-factories"
 label = "Define one factory per model in spec/factories/; use create/build/build_stubbed at call sites"
 directive = "Define factories in spec/factories/<model_name>.rb (one file per model). Each factory specifies the minimal set of attributes that satisfies validations; traits extend the base factory for variant states (e.g. trait :admin do role { 'admin' } end). At call sites: use create(:model) for persisted records, build(:model) for in-memory instances, and build_stubbed(:model) for unit tests that do not need DB I/O. Override attributes inline: create(:user, name: 'Alice'). Avoid fixtures (test/fixtures/) and bare Model.create calls in spec bodies. Run FactoryBot.lint in a dedicated spec (or as a CI step) to catch invalid factory definitions early."
+remediation = """
+Replace the Rails YAML fixture or inline Model.create call with a FactoryBot factory defined in spec/factories/, one file per model,, specifying the minimal attributes needed to satisfy validations, with traits for variant states. Update call sites to use create/build/build_stubbed instead of raw ActiveRecord calls or fixtures. Verify by confirming the test still passes and no longer depends on a fixtures :all load or an inline attribute hash duplicated across tests.
+"""
 why = "Expressive, co-located, and overrideable test data with no hidden fixture coupling."
 
 [[option]]

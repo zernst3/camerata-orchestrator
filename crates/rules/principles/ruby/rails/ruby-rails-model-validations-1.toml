@@ -16,6 +16,9 @@ why = "A Rails controller receives one HTTP request. A background job, a rake ta
 id = "model-validations"
 label = "validations declared on the model; database constraints mirror them"
 directive = "Data integrity rules (presence, length, format, numericality, inclusion, uniqueness, custom business rules) are declared as `validates` or `validate` calls on the ActiveRecord model class. The controller uses strong_parameters to whitelist which request fields are even accepted before they reach the model, but this is a first line of defense, not the primary guard. Database constraints (NOT NULL, UNIQUE indexes, CHECK) mirror the model validations for defense in depth. Writing data without model validations — using `.update_columns`, `update_all`, or `save(validate: false)` — requires an explicit comment justifying the bypass."
+remediation = """
+Add the missing validates or validate declaration to the ActiveRecord model for this integrity rule, rather than relying solely on controller checks, client-side JavaScript, or database constraints alone. Mirror the rule with a matching database constraint where practical, since the model validation alone doesn't protect against direct database writes. Verify by attempting to save an invalid record through the model and confirming it fails validation before it reaches the database.
+"""
 why = "Model validations fire on every `save` call regardless of the entry point, so background jobs, rake tasks, and console writes all share the same guard."
 
 [[option]]

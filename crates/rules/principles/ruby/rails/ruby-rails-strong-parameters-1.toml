@@ -17,6 +17,9 @@ why = "Without explicit allowlisting, an attacker can POST any attribute — inc
 id = "strong-params-permit"
 label = "require + permit on every inbound params hash"
 directive = "Every controller action that writes model attributes calls `.require(:resource_name).permit(:field1, :field2, ...)` on the params object before passing the result to a model method. Nested attributes are nested inside `permit`. Passing `params`, `params[:model]`, or any unfiltered slice to `.new`, `.create`, `.update`, or `.update_attributes` is forbidden. A private helper method (e.g. `def user_params`) is the canonical place to define the permit block for a resource."
+remediation = """
+Add .require(:resource_name).permit(:field1, :field2, ...) on the params object in the controller action before passing the result to the model, instead of passing params or params[:model] directly, or relying on a model-level attr_accessible allowlist. Verify by attempting to submit a request with an unpermitted attribute and confirming it is silently stripped rather than mass-assigned.
+"""
 why = "Strong Parameters moves the allowlist to the controller, where the action context is known, and raises at runtime if unfiltered params are passed to a model, making violations loud rather than silent."
 
 [[option]]
