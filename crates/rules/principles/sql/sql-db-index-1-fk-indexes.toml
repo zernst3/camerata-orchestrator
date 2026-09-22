@@ -25,6 +25,9 @@ why = "Most major databases (PostgreSQL, SQL Server, Oracle, SQLite) do not auto
 id = "every-foreign-key-column-gets-an-index-in-the-sa"
 label = "Every foreign-key column gets an index in the same migration"
 directive = "When a migration adds a foreign-key column, the same migration adds an index on it. Declare the index adjacent to the FK in the file so a reviewer can see them together. The pair is enforceable by a migration linter that scans for FK declarations and verifies a matching index in the same change."
+remediation = """
+Add an index on the foreign-key column in the same migration that introduces the FK, declared adjacent to the FK declaration, rather than relying on the database to auto-index it, or adding the index reactively in a later migration after performance degrades. Verify by confirming the migration that adds the FK column also creates a matching index, checkable via a migration linter that scans for FK declarations without a paired index.
+"""
 why = "Most major databases (PostgreSQL, SQL Server, Oracle, SQLite) do not automatically index foreign-key columns; missing FK indexes are invisible at low data volume and devastating at high, and no cache layer above the database can compensate for an unindexed FK join."
 
 [[option]]

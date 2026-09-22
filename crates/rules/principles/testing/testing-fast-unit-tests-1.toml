@@ -28,6 +28,9 @@ why = "A unit test suite that takes minutes to run stops being run on every save
 id = "unit-tests-no-io-milliseconds"
 label = "Unit tests: no real I/O, no external processes, completes in milliseconds"
 directive = "A unit test runs in the same process as the code under test, uses no real database connections, network calls, file system reads/writes, or sleep/wait calls, and completes in well under one second (target: milliseconds). Replace external dependencies with in-process fakes, stubs, or in-memory implementations. If a test requires a real external resource to be meaningful, classify it as an integration test and run it in the integration suite, not the unit suite."
+remediation = """
+Replace the real database connection, network call, or filesystem access in this unit test with an in-process fake, stub, or in-memory equivalent, and remove any sleep/wait call. Verify by running the test in isolation and confirming it completes in milliseconds with no external process or network dependency.
+"""
 why = "Millisecond unit tests keep the feedback loop tight enough to run on every save; tests that hit real I/O drift toward minutes-per-suite and stop being run frequently."
 
 [[option]]

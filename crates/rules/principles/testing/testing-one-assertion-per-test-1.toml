@@ -28,6 +28,9 @@ why = "A test that asserts on ten independent properties fails on the first fail
 id = "one-logical-assertion-guideline"
 label = "One logical assertion (one reason to fail) per test — guideline"
 directive = "Each test verifies one logical behavior: it has a single reason to fail, and when it fails, the test name and failure message together identify which behavior broke without ambiguity. Multiple physical assert statements are acceptable when they all verify facets of the same single logical outcome (e.g., confirming every field of a returned record matches expectations). Multiple assert statements that each verify a distinct, independently-breakable behavior must be split into separate tests. Treat this as a guideline rather than a strict 'one assert per file' rule: the goal is single failure attribution, not minimal assert count."
+remediation = """
+Split the test that currently checks multiple unrelated properties into separate tests, one per logical behavior, so each test has a single reason to fail that its name and failure message identify unambiguously. Multiple physical assert statements verifying facets of the same single behavior can stay together. Verify by confirming a failure in this test always points to one specific behavior, not an ambiguous mix of unrelated checks.
+"""
 why = "A test with a single reason to fail names the broken behavior in its failure output; a multi-behavior test hides all failures after the first."
 
 [[option]]

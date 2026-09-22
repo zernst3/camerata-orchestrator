@@ -24,6 +24,9 @@ why = "With live users, a single deploy can't be paired with a breaking schema c
 id = "expand-then-contract-for-breaking-schema-changes"
 label = "Expand-then-contract for breaking schema changes"
 directive = "Split breaking changes (drop/rename/NOT-NULL) across releases: expand (add new, write both), migrate reads, then contract (drop old). Migrations are schema-only; never seed user data in a migration."
+remediation = """
+Split the breaking schema change (drop, rename, or a new NOT NULL) into separate releases: first expand by adding the new column/table and writing to both old and new shapes, then migrate reads over to the new shape, and only in a later release contract by dropping the old column. Never seed user data inside the migration itself. Verify by confirming the application can run against both the pre- and post-expand schema during the rollout window, with no release requiring the drop and the dependent code change to land simultaneously.
+"""
 why = "With live users, a single deploy can't be paired with a breaking schema change without an incompatibility window."
 
 [[option]]

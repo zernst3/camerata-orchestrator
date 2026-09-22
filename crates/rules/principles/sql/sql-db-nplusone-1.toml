@@ -25,6 +25,9 @@ why = "N+1 access patterns cause 10-100x slowdowns at scale and are invisible at
 id = "no-n-1-query-patterns"
 label = "No N+1 query patterns"
 directive = "Iterating a collection with a per-item database call is banned. Use a single batched query (or 1-2 queries with a join / eager-load), never N+1."
+remediation = """
+Replace the loop that issues one database call per item with a single batched query, or a join/eager-load that fetches the related data in one or two queries total. Verify by running the code path under a query-count profiler and confirming the number of queries no longer scales with the number of items iterated.
+"""
 why = "N+1 access patterns cause 10-100x slowdowns at scale and are invisible at small data sizes."
 
 [[option]]

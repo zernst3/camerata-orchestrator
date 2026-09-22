@@ -26,6 +26,9 @@ why = "Preventive enforcement catches what code review misses under pressure; mi
 id = "ci-hygiene-enforce-migration-idempotency-safety"
 label = "CI hygiene — enforce migration idempotency + safety at the gate"
 directive = "For SQL systems: lint every migration in CI. Require a migrations-journal table (or equivalent) that records which migrations have already been applied, so a migration is never silently skipped or re-applied based on guesswork. Use IF NOT EXISTS / IF EXISTS guards on DDL for retry safety (so re-running the same migration script after an interrupted apply is a no-op), not as a stand-in for journal tracking. Require explicit opt-in for destructive ops, guard against migration-journal index collisions, and prefer lock-safe forms for hot-table DDL (e.g. CREATE INDEX CONCURRENTLY, NOT VALID + VALIDATE CONSTRAINT for new foreign keys) so a migration doesn't hold a long lock on a table under production load. All of this runs before the build."
+remediation = """
+Add a CI lint step that checks every migration for idempotency (IF NOT EXISTS / IF EXISTS guards on DDL), confirms a migrations-journal table tracks what's already applied, and flags destructive operations that haven't been explicitly opted into. Verify by re-running a previously-applied migration and confirming the lint (and the migration itself) treats it as a no-op rather than erroring or duplicating the change.
+"""
 why = "Preventive enforcement catches what code review misses under pressure; migrations are append-only, so a silent skip corrupts state downstream. Idempotency guards protect against a retried apply of the same migration; journal tracking protects against a migration being skipped or mis-ordered; lock-safe DDL protects production availability during the apply — three related but distinct safety properties, all worth checking mechanically rather than relying on a reviewer to catch all three under time pressure."
 
 [[option]]
