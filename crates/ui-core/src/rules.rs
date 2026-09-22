@@ -193,9 +193,12 @@ impl ProposedRuleView {
 /// options is never unresolved — there is nothing to pick.
 ///
 /// This is the ONE predicate backing the proposed-rules table's yellow "needs an
-/// alternative chosen" row highlight, the audit/arm gate ("Choose an alternative first
-/// for: ..."), and the "Needs option" table filter (`rules_needing_option_chosen` below) —
-/// all three read it so they can never disagree about which rules still need a choice.
+/// alternative chosen" row highlight and the "Needs option" table filter
+/// (`rules_needing_option_chosen` below) — both read it so they can never disagree about
+/// which rules still need a choice. It is INFORMATIONAL only: since the audit-integrated
+/// alternative-recommendation feature
+/// (docs/design/2026-09-22_audit-integrated-alternatives.md), an unresolved rule no longer
+/// blocks audit or arm — the audit recommends an alternative when none is chosen.
 pub fn rule_option_unresolved(rule: &ProposedRuleView, chosen_option_id: Option<&str>) -> bool {
     if rule.options.is_empty() {
         return false;
@@ -209,11 +212,12 @@ pub fn rule_option_unresolved(rule: &ProposedRuleView, chosen_option_id: Option<
 }
 
 /// The ids of the rules that are BOTH selected and still [`rule_option_unresolved`] — the
-/// exact set the proposed-rules table's yellow row highlight, the "before you can audit or
-/// add them" gate warning, and the "Needs option" table filter all show. `resolve_chosen`
-/// looks up a rule's saved chosen-option id (already scoped by the caller to whichever repo
-/// is being viewed); return `None` when there is no saved pick (falls back to the rule's own
-/// default inside [`rule_option_unresolved`]).
+/// exact set the proposed-rules table's yellow row highlight, the informational "these still
+/// need a choice" hint, and the "Needs option" table filter all show. `resolve_chosen` looks up
+/// a rule's saved chosen-option id (already scoped by the caller to whichever repo is being
+/// viewed); return `None` when there is no saved pick (falls back to the rule's own default
+/// inside [`rule_option_unresolved`]). This set no longer gates audit or arm — see this
+/// module's `rule_option_unresolved` doc comment.
 ///
 /// Pure and framework-free so this is unit-tested directly against fixtures, with no
 /// VirtualDom — `ProposedRulesTable` itself is intentionally excluded from SSR render tests

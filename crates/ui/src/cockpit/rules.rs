@@ -1677,7 +1677,7 @@ pub(super) fn RulesDetailModalHost(on_option_picked: EventHandler<(String, Strin
                     div { class: "rule-modal-section",
                         span { class: "rule-modal-label", "Choose the alternative to adopt" }
                         if r.default_option.is_none() {
-                            p { class: "rule-modal-mustchoose", "No default — you must choose an alternative before arming." }
+                            p { class: "rule-modal-mustchoose", "No default set. Pick an alternative here if you'd like, or leave it: the audit will recommend one for you." }
                         }
                         div { class: "rule-modal-opts",
                             for o in r.options.iter() {
@@ -4086,10 +4086,9 @@ pub(super) fn ProposedRulesTable(
         .filter_map(|rid| id_map.get(rid).map(|r| r.id.clone()))
         .collect();
     // Rules that are BOTH selected (in this table) AND still unresolved — they have options
-    // but neither a chosen alternative nor a usable default directive, so the architect must
-    // pick one before the rule can be enforced. Computed via the shared
+    // but neither a chosen alternative nor a usable default directive. Computed via the shared
     // `rules_needing_option_chosen` predicate (ui-core) so the row highlight, this table's
-    // "Needs option" filter, and the audit/arm gate below can never disagree about which
+    // "Needs option" filter, and the informational hint below can never disagree about which
     // rules still need a choice. Recomputed each render (reads `chosen` + the live
     // selection), so picking an alternative or (de)selecting a row updates it immediately.
     let cur_repo = viewed_repo();
@@ -4099,10 +4098,12 @@ pub(super) fn ProposedRulesTable(
             chosen.read().get(&chosen_key(&cur_repo, rid)).cloned()
         })
     };
-    // The SELECTED unresolved rules ACROSS EVERY REPO's picks (matching the arm guard). These
-    // BLOCK both buttons: an unresolved rule you've selected can't be audited or armed. An
-    // unresolved rule you HAVEN'T selected is only highlighted, not blocking. This is also why
-    // audit no longer silently falls back to the rule title — it's gated the same as arm now.
+    // The SELECTED unresolved rules ACROSS EVERY REPO's picks. Audit-integrated alternative
+    // recommendation (docs/design/2026-09-22_audit-integrated-alternatives.md) removed the hard
+    // gate this used to drive: an unresolved rule no longer blocks audit or arm — the audit
+    // itself now recommends an alternative when none is chosen. This set is kept ONLY to power
+    // the informational "these still need a choice" hint below (and the yellow row highlight /
+    // "Needs option" filter above); it never disables a button.
     let unresolved_selected: Vec<String> = {
         let gate_selected: std::collections::HashSet<String> = if view_repo.is_empty() {
             selected_rule_ids.clone()
@@ -4128,7 +4129,7 @@ pub(super) fn ProposedRulesTable(
     let has_unresolved = !unresolved_selected.is_empty();
     let unresolved_hint = if has_unresolved {
         format!(
-            "Choose an alternative first for: {}",
+            "No alternative chosen yet for: {}. The audit will recommend one automatically.",
             unresolved_selected.join(", ")
         )
     } else {
@@ -4252,23 +4253,23 @@ pub(super) fn ProposedRulesTable(
                 }
             }),
         }
-        // Explain WHY the buttons below are disabled: one or more selected rules still need an
-        // alternative chosen (highlighted yellow above). Click each to pick one; the buttons
-        // re-enable once all are resolved.
+        // Informational only — this no longer disables audit or arm (the audit recommends an
+        // alternative for any rule left unresolved). Highlighted yellow above so the architect
+        // can still choose one deliberately if they'd rather not wait for the recommendation.
         if has_unresolved {
             div { class: "rule-gate-warning", role: "alert",
                 span { class: "rule-gate-warning-icon", "\u{26A0}" }
                 span {
-                    "These selected rules need an alternative chosen before you can audit or add them (highlighted yellow above): "
+                    "These selected rules have no alternative chosen yet (highlighted yellow above): "
                     strong { "{unresolved_selected.join(\", \")}" }
-                    ". Click each rule to pick an option."
+                    ". The audit will recommend one for you automatically; click a rule to choose one yourself if you'd rather decide now."
                 }
             }
         }
         div { class: "findings-toolbar",
             button {
                 class: "btn-run",
-                disabled: auditing || has_unresolved,
+                disabled: auditing,
                 title: unresolved_hint.clone(),
                 onclick: move |_| {
                     // Build the audit request from EVERY repo's saved selection, so one scan
@@ -4326,7 +4327,7 @@ pub(super) fn ProposedRulesTable(
             }
             button {
                 class: "btn-run",
-                disabled: arming() || has_unresolved,
+                disabled: arming(),
                 title: unresolved_hint.clone(),
                 onclick: move |_| {
                     // Arm across EVERY repo's selection: a rule selected in one or more repos'
@@ -4620,7 +4621,7 @@ pub(super) fn RuleDetailModal() -> Element {
                     div { class: "rule-modal-section",
                         span { class: "rule-modal-label", "Choose the alternative to adopt" }
                         if r.default_option.is_none() {
-                            p { class: "rule-modal-mustchoose", "No default — you must choose an alternative before arming." }
+                            p { class: "rule-modal-mustchoose", "No default set. Pick an alternative here if you'd like, or leave it: the audit will recommend one for you." }
                         }
                         div { class: "rule-modal-opts",
                             for o in r.options.iter() {

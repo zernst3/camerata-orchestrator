@@ -586,6 +586,33 @@ pub(super) struct ScanProvenanceView {
     pub finished_at: String,
 }
 
+/// One rule's alternative recommendation, as surfaced by the audit-integrated
+/// alternative-recommendation feature (docs/design/2026-09-22_audit-integrated-alternatives.md).
+/// Mirrors `camerata_server::ai_audit::RuleRecommendation` (minus its own `rule_id` field,
+/// since the UI reaches this through `ScanReportView::recommendations`, a map ALREADY keyed by
+/// rule id). Present only for multi-option semantic rules; single-option / mechanical /
+/// deterministic-floor rules never get an entry.
+#[derive(Clone, PartialEq, Default, serde::Deserialize, serde::Serialize)]
+pub(super) struct RuleRecommendationView {
+    /// The option id violations were (or will be) reported against.
+    #[serde(default)]
+    pub recommended_option_id: String,
+    /// 1-3 sentences explaining the pick, grounded in the codebase evidence the model saw (or,
+    /// for an operator-forced pick, a short fixed note instead of a model explanation).
+    #[serde(default)]
+    pub recommendation_reasoning: String,
+    /// True when the model's raw answer wasn't a real option on this rule (or was
+    /// missing/unparseable) and `recommended_option_id` is therefore a FALLBACK, not what the
+    /// model actually said. The UI shows a note rather than presenting the fallback as genuine.
+    #[serde(default)]
+    pub hallucinated: bool,
+    /// True when this entry reflects the OPERATOR's explicit choice (via `rescan-alternatives`
+    /// or `accept-alternatives`), not the AI's own pick. Drives "your choice" vs "AI
+    /// recommended" in the review panel.
+    #[serde(default)]
+    pub operator_chosen: bool,
+}
+
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
 pub(super) struct ScanReportView {
     #[serde(default)]
@@ -626,6 +653,14 @@ pub(super) struct ScanReportView {
     /// deserializes, with an empty/default stamp.
     #[serde(default)]
     pub provenance: ScanProvenanceView,
+    /// Per-rule alternative recommendations (audit-integrated alternative recommendation,
+    /// docs/design/2026-09-22_audit-integrated-alternatives.md), keyed by rule id. Present for
+    /// every multi-option semantic rule that was part of this audit, REGARDLESS of whether it
+    /// produced any findings (so the review panel can list zero-violation rules too).
+    /// `#[serde(default)]` so a report from before this field existed still deserializes, with
+    /// an empty map (no recommendations to show — matches the pre-feature UI exactly).
+    #[serde(default)]
+    pub recommendations: std::collections::HashMap<String, RuleRecommendationView>,
 }
 
 pub(super) async fn scan_repos(repos: &[String]) -> Option<ScanReportView> {
@@ -777,6 +812,135 @@ pub(super) async fn audit_against(
         .json::<ScanReportView>()
         .await
         .ok()
+}
+
+// ── Audit-integrated alternative recommendation: batched rescan + accept ───────────────────
+// docs/design/2026-09-22_audit-integrated-alternatives.md — Phase 2 (UI). The server side
+// (Phase 1) is done; this is the wire contract the two endpoints already speak.
+
+/// One staged override: force `rule_id` to `chosen_option_id` on the next batched rescan.
+/// Mirrors the server's `AlternativeOverride` request-body entry
+/// (`POST /api/projects/:id/rescan-alternatives`).
+#[derive(Clone, PartialEq, serde::Serialize)]
+pub(super) struct AlternativeOverride {
+    pub rule_id: String,
+    pub chosen_option_id: String,
+}
+
+/// Response body of `POST /api/projects/:id/rescan-alternatives`: `{ ok, message, findings,
+/// recommendations }`. `findings` + `recommendations` cover ONLY the rescanned rules — the
+/// caller merges them in place over the rest of the held audit report via
+/// [`merge_rescanned_alternatives`]. `ok: false` (e.g. the backend `Blocked` compliance gate,
+/// or every submitted override being invalid) carries the reason in `message`; the caller
+/// surfaces it rather than silently failing.
+#[derive(Clone, PartialEq, Default, serde::Deserialize, serde::Serialize)]
+pub(super) struct RescanAlternativesResp {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub findings: Vec<FindingView>,
+    #[serde(default)]
+    pub recommendations: std::collections::HashMap<String, RuleRecommendationView>,
+}
+
+/// POST the batched rescan for exactly the given overridden rules. This is an AI call (it
+/// re-runs the audit for the given rules, forced to the operator's chosen options) — the guard
+/// here drives the background Bombe machine for the whole round trip, same as `audit_against`
+/// and `scan_repos` above. Returns `None` only on a network/transport/parse failure; a
+/// server-reported `{ ok: false, message }` still deserializes into `Some(..)` so the caller
+/// can read `message` (see this type's doc comment).
+pub(super) async fn rescan_alternatives(
+    project_id: &str,
+    overrides: &[AlternativeOverride],
+) -> Option<RescanAlternativesResp> {
+    let _guard = crate::loading::LoadingGuard::new();
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/rescan-alternatives",
+            crate::bff_base(),
+            project_id
+        ))
+        .json(&serde_json::json!({ "overrides": overrides }))
+        .send()
+        .await
+        .ok()?
+        .json::<RescanAlternativesResp>()
+        .await
+        .ok()
+}
+
+/// Response body of `POST /api/projects/:id/accept-alternatives`: `{ ok, message?, accepted,
+/// skipped }` (`accepted` is a COUNT, not a list — mirrors the server's
+/// `accept_alternatives_handler`). `ruleset` is intentionally not modeled here: the caller
+/// doesn't need to re-parse the project's full ruleset shape to reflect an accept — it already
+/// knows which rules it asked to accept.
+#[derive(Clone, PartialEq, Default, serde::Deserialize, serde::Serialize)]
+pub(super) struct AcceptAlternativesResp {
+    #[serde(default)]
+    pub ok: bool,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub accepted: usize,
+    #[serde(default)]
+    pub skipped: Vec<String>,
+}
+
+/// POST `accept-alternatives`. `rule_ids: None` accepts EVERY rule in the project's last-scan
+/// recommendations (the server's `{}` "accept all" shape); `Some(ids)` scopes to that subset.
+/// Not an AI call (it only persists the current selection into `chosen_option`), so — unlike
+/// `rescan_alternatives` — this does NOT take a `LoadingGuard`; no model runs.
+pub(super) async fn accept_alternatives(
+    project_id: &str,
+    rule_ids: Option<&[String]>,
+) -> Option<AcceptAlternativesResp> {
+    let body = match rule_ids {
+        Some(ids) => serde_json::json!({ "rule_ids": ids }),
+        None => serde_json::json!({}),
+    };
+    reqwest::Client::new()
+        .post(format!(
+            "{}/api/projects/{}/accept-alternatives",
+            crate::bff_base(),
+            project_id
+        ))
+        .json(&body)
+        .send()
+        .await
+        .ok()?
+        .json::<AcceptAlternativesResp>()
+        .await
+        .ok()
+}
+
+/// Merge a batched rescan's updated findings + recommendations into the audit report's
+/// existing findings + recommendations, replacing ONLY the rescanned rules' rows — every other
+/// rule's findings and recommendations are left untouched. Pure (no signals, no Dioxus), so the
+/// merge is unit-tested directly; the call site just assigns the two returned values back onto
+/// the held `ScanReportView`.
+pub(super) fn merge_rescanned_alternatives(
+    existing_findings: &[FindingView],
+    existing_recommendations: &std::collections::HashMap<String, RuleRecommendationView>,
+    rescanned_rule_ids: &std::collections::HashSet<String>,
+    new_findings: Vec<FindingView>,
+    new_recommendations: std::collections::HashMap<String, RuleRecommendationView>,
+) -> (
+    Vec<FindingView>,
+    std::collections::HashMap<String, RuleRecommendationView>,
+) {
+    let mut findings: Vec<FindingView> = existing_findings
+        .iter()
+        .filter(|f| !rescanned_rule_ids.contains(&f.rule_id))
+        .cloned()
+        .collect();
+    findings.extend(new_findings);
+    let mut recommendations = existing_recommendations.clone();
+    for (rule_id, rec) in new_recommendations {
+        recommendations.insert(rule_id, rec);
+    }
+    (findings, recommendations)
 }
 
 /// One model entry in a selector, sourced from `GET /api/models/registry`.
@@ -2566,6 +2730,410 @@ fn split_compliance_notes(message: &str) -> (Vec<String>, Option<String>) {
     (compliance, other)
 }
 
+/// Rescan button / sticky-bar label: singular "rule" for exactly one staged override, plural
+/// otherwise. Pure so the pluralization is unit-tested without a render.
+pub(super) fn rescan_button_label(pending: usize) -> String {
+    if pending == 1 {
+        "Rescan 1 overridden rule".to_string()
+    } else {
+        format!("Rescan {pending} overridden rules")
+    }
+}
+
+/// Pure staging decision for the "Change" dropdown: picking the option a rule is ALREADY
+/// evaluated against clears any staged override for it (back to the AI's pick, or whatever a
+/// prior rescan applied); picking anything else stages that rule's override. Extracted out of
+/// the `<select>`'s `onchange` handler so this decision has a directly-testable pure core — a
+/// Tier-1 SSR render test cannot simulate a real `<select>` change event (see docs/UI_TESTING.md).
+pub(super) fn stage_or_clear_override(
+    pending: &mut std::collections::HashMap<String, String>,
+    rule_id: &str,
+    evaluated_option_id: &str,
+    picked_option_id: &str,
+) {
+    if picked_option_id == evaluated_option_id {
+        pending.remove(rule_id);
+    } else {
+        pending.insert(rule_id.to_string(), picked_option_id.to_string());
+    }
+}
+
+/// The "Why?" explanation modal: shows the recommendation's reasoning (or a fallback note if
+/// none was recorded) plus a hallucination notice when the model's raw answer had to be
+/// corrected. Extracted out of `RuleAlternativesPanel` as its own props-only component so it
+/// can be render-tested directly in its "open" shape — the parent only mounts it conditionally
+/// on a local `use_signal`, which a Tier-1 SSR test cannot toggle via a simulated click.
+#[component]
+pub(super) fn RuleWhyModal(
+    rule_id: String,
+    title: String,
+    reasoning: String,
+    hallucinated: bool,
+    on_close: EventHandler<()>,
+) -> Element {
+    rsx! {
+        div { class: "rule-modal-overlay", onclick: move |_| on_close.call(()),
+            div { class: "rule-modal", onclick: move |e| e.stop_propagation(),
+                div { class: "rule-modal-head",
+                    span { class: "rule-modal-id", "{rule_id}" }
+                    button { class: "rule-modal-close", onclick: move |_| on_close.call(()), "\u{2715}" }
+                }
+                p { class: "rule-modal-title", "{title}" }
+                p { class: "rule-modal-label", "Why this alternative" }
+                p { class: "rec-modal-reasoning",
+                    if reasoning.is_empty() {
+                        "No reasoning was recorded for this recommendation."
+                    } else {
+                        "{reasoning}"
+                    }
+                }
+                if hallucinated {
+                    span { class: "rec-hallucinated-note",
+                        "The model did not return a valid choice for this rule; this is the selected or default option shown instead."
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The sticky batched-rescan action bar: appears once at least one override is staged, showing
+/// the count and a button that fires the batched rescan. Extracted out of
+/// `RuleAlternativesPanel` as its own props-driven component so the "N staged overrides shows
+/// the bar with the right count" shape is render-testable directly (a Tier-1 SSR test cannot
+/// stage an override via a simulated `<select>` change to reach this state through the parent).
+#[component]
+pub(super) fn RescanStickyBar(
+    pending_count: usize,
+    rescanning: bool,
+    on_rescan: EventHandler<()>,
+) -> Element {
+    rsx! {
+        div { class: "rec-sticky-bar",
+            span { class: "rec-sticky-label", "{rescan_button_label(pending_count)}" }
+            button {
+                class: "btn-run",
+                disabled: rescanning,
+                onclick: move |_| on_rescan.call(()),
+                if rescanning { "Rescanning\u{2026}" } else { "{rescan_button_label(pending_count)}" }
+            }
+        }
+    }
+}
+
+/// The "Rule alternatives" review panel (audit-integrated alternative recommendation,
+/// docs/design/2026-09-22_audit-integrated-alternatives.md). Lists every multi-option rule the
+/// audit evaluated (every key of `recommendations`), including rules with zero violations, so
+/// the architect can review — and, if they disagree, override — any of them.
+///
+/// This single panel serves BOTH halves of the design's UX: the per-rule "Evaluated against:
+/// <option> (AI recommended) · Why? · Change" control line (normally a findings-table
+/// group-header line) AND the standalone "every rule in scope" review panel. chorale's grouped
+/// `Table` (the findings table below) exposes no group-header content-injection hook, so rather
+/// than duplicate this row UI across two disconnected surfaces — risking the staged-override
+/// state diverging between them — it is rendered ONCE, directly above the findings table it
+/// describes, which reads exactly like a header for what follows.
+///
+/// Rendered (and re-keyed) alongside the findings table in `ScanResults`, so a fresh audit
+/// remounts it with clean staged-override state.
+#[component]
+pub(super) fn RuleAlternativesPanel(
+    project_id: String,
+    proposed_rules: Vec<ProposedRuleView>,
+    findings: Vec<FindingView>,
+    repos: Vec<String>,
+    recommendations: std::collections::HashMap<String, RuleRecommendationView>,
+    audit: Signal<Option<ScanReportView>>,
+) -> Element {
+    let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
+    // The architect's per-repo alternative choices (ScanResults provides this via context) —
+    // updated here too after a successful rescan, so Arm's directive resolution matches the
+    // operator's forced choice rather than the pre-override default.
+    let mut chosen = use_context::<Signal<std::collections::HashMap<String, String>>>();
+
+    // rule_id -> staged override option id. A failed rescan leaves the override in place (so
+    // the architect can retry or adjust) rather than silently discarding it.
+    let mut pending = use_signal(std::collections::HashMap::<String, String>::new);
+    // Which rule's Why modal is open (None = closed).
+    let mut why_open = use_signal(|| Option::<String>::None);
+    let mut rescanning = use_signal(|| false);
+    let mut accepting = use_signal(|| false);
+    // Rule ids the architect has explicitly accepted THIS session — purely a local echo of the
+    // server-persisted chosen_option so the "Accepted" badge updates without a re-fetch.
+    let mut accepted_ids = use_signal(std::collections::HashSet::<String>::new);
+
+    // The rules in scope: every multi-option rule the audit recommended on, joined against the
+    // scan's proposed-rules list for its title + options (the audit response itself carries no
+    // rule metadata — only the scan's `proposed_rules` does).
+    let mut rows: Vec<&ProposedRuleView> = proposed_rules
+        .iter()
+        .filter(|r| recommendations.contains_key(&r.id) && r.options.len() >= 2)
+        .collect();
+    rows.sort_by(|a, b| a.id.cmp(&b.id));
+
+    if rows.is_empty() {
+        // No multi-option rule was part of this audit — nothing to review.
+        return rsx! {};
+    }
+    // Computed BEFORE the rsx! block (not derived from `rows` inside a `move` closure below) so
+    // the Accept button's closure can take ownership without fighting `rows`'s borrow.
+    let rule_ids_in_scope: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+    // A separate clone for the rescan closure below (each `move` closure needs its own owned
+    // copy; `rule_ids_in_scope` itself is still needed, untouched, by the Accept closure).
+    let rule_ids_for_rescan_filter = rule_ids_in_scope.clone();
+    // Likewise: `project_id` is a plain `String` prop (not `Copy`), and BOTH the rescan and
+    // Accept closures below are `move` closures that need their own owned copy — a `move`
+    // closure takes the captured variable itself, not a borrow, so referencing the shared prop
+    // from two separate `move` closures needs two clones made before either closure exists.
+    let project_id_for_rescan = project_id.clone();
+
+    // rule_id -> finding count (0 for a clean rule) + the option id its findings were actually
+    // evaluated under (every finding for one rule shares the same evaluated_option_id).
+    let mut finding_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut evaluated_by_rule: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for f in &findings {
+        *finding_counts.entry(f.rule_id.clone()).or_insert(0) += 1;
+        if let Some(oid) = &f.evaluated_option_id {
+            evaluated_by_rule
+                .entry(f.rule_id.clone())
+                .or_insert_with(|| oid.clone());
+        }
+    }
+
+    // Only count/send overrides for rules STILL in scope — a stale entry left over from a
+    // previous audit (a different rule selection) must never inflate the sticky bar or get
+    // sent to the rescan endpoint for a rule that no longer even renders a row.
+    let pending_count = rows
+        .iter()
+        .filter(|r| pending.read().contains_key(&r.id))
+        .count();
+
+    rsx! {
+        div { class: "rec-panel",
+            p { class: "rec-panel-head", "Rule alternatives" }
+            p { class: "rec-panel-sub",
+                "For every rule with more than one adopted alternative, the audit picked the option it judged best fitting and evaluated the codebase against it (shown below as \"Evaluated against\"). Review each one; change any you disagree with, then rescan just the ones you changed."
+            }
+            for r in rows.iter() {
+                {
+                    let rid = r.id.clone();
+                    let rid_for_select = rid.clone();
+                    let rid_for_why = rid.clone();
+                    let rec = recommendations.get(&rid).cloned().unwrap_or_default();
+                    let count = finding_counts.get(&rid).copied().unwrap_or(0);
+                    let staged = pending.read().get(&rid).cloned();
+                    let is_pending = staged.is_some();
+                    let evaluated_id = staged
+                        .clone()
+                        .or_else(|| evaluated_by_rule.get(&rid).cloned())
+                        .or_else(|| Some(rec.recommended_option_id.clone()).filter(|s| !s.is_empty()))
+                        .or_else(|| r.default_option.clone())
+                        .unwrap_or_default();
+                    let evaluated_label = r
+                        .options
+                        .iter()
+                        .find(|o| o.id == evaluated_id)
+                        .map(|o| o.label.clone())
+                        .unwrap_or_else(|| "(none)".to_string());
+                    let is_accepted = accepted_ids.read().contains(&rid);
+                    let (badge_cls, badge_text) = if is_pending {
+                        ("rec-badge rec-badge-pending", "Override, pending rescan")
+                    } else if rec.operator_chosen {
+                        ("rec-badge rec-badge-yours", "Your choice")
+                    } else {
+                        ("rec-badge rec-badge-ai", "AI recommended")
+                    };
+                    let select_value = staged.unwrap_or_else(|| evaluated_id.clone());
+                    rsx! {
+                        div { class: "rec-row", key: "{rid}",
+                            div { class: "rec-row-main",
+                                span { class: "rec-row-id", "{r.id}" }
+                                span { class: "rec-row-title", "{r.title}" }
+                                span { class: "rec-row-count",
+                                    if count == 0 { "0 findings" } else { "{count} finding(s)" }
+                                }
+                            }
+                            div { class: "rec-line",
+                                "Evaluated against: "
+                                strong { "{evaluated_label}" }
+                                span { class: "{badge_cls}", "{badge_text}" }
+                                if is_accepted {
+                                    span { class: "rec-badge rec-badge-accepted", "Accepted" }
+                                }
+                                button {
+                                    class: "btn-edit-sm",
+                                    onclick: move |_| why_open.set(Some(rid_for_why.clone())),
+                                    "Why?"
+                                }
+                                select {
+                                    class: "rec-select",
+                                    value: "{select_value}",
+                                    onchange: move |e: Event<FormData>| {
+                                        stage_or_clear_override(
+                                            &mut pending.write(),
+                                            &rid_for_select,
+                                            &evaluated_id,
+                                            &e.value(),
+                                        );
+                                    },
+                                    for o in r.options.iter() {
+                                        option { key: "{o.id}", value: "{o.id}", "{o.label}" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Why modal: shared across rows, keyed by whichever rule's "Why?" was clicked.
+        if let Some(rid) = why_open() {
+            {
+                let title = rows
+                    .iter()
+                    .find(|r| r.id == rid)
+                    .map(|r| r.title.clone())
+                    .unwrap_or_default();
+                let rec = recommendations.get(&rid).cloned().unwrap_or_default();
+                rsx! {
+                    RuleWhyModal {
+                        rule_id: rid.clone(),
+                        title,
+                        reasoning: rec.recommendation_reasoning,
+                        hallucinated: rec.hallucinated,
+                        on_close: move |_| why_open.set(None),
+                    }
+                }
+            }
+        }
+        // Sticky batched-rescan bar: appears once at least one override is staged. Drives the
+        // centralized LoadingGuard (inside `rescan_alternatives`) for the whole round trip —
+        // no ad-hoc spinner; `rescanning` only swaps the button's own label.
+        if pending_count > 0 {
+            RescanStickyBar {
+                pending_count,
+                rescanning: rescanning(),
+                on_rescan: move |_| {
+                    // Filtered to rules still in scope — a stale entry left over from a
+                    // previous audit run reusing this same mounted component instance (a
+                    // different rule selection, no remount in between) must never be sent.
+                    let overrides: Vec<AlternativeOverride> = pending
+                        .read()
+                        .iter()
+                        .filter(|(rule_id, _)| rule_ids_for_rescan_filter.contains(rule_id))
+                        .map(|(rule_id, chosen_option_id)| AlternativeOverride {
+                            rule_id: rule_id.clone(),
+                            chosen_option_id: chosen_option_id.clone(),
+                        })
+                        .collect();
+                    if overrides.is_empty() {
+                        return;
+                    }
+                    let pid = project_id_for_rescan.clone();
+                    let repos = repos.clone();
+                    let rescanned_ids: std::collections::HashSet<String> =
+                        overrides.iter().map(|o| o.rule_id.clone()).collect();
+                    let overrides_snapshot = overrides.clone();
+                    rescanning.set(true);
+                    spawn(async move {
+                        match rescan_alternatives(&pid, &overrides).await {
+                            Some(resp) if resp.ok => {
+                                let current_report = audit.peek().clone();
+                                if let Some(current) = current_report {
+                                    let (merged_findings, merged_recs) = merge_rescanned_alternatives(
+                                        &current.findings,
+                                        &current.recommendations,
+                                        &rescanned_ids,
+                                        resp.findings,
+                                        resp.recommendations,
+                                    );
+                                    let mut updated = current;
+                                    updated.findings = merged_findings;
+                                    updated.recommendations = merged_recs;
+                                    audit.set(Some(updated));
+                                }
+                                for o in &overrides_snapshot {
+                                    for repo in &repos {
+                                        chosen
+                                            .write()
+                                            .insert(chosen_key(repo, &o.rule_id), o.chosen_option_id.clone());
+                                    }
+                                }
+                                pending.write().clear();
+                                let msg = resp.message.unwrap_or_else(|| {
+                                    format!("Rescanned {} rule(s).", overrides_snapshot.len())
+                                });
+                                crate::toast::push_toast(toasts, crate::toast::ToastKind::Info, msg);
+                            }
+                            Some(resp) => {
+                                crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Error,
+                                    resp.message.unwrap_or_else(|| "Rescan failed.".to_string()),
+                                );
+                            }
+                            None => {
+                                crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Error,
+                                    "Rescan failed. Could not reach the server.",
+                                );
+                            }
+                        }
+                        rescanning.set(false);
+                    });
+                },
+            }
+        }
+        // Accept alternatives: persists the CURRENT per-rule selection (the AI's where the
+        // architect never overrode it, the operator's where a rescan already applied one) into
+        // the project's chosen_option. Disabled while an override is staged but not yet
+        // rescanned — accepting then would persist the STALE (pre-override) recommendation.
+        div { class: "findings-toolbar",
+            button {
+                class: "btn-edit-sm",
+                disabled: accepting() || pending_count > 0,
+                title: if pending_count > 0 { "Rescan the pending override(s) first." } else { "" },
+                onclick: move |_| {
+                    let pid = project_id.clone();
+                    let all_ids = rule_ids_in_scope.clone();
+                    accepting.set(true);
+                    spawn(async move {
+                        match accept_alternatives(&pid, None).await {
+                            Some(resp) if resp.ok => {
+                                accepted_ids.write().extend(all_ids);
+                                crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Info,
+                                    format!("Accepted {} alternative(s).", resp.accepted),
+                                );
+                            }
+                            Some(resp) => {
+                                crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Error,
+                                    resp.message.unwrap_or_else(|| "Accept failed.".to_string()),
+                                );
+                            }
+                            None => {
+                                crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Error,
+                                    "Accept failed. Could not reach the server.",
+                                );
+                            }
+                        }
+                        accepting.set(false);
+                    });
+                },
+                if accepting() { "Accepting\u{2026}" } else { "Accept alternatives" }
+            }
+        }
+    }
+}
+
 /// Renders one brownfield scan's results: the audit summary, the findings table,
 /// and the proposed-rules table. Keyed by the parent so a new scan remounts the
 /// chorale tables with fresh rows.
@@ -3654,6 +4222,33 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                     }
                 }
 
+                // Rule alternatives (audit-integrated alternative recommendation): reviews
+                // every multi-option rule the audit evaluated, doubling as the informational
+                // "group header" for the findings table right below it. Keyed on the audit's
+                // own started_at stamp so a fresh audit run (a different rule selection) gets a
+                // clean remount instead of reusing stale staged-override state.
+                {
+                    let recommendations = audited
+                        .as_ref()
+                        .map(|a| a.recommendations.clone())
+                        .unwrap_or_default();
+                    let audit_stamp = audited
+                        .as_ref()
+                        .map(|a| a.provenance.started_at.clone())
+                        .unwrap_or_default();
+                    rsx! {
+                        RuleAlternativesPanel {
+                            key: "{audit_stamp}",
+                            project_id: project_id.clone(),
+                            proposed_rules: report.proposed_rules.clone(),
+                            findings: findings.clone(),
+                            repos: report.repos.clone(),
+                            recommendations,
+                            audit,
+                        }
+                    }
+                }
+
                 // Wrapped so the key is the first node in its block (Dioxus requirement);
                 // keying on the view remounts the table so its frozen rows reflect the switch.
                 {
@@ -4696,6 +5291,171 @@ mod tests {
         assert_eq!(p.finished_at, "2026-07-23T00:05:00+00:00");
     }
 
+    // ── ScanReportView.recommendations + FindingView.evaluated_option_id round-trip ────────
+    // docs/design/2026-09-22_audit-integrated-alternatives.md — Phase 2 wire-contract sync
+    // guard, same idiom as `scan_report_view_mirrors_server_provenance_shape` above: this pins
+    // the JSON shape `camerata_server::ai_audit::RuleRecommendation` (keyed by rule id into a
+    // map, mirroring `camerata_server::onboard::ScanReport::recommendations`) and
+    // `Finding::evaluated_option_id` emit, and asserts every field survives deserialization.
+    #[test]
+    fn scan_report_view_recommendations_round_trip() {
+        let r = scan_report(serde_json::json!({
+            "repos": ["owner/repo"], "files_scanned": 10,
+            "findings": [
+                {
+                    "repo": "owner/repo", "path": "src/a.rs", "line": 3, "rule_id": "ARCH-1",
+                    "severity": "medium", "snippet": "s", "detail": "d",
+                    "evaluated_option_id": "layered"
+                }
+            ],
+            "proposed_rules": [], "gated": false,
+            "recommendations": {
+                "ARCH-1": {
+                    "recommended_option_id": "layered",
+                    "recommendation_reasoning": "The repo already separates controllers from services.",
+                    "hallucinated": false,
+                    "operator_chosen": false
+                },
+                "ARCH-2": {
+                    "recommended_option_id": "fallback-opt",
+                    "recommendation_reasoning": "The model did not return a valid option id for this rule.",
+                    "hallucinated": true,
+                    "operator_chosen": true
+                }
+            }
+        }));
+        assert_eq!(r.findings[0].evaluated_option_id.as_deref(), Some("layered"));
+        assert_eq!(r.recommendations.len(), 2);
+        let arch1 = &r.recommendations["ARCH-1"];
+        assert_eq!(arch1.recommended_option_id, "layered");
+        assert_eq!(
+            arch1.recommendation_reasoning,
+            "The repo already separates controllers from services."
+        );
+        assert!(!arch1.hallucinated);
+        assert!(!arch1.operator_chosen);
+        let arch2 = &r.recommendations["ARCH-2"];
+        assert!(arch2.hallucinated, "hallucinated flag must survive the round trip");
+        assert!(arch2.operator_chosen, "operator_chosen flag must survive the round trip");
+    }
+
+    #[test]
+    fn scan_report_view_recommendations_defaults_to_empty_map_when_absent() {
+        // Back-compat: a report persisted before this feature existed (e.g. an old onboarding
+        // draft) must still deserialize, with no recommendations to show — matching exactly
+        // the pre-feature UI (no panel, no gate change visible).
+        let r = scan_report(serde_json::json!({
+            "repos": [], "files_scanned": 0, "findings": [], "proposed_rules": [], "gated": false
+        }));
+        assert!(r.recommendations.is_empty());
+    }
+
+    // ── merge_rescanned_alternatives (pure; drives the batched-rescan merge-in-place) ───────
+
+    fn finding_for(rule_id: &str, path: &str) -> super::FindingView {
+        serde_json::from_value(serde_json::json!({
+            "repo": "owner/repo", "path": path, "line": 1, "rule_id": rule_id,
+            "severity": "low", "snippet": "s", "detail": ""
+        }))
+        .expect("valid FindingView fixture")
+    }
+
+    fn rec(option_id: &str, operator_chosen: bool) -> super::RuleRecommendationView {
+        super::RuleRecommendationView {
+            recommended_option_id: option_id.to_string(),
+            recommendation_reasoning: "because".to_string(),
+            hallucinated: false,
+            operator_chosen,
+        }
+    }
+
+    #[test]
+    fn merge_rescanned_alternatives_replaces_only_the_rescanned_rules() {
+        let existing_findings = vec![
+            finding_for("ARCH-1", "a.rs"),
+            finding_for("ARCH-2", "b.rs"),
+            finding_for("ARCH-2", "c.rs"),
+        ];
+        let mut existing_recs = std::collections::HashMap::new();
+        existing_recs.insert("ARCH-1".to_string(), rec("opt-a", false));
+        existing_recs.insert("ARCH-2".to_string(), rec("opt-b", false));
+
+        let rescanned: std::collections::HashSet<String> = ["ARCH-2".to_string()].into_iter().collect();
+        let new_findings = vec![finding_for("ARCH-2", "b.rs")]; // the operator's forced re-audit shrank it to 1
+        let mut new_recs = std::collections::HashMap::new();
+        new_recs.insert("ARCH-2".to_string(), rec("opt-c", true));
+
+        let (merged_findings, merged_recs) = super::merge_rescanned_alternatives(
+            &existing_findings,
+            &existing_recs,
+            &rescanned,
+            new_findings,
+            new_recs,
+        );
+
+        // ARCH-1's finding is untouched; ARCH-2's two old findings are replaced by the one new one.
+        assert_eq!(merged_findings.len(), 2, "ARCH-1 (1) + the new ARCH-2 (1)");
+        assert!(merged_findings.iter().any(|f| f.rule_id == "ARCH-1" && f.path == "a.rs"));
+        assert!(merged_findings.iter().any(|f| f.rule_id == "ARCH-2" && f.path == "b.rs"));
+        assert!(!merged_findings.iter().any(|f| f.path == "c.rs"), "the old ARCH-2 finding must be gone");
+
+        assert_eq!(merged_recs["ARCH-1"].recommended_option_id, "opt-a", "untouched");
+        assert_eq!(merged_recs["ARCH-2"].recommended_option_id, "opt-c", "replaced by the rescan");
+        assert!(merged_recs["ARCH-2"].operator_chosen, "rescanned rule is now operator-chosen");
+    }
+
+    #[test]
+    fn merge_rescanned_alternatives_adds_a_brand_new_recommendation() {
+        // A rule with zero findings pre-rescan still gets its recommendation merged in.
+        let (_, merged_recs) = super::merge_rescanned_alternatives(
+            &[],
+            &std::collections::HashMap::new(),
+            &["ARCH-9".to_string()].into_iter().collect(),
+            vec![],
+            std::collections::HashMap::from([("ARCH-9".to_string(), rec("opt-z", true))]),
+        );
+        assert_eq!(merged_recs["ARCH-9"].recommended_option_id, "opt-z");
+    }
+
+    // ── rescan_button_label ─────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn rescan_button_label_is_singular_for_one() {
+        assert_eq!(super::rescan_button_label(1), "Rescan 1 overridden rule");
+    }
+
+    #[test]
+    fn rescan_button_label_is_plural_for_many() {
+        assert_eq!(super::rescan_button_label(3), "Rescan 3 overridden rules");
+    }
+
+    // ── stage_or_clear_override (pure core of the Change dropdown's onchange) ──────────────
+
+    #[test]
+    fn stage_or_clear_override_stages_a_different_pick() {
+        let mut pending = std::collections::HashMap::new();
+        super::stage_or_clear_override(&mut pending, "ARCH-1", "layered", "hexagonal");
+        assert_eq!(pending.get("ARCH-1"), Some(&"hexagonal".to_string()));
+    }
+
+    #[test]
+    fn stage_or_clear_override_clears_when_picking_the_evaluated_option_back() {
+        let mut pending = std::collections::HashMap::new();
+        pending.insert("ARCH-1".to_string(), "hexagonal".to_string());
+        // Picking the option the rule is CURRENTLY evaluated against again clears the override.
+        super::stage_or_clear_override(&mut pending, "ARCH-1", "layered", "layered");
+        assert!(!pending.contains_key("ARCH-1"));
+    }
+
+    #[test]
+    fn stage_or_clear_override_only_touches_its_own_rule() {
+        let mut pending = std::collections::HashMap::new();
+        pending.insert("ARCH-2".to_string(), "opt-x".to_string());
+        super::stage_or_clear_override(&mut pending, "ARCH-1", "layered", "hexagonal");
+        assert_eq!(pending.get("ARCH-2"), Some(&"opt-x".to_string()), "untouched");
+        assert_eq!(pending.get("ARCH-1"), Some(&"hexagonal".to_string()));
+    }
+
     #[test]
     fn scan_report_view_provenance_defaults_when_absent() {
         // A report from before the provenance stamp existed (or a hand-built test fixture that
@@ -5319,6 +6079,164 @@ mod tests {
 
         assert!(md.is_none(), "a non-2xx must yield None, not the error body");
     }
+
+    // ── rescan_alternatives / accept_alternatives (audit-integrated alternative
+    // recommendation, docs/design/2026-09-22_audit-integrated-alternatives.md) ─────────────
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn rescan_alternatives_posts_the_overrides_payload() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-1/rescan-alternatives"))
+            .and(body_json(serde_json::json!({
+                "overrides": [{ "rule_id": "ARCH-1", "chosen_option_id": "layered" }]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "message": null,
+                "findings": [],
+                "recommendations": {
+                    "ARCH-1": {
+                        "recommended_option_id": "layered",
+                        "recommendation_reasoning": "Operator override.",
+                        "hallucinated": false,
+                        "operator_chosen": true
+                    }
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let resp = super::rescan_alternatives(
+            "proj-1",
+            &[super::AlternativeOverride {
+                rule_id: "ARCH-1".to_string(),
+                chosen_option_id: "layered".to_string(),
+            }],
+        )
+        .await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let resp = resp.expect("a 200 response must parse");
+        assert!(resp.ok);
+        assert!(resp.findings.is_empty());
+        assert!(resp.recommendations["ARCH-1"].operator_chosen);
+    }
+
+    /// The `Blocked` compliance gate (and any other `{ ok: false, message }` response) must
+    /// come back as `Some(..)` with the message intact — not collapsed to `None` — so the
+    /// caller can surface it instead of silently failing (design doc's explicit requirement).
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn rescan_alternatives_surfaces_ok_false_message_instead_of_failing_silently() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-1/rescan-alternatives"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": false,
+                "message": "This project is API-only and has no Anthropic key configured."
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let resp = super::rescan_alternatives(
+            "proj-1",
+            &[super::AlternativeOverride {
+                rule_id: "ARCH-1".to_string(),
+                chosen_option_id: "layered".to_string(),
+            }],
+        )
+        .await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let resp = resp.expect("an ok:false body still parses");
+        assert!(!resp.ok);
+        assert_eq!(
+            resp.message.as_deref(),
+            Some("This project is API-only and has no Anthropic key configured.")
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn rescan_alternatives_returns_none_on_network_failure() {
+        std::env::set_var("CAMERATA_BFF_URL", "http://127.0.0.1:9");
+        let resp = super::rescan_alternatives(
+            "proj-1",
+            &[super::AlternativeOverride {
+                rule_id: "ARCH-1".to_string(),
+                chosen_option_id: "layered".to_string(),
+            }],
+        )
+        .await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert!(resp.is_none());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn accept_alternatives_with_no_rule_ids_posts_empty_body() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-1/accept-alternatives"))
+            .and(body_json(serde_json::json!({})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "accepted": 2,
+                "skipped": [],
+                "ruleset": { "selections": [], "cross_repo": [], "process": [], "custom": [] }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let resp = super::accept_alternatives("proj-1", None).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let resp = resp.expect("a 200 response must parse");
+        assert!(resp.ok);
+        assert_eq!(resp.accepted, 2);
+        assert!(resp.skipped.is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn accept_alternatives_scopes_to_the_given_rule_ids() {
+        use wiremock::matchers::{body_json, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/projects/proj-1/accept-alternatives"))
+            .and(body_json(serde_json::json!({ "rule_ids": ["ARCH-1"] })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true, "accepted": 1, "skipped": [], "ruleset": {}
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let resp = super::accept_alternatives("proj-1", Some(&["ARCH-1".to_string()])).await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        assert_eq!(resp.expect("parses").accepted, 1);
+    }
 }
 
 #[cfg(test)]
@@ -5451,5 +6369,250 @@ mod render_tests {
             html.contains("SOC-2 gap analysis is disabled for this workspace"),
             "soc2-off hint; html=\n{html}"
         );
+    }
+
+    // ── Tier-1 render: audit-integrated alternative recommendation ─────────────────────────
+    // docs/design/2026-09-22_audit-integrated-alternatives.md — Phase 2 (UI).
+
+    /// A multi-option `ProposedRuleView` fixture (2+ options), built via JSON so the required
+    /// fields (`id`, `title`, `kind`) are explicit and every optional field defaults sanely.
+    fn proposed_rule_with_options(
+        id: &str,
+        title: &str,
+        options: &[(&str, &str)],
+    ) -> ProposedRuleView {
+        let opts: Vec<serde_json::Value> = options
+            .iter()
+            .map(|(oid, label)| {
+                serde_json::json!({ "id": oid, "label": label, "directive": format!("{label} directive"), "why": "" })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "id": id, "title": title, "kind": "semantic", "options": opts
+        }))
+        .expect("valid ProposedRuleView fixture")
+    }
+
+    fn recommendation(option_id: &str, reasoning: &str, hallucinated: bool, operator_chosen: bool) -> RuleRecommendationView {
+        RuleRecommendationView {
+            recommended_option_id: option_id.to_string(),
+            recommendation_reasoning: reasoning.to_string(),
+            hallucinated,
+            operator_chosen,
+        }
+    }
+
+    fn finding_evaluated_under(rule_id: &str, option_id: &str) -> FindingView {
+        serde_json::from_value(serde_json::json!({
+            "repo": "owner/repo", "path": "a.rs", "line": 1, "rule_id": rule_id,
+            "severity": "medium", "snippet": "s", "detail": "",
+            "evaluated_option_id": option_id
+        }))
+        .expect("valid FindingView fixture")
+    }
+
+    /// Harness: one multi-option rule WITH a finding (evaluated against "layered", AI
+    /// recommended) and one multi-option rule with ZERO findings (still listed — build item 2
+    /// of the design's UX: the review panel includes zero-violation rules so they can still be
+    /// overridden).
+    fn rule_alternatives_harness() -> Element {
+        use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+        use_context_provider(|| Signal::new(std::collections::HashMap::<String, String>::new()));
+        let audit = use_signal(|| None::<ScanReportView>);
+        let proposed_rules = vec![
+            proposed_rule_with_options(
+                "ARCH-1",
+                "Layering",
+                &[("layered", "Layered architecture"), ("hexagonal", "Hexagonal architecture")],
+            ),
+            proposed_rule_with_options(
+                "ARCH-2",
+                "Error handling",
+                &[("result", "Result-based"), ("exceptions", "Exception-based")],
+            ),
+        ];
+        let mut recommendations = std::collections::HashMap::new();
+        recommendations.insert(
+            "ARCH-1".to_string(),
+            recommendation("layered", "The repo already separates controllers from services.", false, false),
+        );
+        recommendations.insert(
+            "ARCH-2".to_string(),
+            recommendation("result", "Fallback: no valid choice returned.", true, false),
+        );
+        rsx! {
+            RuleAlternativesPanel {
+                project_id: "proj-1".to_string(),
+                proposed_rules,
+                findings: vec![finding_evaluated_under("ARCH-1", "layered")],
+                repos: vec!["owner/repo".to_string()],
+                recommendations,
+                audit,
+            }
+        }
+    }
+
+    #[test]
+    fn rule_alternatives_panel_renders_group_controls_for_every_multi_option_rule() {
+        let mut vdom = VirtualDom::new(rule_alternatives_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("rec-panel"), "panel container; html=\n{html}");
+        assert!(html.contains("Rule alternatives"), "panel heading; html=\n{html}");
+        // ARCH-1: has a finding, evaluated against its AI-recommended option.
+        assert!(html.contains("ARCH-1"), "rule id; html=\n{html}");
+        assert!(html.contains("Layering"), "rule title; html=\n{html}");
+        assert!(html.contains("Evaluated against"), "evaluated-against label; html=\n{html}");
+        assert!(html.contains("Layered architecture"), "evaluated option label; html=\n{html}");
+        assert!(html.contains("AI recommended"), "AI-recommended badge; html=\n{html}");
+        assert!(html.contains("1 finding(s)"), "ARCH-1 finding count; html=\n{html}");
+        assert!(html.contains("Why?"), "Why control; html=\n{html}");
+        assert!(html.contains("rec-select"), "Change dropdown; html=\n{html}");
+        assert!(html.contains("Hexagonal architecture"), "the non-evaluated option is still offered; html=\n{html}");
+        // ARCH-2: zero findings, but still listed with its own controls (build item 2 — the
+        // review panel includes zero-violation rules so they can still be overridden).
+        assert!(html.contains("ARCH-2"), "zero-violation rule id; html=\n{html}");
+        assert!(html.contains("Error handling"), "zero-violation rule title; html=\n{html}");
+        assert!(html.contains("0 findings"), "zero-violation finding count; html=\n{html}");
+        assert!(html.contains("Result-based"), "zero-violation rule's evaluated option; html=\n{html}");
+        // Accept alternatives is present and enabled (nothing staged yet).
+        assert!(html.contains("Accept alternatives"), "accept button; html=\n{html}");
+        // No sticky bar yet — nothing staged.
+        assert!(!html.contains("rec-sticky-bar"), "no sticky bar before any override is staged; html=\n{html}");
+    }
+
+    #[test]
+    fn rule_alternatives_panel_renders_nothing_when_no_recommendations() {
+        // No multi-option rule was part of the audit (e.g. a mechanical-only scan) — the panel
+        // must render nothing, not an empty shell.
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            use_context_provider(|| Signal::new(std::collections::HashMap::<String, String>::new()));
+            let audit = use_signal(|| None::<ScanReportView>);
+            rsx! {
+                RuleAlternativesPanel {
+                    project_id: "proj-1".to_string(),
+                    proposed_rules: vec![],
+                    findings: vec![],
+                    repos: vec![],
+                    recommendations: std::collections::HashMap::new(),
+                    audit,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(!html.contains("rec-panel"), "no panel shell when nothing is in scope; html=\n{html}");
+    }
+
+    // ── Tier-1 render: RuleWhyModal (extracted so the "open" shape is directly testable) ────
+
+    fn why_modal_harness() -> Element {
+        rsx! {
+            RuleWhyModal {
+                rule_id: "ARCH-1".to_string(),
+                title: "Layering".to_string(),
+                reasoning: "The repo already separates controllers from services.".to_string(),
+                hallucinated: false,
+                on_close: move |_| {},
+            }
+        }
+    }
+
+    #[test]
+    fn rule_why_modal_shows_the_reasoning() {
+        let mut vdom = VirtualDom::new(why_modal_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("ARCH-1"), "rule id; html=\n{html}");
+        assert!(html.contains("Layering"), "title; html=\n{html}");
+        assert!(html.contains("Why this alternative"), "section label; html=\n{html}");
+        assert!(
+            html.contains("The repo already separates controllers from services."),
+            "reasoning body; html=\n{html}"
+        );
+        assert!(!html.contains("rec-hallucinated-note"), "no hallucination note when false; html=\n{html}");
+    }
+
+    fn why_modal_hallucinated_harness() -> Element {
+        rsx! {
+            RuleWhyModal {
+                rule_id: "ARCH-2".to_string(),
+                title: "Error handling".to_string(),
+                reasoning: "Fallback: no valid choice returned.".to_string(),
+                hallucinated: true,
+                on_close: move |_| {},
+            }
+        }
+    }
+
+    #[test]
+    fn rule_why_modal_renders_hallucinated_note() {
+        let mut vdom = VirtualDom::new(why_modal_hallucinated_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("rec-hallucinated-note"), "hallucination note class; html=\n{html}");
+        assert!(
+            html.contains("did not return a valid choice"),
+            "hallucination explanation; html=\n{html}"
+        );
+    }
+
+    #[test]
+    fn rule_why_modal_falls_back_when_no_reasoning_recorded() {
+        fn harness() -> Element {
+            rsx! {
+                RuleWhyModal {
+                    rule_id: "ARCH-3".to_string(),
+                    title: "Naming".to_string(),
+                    reasoning: String::new(),
+                    hallucinated: false,
+                    on_close: move |_| {},
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("No reasoning was recorded for this recommendation."),
+            "fallback note; html=\n{html}"
+        );
+    }
+
+    // ── Tier-1 render: RescanStickyBar ───────────────────────────────────────────────────────
+
+    fn sticky_bar_harness() -> Element {
+        rsx! {
+            RescanStickyBar { pending_count: 3usize, rescanning: false, on_rescan: move |_| {} }
+        }
+    }
+
+    #[test]
+    fn rescan_sticky_bar_shows_the_correct_count() {
+        let mut vdom = VirtualDom::new(sticky_bar_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("rec-sticky-bar"), "sticky bar container; html=\n{html}");
+        assert!(
+            html.contains("Rescan 3 overridden rules"),
+            "count reflected in both the label and the button; html=\n{html}"
+        );
+    }
+
+    fn sticky_bar_rescanning_harness() -> Element {
+        rsx! {
+            RescanStickyBar { pending_count: 1usize, rescanning: true, on_rescan: move |_| {} }
+        }
+    }
+
+    #[test]
+    fn rescan_sticky_bar_shows_rescanning_label_and_disables_the_button() {
+        let mut vdom = VirtualDom::new(sticky_bar_rescanning_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Rescanning"), "in-flight label; html=\n{html}");
+        assert!(html.contains("disabled"), "button disabled while rescanning; html=\n{html}");
     }
 }

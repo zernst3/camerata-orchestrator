@@ -121,6 +121,13 @@ pub struct FindingView {
     /// findings calibration never saw. Mirrors `camerata_server::onboard::Finding::effort`.
     #[serde(default)]
     pub effort: Option<String>,
+    /// The alternative option this finding was judged AGAINST (audit-integrated alternative
+    /// recommendation, docs/design/2026-09-22_audit-integrated-alternatives.md). `None` for a
+    /// single-option rule, or for a finding produced before this field existed. Mirrors
+    /// `camerata_server::onboard::Finding::evaluated_option_id`. Used by the scan UI to label
+    /// each multi-option rule group "Evaluated against: <option label>".
+    #[serde(default)]
+    pub evaluated_option_id: Option<String>,
 }
 
 /// The default finding status (`"active"`). FindingView's `#[serde(default)]` provider; lives in
@@ -305,6 +312,29 @@ mod tests {
     #[test]
     fn default_finding_status_is_active() {
         assert_eq!(default_finding_status(), "active");
+    }
+
+    // ── evaluated_option_id (audit-integrated alternative recommendation) ──────────────────
+
+    #[test]
+    fn evaluated_option_id_round_trips_when_present() {
+        let f = finding(serde_json::json!({
+            "repo": "r", "path": "p", "line": 1,
+            "rule_id": "R", "severity": "low", "snippet": "s", "detail": "",
+            "evaluated_option_id": "option-b"
+        }));
+        assert_eq!(f.evaluated_option_id.as_deref(), Some("option-b"));
+    }
+
+    #[test]
+    fn evaluated_option_id_defaults_to_none_when_absent() {
+        // Back-compat: a finding from before this field existed (or a single-option rule's
+        // finding, which the server never tags) must still deserialize.
+        let f = finding(serde_json::json!({
+            "repo": "r", "path": "p", "line": 1,
+            "rule_id": "R", "severity": "low", "snippet": "s", "detail": ""
+        }));
+        assert_eq!(f.evaluated_option_id, None);
     }
 
     #[test]
