@@ -20,6 +20,9 @@ why = "False positives are recoverable. A false positive is flagged, a human eve
 id = "default-to-recall-opt-specific-signals-into-prec"
 label = "default to recall, opt specific signals into precision-tuning"
 directive = "Detection signals in autonomous routines (tech-debt sniffers, anomaly flags, drift detectors, anything that gates the routine on a judgment call) are tuned broadly. Anything that could plausibly be a real issue is flagged, including borderline cases that turn out to be false positives; per `orch-tiered-escalation-1`, most of those flags soft-flag (logged, routine continues) and only hard-guard-area or overflow cases hard-pause. The cost of a reviewer later dismissing a false positive is small and recoverable. The cost of letting a real issue slip through silently is unbounded. Default posture: catch too much, not too little, and let the escalation tier — not detection sensitivity — decide what actually halts the routine."
+remediation = """
+Tune autonomous detection signals (tech-debt sniffers, anomaly flags, drift detectors) broadly by default, so anything plausibly a real issue gets flagged, and route most of those flags to a soft-flag (logged, run continues) rather than a hard pause, reserving hard pauses for hard-guard areas. Opt individual signals into precision-tuning only when their false-positive rate is shown to be a real cost. Verify by confirming a borderline signal is logged rather than silently dropped, and that only hard-guard-area flags actually halt the run.
+"""
 why = "False positives are recoverable."
 
 [[option]]

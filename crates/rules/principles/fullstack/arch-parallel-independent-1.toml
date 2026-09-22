@@ -24,6 +24,9 @@ why = "Sequential awaits sum the latency of each call (three 50ms calls take 150
 id = "independent-concurrent-calls-in-any-code-path-ru"
 label = "Independent concurrent calls in any code path run in parallel, not sequentially"
 directive = "Wherever code awaits two or more calls that have no data dependency on each other (independent repository lookups in a service, independent backend fetches in a UI component, independent third-party API calls, independent cache fetches), the calls run concurrently via the language's parallel-await primitive (try_join, Promise.all, asyncio.gather, errgroup, or equivalent). Sequential awaits on calls without a dependency are a violation. Real exceptions: calls with a true data dependency, calls that must be serialized inside the same transaction, and writes whose ordering matters semantically."
+remediation = """
+Change the sequential awaits on independent calls (repository lookups, backend fetches, third-party API calls, cache fetches with no data dependency on each other) to run concurrently using the language's parallel-await primitive (try_join, Promise.all, asyncio.gather, or equivalent). Only keep calls sequential when a later call genuinely depends on an earlier call's result. Verify by timing the code path before and after and confirming its latency drops to roughly the slowest single call instead of the sum of all calls.
+"""
 why = "Sequential awaits sum the latency of each call (three 50ms calls take 150ms); parallel awaits take the max (three 50ms calls take 50ms)."
 
 [[option]]

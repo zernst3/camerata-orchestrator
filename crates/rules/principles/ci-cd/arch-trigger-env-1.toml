@@ -24,6 +24,9 @@ why = "Direct mapping reduces human error; immutable tags make a release always 
 id = "git-ref-environment-immutable-prod-tags"
 label = "git-ref → environment, immutable prod tags"
 directive = "Map git refs to environments (push to main → dev; release branch → staging; semver tag → prod). Tags are immutable, never moved. Hotfixes branch from the broken tag."
+remediation = """
+Set up the deploy pipeline so a push to the trunk branch deploys to dev, a push to a release branch deploys to staging, and pushing a semver tag on a release branch deploys to prod, with tags treated as immutable and never moved or reused. Route any hotfix from the broken tag itself, not from trunk. Verify by confirming a tag push triggers the prod workflow and that re-pushing or force-moving an existing tag is rejected or blocked by branch/tag protection.
+"""
 why = "Direct ref-to-env mapping reduces human error, and immutable tags make a release always resolve to the same SHA for auditability and rollback."
 
 [[option]]

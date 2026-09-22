@@ -24,6 +24,9 @@ why = "An agent that decides on training-cutoff-sensitive surfaces with high con
 id = "training-data-limited-decisions-route-to-human-r"
 label = "Training-data-limited decisions route to human review by category, not by confidence"
 directive = "When a decision depends on the current state of something the agent cannot directly observe from inside the project (third-party dependency versions, framework or vendor API shapes, latest model identifiers, current security-advisory state, anything whose ground truth ships outside the project's own source tree and moves faster than the agent's training cutoff), the agent does not decide unilaterally. It surfaces the question to a human reviewer along with the candidate answer and the citation it would use. The trigger is the CATEGORY of question, not the agent's subjective confidence: confidence calibrated against a stale training snapshot is the failure mode the rule exists to prevent. The category is visible, shipped version surfaces with an external ground truth. The rule does NOT cover stable, self-correcting surfaces like the host language's edition or backwards-compatible compiler features, where the project's own declared version anchors the answer."
+remediation = """
+Route any decision that depends on fast-moving external ground truth the agent cannot observe from inside the project (third-party dependency versions, vendor API shapes, current model identifiers, live security-advisory state) to human review by category, rather than letting the agent decide based on how confident it feels. Configure the routing rule to trigger on the category of the question, not on a confidence score. Verify by confirming a recent version-sensitive or vendor-API decision in the log shows a human sign-off rather than an autonomous answer.
+"""
 why = "An agent that decides on training-cutoff-sensitive surfaces with high confidence is calibrating against a stale snapshot, not the current world."
 
 [[option]]

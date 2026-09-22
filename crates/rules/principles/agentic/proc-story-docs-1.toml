@@ -25,6 +25,9 @@ why = "The commit and PR records capture WHAT changed; a governed agent needs a 
 id = "per-story-docs"
 label = "Per-story docs keyed by story id"
 directive = "When a governed agent completes a story, emit two documentation files: docs/<story-id>/technical/<story-id>-dev.md (developer-facing: design rationale, implementation decisions, testable assertions, routing notes) and docs/<story-id>/user/<story-id>-guide.md (user-facing: what the change enables, how to use it, any migration steps). The story id is the canonical key already tracked by the dev console and unit of work, so the agent places files deterministically without additional configuration."
+remediation = """
+Configure the pipeline so completing a story emits two files keyed by the story id: a developer-facing doc at docs/<story-id>/technical/<story-id>-dev.md covering design rationale and implementation decisions, and a user-facing doc at docs/<story-id>/user/<story-id>-guide.md covering what changed and how to use it. Verify by confirming a recently completed story has both files present under its story id.
+"""
 why = "Keys off the story id the dev console and UoW already track; separates technical vs. user audiences; the governed agent can place docs deterministically without additional routing logic."
 
 [[option]]

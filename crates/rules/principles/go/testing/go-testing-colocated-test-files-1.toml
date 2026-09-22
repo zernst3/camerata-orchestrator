@@ -33,6 +33,9 @@ why = "Placing _test.go files in the same directory as the code they test is the
 id = "colocated"
 label = "unit tests in foo_test.go alongside foo.go in the same directory"
 directive = "Every Go source file foo.go has its tests in foo_test.go in the same directory. The file name matches the source file name with the _test.go suffix appended. go test ./... discovers and runs all tests automatically."
+remediation = """
+Move the test file for this source file into the same directory, renamed to match the source file with a _test.go suffix, out of a separate tests/ directory. Verify by confirming go test ./... discovers and runs the relocated test automatically.
+"""
 why = "Required by the go tool for automatic test discovery. Keeps tests adjacent to the code they test."
 
 [[option]]

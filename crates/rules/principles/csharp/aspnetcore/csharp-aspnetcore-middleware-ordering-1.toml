@@ -16,6 +16,9 @@ why = "ASP.NET Core middleware executes in registration order, and order is not 
 id = "canonical-middleware-order"
 label = "Canonical middleware order: exception handler → HSTS → HTTPS redirect → static files → routing → CORS → auth/n → endpoints"
 directive = "Middleware is registered in this order: UseExceptionHandler (or UseDeveloperExceptionPage in development) first, then UseHsts, UseHttpsRedirection, UseStaticFiles, UseRouting, UseCors, UseAuthentication, UseAuthorization, and finally MapControllers / MapEndpoints (or the equivalent endpoint registration). No middleware that depends on an authenticated identity (authorization, business logic) is registered before UseAuthentication. No authorization middleware is registered before UseRouting. Any custom middleware that inspects the authenticated user is placed after UseAuthentication."
+remediation = """
+Reorder the middleware pipeline in Program.cs to the canonical sequence: exception handler, HSTS, HTTPS redirection, static files, routing, CORS, authentication, authorization, then endpoint mapping. Pay particular attention to authentication and authorization following routing and preceding endpoint execution. Verify by confirming a request to a protected endpoint is rejected before reaching the handler, and that routing-dependent middleware runs after UseRouting.
+"""
 why = "Each middleware requires specific context established by the middleware above it; the canonical order is the only order where all inter-middleware dependencies are satisfied."
 
 [[option]]

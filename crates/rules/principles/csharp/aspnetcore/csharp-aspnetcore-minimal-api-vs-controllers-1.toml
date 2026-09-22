@@ -15,12 +15,18 @@ why = "ASP.NET Core supports two first-class routing styles, and the right one f
 id = "minimal-apis-throughout"
 label = "Minimal APIs throughout the project; no MVC controllers"
 directive = "All HTTP endpoints are registered via MapGet, MapPost, MapPut, MapDelete (and MapGroup for prefix grouping) in Program.cs or in IEndpointRouteBuilder extension methods. No ControllerBase subclasses are introduced. Endpoint handlers delegate to service-layer methods; business logic does not live inline in the lambda. Validation occurs via the filter pipeline (AddEndpointFilter) or via a service-layer contract, not scattered per-handler."
+remediation = """
+Convert the controller-based endpoint to a Minimal API registration (MapGet/MapPost/etc., grouped with MapGroup for a shared prefix) in Program.cs or an IEndpointRouteBuilder extension method, removing the ControllerBase subclass. Keep the handler thin, delegating to the same service-layer method the controller action called. Verify by confirming the project has no remaining ControllerBase subclasses and the endpoint is reachable at the same route through the Minimal API registration.
+"""
 why = "Produces the least framework ceremony per endpoint, aligns with the direction modern ASP.NET Core tooling is built around, and keeps each endpoint trivially testable in isolation. The strongest fit for new services and small focused APIs; it offers fewer built-in conventions than controllers, so projects that lean heavily on controller-scoped filters or action-result machinery wire those concerns up themselves."
 
 [[option]]
 id = "mvc-controllers-throughout"
 label = "MVC controllers throughout; no Minimal API registrations"
 directive = "All HTTP endpoints live in classes that inherit ControllerBase (or Controller for MVC views), decorated with [ApiController] and [Route] attributes. No MapGet/MapPost/etc. registrations appear. The [ApiController] attribute is applied on all controllers to enable automatic model-state 400 responses."
+remediation = """
+Convert the Minimal API registration to an MVC controller action: create or extend a ControllerBase subclass decorated with [ApiController] and [Route], and move the handler logic into an action method calling the same service. Remove the corresponding Map* registration once the controller action is in place. Verify by confirming the endpoint is reachable through the controller action at the same route and no Map* registration for it remains in Program.cs.
+"""
 why = "Brings richer filter, model-binding, and action-result conventions out of the box (controller-scoped filters, automatic model-state 400s via [ApiController]), which a large endpoint surface benefits from. The natural fit for projects with deep existing investment in those conventions or an established controller codebase; the trade-off is more framework ceremony per endpoint than Minimal APIs."
 
 [[option]]

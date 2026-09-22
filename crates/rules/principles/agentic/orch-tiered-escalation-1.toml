@@ -24,6 +24,9 @@ why = "Routine work should flow; reserve the halt for decisions that truly block
 id = "soft-flag-by-default-hard-pause-only-for-guard-a"
 label = "soft-flag by default, hard-pause only for guard areas"
 directive = "Flagged items are soft-flagged (logged, routine continues on other work). Hard-pause (halt until a human clears it) applies only to sensitive hard-guard areas (auth, payments, infra, CI) and to overflow conditions when the review queue passes a threshold."
+remediation = """
+Configure flagged items to soft-flag by default, meaning they get logged and the routine continues on other work, and restrict hard pauses (halt until a human clears it) to sensitive hard-guard areas such as auth, payments, infrastructure, and CI, plus review-queue overflow. Verify by confirming a non-guard-area flag from a recent run shows up in the log without having halted the routine, and that a guard-area flag did halt it.
+"""
 why = "Routine work should flow; reserve the halt for decisions that truly block forward progress or that accumulate into a backlog."
 
 [[option]]

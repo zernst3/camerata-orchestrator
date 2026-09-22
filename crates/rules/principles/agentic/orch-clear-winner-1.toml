@@ -20,6 +20,9 @@ why = "Most language/framework choices have a canonical answer; stopping on thos
 id = "the-clear-winner-test-decide-vs-stop"
 label = "The clear-winner test — decide vs. stop"
 directive = "Before stopping for a human, run the test. (a) Is there a documented convention? Apply it, cite it, continue. (b) Does a guiding principle (e.g. robustness) break the tie? Apply the winner, document it, continue. Stop only if neither resolves it."
+remediation = """
+Before an autonomous run escalates a choice to a human, have it check for a documented project convention or a guiding principle (such as robustness) that already resolves the tie; apply and cite that instead of stopping. Reserve the human-escalation path for choices where neither a convention nor a principle settles the question. Verify by reviewing a sample of past escalations and confirming none of them had a citable convention the agent missed.
+"""
 why = "Most language/framework choices have a canonical answer; stopping on those wastes the human's attention."
 
 [[option]]

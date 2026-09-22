@@ -17,6 +17,9 @@ why = "Before C# 8.0, all reference types were implicitly nullable, and the comp
 id = "nullable-ref-types-enabled"
 label = "enable Nullable Reference Types globally; treat warnings as errors"
 directive = "<Nullable>enable</Nullable> is set in the project file (.csproj). All reference types default to non-null; nullable types are marked with ?. The compiler warns on: (1) dereferencing nullable types without null checks, (2) assigning possibly-null values to non-nullable variables, (3) failing to initialize non-nullable fields. Warnings are treated as errors in the build (via <WarningLevel>4</WarningLevel> and <TreatWarningsAsErrors>true</TreatWarningsAsErrors>) so that null-unsafe code cannot compile."
+remediation = """
+Enable the Nullable setting in the project file and fix the resulting nullable-reference warnings (dereferencing a possibly-null value, assigning null to a non-nullable variable, uninitialized non-nullable fields) rather than suppressing them. Set warnings as errors so a new null-safety issue fails the build going forward. Verify by confirming the project builds clean with Nullable enabled and no nullable warnings are suppressed with pragma directives.
+"""
 why = "Nullable reference types catch null-reference bugs at compile time, eliminating an entire class of runtime crashes."
 
 [[option]]

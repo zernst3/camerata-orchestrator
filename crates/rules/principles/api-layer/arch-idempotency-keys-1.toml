@@ -24,6 +24,9 @@ why = "Network retries are inevitable. Without idempotency keys, a client cannot
 id = "non-get-writes-that-trigger-external-side-effect"
 label = "Non-GET writes that trigger external side effects require an idempotency key"
 directive = "POST, PUT, PATCH, and DELETE endpoints that produce external side effects (charge a card, send an email, enqueue a downstream job, write to a message queue) require an Idempotency-Key header on each request. The server stores the response keyed by that key; a retry with the same key returns the stored response instead of running the operation again. Reads and writes that are naturally idempotent at the storage layer may omit this. The key-retention window is bounded (commonly 24 hours) and documented per endpoint."
+remediation = """
+Require an Idempotency-Key header on the endpoint and store the response keyed by that value so a retried request with the same key returns the stored response instead of re-running the side effect. Apply this to every POST/PUT/PATCH/DELETE endpoint that charges a card, sends an email, enqueues a job, or otherwise triggers an external effect. Verify by sending the same request twice with the same Idempotency-Key and confirming the side effect (charge, email, job) only happens once.
+"""
 why = "Network retries are inevitable."
 
 [[option]]

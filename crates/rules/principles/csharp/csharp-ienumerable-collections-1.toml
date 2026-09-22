@@ -16,6 +16,9 @@ why = "Returning a concrete collection type (List<T>, T[], HashSet<T>) tightly c
 id = "return-abstract-collections"
 label = "return IEnumerable<T>, ICollection<T>, or IReadOnlyList<T> from public methods"
 directive = "Public methods that return collections use abstract types chosen for what the caller actually needs: IEnumerable<T> for lazy or streaming results (being mindful that a lazy IEnumerable<T> may re-run its source on each enumeration, so it is documented or materialized once if the caller needs a stable snapshot); IReadOnlyCollection<T> or IReadOnlyList<T> for a read-only, already-realized view with Count and, for the latter, indexed access; ICollection<T> or IList<T> only when the caller is genuinely meant to add, remove, or otherwise mutate the returned collection, since both interfaces expose Add/Remove/Clear directly. Callers of a read-only-typed return value cannot modify or invalidate internal state. Internal implementations may return any concrete type (List<T>, HashSet<T>, etc.); the caller sees only the interface."
+remediation = """
+Change the public method's return type from a concrete a List or array to the abstract type the caller actually needs (IEnumerable for streaming, IReadOnlyList or ICollection for known-size read access). If the underlying sequence is lazy and would re-run on each enumeration, materialize it once before returning or document that behavior. Verify by confirming callers no longer depend on list-specific members like Add or indexed mutation on this return value.
+"""
 why = "Abstract types hide implementation details and prevent accidental corruption of internal state, but only if the specific interface's mutability and evaluation semantics (mutable vs. read-only, eager vs. lazy) actually match what is being promised to the caller."
 
 [[option]]

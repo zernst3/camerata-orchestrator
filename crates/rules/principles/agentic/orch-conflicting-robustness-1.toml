@@ -20,6 +20,9 @@ why = "Robustness is plural; picking one dimension unilaterally silently accepts
 id = "conflicting-robustness-is-a-real-tradeoff-not-a"
 label = "Conflicting robustness is a real tradeoff, not a clear winner"
 directive = "When options are each robust against different failures (rigid constraints vs. bad data; flexibility vs. changing requirements), name both failure modes and pause to escalate the decision to a human reviewer. That is a genuine tradeoff, not a clear winner. Let the human pick which failure mode their context cares about more."
+remediation = """
+When two options are each robust against a different failure mode (for example rigid validation versus tolerance for messy input), have the agent name both failure modes explicitly and pause for a human to pick which one the project's context cares about more, rather than silently choosing one. Verify by checking that a past decision between two genuinely competing robustness properties is logged as an escalation with both failure modes stated, not as an autonomous pick.
+"""
 why = "Robustness is plural; picking one dimension unilaterally silently accepts the other failure mode."
 
 [[option]]

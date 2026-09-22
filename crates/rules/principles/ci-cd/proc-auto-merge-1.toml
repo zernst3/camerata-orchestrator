@@ -19,12 +19,18 @@ why = "Tight bot PRs don't need human judgment; conventions + CI cover the safet
 id = "tight-single-purpose-convention-following-non-ha"
 label = "tight, single-purpose, convention-following, non-hard-guard PRs on green CI"
 directive = "PRs that are bot-authored, single-purpose, convention-following, touch no hard-guard areas, add no new conventions, and pass CI + automated review → auto-merge (tagged). Frees human review for judgment-heavy PRs."
+remediation = """
+Configure auto-merge to apply only to PRs that are bot-authored, single-purpose, convention-following, touch no hard-guard area, introduce no new convention, and have passed CI plus automated review, and tag those PRs explicitly so the exception is auditable. Route every other bot-authored PR to human review instead of merging it automatically. Verify by confirming a PR that touches a hard-guard area or introduces a new pattern does not auto-merge, even with green CI.
+"""
 why = "Tight bot PRs do not need human judgment; conventions and CI already cover their safety surface, and routing them through manual review consumes reviewer attention on changes whose correctness is already guaranteed."
 
 [[option]]
 id = "require-human-review-on-everything"
 label = "require human review on everything"
 directive = "every pull request including tight bot-authored ones requires explicit human review of the diff before it can merge, with no auto-merge path"
+remediation = """
+Remove any auto-merge path from the repository's branch protection or CI configuration, so every pull request, including tight bot-authored ones, requires an explicit human approval before it can merge. Verify by confirming a bot-authored PR with green CI still shows as blocked pending a human review approval.
+"""
 why = "Requiring human review on everything is safer but loses the throughput benefit of letting cheap mechanical changes through; reviewer attention gets consumed by changes whose correctness is already guaranteed by conventions and CI."
 
 [[option]]

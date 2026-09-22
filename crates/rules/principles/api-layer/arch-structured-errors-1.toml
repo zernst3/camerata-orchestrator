@@ -21,6 +21,9 @@ why = "Stringly-typed error messages are a leading source of brittle client code
 id = "error-responses-use-a-structured-envelope-with-s"
 label = "Error responses use a structured envelope with stable machine-readable codes"
 directive = "Every 4xx and 5xx response uses the same shape: a top-level error object containing a code (a stable identifier like INVALID_EMAIL or RATE_LIMITED), a message (a human-readable description), and an optional details object for field-level errors or context. Codes are documented and remain stable across releases; messages may evolve freely. Clients pattern-match on code, never on message. Enforced at the controller layer with a single error-rendering middleware that all handlers route through."
+remediation = """
+Change the error response shape for this endpoint to a structured envelope with a stable code (like INVALID_EMAIL), a human-readable message, and an optional details object for field-level context. Keep the code stable across releases even if the message wording changes. Verify by triggering a 4xx/5xx from the endpoint and confirming the response body contains the code/message/details envelope instead of a plain string or empty body.
+"""
 why = "Stringly-typed error messages are a leading source of brittle client code because logic ends up doing substring matches on text that was meant for humans."
 
 [[option]]

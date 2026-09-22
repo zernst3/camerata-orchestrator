@@ -24,6 +24,9 @@ why = "Cross-cutting logic that lives inside individual handlers drifts. Five ha
 id = "if-a-cross-cutting-concern-can-be-expressed-as-m"
 label = "If a cross-cutting concern can be expressed as middleware, it must be"
 directive = "Cross-cutting concerns that apply to more than one handler (authentication, authorization gates, request logging, tracing, request ID generation, rate limiting, body size limits, CORS, security headers, error-envelope rendering, idempotency-key lookup, response compression) are implemented as reusable middleware once and attached to the route or router. Inlining the same logic across handlers is forbidden, and so is per-handler helper-function calls that depend on every handler remembering to make the call. New handlers inherit the cross-cutting behavior by virtue of where they are mounted, not by virtue of what each handler's author remembers to write."
+remediation = """
+Extract the cross-cutting logic duplicated across handlers (auth, logging, tracing, rate limiting, CORS, or similar) into a single reusable middleware, and attach it to the route or router rather than repeating it per handler. Remove the inline or per-handler copies once the middleware is wired in. Verify by confirming the concern now executes for every relevant route from one middleware definition, and a handler no longer implements it inline.
+"""
 why = "Cross-cutting logic that lives inside individual handlers drifts."
 
 [[option]]

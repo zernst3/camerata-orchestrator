@@ -25,6 +25,9 @@ why = "Architecture lives or dies by its dependency direction. Once a single for
 id = "modules-import-only-across-declared-allowed-boundaries"
 label = "No cross-boundary imports — modules import only their declared dependencies"
 directive = "Each architectural layer/feature declares which other modules it may depend on; an AST import-graph check parses every module's imports and rejects any that crosses a forbidden boundary (controller→repository, domain→infrastructure, feature→sibling-internals). The allowed dependency direction is enforced in CI so a forbidden import fails the build, keeping the real module graph aligned with the intended architecture."
+remediation = """
+Remove the forbidden import that crosses a declared module boundary (for example a controller importing a repository directly, or domain importing infrastructure), and route the dependency through the allowed layer instead. Add or confirm the AST import-graph check runs in CI and fails the build on this class of import. Verify by confirming the offending import is gone and the CI import-boundary check passes.
+"""
 why = "Dependency direction is the architecture; enforcing it by AST keeps the diagram and the code in lockstep, where review alone reliably misses a single forbidden `use` line in a large diff."
 
 [[option]]

@@ -23,34 +23,52 @@ why = "All four are real ways to evolve an API, and the right one follows from w
 id = "api-versions-live-in-the-url-prefix-changes-with"
 label = "API versions live in the URL prefix; changes within a version are additive only"
 directive = "Public endpoints carry an explicit version in the URL path: /v1/orgs, /v2/orgs, and so on. Within a published version, no field is renamed, removed, or has its type changed; only additive changes are allowed (new optional fields, new endpoints, looser validation). Breaking changes ship as a new major version; older versions remain available for a documented deprecation window before retirement."
+remediation = """
+Add an explicit version segment to the endpoint's URL (for example /v1/... or /v2/...) instead of changing the existing published shape in place. Keep the older version available and unchanged; make only additive changes (new optional fields, new endpoints) within a version. Verify by confirming the endpoint's URL carries a version prefix and that existing clients on the prior version still get the prior response shape.
+"""
 why = "Makes the version the most discoverable and toolable part of every request: a curl command, a router log, and a trace all surface it at a glance, and strict additive evolution within a version means a client that worked on day one of v1 still works on day N of v1. The natural fit for a public or multi-team API where versions must be obvious and clients migrate on their own schedule; the cost is that each live major version is a separate route tree to maintain through its deprecation window."
 
 [[option]]
 id = "the-api-version-is-selected-by-a-request-header"
 label = "the API version is selected by a request header"
 directive = "The API version is selected by a single request header whose value is a plain version identifier (such as a custom Api-Version: 2 header, or a version parameter folded into a vendor media type like Accept: application/vnd.api.v2+json used purely to carry the version number) rather than appearing in the URL path; a resource keeps one canonical URL across versions and the server resolves the requested version from the header."
+remediation = """
+Add a version request header (for example Api-Version) that the endpoint reads to select behavior, and remove any version segment baked into the URL path. Document the header's accepted values and keep the resource's URL stable across versions. Verify by confirming the endpoint returns different versioned behavior based solely on the header value, with one canonical URL.
+"""
 why = "Keeps URLs clean and gives each resource a single stable address across versions, which suits content-type-driven APIs and clients that already negotiate behaviour through headers. The trade-off is reduced visibility: the active version is not apparent from the URL in a log or a trace, so a client that forgets or mis-sets the header lands on a default version — worth managing with a clear default and good observability when header negotiation fits the consumers. This is narrower than full content negotiation (below): the header carries a version number and nothing else selects between representations — the resource's shape and format are otherwise fixed. It differs from date-pinned versioning (below) in that the client names a version number directly rather than a calendar date, and every version boundary requires the server to define and ship an explicit new version value."
 
 [[option]]
 id = "the-api-version-is-selected-by-a-query-parameter"
 label = "the API version is selected by a query parameter"
 directive = "The API version is selected by a query parameter on the request URL, such as ?version=2 or ?api-version=2024-01, rather than a URL path segment or a header."
+remediation = """
+Add a version query parameter (for example ?version=2) that the endpoint reads to select behavior, instead of a URL path segment or header. Verify by confirming a request without the parameter falls back to a documented default version and a request with it returns the corresponding versioned behavior.
+"""
 why = "Cheap to implement and debug: the version is visible in a browser address bar, a server access log, and a shared link without needing to inspect headers or restructure routes, and it can be added to an existing unversioned API without moving endpoints. The trade-offs: query parameters are easy for clients to omit or drop when following a link or building a request by hand (there's no path segment forcing the issue), they get mixed in with other query parameters used for filtering/pagination/sorting, and they don't compose as cleanly with HTTP caching keyed on the path. It suits internal or lower-traffic APIs more than a public API with many independent client teams."
 
 [[option]]
 id = "clients-pin-to-a-release-date-via-a-version-head"
 label = "clients pin to a release date via a version header (date-pinned versioning)"
 directive = "Clients pin to a specific release date via a version header (Stripe's model: a Stripe-Version: 2024-06-20 header), and the API applies whatever behavior was current as of that date for that account/client. The server maintains a changelog of dated behavior changes and can apply per-request date-based shims to serve older-dated clients the older behavior on the same endpoints, without a version number ever appearing in the URL or route tree."
+remediation = """
+Add a dated version header (for example Version: 2024-06-20) that the endpoint reads, and maintain a changelog of dated behavior changes the server can apply as per-request shims for older-dated clients. Verify by confirming two requests with different dated header values receive the behavior that was current as of each date.
+"""
 why = "Avoids the discrete-major-version problem entirely: instead of clients jumping between a handful of published versions (v1, v2, v3), each client is pinned to the exact date it integrated, and small breaking changes ship continuously with no need to bundle them into a big-bang major version or maintain parallel route trees. New accounts default to the latest date, so the API's default behavior keeps moving forward without action. The cost is real: the server must carry a growing table of per-date behavioral differences and apply the right shim per request indefinitely (or until a deprecation/migration policy retires old dates), which is meaningfully more runtime bookkeeping than a small, fixed set of URL-versioned route trees. It fits an API with a large number of independent client integrations and a team disciplined enough to maintain the changelog-of-shims machinery; it's overkill for a small number of coordinated clients."
 
 [[option]]
 id = "the-api-has-no-version-segment-at-all-and-evolve"
 label = "the API has no version segment at all and evolves in place"
 directive = "The API has no version segment at all and evolves in place; each change applies to all current clients, and breaking changes are coordinated directly with the consumers rather than isolated behind a version."
+remediation = """
+Remove any version segment or header from the endpoint and coordinate upcoming breaking changes directly with the known consumers before shipping them, rather than isolating the change behind a version. Verify by confirming the endpoint has no version identifier in its URL, headers, or query parameters.
+"""
 why = "The lightest scheme, and the right fit when the server and its only client ship together as one product (one team, one deployable): a coordinated change costs nothing because both sides deploy at once, and a version segment would be pure ceremony. It asks that every consumer move in lockstep with the server, so it stops fitting once the API gains consumers that upgrade on their own cadence."
 
 [[option]]
 id = "the-api-exposes-multiple-representations-of-each"
 label = "the API exposes multiple representations of each resource and clients negotiate via content negotiation"
 directive = "The API exposes multiple representations of each resource and clients negotiate version (and format) through a content-negotiation handshake over the standard Accept/Content-Type mechanism."
+remediation = """
+Wire standard content negotiation (Accept / Content-Type headers) into the endpoint so a client can request the representation and version it needs. Verify by confirming a request with a different Accept header receives the corresponding representation from the same URL.
+"""
 why = "The most expressive scheme: it lets clients select among genuinely different representations and formats per request through standard HTTP content negotiation, which earns its weight where that flexibility is a real requirement (varied client formats, hypermedia APIs). The cost is the machinery, which every client and the server must implement correctly, so it pays off when representation choice is a first-class need rather than a stand-in for plain version isolation. This is broader than header-based versioning (above): header-based versioning uses one header purely to pick a version number of an otherwise-fixed representation, whereas content negotiation uses the standard Accept/Content-Type mechanism to select among genuinely different representations or media types, of which 'which API version' may be only one axis alongside format (JSON vs. XML vs. HAL+JSON) and schema variant."

@@ -29,6 +29,9 @@ why = "A commitment that nobody checks degrades into a commitment nobody respect
 id = "codified-architectural-commitments-are-enforced"
 label = "Codified architectural commitments are enforced gates, not advisory documents"
 directive = "The architectural commitments the project codifies for its autonomous agents are enforced as gates on changes, not held as advisory documents. A deterministic check (a lint rule, a type-system constraint, an AST scan, an AI reviewer reading against the rules, or a combination of those) is wired into the change pipeline. A change that violates a commitment is rejected, escalated, or carries an explicit waiver naming the commitment, the violation, and the reviewer who waived it. Waivers are recorded in a durable log so periodic human review can sweep them and decide whether the commitment needs refinement."
+remediation = """
+Wire the project's codified architectural commitments into the change pipeline as an enforced gate (a lint rule, a type-system constraint, an AST scan, or an AI reviewer checking the diff against the rules), not as a document reviewers only consult ad hoc. Configure the gate so a violating change is rejected, escalated, or requires an explicit, auditable waiver rather than merging silently. Verify by introducing a deliberate violation of a codified commitment and confirming the pipeline blocks or flags it before merge.
+"""
 why = "A commitment that nobody checks degrades into a commitment nobody respects."
 
 [[option]]

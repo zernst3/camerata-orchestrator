@@ -28,6 +28,9 @@ why = "Reproducible environments, centralized rotation, no credential sprawl. Pr
 id = "infrastructure-as-code-per-environment-isolation"
 label = "Infrastructure as code, per-environment isolation"
 directive = "All infra scaffolding lives in IaC (e.g. Terraform); secrets live in a per-environment vault with isolation, never in the repo or CI logs; local dev stays credential-free via injection tooling."
+remediation = """
+Move the infrastructure currently provisioned by hand into IaC definitions (such as Terraform) checked into source control, and move any secret or credential out of the repo or CI logs into a per-environment vault or secret manager. Wire local development to pull credentials through injection tooling rather than storing them on disk. Verify by confirming the infrastructure can be recreated from the checked-in IaC alone and a repo-wide secret scan finds no hardcoded credential.
+"""
 why = "Reproducible environments, centralized rotation, no credential sprawl."
 
 [[option]]

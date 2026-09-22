@@ -26,6 +26,9 @@ why = "Go's context.Context is the idiomatic way to signal request boundaries, d
 id = "context-propagation"
 label = "propagate context through every layer and goroutine"
 directive = "HTTP handlers receive context.Context from the http.Request (via r.Context()) or create a context with a timeout. This context is passed as the first parameter to every downstream function. When a function spawns a goroutine, it passes the context or creates a child context with context.WithCancel or context.WithTimeout. Database queries use a context-aware driver (e.g., db.QueryContext(ctx, ...) not db.Query(...)). Goroutines check context.Err() or use select { case <-ctx.Done(): ... } to exit gracefully when the context cancels."
+remediation = """
+Thread context.Context as the first parameter through every downstream function call starting from the HTTP handler's r.Context(), and pass it (or a child context) into every goroutine the request spawns. Replace any context.Background() call in a request-scoped path, and switch bare db.Query calls to their context-accepting variants. Verify by cancelling the request's context mid-flight and confirming downstream database calls and goroutines stop rather than continuing to completion.
+"""
 why = "Context propagation ensures that cancelled requests do not waste work downstream, and deadlines flow to all blocking operations."
 
 [[option]]

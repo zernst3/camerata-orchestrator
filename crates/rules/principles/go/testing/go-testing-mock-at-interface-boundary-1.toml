@@ -33,6 +33,9 @@ why = "Go's implicit interface satisfaction means any struct with the right meth
 id = "interface-mock-at-injection-point"
 label = "mock implements the interface; injected through the same constructor the production code uses"
 directive = "Each external dependency (database, HTTP client, email sender, cache) is expressed as a narrow interface in the consumer package. Tests create a mock struct implementing that interface — using testify/mock or a hand-written stub — and pass it to the function or constructor under test via the same parameter the production wiring uses. m.On('MethodName', args...).Return(values...) sets expectations. m.AssertExpectations(t) verifies all expected calls occurred."
+remediation = """
+Introduce a narrow interface in the consumer package for the external dependency (database, HTTP client, email sender), and have the test create a mock implementing that interface and pass it through the same constructor or injection point the production code uses. Remove any global-variable swap or reliance on a real dependency in the unit test. Verify by confirming the test passes with the dependency unavailable, since only the interface mock is exercised.
+"""
 why = "No test-only code paths in production. Mocks are isolated to test files. Interface satisfaction is compile-time checked."
 
 [[option]]

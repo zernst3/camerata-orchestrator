@@ -25,6 +25,9 @@ why = "Structured logging produces machine-parseable output (JSON, key-value pai
 id = "structured-logging"
 label = "use structured logging with a logger interface"
 directive = "A logger is passed or injected (e.g., *slog.Logger, *zap.Logger) and used with structured methods: log.Info(\"event\", \"key\", value, \"key2\", value2). Log lines are never built with fmt.Printf or string concatenation."
+remediation = """
+Replace the fmt.Printf or string-concatenated log call with a structured logger call (slog.Info, zap's equivalent) that passes the event and its fields as key-value pairs rather than baking them into a formatted string. Verify by confirming the resulting log line is a structured record (JSON or key=value) with the relevant fields queryable, not a single opaque string.
+"""
 why = "Structured logs are machine-parseable and searchable in aggregation systems."
 
 [[option]]

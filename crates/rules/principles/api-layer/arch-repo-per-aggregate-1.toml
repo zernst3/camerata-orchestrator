@@ -24,6 +24,9 @@ why = "Per-aggregate abstractions let services depend on the shape of the data t
 id = "one-repository-abstraction-per-aggregate-declare"
 label = "One repository abstraction per aggregate, declared in the domain layer"
 directive = "Each domain aggregate has its own repository abstraction (an interface, trait, or protocol depending on the language) declared in the domain layer. The methods take and return domain types only. Concrete implementations live in the infrastructure layer and are wired in at the edges. Services depend on the abstraction, not the implementation."
+remediation = """
+Declare a repository abstraction for the affected aggregate in the domain layer, with methods that take and return domain types only, and move the concrete implementation into the infrastructure layer wired in at the composition root. Update the service to depend on the abstraction rather than a concrete implementation or a different aggregate's repository. Verify by confirming the domain layer contains only the interface/trait definition and services reference it, not a concrete persistence type.
+"""
 why = "Per-aggregate abstractions let services depend on the shape of the data they actually need (a UserRepository exposes find_by_email, find_by_org; a ProjectRepository exposes find_by_owner) without inheriting persistence-specific methods they do not use."
 
 [[option]]

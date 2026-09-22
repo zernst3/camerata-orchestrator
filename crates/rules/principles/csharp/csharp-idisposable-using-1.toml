@@ -25,6 +25,9 @@ why = "Objects implementing IDisposable hold unmanaged resources (database conne
 id = "using-declarations"
 label = "use using declarations (C# 8.0+) for automatic cleanup"
 directive = "IDisposable resources are declared with the `using` keyword at the top of a method or block: `using var conn = new SqlConnection(...);`. The resource's Dispose() method is called automatically when the block exits. This is preferred over using statements for brevity and clarity. No manual Dispose() calls; no try-finally blocks."
+remediation = """
+Wrap the IDisposable resource in a using declaration (using var resource = ...;) so it is disposed automatically when the enclosing block exits, and remove any manual Dispose() call or naked instantiation without a using scope. Verify by confirming the resource's Dispose() runs even when an exception is thrown partway through the method, for example by checking a connection pool doesn't leak connections under a fault-injection test.
+"""
 why = "Using declarations are the most concise and guarantee cleanup on any code path (exception or return)."
 
 [[option]]

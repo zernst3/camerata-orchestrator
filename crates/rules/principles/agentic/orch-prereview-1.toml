@@ -29,6 +29,9 @@ why = "Human reviewers are the scarcest resource in any AI-orchestrated workflow
 id = "ai-pre-review-then-human-review"
 label = "AI pre-review then human review"
 directive = "Code changes authored by autonomous agents pass through an AI review step. A reviewer agent reads the diff against the project's codified architectural commitments and either approves the change, requests specific changes, or escalates the change as out of scope. The human review queue contains only changes the reviewer agent has cleared or has explicitly flagged for human attention. The reviewer step is wired into the change pipeline (a pre-merge hook, a CI job, a bot on the pull request, or equivalent) such that the change cannot reach the human merge gate without an approval status from the reviewer agent."
+remediation = """
+Add an AI review step between an autonomous agent's change and the human review queue: a reviewer agent reads the diff against the project's codified architectural commitments and either approves it, requests specific changes, or flags it as out of scope. Configure the human queue to receive only changes the reviewer agent cleared or explicitly escalated, not every raw diff. Verify by confirming a sampled change in the human queue carries a reviewer-agent verdict attached to it.
+"""
 why = "An AI pre-review step catches common drift cases cheaply so the human review pool sees a sharper, smaller queue; the review agent also acts as a forcing function that surfaces commitments that cannot be checked from the diff alone, strengthening the commitment library over time."
 
 [[option]]

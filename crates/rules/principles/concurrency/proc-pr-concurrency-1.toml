@@ -20,6 +20,9 @@ why = "Forcing authors to make the concurrency analysis visible and required cat
 id = "pr-template-forces-a-concurrency-story"
 label = "PR template forces a concurrency story"
 directive = "PRs touching shared mutable state must document the locking strategy and concurrency testing in a required template section. Skippable for read-only / UI / docs PRs."
+remediation = """
+Add a required section to the PR template that asks the author to document the locking strategy and how the change was tested for concurrency issues, for any PR touching shared mutable state; make it explicitly skippable for read-only, UI, or docs-only PRs. Verify by confirming a PR that touches shared mutable state cannot be submitted or merged with that section left blank.
+"""
 why = "Forcing authors to make the concurrency analysis visible and required catches races that review otherwise misses."
 
 [[option]]

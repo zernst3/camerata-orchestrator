@@ -20,6 +20,9 @@ why = "Keeping the persistence representation an infrastructure detail is what m
 id = "repositories-return-domain-types-never-persisten"
 label = "Repositories return domain types, never persistence representations"
 directive = "Repository methods take and return domain types only. The translation between the persistence library's row, entity, or document representation and the domain type happens inside the repository implementation (via a mapping layer). The domain layer never imports or names a persistence representation."
+remediation = """
+Add a mapping step inside the repository implementation that translates the persistence library's row/entity/document into the domain type before returning it. Remove any place the domain layer imports or names the persistence representation directly. Verify by confirming the repository method's return type is the domain type and no persistence-library type leaks past the repository boundary.
+"""
 why = "Keeping the persistence representation an infrastructure detail is what makes the domain layer survive persistence-library changes."
 
 [[option]]

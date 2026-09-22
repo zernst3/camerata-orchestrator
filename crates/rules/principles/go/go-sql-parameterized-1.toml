@@ -22,6 +22,9 @@ why = "Building a SQL string by concatenating or sprintf-interpolating a value p
 id = "bind-parameters-or-query-builder"
 label = "always bind values via prepared statements or ORM query builders"
 directive = "Every dynamic value in a SQL query is passed as a bound parameter using ? or $N placeholders with (database/sql).Query(..., args...), (database/sql).Stmt.Query(args...), or an ORM query builder that generates parameterized SQL. String concatenation, fmt.Sprintf, or interpolation to build query strings are forbidden. Static table or column names that must be dynamic come from a fixed allow-list, never from request input."
+remediation = """
+Replace the string-concatenated or fmt.Sprintf-built SQL with a parameterized query using ? or $N placeholders passed through database/sql's args, or through the ORM's query builder. Remove any manual escaping logic, since parameter binding replaces it. Verify by passing a value containing a SQL metacharacter as an argument and confirming it is treated as data rather than executable SQL.
+"""
 why = "Parameterization sends SQL and values separately so a value can never be parsed as SQL, eliminating injection entirely."
 
 [[option]]

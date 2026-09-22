@@ -33,6 +33,9 @@ why = "Preventive gatekeeping catches issues before they compound downstream, wh
 id = "environment-gated-quality-nothing-ships-unverifi"
 label = "Environment-gated quality — nothing ships unverified"
 directive = "Autonomously-generated code passes a local quality bar (compile clean, lint clean, tests green; schema changes also pass a migration-safety check) before merge. After merge, the code progresses through one or more pre-production environments before reaching users, and advancement through each one is gated by automated checks rather than reviewer judgment. The number, naming, and topology of pre-production environments is the organization's call (single staging, dev-then-staging, ephemeral preview-per-PR, canary slices of the production environment, or any combination); the rule commits to the existence of the gradient and to automated gating between its steps, not to a specific environment layout."
+remediation = """
+Require autonomously-generated code to pass a local quality bar (clean compile, clean lint, green tests, and a migration-safety check for schema changes) before it can merge. After merge, route the change through at least one pre-production environment with automated checks gating each promotion, rather than sending it straight to the user-facing environment. Verify by confirming a recent change's pipeline history shows the quality bar and each promotion gate passing before it reached production.
+"""
 why = "Preventive gatekeeping catches issues before they compound downstream, where they are far more expensive to triage and roll back."
 
 [[option]]

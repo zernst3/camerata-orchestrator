@@ -25,6 +25,9 @@ why = "Rob Pike's principle: small interfaces are the right size in Go. A callee
 id = "small-focused-interfaces"
 label = "define small, focused interfaces with 1-3 methods"
 directive = "Each interface has a single responsibility and defines the minimal set of methods a caller needs. If a service needs to read JSON and write to a database, it takes (io.Reader, database.Saver), not a large Database interface with every method. Larger interfaces are built by embedding smaller ones."
+remediation = """
+Split the large interface into smaller, single-responsibility interfaces with only the methods a given caller actually needs, and change the caller's parameter type to the smaller interface instead of the god-interface. Compose larger interfaces from the smaller ones via embedding where a consumer genuinely needs more than one capability. Verify by confirming a caller can be satisfied with a minimal stub implementing only the methods it uses, rather than the full original interface.
+"""
 why = "Small interfaces are easy to implement, mock, and test; they compose well."
 
 [[option]]

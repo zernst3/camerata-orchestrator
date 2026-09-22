@@ -34,6 +34,9 @@ why = "Without t.Helper(), every failure inside a shared helper function reports
 id = "t-helper-always"
 label = "call t.Helper() as first statement in every test helper function"
 directive = "Any function that accepts *testing.T (or *testing.TB) and may call t.Fatal, t.Error, t.Fatalf, or t.Errorf calls t.Helper() as its first line. This includes helper constructors (e.g., mustOpenDB(t, dsn)), assertion helpers (e.g., assertUser(t, got, want)), and setup helpers (e.g., seedTestData(t, db)). The thelper golangci-lint linter is enabled to catch violations."
+remediation = """
+Add a t.Helper() call as the first line of the helper function that accepts *testing.T and may call t.Fatal/t.Error/t.Fatalf/t.Errorf. Verify by forcing the helper to fail and confirming the reported failure line points to the caller's call site, not to the line inside the helper.
+"""
 why = "Failures are attributed to the call site in the test body, not the helper internals. Required for debuggable test output."
 
 [[option]]

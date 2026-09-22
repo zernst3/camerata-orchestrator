@@ -16,6 +16,9 @@ why = "ASP.NET Core's IConfiguration is a flat string-keyed dictionary that acce
 id = "options-pattern-ioptionst"
 label = "Configuration bound to typed POCO via IOptions<T>; validated at startup"
 directive = "Each logical group of configuration values is represented by a POCO class with public properties. The section is bound in Program.cs via builder.Services.Configure<MyOptions>(builder.Configuration.GetSection('MySection')) and startup validation is enabled via .ValidateOnStart() or ValidateDataAnnotations(). Service classes accept IOptions<MyOptions> (or IOptionsSnapshot<MyOptions> for per-request reload) in their constructor, not IConfiguration. Direct IConfiguration injection into service or repository classes is forbidden; raw string-keyed reads (configuration['Key']) outside of Program.cs are forbidden."
+remediation = """
+Define a POCO class for this configuration section, bind it with builder.Services.Configure for that options type against builder.Configuration.GetSection("SectionName"), and enable startup validation with ValidateOnStart() or ValidateDataAnnotations(). Replace the service's direct IConfiguration injection with the bound IOptions for that type (or IOptionsSnapshot/IOptionsMonitor as needed). Verify by removing a required configuration value in a local environment and confirming the app fails fast at startup instead of at first use.
+"""
 why = "Typed binding exposes configuration requirements in the constructor signature, catches missing or malformed values at startup rather than at runtime under load, and eliminates string-keyed reads scattered across service classes."
 
 [[option]]

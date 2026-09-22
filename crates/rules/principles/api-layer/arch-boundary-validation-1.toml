@@ -24,6 +24,9 @@ why = "Centralizing validation at one tier eliminates the defensive re-validatio
 id = "validate-every-request-at-the-boundary-downstrea"
 label = "Validate every request at the boundary; downstream code trusts only validated values"
 directive = "All HTTP input (body, query, path, headers) is parsed and validated against a typed schema at the controller layer. Services and repositories never re-validate; they trust the types they receive. Validation produces a typed value (not raw strings or loosely-shaped objects), and fields that fail validation produce a 4xx response with a structured error envelope before any business logic runs."
+remediation = """
+Add a typed schema validator at the controller layer for this endpoint that checks the request body, query, path, and headers before the handler runs, and have it produce a 4xx response with field-level errors on failure. Remove any re-validation of the same input further down in the service or repository layer, since they should trust the typed value they receive. Verify by sending a malformed request to the endpoint and confirming it is rejected at the boundary with a structured error, never reaching the service layer.
+"""
 why = "Centralizing validation at one tier eliminates the defensive re-validation that otherwise creeps into every service method."
 
 [[option]]

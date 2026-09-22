@@ -24,6 +24,9 @@ why = "TIMESTAMPTZ and equivalent column types store UTC; the wire offset is ses
 id = "domain-timestamps-are-anchored-to-utc-mappers-no"
 label = "Domain timestamps are anchored to UTC; mappers normalize at the persistence boundary"
 directive = "Timestamps in the domain layer use the language's UTC-anchored type, never an offset-bearing or naive type. The persistence boundary (the mapper between the storage representation and the domain type) is responsible for normalizing whatever the storage layer returns into UTC before the value reaches the domain. Locale and timezone presentation happen at the rendering boundary, never inside the domain."
+remediation = """
+Change the timestamp type in the domain layer to the language's UTC-anchored type, and add normalization inside the persistence-boundary mapper so whatever the storage layer returns is converted to UTC before it reaches the domain. Move any locale/timezone display formatting to the presentation layer, away from the domain type. Verify by confirming a value read from storage with a non-UTC offset arrives in the domain already normalized to UTC.
+"""
 why = "TIMESTAMPTZ and equivalent column types store UTC; the wire offset is session-determined noise."
 
 [[option]]

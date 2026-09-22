@@ -84,6 +84,9 @@ in_loop  = false               # CI-only cadence; not run in the in-loop dev gat
 ```
 
 The developer owns the cron schedule and CI wiring. Camerata enforces the check once it is in the manifest; the manifest entry here sets `in_loop = false` so it does not run on every agent task — only in CI on the weekly schedule."""
+remediation = """
+Add a scheduled weekly CI job that runs osv-scanner against the project's dependency lock file, rather than running it on every PR. Verify by checking the CI history for a completed weekly dependency-scan run and confirming it would catch a dependency with a newly-disclosed CVE.
+"""
 why = "A weekly scheduled CI job is the industry-standard cadence for dependency scanning: it catches newly-disclosed CVEs (which per-PR scans miss) without adding per-PR friction. It is the right trade for most teams. The developer implements the cron schedule in CI; Camerata carries the rule and the manifest entry as guidance."
 
 [[option]]
@@ -131,6 +134,9 @@ in_loop  = false               # CI gate; not run in the in-loop dev gate
 ```
 
 The developer owns the trigger wiring in the CI workflow. Camerata enforces the check via the manifest once CI runs it."""
+remediation = """
+Wire osv-scanner into CI to run on every pull request and push, so a vulnerable dependency is caught the moment it is introduced. Verify by opening a PR that introduces a known-vulnerable dependency version and confirming the CI check fails on it.
+"""
 why = "Per-PR scanning catches vulnerabilities the moment they are introduced. Appropriate for high-security-posture or regulated teams that can accept the added PR latency. The developer implements the trigger; Camerata carries the rule."
 
 [[option]]
@@ -155,6 +161,9 @@ in_loop  = true                # bounces the agent at Layer 2 too; also in CI
 ```
 
 For the CI trigger, pair with any schedule or pull_request workflow — the manifest drives both layers. The developer wires the CI cadence (weekly cron, per-PR, or both); Camerata's Layer-2 runner picks up `in_loop = true` automatically from the manifest."""
+remediation = """
+Wire osv-scanner into both the in-loop development gate (set in_loop = true in the manifest) and CI, so every agent task and every CI run is scanned. Verify by confirming a vulnerable dependency is caught both during local/agent development and again in the CI run.
+"""
 why = "The every-pass option maximises coverage by running at both Layer 2 (in-loop dev gate) and Layer 3 (CI), because osv-scanner is lightweight enough to run locally. Best for teams with strict security requirements; accept the in-loop latency in exchange for the tightest possible gate."
 
 [[option]]
@@ -199,4 +208,7 @@ in_loop  = false               # manual-only; not run automatically
 ```
 
 The developer owns the decision of when to fire the workflow. Upgrade to a scheduled or per-PR cadence as the project matures."""
+remediation = """
+Add a manual, on-demand osv-scanner workflow (workflow_dispatch) with no scheduled or PR-triggered runs, and have the team run it deliberately before releases or after dependency bumps. Verify by manually triggering the workflow and confirming it reports known vulnerabilities in the current lock file.
+"""
 why = "Manual-only scanning is appropriate for early-stage projects or teams not ready for automated scanning. It documents the decision and the tool, and is easily upgraded to an automated cadence later."

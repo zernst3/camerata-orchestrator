@@ -26,6 +26,9 @@ why = "Go's package system enforces a simple rule: only exported symbols (capita
 id = "clear-boundaries-internal-packages"
 label = "use clear package boundaries and internal/ packages"
 directive = "Circular imports are not allowed (enforced by the compiler). Public APIs are exported at the package root (package main, package http, package service). Implementation details are placed in .../internal/... packages. External packages can only import the public API; the internal/ tree is off-limits. This enforces one-way dependency flows: handlers import services, services import repositories; repositories do not import services or handlers."
+remediation = """
+Move the implementation detail currently importable from outside the module into an internal/ package so external packages can no longer import it, and break the circular import by moving the shared type or function into a package both sides can depend on without depending on each other. Verify by confirming the compiler rejects an external package's attempt to import the internal path, and go build no longer reports an import cycle.
+"""
 why = "Clear boundaries prevent circular dependencies and keep the dependency graph a DAG."
 
 [[option]]

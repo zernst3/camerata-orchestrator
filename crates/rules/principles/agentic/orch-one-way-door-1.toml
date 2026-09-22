@@ -28,6 +28,9 @@ why = "A wrong 'clear' call on a one-way door costs a migration; on a two-way do
 id = "one-way-door-routing-blast-radius-gates-autonomy"
 label = "One-way-door routing — blast radius gates autonomy"
 directive = "Even with a clear winner, STOP and escalate the decision to a human reviewer if the call is hard to reverse: it shapes the data model, a public/API contract, or a pattern that gets copied. Two-way doors (local, encapsulated, trivially refactored) you may auto-decide. Structural/topology changes (new/moved crate or module boundary, changed public trait/API surface) always pause for a human, even with a clear winner: reversibility decays as downstream code adopts the new shape. Decaying reversibility, not file count, is the real property. (\"Routing\" in the title refers to where the decision goes: to the AI to auto-apply, or to a human to review, based on the blast radius of getting it wrong.)"
+remediation = """
+Configure the agent to auto-decide only on reversible, locally-encapsulated changes, and to always pause for human review on hard-to-reverse calls, meaning anything that shapes the data model, a public or API contract, or a pattern likely to be copied elsewhere. Route structural or topology changes, such as a new or moved crate/module boundary or a changed public trait or API surface, to a human even when the agent is confident in the answer. Verify by confirming a recent structural change in the log carries a human approval, not just an autonomous decision.
+"""
 why = "A wrong 'clear' call on a one-way door costs a migration; on a two-way door it costs ten minutes."
 
 [[option]]

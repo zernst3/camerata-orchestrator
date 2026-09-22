@@ -17,6 +17,9 @@ why = "Concatenating or interpolating user input directly into a SQL string is t
 id = "parameterized-queries"
 label = "use SqlParameter or Entity Framework parameter syntax"
 directive = "Every dynamic value in a SQL statement is passed as a SqlParameter (using SqlCommand.Parameters.Add()) or as a parameter in a parameterized LINQ/EF query (Where(x => x.Id == paramValue)). String concatenation, string interpolation, or string.Format() are forbidden anywhere a value flows into query execution. Table or column names that must be dynamic come from a fixed allow-list, never from request input."
+remediation = """
+Replace the string-concatenated or interpolated SQL with a parameterized query, passing the dynamic value as a SqlParameter or through EF Core's parameterized LINQ syntax. Remove any manual escaping logic, since parameter binding replaces it. Verify by passing a value containing a single quote or SQL metacharacter through the query and confirming it is treated as data, not executable SQL.
+"""
 why = "Parameterization prevents SQL injection entirely by sending SQL and values to the database separately."
 
 [[option]]

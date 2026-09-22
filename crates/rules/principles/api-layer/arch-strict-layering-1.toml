@@ -29,6 +29,9 @@ why = "Prevents business logic hiding inside the query layer; keeps each layer t
 id = "strict-layering-services-orchestrate-repositorie"
 label = "Strict layering — services orchestrate, repositories own data access"
 directive = "Controllers handle HTTP only; services hold framework-agnostic business logic; repositories own all DB query calls. Enforce the boundary with lint (block direct DB access outside the data layer), with the AST checks in `arch-handler-no-db-1` and `arch-no-cross-boundary-imports-1` as the concrete enforcement mechanisms. Exception: transaction flow control belongs in services."
+remediation = """
+Move the database access found in the controller or service into a repository, keep business logic in the service layer, and keep the controller limited to HTTP handling. Add or confirm the lint/AST checks (arch-handler-no-db-1 and arch-no-cross-boundary-imports-1) run in CI to keep the boundary enforced going forward. Verify by confirming the controller and service in question contain no direct DB query calls and the lint check passes.
+"""
 why = "Prevents business logic hiding inside the query layer; keeps each layer testable and swappable."
 
 [[option]]

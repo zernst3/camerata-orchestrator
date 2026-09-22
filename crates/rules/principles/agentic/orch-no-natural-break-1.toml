@@ -20,6 +20,9 @@ why = "For long-running work, the budget cap is the ceiling, not the target; qui
 id = "never-stop-on-a-natural-break"
 label = "Never stop on a \"natural break\""
 directive = "A completed chunk, a milestone, or a periodic self-check is NOT a valid stop. The only valid exits are: budget/time cap, a real escalation trigger, queue genuinely empty, or unrecoverable error. Don't wrap early with budget unspent."
+remediation = """
+Configure the autonomous run so completing a chunk, hitting a milestone, or finishing a periodic self-check is not treated as a stopping point on its own. Restrict valid stops to the budget or time cap being reached, a real escalation trigger firing, the work queue being genuinely empty, or an unrecoverable error. Verify by checking that a run with remaining budget and queued work continued past a completed milestone instead of exiting early.
+"""
 why = "For long-running work, the budget cap is the ceiling, not the target; quitting early with capacity left is a failure mode."
 
 [[option]]

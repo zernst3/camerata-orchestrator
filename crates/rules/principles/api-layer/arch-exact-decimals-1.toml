@@ -25,6 +25,9 @@ why = "Binary floating-point cannot represent most decimal fractions exactly. 0.
 id = "monetary-and-quantity-values-use-exact-decimal-t"
 label = "Monetary and quantity values use exact decimal types in code; never floats"
 directive = "Any value that represents money, a counted quantity, a percentage with decimal precision, or any other domain where exact arithmetic matters is represented in code by the language's exact-decimal type (BigDecimal, Decimal, rust_decimal, decimal.Decimal, depending on language), never by binary floating-point (f64, double, Number, etc.). The persistence layer uses NUMERIC or DECIMAL columns for these values, not REAL or DOUBLE. Strings or integer-cents representations are not substitutes; they remove the ability to do arithmetic at the type level."
+remediation = """
+Change the type backing the monetary or quantity value from a binary floating-point type to the language's exact-decimal type (BigDecimal, Decimal, rust_decimal, decimal.Decimal, or equivalent), and store it as a matching exact-numeric column in the database rather than REAL/DOUBLE. Update arithmetic on that value to use the decimal type's operations instead of float math. Verify by confirming a calculation that previously produced a rounding artifact (like 0.1 + 0.2) now returns an exact result.
+"""
 why = "Binary floating-point cannot represent most decimal fractions exactly."
 
 [[option]]

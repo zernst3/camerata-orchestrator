@@ -24,6 +24,9 @@ why = "Go's json and http packages provide low-level unmarshaling that requires 
 id = "typed-struct-with-validation"
 label = "Typed request structs with framework binding + struct tags for validation"
 directive = "Request payloads are bound to typed structs using the framework's binder (Gin's c.ShouldBindJSON / c.ShouldBindQuery / c.ShouldBindUri, Echo's c.Bind which binds body, query, and path params together using json/query/param struct tags, or std net/http with encoding/json + manual validation applied consistently). Each struct field has a binding tag (json/form/query/param, depending on framework and source) specifying its source and a validate tag (required/min/max/email/etc. via the validator library or framework built-ins) specifying its constraints. Handlers receive the bound and validated struct, or an error if binding or validation failed; no raw map access or manual parsing occurs in the handler."
+remediation = """
+Define a typed request struct with the framework's binding and validation struct tags, and bind the incoming payload to it through the framework's binder instead of accessing a raw map or manually parsing strings in the handler. Verify by sending a request with a missing or malformed field and confirming it is rejected by the binder's validation before the handler's business logic runs.
+"""
 why = "Type-safe, validation-consistent, and leverages the framework's or the language's standard validation tools to catch invalid input before business logic runs."
 
 [[option]]

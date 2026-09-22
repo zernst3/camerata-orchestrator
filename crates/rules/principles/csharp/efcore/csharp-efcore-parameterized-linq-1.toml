@@ -16,6 +16,9 @@ why = "EF Core's LINQ provider translates C# expressions into parameterized SQL 
 id = "linq-parameters-and-interpolated-sql"
 label = "LINQ for queries; FromSqlInterpolated or SqlParameter for raw SQL"
 directive = "All data filtering, ordering, and projection uses the LINQ provider (Where, Select, OrderBy, etc.), which generates parameterized SQL automatically. When raw SQL is necessary, FromSqlInterpolated (FormattableString) and ExecuteSqlInterpolated are used instead of their Raw counterparts, so format arguments are automatically bound as parameters. If FromSqlRaw or ExecuteSqlRaw is used for a query that accepts no user input, a comment confirms the SQL string contains no user-controlled values. String interpolation into FromSqlRaw or ExecuteSqlRaw with any variable derived from request input is forbidden."
+remediation = """
+Replace the raw SQL call built with string interpolation or concatenation with FromSqlInterpolated (or ExecuteSqlInterpolated) using a FormattableString, or migrate the query to LINQ where possible so EF Core parameterizes it automatically. Never use FromSqlRaw with a manually-built string containing user input. Verify by passing a value containing SQL metacharacters into the query and confirming it is bound as a parameter rather than concatenated into the SQL text.
+"""
 why = "LINQ parameterizes automatically; FromSqlInterpolated extends the same guarantee to raw SQL via FormattableString parameter extraction."
 
 [[option]]

@@ -20,6 +20,9 @@ why = "Per-decision gates miss aggregate drift; many small calls can drift heavy
 id = "auto-calls-ledger-periodic-judgment-review"
 label = "Auto-calls ledger + periodic judgment review"
 directive = "Every self-made clear-winner call is logged with date, rule, decision, alternatives, and why. The agent surfaces the accumulated batch for human accept/modify/reject on a weekly cadence. Further autonomous runs hold until the batch is cleared, so drift cannot compound past the weekly review window."
+remediation = """
+Set up a ledger that logs every autonomous rule-decided call with its date, the rule, the decision made, the alternatives considered, and the reasoning. Configure the run to surface the accumulated ledger entries to a human for accept/modify/reject once a week, and have further autonomous runs hold until that batch is cleared. Verify by confirming the ledger file grows with each autonomous decision and that a new run pauses when a prior week's batch is still unreviewed.
+"""
 why = "Per-decision gates miss aggregate drift; many small calls can drift heavy or split into competing patterns over hundreds of choices."
 
 [[option]]

@@ -17,6 +17,9 @@ why = "Integration tests that spin up the real application pipeline catch bugs t
 id = "webapplicationfactory-in-process"
 label = "subclass WebApplicationFactory<TProgram>, override ConfigureWebHost to swap infrastructure, use IClassFixture to share the factory"
 directive = "Create a CustomWebApplicationFactory<TProgram> : WebApplicationFactory<TProgram> class. In ConfigureWebHost, call builder.ConfigureServices to remove the production DbContext registration and add an in-memory or SQLite equivalent, replace external HttpClient registrations with stub handlers, and call builder.UseEnvironment(\"Development\"). Test classes implement IClassFixture<CustomWebApplicationFactory<Program>>. Each test creates an HttpClient via _factory.CreateClient() and follows the Arrange-Act-Assert pattern: Arrange prepares the request, Act calls await client.GetAsync(\"/endpoint\"), Assert checks response.StatusCode and the deserialized body."
+remediation = """
+Create a custom WebApplicationFactory subclass for the app's Program type, and in ConfigureWebHost remove the production DbContext/HttpClient registrations and replace them with an in-memory or stub equivalent. Share the factory across tests in a class via IClassFixture rather than starting the app out-of-process. Verify by confirming the integration test suite runs the real HTTP pipeline and DI container in-process, with no dependency on a locally running dotnet run instance.
+"""
 why = "The in-process TestServer is the correct ASP.NET Core mechanism for integration tests; it exercises the real pipeline without network overhead."
 
 [[option]]

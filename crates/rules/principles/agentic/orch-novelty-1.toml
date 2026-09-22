@@ -20,6 +20,9 @@ why = "Precedent is a reality-check; an 'obvious' call with no prior example is 
 id = "novelty-downgrades-authority"
 label = "Novelty downgrades authority"
 directive = "A choice with no clear analog in existing conventions is treated as contested; lack of precedent lowers confidence even when the winner feels obvious. Pause and escalate the decision to a human reviewer rather than auto-applying the obvious-feeling answer."
+remediation = """
+When a choice has no clear precedent in the project's existing conventions, have the agent treat it as contested even if the answer feels obvious, and pause to escalate it to a human reviewer instead of auto-applying it. Log what precedent search was attempted and why it came up empty. Verify by confirming that a past no-precedent decision in the log shows a human sign-off rather than an autonomous apply.
+"""
 why = "Precedent is a reality-check; an 'obvious' call with no prior example is higher-risk than one anchored in existing patterns."
 
 [[option]]

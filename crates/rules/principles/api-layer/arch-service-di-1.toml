@@ -24,6 +24,9 @@ why = "A service that constructs its own concrete repository binds itself to a s
 id = "inject-abstractions"
 label = "inject repository abstractions at the composition root"
 directive = "Services depend on repository abstractions (interfaces or traits), never on concrete persistence implementations. The concrete implementations are constructed once at the application's composition root and passed into services as dependencies. A service never instantiates its own repository, opens its own connection, or reads its own datastore configuration; it receives an already-constructed abstraction that satisfies the capability it declares."
+remediation = """
+Change the service to receive its repository dependency as an injected abstraction (interface or trait) through its constructor, rather than instantiating a concrete repository or reading a datastore configuration itself. Wire the concrete implementation at the application's composition root instead. Verify by confirming the service's constructor takes the repository abstraction as a parameter and contains no direct construction of a concrete repository or connection.
+"""
 why = "Depending on an abstraction makes services testable in isolation and decoupled from the backing store, and centralizing construction keeps backend assumptions in one place."
 
 [[option]]

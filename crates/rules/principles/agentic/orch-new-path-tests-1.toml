@@ -29,6 +29,9 @@ why = "Green existing tests prove the new code did not break old paths; they do 
 id = "ai-authored-code-paths-carry-tests-not-just-a-pa"
 label = "AI-authored code paths carry tests, not just a passing existing suite"
 directive = "A change that adds a new code path carries new tests for that path, not only a green run of the existing test suite. The new test exercises the new branch directly, and a change-time check verifies that the new path is actually reached by the new test (a coverage diff on the introduced lines, a mutation check on the new branch, or equivalent). The rule applies to every change but is load-bearing for AI-authored ones, because agents can write code that compiles and that the existing suite passes while leaving the new branch entirely uncovered."
+remediation = """
+Require every change that introduces a new code path to add a test that exercises that path directly, not just rely on the existing suite staying green. Wire a change-time check (a coverage diff on the newly introduced lines, or a mutation check on the new branch) that fails the change if the new path is not actually reached by a new test. Verify by introducing a new branch with no accompanying test and confirming the pipeline flags the gap before merge.
+"""
 why = "Green existing tests prove the new code did not break old paths; they do not prove the new path works."
 
 [[option]]

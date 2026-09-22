@@ -24,6 +24,9 @@ why = "Signal-to-noise: one clean ranked digest is read; N direct pings get mute
 id = "local-artifacts-a-single-consolidated-daily-dige"
 label = "local artifacts + a single consolidated daily digest"
 directive = "Autonomous routines produce local artifacts (commits, state files) and write to a shared inbox. A single daily consolidator ranks all routines' output by priority and sends one digest, rather than each routine pinging directly. Critical items break through this cadence and notify immediately."
+remediation = """
+Have each autonomous routine write its own output to local artifacts (commits, state files) and a shared inbox, rather than notifying a human directly. Add a single daily consolidator that ranks all routines' output by priority and sends one digest, with an explicit exception that lets a truly critical item break through immediately instead of waiting for the next digest. Verify by confirming a day's worth of routine output arrives as one ranked digest instead of as separate pings per routine.
+"""
 why = "Signal-to-noise: one clean ranked digest is read; N direct pings get muted."
 
 [[option]]

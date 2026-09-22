@@ -16,6 +16,9 @@ why = "Constructor injection makes dependencies explicit in the type's public co
 id = "constructor-injection"
 label = "inject dependencies via constructor parameters (traditional or C# 12 primary constructor), marked private readonly"
 directive = "All dependencies are declared as constructor parameters — either a traditional constructor assigning to private readonly instance fields, or a C# 12 primary constructor whose captured parameters are used directly in the class body — rather than as settable properties or fields. The constructor (or primary constructor parameter list) is the complete list of what the class requires. For ASP.NET Core, the container automatically wires all registered service dependencies to the constructor. No [Inject] or [Service] attributes on properties or fields, EXCEPT inside a Blazor @code block / component class, where [Inject] property injection is the framework's own idiomatic mechanism and is not a violation of this rule."
+remediation = """
+Move the class's dependencies from [Inject]-annotated properties or IServiceProvider resolution into constructor parameters (a traditional constructor or a C# 12 primary constructor), assigned to private readonly fields. Remove the property-injection attributes or service-locator calls once the constructor accepts the dependency directly. Verify by confirming the class can be instantiated in a unit test by passing mocks directly to the constructor, with no container involved.
+"""
 why = "Constructor injection (traditional or primary-constructor form) is explicit, immutable, testable, and makes circular dependencies obvious; Blazor components are the one place the framework itself requires property injection instead."
 
 [[option]]

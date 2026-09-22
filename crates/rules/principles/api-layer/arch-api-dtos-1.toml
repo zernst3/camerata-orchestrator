@@ -24,16 +24,25 @@ why = "The right answer follows from how independently the wire format and the i
 id = "api-request-and-response-types-are-dtos-never-do"
 label = "endpoints use dedicated request/response DTOs mapped to and from domain types"
 directive = "Endpoints accept request DTOs and return response DTOs; the controller layer maps DTOs to and from domain types. The wire format and the internal model evolve independently. Enforce with a lint rule that blocks imports of domain types from controller files. Adding a field to a domain type does not silently change the API; renaming or restructuring a domain field does not break clients."
+remediation = """
+Add a dedicated request/response DTO for the endpoint and map it to and from the domain type inside the controller. Add a lint rule that blocks controller files from importing domain types directly, so the boundary stays enforced going forward. Verify by confirming the controller no longer references a domain type and the lint rule fails the build if it does.
+"""
 why = "Decouples the wire format from the domain model so each evolves on its own schedule: an internal refactor cannot break external consumers, and an external API requirement cannot leak into the domain core. The strongest fit when the API has consumers that upgrade independently (public clients, other teams, mobile apps); the cost is the mapping tier, which a lint-enforced import boundary keeps honest."
 
 [[option]]
 id = "endpoints-return-domain-types-directly-in-the-re"
 label = "endpoints return domain types directly, with no DTO layer"
 directive = "Endpoints return domain types directly in the response body and accept domain types in the request body, with no DTO layer in between."
+remediation = """
+Remove the DTO mapping layer around the endpoint and have it accept and return the domain type directly. Confirm no other consumer of this endpoint depends on a wire shape that differs from the domain type before making the change. Verify by confirming the request/response body matches the domain type's fields with no separate DTO class in between.
+"""
 why = "The lightest option: no mapping tier to write or maintain, and one type per concept. The natural fit for an internal API whose only consumer ships alongside it, where the wire shape and the domain shape move together anyway and a coordinated change is free. Its trade-off is that the wire shape follows the internal model, so it stops fitting once the API gains consumers that must not be broken by an internal refactor."
 
 [[option]]
 id = "the-project-uses-a-single-shared-model-type-acro"
 label = "the project uses one shared model type across wire and domain"
 directive = "The project uses a single shared model type across both the wire format and the domain core, rather than maintaining separate DTOs and domain types."
+remediation = """
+Consolidate the separate wire and domain types for this concept into one shared model type used on both sides. Delete the now-redundant DTO or domain type and update call sites to reference the single model. Verify by confirming only one type definition exists for this concept and it is used consistently across the wire and domain layers.
+"""
 why = "Keeps exactly one definition per concept, avoiding the double-definition and drift between a DTO and its domain twin. The fit for a small or monorepo codebase where the wire shape and the domain shape are genuinely the same thing and maintaining two would be the larger cost. The trade-off is coupling: API concerns sit in the domain core and release cadence is tied to client tolerance, which is acceptable while the API and its clients evolve together."

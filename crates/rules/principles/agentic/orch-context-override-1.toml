@@ -24,6 +24,9 @@ why = "Documented rules exist because an architect made an explicit commit; over
 id = "rule-overrides-driven-by-project-context-require"
 label = "Rule overrides driven by project context require explicit human sign-off"
 directive = "When the agent identifies that applying a documented rule would produce wrong-shaped output for the project, the agent pauses and escalates the override to a human reviewer before either updating the rule or producing any artifact that diverges from it. Wrong-shaped output here means context-fit failures such as: the rule's stance conflicts with the project's positioning, a downstream constraint defeats the rule's rationale, an ecosystem convention diverges from the rule's stance, or similar misalignments between the rule's assumptions and the project's actual context. The escalation cites the rule by identifier and proposes the override. The agent resumes only after explicit sign-off. Silent override of a documented rule is forbidden."
+remediation = """
+When an agent determines that a documented rule would produce the wrong output for this project's context, have it pause and route the override to a human reviewer before applying it or updating the rule, rather than deciding unilaterally. Log the specific context-fit failure (positioning conflict, downstream constraint, ecosystem divergence) that triggered the override request. Verify by confirming a logged override shows a human sign-off before the rule was changed or bypassed.
+"""
 why = "Pausing preserves rule authority while still allowing rules to evolve; the override and the deviating artifact together represent an architectural shift that warrants the same review the original rule received."
 
 [[option]]

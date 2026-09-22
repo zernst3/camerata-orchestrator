@@ -17,6 +17,9 @@ why = "A test name is the first diagnostic signal when a build fails. A name lik
 id = "method-scenario-result"
 label = "MethodName_Scenario_ExpectedResult for methods; <ClassUnderTest>Tests for classes"
 directive = "Every [Fact] or [Theory] method follows the pattern MethodName_Scenario_ExpectedResult using PascalCase for each segment separated by underscores. Examples: Add_SingleNumber_ReturnsSameNumber; Checkout_WithNullCart_ThrowsArgumentNullException; GetUser_UserDoesNotExist_ReturnsNull. Test classes are named <ClassUnderTest>Tests (e.g., StringCalculatorTests, OrderServiceTests) and live in the same namespace as the class under test but in the test project. One test class per production class is the default structure."
+remediation = """
+Rename the test method to the MethodName_Scenario_ExpectedResult pattern (for example Checkout_WithNullCart_ThrowsArgumentNullException) and rename the test class to ClassNameTests, named after the class under test. Verify by scanning the test project for method names that don't fit the three-part pattern and renaming them to match.
+"""
 why = "Microsoft's official documentation demonstrates this pattern explicitly with before/after code examples."
 
 [[option]]

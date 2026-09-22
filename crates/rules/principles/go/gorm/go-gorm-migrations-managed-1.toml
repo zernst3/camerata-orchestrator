@@ -20,6 +20,9 @@ why = "A migration is a versioned SQL script or code that transforms the schema 
 id = "migrations-all-changes"
 label = "All schema changes go through version-controlled migrations"
 directive = "Production schema changes (create table, add column, add index, drop constraint) are written as versioned SQL migration files managed by a tool like golang-migrate, goose, or atlas. Migrations are committed to version control, reviewed, and applied in order. Production deployments run migrations as part of the deployment process. GORM's db.AutoMigrate(&Model{}) is reserved for local development or prototyping, or as an additive dev-convenience supplement; it is not used to manage production schema, since it only adds columns/tables/indexes, never drops or alters destructively, and produces no version history or rollback path. No manual SQL ALTER statements are executed in production; any schema change not tracked in a migration is a deviation that must be rolled back or documented."
+remediation = """
+Write the schema change as a versioned migration file using golang-migrate, goose, or atlas, and commit it to source control instead of applying the change by hand or relying solely on AutoMigrate. Apply migrations as an explicit step in the deployment process. Verify by confirming a fresh database brought up from the migration files ends up in the same schema state as production.
+"""
 why = "Migrations are the source of truth for schema evolution; the database is reproducible from migrations."
 
 [[option]]

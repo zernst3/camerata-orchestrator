@@ -28,6 +28,9 @@ why = "An agent that reviews its own output inherits its own blindspots: the arc
 id = "the-reviewer-agent-for-any-change-is-distinct-fr"
 label = "The reviewer agent for any change is distinct from the author agent"
 directive = "The agent that reviews a change is a separate agent from the one that authored it. Author and reviewer differ in some load-bearing configuration: a different prompt, a different principles set, a different model, or a combination of those. The reviewer reads the diff, the change's stated intent, and the codified architectural commitments. The reviewer does not read the author agent's reasoning trace. This separation holds across all orchestrated work regardless of whether author and reviewer share a model family."
+remediation = """
+Configure the pipeline so the agent that reviews a change is a separate agent instance from the one that authored it, differing in at least one load-bearing way (a different prompt, a different principles set, or a different model). Have the reviewer evaluate the diff, the stated intent, and the codified commitments on their own terms, without reading the author's reasoning trace. Verify by confirming the review step's configuration names a distinct reviewer identity from the author and that the reviewer's input excludes the author's internal reasoning.
+"""
 why = "An agent that reviews its own output inherits its own blindspots: the architectural drift the author missed at write time is the same drift the same agent will miss at review time."
 
 [[option]]

@@ -23,22 +23,34 @@ why = "The right pagination shape follows from how the list is consumed — its 
 id = "list-endpoints-paginate-by-cursor-not-by-offset"
 label = "list endpoints paginate by opaque cursor"
 directive = "Any list endpoint that can grow uses opaque cursor tokens for pagination: the response includes a next_cursor, the next request passes it back. Bounded lists below a hard cap that does not grow may skip pagination entirely."
+remediation = """
+Add opaque cursor-based pagination to the list endpoint: return a next_cursor in the response and accept it back on the following request. Reserve skipping pagination entirely for lists with a hard, low cap that cannot grow. Verify by requesting the endpoint's first page, confirming a next_cursor is returned, and confirming passing it back returns the following page with no duplicated or skipped items.
+"""
 why = "Anchors each page to a stable position in the result set, so a reader stays correct under concurrent inserts and deletes rather than silently skipping or duplicating rows. The natural fit for large or actively-changing lists (feeds, activity, anything unbounded); the trade-off is that cursors are opaque, so they do not support jumping to an arbitrary page or showing a numbered page bar."
 
 [[option]]
 id = "list-endpoints-paginate-by-offset-page-n-page-si"
 label = "list endpoints paginate by offset (page=N, page_size=K)"
 directive = "List endpoints paginate by offset: the client requests a page number and page size (page=N, page_size=K), and the server returns that slice along with a total count where useful for a page index."
+remediation = """
+Add offset-based pagination to the list endpoint accepting a page number and page size, and return the requested slice along with a total count where useful. Verify by requesting page 2 with a fixed page size and confirming it returns the expected slice distinct from page 1.
+"""
 why = "Simple to implement and the shape that supports random page access — jump to page 7, render a numbered page bar — which is exactly what admin tables and report views often need. The fit for stable or slowly-changing datasets where read-during-write consistency is not the dominant concern; its known trade-off is that inserts and deletes during a paging session can shift rows across pages, so it is the wrong choice for lists that change rapidly under the reader."
 
 [[option]]
 id = "list-endpoints-return-the-full-result-set-in-a-s"
 label = "list endpoints return the full result set in one response"
 directive = "List endpoints return the full result set in a single response and do not paginate, reserved for lists with a hard, low upper bound that does not grow over time."
+remediation = """
+Remove pagination from the list endpoint and return the full result set in a single response, only after confirming the list has a hard, low upper bound that will not grow over time. If the list can grow unbounded, add pagination instead of leaving it unpaginated. Verify by confirming the response includes every item with no truncation and that the underlying data set cannot exceed the assumed cap.
+"""
 why = "The simplest possible contract — one request, the whole list — and exactly right when the list has a small fixed ceiling (a country list, a status enum, a short reference table) where any paging machinery would be overhead the data never justifies. It depends on that bound actually holding, so it is the wrong shape for any list that can grow without limit."
 
 [[option]]
 id = "list-endpoints-expose-both-cursor-and-offset-pag"
 label = "list endpoints expose both cursor and offset pagination shapes"
 directive = "List endpoints expose both cursor and offset pagination shapes and let the client choose which to use per request."
+remediation = """
+Add both a cursor-based and an offset-based pagination path to the list endpoint, letting the client choose which query parameters to send. Verify by confirming a request using cursor parameters and a separate request using offset parameters each return correctly paginated results from the same endpoint.
+"""
 why = "Maximises client flexibility: consumers that need stable streaming pick the cursor shape and consumers that need random page access pick the offset shape, from the same endpoint. The cost is a larger surface to build, test, and document, and a default shape clients reach for, so it is worth it when the endpoint genuinely serves both kinds of consumer rather than when one shape would do."

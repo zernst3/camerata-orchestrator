@@ -16,6 +16,9 @@ why = "A controller action's job is protocol translation: read the validated req
 id = "thin-controllers-service-layer"
 label = "Controllers translate HTTP to service calls; all business logic lives in a service layer"
 directive = "Controller actions and Minimal API endpoint handlers are limited to: reading validated input from the request, calling one service method, and returning an IActionResult (or typed result) that maps the service's success or error. Business rules, conditional logic, validation beyond schema constraints, and data-access calls do not appear inside controllers or endpoint lambdas. Service classes own domain rules; repository classes own data access. A controller method body longer than ~10 lines is a signal that logic has leaked into the controller."
+remediation = """
+Move the business logic and data access currently inline in the controller action into a service method, so the action only reads validated input, calls the service, and maps the result to an HTTP response. Verify by confirming the action method body is a few lines long with no conditional business logic or direct DbContext/repository calls.
+"""
 why = "Controllers that translate protocol to service calls are independently testable, reusable across entry points, and insulated from domain changes."
 
 [[option]]

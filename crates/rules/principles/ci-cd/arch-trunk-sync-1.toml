@@ -20,6 +20,9 @@ why = "Per-fix mirroring creates hidden divergence (a fix lands on release, the 
 id = "one-merge-commit-after-the-release-ships"
 label = "one merge-commit after the release ships"
 directive = "Release-line fixes stay on the release branch until ship, then sync back to trunk in ONE merge-commit, not per-fix cherry-picks."
+remediation = """
+Keep release-line fixes on the release branch until that release ships, then sync them back to trunk in a single merge commit rather than cherry-picking each fix back individually as it lands. Verify by confirming trunk's history shows one consolidated sync commit per shipped release rather than a scattered trail of individual cherry-picks.
+"""
 why = "One end-of-release merge commit keeps the sync atomic and provides a clear moment at which trunk and the release line are known to be in sync."
 
 [[option]]

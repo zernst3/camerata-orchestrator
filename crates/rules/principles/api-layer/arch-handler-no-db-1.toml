@@ -25,6 +25,9 @@ why = "A handler's job is request/response shaping; data access is the repositor
 id = "handlers-delegate-all-data-access-to-services-or-repositories"
 label = "Handlers never touch the database directly"
 directive = "Handler and controller functions contain no direct database-handle calls (no `db`/`pool`/`conn`/`tx` receiver calling a query/execute method). Handlers delegate to a service, which delegates to a repository; only repositories hold a DB handle. Enforce with an AST static-analysis check in CI that parses each handler body and rejects a direct DB call, so a handler that queries the database directly fails the build."
+remediation = """
+Move the direct database call out of the handler and into a repository method, with the handler calling a service that in turn calls the repository. Add or confirm the AST-based CI check that rejects a handler body containing a direct db/pool/conn/tx call. Verify by confirming the handler function contains no direct database-handle call and the CI check fails if one is reintroduced.
+"""
 why = "A handler's job is request/response shaping; collapsing data access into it hides business logic in the transport layer where it is hardest to test and review, and an AST check makes the violation impossible to merge rather than relying on review to notice it."
 
 [[option]]

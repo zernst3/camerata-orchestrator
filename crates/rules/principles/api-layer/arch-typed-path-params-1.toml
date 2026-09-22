@@ -24,6 +24,9 @@ why = "A path parameter arrives as text. If each handler parses that text itself
 id = "typed-extraction"
 label = "extract typed parameters at the boundary"
 directive = "Route path and query parameters are extracted into typed values at the framework boundary (the routing or controller layer), using the framework's typed-extraction mechanism. A parameter that cannot be parsed into its declared type produces a uniform 4xx error response before the handler body runs. Handlers receive already-parsed, typed parameters and never parse raw parameter strings themselves."
+remediation = """
+Move parameter parsing for this endpoint into the framework's typed-extraction mechanism at the routing/controller layer, so a parameter that fails to parse produces a uniform 4xx response before the handler body runs. Remove any manual string parsing of path or query parameters inside the handler itself. Verify by sending a malformed parameter value to the endpoint and confirming it is rejected before the handler logic executes, with a consistent error shape.
+"""
 why = "Boundary extraction writes the parse-error path once and hands every handler values it can trust."
 
 [[option]]
