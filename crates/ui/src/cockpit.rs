@@ -115,14 +115,19 @@ struct ProjectView {
     /// the drag-and-drop builder. Absent → empty (the server seeds a default on the project side).
     #[serde(default)]
     hierarchy_schema: HierarchySchemaView,
-    /// The compliance-safety master switch (Feature B,
-    /// `docs/design/2026-08-27_backend-safety-and-live-models.md`): whether this project may
-    /// EVER use the operator's personal Claude CLI subscription as a transport. Defaults to
-    /// `false` (API-only, client-safe) so a project written before this field existed — or a
-    /// freshly-created one — is never more permissive than the secure default. `#[serde(default)]`
-    /// is the field's ONLY source of that default; there is no separate "new project" path here.
+    /// The project's AI backend (`docs/design/2026-09-22_per-project-backend.md`): the source
+    /// of truth for EVERY project-scoped model call (the scan, the alternative-recommendation
+    /// pass, the disagreement rescan, and the governed dev loop). Replaces the old
+    /// `cli_active: bool` compliance flag. `Cli` (the shared type's `Default` AND serde
+    /// default) runs on the operator's Claude Code subscription, no key needed, the
+    /// zero-setup path a scan needs to "just work" out of the box. `Api` runs on the
+    /// Anthropic API and hard-blocks (never silently falls back to CLI) when no key is
+    /// configured, the compliant metered chain for client code. `#[serde(default)]` is what
+    /// migrates a project persisted with the old, now-absent `cli_active` field: it
+    /// deserializes with no `backend` key present at all, so it lands on the same `Cli`
+    /// default as a freshly-created project.
     #[serde(default)]
-    cli_active: bool,
+    backend: ProjectBackend,
 }
 
 /// One project-memory entry as the BFF reports it (mirrors the server's `MemoryEntry`). Enum-ish
@@ -285,8 +290,10 @@ async fn set_hierarchy_schema(id: &str, schema: &HierarchySchemaView) -> bool {
 /// serializes, so defaults can never drift again). The `*View` names are kept so the many
 /// existing call sites read unchanged.
 use camerata_api_types::project::L3ReviewConfig as L3ReviewView;
+use camerata_api_types::project::ProjectBackend;
 use camerata_api_types::project::StallThresholds as StallThresholdsView;
 use camerata_api_types::project::StepModels as StepModelsView;
+use camerata_ui_core::backend::ProjectBackendExt;
 
 /// UI mirror of `camerata_fleet::tier::TierMap`. Three model-id slots, one per
 /// capability band. `fast` and `balanced` are ordered chains (Vec<String>); `strongest`
@@ -486,25 +493,24 @@ pub(super) async fn set_project_vision_enabled(id: &str, enabled: bool) -> bool 
         .unwrap_or(false)
 }
 
-/// Flip a project's `cli_active` compliance-safety master switch (Feature B — the
-/// backend-safety gate, `docs/design/2026-08-27_backend-safety-and-live-models.md`). OFF
-/// (the default) forces every scan/run on this project onto the API backend and HARD-BLOCKS
-/// when no Anthropic key is present, rather than silently falling back to the operator's
-/// personal Claude CLI subscription. ON permits that fallback (and an explicit `cli` choice)
-/// for this project only.
+/// Set a project's AI backend (`docs/design/2026-09-22_per-project-backend.md`). This is the
+/// source of truth for EVERY project-scoped model call: the scan, the alternative-recommendation
+/// pass, the disagreement rescan, and the governed dev loop. `Cli` runs on the operator's Claude
+/// Code subscription (no key needed, the zero-setup default); `Api` runs on the Anthropic API
+/// and hard-blocks (never silently falls back to CLI) when no key is configured.
 ///
-/// Uses `POST /api/projects/:id/cli-active { active }`, mirroring `set_step_model`'s response
+/// Uses `POST /api/projects/:id/backend { backend }`, mirroring `set_step_model`'s response
 /// shape exactly: `{ "ok": true, "project": {...} }` on success, `{ "ok": false, "message":
-/// "..." }` on failure — see `set_cli_active_handler` in `crates/server/src/lib.rs`. Unlike the
+/// "..." }` on failure — see `set_backend_handler` in `crates/server/src/lib.rs`. Unlike the
 /// sibling mutators above (which only check the HTTP status), this one PARSES the response and
-/// hands back the server's own echoed `cli_active`, not the value the caller asked for: this is
-/// a compliance flag, so the UI must reflect what the server actually persisted, never an
-/// optimistic guess that silently drifted from it. Returns `None` on any failure (network,
+/// hands back the server's own echoed `backend`, not the value the caller asked for: this is a
+/// compliance-relevant setting, so the UI must reflect what the server actually persisted, never
+/// an optimistic guess that silently drifted from it. Returns `None` on any failure (network,
 /// non-2xx, unparseable body, unknown project, or an explicit `ok: false`).
-pub(super) async fn set_project_cli_active(id: &str, active: bool) -> Option<bool> {
+pub(super) async fn set_project_backend(id: &str, backend: ProjectBackend) -> Option<ProjectBackend> {
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/projects/{}/cli-active", crate::bff_base(), id))
-        .json(&serde_json::json!({ "active": active }))
+        .post(format!("{}/api/projects/{}/backend", crate::bff_base(), id))
+        .json(&serde_json::json!({ "backend": backend.as_wire() }))
         .send()
         .await
         .ok()?;
@@ -515,7 +521,7 @@ pub(super) async fn set_project_cli_active(id: &str, active: bool) -> Option<boo
     if body.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return None;
     }
-    body.get("project")?.get("cli_active")?.as_bool()
+    serde_json::from_value(body.get("project")?.get("backend")?.clone()).ok()
 }
 
 /// Set the model for ONE non-fleet AI step on a project. Uses the
@@ -2897,12 +2903,12 @@ fn SettingsView(global_only: bool) -> Element {
                 Some(p) => {
                     let p_owned = p.clone();
                     rsx! {
-                        // ── Backend safety (Feature B, compliance gate) ────────
-                        // Placed first: this is the auth/billing/compliance switch that governs
-                        // which chain (API vs. personal-subscription CLI) every other setting on
-                        // this project runs on. See docs/design/2026-08-27_backend-safety-and-live-models.md.
-                        p { class: "section-label settings-label", "Backend safety" }
-                        rules::CliActiveEditor { project: p_owned.clone() }
+                        // ── Backend (per-project) ──────────────────────────────
+                        // Placed first: this is the setting that governs which chain (CLI
+                        // subscription vs. Anthropic API) every project-scoped AI call on this
+                        // project runs on. See docs/design/2026-09-22_per-project-backend.md.
+                        p { class: "section-label settings-label", "Backend" }
+                        rules::BackendEditor { project: p_owned.clone() }
 
                         // ── Loop guard ────────────────────────────────────────
                         LoopGuardControl {}
@@ -3200,7 +3206,8 @@ pub use uow::*;
 mod tests {
     use super::{
         dev_run_body, is_enforced_floor, run_is_cancellable, run_status_badge, FindingView,
-        JobStatusEnvelope, JobStateView, RunGateEvent, RunView, StallThresholdsView, TierMapView,
+        JobStatusEnvelope, JobStateView, ProjectBackend, RunGateEvent, RunView, StallThresholdsView,
+        TierMapView,
     };
 
     /// The job-state view deserializes the server's `deterministic` progress section
@@ -4434,47 +4441,47 @@ mod tests {
         assert!(ok);
     }
 
-    /// `set_project_cli_active` POSTs {active} and, on `{ ok: true, project: {..., cli_active} }`,
-    /// hands back the server's ECHOED `cli_active` — not the value the caller asked for. This
-    /// locks that the toggle trusts what the server actually persisted rather than assuming
+    /// `set_project_backend` POSTs {backend} and, on `{ ok: true, project: {..., backend} }`,
+    /// hands back the server's ECHOED `backend` — not the value the caller asked for. This
+    /// locks that the control trusts what the server actually persisted rather than assuming
     /// its own request succeeded verbatim.
     #[tokio::test]
     #[serial_test::serial(bff_env)]
-    async fn set_project_cli_active_posts_flag_and_returns_echoed_value() {
+    async fn set_project_backend_posts_backend_and_returns_echoed_value() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/projects/p-1/cli-active"))
-            .and(body_json(serde_json::json!({ "active": true })))
+            .and(path("/api/projects/p-1/backend"))
+            .and(body_json(serde_json::json!({ "backend": "api" })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
-                "project": { "id": "p-1", "name": "Acme", "cli_active": true }
+                "project": { "id": "p-1", "name": "Acme", "backend": "api" }
             })))
             .expect(1)
             .mount(&server)
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let result = super::set_project_cli_active("p-1", true).await;
+        let result = super::set_project_backend("p-1", ProjectBackend::Api).await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
-        assert_eq!(result, Some(true));
+        assert_eq!(result, Some(ProjectBackend::Api));
     }
 
     /// An `{ ok: false, message: "..." }` response (e.g. unknown project id) must NOT be read
-    /// as success just because the HTTP status is 200 — `set_project_cli_active` checks the
+    /// as success just because the HTTP status is 200 — `set_project_backend` checks the
     /// `ok` field, not only the status code.
     #[tokio::test]
     #[serial_test::serial(bff_env)]
-    async fn set_project_cli_active_returns_none_on_ok_false() {
+    async fn set_project_backend_returns_none_on_ok_false() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/projects/does-not-exist/cli-active"))
+            .and(path("/api/projects/does-not-exist/backend"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": false,
                 "message": "no such project"
@@ -4484,7 +4491,7 @@ mod tests {
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let result = super::set_project_cli_active("does-not-exist", true).await;
+        let result = super::set_project_backend("does-not-exist", ProjectBackend::Api).await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(result, None);
@@ -4494,11 +4501,11 @@ mod tests {
     /// back as `None`, not a panic.
     #[tokio::test]
     #[serial_test::serial(bff_env)]
-    async fn set_project_cli_active_returns_none_on_network_failure() {
+    async fn set_project_backend_returns_none_on_network_failure() {
         // Port 9 is the discard service; nothing answers HTTP there, so the request fails
         // at the transport layer without needing a mock server at all.
         std::env::set_var("CAMERATA_BFF_URL", "http://127.0.0.1:9");
-        let result = super::set_project_cli_active("p-1", true).await;
+        let result = super::set_project_backend("p-1", ProjectBackend::Api).await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         assert_eq!(result, None);
@@ -5454,6 +5461,34 @@ mod tests {
     fn project_fixture() -> super::ProjectView {
         serde_json::from_value(serde_json::json!({ "id": "p-1", "name": "Acme" }))
             .expect("valid ProjectView fixture")
+    }
+
+    /// `ProjectView.backend` (`docs/design/2026-09-22_per-project-backend.md`) round-trips
+    /// both wire values, and a project with no `backend` field at all (either a bare fixture
+    /// or one still carrying the dead `cli_active` key from before the migration) deserializes
+    /// to `Cli`, the same zero-setup default a freshly-created project gets.
+    #[test]
+    fn project_view_deserializes_backend_with_legacy_absent_default() {
+        assert_eq!(project_fixture().backend, ProjectBackend::Cli, "bare fixture defaults to Cli");
+
+        let cli: super::ProjectView =
+            serde_json::from_value(serde_json::json!({ "id": "p-1", "name": "Acme", "backend": "cli" }))
+                .expect("valid ProjectView fixture");
+        assert_eq!(cli.backend, ProjectBackend::Cli);
+
+        let api: super::ProjectView =
+            serde_json::from_value(serde_json::json!({ "id": "p-1", "name": "Acme", "backend": "api" }))
+                .expect("valid ProjectView fixture");
+        assert_eq!(api.backend, ProjectBackend::Api);
+
+        // A project persisted before the migration carries the old `cli_active` key and no
+        // `backend` key at all; it's an unknown field now, ignored, and `backend` still
+        // lands on the Cli default.
+        let legacy: super::ProjectView = serde_json::from_value(serde_json::json!({
+            "id": "p-1", "name": "Acme", "cli_active": true,
+        }))
+        .expect("valid ProjectView fixture despite the dead cli_active field");
+        assert_eq!(legacy.backend, ProjectBackend::Cli, "legacy cli_active project migrates to Cli");
     }
 
     /// `ProductBriefEditor` needs the toast context (use_context::<Signal<Vec<Toast>>>),

@@ -2713,82 +2713,105 @@ pub(super) fn L3ReviewEditor(project: ProjectView) -> Element {
     }
 }
 
-/// Per-project **"Allow Claude CLI (personal subscription)"** toggle (Feature B — the
-/// backend-safety gate, `docs/design/2026-08-27_backend-safety-and-live-models.md`). This is
-/// an auth/billing/compliance switch, not a model-quality one: OFF (the default) means this
-/// project is API-only — every scan/run rides the commercial, metered Anthropic API, and a
-/// missing key HARD-BLOCKS rather than silently falling back to the operator's personal Claude
-/// subscription. ON permits that fallback (and an explicit `cli` backend choice) for this
-/// project only.
+/// Per-project **Backend** control (`docs/design/2026-09-22_per-project-backend.md`): a CLI /
+/// API choice that is the source of truth for EVERY project-scoped model call, the scan, the
+/// alternative-recommendation pass, the disagreement rescan, and the governed dev loop.
+/// Replaces the old "Allow Claude CLI (personal subscription)" checkbox.
+///
+/// - **CLI** (the default) runs on the operator's Claude Code subscription. No API key needed;
+///   a scan "just works" out of the box.
+/// - **API** runs on the Anthropic API. Needs an Anthropic API key; if one is missing, the AI
+///   step does not run (the deterministic floor still does) rather than silently falling back
+///   to the CLI. This is the compliant, metered, single-party chain nameable in a client
+///   contract, so a project doing client work should be set to API.
 ///
 /// Auto-saves on change (same idiom as the Designer/vision toggle in `TierMapEditor`), except
-/// the local signal is reconciled from the server's ECHOED value — `set_project_cli_active`
-/// returns `Option<bool>`, not a bare success flag — since a compliance flag must never
-/// silently drift from what the server actually persisted. A failed save reverts the checkbox
-/// to its pre-click state rather than leaving it showing an unconfirmed value.
+/// the local signal is reconciled from the server's ECHOED value — `set_project_backend`
+/// returns `Option<ProjectBackend>`, not a bare success flag — since this is a
+/// compliance-relevant setting that must never silently drift from what the server actually
+/// persisted. A failed save reverts the control to its pre-click state rather than leaving it
+/// showing an unconfirmed value.
 #[component]
-pub(super) fn CliActiveEditor(project: ProjectView) -> Element {
+pub(super) fn BackendEditor(project: ProjectView) -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let pid = project.id.clone();
-    let mut cli_active = use_signal(|| project.cli_active);
+    let mut backend = use_signal(|| project.backend);
     let mut saving = use_signal(|| false);
 
-    rsx! {
-        div { class: "tier-map-editor cli-active-editor",
-            p { class: "tier-map-heading", "Backend safety" }
-            p { class: "section-hint tier-map-hint",
-                "OFF = API-only (client-safe): scans require an Anthropic API key and will \
-                 never use your personal Claude subscription. ON = permits the personal-\
-                 subscription CLI as a transport for this project \u{2014} not for client code."
-            }
-            div { class: "tier-map-row cli-active-toggle-row",
-                label { class: "tier-map-band-label", "Allow Claude CLI (personal subscription)" }
-                input {
-                    r#type: "checkbox",
-                    class: "l3-review-checkbox cli-active-checkbox",
-                    checked: cli_active(),
-                    disabled: saving(),
-                    onchange: move |e| {
-                        let requested = e.checked();
-                        let previous = cli_active();
-                        // Optimistic flip so the checkbox responds immediately; reconciled (or
-                        // reverted) below once the server confirms what it actually persisted.
-                        cli_active.set(requested);
-                        let pid = pid.clone();
-                        saving.set(true);
-                        spawn(async move {
-                            match set_project_cli_active(&pid, requested).await {
-                                Some(confirmed) => {
-                                    cli_active.set(confirmed);
-                                    crate::toast::push_toast(
-                                        toasts,
-                                        crate::toast::ToastKind::Info,
-                                        if confirmed {
-                                            "Claude CLI (personal subscription) allowed for this project."
-                                        } else {
-                                            "Project is API-only \u{2014} the Claude CLI is disabled for it."
-                                        },
-                                    );
-                                }
-                                None => {
-                                    cli_active.set(previous);
-                                    crate::toast::push_toast(
-                                        toasts,
-                                        crate::toast::ToastKind::Error,
-                                        "Could not update the Allow Claude CLI setting.",
-                                    );
-                                }
-                            }
-                            saving.set(false);
-                        });
-                    },
-                }
-                span { class: "l3-review-toggle-hint cli-active-toggle-hint",
-                    if cli_active() {
-                        "On \u{2014} the personal-subscription CLI may be used for this project. Not for client code."
-                    } else {
-                        "Off \u{2014} API-only. A missing Anthropic key blocks scans instead of falling back to the CLI."
+    let seg = move |candidate: ProjectBackend, label: &'static str| {
+        let is_active = backend() == candidate;
+        // Cloned per invocation (`seg` is called once per segment) so the `move` onclick
+        // closure below moves this fresh clone, not the `pid` `seg` itself captured — moving
+        // the latter would make `seg` an `FnOnce`, unable to render the second segment.
+        let pid = pid.clone();
+        rsx! {
+            button {
+                key: "{label}",
+                r#type: "button",
+                class: if is_active {
+                    "backend-seg backend-seg-active"
+                } else {
+                    "backend-seg"
+                },
+                disabled: saving() || is_active,
+                onclick: move |_| {
+                    if is_active {
+                        return;
                     }
+                    let previous = backend();
+                    // Optimistic flip so the control responds immediately; reconciled (or
+                    // reverted) below once the server confirms what it actually persisted.
+                    backend.set(candidate);
+                    let pid = pid.clone();
+                    saving.set(true);
+                    spawn(async move {
+                        match set_project_backend(&pid, candidate).await {
+                            Some(confirmed) => {
+                                backend.set(confirmed);
+                                crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Info,
+                                    format!("Backend set to {} for this project.", confirmed.label()),
+                                );
+                            }
+                            None => {
+                                backend.set(previous);
+                                crate::toast::push_toast(
+                                    toasts,
+                                    crate::toast::ToastKind::Error,
+                                    "Could not update the project backend.",
+                                );
+                            }
+                        }
+                        saving.set(false);
+                    });
+                },
+                "{label}"
+            }
+        }
+    };
+
+    rsx! {
+        div { class: "tier-map-editor backend-editor",
+            p { class: "tier-map-heading", "Backend" }
+            p { class: "section-hint tier-map-hint",
+                "CLI is your Claude Code subscription, no key needed. API is the Anthropic API, \
+                 it needs an Anthropic API key and is the compliant, metered chain for client \
+                 code. This governs every AI call this project makes: the scan, alternative \
+                 recommendations, rescans, and the governed dev loop."
+            }
+            div { class: "tier-map-row backend-toggle-row",
+                label { class: "tier-map-band-label", "Project backend" }
+                div { class: "backend-toggle",
+                    {seg(ProjectBackend::Cli, "CLI")}
+                    {seg(ProjectBackend::Api, "API")}
+                }
+            }
+            span { class: "l3-review-toggle-hint backend-toggle-hint",
+                if backend() == ProjectBackend::Cli {
+                    "CLI selected. Scans and the dev loop run on your Claude Code subscription."
+                } else {
+                    "API selected. If no Anthropic API key is configured, AI steps on this project will not run until one is saved; the deterministic floor still runs."
                 }
             }
         }
@@ -7287,59 +7310,99 @@ mod render_tests {
         );
     }
 
-    // CliActiveEditor (Feature B — the backend-safety gate): reads only `project.cli_active`
-    // via use_signal and the toast context, no use_resource — so both the OFF (default) and ON
-    // seed states render deterministically under SSR with no async gap to account for.
-    fn project_with_cli_active(active: bool) -> ProjectView {
+    // BackendEditor (`docs/design/2026-09-22_per-project-backend.md`): reads only
+    // `project.backend` via use_signal and the toast context, no use_resource — so both the
+    // CLI (default) and API seed states render deterministically under SSR with no async gap
+    // to account for.
+    fn project_with_backend(backend: &str) -> ProjectView {
         serde_json::from_value(serde_json::json!({
-            "id": "proj-cli-1",
+            "id": "proj-backend-1",
             "name": "Acme",
-            "cli_active": active,
+            "backend": backend,
         }))
         .expect("valid ProjectView fixture")
     }
 
-    #[test]
-    fn cli_active_editor_renders_label_and_off_state_by_default() {
-        fn harness() -> Element {
-            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
-            rsx! {
-                CliActiveEditor { project: project_with_cli_active(false) }
-            }
-        }
-        let mut vdom = VirtualDom::new(harness);
-        vdom.rebuild_in_place();
-        let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("cli-active-editor"), "wrapper class; html=\n{html}");
-        assert!(
-            html.contains("Allow Claude CLI (personal subscription)"),
-            "the exact label text; html=\n{html}"
-        );
-        // Backend-safety copy: OFF means API-only / client-safe.
-        assert!(html.contains("API-only"), "the API-only explanation; html=\n{html}");
-        assert!(
-            html.contains("blocks scans instead of falling back to the CLI"),
-            "the off-state hint; html=\n{html}"
-        );
-        // The checkbox itself is unchecked when cli_active is false.
-        assert!(!html.contains("checked=true"), "unchecked when OFF; html=\n{html}");
+    fn project_with_no_backend_field() -> ProjectView {
+        serde_json::from_value(serde_json::json!({
+            "id": "proj-backend-legacy",
+            "name": "Acme Legacy",
+        }))
+        .expect("valid ProjectView fixture, backend absent")
     }
 
     #[test]
-    fn cli_active_editor_renders_checked_when_project_cli_active_is_true() {
+    fn backend_editor_renders_label_and_cli_state_by_default() {
         fn harness() -> Element {
             use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
             rsx! {
-                CliActiveEditor { project: project_with_cli_active(true) }
+                BackendEditor { project: project_with_backend("cli") }
             }
         }
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
-        assert!(html.contains("checked=true"), "checked when ON; html=\n{html}");
+        assert!(html.contains("backend-editor"), "wrapper class; html=\n{html}");
+        assert!(html.contains("Backend"), "the heading renders; html=\n{html}");
+        assert!(html.contains("backend-toggle"), "the segmented toggle renders; html=\n{html}");
+        // CLI is the active segment when the project backend is cli.
         assert!(
-            html.contains("the personal-subscription CLI may be used for this project"),
-            "the on-state hint; html=\n{html}"
+            html.contains("backend-seg backend-seg-active"),
+            "the active segment class renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("CLI selected"),
+            "the CLI-selected hint renders; html=\n{html}"
+        );
+        assert!(
+            !html.contains("API selected"),
+            "the API-selected hint must not render when CLI is active; html=\n{html}"
+        );
+    }
+
+    #[test]
+    fn backend_editor_renders_api_state_when_project_backend_is_api() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            rsx! {
+                BackendEditor { project: project_with_backend("api") }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("API selected"),
+            "the API-selected hint renders; html=\n{html}"
+        );
+        assert!(
+            html.contains("AI steps on this project will not run"),
+            "the no-key consequence is explained; html=\n{html}"
+        );
+        assert!(
+            !html.contains("CLI selected"),
+            "the CLI-selected hint must not render when API is active; html=\n{html}"
+        );
+    }
+
+    /// A project persisted before this field existed (or with the old, now-dead `cli_active`
+    /// key) has no `backend` field at all — the migration path from
+    /// `docs/design/2026-09-22_per-project-backend.md` must deserialize it to `Cli`, the same
+    /// default a freshly-created project gets.
+    #[test]
+    fn backend_editor_treats_legacy_absent_backend_field_as_cli() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            rsx! {
+                BackendEditor { project: project_with_no_backend_field() }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("CLI selected"),
+            "a legacy project with no backend field defaults to Cli; html=\n{html}"
         );
     }
 }

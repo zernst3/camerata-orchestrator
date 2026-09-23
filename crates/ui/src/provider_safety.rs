@@ -384,7 +384,7 @@ mod tests {
                 "workspace_root": null,
                 "repo_paths": {},
                 "chat_model": null,
-                "llm_backend": "cli",
+                "chat_backend": "cli",
                 "api_key_present": false,
                 "safe_mode": false,
                 "pinned_provider": "deepinfra",

@@ -9,7 +9,8 @@
 
 use dioxus::prelude::*;
 
-use camerata_ui_core::llm_backend::{show_api_key_warning, LlmBackend};
+use camerata_api_types::project::ProjectBackend;
+use camerata_ui_core::backend::{show_api_key_warning, ProjectBackendExt};
 
 use crate::loading::{BombeEnabled, BombePreview};
 use crate::toast::{push_toast, ToastKind};
@@ -21,9 +22,9 @@ const BOMBE_ENABLED_KEY: &str = "camerata.bombe.enabled";
 
 const OPENROUTER_API_KEY: &str = "openrouter_api_key";
 const GITHUB_TOKEN: &str = "github_token";
-/// The Anthropic API key credential. NOT in the always-shown [`ALL_CREDENTIALS`] list —
-/// it's revealed contextually inside [`ModelBackendSettings`] only when the `api` Claude
-/// backend is selected.
+/// The Anthropic API key credential. NOT in the always-shown [`ALL_CREDENTIALS`] list, it's
+/// revealed contextually inside [`ChatBackendSettings`] only when the `api` chat backend is
+/// selected. The same keychain entry is also read by any project set to the `api` backend.
 const ANTHROPIC_API_KEY: &str = "anthropic_api_key";
 
 const ALL_CREDENTIALS: &[(&str, &str)] = &[
@@ -53,17 +54,20 @@ async fn fetch_credentials() -> Option<Vec<CredentialListItem>> {
 
 // ── LLM backend (Model backend) settings ────────────────────────────────────
 
-/// The subset of `GET /api/settings` the Model-backend control reads: the EFFECTIVE backend
-/// (stored setting > env > default `cli`) and whether an Anthropic API key is present.
+/// The subset of `GET /api/settings` the Chat-backend control reads: the GLOBAL chat
+/// assistant's backend (`settings.chat_backend`, `docs/design/2026-09-22_per-project-backend.md`)
+/// and whether an Anthropic API key is present. This backend affects ONLY the project-less
+/// chatbox — every project resolves its own scans/dev-loop from its own `Project.backend`
+/// instead (see `crate::cockpit::rules::BackendEditor`).
 #[derive(Clone, PartialEq, serde::Deserialize)]
 struct BackendSettingsView {
     #[serde(default)]
-    llm_backend: Option<String>,
+    chat_backend: Option<String>,
     #[serde(default)]
     api_key_present: bool,
 }
 
-/// Fetch the effective LLM backend + api-key presence from `GET /api/settings`.
+/// Fetch the global chat backend + api-key presence from `GET /api/settings`.
 async fn fetch_backend_settings() -> Option<BackendSettingsView> {
     reqwest::get(format!("{}/api/settings", crate::bff_base()))
         .await
@@ -73,11 +77,13 @@ async fn fetch_backend_settings() -> Option<BackendSettingsView> {
         .ok()
 }
 
-/// Persist the LLM backend via `POST /api/settings/llm-backend`. Returns the server-echoed
-/// (backend, api_key_present) on success. `None` on any transport/parse error or non-2xx.
-async fn set_backend(backend: LlmBackend) -> Option<(LlmBackend, bool)> {
+/// Persist the GLOBAL chat backend via `POST /api/settings/chat-backend`. Returns the
+/// server-echoed (backend, api_key_present) on success. `None` on any transport/parse error or
+/// non-2xx. This setting affects ONLY the chatbox — it is never read by any project's scan or
+/// governed dev loop, which resolve from that project's own `Project.backend` instead.
+async fn set_chat_backend(backend: ProjectBackend) -> Option<(ProjectBackend, bool)> {
     let resp = reqwest::Client::new()
-        .post(format!("{}/api/settings/llm-backend", crate::bff_base()))
+        .post(format!("{}/api/settings/chat-backend", crate::bff_base()))
         .json(&serde_json::json!({ "backend": backend.as_wire() }))
         .send()
         .await
@@ -86,7 +92,7 @@ async fn set_backend(backend: LlmBackend) -> Option<(LlmBackend, bool)> {
         return None;
     }
     let v: serde_json::Value = resp.json().await.ok()?;
-    let backend = LlmBackend::parse(v.get("backend").and_then(|b| b.as_str()).unwrap_or("cli"));
+    let backend = ProjectBackend::parse_lenient(v.get("backend").and_then(|b| b.as_str()).unwrap_or("cli"));
     let api_key_present = v
         .get("api_key_present")
         .and_then(|b| b.as_bool())
@@ -289,9 +295,9 @@ enum AnthropicRefreshStatus {
 }
 
 /// Manual "Refresh models" control for the live Anthropic `/v1/models` catalog. Rendered
-/// only while the `api` Claude backend is selected (see [`ModelBackendSettings`]) —
-/// refreshing it while on the CLI backend would populate a cache the picker isn't reading
-/// from anyway. Mirrors [`OpenRouterModelsRefresh`]'s Idle → Loading → Done/Failed shape.
+/// only while the `api` chat backend is selected (see [`ChatBackendSettings`]), refreshing it
+/// while on the CLI backend would populate a cache the picker isn't reading from anyway.
+/// Mirrors [`OpenRouterModelsRefresh`]'s Idle → Loading → Done/Failed shape.
 #[component]
 fn AnthropicModelsRefresh() -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
@@ -422,8 +428,8 @@ pub fn CredentialsSettings() -> Element {
             // ── Data safety (OpenRouter provider-safety toggle, Pass 2 §3) ──
             crate::provider_safety::DataSafetySettings {}
 
-            // ── Claude backend (CLI ⟷ API) ────────────────────────────────
-            ModelBackendSettings {}
+            // ── Chat backend (CLI ⟷ API, chatbox only) ────────────────────
+            ChatBackendSettings {}
 
             // ── Bombe animation settings ──────────────────────────────────
             BombeSettings {}
@@ -431,21 +437,26 @@ pub fn CredentialsSettings() -> Element {
     }
 }
 
-// ── ModelBackendSettings ────────────────────────────────────────────────────
+// ── ChatBackendSettings ──────────────────────────────────────────────────────
 
-/// The "Claude backend" control: a CLI ⟷ API segmented toggle for how Claude runs.
+/// The "Chat backend" control: a CLI ⟷ API segmented toggle for the project-less chat
+/// assistant ONLY (`docs/design/2026-09-22_per-project-backend.md`). It has no effect on any
+/// project's scan, alternative-recommendation pass, rescan, or governed dev loop — those all
+/// resolve from that project's own **Backend** setting (Settings → This project →
+/// `crate::cockpit::rules::BackendEditor`), never from this one.
 ///
-/// - **CLI** runs Claude via the logged-in Claude Code subscription (no key).
-/// - **API** runs Claude via the Anthropic API and requires an Anthropic API key.
+/// - **CLI** runs the chat via the logged-in Claude Code subscription (no key).
+/// - **API** runs the chat via the Anthropic API and requires an Anthropic API key.
 ///
-/// Reads the current effective backend + key presence from `GET /api/settings`, and writes the
-/// choice via `POST /api/settings/llm-backend`. When `api` is selected the Anthropic API key
-/// input is revealed inline (reusing [`CredentialRow`], stored in the keychain under
-/// `anthropic_api_key`). When `api` is selected with no key present the server silently falls
-/// back to CLI, so an inline warning is shown until a key is saved (pure view logic lives in
-/// `camerata_ui_core::llm_backend`).
+/// Reads the current global chat backend + key presence from `GET /api/settings`, and writes
+/// the choice via `POST /api/settings/chat-backend`. When `api` is selected the Anthropic API
+/// key input is revealed inline (reusing [`CredentialRow`], stored in the keychain under
+/// `anthropic_api_key` — the same key any project set to `Api` also reads). When `api` is
+/// selected with no key present, the chat is blocked rather than silently falling back to CLI,
+/// so an inline warning is shown until a key is saved (pure view logic lives in
+/// `camerata_ui_core::backend`).
 #[component]
-fn ModelBackendSettings() -> Element {
+fn ChatBackendSettings() -> Element {
     let toasts = use_context::<Signal<Vec<crate::toast::Toast>>>();
     let mut settings_res = use_resource(fetch_backend_settings);
     // The credentials list drives the revealed Anthropic key row's is_set/masked state.
@@ -459,7 +470,7 @@ fn ModelBackendSettings() -> Element {
         None => rsx! {
             div { class: "credentials-field-section",
                 div { class: "credentials-field-header",
-                    label { class: "credentials-label", "Claude backend" }
+                    label { class: "credentials-label", "Chat backend" }
                 }
                 p { class: "ink-soft", "Loading…" }
             }
@@ -467,17 +478,17 @@ fn ModelBackendSettings() -> Element {
         Some(None) => rsx! {
             div { class: "credentials-field-section",
                 div { class: "credentials-field-header",
-                    label { class: "credentials-label", "Claude backend" }
+                    label { class: "credentials-label", "Chat backend" }
                 }
                 p { class: "ink-soft warn", "Could not reach the server." }
             }
         },
         Some(Some(view)) => {
-            let selected = LlmBackend::parse(view.llm_backend.as_deref().unwrap_or("cli"));
+            let selected = ProjectBackend::parse_lenient(view.chat_backend.as_deref().unwrap_or("cli"));
             let api_key_present = view.api_key_present;
             let warn = show_api_key_warning(selected, api_key_present);
 
-            let seg = move |backend: LlmBackend, label: &'static str| {
+            let seg = move |backend: ProjectBackend, label: &'static str| {
                 let is_active = selected == backend;
                 rsx! {
                     button {
@@ -492,12 +503,12 @@ fn ModelBackendSettings() -> Element {
                             if is_active { return; }
                             saving.set(true);
                             spawn(async move {
-                                match set_backend(backend).await {
+                                match set_chat_backend(backend).await {
                                     Some((b, _)) => {
                                         push_toast(
                                             toasts,
                                             ToastKind::Info,
-                                            format!("Claude backend set to {}.", b.label()),
+                                            format!("Chat backend set to {}.", b.label()),
                                         );
                                         settings_res.restart();
                                     }
@@ -505,7 +516,7 @@ fn ModelBackendSettings() -> Element {
                                         push_toast(
                                             toasts,
                                             ToastKind::Error,
-                                            "Could not update the Claude backend.".to_string(),
+                                            "Could not update the chat backend.".to_string(),
                                         );
                                     }
                                 }
@@ -528,19 +539,22 @@ fn ModelBackendSettings() -> Element {
             };
             let anthropic_is_set = anthropic_item.as_ref().map(|i| i.is_set).unwrap_or(false);
             let anthropic_masked = anthropic_item.and_then(|i| i.masked);
-            let show_api = selected == LlmBackend::Api;
+            let show_api = selected == ProjectBackend::Api;
 
             rsx! {
                 div { class: "credentials-field-section",
                     div { class: "credentials-field-header",
-                        label { class: "credentials-label", "Claude backend" }
+                        label { class: "credentials-label", "Chat backend" }
                     }
                     p { class: "credentials-intro",
-                        "Claude runs via the CLI (your logged-in Claude Code subscription) or the Anthropic API (needs an Anthropic API key)."
+                        "This controls only the chat assistant, the chatbox that lives outside any project. It does not affect project scans or the governed dev loop, each project has its own Backend setting for that (Settings, This project, Backend)."
+                    }
+                    p { class: "credentials-intro",
+                        "CLI runs the chat via your logged-in Claude Code subscription, no key needed. API runs the chat via the Anthropic API and needs an Anthropic API key."
                     }
                     div { class: "backend-toggle",
-                        {seg(LlmBackend::Cli, "CLI")}
-                        {seg(LlmBackend::Api, "API")}
+                        {seg(ProjectBackend::Cli, "CLI")}
+                        {seg(ProjectBackend::Api, "API")}
                     }
                     // When API is selected: either reveal the key input (once we know the key
                     // isn't present) or, if a key IS present, show the set/masked row. The
@@ -548,7 +562,7 @@ fn ModelBackendSettings() -> Element {
                     if show_api {
                         if warn {
                             p { class: "ink-soft warn backend-key-warning",
-                                "API backend needs an ANTHROPIC_API_KEY — the app will fall back to CLI until one is configured."
+                                "The chat needs an Anthropic API key to run on the API backend. Until one is saved below, the chat will not run, it does not fall back to CLI."
                             }
                         }
                         CredentialRow {
@@ -870,17 +884,17 @@ mod tests {
         assert_eq!(result, Err("invalid token format".to_string()));
     }
 
-    // POST /api/settings/llm-backend — asserts the body is exactly {"backend":"api"} and
+    // POST /api/settings/chat-backend — asserts the body is exactly {"backend":"api"} and
     // that the echoed (backend, api_key_present) parse back.
     #[tokio::test]
     #[serial_test::serial(bff_env)]
-    async fn set_backend_posts_backend_and_parses_response() {
+    async fn set_chat_backend_posts_backend_and_parses_response() {
         use wiremock::matchers::{body_json, method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/settings/llm-backend"))
+            .and(path("/api/settings/chat-backend"))
             .and(body_json(serde_json::json!({ "backend": "api" })))
             .respond_with(ResponseTemplate::new(200).set_body_json(
                 serde_json::json!({ "backend": "api", "api_key_present": true }),
@@ -890,24 +904,24 @@ mod tests {
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let out = super::set_backend(LlmBackend::Api).await;
+        let out = super::set_chat_backend(ProjectBackend::Api).await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         let (backend, key) = out.expect("backend echo parsed");
-        assert_eq!(backend, LlmBackend::Api);
+        assert_eq!(backend, ProjectBackend::Api);
         assert!(key, "api_key_present reflected");
     }
 
     // A non-2xx from the endpoint collapses to None (the UI toasts an error).
     #[tokio::test]
     #[serial_test::serial(bff_env)]
-    async fn set_backend_returns_none_on_error_status() {
+    async fn set_chat_backend_returns_none_on_error_status() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/api/settings/llm-backend"))
+            .and(path("/api/settings/chat-backend"))
             .respond_with(
                 ResponseTemplate::new(400)
                     .set_body_json(serde_json::json!({ "ok": false, "message": "invalid backend" })),
@@ -916,16 +930,16 @@ mod tests {
             .await;
 
         std::env::set_var("CAMERATA_BFF_URL", server.uri());
-        let out = super::set_backend(LlmBackend::Api).await;
+        let out = super::set_chat_backend(ProjectBackend::Api).await;
         std::env::remove_var("CAMERATA_BFF_URL");
 
         assert!(out.is_none(), "a 400 collapses to None");
     }
 
-    // GET /api/settings — the backend view parses the effective backend + api_key_present.
+    // GET /api/settings — the backend view parses the global chat backend + api_key_present.
     #[tokio::test]
     #[serial_test::serial(bff_env)]
-    async fn fetch_backend_settings_parses_backend_and_key_flag() {
+    async fn fetch_backend_settings_parses_chat_backend_and_key_flag() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -933,7 +947,7 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/api/settings"))
             .respond_with(ResponseTemplate::new(200).set_body_json(
-                serde_json::json!({ "llm_backend": "api", "api_key_present": false }),
+                serde_json::json!({ "chat_backend": "api", "api_key_present": false }),
             ))
             .expect(1)
             .mount(&server)
@@ -944,7 +958,7 @@ mod tests {
         std::env::remove_var("CAMERATA_BFF_URL");
 
         let view = out.expect("backend settings parsed");
-        assert_eq!(view.llm_backend.as_deref(), Some("api"));
+        assert_eq!(view.chat_backend.as_deref(), Some("api"));
         assert!(!view.api_key_present);
     }
 
@@ -1239,10 +1253,10 @@ mod tests {
             html.contains("Background Animation"),
             "the Bombe settings section renders below; html=\n{html}"
         );
-        // The Claude backend control renders below the credentials too.
+        // The Chat backend control renders below the credentials too.
         assert!(
-            html.contains("Claude backend"),
-            "the Claude backend control renders; html=\n{html}"
+            html.contains("Chat backend"),
+            "the Chat backend control renders; html=\n{html}"
         );
         // The manual OpenRouter "Refresh models" control renders too — unconditionally,
         // unlike the credential rows above it (which wait on the resource).
@@ -1324,14 +1338,14 @@ mod tests {
         );
     }
 
-    // ModelBackendSettings consumes the toasts context and a use_resource. On first SSR
-    // render the resource is pending, so it renders the loading branch — but the "Claude
+    // ChatBackendSettings consumes the toasts context and a use_resource. On first SSR
+    // render the resource is pending, so it renders the loading branch, but the "Chat
     // backend" label is always present. The pure CLI/API + warning logic is unit-tested in
-    // camerata_ui_core::llm_backend; here we lock the label + loading scaffold.
+    // camerata_ui_core::backend; here we lock the label + loading scaffold.
     fn model_backend_harness() -> Element {
         use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
         rsx! {
-            ModelBackendSettings {}
+            ChatBackendSettings {}
         }
     }
 
@@ -1341,8 +1355,8 @@ mod tests {
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(
-            html.contains("Claude backend"),
-            "the Claude backend label renders; html=\n{html}"
+            html.contains("Chat backend"),
+            "the Chat backend label renders; html=\n{html}"
         );
         // use_resource is pending on first render → loading branch.
         assert!(
@@ -1351,16 +1365,16 @@ mod tests {
         );
     }
 
-    // The Anthropic key input is revealed inside ModelBackendSettings ONLY when the `api`
+    // The Anthropic key input is revealed inside ChatBackendSettings ONLY when the `api`
     // backend is selected. SSR keeps `use_resource` pending, so we can't drive the resolved
-    // branch here; instead we render the reveal sub-tree directly — a `CredentialRow` wired
+    // branch here; instead we render the reveal sub-tree directly, a `CredentialRow` wired
     // exactly as the API branch wires it (name `anthropic_api_key`, label "Anthropic API
-    // Key") — and, for the `cli` case, an empty tree. This locks the contract that the
+    // Key"), and, for the `cli` case, an empty tree. This locks the contract that the
     // Anthropic key input appears for API and is absent for CLI.
     #[component]
-    fn AnthropicKeyRevealProbe(backend: LlmBackend) -> Element {
+    fn AnthropicKeyRevealProbe(backend: ProjectBackend) -> Element {
         let toasts = use_signal(Vec::<crate::toast::Toast>::new);
-        if backend == LlmBackend::Api {
+        if backend == ProjectBackend::Api {
             rsx! {
                 CredentialRow {
                     name: ANTHROPIC_API_KEY.to_string(),
@@ -1378,13 +1392,13 @@ mod tests {
 
     fn anthropic_reveal_api_harness() -> Element {
         rsx! {
-            AnthropicKeyRevealProbe { backend: LlmBackend::Api }
+            AnthropicKeyRevealProbe { backend: ProjectBackend::Api }
         }
     }
 
     fn anthropic_reveal_cli_harness() -> Element {
         rsx! {
-            AnthropicKeyRevealProbe { backend: LlmBackend::Cli }
+            AnthropicKeyRevealProbe { backend: ProjectBackend::Cli }
         }
     }
 

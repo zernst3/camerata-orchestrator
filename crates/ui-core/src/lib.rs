@@ -7,10 +7,10 @@
 //! Extraction from `camerata-ui` is incremental (see `docs/plans/2026-07-01_ui-core-extraction.md`);
 //! modules are added here as each surface's logic moves over.
 
+pub mod backend;
 pub mod designs;
 pub mod git;
 pub mod govdev;
-pub mod llm_backend;
 pub mod models;
 pub mod provider_safety;
 pub mod readiness;
