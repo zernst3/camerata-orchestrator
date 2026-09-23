@@ -13,10 +13,16 @@
 //!
 //! Two axes:
 //! - **Vendor** (`CAMERATA_LLM_VENDOR`, default `anthropic`) — which provider.
-//! - **Transport** (`CAMERATA_LLM_BACKEND`, default `cli`) — for a vendor that offers
-//!   both: `cli` shells the vendor's CLI (the LOCAL path: a human's own login, no key);
-//!   `api` calls the vendor's HTTP API with a key (the PRODUCTION / multi-user path).
-//!   Anthropic offers both; other vendors are API-only.
+//! - **Transport** ([`Backend`]: `Cli` | `Api`) — for a vendor that offers both: `Cli` shells
+//!   the vendor's CLI (the LOCAL path: a human's own login, no key); `Api` calls the vendor's
+//!   HTTP API with a key (the metered, multi-party-safe path). Anthropic offers both; other
+//!   vendors are API-only. Per `docs/design/2026-09-22_per-project-backend.md` this axis is
+//!   NEVER read from an env var — every project-scoped call resolves it from
+//!   `project.backend`, and the project-less chat assistant from `settings.chat_backend`,
+//!   both via [`resolve_backend`], then builds the `Llm` explicitly with
+//!   [`Llm::from_env_with_backend`] (or its ledger-attached sibling). [`Llm::from_env`]
+//!   remains only as a Cli-default construction convenience for hermetic tests and any
+//!   caller with no project/chat context to resolve.
 //!
 //! Model selected by `CAMERATA_LLM_MODEL`, overridable per call (the research chat).
 
@@ -95,6 +101,13 @@ impl Vendor {
 /// `camerata-app-core` in the dependency graph (no cycle risk) while this module's own
 /// uses and every `crate::llm::DEFAULT_MODEL` call site keep resolving unchanged.
 pub use camerata_api_types::project::DEFAULT_MODEL;
+
+/// The per-project / chat backend selection (`Cli` | `Api`). Relocated to
+/// `camerata_api_types::project` (same relocation reasoning as [`DEFAULT_MODEL`] above) so
+/// `camerata_app_core::project::Project.backend` and `camerata_server::settings::Settings.
+/// chat_backend` share the exact same type as [`resolve_backend`] below. Re-exported here so
+/// `crate::llm::ProjectBackend` keeps resolving for every existing/new call site.
+pub use camerata_api_types::project::ProjectBackend;
 
 /// Force the `claude -p` CLI into a PURE, non-agentic, single-shot completion. The
 /// orchestrator's model calls reason over the prompt and return text (JSON for the audit);
@@ -666,105 +679,58 @@ fn cached_user_content(
     serde_json::json!(arr)
 }
 
-/// Which backend, resolved from env. Pure so it's unit-testable without real calls.
+/// Which backend a concrete [`Llm`] instance is wired to. Distinct from [`ProjectBackend`]:
+/// this is the LOW-LEVEL transport a built `Llm` actually uses; `ProjectBackend` is the
+/// SETTING (per-project or the global chat setting) that [`resolve_backend`] turns into one
+/// of these (or a [`BackendResolution::Blocked`] refusal, when it can't).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
     Cli,
     Api,
 }
 
-/// Decide the backend from the (optional) explicit preference and whether an API key is
-/// present. Explicit `api` wins when a key exists; explicit `cli` always wins; with no
-/// preference we default to the CLI (the local-human path) and only auto-pick the API
-/// when a key is set AND the CLI isn't the stated choice.
-pub fn select_backend(pref: Option<&str>, has_api_key: bool) -> Backend {
-    match pref.map(|p| p.trim().to_ascii_lowercase()).as_deref() {
-        Some("api") if has_api_key => Backend::Api,
-        Some("api") => Backend::Cli, // asked for API but no key -> fall back, never silently fail hard
-        Some("cli") => Backend::Cli,
-        _ => Backend::Cli,
-    }
-}
-
-/// The richer, PER-PROJECT-AWARE backend decision — the compliance-safety gate.
+/// The compliance-safety backend decision (`docs/design/2026-09-22_per-project-backend.md`).
 ///
-/// The CLI-vs-API choice is an auth/billing/compliance axis, not a model-quality axis:
-/// the CLI transport shells the operator's PERSONAL Claude Code subscription (personal
-/// account, consumer terms), while the API transport is commercial/metered/single-party.
-/// [`select_backend`] silently falls back to the CLI when an explicit API preference has
-/// no key — fine for the operator's own use, but a silent compliance downgrade for a
-/// client project: pick API, forget the key, and the client's code quietly flows through
-/// the operator's personal subscription. `resolve_backend` closes that gap with a second,
-/// independent guard — the project's `cli_active` flag — that must be explicitly ON before
-/// the CLI transport may be used AT ALL for that project, and it never falls back quietly:
-/// a fallback becomes a loud [`BackendResolution::CliFallbackWarn`], and a project that may
-/// only use the API hard-[`BackendResolution::Blocked`]s rather than downgrading.
-///
-/// `select_backend` is kept as-is (and still exercised by [`Llm::from_env`]) for the
-/// existing env-driven, single-operator path where there is no per-project flag to check;
-/// `resolve_backend` is the new, richer entry the enforcement seams (audit, gov-dev agent)
-/// call once a project is in scope.
+/// The CLI-vs-API choice is an auth/billing/compliance axis, not a model-quality axis: the
+/// CLI transport shells the operator's PERSONAL Claude Code subscription (personal account,
+/// consumer terms), while the API transport is commercial/metered/single-party. There is no
+/// silent fallback in either direction: an `Api` setting with no key never quietly downgrades
+/// to the CLI (that would be a silent compliance downgrade for a client project) — it hard
+/// blocks instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendResolution {
-    /// API selected, key present. Good — the client-safe chain.
+    /// `Api` selected, key present. The client-safe, metered chain.
     Api,
-    /// CLI selected, and the project has explicitly opted in (`cli_active == true`) with
-    /// `app_backend == "cli"`. Quiet — this is the intended personal-use path.
+    /// `Cli` selected. The zero-setup subscription path — no key needed.
     Cli,
-    /// The project wanted the API (`app_backend == "api"`) and has `cli_active == true`,
-    /// but no key is configured, so the call falls through to the CLI. NEVER silent: the
-    /// message must be surfaced to the human running the scan.
-    CliFallbackWarn { message: String },
-    /// The project is API-only (`cli_active == false`, the default) and no key is
-    /// configured. Hard stop — the caller must not start any model call.
+    /// `Api` selected, but no Anthropic key is configured. Hard stop — the caller must not
+    /// start any model call. The deterministic floor (and any other non-AI work) may still
+    /// run; only the AI step is skipped.
     Blocked { message: String },
 }
 
-/// Resolve the compliance-safety backend decision for one project, given:
-/// - `app_backend`: the configured preference (`"api"` / `"cli"` / anything else, from
-///   `effective_llm_backend` or the `CAMERATA_LLM_BACKEND` env at the call seam),
-/// - `has_api_key`: whether an Anthropic API key is present for this call,
-/// - `cli_active`: the PROJECT's `cli_active` flag — the master switch for whether the CLI
-///   transport may be used for this project at all.
+/// Resolve the compliance-safety backend decision from a single [`ProjectBackend`] setting
+/// (a project's `backend`, or the global chat assistant's `chat_backend` — both use this
+/// exact same function) plus whether an Anthropic API key is present. The WHOLE resolution,
+/// per `docs/design/2026-09-22_per-project-backend.md`:
 ///
-/// Implements EXACTLY the truth table in
-/// `docs/design/2026-08-27_backend-safety-and-live-models.md` (Feature B):
+/// | `backend` | key? | resolution |
+/// |---|---|---|
+/// | `Api` | yes | `Api` |
+/// | `Api` | no  | `Blocked` |
+/// | `Cli` | any | `Cli` |
 ///
-/// | `cli_active` | `app_backend` | key? | resolution |
-/// |---|---|---|---|
-/// | false (default) | any | yes | `Api` |
-/// | false (default) | any | no  | `Blocked` |
-/// | true | `api` | yes | `Api` |
-/// | true | `api` | no  | `CliFallbackWarn` |
-/// | true | `cli` (or anything else) | – | `Cli` |
-///
-/// `cli_active == false` FORCES API-only regardless of `app_backend` — even an explicit
-/// global `cli` preference is refused for that project: the client project can never touch
-/// the CLI transport, not as a fallback and not as an explicit choice.
-pub fn resolve_backend(app_backend: &str, has_api_key: bool, cli_active: bool) -> BackendResolution {
-    if !cli_active {
-        // The project has never opted into the CLI transport: API-only, no matter what
-        // `app_backend` asks for.
-        return if has_api_key {
-            BackendResolution::Api
-        } else {
-            BackendResolution::Blocked {
-                message: "This project is API-only (CLI disabled). Add an Anthropic API key to run."
-                    .to_string(),
-            }
-        };
-    }
-
-    // cli_active == true: the project has opted into the CLI transport, so the CLI is a
-    // legitimate destination — the remaining question is just what `app_backend` asked for.
-    match app_backend.trim().to_ascii_lowercase().as_str() {
-        "api" if has_api_key => BackendResolution::Api,
-        "api" => BackendResolution::CliFallbackWarn {
-            message: "Anthropic API key missing — falling back to the Claude CLI (your \
-                      personal subscription). Do not use for client code."
+/// No env reads, no cross-setting override, no CLI fallback: `backend` is the caller's
+/// entire input, already resolved from `project.backend` or `settings.chat_backend`.
+pub fn resolve_backend(backend: ProjectBackend, has_api_key: bool) -> BackendResolution {
+    match backend {
+        ProjectBackend::Cli => BackendResolution::Cli,
+        ProjectBackend::Api if has_api_key => BackendResolution::Api,
+        ProjectBackend::Api => BackendResolution::Blocked {
+            message: "This project is set to the Anthropic API backend, but no API key is \
+                      configured. Add an Anthropic API key (or switch the backend to Cli) to run."
                 .to_string(),
         },
-        _ => BackendResolution::Cli,
     }
 }
 
@@ -800,17 +766,21 @@ impl std::fmt::Debug for Llm {
 }
 
 impl Llm {
-    /// Build from env: `CAMERATA_LLM_VENDOR` (default anthropic), `CAMERATA_LLM_BACKEND`
-    /// (cli|api, default cli), `ANTHROPIC_API_KEY` (for the Anthropic api transport),
-    /// `CAMERATA_LLM_MODEL` (default model). No usage ledger attached (see
-    /// [`Llm::from_env_with_ledger`] for the cockpit's recording path).
-    pub fn from_env() -> Self {
+    /// Build with an EXPLICIT [`Backend`] — no env read for backend selection at all. Vendor
+    /// (`CAMERATA_LLM_VENDOR`, default anthropic), the Anthropic key (`ANTHROPIC_API_KEY`),
+    /// and the default model (`CAMERATA_LLM_MODEL`) still come from env exactly like the old
+    /// `from_env`; only the backend axis moved to an explicit parameter.
+    ///
+    /// This is the constructor every project-scoped or chat-scoped call site uses now
+    /// (`docs/design/2026-09-22_per-project-backend.md`): the caller resolves `Cli`/`Api`
+    /// itself — from `project.backend` or `settings.chat_backend` via [`resolve_backend`] —
+    /// and passes the resolved [`Backend`] in here. No usage ledger attached (see
+    /// [`Llm::from_env_with_backend_and_ledger`] for the cockpit's recording path).
+    pub fn from_env_with_backend(backend: Backend) -> Self {
         let vendor = Vendor::parse(std::env::var("CAMERATA_LLM_VENDOR").ok().as_deref());
-        let pref = std::env::var("CAMERATA_LLM_BACKEND").ok();
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .ok()
             .filter(|k| !k.trim().is_empty());
-        let backend = select_backend(pref.as_deref(), api_key.is_some());
         let default_model = std::env::var("CAMERATA_LLM_MODEL")
             .ok()
             .filter(|m| !m.trim().is_empty())
@@ -824,9 +794,27 @@ impl Llm {
         }
     }
 
-    /// Same as [`Llm::from_env`] but with the process-global usage ledger attached, so every
-    /// call this instance makes is recorded into the cumulative cockpit meter. This is the
-    /// constructor every HTTP handler / feature uses, so ALL LLM call paths feed one ledger.
+    /// Same as [`Llm::from_env_with_backend`] but with the process-global usage ledger
+    /// attached, so every call this instance makes is recorded into the cumulative cockpit
+    /// meter. This is the constructor every HTTP handler / feature uses, so ALL LLM call
+    /// paths feed one ledger.
+    pub fn from_env_with_backend_and_ledger(
+        backend: Backend,
+        ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>,
+    ) -> Self {
+        Self::from_env_with_backend(backend).with_ledger(ledger)
+    }
+
+    /// Construction-only convenience for callers that have not yet resolved a per-project or
+    /// chat backend (hermetic tests, and any remaining non-project misc call site): builds
+    /// with [`Backend::Cli`] — the zero-setup default both `project.backend` and
+    /// `settings.chat_backend` share — reading NO backend-selecting env var. Vendor/key/model
+    /// still come from env, same as [`Llm::from_env_with_backend`].
+    pub fn from_env() -> Self {
+        Self::from_env_with_backend(Backend::Cli)
+    }
+
+    /// Same as [`Llm::from_env`] but with the process-global usage ledger attached.
     pub fn from_env_with_ledger(
         ledger: std::sync::Arc<crate::usage_ledger::UsageLedger>,
     ) -> Self {
@@ -2253,69 +2241,41 @@ mod tests {
     }
 
     #[test]
-    fn backend_selection_rules() {
-        // Explicit api with a key -> api.
-        assert_eq!(select_backend(Some("api"), true), Backend::Api);
-        // Explicit api WITHOUT a key -> falls back to cli (never hard-fail silently).
-        assert_eq!(select_backend(Some("api"), false), Backend::Cli);
-        // Explicit cli -> cli regardless of key.
-        assert_eq!(select_backend(Some("cli"), true), Backend::Cli);
-        // No preference -> cli (the local-human default).
-        assert_eq!(select_backend(None, true), Backend::Cli);
-        assert_eq!(select_backend(None, false), Backend::Cli);
-        // Case / whitespace tolerant.
-        assert_eq!(select_backend(Some(" API "), true), Backend::Api);
+    fn resolve_backend_cli_is_always_quiet_regardless_of_key() {
+        // `Cli` never depends on key presence — it's the zero-setup subscription path.
+        assert_eq!(resolve_backend(ProjectBackend::Cli, true), BackendResolution::Cli);
+        assert_eq!(resolve_backend(ProjectBackend::Cli, false), BackendResolution::Cli);
     }
 
     #[test]
-    fn resolve_backend_cli_inactive_forces_api_only_regardless_of_app_backend() {
-        // cli_active == false (default, secure-by-default): API-only, no matter what
-        // app_backend asks for — even an explicit "cli" preference is refused.
-        assert_eq!(resolve_backend("api", true, false), BackendResolution::Api);
-        assert_eq!(resolve_backend("cli", true, false), BackendResolution::Api);
-        assert_eq!(resolve_backend("", true, false), BackendResolution::Api);
+    fn resolve_backend_api_with_key_resolves_api() {
+        assert_eq!(resolve_backend(ProjectBackend::Api, true), BackendResolution::Api);
+    }
 
-        for pref in ["api", "cli", "", "bogus"] {
-            match resolve_backend(pref, false, false) {
-                BackendResolution::Blocked { message } => {
-                    assert_eq!(
-                        message,
-                        "This project is API-only (CLI disabled). Add an Anthropic API key to run."
-                    );
-                }
-                other => panic!("expected Blocked for app_backend={pref:?}, got {other:?}"),
+    #[test]
+    fn resolve_backend_api_without_key_blocks_never_falls_back_to_cli() {
+        match resolve_backend(ProjectBackend::Api, false) {
+            BackendResolution::Blocked { message } => {
+                assert!(message.contains("Anthropic API"), "message: {message}");
             }
+            other => panic!("expected Blocked, got {other:?}"),
         }
     }
 
     #[test]
-    fn resolve_backend_cli_active_api_preference() {
-        // cli_active == true, app_backend == "api", key present -> Api.
-        assert_eq!(resolve_backend("api", true, true), BackendResolution::Api);
-        // Case / whitespace tolerant on app_backend.
-        assert_eq!(resolve_backend(" API ", true, true), BackendResolution::Api);
-
-        // cli_active == true, app_backend == "api", no key -> loud CliFallbackWarn.
-        match resolve_backend("api", false, true) {
-            BackendResolution::CliFallbackWarn { message } => {
-                assert_eq!(
-                    message,
-                    "Anthropic API key missing — falling back to the Claude CLI (your \
-                     personal subscription). Do not use for client code."
-                );
-            }
-            other => panic!("expected CliFallbackWarn, got {other:?}"),
+    fn from_env_with_backend_never_reads_camerata_llm_backend() {
+        // The old env-driven axis is gone: setting CAMERATA_LLM_BACKEND=api must NOT change
+        // the explicitly-requested backend on the built `Llm`.
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prior = std::env::var("CAMERATA_LLM_BACKEND").ok();
+        std::env::set_var("CAMERATA_LLM_BACKEND", "api");
+        let llm = Llm::from_env_with_backend(Backend::Cli);
+        assert_eq!(llm.backend, Backend::Cli, "explicit Cli must win over any env var");
+        match prior {
+            Some(v) => std::env::set_var("CAMERATA_LLM_BACKEND", v),
+            None => std::env::remove_var("CAMERATA_LLM_BACKEND"),
         }
-    }
-
-    #[test]
-    fn resolve_backend_cli_active_cli_preference_is_quiet() {
-        // cli_active == true, app_backend == "cli" -> quiet Cli, regardless of key.
-        assert_eq!(resolve_backend("cli", true, true), BackendResolution::Cli);
-        assert_eq!(resolve_backend("cli", false, true), BackendResolution::Cli);
-        // Anything other than exactly "api" behaves like "cli" once cli_active is on.
-        assert_eq!(resolve_backend("", true, true), BackendResolution::Cli);
-        assert_eq!(resolve_backend("bogus", false, true), BackendResolution::Cli);
     }
 
     #[test]

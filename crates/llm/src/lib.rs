@@ -38,7 +38,7 @@ pub mod usage_ledger;
 pub use credentials::{CredentialStore, KeyringCredentialStore, MemoryCredentialStore};
 pub use llm::{
     build_completer, call_with_fallback, Llm, LlmPort, LlmRequest, LlmResponse,
-    OpenRouterCompleter,
+    OpenRouterCompleter, ProjectBackend,
 };
 pub use model_registry::ModelRegistry;
 pub use provider_policy::{provider_constraint_for_request, ProviderPolicy, SafeProviders};
