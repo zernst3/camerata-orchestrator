@@ -1,7 +1,11 @@
 # ADR: In-app Claude backend setting (CLI vs API) with keychain-backed Anthropic key
 
 **Date:** 2026-07-02
-**Status:** Accepted (shipped)
+**Status:** SUPERSEDED by `docs/design/2026-09-22_per-project-backend.md` (the single global
+`llm_backend` toggle + env-var precedence described below is gone, replaced by a per-project
+`Project.backend` setting plus one separate global `chat_backend` used only by the chat
+assistant). The keychain-backed Anthropic key mechanics (§3) are unchanged. Kept as history of
+the first in-app version of this control.
 **Refines:** `2026-06-27` provider-agnostic agent runtime
 
 ## Context

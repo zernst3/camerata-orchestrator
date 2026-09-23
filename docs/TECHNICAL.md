@@ -824,10 +824,19 @@ Key design points:
   An OpenRouter key routes through `https://openrouter.ai/api/v1`; an Anthropic
   key routes directly. The Messages API shape is identical; only the base URL and
   `Authorization` header differ. For the Claude vendor specifically, the transport
-  is chosen by `CAMERATA_LLM_BACKEND` (default `cli`): set `CAMERATA_LLM_BACKEND=api`
-  with `ANTHROPIC_API_KEY` to run Camerata's Claude agents over the Anthropic Messages
-  API directly, with no Claude CLI installed (issue #110); otherwise the `ClaudeCliDriver`
-  drives `claude -p`.
+  (CLI subprocess vs this in-process driver) is no longer chosen by an env var — the
+  `CAMERATA_LLM_BACKEND` env var and its boot-time hydration are gone
+  (`docs/design/2026-09-22_per-project-backend.md`). Every project-scoped seam (the
+  brownfield scan, the alternative-recommendation pass, the disagreement rescan, and the
+  gov-dev driver) resolves the transport from that project's own `Project.backend` field
+  (`Cli` | `Api`, default `Cli`) via `resolve_backend_for_project` in
+  `crates/server/src/lib.rs`: `Cli` always drives `claude -p` through `ClaudeCliDriver`;
+  `Api` with `ANTHROPIC_API_KEY` present (keychain or env) runs Camerata's Claude agents
+  over the Anthropic Messages API directly with no Claude CLI installed (issue #110); `Api`
+  with no key resolves to `BackendResolution::Blocked` and the AI step does not run (the
+  deterministic floor still does). The project-less chat assistant resolves the same way
+  but from its own independent global setting, `settings.chat_backend`, never from any
+  project's `backend`.
 - **Per-model provider coupling**: a model always runs on its own provider's transport.
   When the fleet mixes models from different providers, each model is dispatched through
   the provider it belongs to rather than being forced onto one shared transport.

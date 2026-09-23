@@ -68,31 +68,50 @@ paths you use:
    ```bash
    export CAMERATA_GITHUB_TOKEN=github_pat_xxx
    ```
-2. **Model provider**: two paths, pick one:
+2. **Model provider**: the credentials behind each access path, both optional depending on which
+   path a project uses:
    - **Claude CLI (subscription):** the `claude` CLI on your PATH, logged in. Camerata drives it as
-     a subprocess (`ClaudeCliDriver`). Set `CAMERATA_LIVE_BUILD=1` to activate the live fleet.
+     a subprocess (`ClaudeCliDriver`). No key needed. Set `CAMERATA_LIVE_BUILD=1` to activate the
+     live fleet.
    - **API path (OpenRouter or Anthropic API):** set an **OpenRouter API key** in Settings (or
      `ANTHROPIC_API_KEY` for direct Anthropic). The `ApiAgentDriver` owns the MCP tool-use loop
      in-process and works with any provider the model registry discovers (Claude, and every
      OpenRouter-listed model flagged for tool use).
 
+   These credentials are global (one keychain entry each, shared by every project); which path is
+   actually **active** is a separate choice made **per project**, described in the next section.
+
 Launch:
 ```bash
 cargo run -p camerata-ui
 ```
-The desktop app opens with its embedded server; the topbar shows the live connection status and
-which provider path is active.
+The desktop app opens with its embedded server; the topbar shows the live connection status.
 
-### Claude backend
+### Backend: CLI vs API (per project)
 
-Camerata can call Claude in two ways, selected in **Settings → Claude backend**:
+Every project-scoped AI call, including the brownfield scan, the alternative-recommendation pass,
+the disagreement rescan, and the governed dev loop, is driven by that **project's own Backend
+setting**, not a global switch. Set it per project in that project's **Settings**:
 
 | Option | How it works | API key needed? |
 |--------|-------------|-----------------|
 | **CLI** (default) | Spawns the `claude` CLI using your logged-in Claude Code subscription | No |
-| **API** | Calls the Anthropic Messages API directly | Yes, enter it below |
+| **API** | Calls the Anthropic Messages API directly | Yes |
 
-When you select **API**, an **Anthropic API Key** input appears. Enter your key once; it is stored in the OS keychain (never in files or the repo) and hydrated into the server process automatically. If you select **API** but have not yet saved a key, the server falls back to CLI, and an inline warning stays visible until a key is present. The CLI path requires an active Claude Code subscription on the machine running Camerata; the API path works without one but consumes Anthropic API credits.
+CLI is the zero-setup default: a brand-new project's scan just works against your subscription,
+no key required. Switch a project to **API** for client work, since it is metered, single-party,
+and nameable in a contract, which a subscription running on your own machine is not.
+
+If a project is set to **API** and no Anthropic API key is configured, AI steps on that project
+do not run: the scan/audit page shows an **"AI review did not run"** banner explaining why, and
+the deterministic security floor still runs on its own. To unblock it, add an **Anthropic API
+Key** in **Settings** (stored in the OS keychain, never in files or the repo) or switch that
+project's backend back to **CLI**.
+
+**Chat backend (a separate, global setting).** One global toggle in **Settings**, labeled **Chat
+backend**, controls only the project-less chat assistant (the chatbox that lives outside any
+project). It does not affect any project's scan, recommendations, rescans, or dev loop: those
+always resolve from that project's own Backend setting above, never from the chat setting.
 
 **Local-first:** Camerata stores only configs + pointers (JSON in your OS app-data dir —
 `projects.json`, `settings.json`, `onboarding-draft.json`); your repo code lives on your own
@@ -293,9 +312,10 @@ fresh scan starts a new session; a crash mid-scan just re-runs the scan).
      where a foreground scan would tie up the page. (Parallel and Sequential run in the foreground and
      block until they finish; Background job is the same work, just detached.)
    - **Batch (50% off — async, API key required)** — submits all passes as a single **Anthropic
-     Message Batch**, for a flat **50% discount on all scan tokens**. Requires `ANTHROPIC_API_KEY` and
-     the `api` backend; results arrive asynchronously (seconds to minutes, up to 24h on very large
-     scans). Best when latency is acceptable in exchange for cost.
+     Message Batch**, for a flat **50% discount on all scan tokens**. Requires this project's backend
+     to be set to **API** with an Anthropic API key configured; results arrive asynchronously
+     (seconds to minutes, up to 24h on very large scans). Best when latency is acceptable in
+     exchange for cost.
 
    **Thorough calibration (opt-in checkbox).** Off by default. When ticked, the calibration pass
    that recalibrates AI-suggested severities runs as a **multi-vote consensus** instead of a single
@@ -1482,7 +1502,13 @@ scopes.
 ### Cross-project settings (apply to all projects)
 
 - **OpenRouter API key**: for API-path model access. Stored in the system keychain; shown masked.
+- **Anthropic API key**: needed by any project whose own Backend is set to **API** (see below), and
+  by the chat assistant when the **Chat backend** is set to API. Stored in the system keychain;
+  shown masked.
 - **GitHub token**: for push, PR, and Issues operations. Stored in the system keychain; shown masked.
+- **Chat backend**: a CLI/API toggle for the project-less **chat assistant only**. It has no effect
+  on any project's scan, alternative recommendations, rescans, or governed dev loop: those always
+  read that project's own Backend setting, described next.
 - **Bombe animation**: a global ON/OFF toggle and a Play/Pause preview control. ON by default;
   turning it off stops the background animation entirely. The preview lets you see the Bombe in motion
   (and pause it) without waiting for a real run to start.
@@ -1490,6 +1516,13 @@ scopes.
 ### Per-project model configuration
 
 Model configuration is the other half of the Settings page, scoped to the open project.
+
+#### Backend
+
+The first control in this section is **Backend**, the per-project CLI/API choice described in
+[§0](#0-credentials-the-only-setup). It governs every AI call this project makes: the scan, the
+alternative recommendations, rescans, and the governed dev loop. Switching it here takes effect
+immediately for this project only; other projects, and the chat assistant, are unaffected.
 
 #### Suggested profiles
 

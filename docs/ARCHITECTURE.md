@@ -49,6 +49,23 @@ boundary moved.
 > (the highlight and hint stay, the disabling behavior does not). See
 > [`docs/design/2026-09-22_audit-integrated-alternatives.md`](design/2026-09-22_audit-integrated-alternatives.md).
 
+> **Update (2026-09-22, per-project backend):** the `CAMERATA_LLM_BACKEND` env var, its
+> boot-time hydration in `lib.rs`, and the per-project `cli_active: bool` flag are gone. There
+> are now exactly two backend settings: `Project.backend: ProjectBackend { Cli, Api }`
+> (default `Cli`) is the source of truth for EVERY project-scoped model call — the brownfield
+> scan, the alternative-recommendation pass, the disagreement rescan, and the governed dev
+> loop — and `settings.chat_backend` (default `Cli`) is the ONE global setting, used only by the
+> project-less chat assistant. `resolve_backend_for_project` (`crates/server/src/lib.rs`)
+> resolves trivially: `Cli` -> `Cli`; `Api` with an Anthropic key present (keychain or env) ->
+> `Api`; `Api` with no key -> `Blocked`, which surfaces as the "AI review did not run" banner
+> while the deterministic floor still runs. No cross-setting override, no silent CLI fallback,
+> no env read on any project-scoped path. A project persisted with the old `cli_active` field
+> loads as `backend = Cli` on read (migration, not a live conversion). UI: a per-project
+> **Backend** control (`crate::cockpit::rules::BackendEditor`) replaces the old "Allow Claude
+> CLI" checkbox; the Settings page's global toggle is relabeled **"Chat backend"** and scoped
+> to the chat assistant only. See
+> [`docs/design/2026-09-22_per-project-backend.md`](design/2026-09-22_per-project-backend.md).
+
 ---
 
 ## The layer separation (post-#116/#117)
