@@ -46,6 +46,27 @@ pub fn default_routine_secs() -> u64 {
         .unwrap_or(DEFAULT_ROUTINE_STALL_SECS)
 }
 
+/// The backend a project (or the global chat assistant) uses for every one of its AI calls
+/// — see `docs/design/2026-09-22_per-project-backend.md`. Replaces the old per-project
+/// `cli_active: bool` compliance-safety flag AND the global `CAMERATA_LLM_BACKEND`-driven
+/// app preference: there are now exactly two backend SETTINGS in the whole app (this type
+/// used for both) and no env-driven third axis.
+///
+/// - **`Cli`** (the serde default AND the [`Default`] impl) — the Claude Code CLI, i.e. the
+///   operator's own logged-in subscription. No API key needed; a project (or the chat
+///   assistant) "just works" out of the box.
+/// - **`Api`** — the Anthropic Messages API. Needs `ANTHROPIC_API_KEY` (keychain or env). A
+///   missing key never falls back to the CLI — `resolve_backend` reports
+///   `BackendResolution::Blocked` and the caller must not start any model call. This is the
+///   compliant, metered, single-party chain nameable in a client contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ProjectBackend {
+    #[default]
+    Cli,
+    Api,
+}
+
 /// Per-project Layer-3 (agentic code-review) configuration (R7).
 ///
 /// Default: off, using the project's `balanced` tier model when enabled.

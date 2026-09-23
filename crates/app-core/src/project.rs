@@ -29,8 +29,8 @@ use camerata_fleet::tier::TierMap;
 /// (including `llm`'s `pub use camerata_app_core::project::DEFAULT_MODEL`) keeps
 /// resolving unchanged.
 pub use camerata_api_types::project::{
-    default_model, default_routine_secs, default_watched_secs, L3ReviewConfig, StallThresholds,
-    StepModels, DEFAULT_MODEL, DEFAULT_ROUTINE_STALL_SECS,
+    default_model, default_routine_secs, default_watched_secs, L3ReviewConfig, ProjectBackend,
+    StallThresholds, StepModels, DEFAULT_MODEL, DEFAULT_ROUTINE_STALL_SECS,
 };
 
 /// The NON-FLEET AI steps whose model is configured per-project on [`StepModels`].
@@ -365,27 +365,30 @@ pub struct Project {
     /// `docs/plans/2026-06-30_epic-design-page.md`.
     #[serde(default = "default_hierarchy_schema")]
     pub hierarchy_schema: HierarchySchema,
-    /// The compliance-safety master switch for the CLI transport (Feature B, the
-    /// backend-safety gate — see `docs/design/2026-08-27_backend-safety-and-live-models.md`).
+    /// The backend this project's AI calls use — the source of truth for EVERY project-scoped
+    /// model call (the brownfield scan, the alternative recommendation pass, the disagreement
+    /// rescan, and the governed dev loop). See
+    /// `docs/design/2026-09-22_per-project-backend.md`. Replaces the old `cli_active: bool`
+    /// compliance-safety flag AND the global `CAMERATA_LLM_BACKEND`-driven app preference that
+    /// used to also apply to project work — there is no cross-setting override anymore.
     ///
-    /// **OFF (the default, serde-default `false`)** means this project is API-ONLY: every
-    /// AI call (audit, gov-dev agent) must ride the Anthropic API — a missing key is a hard
-    /// block, never a silent fallback to the CLI. This is the client-safe default, because
-    /// the CLI transport shells the operator's PERSONAL Claude Code subscription (personal
-    /// account, consumer terms) — not a chain nameable in a client contract.
+    /// **`Cli` (the default)** — the Claude Code subscription; no key needed; a scan "just
+    /// works" out of the box.
     ///
-    /// **ON** permits the personal-subscription CLI for this project: an explicit `cli`
-    /// preference runs quietly, and an `api` preference with no key falls back to the CLI
-    /// with a loud, visible warning rather than blocking. Intended for the operator's own,
-    /// non-client repos only.
+    /// **`Api`** — the Anthropic API; needs a key. A missing key means the AI does not run at
+    /// all (`camerata_llm::BackendResolution::Blocked`) — never a silent fallback to the CLI.
+    /// The deterministic floor still runs and the "AI review did not run" banner shows. This
+    /// is the whole client-safety story now, expressed per project: set a CLIENT project's
+    /// backend to `Api` (metered, single-party, no-train, nameable in a contract).
     ///
-    /// Serde default fills in `false` for every project persisted before this field existed
-    /// — no migration required, but this IS a live behavior change: an existing project that
-    /// was previously running scans on the CLI default with no key will now block until the
-    /// operator either adds an Anthropic key or flips this ON. See
-    /// `camerata_llm::resolve_backend` for the resolution logic this flag feeds.
+    /// MIGRATION: a project persisted before this field existed carried `cli_active: bool`
+    /// instead (default `false`, i.e. API-only). `#[serde(default)]` here means an ABSENT
+    /// `backend` key deserializes to `Cli` — the new default — regardless of whatever
+    /// `cli_active` value sits alongside it in the same JSON blob: `cli_active` is simply an
+    /// unknown, ignored key (`Project` carries no `#[serde(deny_unknown_fields)]`). See
+    /// `legacy_cli_active_key_is_ignored_and_backend_defaults_to_cli` for the migration test.
     #[serde(default)]
-    pub cli_active: bool,
+    pub backend: ProjectBackend,
 }
 
 /// One agent operating principle: a single imperative line the governed agent is held to (about
@@ -878,7 +881,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
-            cli_active: false,
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset {
                 selections: vec![sel("OLD-1")],
                 cross_repo: vec![],
@@ -918,7 +921,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
-            cli_active: false,
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset {
                 selections,
                 cross_repo: vec![],
@@ -1007,7 +1010,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
-            cli_active: false,
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset {
                 selections: vec![],
                 cross_repo: vec![],
@@ -1088,7 +1091,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
-            cli_active: false,
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset {
                 custom: vec![custom("a", "A1"), custom("b", "B1")],
                 ..Default::default()
@@ -1130,7 +1133,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
-            cli_active: false,
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset {
                 custom: vec![custom("keep", "K"), custom("gone", "G")],
                 ..Default::default()
@@ -1165,7 +1168,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
-            cli_active: false,
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset::default(),
         };
         p.set_max_iterations(5);
@@ -1191,11 +1194,11 @@ mod tests {
     }
 
     #[test]
-    fn cli_active_defaults_to_false_when_absent_from_persisted_json() {
-        // A project JSON written before this field existed (or any project export that
-        // doesn't carry it) must deserialize as `cli_active: false` — the secure-by-default,
-        // API-only posture (Feature B, the backend-safety gate). Mirrors the
-        // max_iterations/step_models/tier_map back-compat tests above.
+    fn backend_defaults_to_cli_when_absent_from_persisted_json() {
+        // A project JSON written before `backend` existed (or any project export that
+        // doesn't carry it) must deserialize as `backend: Cli` — the new zero-setup
+        // subscription default. Mirrors the max_iterations/step_models/tier_map back-compat
+        // tests above.
         let json = r#"{
             "id": "proj-1",
             "name": "Legacy",
@@ -1204,19 +1207,58 @@ mod tests {
             "onboarded": []
         }"#;
         let p: Project = serde_json::from_str(json).unwrap();
-        assert!(!p.cli_active, "cli_active must default to false (API-only) when absent");
+        assert_eq!(p.backend, ProjectBackend::Cli, "backend must default to Cli when absent");
 
-        // An explicit `true` in the JSON round-trips correctly.
-        let json_on = r#"{
+        // An explicit `"api"` in the JSON round-trips correctly.
+        let json_api = r#"{
             "id": "proj-2",
-            "name": "Personal",
+            "name": "Client",
+            "repos": [],
+            "ruleset": {},
+            "onboarded": [],
+            "backend": "api"
+        }"#;
+        let p_api: Project = serde_json::from_str(json_api).unwrap();
+        assert_eq!(p_api.backend, ProjectBackend::Api);
+    }
+
+    /// MIGRATION (per `docs/design/2026-09-22_per-project-backend.md`): a project persisted
+    /// by the OLD `cli_active: bool` model (no `backend` key at all) must load as
+    /// `backend = Cli` — the legacy `cli_active` key is simply an unknown, ignored field
+    /// (`Project` has no `#[serde(deny_unknown_fields)]`), regardless of whether it was
+    /// `true` or `false` in the persisted blob.
+    #[test]
+    fn legacy_cli_active_key_is_ignored_and_backend_defaults_to_cli() {
+        let json_cli_active_false = r#"{
+            "id": "proj-1",
+            "name": "Legacy",
+            "repos": [],
+            "ruleset": {},
+            "onboarded": [],
+            "cli_active": false
+        }"#;
+        let p: Project = serde_json::from_str(json_cli_active_false).unwrap();
+        assert_eq!(
+            p.backend,
+            ProjectBackend::Cli,
+            "a legacy cli_active=false project must migrate to backend=Cli, the new default"
+        );
+
+        let json_cli_active_true = r#"{
+            "id": "proj-2",
+            "name": "Legacy",
             "repos": [],
             "ruleset": {},
             "onboarded": [],
             "cli_active": true
         }"#;
-        let p_on: Project = serde_json::from_str(json_on).unwrap();
-        assert!(p_on.cli_active);
+        let p2: Project = serde_json::from_str(json_cli_active_true).unwrap();
+        assert_eq!(
+            p2.backend,
+            ProjectBackend::Cli,
+            "a legacy cli_active=true project must ALSO migrate to backend=Cli — cli_active is \
+             an ignored unknown key, not consulted at all"
+        );
     }
 
     #[test]
@@ -1238,7 +1280,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
-            cli_active: false,
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset {
                 selections: vec![sel("R-1")],
                 cross_repo: vec![sel("INTEGRATION-API-CONTRACT-1")],
@@ -1305,7 +1347,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
-            cli_active: false,
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset::default(),
         };
         original.set_model_for_step(StepKind::Decomposition, "claude-opus-5".into());
@@ -1391,7 +1433,7 @@ mod tests {
             operating_principles: Vec::new(),
             memory: Vec::new(),
             hierarchy_schema: HierarchySchema::default(),
-            cli_active: false,
+            backend: ProjectBackend::Cli,
             ruleset: ProjectRuleset::default(),
         };
         let json = serde_json::to_string(&original).unwrap();
