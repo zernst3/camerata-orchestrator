@@ -1845,8 +1845,8 @@ async fn run_passes_batch(
 
     if llm.api_key().is_none() {
         anyhow::bail!(
-            "batch mode requires the `api` backend with ANTHROPIC_API_KEY set; \
-             set CAMERATA_LLM_BACKEND=api and ANTHROPIC_API_KEY, or use parallel mode"
+            "batch mode requires the Api backend with ANTHROPIC_API_KEY set; \
+             switch this project's backend to Api and add an Anthropic API key, or use parallel mode"
         );
     }
 

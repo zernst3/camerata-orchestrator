@@ -290,9 +290,21 @@ impl AppState {
     }
 
     /// A clone of the shared `Llm` seam WITH the process-global usage ledger attached, so any
-    /// model call made through it is recorded into the cumulative cockpit meter. Every handler
-    /// that needs the LLM goes through this (instead of bare `Llm::from_env`) so the ledger
-    /// sees ALL call paths. Reads vendor/transport/model from the environment, same as before.
+    /// model call made through it is recorded into the cumulative cockpit meter. Reads
+    /// vendor/key/model from the environment, same as before; the TRANSPORT is fixed to
+    /// `Backend::Cli` (`Llm::from_env`'s new default per
+    /// `docs/design/2026-09-22_per-project-backend.md` — no `CAMERATA_LLM_BACKEND` env read
+    /// exists anymore).
+    ///
+    /// This is the FLOOR constructor for call sites that have not (yet) been threaded with an
+    /// explicit per-project or chat backend — today: the non-fleet AI steps driven purely by
+    /// `state.projects.active()`'s per-step model (decomposition, clarification, story
+    /// authoring, escalation), the L3/integration-gate advisory calls inside the governed dev
+    /// loop, and misc content generation (PR title/body, HTML report rendering). The five
+    /// NAMED seams (brownfield scan, alternative recommendation, rescan, the gov-dev agent
+    /// driver, and the chat assistant) do NOT use this — they resolve `project.backend` /
+    /// `settings.chat_backend` explicitly and call `Llm::from_env_with_backend_and_ledger`
+    /// themselves.
     pub fn llm(&self) -> crate::llm::Llm {
         crate::llm::Llm::from_env_with_ledger(self.usage_ledger.clone())
     }
@@ -724,14 +736,10 @@ impl AppState {
             // rest of `Settings`. See `SettingsStore::reset_provider_policy_to_safe_on_startup`
             // for the full mechanism note — this is the one call site.
             state.settings.reset_provider_policy_to_safe_on_startup();
-            // Hydrate the LLM-backend env var from the persisted setting so the existing
-            // env-driven selection sites (`Llm::from_env`, the agent driver's
-            // `anthropic_api_backend_key`) honor the stored choice unchanged. Making the
-            // stored setting authoritative on boot gives the precedence: setting > `.env` >
-            // default `cli`. Edition 2021, so `set_var` is safe (single-threaded startup).
-            if let Some(backend) = state.settings.llm_backend() {
-                std::env::set_var("CAMERATA_LLM_BACKEND", backend);
-            }
+            // No backend env hydration anymore (`docs/design/2026-09-22_per-project-backend.md`):
+            // there is no `CAMERATA_LLM_BACKEND` env var to hydrate. Every project-scoped call
+            // resolves its `Llm` from `project.backend` and the chat path from
+            // `state.settings.chat_backend()`, both read directly at the call seam.
             state.draft = crate::draft::DraftStore::at(dir.join("onboarding-draft.json"));
             state.uow = crate::uow::UowStore::at(dir.join("uow.json"));
             // Clarifications persist too: every open structured question is a resumable
@@ -981,8 +989,8 @@ pub fn router(state: AppState) -> Router {
         )
         // Per-step model config: set the model for one NON-FLEET AI step on this project.
         .route("/api/projects/:id/step-models", post(set_step_model))
-        // Compliance-safety gate: per-project CLI-transport master switch (Feature B).
-        .route("/api/projects/:id/cli-active", post(set_cli_active_handler))
+        // Per-project backend (docs/design/2026-09-22_per-project-backend.md): Cli | Api.
+        .route("/api/projects/:id/backend", post(set_backend_handler))
         // Stall-detection thresholds: per-project idle timeout config.
         .route("/api/projects/:id/stall-thresholds", post(set_stall_thresholds_handler))
         // Audit-integrated alternative recommendation (docs/design/2026-09-22_audit-
@@ -1103,7 +1111,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/settings", get(get_settings))
         .route("/api/settings/workspace", post(set_workspace_root))
         .route("/api/settings/chat-model", post(set_chat_model))
-        .route("/api/settings/llm-backend", post(set_llm_backend))
+        .route("/api/settings/chat-backend", post(set_chat_backend_handler))
         // Pass 2 (provider-safety UI): the settings-panel "Data safety" toggle + pin.
         .route("/api/settings/provider-policy", post(set_provider_policy_handler))
         .route(
@@ -2348,11 +2356,11 @@ async fn start_governed_run(
                     let live_policy = state.settings.provider_policy();
                     let live_creds = state.credential_store.clone();
                     let live_limiter = state.rate_limiter.clone();
-                    // Feature B — the compliance-safety gate: the active project's `cli_active`
-                    // flag, threaded into the lead/child driver factory. No active project
-                    // floors to `cli_active=false` (as strict as a freshly-created project).
-                    let live_cli_active =
-                        state.projects.active().map(|p| p.cli_active).unwrap_or(false);
+                    // The compliance-safety gate: the active project's backend setting,
+                    // threaded into the lead/child driver factory. No active project floors
+                    // to `ProjectBackend::Cli` (the same zero-setup default a fresh project gets).
+                    let live_backend =
+                        state.projects.active().map(|p| p.backend).unwrap_or_default();
                     // LIFECYCLE-1: register the abort handle so a Stop reaps the greenfield
                     // fleet's live agent subprocesses (kill_on_drop). Cleared on finish.
                     let runs_for_clear = state.runs.clone();
@@ -2372,7 +2380,7 @@ async fn start_governed_run(
                             live_policy,
                             live_creds,
                             live_limiter,
-                            live_cli_active,
+                            live_backend,
                         )
                         .await;
                         runs_for_clear.clear_abort(&rid_for_clear);
@@ -4104,25 +4112,37 @@ async fn set_step_model(
     }
 }
 
-/// Body for `POST /api/projects/:id/cli-active`: the new value of the project's
-/// compliance-safety `cli_active` master switch (Feature B, the backend-safety gate).
+/// Body for `POST /api/projects/:id/backend`: the project's new backend setting
+/// (`docs/design/2026-09-22_per-project-backend.md`). `backend` must be `"cli"` or `"api"`
+/// (case-insensitive, trimmed); anything else is rejected with `{ ok: false, message }`.
 #[derive(serde::Deserialize)]
-struct SetCliActiveReq {
-    /// `false` (the default) = API-only for this project, missing key hard-blocks.
-    /// `true` = the operator's personal-subscription CLI may be used for this project.
-    active: bool,
+struct SetProjectBackendReq {
+    backend: String,
 }
 
-/// `POST /api/projects/:id/cli-active` — flip the per-project `cli_active` compliance
-/// switch. Mirrors `set_step_model`'s shape exactly: same `State`/`Path`/`Json` extraction,
-/// same `{ ok, project }` / `{ ok: false, message }` response shape, no HTTP-status
-/// signaling — the UI reads `ok` + `message`.
-async fn set_cli_active_handler(
+/// `POST /api/projects/:id/backend` — set the project's AI backend. `Cli` (the default) runs
+/// on the Claude Code subscription (no key needed); `Api` runs on the Anthropic API and
+/// hard-blocks — never silently falls back to the CLI — when no key is configured. This is
+/// the source of truth for EVERY project-scoped model call (scan, alternative
+/// recommendation, rescan, governed dev loop). Mirrors `set_step_model`'s shape exactly:
+/// same `State`/`Path`/`Json` extraction, same `{ ok, project }` / `{ ok: false, message }`
+/// response shape, no HTTP-status signaling — the UI reads `ok` + `message`.
+async fn set_backend_handler(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(req): Json<SetCliActiveReq>,
+    Json(req): Json<SetProjectBackendReq>,
 ) -> Json<serde_json::Value> {
-    match state.projects.set_cli_active(&id, req.active) {
+    let backend = match req.backend.trim().to_ascii_lowercase().as_str() {
+        "cli" => crate::project::ProjectBackend::Cli,
+        "api" => crate::project::ProjectBackend::Api,
+        _ => {
+            return Json(serde_json::json!({
+                "ok": false,
+                "message": format!("invalid backend: {:?} (expected \"cli\" or \"api\")", req.backend)
+            }));
+        }
+    };
+    match state.projects.set_backend(&id, backend) {
         Some(p) => Json(serde_json::json!({ "ok": true, "project": p })),
         None => Json(serde_json::json!({ "ok": false, "message": "no such project" })),
     }
@@ -4182,10 +4202,10 @@ struct RescanAlternativesReq {
 /// every `chosen_option_id` is a real option on it BEFORE any model call — an invalid
 /// override is reported in `message` and simply excluded from the batch (the valid ones still
 /// run). Routes through the SAME compliance-safety gate as the main audit
-/// (`resolve_backend_for_project` -> `Blocked` refuses with the message, `CliFallbackWarn`
-/// proceeds on the CLI with a loud warning folded into `message`) and builds its `Llm` via
-/// `from_env_with_ledger`, so this endpoint's spend folds into the same cumulative ledger as
-/// every other model call.
+/// (`resolve_backend_for_project` -> `Blocked` refuses with the message; `Api`/`Cli` build the
+/// `Llm` on that EXACT resolved transport) and builds its `Llm` via
+/// `from_env_with_backend_and_ledger`, so this endpoint's spend folds into the same cumulative
+/// ledger as every other model call.
 ///
 /// Also updates this project's stored `last_scan` in place: the rescanned rules' findings
 /// replace their previous entries and `recommendations` is updated for those rule ids
@@ -4280,20 +4300,21 @@ async fn rescan_alternatives_handler(
         .filter(|(rid, _)| alternatives_by_rule.contains_key(rid))
         .collect();
 
-    // Feature B — the SAME compliance-safety gate the main audit uses.
+    // The SAME compliance-safety gate the main audit uses.
     let backend_resolution = resolve_backend_for_project(&state, Some(&project));
-    if let crate::llm::BackendResolution::Blocked { message } = &backend_resolution {
-        return Json(serde_json::json!({ "ok": false, "message": message }));
-    }
+    let llm_backend = match &backend_resolution {
+        crate::llm::BackendResolution::Blocked { message } => {
+            return Json(serde_json::json!({ "ok": false, "message": message }));
+        }
+        crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
+        crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
+    };
     let mut run_notes: Vec<String> = invalid
         .iter()
         .map(|m| format!("skipped invalid override — {m}"))
         .collect();
-    if let crate::llm::BackendResolution::CliFallbackWarn { message } = &backend_resolution {
-        run_notes.push(format!("⚠ COMPLIANCE: {message}"));
-    }
 
-    let llm = crate::llm::Llm::from_env_with_ledger(state.usage_ledger.clone());
+    let llm = crate::llm::Llm::from_env_with_backend_and_ledger(llm_backend, state.usage_ledger.clone());
     let (sources, source_notes) = resolve_local_sources(&state, &project.repos);
     run_notes.extend(source_notes);
 
@@ -5139,9 +5160,9 @@ async fn onboard_audit(
     } else {
         None
     };
-    // Feature B — the compliance-safety gate: resolve BEFORE the scan runs, from the app's
-    // configured backend, whether an Anthropic key is present, and this project's own
-    // `cli_active` flag. See `resolve_backend_for_project`'s doc comment.
+    // The compliance-safety gate: resolve BEFORE the scan runs, from this project's own
+    // `backend` setting and whether an Anthropic key is present. See
+    // `resolve_backend_for_project`'s doc comment.
     let backend_resolution = resolve_backend_for_project(&state, active_project.as_ref());
     let (mut report, manifest) = crate::onboard::audit_repos(
         &sources,
@@ -5561,9 +5582,9 @@ async fn onboard_audit_start(
     let project_id = active_project.as_ref().map(|p| p.id.clone());
     let job_id = state.jobs.create("audit", project_id.clone());
     state.transcripts.clear(SCAN_AUDIT_KEY);
-    // Feature B — the compliance-safety gate: resolved up front (same as the synchronous
-    // `onboard_audit` handler) from the app's configured backend, key presence, and this
-    // project's `cli_active` flag, then moved into the spawned task below.
+    // The compliance-safety gate: resolved up front (same as the synchronous `onboard_audit`
+    // handler) from this project's `backend` setting and key presence, then moved into the
+    // spawned task below.
     let backend_resolution = resolve_backend_for_project(&state, active_project.as_ref());
     // Audit-integrated alternative recommendation: this project's persisted chosen options,
     // computed up front (like `backend_resolution`) and moved into the spawned task below.
@@ -9292,49 +9313,37 @@ fn anthropic_api_key_present(store: &dyn crate::credentials::CredentialStore) ->
         .unwrap_or(false)
 }
 
-/// The effective LLM backend the app will use: the stored setting if present, else the
-/// current `CAMERATA_LLM_BACKEND` env var, else the `"cli"` default. Mirrors the precedence
-/// the boot-time hydration establishes (setting > `.env` > default).
-fn effective_llm_backend(settings: &crate::settings::SettingsStore) -> String {
-    settings
-        .llm_backend()
-        .or_else(|| {
-            std::env::var("CAMERATA_LLM_BACKEND")
-                .ok()
-                .filter(|b| !b.trim().is_empty())
-        })
-        .unwrap_or_else(|| "cli".to_string())
-}
-
 /// Whether the model-registry picker should be served the LIVE Anthropic `/v1/models`
-/// list (Feature A, see `docs/design/2026-08-27_backend-safety-and-live-models.md`)
-/// rather than the hardcoded `CLAUDE_REGISTRY_MODELS` catalog. `true` exactly when the
-/// effective LLM backend is `"api"` AND an Anthropic key is present — the CLI backend
-/// always gets the hardcoded list regardless of this check (the CLI/subscription model
-/// set is not the API `/v1/models` set), and `ModelRegistry::claude_entries_for_backend`
-/// separately fails soft to hardcoded even when this returns `true`, if the live cache
-/// hasn't been populated yet or the last fetch failed.
+/// list rather than the hardcoded `CLAUDE_REGISTRY_MODELS` catalog. `true` exactly when the
+/// global CHAT backend (`settings.chat_backend` — see
+/// `docs/design/2026-09-22_per-project-backend.md`) is `Api` AND an Anthropic key is
+/// present — the CLI backend always gets the hardcoded list regardless of this check (the
+/// CLI/subscription model set is not the API `/v1/models` set), and
+/// `ModelRegistry::claude_entries_for_backend` separately fails soft to hardcoded even when
+/// this returns `true`, if the live cache hasn't been populated yet or the last fetch
+/// failed. This is deliberately keyed off the CHAT setting, not any project's: the model
+/// picker this feeds is a cross-project/app-level surface, so it mirrors the one other
+/// app-level backend setting rather than an arbitrary project's.
 fn use_live_anthropic_models(state: &AppState) -> bool {
-    effective_llm_backend(&state.settings) == "api"
+    state.settings.chat_backend() == crate::llm::ProjectBackend::Api
         && anthropic_api_key_present(state.credential_store.as_ref())
 }
 
-/// Resolve the Feature-B compliance-safety backend decision (see
-/// `docs/design/2026-08-27_backend-safety-and-live-models.md`) for `project`. Centralizes the
-/// three-input gather — `effective_llm_backend` (the app's configured preference),
-/// `anthropic_api_key_present` (keychain or env), and the PROJECT's own `cli_active` flag —
-/// so every enforcement seam (the audit, the gov-dev agent driver) assembles the resolution
-/// identically and can't drift. `project = None` (no active/target project) is treated as
-/// `cli_active = false` — the same secure-by-default floor as a freshly-created project, so a
-/// project-less call is never accidentally more permissive than a real one.
+/// Resolve the compliance-safety backend decision (see
+/// `docs/design/2026-09-22_per-project-backend.md`) for `project`. Centralizes the
+/// two-input gather — the PROJECT's own `backend` setting and `anthropic_api_key_present`
+/// (keychain or env) — so every enforcement seam (the audit, the gov-dev agent driver)
+/// assembles the resolution identically and can't drift. `project = None` (no active/target
+/// project) is treated as `ProjectBackend::Cli` — the same zero-setup default a
+/// freshly-created project gets, so a project-less call is never MORE restrictive than a
+/// real one either.
 fn resolve_backend_for_project(
     state: &AppState,
     project: Option<&crate::project::Project>,
 ) -> crate::llm::BackendResolution {
-    let app_backend = effective_llm_backend(&state.settings);
     let has_api_key = anthropic_api_key_present(state.credential_store.as_ref());
-    let cli_active = project.map(|p| p.cli_active).unwrap_or(false);
-    crate::llm::resolve_backend(&app_backend, has_api_key, cli_active)
+    let backend = project.map(|p| p.backend).unwrap_or_default();
+    crate::llm::resolve_backend(backend, has_api_key)
 }
 
 /// Every rule's PROJECT-level chosen alternative option, keyed by uppercased rule id —
@@ -9363,20 +9372,20 @@ fn project_chosen_options(
 }
 
 /// The `GET /api/settings` response: the persisted [`crate::settings::Settings`] fields, plus
-/// two derived fields the settings UI needs — the EFFECTIVE `llm_backend` (stored, else env,
-/// else `cli`) and whether an Anthropic API key is present (for the api-backend warning).
+/// whether an Anthropic API key is present (for the api-backend warning).
 ///
-/// The settings fields are listed explicitly (not `#[serde(flatten)]`) so the top-level
-/// `llm_backend` — the EFFECTIVE value — is the single authoritative one, with no duplicate
-/// JSON key from the stored `Settings::llm_backend`.
+/// `chat_backend` (`docs/design/2026-09-22_per-project-backend.md`) is the GLOBAL backend
+/// used ONLY by the project-less chat assistant — it has no bearing on any project's own
+/// scan/dev-loop backend, which lives on `Project.backend` instead (see
+/// `GET`/the per-project `backend` field on each project response).
 #[derive(serde::Serialize)]
 struct SettingsResp {
     workspace_root: Option<String>,
     repo_paths: std::collections::HashMap<String, String>,
     chat_model: Option<String>,
-    /// The effective backend (`"cli"` | `"api"`) after applying precedence
-    /// (stored setting > env > default). This is the value the UI reads and toggles.
-    llm_backend: String,
+    /// The global chat assistant's backend (`"cli"` | `"api"`). This is the value the
+    /// Settings UI reads and toggles; it affects ONLY the chatbox, never a project.
+    chat_backend: crate::llm::ProjectBackend,
     /// Whether an Anthropic API key is available — in the keychain (the
     /// `anthropic_api_key` credential) or the `ANTHROPIC_API_KEY` env var. See
     /// [`anthropic_api_key_present`].
@@ -9388,16 +9397,15 @@ struct SettingsResp {
     pinned_provider: Option<String>,
 }
 
-/// The current app settings (incl. the workspace root), plus the effective LLM backend and
+/// The current app settings (incl. the workspace root), the global chat backend, and
 /// whether an Anthropic API key is present.
 async fn get_settings(State(state): State<AppState>) -> Json<SettingsResp> {
     let settings = state.settings.get();
-    let llm_backend = effective_llm_backend(&state.settings);
     Json(SettingsResp {
         workspace_root: settings.workspace_root,
         repo_paths: settings.repo_paths,
         chat_model: settings.chat_model,
-        llm_backend,
+        chat_backend: settings.chat_backend,
         api_key_present: anthropic_api_key_present(state.credential_store.as_ref()),
         safe_mode: settings.provider_policy.safe_mode,
         pinned_provider: settings.provider_policy.pinned_provider,
@@ -9432,38 +9440,38 @@ async fn set_chat_model(
 }
 
 #[derive(serde::Deserialize)]
-struct LlmBackendReq {
+struct ChatBackendReq {
     backend: String,
 }
 
-/// Set the APP-LEVEL LLM backend (`"cli"` | `"api"`). Persists the choice to the settings
-/// store, which is the single source of truth the driver-selection path reads at run-build
-/// time (via [`AppState::settings`]). Rejects any value other than `"cli"`/`"api"` with 400.
-/// Returns the stored backend plus `api_key_present` so the UI can immediately warn when
-/// `api` is selected with no Anthropic key.
+/// `POST /api/settings/chat-backend` — set the GLOBAL CHAT backend (`"cli"` | `"api"`), used
+/// ONLY by the project-less chatbox assistant (`docs/design/2026-09-22_per-project-backend.md`).
+/// Persists the choice to the settings store, which is the single source of truth the chat
+/// path reads at call time (via [`AppState::settings`]). Rejects any value other than
+/// `"cli"`/`"api"` with 400. Returns the stored backend plus `api_key_present` so the UI can
+/// immediately warn when `api` is selected with no Anthropic key.
 ///
-/// ROUTES-9: this handler used to `std::env::set_var("CAMERATA_LLM_BACKEND", ...)` so a
-/// runtime backend switch took effect without a restart. That mutated process-global env
-/// from a request-handler thread while worker threads called `getenv` on the same var —
-/// undefined behaviour on POSIX, and the concurrent writer made the credential env-fallback
-/// test flaky. The env write is gone: the effective backend is now read from the persisted
-/// settings store (see `effective_backend_from`), so a runtime switch still takes effect
-/// without a restart AND without touching process env.
-async fn set_llm_backend(
+/// Never touches process env: the effective backend is read straight from the persisted
+/// settings store, so a runtime switch takes effect immediately without a restart AND
+/// without the POSIX `set_var`/`getenv` race a prior env-hydrated design had.
+async fn set_chat_backend_handler(
     State(state): State<AppState>,
-    Json(req): Json<LlmBackendReq>,
+    Json(req): Json<ChatBackendReq>,
 ) -> impl IntoResponse {
-    let backend = req.backend.trim().to_ascii_lowercase();
-    if backend != "cli" && backend != "api" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "ok": false,
-                "message": format!("invalid backend: {:?} (expected \"cli\" or \"api\")", req.backend)
-            })),
-        );
-    }
-    state.settings.set_llm_backend(Some(backend.clone()));
+    let backend = match req.backend.trim().to_ascii_lowercase().as_str() {
+        "cli" => crate::llm::ProjectBackend::Cli,
+        "api" => crate::llm::ProjectBackend::Api,
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "message": format!("invalid backend: {:?} (expected \"cli\" or \"api\")", req.backend)
+                })),
+            );
+        }
+    };
+    state.settings.set_chat_backend(backend);
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -15279,15 +15287,13 @@ mod tests {
         }
     }
 
-    /// `GET /api/settings` includes the effective `llm_backend` and `api_key_present`.
-    /// A stored backend takes precedence over any ambient env, so this is deterministic
-    /// regardless of the process env var.
+    /// `GET /api/settings` includes the global `chat_backend` and `api_key_present`. The
+    /// stored value is the ENTIRE input — no env fallback of any kind
+    /// (`docs/design/2026-09-22_per-project-backend.md`).
     #[tokio::test]
-    async fn get_settings_includes_llm_backend_and_api_key_present() {
+    async fn get_settings_includes_chat_backend_and_api_key_present() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
-        // Store an explicit backend; it should surface as the effective value (precedence
-        // setting > env > default), independent of the ambient CAMERATA_LLM_BACKEND.
-        state.settings.set_llm_backend(Some("api".to_string()));
+        state.settings.set_chat_backend(crate::llm::ProjectBackend::Api);
         let app = router(state);
 
         let resp = app
@@ -15301,17 +15307,17 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["llm_backend"], "api", "stored backend surfaces as effective");
+        assert_eq!(json["chat_backend"], "api", "stored chat backend surfaces verbatim");
         assert!(
             json["api_key_present"].is_boolean(),
             "api_key_present is present and boolean"
         );
     }
 
-    /// `POST /api/settings/llm-backend` persists a valid backend and echoes it plus
+    /// `POST /api/settings/chat-backend` persists a valid backend and echoes it plus
     /// `api_key_present`; the stored setting reflects the new value.
     #[tokio::test]
-    async fn post_llm_backend_persists_valid_value() {
+    async fn post_chat_backend_persists_valid_value() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let app = router(state.clone());
 
@@ -15319,7 +15325,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/settings/llm-backend")
+                    .uri("/api/settings/chat-backend")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"backend":"api"}"#))
                     .unwrap(),
@@ -15331,16 +15337,14 @@ mod tests {
         assert_eq!(json["backend"], "api");
         assert!(json["api_key_present"].is_boolean());
         // Persisted on the settings store.
-        assert_eq!(state.settings.llm_backend().as_deref(), Some("api"));
+        assert_eq!(state.settings.chat_backend(), crate::llm::ProjectBackend::Api);
     }
 
-    /// ROUTES-9: `POST /api/settings/llm-backend` persists to the settings store WITHOUT
-    /// mutating the `CAMERATA_LLM_BACKEND` process-env var. The previous implementation did a
-    /// `std::env::set_var` from the request thread, racing worker-thread `getenv` (POSIX UB)
-    /// and making the credential env-fallback test flaky. The store is now the source of truth.
+    /// `POST /api/settings/chat-backend` persists to the settings store WITHOUT touching
+    /// process env at all — there is no `CAMERATA_LLM_BACKEND` env var to mutate anymore.
     #[tokio::test]
-    async fn post_llm_backend_does_not_mutate_process_env() {
-        // Sentinel value the handler must NOT overwrite.
+    async fn post_chat_backend_does_not_mutate_process_env() {
+        // Sentinel value the handler must NOT touch (proving no env write happens at all).
         std::env::set_var("CAMERATA_LLM_BACKEND", "sentinel-untouched");
 
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
@@ -15349,7 +15353,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/settings/llm-backend")
+                    .uri("/api/settings/chat-backend")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"backend":"api"}"#))
                     .unwrap(),
@@ -15359,7 +15363,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // The setting is persisted to the store...
-        assert_eq!(state.settings.llm_backend().as_deref(), Some("api"));
+        assert_eq!(state.settings.chat_backend(), crate::llm::ProjectBackend::Api);
         // ...but the process env was left exactly as it was (no per-request set_var).
         assert_eq!(
             std::env::var("CAMERATA_LLM_BACKEND").as_deref(),
@@ -15423,7 +15427,7 @@ mod tests {
     }
 
     /// A blank/whitespace `pinned_provider` collapses to `None` — same convention as
-    /// `set_chat_model` / `set_llm_backend` elsewhere in this file.
+    /// `set_chat_model` elsewhere in this file.
     #[tokio::test]
     async fn post_provider_policy_blank_pin_collapses_to_none() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
@@ -15582,10 +15586,10 @@ mod tests {
         assert!(effective_workspace_root(&state, &project).is_none());
     }
 
-    /// `POST /api/settings/llm-backend` rejects a bogus backend with 400 and does not
+    /// `POST /api/settings/chat-backend` rejects a bogus backend with 400 and does not
     /// mutate the stored setting.
     #[tokio::test]
-    async fn post_llm_backend_rejects_bogus_value() {
+    async fn post_chat_backend_rejects_bogus_value() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let app = router(state.clone());
 
@@ -15593,7 +15597,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/settings/llm-backend")
+                    .uri("/api/settings/chat-backend")
                     .header("content-type", "application/json")
                     .body(Body::from(r#"{"backend":"gemini"}"#))
                     .unwrap(),
@@ -15601,18 +15605,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-        // The store was left untouched (still None).
-        assert!(state.settings.llm_backend().is_none());
+        // The store was left untouched (still the Cli default).
+        assert_eq!(state.settings.chat_backend(), crate::llm::ProjectBackend::Cli);
     }
 
-    /// `POST /api/projects/:id/cli-active` — Feature B, the backend-safety gate. A fresh
-    /// project defaults to `cli_active: false` (API-only); the endpoint flips it and echoes
-    /// the updated project. Mirrors `post_llm_backend_persists_valid_value`'s shape.
+    /// `POST /api/projects/:id/backend` — the per-project backend setting
+    /// (`docs/design/2026-09-22_per-project-backend.md`). A fresh project defaults to `Cli`;
+    /// the endpoint switches it and echoes the updated project. Mirrors
+    /// `post_chat_backend_persists_valid_value`'s shape.
     #[tokio::test]
-    async fn post_cli_active_persists_valid_value() {
+    async fn post_project_backend_persists_valid_value() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let p = state.projects.create("Compliance", vec![]).unwrap();
-        assert!(!p.cli_active, "fresh project defaults to API-only");
+        assert_eq!(p.backend, crate::project::ProjectBackend::Cli, "fresh project defaults to Cli");
         let app = router(state.clone());
 
         let resp = app
@@ -15620,9 +15625,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/projects/{}/cli-active", p.id))
+                    .uri(format!("/api/projects/{}/backend", p.id))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"active":true}"#))
+                    .body(Body::from(r#"{"backend":"api"}"#))
                     .unwrap(),
             )
             .await
@@ -15630,32 +15635,58 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         assert_eq!(json["ok"], true);
-        assert_eq!(json["project"]["cli_active"], true);
+        assert_eq!(json["project"]["backend"], "api");
         // Persisted on the store.
-        assert!(state.projects.get(&p.id).unwrap().cli_active);
+        assert_eq!(state.projects.get(&p.id).unwrap().backend, crate::project::ProjectBackend::Api);
 
-        // Flipping it back off round-trips too.
+        // Switching it back to cli round-trips too.
         let resp2 = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/projects/{}/cli-active", p.id))
+                    .uri(format!("/api/projects/{}/backend", p.id))
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"active":false}"#))
+                    .body(Body::from(r#"{"backend":"cli"}"#))
                     .unwrap(),
             )
             .await
             .unwrap();
         assert_eq!(resp2.status(), StatusCode::OK);
         let json2 = body_json(resp2).await;
-        assert_eq!(json2["project"]["cli_active"], false);
+        assert_eq!(json2["project"]["backend"], "cli");
     }
 
-    /// `POST /api/projects/:id/cli-active` against an unknown project id: no HTTP-status
+    /// `POST /api/projects/:id/backend` rejects a bogus backend with `ok: false` (no
+    /// HTTP-status signaling, mirrors `set_step_model`'s shape) and does not mutate the
+    /// project.
+    #[tokio::test]
+    async fn post_project_backend_rejects_bogus_value() {
+        let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
+        let p = state.projects.create("Compliance", vec![]).unwrap();
+        let app = router(state.clone());
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/projects/{}/backend", p.id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"backend":"gemini"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json = body_json(resp).await;
+        assert_eq!(json["ok"], false);
+        assert_eq!(state.projects.get(&p.id).unwrap().backend, crate::project::ProjectBackend::Cli);
+    }
+
+    /// `POST /api/projects/:id/backend` against an unknown project id: no HTTP-status
     /// signaling (mirrors `set_step_model`'s shape) — a 200 response with `ok: false` and a
     /// human-readable `message` the UI can display.
     #[tokio::test]
-    async fn post_cli_active_reports_error_for_unknown_project() {
+    async fn post_project_backend_reports_error_for_unknown_project() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let app = router(state);
 
@@ -15663,9 +15694,9 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/api/projects/does-not-exist/cli-active")
+                    .uri("/api/projects/does-not-exist/backend")
                     .header("content-type", "application/json")
-                    .body(Body::from(r#"{"active":true}"#))
+                    .body(Body::from(r#"{"backend":"api"}"#))
                     .unwrap(),
             )
             .await
@@ -15716,18 +15747,19 @@ mod tests {
     }
 
     /// A rescan request with at least one VALID override reaches the compliance-safety gate,
-    /// and a `Blocked` resolution (a fresh project defaults to `cli_active: false`, API-only,
-    /// and this test guarantees no Anthropic key is present) refuses the whole batch with the
-    /// gate's own message — no model call, no findings. Mirrors the main audit's
+    /// and a `Blocked` resolution (this project is explicitly switched to `Api`, and this
+    /// test guarantees no Anthropic key is present) refuses the whole batch with the gate's
+    /// own message — no model call, no findings. Mirrors the main audit's
     /// `blocked_resolution_aborts_the_whole_scan_before_any_work` guard, at the endpoint layer.
     #[tokio::test]
-    async fn rescan_alternatives_blocked_when_project_is_api_only_with_no_key() {
+    async fn rescan_alternatives_blocked_when_project_is_api_backend_with_no_key() {
         // Defensive against the known cross-test env-var race (see
         // `resolve_backend_for_project_gathers_the_three_inputs_correctly`'s doc comment).
         std::env::remove_var("ANTHROPIC_API_KEY");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let p = state.projects.create("Acme", vec!["me/api".to_string()]).unwrap();
-        assert!(!p.cli_active, "fresh project defaults to API-only");
+        assert_eq!(p.backend, crate::project::ProjectBackend::Cli, "fresh project defaults to Cli");
+        state.projects.set_backend(&p.id, crate::project::ProjectBackend::Api);
         let app = router(state);
 
         let resp = app
@@ -15747,26 +15779,23 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["ok"], false);
         assert!(
-            json["message"].as_str().unwrap_or_default().contains("API-only"),
+            json["message"].as_str().unwrap_or_default().contains("Anthropic API"),
             "message: {:?}",
             json["message"]
         );
     }
 
-    /// `CliFallbackWarn` does not abort a rescan — but with no real Anthropic key/CLI
-    /// available in the test environment, the eventual model call fails; the resulting
-    /// `{ ok: true, message }` response still carries the loud compliance warning (folded in
-    /// BEFORE the call attempt, per the main audit's own contract), proving the warning path
-    /// is reached and surfaced rather than silently skipped. This does not assert findings
-    /// content — no live model runs in this test suite — only that the gate resolution itself
-    /// is honored and disclosed, mirroring `onboard::cli_fallback_warn_proceeds_but_surfaces_the_warning`.
+    /// A `Cli`-backend project's rescan is never blocked, regardless of key presence — no
+    /// silent downgrade path exists anymore (the removed `CliFallbackWarn`), just a plain
+    /// `Cli` resolution that proceeds straight to the (in this test env, failing) model call.
+    /// Asserts the gate itself never refuses the request; it does not assert findings content
+    /// (no live model runs in this test suite).
     #[tokio::test]
-    async fn rescan_alternatives_surfaces_the_cli_fallback_warning() {
+    async fn rescan_alternatives_proceeds_on_cli_backend_project() {
         std::env::remove_var("ANTHROPIC_API_KEY");
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
         let p = state.projects.create("Acme", vec!["me/api".to_string()]).unwrap();
-        state.projects.set_cli_active(&p.id, true);
-        state.settings.set_llm_backend(Some("api".to_string()));
+        assert_eq!(p.backend, crate::project::ProjectBackend::Cli);
         let app = router(state);
 
         let resp = app
@@ -15785,12 +15814,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
         // Not Blocked: the request proceeds (ok: true) rather than being refused outright.
-        assert_eq!(json["ok"], true);
-        let message = json["message"].as_str().unwrap_or_default();
-        assert!(
-            message.contains("⚠ COMPLIANCE:"),
-            "the fallback warning must be surfaced, clearly prefixed: {message}"
-        );
+        assert_eq!(json["ok"], true, "a Cli-backend project must never be blocked: {json:?}");
     }
 
     /// `rescan-alternatives` against an unknown project id reports the same `{ ok: false,
@@ -23407,7 +23431,7 @@ mod tests {
     fn use_live_anthropic_models_requires_both_api_backend_and_key() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
         // API backend selected, but no key yet.
-        state.settings.set_llm_backend(Some("api".to_string()));
+        state.settings.set_chat_backend(crate::llm::ProjectBackend::Api);
         assert!(!use_live_anthropic_models(&state), "api backend alone, no key, must stay false");
 
         // Key present, but backend still `api` — now both hold.
@@ -23418,7 +23442,7 @@ mod tests {
         assert!(use_live_anthropic_models(&state), "api backend + key present must be true");
 
         // Flip back to CLI: even with the key present, must be false.
-        state.settings.set_llm_backend(Some("cli".to_string()));
+        state.settings.set_chat_backend(crate::llm::ProjectBackend::Cli);
         assert!(!use_live_anthropic_models(&state), "cli backend must stay false even with a key");
     }
 
@@ -23475,7 +23499,7 @@ mod tests {
     #[tokio::test]
     async fn get_model_registry_serves_live_list_on_api_backend_with_key_and_cache() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
-        state.settings.set_llm_backend(Some("api".to_string()));
+        state.settings.set_chat_backend(crate::llm::ProjectBackend::Api);
         state
             .credential_store
             .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test-key")
@@ -23526,7 +23550,7 @@ mod tests {
     #[tokio::test]
     async fn get_model_registry_falls_back_to_hardcoded_when_api_backend_but_no_live_cache() {
         let state = AppState::new(Arc::new(InMemoryStoryStore::new()));
-        state.settings.set_llm_backend(Some("api".to_string()));
+        state.settings.set_chat_backend(crate::llm::ProjectBackend::Api);
         state
             .credential_store
             .set(crate::credentials::ANTHROPIC_API_KEY, "sk-ant-test-key")
@@ -23688,51 +23712,56 @@ mod tests {
         assert!(present, "env var alone makes the key present");
     }
 
-    /// `resolve_backend_for_project` — Feature B's per-seam glue — must gather
-    /// `effective_llm_backend`, `anthropic_api_key_present`, and the PROJECT's OWN
-    /// `cli_active` (never a global) into one resolution. Exercises the two extremes of the
-    /// truth table plus the "no project" floor, using the keychain path for the key (not the
-    /// env var) so this test can't race the env-var-based tests around it.
+    /// `resolve_backend_for_project` — the per-seam glue
+    /// (`docs/design/2026-09-22_per-project-backend.md`) — must gather `anthropic_api_key_present`
+    /// and the PROJECT's OWN `backend` setting (never a global/env preference) into one
+    /// resolution. Exercises the "no project" floor plus both concrete `backend` values,
+    /// using the keychain path for the key (not the env var) so this test can't race the
+    /// env-var-based tests around it.
     #[test]
-    fn resolve_backend_for_project_gathers_the_three_inputs_correctly() {
+    fn resolve_backend_for_project_gathers_the_two_inputs_correctly() {
         let state = AppState::new(std::sync::Arc::new(InMemoryStoryStore::new()));
 
-        // No project at all, no key -> Blocked. The project-less floor must be exactly as
-        // strict as a freshly-created project's default (cli_active=false), never more
-        // permissive. This uses a FRESH MemoryCredentialStore (never touched by any other
-        // test) for the "no key" side, and defensively clears the env var too, so this
-        // assertion can't be poisoned by another test's ANTHROPIC_API_KEY mutation running
-        // concurrently (the known env-var race noted on
+        // No project at all, no key -> Cli, never Blocked. The project-less floor must be
+        // exactly as permissive as a freshly-created project's default (backend=Cli), never
+        // more restrictive. Defensively clears the env var too, so this assertion can't be
+        // poisoned by another test's ANTHROPIC_API_KEY mutation running concurrently (the
+        // known env-var race noted on
         // `credentials::tests::resolve_falls_back_to_env_when_store_empty`).
         std::env::remove_var("ANTHROPIC_API_KEY");
+        assert_eq!(resolve_backend_for_project(&state, None), crate::llm::BackendResolution::Cli);
+
+        // A project explicitly switched to `Api`, no key anywhere -> Blocked.
+        let api_project = state.projects.create("ApiOnly", vec![]).unwrap();
+        assert_eq!(api_project.backend, crate::project::ProjectBackend::Cli, "fresh project defaults to Cli");
+        let api_project = state
+            .projects
+            .set_backend(&api_project.id, crate::project::ProjectBackend::Api)
+            .unwrap();
         assert_eq!(
-            resolve_backend_for_project(&state, None),
+            resolve_backend_for_project(&state, Some(&api_project)),
             crate::llm::BackendResolution::Blocked {
-                message: "This project is API-only (CLI disabled). Add an Anthropic API key to run."
+                message: "This project is set to the Anthropic API backend, but no API key is \
+                          configured. Add an Anthropic API key (or switch the backend to Cli) to run."
                     .to_string(),
             }
         );
 
-        // A key in the credential store (keychain path), a project with cli_active=false
-        // (the create() default) -> Api.
+        // A key in the credential store (keychain path) + backend=Api -> Api.
         crate::credentials::CredentialStore::set(
             state.credential_store.as_ref(),
             crate::credentials::ANTHROPIC_API_KEY,
             "sk-ant-test",
         )
         .expect("set must succeed");
-        let api_only_project = state.projects.create("ApiOnly", vec![]).unwrap();
-        assert!(!api_only_project.cli_active, "fresh project defaults to API-only");
         assert_eq!(
-            resolve_backend_for_project(&state, Some(&api_only_project)),
+            resolve_backend_for_project(&state, Some(&api_project)),
             crate::llm::BackendResolution::Api
         );
 
-        // cli_active=true + app_backend="cli" (an explicit stored setting) -> quiet Cli,
-        // regardless of the key already present from the step above.
-        let personal_id = state.projects.create("Personal", vec![]).unwrap().id;
-        let personal_project = state.projects.set_cli_active(&personal_id, true).unwrap();
-        state.settings.set_llm_backend(Some("cli".to_string()));
+        // backend=Cli (the create() default) -> quiet Cli, regardless of the key already
+        // present from the step above.
+        let personal_project = state.projects.create("Personal", vec![]).unwrap();
         assert_eq!(
             resolve_backend_for_project(&state, Some(&personal_project)),
             crate::llm::BackendResolution::Cli

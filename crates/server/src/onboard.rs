@@ -454,12 +454,12 @@ pub struct ScanReport {
     pub proposed_rules: Vec<ProposedRule>,
     /// True when no scan was performed because GitHub is not connected.
     pub gated: bool,
-    /// True when the scan was REFUSED by the compliance backend gate — an API-only project
-    /// (`cli_active` OFF) with no Anthropic key, i.e. a [`crate::llm::BackendResolution::Blocked`].
-    /// Distinct from `gated` (the GitHub-connect gate): both mean "no scan ran", but this is the
-    /// compliance block, so the UI renders it under its own "Scan blocked" heading with a key/CLI
-    /// hint rather than inferring the state from the report's shape. See the backend-safety design
-    /// doc (`docs/design/2026-08-27_backend-safety-and-live-models.md`).
+    /// True when the scan was REFUSED by the compliance backend gate — a project on the `Api`
+    /// backend with no Anthropic key configured, i.e. a
+    /// [`crate::llm::BackendResolution::Blocked`]. Distinct from `gated` (the GitHub-connect
+    /// gate): both mean "no scan ran", but this is the compliance block, so the UI renders it
+    /// under its own "Scan blocked" heading with a key/CLI hint rather than inferring the
+    /// state from the report's shape. See `docs/design/2026-09-22_per-project-backend.md`.
     #[serde(default)]
     pub blocked: bool,
     /// Set when the compliance backend gate resolved to `Blocked` (API-only project, no
@@ -710,11 +710,12 @@ pub async fn audit_repos(
     // session-wide usage meter (in addition to the per-audit `UsageMeter` below). `None` in
     // tests / non-cockpit callers — recording is then simply skipped. Observability only.
     ledger: Option<std::sync::Arc<crate::usage_ledger::UsageLedger>>,
-    // Feature B — the compliance-safety backend gate (see
-    // `docs/design/2026-08-27_backend-safety-and-live-models.md`). The caller resolves this
-    // from `(effective app_backend, has_api_key, the project's cli_active flag)` via
-    // `crate::llm::resolve_backend` BEFORE calling in, so this function never has to reach
-    // for settings/credentials itself — it only has to ACT on the resolution.
+    // The compliance-safety backend gate (see
+    // `docs/design/2026-09-22_per-project-backend.md`). The caller resolves this from the
+    // project's `backend` setting + key presence via `crate::llm::resolve_backend` BEFORE
+    // calling in, so this function never has to reach for settings/credentials itself — it
+    // only has to ACT on the resolution (both to decide whether the AI review runs at all,
+    // and to pick the transport the `Llm` below is built with).
     backend_resolution: crate::llm::BackendResolution,
     // The loaded rule corpus, when available — joined against each repo's `semantic` rule ids
     // to build the multi-option [`crate::ai_audit::RuleAlternatives`] set for the audit-
@@ -762,16 +763,16 @@ pub async fn audit_repos(
         ai_blocked_reason = Some(message.clone());
         run_ai_review = false;
     }
-    // CliFallbackWarn does NOT abort — the scan proceeds on the CLI (the underlying `Llm`
-    // below resolves to the CLI transport on its own via `select_backend`'s env path, since
-    // an "api" preference with no key already falls back there) — but the warning must be
-    // LOUD, never silent: fold it into `extra_notes` so it survives into `report.message`
-    // with the rest of this run's notes, clearly prefixed so it can't be mistaken for a
-    // routine coverage note.
-    let mut extra_notes = extra_notes;
-    if let crate::llm::BackendResolution::CliFallbackWarn { message } = &backend_resolution {
-        extra_notes.push(format!("⚠ COMPLIANCE: {message}"));
-    }
+    let extra_notes = extra_notes;
+    // The transport this run's `Llm` (below) is built with: EXACTLY the resolution's
+    // Cli/Api choice, never re-derived from env. `Blocked` never reaches here with
+    // `run_ai_review` still true (forced off above), so its transport value is moot; `Cli` is
+    // supplied defensively so the `Llm` below still constructs.
+    let llm_backend = match &backend_resolution {
+        crate::llm::BackendResolution::Api => crate::llm::Backend::Api,
+        crate::llm::BackendResolution::Cli => crate::llm::Backend::Cli,
+        crate::llm::BackendResolution::Blocked { .. } => crate::llm::Backend::Cli,
+    };
     // Provenance (P1): stamp the start time now, before any I/O, so `finished_at -
     // started_at` reflects the whole run including the git-ref capture below.
     let started_at = chrono::Utc::now().to_rfc3339();
@@ -816,8 +817,8 @@ pub async fn audit_repos(
     // also folded into `notes` below so it is not lost from the human-readable message either.
     let mut first_ai_error: Option<String> = None;
     let llm = match ledger {
-        Some(l) => crate::llm::Llm::from_env_with_ledger(l),
-        None => crate::llm::Llm::from_env(),
+        Some(l) => crate::llm::Llm::from_env_with_backend_and_ledger(llm_backend, l),
+        None => crate::llm::Llm::from_env_with_backend(llm_backend),
     };
     // Aggregates REAL usage across every repo's audit (passes + calibration) for the
     // actual-vs-estimated readout.
@@ -2634,7 +2635,7 @@ mod tests {
         );
     }
 
-    // ── Feature B: the compliance-safety backend gate ─────────────────────────
+    // ── The compliance-safety backend gate ────────────────────────────────────
 
     /// Regression for the silent-empty-scan bug: a `Blocked` resolution must NEVER make an
     /// AI/model call, but when the deterministic floor was requested (`run_deterministic:
@@ -2794,11 +2795,16 @@ mod tests {
         );
     }
 
-    /// A `CliFallbackWarn` resolution does NOT abort the scan — the deterministic floor still
-    /// runs — but the warning is folded into `report.message`, clearly prefixed so it can't be
-    /// mistaken for a routine coverage note.
+    /// An `Api` resolution with `run_ai_review` requested runs the `Llm` on the API
+    /// transport (`Backend::Api`), never silently re-deriving the transport from anywhere
+    /// else — the only way `audit_repos` picks a transport now is from `backend_resolution`.
+    /// A `Cli` resolution behaves the same way, on `Backend::Cli`. Both are exercised
+    /// end-to-end (token-free — `run_ai_review: false`) by the tests above; this is a
+    /// dedicated regression for the removed `CliFallbackWarn` silent-downgrade path: there is
+    /// no longer any resolution that proceeds on the CLI while claiming an `Api` gate — `Api`
+    /// with no key is `Blocked`, full stop.
     #[tokio::test]
-    async fn cli_fallback_warn_proceeds_but_surfaces_the_warning() {
+    async fn api_backend_resolution_never_downgrades_to_cli_silently() {
         std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, _manifest) = audit_repos(
@@ -2814,36 +2820,24 @@ mod tests {
             None,
             false,
             true,
-            false, // run_ai_review off — stay token-free; the warning path is independent of it
-            true,  // run_deterministic on — the floor still runs under a fallback warning
+            false, // run_ai_review off — stay token-free
+            true,  // run_deterministic on — the floor still runs
             None,
-            crate::llm::BackendResolution::CliFallbackWarn {
-                message: "Anthropic API key missing — falling back to the Claude CLI (your \
-                          personal subscription). Do not use for client code."
-                    .to_string(),
-            },
+            crate::llm::BackendResolution::Api,
             None, // corpus
             &std::collections::HashMap::new(), // chosen_options
         )
         .await;
-        // The scan was NOT aborted: the floor still caught the secret.
         assert!(
             report
                 .findings
                 .iter()
                 .any(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
-            "CliFallbackWarn must not abort the scan: {:?}",
+            "an Api resolution must not affect the deterministic floor: {:?}",
             report.findings
         );
-        let message = report.message.expect("a fallback-warn scan must carry a message");
-        assert!(
-            message.contains("⚠ COMPLIANCE:"),
-            "the warning must be clearly prefixed so it can't be mistaken for a routine note: {message}"
-        );
-        assert!(
-            message.contains("personal subscription"),
-            "the full warning text must be present: {message}"
-        );
+        assert!(!report.blocked, "Api (not Blocked) must never mark the scan as blocked");
+        assert!(report.ai_blocked_reason.is_none(), "Api must never carry a block reason");
     }
 
     // ── corpus-rules wire payload carries full content ────────────────────────
