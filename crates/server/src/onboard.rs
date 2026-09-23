@@ -462,6 +462,26 @@ pub struct ScanReport {
     /// doc (`docs/design/2026-08-27_backend-safety-and-live-models.md`).
     #[serde(default)]
     pub blocked: bool,
+    /// Set when the compliance backend gate resolved to `Blocked` (API-only project, no
+    /// Anthropic key) for this run, but the scan was NOT aborted because a local pass
+    /// (the deterministic floor, and/or preview linters / dep-audit) was requested and
+    /// ran anyway. Distinct from `blocked`: `blocked` means "nothing ran at all"; this
+    /// field means "the AI review specifically did not run, but you are still looking at
+    /// a real (partial) result, not a silent empty table". Also set (alongside `blocked`)
+    /// when the request was AI-only and therefore nothing local could run either — see
+    /// `audit_repos`'s gate-handling doc comment. `#[serde(default)]` so a report
+    /// persisted before this field existed still deserializes as `None`.
+    #[serde(default)]
+    pub ai_blocked_reason: Option<String>,
+    /// Set when the AI review was REQUESTED (compliance gate did not block it) but every
+    /// pass failed with a real error (bad model id, an API/CLI transport error, an auth
+    /// failure, …) so the AI review produced no findings. Carries the first such error's
+    /// text, verbatim, so the operator sees the actual reason rather than a silent empty
+    /// table. Never set on the happy path (some passes succeeding is not an error, even
+    /// if a minority failed). `#[serde(default)]` for the same back-compat reason as
+    /// `ai_blocked_reason`.
+    #[serde(default)]
+    pub ai_error: Option<String>,
     /// A human message (e.g. the connect-GitHub gate, a per-repo error, or a cap).
     pub message: Option<String>,
     /// REAL token usage + cost for the Phase-2 audit (every pass + calibration), when the
@@ -515,6 +535,8 @@ impl ScanReport {
             proposed_rules: Vec::new(),
             gated: true,
             blocked: false,
+            ai_blocked_reason: None,
+            ai_error: None,
             actual_usage: None,
             deep: None,
             message: Some(
@@ -706,19 +728,39 @@ pub async fn audit_repos(
     chosen_options: &std::collections::HashMap<String, String>,
 ) -> (ScanReport, crate::scan_cache::ScanManifest) {
     // THE GATE: resolved before anything else — no file read, no deterministic tool, no
-    // model call — because a `Blocked` project must not scan AT ALL, not just skip the LLM
-    // call. Reuses `ScanReport::gated`'s zero-stats shape for the empty report, but sets the
-    // EXPLICIT `blocked` flag (not `gated`, which means the GitHub-connect gate) so the UI
-    // renders the compliance block unambiguously — never inferring it from the report's shape,
-    // which would misfire on a legitimate empty-repo scan. The prior manifest (if any) is
-    // preserved rather than wiped, so a later, unblocked scan can still go incremental.
+    // model call, UNLESS a local (non-AI) pass was actually requested. A `Blocked` project
+    // must never make an AI/model call — that part of the gate is absolute — but it must
+    // NOT ALSO kill the free, token-free deterministic security floor: that used to be a
+    // second, unintended bug riding along with the (correct) AI block. So:
+    //
+    //   * `run_ai_review` is forced off below whenever the gate is `Blocked` — no model
+    //     call happens for this run, full stop.
+    //   * When NOTHING local was requested either (`run_deterministic == false`, which also
+    //     covers the "AI-only" request shape `run_ai_review && !run_deterministic`), there
+    //     is truly nothing this call can do, so it aborts immediately exactly as before —
+    //     reusing `ScanReport::gated`'s zero-stats shape, with the EXPLICIT `blocked` flag
+    //     (not `gated`, which means the GitHub-connect gate) so the UI renders the compliance
+    //     block unambiguously rather than inferring it from the report's shape. The prior
+    //     manifest (if any) is preserved rather than wiped, so a later, unblocked scan can
+    //     still go incremental.
+    //   * Otherwise (`run_deterministic == true`) the rest of this function runs as normal —
+    //     floor, architectural checkers, preview linters, dep-audit — with `run_ai_review`
+    //     forced false, and the block reason stashed into `ai_blocked_reason` on the final
+    //     report so a no-key scan is a real (partial) result, never a silent empty table.
+    let mut run_ai_review = run_ai_review;
+    let mut ai_blocked_reason: Option<String> = None;
     if let crate::llm::BackendResolution::Blocked { message } = &backend_resolution {
-        let repos: Vec<String> = sources.iter().map(|(spec, _)| spec.clone()).collect();
-        let mut report = ScanReport::gated(&repos);
-        report.gated = false;
-        report.blocked = true;
-        report.message = Some(message.clone());
-        return (report, incremental_prior.cloned().unwrap_or_default());
+        if !run_deterministic {
+            let repos: Vec<String> = sources.iter().map(|(spec, _)| spec.clone()).collect();
+            let mut report = ScanReport::gated(&repos);
+            report.gated = false;
+            report.blocked = true;
+            report.message = Some(message.clone());
+            report.ai_blocked_reason = Some(message.clone());
+            return (report, incremental_prior.cloned().unwrap_or_default());
+        }
+        ai_blocked_reason = Some(message.clone());
+        run_ai_review = false;
     }
     // CliFallbackWarn does NOT abort — the scan proceeds on the CLI (the underlying `Llm`
     // below resolves to the CLI transport on its own via `select_backend`'s env path, since
@@ -766,6 +808,13 @@ pub async fn audit_repos(
     // read the full repo, not just the incrementally-changed files) and run after the standard
     // audit completes. Empty / unused when `deep` is false.
     let mut deep_inputs: Vec<(String, Vec<(String, String)>)> = Vec::new();
+    // The FIRST fatal AI-review error across every repo this run touched (a bad model id,
+    // an API/CLI transport error, an auth failure, …) — i.e. `audit_repo` returning `Err`
+    // because every one of its passes failed. Surfaced on the final report as `ai_error` so
+    // the operator sees the real error text instead of a silent empty findings table. Only
+    // the FIRST is kept (matching `ai_blocked_reason`'s single-reason shape); it is still
+    // also folded into `notes` below so it is not lost from the human-readable message either.
+    let mut first_ai_error: Option<String> = None;
     let llm = match ledger {
         Some(l) => crate::llm::Llm::from_env_with_ledger(l),
         None => crate::llm::Llm::from_env(),
@@ -994,7 +1043,13 @@ pub async fn audit_repos(
                                     recommendations.insert(rec.rule_id.clone(), rec);
                                 }
                             }
-                            Err(e) => notes.push(format!("{spec}: AI audit skipped ({e})")),
+                            Err(e) => {
+                                let msg = format!("{spec}: AI audit skipped ({e})");
+                                if first_ai_error.is_none() {
+                                    first_ai_error = Some(msg.clone());
+                                }
+                                notes.push(msg);
+                            }
                         }
                     }
                 } else if !files.is_empty() {
@@ -1059,6 +1114,13 @@ pub async fn audit_repos(
     report.actual_usage = Some(meter.snapshot());
     report.deep = deep_report;
     report.recommendations = recommendations;
+    // Surface the compliance block (if any) and the first fatal AI error (if any) as their
+    // own structured fields — never just buried inside `notes`/`message` — so the UI can
+    // render an unmissable banner. `blocked` stays false here: this path only runs when a
+    // local pass (the deterministic floor and friends) was requested and DID run, so this is
+    // a real partial result, not "nothing ran at all".
+    report.ai_blocked_reason = ai_blocked_reason;
+    report.ai_error = first_ai_error;
     // Fold the always-on dep-audit coverage notes into the report.  The scan-tools
     // preview notes are merged separately (via `merge_scan_preview` in lib.rs); both
     // sets land in `coverage_notes` so the UI sees them in one place.
@@ -2574,13 +2636,15 @@ mod tests {
 
     // ── Feature B: the compliance-safety backend gate ─────────────────────────
 
-    /// A `Blocked` resolution must abort the WHOLE scan — no file read, no deterministic
-    /// floor, no model call — and surface the block message on `report.message` (the same
-    /// channel the "GitHub not connected" gate uses), with `gated` left false (this isn't
-    /// that gate). `run_deterministic: true` is passed deliberately, so if the gate check
-    /// weren't first, the floor would still fire on the planted secret.
+    /// Regression for the silent-empty-scan bug: a `Blocked` resolution must NEVER make an
+    /// AI/model call, but when the deterministic floor was requested (`run_deterministic:
+    /// true`) it must still RUN — a no-key project is not the same as a project that asked
+    /// for nothing. The block reason must be surfaced on the new `ai_blocked_reason` field
+    /// (never silently dropped), `blocked` stays FALSE (this is a real partial result, not
+    /// "nothing ran"), and the floor still catches the planted secret.
     #[tokio::test]
-    async fn blocked_resolution_aborts_the_whole_scan_before_any_work() {
+    async fn blocked_resolution_with_deterministic_requested_still_runs_the_floor() {
+        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
         let (_dir, sources) = scratch_repo_with_secret();
         let (report, manifest) = audit_repos(
             &sources,
@@ -2596,7 +2660,64 @@ mod tests {
             false,
             true,
             true, // run_ai_review requested...
-            true, // ...and run_deterministic requested — the gate must still short-circuit both
+            true, // ...but forced off internally by the Blocked gate; run_deterministic still runs
+            None,
+            crate::llm::BackendResolution::Blocked {
+                message: "This project is API-only (CLI disabled). Add an Anthropic API key to run."
+                    .to_string(),
+            },
+            None, // corpus
+            &std::collections::HashMap::new(), // chosen_options
+        )
+        .await;
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|f| f.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
+            "the deterministic floor must still catch the planted secret when Blocked: {:?}",
+            report.findings
+        );
+        assert!(report.files_scanned > 0, "the floor pass must have actually read the repo");
+        assert!(!report.gated, "Blocked is a distinct condition from the GitHub-not-connected gate");
+        assert!(
+            !report.blocked,
+            "a real (partial) result — the floor ran — must not ALSO be flagged as the \
+             nothing-ran-at-all `blocked` state"
+        );
+        assert_eq!(
+            report.ai_blocked_reason.as_deref(),
+            Some("This project is API-only (CLI disabled). Add an Anthropic API key to run."),
+            "the compliance-block reason must be surfaced so the UI can render it, even though \
+             the floor ran"
+        );
+        // A real scan happened, so the manifest reflects it (not the empty/default shape of
+        // the fully-aborted path) — it carries the current schema version.
+        assert!(manifest.is_current());
+    }
+
+    /// The AI-only edge case: `run_ai_review: true, run_deterministic: false`. With nothing
+    /// local requested and the AI forced off by the gate, there is truly nothing this call can
+    /// do — it aborts immediately exactly like the old behaviour, with `blocked: true` AND
+    /// `ai_blocked_reason` set (never a silent empty result), and the prior manifest preserved.
+    #[tokio::test]
+    async fn blocked_resolution_ai_only_aborts_with_reason_surfaced() {
+        let (_dir, sources) = scratch_repo_with_secret();
+        let (report, manifest) = audit_repos(
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            true,  // run_ai_review requested (AI-only)...
+            false, // ...and NOTHING local requested either
             None,
             crate::llm::BackendResolution::Blocked {
                 message: "This project is API-only (CLI disabled). Add an Anthropic API key to run."
@@ -2608,15 +2729,21 @@ mod tests {
         .await;
         assert!(
             report.findings.is_empty(),
-            "a blocked project must produce zero findings — no scan ran at all: {:?}",
+            "nothing local was requested — zero findings is correct here: {:?}",
             report.findings
         );
-        assert_eq!(report.files_scanned, 0, "no file was read for a blocked scan");
+        assert_eq!(report.files_scanned, 0, "no file was read — nothing local was requested");
         assert!(!report.gated, "Blocked is a distinct condition from the GitHub-not-connected gate");
         assert!(
             report.blocked,
-            "the explicit compliance-block flag must be set, so the UI renders the block \
-             unambiguously rather than inferring it from the report's shape"
+            "the explicit compliance-block flag must be set when truly nothing ran, so the UI \
+             renders the block unambiguously rather than inferring it from the report's shape"
+        );
+        assert_eq!(
+            report.ai_blocked_reason.as_deref(),
+            Some("This project is API-only (CLI disabled). Add an Anthropic API key to run."),
+            "the compliance-block reason must ALSO be on the dedicated field, never only on \
+             the free-text message"
         );
         assert_eq!(
             report.message.as_deref(),

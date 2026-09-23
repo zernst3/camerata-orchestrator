@@ -1998,6 +1998,8 @@ mod tests {
             proposed_rules: Vec::new(),
             gated: false,
             blocked: false,
+            ai_blocked_reason: None,
+            ai_error: None,
             message: None,
             actual_usage: None,
             deep: None,

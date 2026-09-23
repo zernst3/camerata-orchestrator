@@ -638,6 +638,22 @@ pub(super) struct ScanReportView {
     /// so reports persisted before this field existed still deserialize (as `false`).
     #[serde(default)]
     pub blocked: bool,
+    /// Set when the compliance backend gate was `Blocked` for this run but a local pass
+    /// (the deterministic floor and/or preview linters / dep-audit) was requested and DID
+    /// run anyway — so this report carries real (partial) findings, not a silent empty
+    /// table. Distinct from `blocked`: `blocked` means nothing ran at all; this means the
+    /// AI review specifically did not run. Mirrors
+    /// `camerata_server::onboard::ScanReport::ai_blocked_reason`. `#[serde(default)]` so a
+    /// report from before this field existed still deserializes as `None`.
+    #[serde(default)]
+    pub ai_blocked_reason: Option<String>,
+    /// Set when the AI review was requested (not compliance-blocked) but every pass failed
+    /// with a real error (bad model id, an API/transport error, an auth failure, …), so the
+    /// AI review produced no findings. Carries the first such error's text verbatim. Mirrors
+    /// `camerata_server::onboard::ScanReport::ai_error`. `#[serde(default)]` for the same
+    /// back-compat reason as `ai_blocked_reason`.
+    #[serde(default)]
+    pub ai_error: Option<String>,
     #[serde(default)]
     pub message: Option<String>,
     /// OPT-IN deep compliance & security tier output (#55). `None` unless the audit
@@ -3134,6 +3150,45 @@ pub(super) fn RuleAlternativesPanel(
     }
 }
 
+/// The compliance-gate fix's unmissable banner: renders when the audit's AI review either
+/// (a) did not run at all because the compliance backend gate was `Blocked` (`ai_blocked_reason`
+/// set), or (b) was requested but every pass failed with a real error (`ai_error` set). Renders
+/// nothing when both are `None` (the ordinary happy path — most audits). Deliberately its own
+/// small component (rather than inline in `ScanResults`) so it is directly SSR-testable without
+/// standing up `ScanResults`'s network-backed resources. See
+/// `camerata_server::onboard::ScanReport::ai_blocked_reason` / `ai_error` for the server side.
+#[component]
+pub(super) fn AiReviewBlockedBanner(
+    ai_blocked_reason: Option<String>,
+    ai_error: Option<String>,
+) -> Element {
+    rsx! {
+        if let Some(reason) = ai_blocked_reason {
+            div { class: "onboard-gate ai-review-blocked-banner",
+                span { class: "onboard-gate-dot" }
+                div {
+                    p { class: "onboard-gate-h", "AI review did not run" }
+                    p { class: "onboard-gate-b", "AI review did not run: {reason}" }
+                    p { class: "onboard-gate-hint",
+                        "Add an Anthropic API key in Settings, or enable \u{201c}Allow Claude CLI (personal subscription)\u{201d} for this project, then re-run the audit for the AI review. The deterministic security floor still ran; its findings (if any) are shown below."
+                    }
+                }
+            }
+        } else if let Some(err) = ai_error {
+            div { class: "onboard-gate ai-review-error-banner",
+                span { class: "onboard-gate-dot" }
+                div {
+                    p { class: "onboard-gate-h", "AI review failed" }
+                    p { class: "onboard-gate-b", "AI review did not run: {err}" }
+                    p { class: "onboard-gate-hint",
+                        "Check the selected audit model id and your Anthropic API key or Claude CLI setup, then re-run the audit. The deterministic security floor still ran; its findings (if any) are shown below."
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Renders one brownfield scan's results: the audit summary, the findings table,
 /// and the proposed-rules table. Keyed by the parent so a new scan remounts the
 /// chorale tables with fresh rows.
@@ -4203,6 +4258,24 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 p { class: "scan-section-h", "Findings" }
                 p { class: "scan-section-sub", "Triage every finding into one of four tables: leave it Unresolved, Ignore it (with a reason), save it as Tech debt, or mark it a False positive (with a reason — the tool was wrong; excluded from the report, never baselined). Switch tables below; selected findings move between tables. When nothing is Unresolved, Process the ignored + tech-debt buckets." }
 
+                // ── AI-review-did-not-run / AI-review-failed banner ────────────────
+                // Compliance-gate fix: a `Blocked` project (API-only, no Anthropic key) or a
+                // hard AI-pass failure (bad model id, an API/CLI error, an auth failure) must
+                // NEVER look like a silent, clean scan. Rendered UNCONDITIONALLY whenever
+                // either field is set on the audited report — including when `findings` is
+                // empty, since an empty-but-blocked/failed table is exactly the case that used
+                // to look like a clean pass. This is intentionally its own banner (not folded
+                // into the gate box above, which only covers the pre-audit `scan()` report):
+                // the deterministic floor (and preview linters / dep-audit) may well have run
+                // and produced real findings below, so this is a partial-result notice, not a
+                // "nothing happened" gate. Extracted into its own component so it's directly
+                // SSR-testable without standing up the whole `ScanResults` tree (which needs
+                // network resources under `use_resource`).
+                AiReviewBlockedBanner {
+                    ai_blocked_reason: audited.as_ref().and_then(|a| a.ai_blocked_reason.clone()),
+                    ai_error: audited.as_ref().and_then(|a| a.ai_error.clone()),
+                }
+
                 // Single-select over the four triage tables, each with a live count.
                 div { class: "triage-switch",
                     for st in [TriageState::Unresolved, TriageState::Ignored, TriageState::TechDebt, TriageState::FalsePositive] {
@@ -4840,6 +4913,33 @@ mod tests {
             "files_scanned": 42
         }));
         assert!(!super::scan_report_looks_blocked(&report));
+    }
+
+    // ── Compliance-gate fix: `ScanReportView.ai_blocked_reason` / `ai_error` ────────────────
+    // `ScanReportView` must deserialize the two new fields (additive, `#[serde(default)]`), and
+    // a report persisted before they existed must still deserialize with both `None` — the
+    // exact back-compat contract every other additive field on this struct already has.
+
+    #[test]
+    fn scan_report_view_deserializes_ai_blocked_reason_and_ai_error() {
+        let report = scan_report_fixture(serde_json::json!({
+            "ai_blocked_reason": "This project is API-only (CLI disabled). Add an Anthropic API key to run.",
+            "ai_error": "me/api: AI audit skipped (boom)",
+        }));
+        assert_eq!(
+            report.ai_blocked_reason.as_deref(),
+            Some("This project is API-only (CLI disabled). Add an Anthropic API key to run.")
+        );
+        assert_eq!(report.ai_error.as_deref(), Some("me/api: AI audit skipped (boom)"));
+    }
+
+    #[test]
+    fn scan_report_view_defaults_ai_fields_to_none_when_absent() {
+        // A report shape from before these fields existed (or a clean scan that never set
+        // them) must still deserialize, with both reading as `None`.
+        let report = scan_report_fixture(serde_json::json!({}));
+        assert!(report.ai_blocked_reason.is_none());
+        assert!(report.ai_error.is_none());
     }
 
     // ── Feature B: `split_compliance_notes` ─────────────────────────────────────
@@ -6369,6 +6469,78 @@ mod render_tests {
             html.contains("SOC-2 gap analysis is disabled for this workspace"),
             "soc2-off hint; html=\n{html}"
         );
+    }
+
+    // ── Tier-1 render: AiReviewBlockedBanner (compliance-gate fix) ──────────────────────────
+    // Regression for the silent-empty-audit bug: a `Blocked` compliance gate or a hard AI-pass
+    // failure must never render as a clean, empty findings table. These SSR renders (no network
+    // resources needed — `AiReviewBlockedBanner` takes plain `Option<String>` props) prove the
+    // banner text is actually in the DOM, not just present on the underlying data.
+
+    fn ai_blocked_banner_harness() -> Element {
+        rsx! {
+            AiReviewBlockedBanner {
+                ai_blocked_reason: Some(
+                    "This project is API-only (CLI disabled). Add an Anthropic API key to run."
+                        .to_string(),
+                ),
+                ai_error: None,
+            }
+        }
+    }
+
+    #[test]
+    fn ai_review_blocked_banner_renders_reason_and_remediation() {
+        let mut vdom = VirtualDom::new(ai_blocked_banner_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("AI review did not run"), "heading; html=\n{html}");
+        assert!(
+            html.contains("This project is API-only (CLI disabled). Add an Anthropic API key to run."),
+            "the exact block reason must be visible verbatim; html=\n{html}"
+        );
+        assert!(
+            html.contains("Add an Anthropic API key in Settings"),
+            "actionable remediation hint; html=\n{html}"
+        );
+        assert!(!html.contains("AI review failed"), "must not ALSO show the error heading; html=\n{html}");
+    }
+
+    fn ai_error_banner_harness() -> Element {
+        rsx! {
+            AiReviewBlockedBanner {
+                ai_blocked_reason: None,
+                ai_error: Some("me/api: AI audit skipped (simulated LLM unavailable (complete))".to_string()),
+            }
+        }
+    }
+
+    #[test]
+    fn ai_review_error_banner_renders_real_error_text() {
+        let mut vdom = VirtualDom::new(ai_error_banner_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("AI review failed"), "heading; html=\n{html}");
+        assert!(
+            html.contains("simulated LLM unavailable"),
+            "the real underlying error text must be visible verbatim, not a generic message; html=\n{html}"
+        );
+    }
+
+    fn ai_banner_neither_set_harness() -> Element {
+        rsx! {
+            AiReviewBlockedBanner { ai_blocked_reason: None, ai_error: None }
+        }
+    }
+
+    #[test]
+    fn ai_review_banner_renders_nothing_on_the_happy_path() {
+        // Neither field set (the ordinary case — the AI review ran and produced findings, or
+        // wasn't requested at all) — the banner must be entirely absent, never an empty box.
+        let mut vdom = VirtualDom::new(ai_banner_neither_set_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(!html.contains("onboard-gate"), "no banner markup at all on the happy path; html=\n{html}");
     }
 
     // ── Tier-1 render: audit-integrated alternative recommendation ─────────────────────────
