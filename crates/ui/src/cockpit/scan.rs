@@ -1343,6 +1343,14 @@ pub(super) async fn audit_job_poll(job_id: &str) -> Option<JobStatusEnvelope> {
 /// final report, clearing the shared `active_audit_job` so a later mount doesn't re-resume.
 /// Shared by the manual start AND the resume-on-mount path. Gives up after a few misses (the
 /// job vanished, e.g. the server restarted) so it can't spin forever.
+///
+/// SILENT-DEATH FIX: `failed` used to clear the spinner and stop, with nothing else — the
+/// job's `message` (the server's `jobs.fail` reason) was read off the wire but never shown
+/// anywhere, so a failed background scan looked EXACTLY like nothing had happened. Same gap
+/// on the "job vanished" (misses >= 3) path: no report, no message, no signal it even ran.
+/// Both paths now set `job_failed_message`, which `ScanJobFailedBanner` renders
+/// unconditionally (not gated on a report existing, since a failed/vanished job never
+/// produces one).
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn poll_job(
     jid: String,
@@ -1354,6 +1362,9 @@ pub(super) async fn poll_job(
     mut det_progress: Signal<Option<DetProgressView>>,
     mut active_audit_job: Signal<Option<String>>,
     mut scan_idle_ms: Signal<Option<u128>>,
+    // Set on `failed` (with the server's reason) or when the job vanishes mid-poll; cleared
+    // by the caller when a fresh scan starts. `None` renders nothing (`ScanJobFailedBanner`).
+    mut job_failed_message: Signal<Option<String>>,
 ) {
     // Loading guard held for the ENTIRE poll loop so the Bombe machine stays
     // active until the background job reports done/failed/cancelled.
@@ -1381,6 +1392,9 @@ pub(super) async fn poll_job(
                         break;
                     }
                     "failed" => {
+                        job_failed_message.set(Some(js.job.message.clone().unwrap_or_else(|| {
+                            "The scan failed for an unspecified reason.".to_string()
+                        })));
                         auditing.set(false);
                         job_progress.set(None);
                         det_progress.set(None);
@@ -1400,6 +1414,11 @@ pub(super) async fn poll_job(
             None => {
                 misses += 1;
                 if misses >= 3 {
+                    job_failed_message.set(Some(
+                        "Lost contact with the running scan (the server may have restarted \
+                         or the job was lost). Please retry."
+                            .to_string(),
+                    ));
                     auditing.set(false);
                     job_progress.set(None);
                     det_progress.set(None);
@@ -3150,6 +3169,36 @@ pub(super) fn RuleAlternativesPanel(
     }
 }
 
+/// The background-JOB failure banner: renders when an async audit job ends in the
+/// `failed` state (the server's `jobs.fail` — see `run_job_body_with_panic_guard` and the
+/// "no local repos" / panic-guard failure paths in `camerata_server`'s
+/// `onboard_audit_start`), or when polling loses contact with a job that never reported
+/// back. Distinct from [`AiReviewBlockedBanner`]: that one renders from a COMPLETED
+/// report's `ai_blocked_reason` / `ai_error` fields, but a failed (or vanished) job never
+/// produces a report at all (`audit` stays `None`), so without this banner the scan just
+/// stops — the spinner clears and nothing else appears. That silent stop is the exact
+/// "the scan dies with no error" bug this closes. Reuses the `onboard-gate` banner classes
+/// for visual consistency with `AiReviewBlockedBanner`. Its own component (rather than
+/// inline in `ScanResults`) so it is directly SSR-testable without standing up
+/// `ScanResults`'s network-backed resources.
+#[component]
+pub(super) fn ScanJobFailedBanner(message: Option<String>) -> Element {
+    rsx! {
+        if let Some(msg) = message {
+            div { class: "onboard-gate scan-job-failed-banner",
+                span { class: "onboard-gate-dot" }
+                div {
+                    p { class: "onboard-gate-h", "Scan failed" }
+                    p { class: "onboard-gate-b", "{msg}" }
+                    p { class: "onboard-gate-hint",
+                        "The background scan stopped before it could finish. Check your project's backend setup (Claude CLI on PATH, or an Anthropic API key), then retry the scan."
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The compliance-gate fix's unmissable banner: renders when the audit's AI review either
 /// (a) did not run at all because the compliance backend gate was `Blocked` (`ai_blocked_reason`
 /// set), or (b) was requested but every pass failed with a real error (`ai_error` set). Renders
@@ -3285,6 +3334,10 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // Live DETERMINISTIC-pass progress (floor + preview tools), rendered above the AI
     // agent-activity drawer. Primary progress view in deterministic-only mode (no AI drawer).
     let mut det_progress = use_signal(|| Option::<DetProgressView>::None);
+    // Background-job FAILURE message (silent-death fix): set by `poll_job` when a job ends
+    // `failed` or vanishes mid-poll. Rendered by `ScanJobFailedBanner`, UNCONDITIONALLY —
+    // not gated on a report existing, since a failed job never produces one.
+    let mut job_failed_message = use_signal(|| Option::<String>::None);
     // The in-flight async job id (app-scope, survives navigation). RESUME: if a job was
     // already running when this view (re)mounted, re-attach the poll instead of losing it.
     let active_audit_job = use_context::<Signal<Option<String>>>();
@@ -3292,7 +3345,7 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     use_future(move || async move {
         if let Some(jid) = active_audit_job.peek().clone() {
             auditing.set(true);
-            poll_job(jid, audit, auditing, job_progress, det_progress, active_audit_job, scan_idle_ms).await;
+            poll_job(jid, audit, auditing, job_progress, det_progress, active_audit_job, scan_idle_ms, job_failed_message).await;
         }
     });
     // Selected-rule count, set by ProposedRulesTable and read here for the cost estimate
@@ -3852,6 +3905,10 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                             detail_finding.set(None);
                             job_progress.set(None);
                             det_progress.set(None);
+                            // Clear any PREVIOUS run's failure banner — a fresh scan starting
+                            // is not itself a failure, and a stale message here would look
+                            // like this new run already failed before it even began.
+                            job_failed_message.set(None);
                             auditing.set(true);
                             if use_job {
                                 // Async job: submit, record the id (app-scope, so a later
@@ -3862,15 +3919,32 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                     let _guard = crate::loading::LoadingGuard::new();
                                     let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough, incremental, deep, ai, det).await else {
                                         auditing.set(false);
+                                        job_failed_message.set(Some(
+                                            "Could not start the background scan (the request \
+                                             to submit it failed). Please retry."
+                                                .to_string(),
+                                        ));
                                         return;
                                     };
                                     active_audit_job.set(Some(jid.clone()));
-                                    poll_job(jid, audit, auditing, job_progress, det_progress, active_audit_job, scan_idle_ms).await;
+                                    poll_job(jid, audit, auditing, job_progress, det_progress, active_audit_job, scan_idle_ms, job_failed_message).await;
                                 });
                             } else {
                                 // Synchronous: hold the request until the (shorter) run finishes.
                                 spawn(async move {
-                                    audit.set(audit_against(&repos, &rules, &model, &calib, &mode, thorough, incremental, deep, ai, det).await);
+                                    let result = audit_against(&repos, &rules, &model, &calib, &mode, thorough, incremental, deep, ai, det).await;
+                                    if result.is_none() {
+                                        // The sync request itself failed (network error, server
+                                        // unreachable) — the server-side crash path already
+                                        // returns a normal 200 JSON with `ai_error` set, so
+                                        // `None` here means the response never arrived at all.
+                                        job_failed_message.set(Some(
+                                            "The scan request failed (no response from the \
+                                             server). Please retry."
+                                                .to_string(),
+                                        ));
+                                    }
+                                    audit.set(result);
                                     auditing.set(false);
                                 });
                             }
@@ -4240,6 +4314,10 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                 if let Some(dp) = det_progress() {
                     DeterministicProgress { progress: dp }
                 }
+                // Background-job FAILURE banner (silent-death fix): rendered UNCONDITIONALLY,
+                // not gated on `audited.is_some()` below — a failed or vanished job never
+                // produces a report, so this is the only place a failure would ever surface.
+                ScanJobFailedBanner { message: job_failed_message() }
                 // Live feedback: open this to watch the AI's actual prompt + output for
                 // the audit (so you can trust it's really working, not hung). Shown ONLY for
                 // a current-session audit (running or done THIS mount). The transcript lives
@@ -6079,6 +6157,55 @@ mod tests {
         assert!(!env.cancel_requested);
     }
 
+    /// Confirms the background-job delivery path actually carries `ai_error` all the way
+    /// through: `jobs.finish` on the server attaches the full report (including `ai_error`)
+    /// to the job, `GET /api/onboard/audit/job/:id` serializes it under `job.report`, and
+    /// `audit_job_poll` must deserialize that nested field intact — this is the exact chain
+    /// `poll_job`'s `"done"` branch reads (`audit.set(js.job.report)`) before
+    /// `AiReviewBlockedBanner` ever gets a chance to render it. Without this, a background
+    /// scan whose AI review failed (but the job still finished "done") could silently lose
+    /// the error on the wire and present as a clean, empty result.
+    #[tokio::test]
+    #[serial_test::serial(bff_env)]
+    async fn audit_job_poll_carries_ai_error_through_a_finished_reports_job() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/onboard/audit/job/job-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "job": {
+                    "status": "done",
+                    "done": 1,
+                    "total": 1,
+                    "findings": [],
+                    "report": {
+                        "repos": ["me/api"],
+                        "files_scanned": 10,
+                        "findings": [],
+                        "proposed_rules": [],
+                        "gated": false,
+                        "ai_error": "me/api: AI audit skipped (boom)",
+                        "message": null
+                    }
+                },
+                "idle_ms": null,
+                "cancel_requested": false
+            })))
+            .mount(&server)
+            .await;
+
+        std::env::set_var("CAMERATA_BFF_URL", server.uri());
+        let env = super::audit_job_poll("job-2").await;
+        std::env::remove_var("CAMERATA_BFF_URL");
+
+        let env = env.expect("envelope parses");
+        assert_eq!(env.job.status, "done");
+        let report = env.job.report.expect("a done job carries its report");
+        assert_eq!(report.ai_error.as_deref(), Some("me/api: AI audit skipped (boom)"));
+    }
+
     #[tokio::test]
     #[serial_test::serial(bff_env)]
     async fn scaffold_greenfield_api_filters_cross_repo_and_posts_arm_rules() {
@@ -6538,6 +6665,52 @@ mod render_tests {
         // Neither field set (the ordinary case — the AI review ran and produced findings, or
         // wasn't requested at all) — the banner must be entirely absent, never an empty box.
         let mut vdom = VirtualDom::new(ai_banner_neither_set_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(!html.contains("onboard-gate"), "no banner markup at all on the happy path; html=\n{html}");
+    }
+
+    // ── Tier-1 render: ScanJobFailedBanner (background-job silent-death fix) ───────────────
+    // Regression for "the scan silently dies with no error": a background job that ends
+    // `failed` (or that the poller loses contact with) must render a loud, visible banner —
+    // never just a spinner that quietly disappears with nothing else on screen.
+
+    fn scan_job_failed_banner_harness() -> Element {
+        rsx! {
+            ScanJobFailedBanner {
+                message: Some(
+                    "The scan crashed unexpectedly: claude CLI (`claude`) was not found on PATH. \
+                     Please retry; if it keeps happening, this is a bug worth reporting."
+                        .to_string(),
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn scan_job_failed_banner_renders_the_real_failure_text() {
+        let mut vdom = VirtualDom::new(scan_job_failed_banner_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(html.contains("Scan failed"), "heading; html=\n{html}");
+        assert!(
+            html.contains("claude CLI (`claude`) was not found on PATH"),
+            "the real underlying failure text must be visible verbatim, not swallowed; html=\n{html}"
+        );
+        assert!(html.contains("onboard-gate"), "reuses the same unmissable banner styling; html=\n{html}");
+    }
+
+    fn scan_job_failed_banner_none_harness() -> Element {
+        rsx! {
+            ScanJobFailedBanner { message: None }
+        }
+    }
+
+    #[test]
+    fn scan_job_failed_banner_renders_nothing_on_the_happy_path() {
+        // No failure message (the ordinary case — the job is still running, or finished
+        // cleanly) — the banner must be entirely absent, never an empty box.
+        let mut vdom = VirtualDom::new(scan_job_failed_banner_none_harness);
         vdom.rebuild_in_place();
         let html = dioxus_ssr::render(&vdom);
         assert!(!html.contains("onboard-gate"), "no banner markup at all on the happy path; html=\n{html}");
