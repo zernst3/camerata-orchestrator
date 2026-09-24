@@ -5098,6 +5098,73 @@ async fn split_scannable_rules(
     (scannable, excluded, preview, set)
 }
 
+/// Extract a human-readable message from a caught panic payload (`std::panic::catch_unwind`
+/// / `futures::FutureExt::catch_unwind`'s `Err` side). A panic conventionally carries either
+/// a `&'static str` (a string-literal `panic!("...")`) or an owned `String` (a formatted
+/// `panic!("{x}")`); anything else (a custom payload type) falls back to a generic label so
+/// this ALWAYS produces a usable message rather than failing to report one at all — the
+/// whole point of catching the panic here is to surface it, never to trade one silent
+/// failure for another.
+///
+/// Takes the `Box<dyn Any + Send>` BY REFERENCE, deliberately — not `&(dyn Any + Send)`.
+/// `Box<dyn Any + Send>` itself satisfies `Any`'s blanket impl, so a caller passing
+/// `&payload` where `payload: Box<dyn Any + Send>` to a `&(dyn Any + Send)` parameter
+/// would coerce via UNSIZING the box itself (treating "the Box IS the Any") rather than
+/// DEREFING into its contents, and `downcast_ref` would then always miss — silently
+/// reporting every real panic as "no panic message available". Taking `&Box<...>` here
+/// means `payload.downcast_ref()` resolves through Rust's method-call auto-deref (which
+/// unlike argument coercion, derefs through the `Box` to the `dyn Any` it targets first),
+/// so the natural call `panic_message(&panic)` is simply correct at every call site.
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "no panic message available".to_string()
+    }
+}
+
+/// Run one job's background audit `body` to completion, guaranteeing `jid` lands in a
+/// TERMINAL job state (`done` or `failed`) no matter how `body` exits.
+///
+/// This is the panic guard for the class of "the scan silently dies with no error" bugs:
+/// `body` is expected to end by calling `jobs.finish(jid, ...)` or `jobs.fail(jid, ...)`
+/// itself on every path it knows about (empty sources, a clean completion, ...). What it
+/// canNOT protect against on its own is a PANIC partway through — a stuck subprocess
+/// turning into an unwrap, an indexing bug, anything — which would otherwise unwind
+/// straight out of the spawned task with nobody ever calling `fail`/`finish`, leaving the
+/// job stuck at `running` forever and the UI watching nothing happen. Wrapping `body` in
+/// `catch_unwind` here means that no matter what it does internally, EITHER it reaches its
+/// own terminal call, OR this function reaches one on its behalf.
+///
+/// `AssertUnwindSafe` is required because `body` is expected to close over `&mut` locals
+/// (an accumulating report, loop counters) that aren't automatically `UnwindSafe`. That is
+/// sound here: every value that must survive a panic (the job store, scan cache, and
+/// friends) is behind `Arc<Mutex<_>>`, which IS unwind-safe via mutex poisoning; everything
+/// else is plain owned data that is simply dropped, unobserved, when `body` panics.
+///
+/// Calling `jobs.fail` after `body` already called `jobs.finish` (or `fail`) would be a
+/// bug, but it can't happen: `catch_unwind` only returns `Err` when `body` panicked, and a
+/// panic can only occur BEFORE `body`'s own terminal call runs (it's always the last thing
+/// on every path) — never after, since there is no code left to panic in.
+async fn run_job_body_with_panic_guard<F>(jobs: &crate::jobs::JobStore, jid: &str, body: F)
+where
+    F: std::future::Future<Output = ()>,
+{
+    use futures::FutureExt;
+    if let Err(panic) = std::panic::AssertUnwindSafe(body).catch_unwind().await {
+        let msg = panic_message(&panic);
+        jobs.fail(
+            jid,
+            format!(
+                "The scan crashed unexpectedly: {msg}. Please retry; if it keeps happening, \
+                 this is a bug worth reporting."
+            ),
+        );
+    }
+}
+
 async fn onboard_audit(
     State(state): State<AppState>,
     Json(req): Json<AuditReq>,
@@ -5164,93 +5231,128 @@ async fn onboard_audit(
     // `backend` setting and whether an Anthropic key is present. See
     // `resolve_backend_for_project`'s doc comment.
     let backend_resolution = resolve_backend_for_project(&state, active_project.as_ref());
-    let (mut report, manifest) = crate::onboard::audit_repos(
-        &sources,
-        &selected,
-        notes,
-        model.as_deref(),
-        calibration_model.as_deref(),
-        mode,
-        req.thorough,
-        Some((&state.transcripts, SCAN_AUDIT_KEY)),
-        None,
-        prior.as_ref(),
-        req.deep,
-        state.feature_flags.soc2,
-        run_ai_review,
-        run_deterministic,
-        Some(state.usage_ledger.clone()),
-        backend_resolution,
-        corpus.as_ref(),
-        &active_project
-            .as_ref()
-            .map(project_chosen_options)
-            .unwrap_or_default(),
-    )
-    .await;
-    // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
-    // incremental. Only when there's an active project to key it to.
-    if let Some(id) = &project_id {
-        state.scan_cache.put(id, manifest);
-    }
-    report.excluded_mechanical_rules = excluded_mechanical;
-    // SCAN-TIME deterministic PREVIEW pass: run the selected mechanical rules' own tools
-    // and fold their findings into triage as preview findings (advisory, not enforced).
-    // Gated on the deterministic selection — deselecting deterministic scans skips it too.
-    // (No job here, so no live deterministic progress on the synchronous path.)
-    if run_deterministic {
-        merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref(), None).await;
-    }
 
-    // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────────────
-    // Runs after preview linters so a slow osv-scanner never blocks them.
-    // Hard 60-second total timeout (provisioning + scan); fail-soft on timeout.
-    // Gated on run_deterministic; CAMERATA_DISABLE_DEP_AUDIT bypasses for test isolation.
-    if run_deterministic {
-        use tokio::time::{timeout, Duration};
-        let dep_audit_timeout = Duration::from_secs(60);
-        for (spec, dir) in &sources {
-            let spec = spec.as_str();
-            let run = crate::dep_audit::run_dep_audit(spec, dir);
-            let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
-                Ok(result) => result,
-                Err(_elapsed) => (
-                    Vec::new(),
-                    Some(crate::onboard::CoverageNote {
-                        tool: "osv-scanner".to_string(),
-                        message: format!(
-                            "dependency audit (osv-scanner) timed out after 60 s for {spec}"
-                        ),
-                    }),
-                ),
-            };
-            if !dep_findings.is_empty() {
-                report.findings.extend(dep_findings);
-            }
-            if let Some(note) = dep_note {
-                report.coverage_notes.push(note);
+    // PANIC GUARD: this handler has no background job to fail into (unlike
+    // `onboard_audit_start`'s spawned task) — a bare panic anywhere in the pipeline below
+    // would otherwise unwind straight through the handler, dropping the connection and
+    // leaving the caller with an opaque network error instead of an explained failure.
+    // `catch_unwind` turns that into a normal JSON response carrying `ai_error`, so the
+    // SAME banner the UI already renders for an AI-review failure covers a crash too —
+    // never a silent, blank result. `AssertUnwindSafe` is required because the block
+    // below captures locals (accumulating `report`, loop state) that aren't automatically
+    // UnwindSafe; nothing here is observed again after a panic except through `report`,
+    // which this function constructs fresh either way (real or synthesized), so there is
+    // no stale/partially-mutated state a caller could see.
+    use futures::FutureExt;
+    let outcome = std::panic::AssertUnwindSafe(async move {
+        let (mut report, manifest) = crate::onboard::audit_repos(
+            &sources,
+            &selected,
+            notes,
+            model.as_deref(),
+            calibration_model.as_deref(),
+            mode,
+            req.thorough,
+            Some((&state.transcripts, SCAN_AUDIT_KEY)),
+            None,
+            prior.as_ref(),
+            req.deep,
+            state.feature_flags.soc2,
+            run_ai_review,
+            run_deterministic,
+            Some(state.usage_ledger.clone()),
+            backend_resolution,
+            corpus.as_ref(),
+            &active_project
+                .as_ref()
+                .map(project_chosen_options)
+                .unwrap_or_default(),
+        )
+        .await;
+        // Persist the fresh manifest (even after a forced full scan) so the NEXT scan can be
+        // incremental. Only when there's an active project to key it to.
+        if let Some(id) = &project_id {
+            state.scan_cache.put(id, manifest);
+        }
+        report.excluded_mechanical_rules = excluded_mechanical;
+        // SCAN-TIME deterministic PREVIEW pass: run the selected mechanical rules' own tools
+        // and fold their findings into triage as preview findings (advisory, not enforced).
+        // Gated on the deterministic selection — deselecting deterministic scans skips it too.
+        // (No job here, so no live deterministic progress on the synchronous path.)
+        if run_deterministic {
+            merge_scan_preview(&mut report, &sources, &preview_rules, corpus.as_ref(), None)
+                .await;
+        }
+
+        // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────────
+        // Runs after preview linters so a slow osv-scanner never blocks them.
+        // Hard 60-second total timeout (provisioning + scan); fail-soft on timeout.
+        // Gated on run_deterministic; CAMERATA_DISABLE_DEP_AUDIT bypasses for test isolation.
+        if run_deterministic {
+            use tokio::time::{timeout, Duration};
+            let dep_audit_timeout = Duration::from_secs(60);
+            for (spec, dir) in &sources {
+                let spec = spec.as_str();
+                let run = crate::dep_audit::run_dep_audit(spec, dir);
+                let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
+                    Ok(result) => result,
+                    Err(_elapsed) => (
+                        Vec::new(),
+                        Some(crate::onboard::CoverageNote {
+                            tool: "osv-scanner".to_string(),
+                            message: format!(
+                                "dependency audit (osv-scanner) timed out after 60 s for {spec}"
+                            ),
+                        }),
+                    ),
+                };
+                if !dep_findings.is_empty() {
+                    report.findings.extend(dep_findings);
+                }
+                if let Some(note) = dep_note {
+                    report.coverage_notes.push(note);
+                }
             }
         }
-    }
 
-    // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ──────────
-    // After a scan completes, write one floor/catch record for each ACTIVE floor finding
-    // to the enforcement ledger. Best-effort / fail-soft: runs in a background task so
-    // the response is never delayed by ledger writes. Errors inside are logged and swallowed.
-    {
-        let ledger = state.enforcement_ledger.clone();
-        let all_findings = report.findings.clone();
-        tokio::spawn(async move {
-            crate::enforcement_ledger::capture_scan_findings(&ledger, &all_findings).await;
-        });
-    }
+        // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ─────
+        // After a scan completes, write one floor/catch record for each ACTIVE floor
+        // finding to the enforcement ledger. Best-effort / fail-soft: runs in a
+        // background task so the response is never delayed by ledger writes. Errors
+        // inside are logged and swallowed.
+        {
+            let ledger = state.enforcement_ledger.clone();
+            let all_findings = report.findings.clone();
+            tokio::spawn(async move {
+                crate::enforcement_ledger::capture_scan_findings(&ledger, &all_findings).await;
+            });
+        }
 
-    // ── Write last_scan (synchronous path) ───────────────────────────────────────────
-    // Store the completed report immediately so chat grounding can read it regardless of
-    // whether the UI has round-tripped the draft back yet (timing race fixed).
-    if let Some(id) = &project_id {
-        state.set_last_scan(id.clone(), report.clone());
-    }
+        // ── Write last_scan (synchronous path) ───────────────────────────────────────
+        // Store the completed report immediately so chat grounding can read it regardless
+        // of whether the UI has round-tripped the draft back yet (timing race fixed).
+        if let Some(id) = &project_id {
+            state.set_last_scan(id.clone(), report.clone());
+        }
+
+        report
+    })
+    .catch_unwind()
+    .await;
+
+    let report = match outcome {
+        Ok(report) => report,
+        Err(panic) => {
+            let msg = panic_message(&panic);
+            crate::onboard::ScanReport::crashed(
+                &repos,
+                format!(
+                    "The scan crashed unexpectedly: {msg}. Please retry; if it keeps \
+                     happening, this is a bug worth reporting."
+                ),
+            )
+        }
+    };
 
     Json(report)
 }
@@ -5612,164 +5714,175 @@ async fn onboard_audit_start(
     // Also capture recent_scan so the project-agnostic fallback is kept in sync.
     let recent_scan = state.recent_scan.clone();
     tokio::spawn(async move {
-        if sources.is_empty() {
-            jobs.fail(
-                &jid,
-                "No local repos to audit — browse to each repo's local folder first.",
-            );
-            return;
-        }
+        // PANIC GUARD (see `run_job_body_with_panic_guard`'s doc comment for the full
+        // rationale): everything below runs the entire AI + deterministic pipeline in this
+        // detached background task. `body_jobs` / `body_jid` are clones moved into the
+        // body itself so it can report progress and its own terminal state; the outer
+        // `jobs` / `jid` stay behind for the guard to fail the job on a panic the body
+        // never got to handle.
+        let body_jobs = jobs.clone();
+        let body_jid = jid.clone();
+        run_job_body_with_panic_guard(&jobs, &jid, async move {
+            if sources.is_empty() {
+                body_jobs.fail(
+                    &body_jid,
+                    "No local repos to audit. Browse to each repo's local folder first.",
+                );
+                return;
+            }
 
-        // ── Pre-declare the FULL deterministic tool pipeline before any tool runs ──
-        //
-        // The progress box shows "X / N tools"; N must reflect the complete pipeline
-        // from the first poll, not grow one tool at a time.  We compute the complete
-        // tool set now — before audit_repos starts — and seed the job with all of them
-        // at `starting` status.
-        //
-        // Pipeline:
-        //   1. floor      (always, when run_deterministic)
-        //   2. preview linters (clippy / ruff / eslint / semgrep / unrouted — derived
-        //      from the selected mechanical rules via the corpus, when run_deterministic;
-        //      STACK-GATED: a tool whose language is absent from all repos is omitted)
-        //   3. dep-audit  (always-on unless CAMERATA_DISABLE_DEP_AUDIT is set)
-        //
-        // The UI will see, e.g. "0/4 tools" and then watch them fill in, rather than
-        // "1/2 tools" while the other two are still invisible.
-        if run_deterministic {
-            let lookup = |id: &str| corpus.as_ref().and_then(|s| s.get_by_id(id));
-            // Derive the UNION of all languages present across every source repo.
-            // Stack-gating uses this union so the pre-declared tool count matches the
-            // tools that `merge_scan_preview` will actually run (which gates per-repo
-            // but adds to the same job). Using the union is conservative: a tool
-            // present in ANY repo stays in the denominator.
-            let mut union_languages = std::collections::HashSet::<String>::new();
-            for (_, dir) in &sources {
-                let dir_clone = dir.clone();
-                if let Ok(Ok(extracted)) =
-                    tokio::task::spawn_blocking(move || crate::onboard::files::read_local_repo_files(&dir_clone)).await
-                {
-                    union_languages.extend(
-                        crate::scan_tools::languages_from_files(&extracted.files)
-                    );
+            // ── Pre-declare the FULL deterministic tool pipeline before any tool runs ──
+            //
+            // The progress box shows "X / N tools"; N must reflect the complete pipeline
+            // from the first poll, not grow one tool at a time.  We compute the complete
+            // tool set now — before audit_repos starts — and seed the job with all of them
+            // at `starting` status.
+            //
+            // Pipeline:
+            //   1. floor      (always, when run_deterministic)
+            //   2. preview linters (clippy / ruff / eslint / semgrep / unrouted — derived
+            //      from the selected mechanical rules via the corpus, when run_deterministic;
+            //      STACK-GATED: a tool whose language is absent from all repos is omitted)
+            //   3. dep-audit  (always-on unless CAMERATA_DISABLE_DEP_AUDIT is set)
+            //
+            // The UI will see, e.g. "0/4 tools" and then watch them fill in, rather than
+            // "1/2 tools" while the other two are still invisible.
+            if run_deterministic {
+                let lookup = |id: &str| corpus.as_ref().and_then(|s| s.get_by_id(id));
+                // Derive the UNION of all languages present across every source repo.
+                // Stack-gating uses this union so the pre-declared tool count matches the
+                // tools that `merge_scan_preview` will actually run (which gates per-repo
+                // but adds to the same job). Using the union is conservative: a tool
+                // present in ANY repo stays in the denominator.
+                let mut union_languages = std::collections::HashSet::<String>::new();
+                for (_, dir) in &sources {
+                    let dir_clone = dir.clone();
+                    if let Ok(Ok(extracted)) =
+                        tokio::task::spawn_blocking(move || crate::onboard::files::read_local_repo_files(&dir_clone)).await
+                    {
+                        union_languages.extend(
+                            crate::scan_tools::languages_from_files(&extracted.files)
+                        );
+                    }
                 }
+                let lang_gate = if union_languages.is_empty() { None } else { Some(&union_languages) };
+                let mut tool_ids: Vec<String> = vec!["floor".to_string()];
+                let preview_ids =
+                    crate::scan_tools::preview_tool_ids_for_rules(&preview_rules, &lookup, lang_gate);
+                tool_ids.extend(preview_ids);
+                let dep_audit_disabled = std::env::var(crate::dep_audit::DISABLE_ENV_VAR)
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false);
+                if !dep_audit_disabled {
+                    tool_ids.push("dep-audit".to_string());
+                }
+                let id_refs: Vec<&str> = tool_ids.iter().map(String::as_str).collect();
+                body_jobs.declare_tools(&body_jid, &id_refs);
             }
-            let lang_gate = if union_languages.is_empty() { None } else { Some(&union_languages) };
-            let mut tool_ids: Vec<String> = vec!["floor".to_string()];
-            let preview_ids =
-                crate::scan_tools::preview_tool_ids_for_rules(&preview_rules, &lookup, lang_gate);
-            tool_ids.extend(preview_ids);
-            let dep_audit_disabled = std::env::var(crate::dep_audit::DISABLE_ENV_VAR)
-                .map(|v| !v.is_empty())
-                .unwrap_or(false);
-            if !dep_audit_disabled {
-                tool_ids.push("dep-audit".to_string());
-            }
-            let id_refs: Vec<&str> = tool_ids.iter().map(String::as_str).collect();
-            jobs.declare_tools(&jid, &id_refs);
-        }
 
-        let (mut report, manifest) = crate::onboard::audit_repos(
-            &sources,
-            &selected,
-            notes,
-            model.as_deref(),
-            calibration_model.as_deref(),
-            mode,
-            thorough,
-            Some((&transcripts, SCAN_AUDIT_KEY)),
-            Some((&jobs, &jid)),
-            prior.as_ref(),
-            deep,
-            soc2_enabled,
-            run_ai_review,
-            run_deterministic,
-            Some(usage_ledger.clone()),
-            backend_resolution,
-            corpus.as_ref(),
-            &chosen_options,
-        )
-        .await;
-        // Persist the fresh manifest so the next scan can be incremental.
-        if let Some(id) = &project_id {
-            scan_cache.put(id, manifest);
-        }
-        report.excluded_mechanical_rules = excluded_mechanical;
-        // SCAN-TIME deterministic PREVIEW pass (advisory; not enforced until wired). Gated on
-        // the deterministic selection; reports per-tool progress into the job so the cockpit's
-        // deterministic progress view shows each preview tool start/run/done live.
-        if run_deterministic {
-            merge_scan_preview(
-                &mut report,
+            let (mut report, manifest) = crate::onboard::audit_repos(
                 &sources,
-                &preview_rules,
+                &selected,
+                notes,
+                model.as_deref(),
+                calibration_model.as_deref(),
+                mode,
+                thorough,
+                Some((&transcripts, SCAN_AUDIT_KEY)),
+                Some((&body_jobs, &body_jid)),
+                prior.as_ref(),
+                deep,
+                soc2_enabled,
+                run_ai_review,
+                run_deterministic,
+                Some(usage_ledger.clone()),
+                backend_resolution,
                 corpus.as_ref(),
-                Some((&jobs, &jid)),
+                &chosen_options,
             )
             .await;
-        }
+            // Persist the fresh manifest so the next scan can be incremental.
+            if let Some(id) = &project_id {
+                scan_cache.put(id, manifest);
+            }
+            report.excluded_mechanical_rules = excluded_mechanical;
+            // SCAN-TIME deterministic PREVIEW pass (advisory; not enforced until wired). Gated on
+            // the deterministic selection; reports per-tool progress into the job so the cockpit's
+            // deterministic progress view shows each preview tool start/run/done live.
+            if run_deterministic {
+                merge_scan_preview(
+                    &mut report,
+                    &sources,
+                    &preview_rules,
+                    corpus.as_ref(),
+                    Some((&body_jobs, &body_jid)),
+                )
+                .await;
+            }
 
-        // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────
-        //
-        // dep-audit runs AFTER the floor AND the preview linters so a slow osv-scanner
-        // provisioning or scan never blocks them.  A single 60-second hard
-        // tokio::time::timeout wraps the ENTIRE call (provisioning + scan); on timeout
-        // the step fails soft and the scan completes without dep-audit findings.
-        //
-        // Gated on `run_deterministic` (dep-audit is part of the deterministic floor);
-        // CAMERATA_DISABLE_DEP_AUDIT bypasses it entirely for test isolation.
-        if run_deterministic {
-            use tokio::time::{timeout, Duration};
-            let dep_audit_timeout = Duration::from_secs(60);
-            for (spec, dir) in &sources {
-                let spec = spec.as_str();
-                let run = crate::dep_audit::run_dep_audit(spec, dir);
-                let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
-                    Ok(result) => result,
-                    Err(_elapsed) => (
-                        Vec::new(),
-                        Some(crate::onboard::CoverageNote {
-                            tool: "osv-scanner".to_string(),
-                            message: format!(
-                                "dependency audit (osv-scanner) timed out after 60 s for {spec}"
-                            ),
-                        }),
-                    ),
-                };
-                let dep_count = dep_findings.len();
-                jobs.det_tool_running(&jid, "dep-audit");
-                jobs.det_tool_done(&jid, "dep-audit", dep_count);
-                if !dep_findings.is_empty() {
-                    jobs.add_findings(&jid, dep_findings.clone());
-                    report.findings.extend(dep_findings);
-                }
-                if let Some(note) = dep_note {
-                    report.coverage_notes.push(note);
+            // ── Always-on dep-audit (osv-scanner) — runs LAST, hard-bounded ──────────
+            //
+            // dep-audit runs AFTER the floor AND the preview linters so a slow osv-scanner
+            // provisioning or scan never blocks them.  A single 60-second hard
+            // tokio::time::timeout wraps the ENTIRE call (provisioning + scan); on timeout
+            // the step fails soft and the scan completes without dep-audit findings.
+            //
+            // Gated on `run_deterministic` (dep-audit is part of the deterministic floor);
+            // CAMERATA_DISABLE_DEP_AUDIT bypasses it entirely for test isolation.
+            if run_deterministic {
+                use tokio::time::{timeout, Duration};
+                let dep_audit_timeout = Duration::from_secs(60);
+                for (spec, dir) in &sources {
+                    let spec = spec.as_str();
+                    let run = crate::dep_audit::run_dep_audit(spec, dir);
+                    let (dep_findings, dep_note) = match timeout(dep_audit_timeout, run).await {
+                        Ok(result) => result,
+                        Err(_elapsed) => (
+                            Vec::new(),
+                            Some(crate::onboard::CoverageNote {
+                                tool: "osv-scanner".to_string(),
+                                message: format!(
+                                    "dependency audit (osv-scanner) timed out after 60 s for {spec}"
+                                ),
+                            }),
+                        ),
+                    };
+                    let dep_count = dep_findings.len();
+                    body_jobs.det_tool_running(&body_jid, "dep-audit");
+                    body_jobs.det_tool_done(&body_jid, "dep-audit", dep_count);
+                    if !dep_findings.is_empty() {
+                        body_jobs.add_findings(&body_jid, dep_findings.clone());
+                        report.findings.extend(dep_findings);
+                    }
+                    if let Some(note) = dep_note {
+                        report.coverage_notes.push(note);
+                    }
                 }
             }
-        }
 
-        // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──
-        // (The job path is async; ledger capture lives in the synchronous `onboard_audit`
-        // handler. If you add ledger capture here in the future, follow the same
-        // background-spawn pattern used there.)
+            // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──
+            // (The job path is async; ledger capture lives in the synchronous `onboard_audit`
+            // handler. If you add ledger capture here in the future, follow the same
+            // background-spawn pattern used there.)
 
-        // ── Write last_scan + recent_scan (async job path) ──────────────────────────
-        // Store the completed report before finishing the job so any concurrent chat
-        // request landing immediately after sees the full results. Fail-soft.
-        // Also update the project-agnostic `recent_scan` fallback so the active-project
-        // context can surface this scan even if the active project changed since the
-        // scan was submitted (or no project was active at submission time).
-        if let Some(id) = &project_id {
-            let mut guard = last_scan.lock().unwrap_or_else(|e| e.into_inner());
-            guard.insert(id.clone(), report.clone());
-        }
-        {
-            let mut recent = recent_scan.lock().unwrap_or_else(|e| e.into_inner());
-            *recent = Some(report.clone());
-        }
+            // ── Write last_scan + recent_scan (async job path) ──────────────────────────
+            // Store the completed report before finishing the job so any concurrent chat
+            // request landing immediately after sees the full results. Fail-soft.
+            // Also update the project-agnostic `recent_scan` fallback so the active-project
+            // context can surface this scan even if the active project changed since the
+            // scan was submitted (or no project was active at submission time).
+            if let Some(id) = &project_id {
+                let mut guard = last_scan.lock().unwrap_or_else(|e| e.into_inner());
+                guard.insert(id.clone(), report.clone());
+            }
+            {
+                let mut recent = recent_scan.lock().unwrap_or_else(|e| e.into_inner());
+                *recent = Some(report.clone());
+            }
 
-        jobs.finish(&jid, report);
+            body_jobs.finish(&body_jid, report);
+        })
+        .await;
     });
 
     Json(serde_json::json!({ "job_id": job_id }))
@@ -25251,5 +25364,108 @@ mod tests {
         );
         let json = serde_json::json!({ "fix": fix });
         assert_eq!(json["fix"], serde_json::Value::Null);
+    }
+
+    // ── Silent-death-class fix: the background job panic/failure guard ─────────────
+
+    #[tokio::test]
+    async fn panic_guard_fails_the_job_when_the_body_panics() {
+        // Stand in for the audit body panicking (a hung subprocess turning into an
+        // unwrap, an indexing bug, whatever) BEFORE it reaches its own `jobs.fail` /
+        // `jobs.finish` call. Without the guard, this job would stay `running` forever.
+        let jobs = crate::jobs::JobStore::new();
+        let jid = jobs.create("audit", None);
+        run_job_body_with_panic_guard(&jobs, &jid, async {
+            panic!("boom: simulated AI pipeline crash");
+        })
+        .await;
+        let job = jobs.get(&jid).expect("job exists");
+        assert_eq!(job.status, "failed", "a panicking body must not leave the job running");
+        let msg = job.message.expect("a failure message must be set");
+        assert!(msg.contains("crashed unexpectedly"), "message: {msg}");
+        assert!(msg.contains("boom: simulated AI pipeline crash"), "message: {msg}");
+    }
+
+    #[tokio::test]
+    async fn panic_guard_does_not_clobber_a_clean_finish() {
+        // When the body reaches its own `jobs.finish` normally, the guard must be a
+        // total no-op — it must never overwrite a successful result.
+        let jobs = crate::jobs::JobStore::new();
+        let jid = jobs.create("audit", None);
+        let (body_jobs, body_jid) = (jobs.clone(), jid.clone());
+        run_job_body_with_panic_guard(&jobs, &jid, async move {
+            body_jobs.finish(&body_jid, crate::onboard::ScanReport::gated(&[]));
+        })
+        .await;
+        let job = jobs.get(&jid).expect("job exists");
+        assert_eq!(job.status, "done", "the guard must not touch a job the body already finished");
+    }
+
+    #[tokio::test]
+    async fn panic_guard_does_not_clobber_a_bodys_own_fail_message() {
+        // When the body reaches its own `jobs.fail` (e.g. "no repos to audit") normally,
+        // the guard must not overwrite that specific message with its generic one.
+        let jobs = crate::jobs::JobStore::new();
+        let jid = jobs.create("audit", None);
+        let (body_jobs, body_jid) = (jobs.clone(), jid.clone());
+        run_job_body_with_panic_guard(&jobs, &jid, async move {
+            body_jobs.fail(&body_jid, "No local repos to audit.");
+        })
+        .await;
+        let job = jobs.get(&jid).expect("job exists");
+        assert_eq!(job.status, "failed");
+        assert_eq!(job.message.as_deref(), Some("No local repos to audit."));
+    }
+
+    #[test]
+    fn panic_message_extracts_str_and_string_payloads_with_generic_fallback() {
+        let payload: Box<dyn std::any::Any + Send> = Box::new("literal panic message");
+        assert_eq!(panic_message(&payload), "literal panic message");
+        let payload: Box<dyn std::any::Any + Send> = Box::new(String::from("owned panic message"));
+        assert_eq!(panic_message(&payload), "owned panic message");
+        // A non-string payload (a custom panic type) still produces a usable message
+        // rather than failing to report one at all.
+        let payload: Box<dyn std::any::Any + Send> = Box::new(42i32);
+        assert_eq!(panic_message(&payload), "no panic message available");
+    }
+
+    /// Regression guard for the exact footgun `panic_message`'s signature was designed to
+    /// avoid: a caught panic's payload MUST downcast successfully through this function
+    /// when called the natural way (`panic_message(&caught)`), not just when manually
+    /// dereferenced first. A prior version of this function took `&(dyn Any + Send)` and
+    /// looked correct, compiled, and ran without erroring — but silently reported EVERY
+    /// panic as "no panic message available", because `Box<dyn Any + Send>` itself
+    /// satisfies `Any`'s blanket impl: `&caught` coerced by unsizing the Box (as if the Box
+    /// were the payload) rather than dereferencing into it. This test exercises the actual
+    /// `catch_unwind` path (not a hand-built `Box::new(...)`) so a regression back to that
+    /// signature would be caught here even though it type-checks.
+    #[tokio::test]
+    async fn panic_message_recovers_the_real_text_from_an_actual_caught_panic() {
+        use futures::FutureExt;
+        let caught = std::panic::AssertUnwindSafe(async {
+            panic!("this exact text must survive catch_unwind intact");
+        })
+        .catch_unwind()
+        .await
+        .expect_err("the async block panics");
+        assert_eq!(
+            panic_message(&caught),
+            "this exact text must survive catch_unwind intact"
+        );
+    }
+
+    /// A background scan whose pipeline crashes must never present as a silent, blank,
+    /// zero-findings result — it renders through the same `ai_error` banner path as any
+    /// other AI-review failure (see `ScanReport::crashed`'s doc comment).
+    #[test]
+    fn scan_report_crashed_is_shaped_like_an_ai_error_never_a_clean_empty_scan() {
+        let repos = vec!["me/api".to_string()];
+        let report = crate::onboard::ScanReport::crashed(&repos, "boom".to_string());
+        assert_eq!(report.repos, repos);
+        assert!(!report.gated, "must not be mistaken for the GitHub-connect gate");
+        assert!(!report.blocked, "must not be mistaken for the compliance block");
+        assert_eq!(report.ai_error.as_deref(), Some("boom"));
+        assert_eq!(report.message.as_deref(), Some("boom"));
+        assert!(report.findings.is_empty());
     }
 }

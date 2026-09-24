@@ -548,6 +548,36 @@ impl ScanReport {
             recommendations: std::collections::HashMap::new(),
         }
     }
+
+    /// A scan that never produced a real result because the pipeline crashed (a caught
+    /// panic) rather than returning cleanly or via [`Self::gated`] / the compliance
+    /// `blocked` gate. Deliberately shaped like an AI-review failure (`ai_error` set,
+    /// `gated`/`blocked` false) so it renders through the SAME "AI review failed" banner
+    /// the UI already has for `ai_error` — a crash must never look like a silent, clean,
+    /// zero-findings scan.
+    pub fn crashed(repos: &[String], message: String) -> Self {
+        Self {
+            repos: repos.to_vec(),
+            stacks: Vec::new(),
+            files_scanned: 0,
+            test_file_count: 0,
+            files_excluded: 0,
+            excluded_mechanical_rules: Vec::new(),
+            code_chars: 0,
+            findings: Vec::new(),
+            proposed_rules: Vec::new(),
+            gated: false,
+            blocked: false,
+            ai_blocked_reason: None,
+            ai_error: Some(message.clone()),
+            actual_usage: None,
+            deep: None,
+            message: Some(message),
+            coverage_notes: Vec::new(),
+            provenance: ScanProvenance::default(),
+            recommendations: std::collections::HashMap::new(),
+        }
+    }
 }
 
 /// One rule the architect selected for the Phase-2 audit, with its per-repo binding.
