@@ -226,10 +226,90 @@ impl Drop for ClaudePidGuard {
 pub fn kill_inflight_claude() {
     if let Ok(g) = inflight_claude().lock() {
         for &pid in g.iter() {
-            let _ = std::process::Command::new("kill")
-                .arg("-9")
-                .arg(pid.to_string())
-                .status();
+            kill_pid(Some(pid));
+        }
+    }
+}
+
+/// Best-effort SIGKILL by pid. Shared by every "the subprocess must not be leaked" path:
+/// the shutdown hook above, and the CLI timeouts below. `kill_on_drop(true)` on the
+/// `Command` already reaps the child when its owning future/value is dropped, but a hard
+/// timeout wants to be explicit and immediate rather than relying on drop timing — this
+/// is that explicit kill. Killing an already-exited pid is a harmless no-op.
+fn kill_pid(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        let _ = std::process::Command::new("kill")
+            .arg("-9")
+            .arg(pid.to_string())
+            .status();
+    }
+}
+
+/// Parse a duration-in-seconds env var, falling back to `default` on missing/invalid/zero
+/// input. Shared by every CLI subprocess timeout knob (`CAMERATA_LLM_IDLE_SECS`,
+/// `CAMERATA_CLI_TIMEOUT_SECS`) so the parse-with-fallback behavior is identical across
+/// both.
+fn env_secs(var: &str, default: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(
+        std::env::var(var)
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(default),
+    )
+}
+
+/// The hard, overall cap on a single `claude` CLI call (spawn to exit), independent of
+/// any idle/progress-based stall detection. `CAMERATA_CLI_TIMEOUT_SECS` overrides the
+/// 300s default. This is the backstop for the class of "the scan silently dies" bugs: a
+/// hung `claude` (stuck on an auth prompt, waiting on stdin despite the null redirect,
+/// or any other wedge) must always fail loudly within a bounded time rather than hang
+/// the scan forever.
+fn cli_overall_timeout() -> std::time::Duration {
+    env_secs("CAMERATA_CLI_TIMEOUT_SECS", 300)
+}
+
+/// Map a `claude` CLI spawn error to a clear, actionable message. `NotFound` gets a
+/// specific message: a Finder/Dock-launched app inherits a minimal PATH that typically
+/// omits Homebrew's `/opt/homebrew/bin`, so the raw OS error ("No such file or
+/// directory") gives no hint that the fix is a PATH problem, not a missing install.
+/// Every other spawn error keeps the original generic wording, verbatim, so this only
+/// ever narrows the message, never changes behavior for other failure kinds. Pure and
+/// unit-testable in isolation (no process spawn required).
+fn map_spawn_error(e: std::io::Error) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        anyhow::anyhow!(
+            "Claude CLI (`claude`) was not found on PATH. If you launched the app from Finder \
+             or the Dock it may not inherit your shell PATH where `claude` is installed (for \
+             example /opt/homebrew/bin). Launch the app from a terminal, or set this project's \
+             Backend to API and add an Anthropic API key."
+        )
+    } else {
+        anyhow::anyhow!("failed to spawn `claude` CLI (is it installed/on PATH?): {e}")
+    }
+}
+
+/// Run an already-spawned child to completion (collecting stdout/stderr, mirroring
+/// `Command::output`) under a hard overall timeout. On timeout: kill the child by pid
+/// (do not leak it — [`kill_pid`] is a belt-and-suspenders explicit kill; `kill_on_drop`
+/// on the originating `Command` is the backstop) and return the actionable timeout
+/// message. This is the non-streaming CLI timeout wrapper ([`Llm::complete_cli`]);
+/// standalone from any `claude`-specific setup so it's exercisable in a unit test
+/// against ANY child process, not just a live `claude` CLI.
+async fn wait_with_timeout(
+    child: tokio::process::Child,
+    timeout: std::time::Duration,
+) -> anyhow::Result<std::process::Output> {
+    let pid = child.id();
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(res) => res.map_err(|e| anyhow::anyhow!("failed to run `claude` CLI: {e}")),
+        Err(_) => {
+            kill_pid(pid);
+            anyhow::bail!(
+                "Claude CLI timed out after {}s (no output). The `claude` process may be \
+                 stuck waiting for authentication or input.",
+                timeout.as_secs()
+            );
         }
     }
 }
@@ -951,6 +1031,8 @@ impl Llm {
         // set it explicitly so the behavior doesn't depend on that detail.
         cmd.kill_on_drop(true)
             .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .arg("-p")
             .arg(nul_safe(&req.prompt))
             .arg("--model")
@@ -958,9 +1040,10 @@ impl Llm {
             .arg("--output-format")
             .arg("json");
         harden_completion(&mut cmd, req);
-        let out = cmd.output().await.map_err(|e| {
-            anyhow::anyhow!("failed to spawn `claude` CLI (is it installed/on PATH?): {e}")
-        })?;
+        let child = cmd.spawn().map_err(map_spawn_error)?;
+        // Track the PID for the shutdown hook; the guard untracks on every exit path.
+        let _pid_guard = child.id().map(ClaudePidGuard::new);
+        let out = wait_with_timeout(child, cli_overall_timeout()).await?;
         if !out.status.success() {
             anyhow::bail!(
                 "claude CLI exited {}: {}",
@@ -1017,9 +1100,7 @@ impl Llm {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
         harden_completion(&mut cmd, req);
-        let mut child = cmd.spawn().map_err(|e| {
-            anyhow::anyhow!("failed to spawn `claude` CLI (is it installed/on PATH?): {e}")
-        })?;
+        let mut child = cmd.spawn().map_err(map_spawn_error)?;
         // Track the PID for the shutdown hook; the guard untracks on every exit path.
         let _pid_guard = child.id().map(ClaudePidGuard::new);
         let stdout = child
@@ -1050,13 +1131,14 @@ impl Llm {
         // resetting on them was why a stalled call ran for minutes without tripping. A
         // legitimate large scan keeps emitting content and never trips; a call stuck before
         // (or mid) generation does. `CAMERATA_LLM_IDLE_SECS` overrides the 120s default.
-        let idle = std::time::Duration::from_secs(
-            std::env::var("CAMERATA_LLM_IDLE_SECS")
-                .ok()
-                .and_then(|s| s.trim().parse::<u64>().ok())
-                .filter(|n| *n > 0)
-                .unwrap_or(120),
-        );
+        let idle = env_secs("CAMERATA_LLM_IDLE_SECS", 120);
+        // HARD CAP, independent of the idle/progress detector above: a call that keeps
+        // trickling plausible-looking "progress" forever (or any other wedge the idle
+        // detector doesn't catch) must still terminate. `CAMERATA_CLI_TIMEOUT_SECS`
+        // overrides the 300s default — the same knob and default as the non-streaming
+        // path in `complete_cli`.
+        let overall_timeout = cli_overall_timeout();
+        let overall_deadline = tokio::time::Instant::now() + overall_timeout;
 
         let mut full = String::new();
         let mut cost = None;
@@ -1067,6 +1149,14 @@ impl Llm {
         let mut deadline = tokio::time::Instant::now() + idle;
         loop {
             let now = tokio::time::Instant::now();
+            if now >= overall_deadline {
+                kill_pid(child.id());
+                anyhow::bail!(
+                    "Claude CLI timed out after {}s (no output). The `claude` process may be \
+                     stuck waiting for authentication or input.",
+                    overall_timeout.as_secs()
+                );
+            }
             if now >= deadline {
                 // No model progress for the whole window -> a true stall (often a queued /
                 // rate-limited call sitting before its first token). kill_on_drop reaps the
@@ -1076,8 +1166,16 @@ impl Llm {
                     idle.as_secs()
                 );
             }
-            let remaining = deadline - now;
+            let remaining = std::cmp::min(deadline, overall_deadline) - now;
             match tokio::time::timeout(remaining, lines.next_line()).await {
+                Err(_) if tokio::time::Instant::now() >= overall_deadline => {
+                    kill_pid(child.id());
+                    anyhow::bail!(
+                        "Claude CLI timed out after {}s (no output). The `claude` process may \
+                         be stuck waiting for authentication or input.",
+                        overall_timeout.as_secs()
+                    );
+                }
                 Err(_) => anyhow::bail!(
                     "claude produced no model output for {}s — treating as a hang (likely rate-limited/queued; set CAMERATA_LLM_IDLE_SECS to tune)",
                     idle.as_secs()
@@ -3088,5 +3186,96 @@ malformed line, not json
         // An empty chain is an immediate error — no model to try.
         let chain: Vec<String> = vec![];
         assert!(chain.is_empty(), "empty chain should produce an error from call_with_fallback");
+    }
+
+    // ── Silent-death-class fixes: CLI timeout, kill, and the not-found message ─────
+
+    #[test]
+    fn map_spawn_error_not_found_is_actionable() {
+        let e = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let msg = map_spawn_error(e).to_string();
+        assert!(msg.contains("was not found on PATH"), "message: {msg}");
+        assert!(msg.contains("/opt/homebrew/bin"), "message: {msg}");
+        assert!(msg.contains("Backend to API"), "message: {msg}");
+    }
+
+    #[test]
+    fn map_spawn_error_other_kinds_keep_generic_message_verbatim() {
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            let e = std::io::Error::from(kind);
+            let msg = map_spawn_error(e).to_string();
+            assert!(msg.starts_with("failed to spawn `claude` CLI"), "message: {msg}");
+            assert!(!msg.contains("was not found on PATH"), "message: {msg}");
+        }
+    }
+
+    #[test]
+    fn env_secs_falls_back_on_missing_invalid_or_zero() {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let var = "CAMERATA_TEST_ENV_SECS_FALLBACK";
+        std::env::remove_var(var);
+        assert_eq!(env_secs(var, 42), std::time::Duration::from_secs(42));
+        std::env::set_var(var, "not-a-number");
+        assert_eq!(env_secs(var, 42), std::time::Duration::from_secs(42));
+        std::env::set_var(var, "0");
+        assert_eq!(env_secs(var, 42), std::time::Duration::from_secs(42));
+        std::env::set_var(var, "17");
+        assert_eq!(env_secs(var, 42), std::time::Duration::from_secs(17));
+        std::env::remove_var(var);
+    }
+
+    #[tokio::test]
+    async fn wait_with_timeout_kills_child_and_returns_actionable_error() {
+        // A deliberately slow child (well beyond the timeout below) stands in for a
+        // hung `claude` — auth prompt, stuck stream, whatever the trigger. The wrapper
+        // must fail fast with the actionable message AND actually kill the process
+        // rather than leaking it.
+        let mut cmd = tokio::process::Command::new("sleep");
+        cmd.arg("30").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        let child = cmd.spawn().expect("spawn `sleep` for the test");
+        let pid = child.id().expect("child has a pid");
+
+        let result = wait_with_timeout(child, std::time::Duration::from_millis(150)).await;
+
+        let err = result.expect_err("expected a timeout error");
+        let msg = err.to_string();
+        assert!(msg.contains("timed out after 0s"), "message: {msg}");
+        assert!(
+            msg.contains("stuck waiting for authentication or input"),
+            "message: {msg}"
+        );
+
+        // Give the SIGKILL a brief moment to land, then confirm the process is gone —
+        // "do not leak it" is the whole point of this fix.
+        let mut still_alive = true;
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let status = std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .status()
+                .expect("run `kill -0`");
+            if !status.success() {
+                still_alive = false;
+                break;
+            }
+        }
+        assert!(!still_alive, "child pid {pid} was not killed after the timeout");
+    }
+
+    #[tokio::test]
+    async fn wait_with_timeout_returns_output_on_normal_completion() {
+        let mut cmd = tokio::process::Command::new("true");
+        cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        let child = cmd.spawn().expect("spawn `true` for the test");
+        let out = wait_with_timeout(child, std::time::Duration::from_secs(10))
+            .await
+            .expect("should complete well within the timeout");
+        assert!(out.status.success());
     }
 }
