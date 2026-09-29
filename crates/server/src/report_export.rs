@@ -241,6 +241,43 @@ pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Dis
     }
 }
 
+/// P5: whether this export reflects an auditor's actual THIS-SESSION triage pass over the
+/// findings, or is a raw, no-human-touch snapshot straight off the engine. Derived, never
+/// client-supplied — see `build_report_json`'s partition loop, which flips this to `Reviewed`
+/// the moment any finding carries an explicit `Ignored` / `TechDebt*` / `FalsePositive` wire
+/// disposition. A pre-existing `BaselineAccepted` or `WaivedInline` disposition (both sourced
+/// from `Finding.status`, a PRIOR/code-level fact rather than this session's human judgment —
+/// see `classify`'s doc comment) does NOT flip this to `Reviewed`: those findings were never
+/// looked at by anyone THIS run.
+///
+/// Gates two things:
+/// - The narrative voice (`default_narrative`): `Raw` describes what the ENGINE did and never
+///   claims a human reviewed or dispositioned anything; `Reviewed` describes the auditor's
+///   actual dispositions.
+/// - The PDF's per-page "DRAFT: not yet reviewed by the auditor" banner (`Raw` only) — see the
+///   Typst template's `d.review_state` read.
+///
+/// See `docs/plans/2026-09-29_codebase-inspection-hardening.md`'s P5 section: the bug this
+/// fixes is a raw (nobody-reviewed) export whose narrative said "N were reviewed... 0 were
+/// dispositioned as false positives by the auditor" — a flat fabrication, since reviewing
+/// something is precisely what had not happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewState {
+    /// No finding in this scan carries an explicit THIS-SESSION auditor disposition.
+    Raw,
+    /// At least one finding carries an explicit THIS-SESSION auditor disposition
+    /// (`Ignored` / `TechDebt{Now,Later}` / `FalsePositive`).
+    Reviewed,
+}
+
+impl ReviewState {
+    /// Whether the PDF's draft banner must render on every page.
+    pub fn is_draft(self) -> bool {
+        matches!(self, ReviewState::Raw)
+    }
+}
+
 /// Human-facing disposition annotation shown next to each curated-finding site row.
 ///
 /// `bucket` is this SAME finding's own `matrix_bucket(...)` result — passed in rather than
@@ -418,6 +455,15 @@ pub struct ExecutiveSummaryJson {
     pub candidates_reviewed: usize,
     pub excluded_false_positive: usize,
     pub curated_total: usize,
+    /// P5: findings held out of the curated action tiers for a human reviewer's judgment call
+    /// (`matrix.informational.len()`) — the previously-invisible "other 23" in the reconciling
+    /// count `candidates_reviewed == curated_total + held_for_review + excluded_false_positive
+    /// + dependency_advisories`. Always shown in the narrative, in BOTH review states.
+    pub held_for_review: usize,
+    /// P5: `DEP_AUDIT_RULE_ID` findings that survived the false-positive filter — carved into
+    /// their own `dependency_snapshot` table, but still a real piece of `candidates_reviewed`'s
+    /// reconciliation (see `held_for_review`'s doc comment).
+    pub dependency_advisories: usize,
     pub do_now: usize,
     pub do_next: usize,
     pub plan: usize,
@@ -748,6 +794,10 @@ pub struct DependencySnapshotJson {
 pub struct MethodologyJson {
     pub candidates_reviewed: usize,
     pub excluded_false_positive: usize,
+    /// P5: mirrors `ExecutiveSummaryJson::held_for_review` — carried here too so the
+    /// Methodology section's own reconciling line (§`typ` "N candidate findings...") can show
+    /// it without the template reaching back into `executive_summary`.
+    pub held_for_review: usize,
     /// FIX 3 (2026-09-13 review): a short, FACTUAL "what happens next" paragraph, rendered in
     /// its own section right before Methodology (`typ:397`'s heading). Authored prose, same
     /// pattern as `deterministic_note`/`ai_tier_note` below — never an LLM call, never
@@ -763,6 +813,11 @@ pub struct MethodologyJson {
 /// `docs/design/2026-07-23_brownfield-audit-report.md` in order.
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditReportJson {
+    /// P5: `"raw"` (nobody has reviewed anything this session) or `"reviewed"` (at least one
+    /// finding carries an explicit auditor disposition). Read directly by the Typst template
+    /// (`d.review_state`) to gate the per-page draft banner and the Methodology section's
+    /// review-claim wording — see [`ReviewState`]'s doc comment.
+    pub review_state: ReviewState,
     pub cover: CoverJson,
     pub executive_summary: ExecutiveSummaryJson,
     pub three_things: ThreeThingsJson,
@@ -1339,16 +1394,34 @@ pub(crate) fn defect_headline(detail: &str, fallback: &str) -> String {
 /// page) already names in full. Between that box and the (also-dropped) "Top priority items"
 /// bullet list, the top 3 were stated three separate times on one page. The exec summary is
 /// now curation-and-counts ONLY: the false-positive triage line, then the single one-pass
-/// bucket-count partition. `do_now + do_next + plan + accepted == curated_total` ALWAYS (every
-/// code finding lands in exactly one matrix bucket by construction — see `matrix_bucket`), so
-/// listing all four counts once is a complete, self-checking picture; there is deliberately no
-/// "and N still open" tacked on (a SUBSET of those same four counts) and, as of this pass, no
-/// restated finding headline either — the "Three things this week" box is now the ONE place on
-/// the page that names the top items.
+/// bucket-count partition.
+///
+/// # P5: review-state honesty + full reconciliation
+/// `default_narrative` now takes `review_state` and branches on it — this is the fix for a
+/// raw (nobody has reviewed anything this run) export whose narrative used to claim "N were
+/// reviewed... 0 were dispositioned as false positives by the auditor" no matter what, even
+/// when NO auditor had ever opened the report. See [`ReviewState`]'s doc comment for the
+/// derivation.
+/// - `Raw`: describes what the ENGINE did ("The engine analyzed N files and produced C
+///   candidate findings..."). NEVER the phrase "reviewed by the auditor" or "dispositioned by
+///   the auditor" — grep-tested (`raw_narrative_never_claims_auditor_review`).
+/// - `Reviewed`: describes the auditor's actual dispositions, same voice as before this pass.
+///
+/// In BOTH states the narrative reconciles EVERY candidate finding, with each number shown:
+/// `candidates_reviewed == curated_total + held_for_review + excluded_fp +
+/// dependency_advisories` always holds (by construction — see `build_report_json`: every
+/// finding lands in exactly one of those four buckets). This is the fix for the "41 reviewed;
+/// 0 excluded... 18 curated" bug, where the other 23 needs-review rows were held out of the
+/// curated set and never counted anywhere in the narrative.
+#[allow(clippy::too_many_arguments)]
 fn default_narrative(
+    review_state: ReviewState,
+    files_scanned: usize,
     candidates_reviewed: usize,
     excluded_fp: usize,
     curated_total: usize,
+    held_for_review: usize,
+    dependency_advisories: usize,
     do_now: usize,
     do_next: usize,
     plan: usize,
@@ -1357,15 +1430,80 @@ fn default_narrative(
     if candidates_reviewed == 0 {
         return "The scan surfaced no candidate findings to review in this run.".to_string();
     }
-    format!(
-        "{} were reviewed; {} {} dispositioned as false positives by the auditor and excluded \
-         entirely from this report. Of the remaining {}: {do_now} do now, {do_next} do next, \
-         {plan} planned, and {accepted} accepted as risk.",
-        noun(candidates_reviewed, "candidate finding", "candidate findings"),
-        excluded_fp,
-        if excluded_fp == 1 { "was" } else { "were" },
-        noun(curated_total, "curated finding", "curated findings"),
-    )
+    let dep_clause = if dependency_advisories == 0 {
+        String::new()
+    } else {
+        format!(
+            " A further {} tracked separately in the dependency snapshot.",
+            noun(
+                dependency_advisories,
+                "dependency advisory is",
+                "dependency advisories are"
+            ),
+        )
+    };
+    match review_state {
+        ReviewState::Raw => format!(
+            "This is a draft export: no finding in this run has had a human triage pass. The \
+             engine analyzed {} and produced {}. {curated_total} {} curated for action \
+             ({do_now} do now, {do_next} do next, {plan} planned, {accepted} already carried \
+             as accepted risk from a prior baseline or in-code waiver), {held_for_review} {} \
+             held for a human reviewer's judgment call, and {excluded_fp} {} auto-excluded as \
+             likely false positives.{dep_clause}",
+            noun(files_scanned, "file", "files"),
+            noun(
+                candidates_reviewed,
+                "candidate finding",
+                "candidate findings"
+            ),
+            if curated_total == 1 { "is" } else { "are" },
+            if held_for_review == 1 { "is" } else { "are" },
+            if excluded_fp == 1 { "was" } else { "were" },
+        ),
+        ReviewState::Reviewed => format!(
+            "{} were reviewed by the auditor; {} {} dispositioned as false positives and \
+             excluded entirely from this report. Of the remaining {}, {curated_total} {} \
+             curated for action ({do_now} do now, {do_next} do next, {plan} planned, \
+             {accepted} accepted as risk) and {held_for_review} {} held for further review.\
+             {dep_clause}",
+            noun(
+                candidates_reviewed,
+                "candidate finding",
+                "candidate findings"
+            ),
+            excluded_fp,
+            if excluded_fp == 1 { "was" } else { "were" },
+            noun(curated_total + held_for_review, "finding", "findings"),
+            if curated_total == 1 { "is" } else { "are" },
+            if held_for_review == 1 { "is" } else { "are" },
+        ),
+    }
+}
+
+/// P5: the AI-tier Methodology paragraph must never claim a human already reviewed advisory
+/// findings when this export is [`ReviewState::Raw`] — the paragraph used to unconditionally
+/// say "Every advisory finding is reviewed and dispositioned by a human auditor before it
+/// appears here", which is a flat fabrication on a raw, pre-review export. Neither branch
+/// contains the literal phrases "reviewed by the auditor" or "dispositioned by the auditor" in
+/// the `Raw` case — grep-tested alongside `default_narrative`'s own gate.
+fn ai_tier_note_for(review_state: ReviewState) -> String {
+    match review_state {
+        ReviewState::Reviewed => {
+            "A second, advisory tier uses a calibrated language-model audit for findings that \
+             require semantic judgment. Every advisory finding in this export has been \
+             reviewed and dispositioned by a human auditor; lower-confidence items are marked \
+             needs-review."
+                .to_string()
+        }
+        ReviewState::Raw => {
+            "A second, advisory tier uses a calibrated language-model audit for findings that \
+             require semantic judgment. This export has not yet had a human triage pass: every \
+             advisory finding here is the engine's own calibrated output, awaiting the \
+             auditor's review before any is accepted, marked tech debt, or ruled out. \
+             Lower-confidence items are marked needs-review."
+                .to_string()
+        }
+    }
 }
 
 /// Item 7's effort -> rough-hour mapping (a judgment call, documented here rather than buried
@@ -1456,9 +1594,18 @@ pub fn build_report_json(
     // here, so no downstream section can silently mis-bucket a `"Critical"`-cased finding as
     // low severity by matching `finding.severity.as_str()` ad hoc).
     let mut excluded_fp = 0usize;
+    // P5: `Reviewed` the moment ANY finding carries an explicit THIS-SESSION auditor
+    // disposition — see `ReviewState`'s doc comment for why `BaselineAccepted`/`WaivedInline`
+    // (sourced from `Finding.status`, not the wire map) never flip this.
+    let mut auditor_touched_any_finding = false;
     let mut live: Vec<(&Finding, Disposition, String, String)> = Vec::new();
     for f in &report.findings {
         let wire = dispositions.get(&finding_key(f));
+        if let Some(w) = wire {
+            if matches!(w.state.as_str(), "Ignored" | "TechDebt" | "FalsePositive") {
+                auditor_touched_any_finding = true;
+            }
+        }
         if wire.map(|d| d.state.as_str()) == Some("FalsePositive") {
             excluded_fp += 1;
             continue;
@@ -1468,6 +1615,11 @@ pub fn build_report_json(
         let severity = normalize_severity(&f.severity);
         live.push((f, disposition, reason, severity));
     }
+    let review_state = if auditor_touched_any_finding {
+        ReviewState::Reviewed
+    } else {
+        ReviewState::Raw
+    };
 
     // Dependency findings get their own §7 lane — carve them out of every other section.
     let (dep_findings, code_findings): (Vec<_>, Vec<_>) = live
@@ -1750,13 +1902,18 @@ pub fn build_report_json(
     // `top_do_now` bullet list and blast-radius lead sentence are gone (see
     // `default_narrative`'s doc comment).
     let top3_do_now: Vec<&FindingRefJson> = do_now_sorted.iter().take(3).collect();
+    let dependency_advisories = dependency_snapshot.rows.len();
     let (narrative, is_override) = match &opts.executive_summary_override {
         Some(text) if !text.trim().is_empty() => (text.clone(), true),
         _ => (
             default_narrative(
+                review_state,
+                report.files_scanned,
                 candidates_reviewed,
                 excluded_fp,
                 curated_total,
+                informational,
+                dependency_advisories,
                 do_now,
                 do_next,
                 plan,
@@ -1771,6 +1928,8 @@ pub fn build_report_json(
         candidates_reviewed,
         excluded_false_positive: excluded_fp,
         curated_total,
+        held_for_review: informational,
+        dependency_advisories,
         do_now,
         do_next,
         plan,
@@ -1853,6 +2012,7 @@ pub fn build_report_json(
     let methodology = MethodologyJson {
         candidates_reviewed,
         excluded_false_positive: excluded_fp,
+        held_for_review: informational,
         next_steps: NEXT_STEPS_NOTE.to_string(),
         deterministic_note:
             "Camerata runs a two-tier engine. A deterministic security floor (proven-defect \
@@ -1860,12 +2020,7 @@ pub fn build_report_json(
              produces findings that either hold or do not, with no model judgment. These are \
              labeled deterministic in the report."
                 .to_string(),
-        ai_tier_note:
-            "A second, advisory tier uses a calibrated language-model audit for findings that \
-             require semantic judgment. Every advisory finding is reviewed and dispositioned \
-             by a human auditor before it appears here; lower-confidence items are marked \
-             needs-review."
-                .to_string(),
+        ai_tier_note: ai_tier_note_for(review_state),
         not_done: vec![
             "No penetration testing or live exploitation was performed.".to_string(),
             "No runtime or dynamic analysis; findings derive from static repository state."
@@ -1891,6 +2046,7 @@ pub fn build_report_json(
     let priority_grid = build_priority_grid(&matrix);
 
     AuditReportJson {
+        review_state,
         cover,
         executive_summary,
         three_things,
@@ -2355,7 +2511,9 @@ mod tests {
             json.executive_summary.narrative
         );
         assert!(
-            json.executive_summary.narrative.contains("1 do now, 0 do next, 1 planned, and 0 accepted as risk"),
+            json.executive_summary
+                .narrative
+                .contains("1 do now, 0 do next, 1 planned, 0 already carried as accepted risk"),
             "{}",
             json.executive_summary.narrative
         );
@@ -3145,7 +3303,7 @@ mod tests {
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
         assert!(
-            json.executive_summary.narrative.contains("1 candidate finding "),
+            json.executive_summary.narrative.contains("1 candidate finding."),
             "expected singular 'finding', got: {:?}",
             json.executive_summary.narrative
         );
