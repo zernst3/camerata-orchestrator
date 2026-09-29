@@ -2089,17 +2089,42 @@ enum FindingClass {
     Hygiene,
 }
 
-/// Rule-id tokens (matched as case-insensitive substrings of the uppercased rule id) that mark
-/// a finding as `FindingClass::Security` for merge-primacy purposes: secrets/credentials,
-/// RLS/access policy, authn/authz, injection (SQL/XSS/SSRF/deserialization/RCE), transport
-/// security (TLS/CORS), open redirect, weak crypto/randomness, and session/CSRF concerns —
-/// exactly the families `docs/plans/2026-09-29_codebase-inspection-hardening.md` P1 names as
-/// Security. This is a CONTENT scan over the rule id, not a prefix rule: `SEC-*` deterministic
-/// floor rules always match (they are security-named by the corpus's own convention), but so do
-/// `ARCH-*`/`AI-*`/`SUPABASE-*` ids that happen to encode a security concern
-/// (`ARCH-NO-SECRETS-IN-URL-1`, `ARCH-FETCH-THEN-AUTHORIZE-1`, an invented `AI-CORS-...`
-/// finding) — the corpus does NOT reserve security naming to one prefix family, so prefix-only
-/// matching would misclassify real cases in both directions.
+/// Rule-id tokens that mark a finding as `FindingClass::Security` for merge-primacy purposes:
+/// secrets/credentials, RLS/access policy, authn/authz, injection (SQL/XSS/SSRF/deserialization/
+/// RCE), transport security (TLS/CORS), resource exposure, open redirect, weak crypto/
+/// randomness, and CSRF concerns — exactly the families
+/// `docs/plans/2026-09-29_codebase-inspection-hardening.md` P1 names as Security. This is a
+/// CONTENT scan over the rule id's hyphen-delimited WORDS ([`security_token_matches`]), not a
+/// prefix rule: `SEC-*`/`SUPABASE-*` deterministic floor rules match via their own prefix
+/// shortcut below (belt-and-suspenders — every current one also matches a token), but so do
+/// `ARCH-*`/`AI-*` ids that happen to encode a security concern (`ARCH-NO-SECRETS-IN-URL-1`,
+/// `ARCH-FETCH-THEN-AUTHORIZE-1`, an invented `AI-CORS-...` finding) — the corpus does NOT
+/// reserve security naming to one prefix family, so prefix-only matching would misclassify real
+/// cases in both directions.
+///
+/// Word-boundary matched (not raw substring), on purpose: a naive `rule_id.contains(token)` scan
+/// was cross-checked against every rule id in `crates/rules/principles/**` and produced real
+/// false positives — `"RCE"` (meant for remote-code-execution) matched inside `"RESOURCE"` and
+/// `"INTERCEPTORS"` (`ARCH-RESOURCE-LIFECYCLE-1`, a subprocess/temp-file cleanup rule;
+/// `JAVA-RESOURCE-MANAGEMENT-1`, a try-with-resources rule; two interceptor-pattern rules), none
+/// of which are security. `security_token_matches` requires a token to match a WHOLE
+/// hyphen-delimited word (or be a prefix of one, so `"DESERIAL"` still matches
+/// `"DESERIALIZATION"`), which eliminates that whole class of accidental substring hits while
+/// keeping every genuine match (`"RLS"` as its own word in `SUPABASE-RLS-ENABLED-1`, `"AUTH"` as
+/// a prefix of `"AUTHORIZE"`/`"AUTHZ"`).
+///
+/// Two more corpus-verified removals from an earlier draft of this list, kept out for the same
+/// reason: bare `"INJECT"` — every CURRENT corpus id containing an "inject"-rooted word
+/// (`CSHARP-DEPENDENCY-INJECTION-CONSTRUCTOR-1`, `JAVA-SPRING-CONSTRUCTOR-INJECTION-1`,
+/// `JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1`) is a DEPENDENCY-injection pattern rule, not
+/// an injection-VULNERABILITY rule; real SQL-injection rules are already caught via `"SQL"`.
+/// Bare `"SESSION"` — the one hit (`PYTHON-FASTAPI-DI-SESSION-1`) is a DATABASE-session
+/// lifecycle rule, not an authentication session; real auth-session rules are already caught via
+/// `"AUTH"` (`SUPABASE-AUTH-GETSESSION-SERVER-1`). Both words are common enough in non-security
+/// naming that keeping them would re-introduce the fail-safe-direction violation this whole
+/// section exists to prevent: a Hygiene finding mislabeled Security can still beat a GENUINE
+/// Security finding it clusters with, via the severity/confidence/specificity tiebreaks, since
+/// both would tie at `class_rank` — so a wrong Security label is not harmless.
 ///
 /// Deliberately excludes the bare word "BYPASS": the corpus's OWN `categorize_rule_id`
 /// authorization bucket treats bare "BYPASS" as an authz signal, which over-fires on a purely
@@ -2118,15 +2143,48 @@ const SECURITY_RULE_TOKENS: &[&str] = &[
     // RLS / access policy
     "RLS", "ROW-LEVEL", "POLICY", "SEARCH-PATH",
     // Authn / authz
-    "AUTH", "RBAC", "PERMISSION", "ACCESS-CONTROL", "SERVICE-ROLE", "SESSION", "LOGIN", "JWT",
-    "CSRF",
-    // Injection
-    "SQL", "INJECT", "XSS", "SSRF", "DESERIAL", "RCE",
+    "AUTH", "RBAC", "PERMISSION", "ACCESS-CONTROL", "SERVICE-ROLE", "LOGIN", "JWT", "CSRF",
+    // Injection. Deliberately NOT bare "SQL": that matched every SQL-adjacent rule regardless
+    // of topic (indexing, N+1, connection pooling, migrations-checked-in, `SQLX` itself via
+    // prefix matching), none of which are injection concerns. The specific SQL-injection
+    // shapes the corpus actually uses are "raw SQL" / "string SQL" / "parameterized" (its
+    // ABSENCE is the vulnerability) — each is its own token below, plus explicit
+    // "*-INJECTION" compounds for command/code/SQL injection so a future/invented id like
+    // `AI-SQL-INJECTION` still matches without bare "INJECT" reintroducing the
+    // dependency-injection false positive documented above.
+    "RAW-SQL", "STRING-SQL", "PARAMETERIZED", "SQL-INJECTION", "COMMAND-INJECTION",
+    "CODE-INJECTION", "XSS", "SSRF", "DESERIAL", "RCE",
     // Transport security / resource exposure
-    "TLS", "SSL", "HTTPS", "CERT", "CORS",
+    "TLS", "SSL", "HTTPS", "CERT", "CORS", "EXPOSE", "EXPOSURE", "EXPOSED", "PUBLIC-BUCKET",
     // Redirect / crypto / tokens
     "REDIRECT", "CRYPTO", "RANDOM", "NONCE", "TOKEN",
+    // Explicit "security" naming (CI security-scan rules, security-headers/method-security
+    // rules) — a rule that names itself "security" in its own id is Security almost by
+    // definition, and this token catches `CICD-*-SECURITY-SCAN-1`,
+    // `JAVASCRIPT-EXPRESS-SECURITY-HEADERS-1`, `JAVA-SPRING-METHOD-SECURITY-1`, none of which
+    // any other token above reaches.
+    "SECURITY",
 ];
+
+/// True when `token` matches one of `id`'s hyphen-delimited WORDS — either exactly, or as a
+/// prefix of that word (so a fragment like `"DESERIAL"` still matches the word
+/// `"DESERIALIZATION"`). A single-word token (`"AUTH"`) is checked against each word of `id`; a
+/// token that is ITSELF hyphenated (`"API-KEY"`, `"PRIVATE-KEY"`) is checked against every
+/// CONSECUTIVE run of `id`'s words of the same length, so `"PRIVATE-KEY"` matches
+/// `SEC-NO-PRIVATE-KEY-1`'s `["PRIVATE", "KEY"]` run without matching `"PRIVATE"` or `"KEY"`
+/// alone elsewhere. Deliberately NOT a raw substring scan — see `SECURITY_RULE_TOKENS`'s doc
+/// comment for the false positives (`"RCE"` inside `"RESOURCE"`) that motivated this.
+fn security_token_matches(id_words: &[&str], token: &str) -> bool {
+    let token_words: Vec<&str> = token.split('-').collect();
+    if token_words.len() == 1 {
+        let t = token_words[0];
+        id_words.iter().any(|w| w.starts_with(t))
+    } else {
+        id_words
+            .windows(token_words.len())
+            .any(|window| window == token_words.as_slice())
+    }
+}
 
 /// Semantic categories (the closed taxonomy backfilled by `categorize_rule_id` — see
 /// `KNOWN_CATEGORIES`) that are themselves Security families. Consulted as a SECOND signal
@@ -2148,17 +2206,30 @@ fn category_is_security(category: &str) -> bool {
 }
 
 /// Classify a finding as Security or Hygiene for merge-primacy purposes (design point 1). Layered,
-/// most-specific signal first: (1) a security-sounding rule id (`SECURITY_RULE_TOKENS`), else
-/// (2) an already-assigned security category, else (3) Hygiene by default — an unclassified or
-/// genuinely structural/style/testing/process finding never wins primacy over a KNOWN security
-/// finding it happens to cluster with, which is the fail-safe direction (never silently promote
-/// noise to Security; a real security finding is caught by (1) or (2) instead). Kept in this ONE
-/// function, with the rationale above, per the design's "keep the classification in one place"
-/// requirement — every merge-primacy call site derives class through this function, never by
-/// re-deriving its own notion of "is this security".
+/// most-specific signal first: (1) the `SEC-*`/`SUPABASE-*` prefix families — every rule in
+/// either family is security-scoped by the corpus's own domain convention (verified against the
+/// full corpus: all 8 `SEC-*` and all 17 `SUPABASE-*` ids are security), so this is a cheap,
+/// maintenance-free net that also future-proofs a new rule added to either family without an
+/// obviously security-sounding word in its id; (2) a security-sounding rule id
+/// (`SECURITY_RULE_TOKENS`, word-boundary matched — see its doc comment), which is what carries
+/// `ARCH-*`/`AI-*` ids that happen to encode a security concern; (3) an already-assigned security
+/// category; (4) Hygiene by default — an unclassified or genuinely structural/style/testing/
+/// process finding never wins primacy over a KNOWN security finding it happens to cluster with,
+/// which is the fail-safe direction (never silently promote noise to Security; a real security
+/// finding is caught by (1)-(3) instead). Kept in this ONE function, with the rationale above,
+/// per the design's "keep the classification in one place" requirement — every merge-primacy
+/// call site derives class through this function, never by re-deriving its own notion of "is
+/// this security".
 fn finding_class(f: &Finding) -> FindingClass {
     let id = f.rule_id.to_ascii_uppercase();
-    if SECURITY_RULE_TOKENS.iter().any(|t| id.contains(t)) {
+    if id.starts_with("SEC-") || id.starts_with("SUPABASE-") {
+        return FindingClass::Security;
+    }
+    let id_words: Vec<&str> = id.split('-').collect();
+    if SECURITY_RULE_TOKENS
+        .iter()
+        .any(|t| security_token_matches(&id_words, t))
+    {
         return FindingClass::Security;
     }
     if f.category.as_deref().is_some_and(category_is_security) {
@@ -6910,5 +6981,113 @@ mod tests {
             2,
             "two distinct defects survive as exactly two rows — nothing dropped, nothing over-merged"
         );
+    }
+
+    // ── P1: finding_class corpus-verified false-positive/negative regressions ──────────────
+    // These pin the EXACT bugs found by cross-checking `SECURITY_RULE_TOKENS` against every
+    // real rule id in `crates/rules/principles/**` (not a synthetic id) — a naive substring
+    // scan misclassified real corpus rules in both directions. Real ids used deliberately: the
+    // point is that THESE SPECIFIC ids, which exist in the corpus today, classify correctly.
+
+    #[test]
+    fn p1_finding_class_rce_substring_inside_resource_is_not_security() {
+        // "RCE" (remote code execution) must not match merely because "RESOURCE" or
+        // "INTERCEPTORS" happens to contain the letters r-c-e as a substring.
+        let f = site_finding("ARCH-RESOURCE-LIFECYCLE-1", "a.rs", 1, "medium", "");
+        assert_eq!(finding_class(&f), FindingClass::Hygiene);
+        let f2 = site_finding("JAVA-RESOURCE-MANAGEMENT-1", "a.java", 1, "medium", "");
+        assert_eq!(finding_class(&f2), FindingClass::Hygiene);
+        let f3 = site_finding(
+            "JAVASCRIPT-NEST-INTERCEPTORS-CROSS-CUTTING-1",
+            "a.ts",
+            1,
+            "medium",
+            "",
+        );
+        assert_eq!(finding_class(&f3), FindingClass::Hygiene);
+    }
+
+    #[test]
+    fn p1_finding_class_dependency_injection_is_not_injection_vulnerability() {
+        // "Constructor injection" (a DI pattern) must not classify as Security just because it
+        // contains the word "injection" — real SQL/command injection rules are caught via "SQL"
+        // or an explicit injection-vulnerability token, not bare "INJECT".
+        let f = site_finding(
+            "JAVA-SPRING-CONSTRUCTOR-INJECTION-1",
+            "a.java",
+            1,
+            "medium",
+            "",
+        );
+        assert_eq!(finding_class(&f), FindingClass::Hygiene);
+        let f2 = site_finding(
+            "CSHARP-DEPENDENCY-INJECTION-CONSTRUCTOR-1",
+            "a.cs",
+            1,
+            "medium",
+            "",
+        );
+        assert_eq!(finding_class(&f2), FindingClass::Hygiene);
+    }
+
+    #[test]
+    fn p1_finding_class_database_session_di_is_not_auth_session() {
+        // "FastAPI DI session" is a database-session lifecycle rule, not an authentication
+        // session — bare "SESSION" must not promote it to Security.
+        let f = site_finding("PYTHON-FASTAPI-DI-SESSION-1", "a.py", 1, "medium", "");
+        assert_eq!(finding_class(&f), FindingClass::Hygiene);
+    }
+
+    #[test]
+    fn p1_finding_class_real_security_rules_still_classify_security() {
+        // The fixes above must not have thrown out real coverage: every one of these IS a
+        // security rule in the corpus and must still classify as Security.
+        for rule_id in [
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "SUPABASE-RLS-ENABLED-1",
+            "SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1",
+            "SUPABASE-EXPOSURE-SCHEMAS-1",
+            "SUPABASE-STORAGE-PUBLIC-BUCKET-1",
+            "ARCH-NO-SECRETS-IN-URL-1",
+            "ARCH-FETCH-THEN-AUTHORIZE-1",
+            "ARCH-SERVER-AUTHZ-1",
+            "CSHARP-ASPNETCORE-CORS-EXPLICIT-1",
+            "GO-GRPC-INTERCEPTORS-AUTH-LOGGING-1",
+            "JAVASCRIPT-EXPRESS-SECURITY-HEADERS-1",
+            "JAVA-SPRING-METHOD-SECURITY-1",
+            "CICD-CODEQL-SECURITY-SCAN-1",
+        ] {
+            let f = site_finding(rule_id, "a.rs", 1, "medium", "");
+            assert_eq!(
+                finding_class(&f),
+                FindingClass::Security,
+                "{rule_id} must classify as Security"
+            );
+        }
+    }
+
+    #[test]
+    fn p1_finding_class_generic_hygiene_rules_stay_hygiene() {
+        // A spot check of genuinely structural/style/testing/process rules across several
+        // stacks — none of these should ever classify as Security.
+        for rule_id in [
+            "ARCH-MIDDLEWARE-FIRST-1",
+            "ARCH-CURSOR-PAGINATION-1",
+            "ARCH-MONOLITH-FIRST-1",
+            "JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1",
+            "RUST-TESTING-1",
+            "TESTING-PYRAMID-1",
+            "GO-TESTING-TABLE-DRIVEN-T-RUN-1",
+            "SQL-DB-NPLUSONE-1",
+            "RUST-SQLX-CONNECTION-POOL-SIZED-1",
+        ] {
+            let f = site_finding(rule_id, "a.rs", 1, "medium", "");
+            assert_eq!(
+                finding_class(&f),
+                FindingClass::Hygiene,
+                "{rule_id} must classify as Hygiene"
+            );
+        }
     }
 }
