@@ -2498,6 +2498,114 @@ mod tests {
         assert_eq!(json.cover.stats.dependency_advisories, 1);
     }
 
+    // ── P1: deduplication + cross-tier merge, end-to-end through build_report_json ──────────
+    // docs/plans/2026-09-29_codebase-inspection-hardening.md, P1. Runs the SAME two merge
+    // passes the real audit pipeline runs (`ai_audit::merge_by_location` then
+    // `ai_audit::merge_semantic_groups`) over a faktura-SHAPED synthetic fixture — never the
+    // real fixture, never a fixture-specific rule/file/table name — then builds the report and
+    // asserts the cover's counts reflect the MERGED, distinct-defect set.
+
+    #[test]
+    fn p1_e2e_cover_counts_and_security_finding_survive_post_merge() {
+        // Defect 1: one SQL-injection defect, flagged by BOTH a deterministic floor rule and an
+        // AI rule at the exact same location (same file+line+snippet) — must collapse to one
+        // critical row, not two.
+        let sql_code = "SELECT * FROM t WHERE name ILIKE '%${name}%'";
+        let mut det_sql = finding("SEC-NO-RAW-SQL-CONCAT-1", "api/query.ts", 10, "critical");
+        det_sql.snippet = sql_code.to_string();
+        let mut ai_sql = finding("AI-SQL-INJECTION", "api/query.ts", 10, "critical");
+        ai_sql.snippet = sql_code.to_string();
+
+        // Defect 2: a config flag and the handler that trusts it, in DIFFERENT files, tied
+        // together only by a shared captured object — must collapse to one medium row.
+        let mut config_flag = finding("CONFIG-FLAG-DEBUG-MODE", "config.rs", 5, "medium");
+        config_flag
+            .captures
+            .insert("flag".to_string(), "debug_mode".to_string());
+        let mut handler_flag = finding("AI-HANDLER-TRUSTS-DEBUG-FLAG", "handler.rs", 80, "medium");
+        handler_flag
+            .captures
+            .insert("flag".to_string(), "debug_mode".to_string());
+
+        // Defect 3: the canonical security-vs-structure overlap — a low-value structural rule
+        // and a genuine AI security finding (reflected-origin CORS with credentials) at the
+        // same line. The security finding must survive as the primary, never hidden.
+        let cors_code = "app.use(cors())";
+        let mut structural = finding("ARCH-MIDDLEWARE-FIRST-1", "middleware.ts", 12, "high");
+        structural.snippet = cors_code.to_string();
+        let mut security = finding(
+            "AI-CORS-REFLECTED-ORIGIN-CREDENTIALS",
+            "middleware.ts",
+            12,
+            "medium",
+        );
+        security.snippet = cors_code.to_string();
+
+        let files = vec![
+            ("api/query.ts".to_string(), sql_code.to_string()),
+            ("middleware.ts".to_string(), cors_code.to_string()),
+        ];
+        let raw = vec![
+            det_sql,
+            ai_sql,
+            config_flag,
+            handler_flag,
+            structural,
+            security,
+        ];
+
+        // The real pipeline's two merge passes, in the real order: exact-location first, then
+        // cross-tier/cross-file.
+        let merged = crate::ai_audit::merge_semantic_groups(
+            crate::ai_audit::merge_by_location(raw, &files),
+            &files,
+        );
+        assert_eq!(
+            merged.len(),
+            3,
+            "six raw findings, three distinct defects — merging must land on exactly three"
+        );
+
+        let report = report_with(merged, vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        // Cover critical count == distinct criticals: the SQL-injection defect is the only
+        // critical among the three merged defects, and it must count ONCE.
+        assert_eq!(
+            json.cover.stats.critical, 1,
+            "the merged SQL-injection defect must count once, not twice"
+        );
+
+        // The CORS security finding must survive as its own curated row, never absorbed under
+        // (or hidden behind) the structural rule id, and at medium severity or higher.
+        let cors_group = json
+            .curated_findings
+            .iter()
+            .find(|g| g.rule_id == "AI-CORS-REFLECTED-ORIGIN-CREDENTIALS")
+            .expect("the security finding must survive the merge as the primary, not be hidden");
+        assert!(
+            matches!(
+                cors_group.sites[0].severity.as_str(),
+                "medium" | "high" | "critical"
+            ),
+            "the security finding must never be downgraded below medium: {}",
+            cors_group.sites[0].severity
+        );
+        assert!(cors_group.sites[0]
+            .also_matches
+            .contains(&"ARCH-MIDDLEWARE-FIRST-1".to_string()));
+
+        // The structural rule id must NOT appear as its own curated row (it lost primacy to the
+        // security finding it clustered with).
+        assert!(
+            !json
+                .curated_findings
+                .iter()
+                .any(|g| g.rule_id == "ARCH-MIDDLEWARE-FIRST-1"),
+            "the structural row must not survive as its own peer row once absorbed"
+        );
+    }
+
     #[test]
     fn scorecard_rows_are_ordered_action_needed_before_clean() {
         let action_needed = finding("ZZZ-1", "a.rs", 1, "critical");

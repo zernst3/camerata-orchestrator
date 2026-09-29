@@ -23,7 +23,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::llm::{LlmPort, Llm, LlmRequest};
-use crate::onboard::{Finding, ProposedRule, RuleOptionView};
+use crate::onboard::{Finding, MergedLocation, ProposedRule, RuleOptionView};
 
 // ════════════════════════════════════════════════════════════════════════════════════
 // AUDIT-INTEGRATED ALTERNATIVE RECOMMENDATION (docs/design/2026-09-22_audit-integrated-
@@ -503,6 +503,7 @@ pub fn parse_ai_findings(
                 // operator-forced pick) for this finding's rule is known — see its doc
                 // comment. `None` here is the correct pre-tag state, not a gap.
                 evaluated_option_id: None,
+                also_locations: Vec::new(),
             });
         }
     }
@@ -2064,34 +2065,168 @@ fn severity_rank(s: &str) -> u8 {
     }
 }
 
+// ── P1: finding_class (Security vs Hygiene) + shared primary-selection ranking ───────────────
+//
+// docs/plans/2026-09-29_codebase-inspection-hardening.md, P1. The regression this section
+// exists to prevent: a low structural/style row (e.g. an `ARCH-MIDDLEWARE-FIRST-1`-shaped
+// layering rule) sitting at the SAME code location or defect cluster as a genuine security
+// finding (e.g. a reflected-Origin CORS-with-credentials misconfiguration) must never win
+// primary and hide the security finding. Before this section, BOTH merge passes
+// (`merge_location_group`'s exact-location collapse and `merge_semantic_group`'s cross-family/
+// cross-file collapse) picked a primary using ONLY "adopted-vs-invented" / origin-tier +
+// severity — with no notion of WHAT KIND of defect a finding is. A deterministic, non-`AI-`
+// rule id (any adopted corpus/floor rule, regardless of topic) always outranked an AI-invented
+// security finding on that axis alone, independent of severity. `finding_class` closes that gap
+// by making the SECURITY/HYGIENE split the first, highest-priority key in the shared
+// `primary_rank` both passes now use.
+
+/// Which side of the security/hygiene split a finding falls on, for cross-tier merge primacy
+/// (design point 3): Security beats Hygiene UNCONDITIONALLY, ahead of severity/confidence/
+/// specificity — a structural/style row must never absorb and hide a security row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FindingClass {
+    Security,
+    Hygiene,
+}
+
+/// Rule-id tokens (matched as case-insensitive substrings of the uppercased rule id) that mark
+/// a finding as `FindingClass::Security` for merge-primacy purposes: secrets/credentials,
+/// RLS/access policy, authn/authz, injection (SQL/XSS/SSRF/deserialization/RCE), transport
+/// security (TLS/CORS), open redirect, weak crypto/randomness, and session/CSRF concerns —
+/// exactly the families `docs/plans/2026-09-29_codebase-inspection-hardening.md` P1 names as
+/// Security. This is a CONTENT scan over the rule id, not a prefix rule: `SEC-*` deterministic
+/// floor rules always match (they are security-named by the corpus's own convention), but so do
+/// `ARCH-*`/`AI-*`/`SUPABASE-*` ids that happen to encode a security concern
+/// (`ARCH-NO-SECRETS-IN-URL-1`, `ARCH-FETCH-THEN-AUTHORIZE-1`, an invented `AI-CORS-...`
+/// finding) — the corpus does NOT reserve security naming to one prefix family, so prefix-only
+/// matching would misclassify real cases in both directions.
+///
+/// Deliberately excludes the bare word "BYPASS": the corpus's OWN `categorize_rule_id`
+/// authorization bucket treats bare "BYPASS" as an authz signal, which over-fires on a purely
+/// architectural finding like "the handler bypasses the repository layer" (no auth concept at
+/// all). Every genuine auth-bypass rule name already carries a more specific token this list
+/// covers directly (`AUTH`, `RBAC`, `ACCESS-CONTROL`, `SERVICE-ROLE`, `PERMISSION`), so dropping
+/// the bare word loses no real coverage while removing that false-positive source from the
+/// rule-id scan. `finding_class` still consults `category`, so a finding whose `category` was
+/// explicitly backfilled to `"authorization"` via that same bare-"BYPASS" heuristic can still be
+/// classified Security through that path — a known, narrow residual imprecision inherited from
+/// `categorize_rule_id`, not from this list; flagged for review rather than silently accepted.
+#[rustfmt::skip]
+const SECURITY_RULE_TOKENS: &[&str] = &[
+    // Secrets / credentials
+    "SECRET", "CREDENTIAL", "PASSWORD", "API-KEY", "APIKEY", "PRIVATE-KEY", "HARDCODED",
+    // RLS / access policy
+    "RLS", "ROW-LEVEL", "POLICY", "SEARCH-PATH",
+    // Authn / authz
+    "AUTH", "RBAC", "PERMISSION", "ACCESS-CONTROL", "SERVICE-ROLE", "SESSION", "LOGIN", "JWT",
+    "CSRF",
+    // Injection
+    "SQL", "INJECT", "XSS", "SSRF", "DESERIAL", "RCE",
+    // Transport security / resource exposure
+    "TLS", "SSL", "HTTPS", "CERT", "CORS",
+    // Redirect / crypto / tokens
+    "REDIRECT", "CRYPTO", "RANDOM", "NONCE", "TOKEN",
+];
+
+/// Semantic categories (the closed taxonomy backfilled by `categorize_rule_id` — see
+/// `KNOWN_CATEGORIES`) that are themselves Security families. Consulted as a SECOND signal
+/// (after the rule-id token scan) so a finding classified by calibration's `category` field
+/// rather than a security-sounding rule id (an opaque invented AI- name, say) still lands on
+/// the right side of the split.
+fn category_is_security(category: &str) -> bool {
+    matches!(
+        category,
+        "authorization"
+            | "authentication"
+            | "secret-exposure"
+            | "injection"
+            | "transport-security"
+            | "rls-policy"
+            | "resource-exposure"
+            | "input-validation"
+    )
+}
+
+/// Classify a finding as Security or Hygiene for merge-primacy purposes (design point 1). Layered,
+/// most-specific signal first: (1) a security-sounding rule id (`SECURITY_RULE_TOKENS`), else
+/// (2) an already-assigned security category, else (3) Hygiene by default — an unclassified or
+/// genuinely structural/style/testing/process finding never wins primacy over a KNOWN security
+/// finding it happens to cluster with, which is the fail-safe direction (never silently promote
+/// noise to Security; a real security finding is caught by (1) or (2) instead). Kept in this ONE
+/// function, with the rationale above, per the design's "keep the classification in one place"
+/// requirement — every merge-primacy call site derives class through this function, never by
+/// re-deriving its own notion of "is this security".
+fn finding_class(f: &Finding) -> FindingClass {
+    let id = f.rule_id.to_ascii_uppercase();
+    if SECURITY_RULE_TOKENS.iter().any(|t| id.contains(t)) {
+        return FindingClass::Security;
+    }
+    if f.category.as_deref().is_some_and(category_is_security) {
+        return FindingClass::Security;
+    }
+    FindingClass::Hygiene
+}
+
+/// Rank for `finding_class`: Security strictly outranks Hygiene.
+fn class_rank(c: FindingClass) -> u8 {
+    match c {
+        FindingClass::Security => 1,
+        FindingClass::Hygiene => 0,
+    }
+}
+
+/// Rank for a finding's calibrated confidence, for the THIRD primary-selection key (design
+/// point 3: class, then severity, then confidence, then specificity). `"needs-review"` is the
+/// ONLY value calibration uses to flag a debatable/under-evidenced finding, so it alone ranks
+/// low; a clear `"high"` verdict and `None` (no calibrated opinion at all — the deterministic
+/// floor/checkers, which are exact by construction and are never run through calibration) are
+/// BOTH "not flagged as debatable" and rank equally above it. This keeps a deterministic
+/// finding's exact line as the tiebreak winner (via `origin_rank`, the next key) in a same-class,
+/// same-severity tie against an AI "high"-confidence finding, preserving the pre-existing
+/// deterministic-anchor behavior the D1/D2/D7 line-grading tests depend on, while still letting a
+/// "needs-review"-flagged finding lose to a clearer one of the same class and severity.
+fn confidence_rank(c: Option<&str>) -> u8 {
+    match c {
+        Some("needs-review") => 0,
+        _ => 1,
+    }
+}
+
+/// The shared primary-selection ranking for BOTH merge passes (design point 3): higher tuples
+/// win via `max_by_key`. Order is exactly the design's: (1) `FindingClass` — Security beats
+/// Hygiene unconditionally; (2) calibrated severity; (3) confidence (a "needs-review" flag ranks
+/// last); (4) rule specificity via `origin_rank` (deterministic beats an adopted-AI mapping
+/// beats an invented `AI-` name — "more specific/narrow over broad"); (5) earliest appearance,
+/// the final deterministic tiebreak so output never depends on hash/iteration order.
+fn primary_rank(f: &Finding, group_len: usize, index: usize) -> (u8, u8, u8, u8, usize) {
+    (
+        class_rank(finding_class(f)),
+        severity_rank(&f.severity),
+        confidence_rank(f.confidence.as_deref()),
+        origin_rank(finding_origin(f)),
+        // Larger for earlier findings (lower `index`), so `max_by_key` resolves ties toward the
+        // EARLIEST appearance — see BUG-7's original comment on this idiom.
+        group_len - index,
+    )
+}
+
 /// Collapse one `(path, line)` group of findings into a SINGLE finding. The model routinely
 /// reports one smell under several rule names — an invented `AI-` name PLUS the adopted
 /// corpus rule it maps to PLUS sibling invented names — each with a different title, so a
-/// `.expect()` panic at handlers.rs:41 arrives as five rows. This keeps ONE primary
-/// (preferring an adopted corpus rule id over an invented `AI-` one, then the most severe,
-/// then earliest), demotes every OTHER distinct rule id to `also_matches`, and keeps the
-/// max severity — so the row honestly reads "violates layering + DI + entities-chain" rather
-/// than emitting five near-duplicates.
+/// `.expect()` panic at handlers.rs:41 arrives as five rows. This keeps ONE primary, chosen by
+/// `primary_rank` (security-class, then severity, then confidence, then specificity, then
+/// earliest), demotes every OTHER distinct rule id to `also_matches`, and keeps the max
+/// severity — so the row honestly reads "violates layering + DI + entities-chain" rather than
+/// emitting five near-duplicates. Before P1, this picked "adopted (non-AI-) beats invented" as
+/// its FIRST key, which is exactly the canonical failure: an adopted-but-irrelevant structural
+/// rule id at the same exact line as an AI-invented SECURITY finding used to win primacy
+/// regardless of severity, hiding the security defect. `primary_rank`'s class-first ordering
+/// fixes that while leaving same-class ties resolved exactly as before.
 fn merge_location_group(group: Vec<Finding>) -> Finding {
-    // Index of the primary: adopted (non-AI-) beats invented; then higher severity; then
-    // earliest appearance (so the order is deterministic, not HashMap-dependent).
-    //
-    // BUG-7 (readability): `group.len() - i` is a DECREASING function of `i`, so
-    // `max_by_key` with this key prefers lower `i` (earlier findings) — which is exactly
-    // the "earliest appearance wins on a tie" intent. The idiom is intentionally preserved
-    // because changing it to `min_by_key` with `i` would require reversing the other key
-    // components and complicates the tuple; a comment is cheaper and equally clear.
-    // Equivalent but explicit alternative: `.min_by_key(|(i, f)| (adopted_inverted, severity_inverted, i))`.
     let primary_idx = group
         .iter()
         .enumerate()
-        .max_by_key(|(i, f)| {
-            let adopted = u8::from(!f.rule_id.starts_with("AI-"));
-            // Tiebreaker: group.len() - i is larger for earlier findings (lower i),
-            // so max_by_key resolves ties toward the EARLIEST appearance. This is
-            // equivalent to min_by_key(|(i, _)| i) for the tiebreak component only.
-            (adopted, severity_rank(&f.severity), group.len() - i)
-        })
+        .max_by_key(|(i, f)| primary_rank(f, group.len(), *i))
         .map(|(i, _)| i)
         .unwrap_or(0);
     let max_sev = group
@@ -2162,7 +2297,10 @@ fn resolve_finding_lines(findings: &mut [Finding], files: &[(String, String)]) {
 /// NOT location-merged — unrelated file-level issues legitimately share line 0 — so each is
 /// passed through untouched (the exact `(path, line, rule_id)` dedup upstream already
 /// removed byte-identical line-0 repeats).
-fn merge_by_location(findings: Vec<Finding>, files: &[(String, String)]) -> Vec<Finding> {
+pub(crate) fn merge_by_location(
+    findings: Vec<Finding>,
+    files: &[(String, String)],
+) -> Vec<Finding> {
     let by_path: std::collections::HashMap<&str, &str> = files
         .iter()
         .map(|(p, c)| (p.as_str(), c.as_str()))
@@ -2377,6 +2515,38 @@ fn objects_conflict(a: &Finding, b: &Finding) -> bool {
     oa.is_disjoint(&ob)
 }
 
+/// Minimum length (characters, after trimming) for a shared `Finding::captures` VALUE to count
+/// as the "same root cause across files" identity signal (design point 2b). A real detector-
+/// captured object (a table, function name, bucket, flag) is essentially always this long or
+/// longer; a bare "id"/"ok"-shaped value below this length is too generic to prove two findings
+/// share a root cause and is ignored rather than treated as a match.
+const MIN_SHARED_CAPTURE_LEN: usize = 3;
+
+/// True when `a` and `b` each carry a non-empty `Finding::captures` map and share at least one
+/// captured object VALUE (case-insensitive, trimmed) — the general "same root cause across
+/// files" signal design point 2b calls for: a config-flag finding and the handler finding that
+/// reads it, or an RLS-policy finding and the page finding that relies on it, each name the SAME
+/// concrete object (a table, a function name, a bucket, a flag) even though they live in
+/// different files and were flagged by different rule families. Deliberately compares VALUES
+/// only, not keys — the two detectors are not expected to use the same capture-token name for
+/// the object they each independently identified (one might key it `table`, the other
+/// `object-name`); the object identity is what matters, not the label.
+fn shared_captured_object(a: &Finding, b: &Finding) -> bool {
+    if a.captures.is_empty() || b.captures.is_empty() {
+        return false;
+    }
+    let a_values: std::collections::HashSet<String> = a
+        .captures
+        .values()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .filter(|v| v.len() >= MIN_SHARED_CAPTURE_LEN)
+        .collect();
+    b.captures.values().any(|v| {
+        let v = v.trim().to_ascii_lowercase();
+        v.len() >= MIN_SHARED_CAPTURE_LEN && a_values.contains(&v)
+    })
+}
+
 /// The smallest brace-delimited block containing 1-based `line`, as `(start_line, end_line)`.
 /// Cheap single-pass brace matcher; returns `None` for brace-free content (SQL, YAML) so callers
 /// fall back to the line-window rule. Used to unify two findings on the same handler body even
@@ -2413,35 +2583,51 @@ fn same_construct(content: &str, a: usize, b: usize) -> bool {
     }
 }
 
-/// The pairwise semantic-merge predicate (design §1b). `a` and `b` are the same defect iff same
-/// path + same (present) category + within-window-or-same-construct, AND every wrong-fusion
-/// guard passes.
+/// The pairwise semantic-merge predicate (design §1b, extended by P1 design point 2). `a` and
+/// `b` cluster as the same defect when EITHER of two GENERAL signals fires (never a third,
+/// fixture-specific one):
+///  (a) same file, same (present) category, and within-window-or-same-construct — the original
+///      cross-family-at-one-site signal; or
+///  (b) they share a captured structural object ([`shared_captured_object`]) — the "same root
+///      cause across files" signal (a config flag and the handler that reads it; an RLS policy
+///      and the page that relies on it), which does NOT require the same file or category.
+/// Every wrong-fusion guard still applies on top of whichever signal fired.
 fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool {
-    if a.path != b.path {
-        return false;
-    }
-    // Category None on either side ⇒ never merge (fail-open to over-telling).
-    match (&a.category, &b.category) {
-        (Some(ca), Some(cb)) if ca == cb => {}
-        _ => return false,
-    }
-    // Overlap: line window OR same enclosing construct.
-    let in_window = a.line != 0 && b.line != 0 && a.line.abs_diff(b.line) <= SEMANTIC_MERGE_WINDOW;
-    let in_construct = content.is_some_and(|c| same_construct(c, a.line, b.line));
-    if !in_window && !in_construct {
-        return false;
-    }
-    // Guard: two deterministic rows are two distinct defects by construction — never merge.
+    // Guard: two deterministic rows are two distinct defects by construction — never merge,
+    // regardless of which clustering signal below would otherwise fire.
     if finding_origin(a) == Origin::Deterministic && finding_origin(b) == Origin::Deterministic {
         return false;
     }
-    // Guard: disjoint structural objects (different tables/policies) — never merge.
-    if objects_conflict(a, b) {
+
+    // Signal (a): same file + same category + line-window-or-construct overlap.
+    let same_category = matches!((&a.category, &b.category), (Some(ca), Some(cb)) if ca == cb);
+    let in_window = a.path == b.path
+        && a.line != 0
+        && b.line != 0
+        && a.line.abs_diff(b.line) <= SEMANTIC_MERGE_WINDOW;
+    let in_construct =
+        a.path == b.path && content.is_some_and(|c| same_construct(c, a.line, b.line));
+    let same_file_adjacent = a.path == b.path && same_category && (in_window || in_construct);
+
+    // Signal (b): a shared captured object, general and cross-file (design point 2b).
+    let shared_object = shared_captured_object(a, b);
+
+    if !same_file_adjacent && !shared_object {
         return false;
     }
-    // Guard: AI+AI needs snippet corroboration — one snippet contains the other, or both are
-    // located (real, resolved code) inside the same construct. Two AI findings citing DIFFERENT
-    // real code that merely sit near each other stay separate.
+
+    // Guard: disjoint structural objects named in free text (different tables/policies) only
+    // vetoes the LINE-PROXIMITY signal — two same-category findings that merely sit near each
+    // other but visibly name different things. A `shared_captured_object` match is a stronger,
+    // structured same-object proof and is never vetoed by this looser text heuristic.
+    if same_file_adjacent && !shared_object && objects_conflict(a, b) {
+        return false;
+    }
+
+    // Guard: AI+AI needs corroboration beyond mere proximity — one snippet contains the other,
+    // both are located (real, resolved code) inside the same construct, or they share a
+    // captured object (an equally strong structured proof). Two AI findings citing DIFFERENT
+    // real code that merely sit near each other, with no shared object, stay separate.
     let both_ai = matches!(finding_origin(a), Origin::AdoptedAi | Origin::InventedAi)
         && matches!(finding_origin(b), Origin::AdoptedAi | Origin::InventedAi);
     if both_ai {
@@ -2449,7 +2635,8 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
         let sb = b.snippet.trim();
         let snippet_corroborated = (!sa.is_empty() && sb.contains(sa))
             || (!sb.is_empty() && sa.contains(sb))
-            || (a.located && b.located && in_construct);
+            || (a.located && b.located && in_construct)
+            || shared_object;
         if !snippet_corroborated {
             return false;
         }
@@ -2457,21 +2644,22 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
     true
 }
 
-/// Collapse one semantic group into a single finding: deterministic > adopted > invented for
-/// the primary, then higher severity, then earliest; max severity kept; every OTHER distinct
-/// rule id (including the members' own pre-existing `also_matches`) demoted into `also_matches`.
-/// The primary keeps its OWN line — the deterministic anchor that preserves line-grading.
+/// Collapse one semantic group into a single finding, PRIMARY chosen by `primary_rank`
+/// (security-class, then severity, then confidence, then specificity, then earliest — design
+/// point 3); max severity kept; every OTHER distinct rule id (including the members' own
+/// pre-existing `also_matches`) demoted into `also_matches`, scoped to ONLY this cluster's
+/// members (design point 4's `also_matches`-correctness fix: an id can only appear here if it
+/// was actually a member of, or already demoted within, THIS group — never a rule from an
+/// unrelated cluster). Every member's OWN evidence site is preserved in `also_locations`
+/// (design point 4's "list them all" union) rather than silently dropped when it loses the
+/// primary slot; a member whose `located == false` (no independently-fixable code of its own —
+/// see `Finding::located`) is marked `consequence: true` there, so it folds in as an "also
+/// affects" location rather than reading as a peer, independently-actionable site.
 fn merge_semantic_group(group: Vec<Finding>) -> Finding {
     let primary_idx = group
         .iter()
         .enumerate()
-        .max_by_key(|(i, f)| {
-            (
-                origin_rank(finding_origin(f)),
-                severity_rank(&f.severity),
-                group.len() - i,
-            )
-        })
+        .max_by_key(|(i, f)| primary_rank(f, group.len(), *i))
         .map(|(i, _)| i)
         .unwrap_or(0);
     let max_sev = group
@@ -2490,6 +2678,7 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
             also.push(r);
         }
     }
+    let mut also_locations: Vec<MergedLocation> = primary.also_locations.drain(..).collect();
     for f in &group {
         if seen.insert(f.rule_id.clone()) {
             also.push(f.rule_id.clone());
@@ -2499,18 +2688,40 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
                 also.push(r.clone());
             }
         }
+        also_locations.push(MergedLocation {
+            repo: f.repo.clone(),
+            path: f.path.clone(),
+            line: f.line,
+            rule_id: f.rule_id.clone(),
+            snippet: f.snippet.clone(),
+            consequence: !f.located,
+        });
+        also_locations.extend(f.also_locations.iter().cloned());
     }
+    // De-duplicate identical sites (the same absorbed rule id/site can arrive twice across a
+    // nested merge — e.g. it was already in the primary's carried-in `also_locations` AND is
+    // also a direct member of this group).
+    let mut location_seen: std::collections::HashSet<(String, String, usize, String)> =
+        std::collections::HashSet::new();
+    also_locations.retain(|l| {
+        location_seen.insert((l.repo.clone(), l.path.clone(), l.line, l.rule_id.clone()))
+    });
     primary.severity = max_sev;
     primary.also_matches = also;
+    primary.also_locations = also_locations;
     primary
 }
 
-/// The SECOND merge pass (design §1): after `resolve_finding_lines` + `merge_by_location` have
-/// collapsed exact-location duplicates, fuse cross-FAMILY duplicates — the same defect flagged by
-/// two rule families a few lines apart (an AI RLS finding + the native RLS checker; a
-/// service-role-bypass + a fetch-then-authorize on one handler body). Greedy single pass: each
-/// finding joins the first existing group whose seed it merges with, else seeds a new group.
-/// Category is filled from the rule-id heuristic for any finding a source didn't classify.
+/// The SECOND merge pass (design §1, extended by P1 — see
+/// `docs/plans/2026-09-29_codebase-inspection-hardening.md`): after `resolve_finding_lines` +
+/// `merge_by_location` have collapsed exact-location duplicates, fuse cross-TIER duplicates —
+/// the same defect flagged by two rule families a few lines apart (an AI RLS finding + the
+/// native RLS checker; a service-role-bypass + a fetch-then-authorize on one handler body), OR
+/// the same root cause flagged in DIFFERENT files via a shared captured object (a config flag +
+/// the handler that reads it). Greedy single pass: each finding joins the first existing group
+/// whose seed it merges with (via [`semantic_pair_merges`]), else seeds a new group. Category is
+/// filled from the rule-id heuristic for any finding a source didn't classify — this also
+/// determines [`finding_class`] for members that have no security-sounding rule id of their own.
 pub fn merge_semantic_groups(findings: Vec<Finding>, files: &[(String, String)]) -> Vec<Finding> {
     let by_path: std::collections::HashMap<&str, &str> = files
         .iter()
@@ -4081,6 +4292,7 @@ mod tests {
             located: true,
             captures: Default::default(),
             evaluated_option_id: None,
+            also_locations: Vec::new(),
         }
     }
 
@@ -4699,6 +4911,7 @@ mod tests {
             located: true,
             captures: Default::default(),
             evaluated_option_id: None,
+            also_locations: Vec::new(),
         }
     }
 
@@ -5408,6 +5621,7 @@ mod tests {
             located: true,
             captures: Default::default(),
             evaluated_option_id: None,
+            also_locations: Vec::new(),
         };
         // Three AI- findings with equal severity — earliest (index 0) must win.
         let group = vec![
@@ -6467,5 +6681,234 @@ mod tests {
         b.category = Some("rls-policy".to_string());
         let out = merge_semantic_groups(vec![a, b], &[]);
         assert_eq!(out.len(), 2, "two deterministic rows stay separate");
+    }
+
+    // ── P1: deduplication + cross-tier merge ────────────────────────────────────────────
+    // docs/plans/2026-09-29_codebase-inspection-hardening.md, P1. Synthetic findings only —
+    // never keyed to any one benchmark's rule/file/table names.
+
+    #[test]
+    fn p1_merge_location_security_beats_hygiene_regardless_of_severity() {
+        // The canonical P1 regression, at the EXACT same location (the shape the real
+        // ARCH-MIDDLEWARE-FIRST-1-vs-reflected-origin-CORS bug actually takes: both rows cite
+        // the same middleware line, so they collapse via `merge_by_location`). Before the fix,
+        // "adopted (non-AI-) beats invented" was the FIRST key, so the deterministic-but-
+        // irrelevant structural rule always won regardless of severity, hiding the security
+        // finding entirely. The structural row here is even HIGHER severity, to prove class
+        // beats severity, not merely that security happened to also be more severe.
+        let code = "app.use(cors())";
+        let files = vec![("middleware.ts".to_string(), code.to_string())];
+        let structural = site_finding("ARCH-MIDDLEWARE-FIRST-1", "middleware.ts", 12, "high", code);
+        let security = site_finding(
+            "AI-CORS-REFLECTED-ORIGIN-CREDENTIALS",
+            "middleware.ts",
+            12,
+            "medium",
+            code,
+        );
+        let merged = merge_by_location(vec![structural, security], &files);
+        assert_eq!(merged.len(), 1, "both rows cite the same code location");
+        assert_eq!(
+            merged[0].rule_id, "AI-CORS-REFLECTED-ORIGIN-CREDENTIALS",
+            "the security finding must survive as primary, never hidden behind a structural row"
+        );
+        assert!(merged[0]
+            .also_matches
+            .contains(&"ARCH-MIDDLEWARE-FIRST-1".to_string()));
+    }
+
+    #[test]
+    fn p1_semantic_group_shared_object_security_beats_hygiene_primary() {
+        // Cross-file, cross-class cluster via a shared captured object (signal 2b): a Hygiene
+        // structural finding and a Security finding both name the SAME table, in different
+        // files. Security must win primary even though the structural finding is deterministic
+        // AND more severe — both the OTHER keys favor the structural row, isolating class as
+        // the deciding one.
+        let mut structural =
+            site_finding("ARCH-MIDDLEWARE-FIRST-1", "router.ts", 5, "critical", "");
+        structural
+            .captures
+            .insert("table".to_string(), "profiles".to_string());
+        let mut security = site_finding("AI-RLS-MISSING-ON-PROFILES", "schema.sql", 40, "low", "");
+        security.category = Some("rls-policy".to_string());
+        security
+            .captures
+            .insert("table".to_string(), "profiles".to_string());
+        let out = merge_semantic_groups(vec![structural, security], &[]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].rule_id, "AI-RLS-MISSING-ON-PROFILES",
+            "security wins primary even though it is lower severity and the other side is deterministic"
+        );
+        assert_eq!(out[0].severity, "critical", "max severity is still kept");
+    }
+
+    #[test]
+    fn p1_primary_tiebreak_severity_wins_within_same_class() {
+        // Same class (both Hygiene, both invented AI- names, no calibrated confidence) —
+        // severity alone decides, in isolation from the other keys.
+        let low = site_finding("AI-HYGIENE-LOW", "f.rs", 10, "low", "");
+        let high = site_finding("AI-HYGIENE-HIGH", "f.rs", 10, "high", "");
+        let merged = merge_location_group(vec![low, high]);
+        assert_eq!(merged.rule_id, "AI-HYGIENE-HIGH");
+    }
+
+    #[test]
+    fn p1_primary_tiebreak_confidence_wins_within_same_class_and_severity() {
+        // Same class (neither rule id nor category is security-flavored), same severity, and
+        // the SAME origin tier (both confidence.is_some() ⇒ both AdoptedAi) — confidence alone
+        // decides: a "needs-review"-flagged finding must not win over an equally-severe,
+        // clearer one.
+        let mut needs_review = site_finding("RULE-A", "f.rs", 10, "high", "");
+        needs_review.confidence = Some("needs-review".to_string());
+        let mut clear = site_finding("RULE-B", "f.rs", 10, "high", "");
+        clear.confidence = Some("high".to_string());
+        let merged = merge_location_group(vec![needs_review, clear]);
+        assert_eq!(merged.rule_id, "RULE-B");
+    }
+
+    #[test]
+    fn p1_primary_tiebreak_specificity_wins_when_severity_and_confidence_tie() {
+        // Same class, same severity, same confidence (both None — neither ran through
+        // calibration) — specificity (deterministic beats an invented AI- name) decides.
+        let deterministic = site_finding("RULE-DETERMINISTIC", "f.rs", 10, "medium", "");
+        let invented = site_finding("AI-INVENTED-NAME", "f.rs", 10, "medium", "");
+        let merged = merge_location_group(vec![deterministic, invented]);
+        assert_eq!(merged.rule_id, "RULE-DETERMINISTIC");
+    }
+
+    #[test]
+    fn p1_cross_file_shared_captured_object_merges_into_one() {
+        // A config-flag finding in one file and the handler finding that reads that SAME flag
+        // in another file are one root-cause defect, not two — the general "same object across
+        // files" signal (design point 2b), independent of category or line proximity. The
+        // absorbed member's own evidence site is preserved, not silently dropped.
+        let mut flag = site_finding("CONFIG-FLAG-DEBUG-MODE", "config.rs", 5, "medium", "");
+        flag.captures
+            .insert("flag".to_string(), "debug_mode".to_string());
+        let mut handler =
+            site_finding("AI-HANDLER-TRUSTS-DEBUG-FLAG", "handler.rs", 80, "high", "");
+        handler
+            .captures
+            .insert("flag".to_string(), "debug_mode".to_string());
+        let out = merge_semantic_groups(vec![flag, handler], &[]);
+        assert_eq!(
+            out.len(),
+            1,
+            "cross-file findings sharing a captured object collapse into one defect"
+        );
+        assert_eq!(
+            out[0].rule_id, "AI-HANDLER-TRUSTS-DEBUG-FLAG",
+            "higher severity wins primary (same class, no confidence signal)"
+        );
+        assert!(out[0]
+            .also_matches
+            .contains(&"CONFIG-FLAG-DEBUG-MODE".to_string()));
+        assert_eq!(
+            out[0].also_locations.len(),
+            1,
+            "the absorbed member's own evidence site is preserved, not dropped"
+        );
+        assert_eq!(out[0].also_locations[0].path, "config.rs");
+        assert_eq!(out[0].also_locations[0].line, 5);
+        assert!(
+            !out[0].also_locations[0].consequence,
+            "both sides cite real, independently-actionable code"
+        );
+    }
+
+    #[test]
+    fn p1_consequence_member_folds_as_also_affects_location_not_its_own_row() {
+        // Root cause: a deterministic RLS-missing finding on the table's own policy site.
+        let mut root = site_finding("SEC-RLS-MISSING", "policy.sql", 5, "high", "");
+        root.captures
+            .insert("table".to_string(), "profiles".to_string());
+        // Consequence: an AI finding describing that a page is exposed ONLY because of the
+        // missing policy above — no independently-fixable code of its own (an absence/impact
+        // description rather than a presence-type violation at its own site: `located = false`,
+        // the general "no independent fix" signal — see `Finding::located`).
+        let mut consequence = site_finding(
+            "AI-PAGE-EXPOSED-VIA-MISSING-RLS",
+            "page.tsx",
+            40,
+            "medium",
+            "",
+        );
+        consequence
+            .captures
+            .insert("table".to_string(), "profiles".to_string());
+        consequence.located = false;
+        let out = merge_semantic_groups(vec![root, consequence], &[]);
+        assert_eq!(
+            out.len(),
+            1,
+            "the consequence does not survive as its own row"
+        );
+        assert_eq!(out[0].rule_id, "SEC-RLS-MISSING");
+        assert!(out[0]
+            .also_matches
+            .contains(&"AI-PAGE-EXPOSED-VIA-MISSING-RLS".to_string()));
+        assert_eq!(out[0].also_locations.len(), 1);
+        assert!(
+            out[0].also_locations[0].consequence,
+            "a no-independent-fix member is marked as a consequence location"
+        );
+        assert_eq!(out[0].also_locations[0].path, "page.tsx");
+    }
+
+    #[test]
+    fn p1_also_matches_never_links_an_unrelated_unclustered_rule() {
+        // Two findings form a genuine cluster (same category, adjacent lines); a third, wholly
+        // unrelated finding (different file, different category, no shared object) must never
+        // appear in the cluster's `also_matches`, and vice versa.
+        // One deterministic + one AI-invented so the AI+AI corroboration guard does not apply
+        // (this test is about cluster ISOLATION, not corroboration — that is covered by the
+        // existing `semantic_two_ai_same_construct_merge` / snippet-corroboration tests).
+        let mut a = site_finding("AUTHZ-MISSING-CHECK", "h.rs", 10, "high", "");
+        a.category = Some("authorization".to_string());
+        let mut b = site_finding("AI-AUTHZ-MISSING-2", "h.rs", 12, "medium", "");
+        b.category = Some("authorization".to_string());
+        let unrelated = site_finding("PERF-N-PLUS-ONE-1", "other.rs", 500, "low", "");
+        let out = merge_semantic_groups(vec![a, b, unrelated], &[]);
+        assert_eq!(out.len(), 2, "the unrelated finding stays its own row");
+        let cluster = out
+            .iter()
+            .find(|f| f.also_matches.contains(&"AI-AUTHZ-MISSING-2".to_string()))
+            .expect("the a/b cluster must exist");
+        assert!(
+            !cluster
+                .also_matches
+                .contains(&"PERF-N-PLUS-ONE-1".to_string()),
+            "also_matches must never link an unrelated rule: {:?}",
+            cluster.also_matches
+        );
+        let unrelated_out = out
+            .iter()
+            .find(|f| f.rule_id == "PERF-N-PLUS-ONE-1")
+            .expect("the unrelated finding survives as its own row");
+        assert!(unrelated_out.also_matches.is_empty());
+    }
+
+    #[test]
+    fn p1_merge_never_drops_a_distinct_root_cause() {
+        // Two GENUINELY distinct defects, each duplicated across two rule families (4 raw
+        // findings total). Merging must collapse each duplicate pair into one row WITHOUT
+        // losing either distinct defect — output must be exactly 2, never 1 (over-merged) or 4
+        // (under-merged).
+        let mut det1 = site_finding("RLS-MISSING", "a.sql", 10, "high", "");
+        det1.category = Some("rls-policy".to_string());
+        let mut ai1 = site_finding("AI-RLS-GAP", "a.sql", 12, "medium", "");
+        ai1.category = Some("rls-policy".to_string());
+
+        // Categories left unset so both backfill to "injection" via the rule-id heuristic.
+        let det2 = site_finding("SEC-NO-RAW-SQL-CONCAT-1", "b.ts", 40, "critical", "");
+        let ai2 = site_finding("AI-SQL-INJECTION", "b.ts", 41, "high", "");
+
+        let out = merge_semantic_groups(vec![det1, ai1, det2, ai2], &[]);
+        assert_eq!(
+            out.len(),
+            2,
+            "two distinct defects survive as exactly two rows — nothing dropped, nothing over-merged"
+        );
     }
 }
