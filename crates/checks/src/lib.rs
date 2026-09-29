@@ -79,6 +79,14 @@ pub mod strict_layering_call_checker;
 /// `docs/design/2026-07-27_ast-extractor-layer.md` §4 Group D.
 pub mod resource_lifecycle_checker;
 
+/// D2 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`) — lexical (comment-aware)
+/// detection of `SEC-NO-WEAK-TOKEN-RANDOMNESS-1`: a general-purpose PRNG (`Math.random`,
+/// Python's `random.*`, `rand()`, `new Random()`) feeding a value whose surrounding identifier
+/// marks it as a security credential (token/secret/password/session/nonce/CSRF/OTP/reset-code/
+/// share-link/access-id), discriminated against non-security uses (UI jitter, animation,
+/// sampling, shuffling). See `crates/rules/principles/universal/sec-no-weak-token-randomness-1.toml`.
+pub mod weak_randomness_checker;
+
 /// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s
 /// checker registry — "Plug point B" in
 /// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.3. Composed into

@@ -236,6 +236,7 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
         Box::new(crate::import_boundary_checker::ImportBoundaryChecker),
         Box::new(crate::strict_layering_call_checker::StrictLayeringCallChecker),
         Box::new(crate::resource_lifecycle_checker::ResourceLifecycleChecker),
+        Box::new(crate::weak_randomness_checker::WeakTokenRandomnessChecker),
     ]
 }
 
@@ -355,6 +356,7 @@ mod tests {
             "SUPABASE-FUNC-SEARCH-PATH-1",
             "PYTHON-TESTING-FILE-NAMING-1",
             "UI-UTC-DATES-1",
+            "SEC-NO-WEAK-TOKEN-RANDOMNESS-1",
         ] {
             assert!(ids.contains(expected), "missing {expected} from registry: {ids:?}");
         }
