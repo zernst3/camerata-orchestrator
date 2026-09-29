@@ -1,0 +1,43 @@
+id = "SEC-NO-OPEN-REDIRECT-1"
+title = "A redirect target derived from user input is checked against an allowlist before the response is issued"
+tag = "universal"
+domain = "universal"
+layer = "universal"
+enforcement = "structured"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/601.html"
+title = "CWE-601: URL Redirection to Untrusted Site ('Open Redirect')"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Unvalidated_Redirects_and_Forwards_Cheat_Sheet.html"
+title = "OWASP Unvalidated Redirects and Forwards Cheat Sheet"
+
+[decision]
+question = "Is a redirect target (a next/returnTo/redirect_uri query param, a stored callback URL, or similar) ever handed to a redirect response without validating it against a known-safe allowlist of internal paths or registered hosts?"
+default = "allowlist-redirect-targets"
+why = """
+An open redirect lets an attacker craft a link on the victim's own trusted domain that bounces the
+browser to an attacker-controlled site — used to make phishing links and OAuth token theft look
+trustworthy. The defect is almost always the same shape: a query parameter or stored value is read
+and handed straight to a 3xx redirect or a client-side location assignment with only a same-origin
+substring check (or no check at all), which attacker-controlled input such as //evil.com or
+https:evil.com routinely bypasses. The fix is to validate the target against an allowlist of
+internal relative paths or explicitly registered external hosts before issuing the redirect, never
+a substring/prefix check on the raw string.
+"""
+
+[[option]]
+id = "allowlist-redirect-targets"
+label = "Validate every redirect target against an allowlist before redirecting"
+directive = "Every redirect target sourced from user input (query parameters, form fields, or a stored callback URL) is checked against an allowlist of internal relative paths or explicitly registered external hosts before the redirect response is issued; anything that fails the check redirects to a fixed, safe default instead."
+remediation = """
+Replace the raw redirect target with a lookup against an allowlist of internal paths (or
+registered OAuth callback hosts); if the requested target is not on the allowlist, redirect to a
+fixed safe default (e.g. the app's home page) instead of the untrusted value. Verify by confirming
+a payload such as //evil.com or https:evil.com as the redirect parameter no longer leaves the
+application's own origin.
+"""
+why = "A same-origin substring or prefix check is routinely bypassed by protocol-relative URLs and scheme-confusion tricks; an allowlist of exact internal paths or registered hosts is the only check that does not depend on correctly anticipating every bypass shape."

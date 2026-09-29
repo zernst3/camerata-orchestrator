@@ -1,0 +1,48 @@
+id = "SEC-NO-WEAK-TOKEN-RANDOMNESS-1"
+title = "Tokens, nonces, and session/access identifiers are generated from a cryptographically secure random source, never a general-purpose PRNG"
+tag = "universal"
+domain = "universal"
+layer = "universal"
+enforcement = "structured"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/330.html"
+title = "CWE-330: Use of Insufficiently Random Values"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/338.html"
+title = "CWE-338: Use of Cryptographically Weak Pseudo-Random Number Generator (PRNG)"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Cryptographic_Storage_Cheat_Sheet.html"
+title = "OWASP Cryptographic Storage Cheat Sheet (secure random generation)"
+
+[decision]
+question = "Is a security-sensitive value (a password-reset token, session id, API key, share-link secret, or similar access credential) generated with a general-purpose PRNG (Math.random, random.random, rand(), a fixed/time-based seed) instead of a cryptographically secure random source?"
+default = "use-csprng-for-security-tokens"
+why = """
+A general-purpose PRNG such as JavaScript's Math.random() or Python's random module is designed
+for statistical distribution, not unpredictability: its internal state is small, often seeded from
+a predictable source (the current time), and in some implementations fully recoverable from a
+handful of observed outputs. When that generator produces a value that grants access on its own —
+a password-reset token, a session identifier, a share-link secret, an API key — an attacker who can
+observe or brute-force the generator's output space can forge a valid token without ever
+compromising the underlying account. Non-security uses of a fast PRNG (UI jitter, sampling,
+load-testing) are unaffected; the defect is specifically a PRNG feeding a value that itself
+functions as a credential.
+"""
+
+[[option]]
+id = "use-csprng-for-security-tokens"
+label = "Generate every security-sensitive token from a CSPRNG"
+directive = "Any value that functions as an access credential on its own (a password-reset token, session id, API key, or share-link secret) is generated using a cryptographically secure random source (crypto.randomBytes/crypto.randomUUID in Node, the secrets module in Python, SecureRandom on the JVM, or the platform's equivalent) with at least 128 bits of entropy, never a general-purpose PRNG."
+remediation = """
+Replace the general-purpose PRNG call generating this token with a cryptographically secure source
+(e.g. crypto.randomBytes(32) or crypto.randomUUID() in Node, Python's secrets.token_urlsafe(), or
+SecureRandom on the JVM) and confirm the resulting token has at least 128 bits of entropy. Verify
+by confirming the generator import is the crypto/secrets module, not Math.random or the language's
+default random module.
+"""
+why = "A CSPRNG's output is computationally infeasible to predict even given prior outputs, which a general-purpose PRNG cannot guarantee; there is no safe amount of general-purpose-PRNG use once the output functions as a credential."

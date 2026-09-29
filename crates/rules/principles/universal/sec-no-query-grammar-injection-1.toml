@@ -1,0 +1,49 @@
+id = "SEC-NO-QUERY-GRAMMAR-INJECTION-1"
+title = "User-controlled data is never concatenated into a query/filter grammar string (PostgREST .or()/.filter(), a NoSQL operator string, an LDAP filter); it is passed as a bound argument"
+tag = "universal"
+domain = "universal"
+layer = "universal"
+enforcement = "structured"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/943.html"
+title = "CWE-943: Improper Neutralization of Special Elements in Data Query Logic"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/74.html"
+title = "CWE-74: Improper Neutralization of Special Elements in Output Used by a Downstream Component ('Injection')"
+
+[[sources]]
+url = "https://postgrest.org/en/stable/references/api/tables_views.html#operators"
+title = "PostgREST docs — Operators (the .or()/.filter() query-string grammar this rule targets)"
+
+[decision]
+question = "Is user-controlled data string-concatenated into a query/filter GRAMMAR — a PostgREST .or()/.filter() expression, a NoSQL operator object built from a raw string, or an LDAP filter — rather than passed as a bound argument the client library escapes?"
+default = "bind-dont-concatenate-into-query-grammar"
+why = """
+A query/filter grammar (PostgREST's .or()/.filter() string syntax, a hand-built MongoDB $where
+clause, an LDAP filter string) has its OWN special characters — commas, parentheses, operator
+keywords — distinct from SQL's. Concatenating user input into that grammar string lets an attacker
+inject additional clauses (an extra comma or closing paren reopens the expression to add arbitrary
+conditions), exactly as string-concatenated SQL does, even when every underlying SQL call is itself
+fully parameterized. This is not contained by Row Level Security: RLS restricts which ROWS a
+correctly-formed query can see, but a grammar injection can forge a DIFFERENT query entirely,
+bypassing the intended filter logic before RLS is ever evaluated. The safe pattern is the client
+library's own bound-argument methods (.eq(column, value), an escaped .ilike(), a parameterized LDAP
+filter builder) — never string interpolation into the grammar itself.
+"""
+
+[[option]]
+id = "bind-dont-concatenate-into-query-grammar"
+label = "Use the client library's bound-argument filter methods, never string-built grammar"
+directive = "Any filter or query expression accepting user-controlled data uses the client library's own bound-argument methods (e.g. .eq(column, value), a properly escaped .ilike(), a parameterized LDAP filter) instead of concatenating the value into a .or()/.filter() grammar string, a raw NoSQL operator string, or a hand-built LDAP filter."
+remediation = """
+Rewrite the concatenated filter expression to use the client library's bound-argument methods
+(PostgREST/Supabase: .eq(column, value) chains instead of a string-built .or()/.filter()
+expression; escape reserved characters — commas, parentheses, wildcards — for any value that must
+still flow into a grammar string). Verify by confirming a payload containing the grammar's own
+reserved characters (e.g. a comma or closing paren) no longer changes which rows the query returns.
+"""
+why = "A grammar injection bypasses Row Level Security at the query-construction step, before any row-level policy is evaluated, so 'RLS probably contains it' is not a valid mitigation — the fix has to be at the boundary where the string is built."

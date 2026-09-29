@@ -1,0 +1,48 @@
+id = "SEC-NO-UNSAFE-HTML-SINK-1"
+title = "User- or attacker-influenced data is never rendered through a raw-HTML sink without sanitization"
+tag = "universal"
+domain = "universal"
+layer = "universal"
+enforcement = "structured"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/79.html"
+title = "CWE-79: Improper Neutralization of Input During Web Page Generation ('Cross-site Scripting')"
+
+[[sources]]
+url = "https://react.dev/reference/react-dom/components/common#dangerously-setting-the-inner-html"
+title = "React docs — dangerouslySetInnerHTML: rendering raw HTML bypasses React's default escaping"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html"
+title = "OWASP Cross Site Scripting Prevention Cheat Sheet"
+
+[decision]
+question = "Is user- or attacker-influenced data ever written into the DOM through a raw-HTML sink (dangerouslySetInnerHTML, innerHTML, document.write, v-html, an autoescape-disabled template block) without first passing through an HTML sanitizer?"
+default = "sanitize-before-raw-html-sink"
+why = """
+A raw-HTML sink renders its argument as markup, not text: React's dangerouslySetInnerHTML, plain
+DOM innerHTML, Vue's v-html, and template-engine "safe"/"raw"/autoescape-off filters all skip the
+framework's default output-encoding. When the value passed to one of these sinks contains any
+attacker-influenced substring (a stored comment, an uploaded profile field, a query-string
+parameter echoed back), the attacker's own <script>/onerror=/onclick= markup executes in the
+victim's browser session — classic stored or reflected cross-site scripting (CWE-79). The fix is
+never "trust this one input" case by case; it is to run the value through an allowlist HTML
+sanitizer (DOMPurify or equivalent) immediately before the sink, or to avoid the raw-HTML sink
+entirely in favor of the framework's default escaped-text rendering.
+"""
+
+[[option]]
+id = "sanitize-before-raw-html-sink"
+label = "Sanitize with an allowlist HTML sanitizer immediately before any raw-HTML sink"
+directive = "Any value reaching dangerouslySetInnerHTML, innerHTML, document.write, v-html, or an autoescape-disabled template block is passed through an allowlist HTML sanitizer (e.g. DOMPurify) at the point of use; content that never needs to carry real markup is rendered as plain escaped text instead of routed through a raw-HTML sink at all."
+remediation = """
+Wrap the value passed to the raw-HTML sink (dangerouslySetInnerHTML, innerHTML, or an
+autoescape-disabled template block) in an allowlist sanitizer such as DOMPurify.sanitize(...) at
+the point of use, or switch to the framework's default escaped-text rendering if the content
+never needs to carry real markup. Verify by confirming a payload like
+<img src=x onerror=alert(1)> renders as inert text or is stripped, never executes.
+"""
+why = "An allowlist sanitizer run at the point of use is the only fix that survives the value being edited or re-sourced later; per-caller manual escaping is easy to forget on the next code path that reaches the same sink."
