@@ -87,6 +87,14 @@ pub mod resource_lifecycle_checker;
 /// sampling, shuffling). See `crates/rules/principles/universal/sec-no-weak-token-randomness-1.toml`.
 pub mod weak_randomness_checker;
 
+/// D3 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`) — lexical (comment-aware)
+/// detection of `SEC-NO-QUERY-GRAMMAR-INJECTION-1`: user-controlled data concatenated or
+/// interpolated into a query/filter GRAMMAR string — PostgREST `.or()`/`.filter()`, a raw SQL
+/// string issued via `.query()`/`.execute()`/`.raw()`, a MongoDB `$where` clause, or an LDAP
+/// `filter:` value — rather than passed as a bound argument. See
+/// `crates/rules/principles/universal/sec-no-query-grammar-injection-1.toml`.
+pub mod query_grammar_injection_checker;
+
 /// The Layer-2 (Governed Development write-time gate) executor for [`arch_checker`]'s
 /// checker registry — "Plug point B" in
 /// `docs/design/2026-07-26_architectural-executor-feasibility.md` §2.3. Composed into
