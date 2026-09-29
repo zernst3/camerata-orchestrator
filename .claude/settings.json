@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/_keys/**)",
+      "Read(//Users/zacharyernst/Documents/Repos/Camerata tests/faktura-ANSWER-KEY.md)",
+      "Read(//Users/zacharyernst/Documents/Repos/_workspace/brownfield-audits/BENCHMARK_SCORECARD.md)",
+      "Read(**/GRADE-FULL.md)",
+      "Read(**/score.json)",
+      "Read(**/feedback-classes.md)"
+    ]
+  }
+}
