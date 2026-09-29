@@ -225,6 +225,10 @@ pub fn parse_osv_json(
                     // alternative option.
                     evaluated_option_id: None,
                     also_locations: Vec::new(),
+                    // Dependency findings are carved out of the curated-findings lane
+                    // entirely (see the `captures` comment above) — no fix-generation pass
+                    // ever runs over them.
+                    fix_specific: None,
                 });
             }
         }

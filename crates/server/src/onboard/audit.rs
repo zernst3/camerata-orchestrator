@@ -82,6 +82,7 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                         // Deterministic floor rules are never multi-option.
                         evaluated_option_id: None,
                         also_locations: Vec::new(),
+                        fix_specific: None,
                     });
                 }
             }
@@ -133,6 +134,7 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                 captures: Default::default(),
                 evaluated_option_id: None,
                 also_locations: Vec::new(),
+                fix_specific: None,
             });
         }
     }
@@ -310,6 +312,7 @@ pub(crate) fn classify_repo_findings(
             captures: Default::default(),
             evaluated_option_id: None,
             also_locations: Vec::new(),
+            fix_specific: None,
         });
     }
 }

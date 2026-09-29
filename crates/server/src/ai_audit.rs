@@ -504,6 +504,9 @@ pub fn parse_ai_findings(
                 // comment. `None` here is the correct pre-tag state, not a gap.
                 evaluated_option_id: None,
                 also_locations: Vec::new(),
+                // Set by `generate_fix_specifics` in a later pass; a raw pre-generation
+                // finding has no fix opinion yet.
+                fix_specific: None,
             });
         }
     }
@@ -4364,6 +4367,7 @@ mod tests {
             captures: Default::default(),
             evaluated_option_id: None,
             also_locations: Vec::new(),
+            fix_specific: None,
         }
     }
 
@@ -4983,6 +4987,7 @@ mod tests {
             captures: Default::default(),
             evaluated_option_id: None,
             also_locations: Vec::new(),
+            fix_specific: None,
         }
     }
 
@@ -5693,6 +5698,7 @@ mod tests {
             captures: Default::default(),
             evaluated_option_id: None,
             also_locations: Vec::new(),
+            fix_specific: None,
         };
         // Three AI- findings with equal severity — earliest (index 0) must win.
         let group = vec![

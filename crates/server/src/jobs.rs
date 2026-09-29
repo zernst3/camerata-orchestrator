@@ -417,6 +417,7 @@ mod tests {
             captures: Default::default(),
             evaluated_option_id: None,
             also_locations: Vec::new(),
+            fix_specific: None,
         }
     }
 
