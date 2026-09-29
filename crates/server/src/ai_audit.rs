@@ -1274,6 +1274,481 @@ async fn recommend_alternatives(
     Ok(parse_alternative_recommendations(&resp.text, alternatives))
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════
+// FIX-SPECIFIC GENERATION + SELF-CHECK (P2, 2026-09-29)
+// ════════════════════════════════════════════════════════════════════════════════════
+//
+// `Finding::fix_specific` used to be a stable `None` — `report_export::CuratedSiteJson`'s
+// `fix_for_this_finding` field existed but nothing ever populated it (see that field's own
+// doc comment before this pass). This section is the dedicated AI pass that fills it: a
+// batched generation call over every non-dependency finding (modeled on `verify_findings`
+// above — same `&dyn LlmPort`, same `UsageMeter`, same total-backstop timeout), followed by
+// a bounded validate-and-regenerate loop so a fix that names an identifier absent from the
+// finding's own evidence, or contradicts the finding's own `detail`, never reaches the
+// client. A finding that still has no valid fix after every retry gets an honest
+// needs-review marker instead of an empty/fabricated Fix block — see
+// [`generate_fix_specifics`]'s own doc comment for the full contract.
+
+/// How many EXTRA generation attempts a finding gets after its first fix fails the
+/// self-check (identifier grounding or non-contradiction) — 2, per the design doc's "a small
+/// N" bound. Each retry re-sends ONLY the still-failing findings, with a one-line note on
+/// exactly what was wrong, so the model has a concrete correction to make rather than
+/// guessing again blind.
+const MAX_FIX_REGENERATIONS: usize = 2;
+
+/// SYSTEM PROMPT for the fix-specific generation pass. Deliberately narrow: this pass does
+/// NOT re-judge severity/confidence/effort (calibration already did that) and does NOT
+/// explain the violation (the finding's own `detail` already does) — its ONLY job is a
+/// concrete "change X in file Y" sentence grounded in the evidence it's given.
+fn fix_specific_system_prompt() -> String {
+    r#"You write ONE concrete, codebase-specific fix per finding for a paying client's audit
+report. You are NOT re-explaining what is wrong — the finding's own detail already does that.
+Your only job is telling the developer EXACTLY what to change, in THIS codebase.
+
+Rules, every fix:
+- Name the REAL file/symbol/column/function from the evidence given for that finding (its own
+  path, snippet, detail, captured objects, and surrounding code). NEVER invent a name that
+  isn't present anywhere in the evidence you were given for that finding.
+- When the surrounding context shows the repo ALREADY has the correct pattern somewhere else,
+  point to it by name ("use `safeInternalPath` from lib/redirect.ts, as
+  app/auth/signout/route.ts does") instead of describing the pattern generically.
+- 1-4 sentences. A short, repo-style code snippet is fine when it helps, but keep it tight.
+- Say WHAT to change and WHERE — NEVER how this finding was detected. Do not mention
+  Camerata, a scanner, a linter, a rule id, a regex, "the audit", or any detection mechanism.
+- NEVER assert something about the codebase's current state that contradicts the finding's own
+  detail (e.g. do not tell the client to enable/turn on something the detail already says is
+  enabled/on/configured) — if the detail says a mitigation already exists, your fix must
+  address what's actually still missing or broken, not redo what's already there.
+- If you cannot write a grounded, non-contradictory fix for a finding from the evidence given,
+  omit it from your response entirely rather than guessing.
+
+Return ONLY JSON, no prose:
+{"fixes":[{"index":0,"fix":"..."}]}
+One entry per finding you could ground a fix for, addressed by its [index]. Omit any index you
+could not confidently ground — an omitted fix is far better than an invented one."#
+        .to_string()
+}
+
+/// A short, line-numbered excerpt of `path`'s content in `files`, centered on `line`
+/// (`radius` lines each side) — the "enough surrounding repo context to name real
+/// identifiers" the design doc asks for, without re-sending the whole file. Empty when
+/// `path` isn't found in `files` or `line` is 0 (a path-based, not line-based, finding) —
+/// the prompt still has `snippet`/`detail`/`captures` in that case.
+fn fix_context_window(
+    files: &[(String, String)],
+    path: &str,
+    line: usize,
+    radius: usize,
+) -> String {
+    if line == 0 {
+        return String::new();
+    }
+    let Some((_, content)) = files.iter().find(|(p, _)| p == path) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let idx = line.saturating_sub(1).min(lines.len().saturating_sub(1));
+    let start = idx.saturating_sub(radius);
+    let end = (idx + radius + 1).min(lines.len());
+    let mut out = String::new();
+    for (i, l) in lines[start..end].iter().enumerate() {
+        out.push_str(&format!("{}: {l}\n", start + i + 1));
+    }
+    out
+}
+
+/// The evidence blob a finding's generated fix is checked against — EXACTLY the union of
+/// what the generation prompt showed the model for that finding (path/snippet/detail/
+/// captures/surrounding code), so "grounded" means "grounded in what the model actually
+/// saw," never a stricter or looser set. Shared by [`build_fix_specific_block`] (prompt) and
+/// [`find_ungrounded_identifier`] (validation) so the two can never silently drift apart.
+fn fix_evidence_blob(f: &Finding, files: &[(String, String)]) -> String {
+    let context = fix_context_window(files, &f.path, f.line, 8);
+    let captures = f.captures.values().cloned().collect::<Vec<_>>().join(" ");
+    format!(
+        "{} {} {} {} {}",
+        f.path, f.snippet, f.detail, captures, context
+    )
+}
+
+/// Build the per-finding prompt body for a fix-generation round. `findings` are the
+/// findings THIS round is asking about (batch-local order); `feedback`, when present for a
+/// batch-local position, is a one-line note on why that finding's PRIOR attempt was
+/// rejected, appended so the model corrects the specific problem instead of guessing again.
+fn build_fix_specific_block(
+    findings: &[&Finding],
+    files: &[(String, String)],
+    corpus: Option<&camerata_rules::RuleSet>,
+    feedback: &std::collections::HashMap<usize, String>,
+) -> String {
+    let mut out = String::new();
+    for (i, f) in findings.iter().enumerate() {
+        out.push_str(&format!(
+            "[{i}] rule {} — severity {} — {}:{}\n",
+            f.rule_id, f.severity, f.path, f.line
+        ));
+        if !f.snippet.is_empty() {
+            out.push_str(&format!("Snippet: {}\n", f.snippet));
+        }
+        out.push_str(&format!("Detail: {}\n", f.detail));
+        if !f.captures.is_empty() {
+            let caps = f
+                .captures
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            out.push_str(&format!("Captured objects: {caps}\n"));
+        }
+        let context = fix_context_window(files, &f.path, f.line, 8);
+        if !context.is_empty() {
+            out.push_str(&format!("Surrounding code:\n{context}"));
+        }
+        if let Some(rule) = corpus.and_then(|c| c.get_by_id(&f.rule_id)) {
+            if let Some(opt) = rule.resolved_option(f.evaluated_option_id.as_deref()) {
+                if let Some(rem) = opt.remediation.as_deref().filter(|s| !s.trim().is_empty()) {
+                    out.push_str(&format!(
+                        "This rule's generic remediation (inspiration only — your fix must be \
+                         SPECIFIC to this finding, not a restatement of this): {rem}\n"
+                    ));
+                }
+            }
+        }
+        if let Some(reason) = feedback.get(&i) {
+            out.push_str(&format!(
+                "Your previous attempt for this finding was rejected: {reason}. Write a \
+                 corrected fix.\n"
+            ));
+        }
+        out.push('\n');
+    }
+    out
+}
+
+/// Parse the `{"fixes":[{"index":N,"fix":"..."}]}` response into batch-local index -> fix
+/// text. Robust: unparseable/malformed JSON, a missing `fixes` array, or a blank `fix`
+/// string for an entry all simply leave that index absent from the map — the caller treats
+/// an absent index exactly like "the model couldn't ground this one" (never a panic, never a
+/// fabricated empty string).
+fn parse_fix_specifics(raw: &str) -> std::collections::HashMap<usize, String> {
+    let mut out = std::collections::HashMap::new();
+    let Some(json) = extract_json_object(raw) else {
+        return out;
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return out;
+    };
+    let Some(arr) = v["fixes"].as_array() else {
+        return out;
+    };
+    for entry in arr {
+        let Some(idx) = entry["index"].as_u64() else {
+            continue;
+        };
+        let Some(text) = entry["fix"].as_str() else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        out.insert(idx as usize, text.to_string());
+    }
+    out
+}
+
+/// Bare, non-code words a fix is allowed to name without them being present in the
+/// finding's evidence — generic literals/placeholders, never a real identifier a client
+/// could go looking for. Deliberately short: anything NOT on this list must be grounded.
+const GENERIC_FIX_TERMS: &[&str] = &["true", "false", "null", "none", "undefined", "todo"];
+
+/// **Identifier-grounding validator (pure).** Every concrete identifier a generated `fix`
+/// names — a `` `backticked` `` symbol/column, or a bare file-path-like token
+/// (`lib/redirect.ts`, `schema.sql`, `package.json`) — must appear verbatim in `evidence`
+/// (the finding's own path/snippet/detail/captures/surrounding code — see
+/// [`fix_evidence_blob`]) or be one of [`GENERIC_FIX_TERMS`]. Returns the FIRST offending
+/// identifier found, so the caller can hand the model a concrete, specific correction
+/// ("you named X, which isn't in the evidence") rather than a vague rejection. Returns
+/// `None` when every named identifier is grounded (including a fix that names none at all —
+/// pure prose is never rejected on this axis).
+pub(crate) fn find_ungrounded_identifier(fix: &str, evidence: &str) -> Option<String> {
+    let backtick_re = regex::Regex::new(r"`([^`]+)`").expect("static regex");
+    let path_re = regex::Regex::new(r"[A-Za-z0-9_.\-/]+\.[A-Za-z]{1,6}\b").expect("static regex");
+
+    let mut candidates: Vec<String> = Vec::new();
+    for cap in backtick_re.captures_iter(fix) {
+        candidates.push(cap[1].to_string());
+    }
+    for m in path_re.find_iter(fix) {
+        candidates.push(m.as_str().to_string());
+    }
+
+    for ident in candidates {
+        let trimmed = ident.trim_matches(|c: char| matches!(c, '.' | ',' | ')' | '(' | ';' | ':'));
+        if trimmed.is_empty() {
+            continue;
+        }
+        if GENERIC_FIX_TERMS.contains(&trimmed.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        if !evidence.contains(trimmed) {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+/// Common words that precede an "already X" phrase without being the SUBJECT of it (e.g.
+/// "this file is already enabled" — "file" isn't what's enabled). Excluded from
+/// [`fix_contradicts_detail`]'s subject extraction so the heuristic keys on the actual
+/// setting/capability name ("strict mode", "RLS", "verify_jwt"), not filler.
+const CONTRADICTION_STOPWORDS: &[&str] = &[
+    "this", "that", "with", "have", "already", "file", "code", "function", "which", "it", "the",
+];
+
+/// Phrases in a finding's `detail` asserting some setting/capability is ALREADY in a given
+/// state — the premise half of the known "told to fix what's already fixed" contradiction
+/// class (the design doc's strict-mode example generalized: this fires for ANY already-on
+/// setting, not just strict mode — RLS, `verify_jwt`, 2FA, ...).
+const ALREADY_MARKERS: &[&str] = &[
+    "already enabled",
+    "already on",
+    "already true",
+    "already active",
+    "already configured",
+    "already turned on",
+    "is already enabled",
+    "currently enabled",
+];
+
+/// Verbs that, in a fix, instruct turning a setting ON — the instruction half of the
+/// contradiction class. Deliberately narrow (no generic "add"/"set", which fire on
+/// unrelated, legitimate fixes) so this stays a targeted check, not a broad false-positive
+/// generator.
+const ENABLE_VERBS: &[&str] = &[
+    "enable",
+    "turn on",
+    "turning on",
+    "switch on",
+    "re-enable",
+    "reenable",
+    "activate",
+];
+
+/// **Non-contradiction validator (pure, rule-based).** Detects the known "told to do what's
+/// already done" contradiction class: `detail` asserts a setting/capability is ALREADY in
+/// some state (`ALREADY_MARKERS`), and `fix` instructs enabling/turning on ([`ENABLE_VERBS`])
+/// that SAME setting — the strict-mode-already-on example generalized to any subject, not
+/// hardcoded to "strict". Returns `Some(reason)` (fed back to the model verbatim as the
+/// regeneration note) on a hit, `None` otherwise. This is a TARGETED rule check for one known
+/// contradiction shape, not a general consistency oracle — see this module's banner comment
+/// for why a rule-based check satisfies the design doc's self-check requirement on its own.
+pub(crate) fn fix_contradicts_detail(fix: &str, detail: &str) -> Option<String> {
+    let detail_lower = detail.to_ascii_lowercase();
+    let fix_lower = fix.to_ascii_lowercase();
+
+    for marker in ALREADY_MARKERS {
+        let Some(pos) = detail_lower.find(marker) else {
+            continue;
+        };
+        let before = &detail_lower[..pos];
+        let subject_tokens: Vec<&str> = before
+            .split_whitespace()
+            .rev()
+            .take(4)
+            .flat_map(|w| w.split(|c: char| !c.is_alphanumeric()))
+            .filter(|t| t.len() >= 4 && !CONTRADICTION_STOPWORDS.contains(t))
+            .collect();
+        if subject_tokens.is_empty() {
+            continue;
+        }
+        for verb in ENABLE_VERBS {
+            let Some(vpos) = fix_lower.find(verb) else {
+                continue;
+            };
+            let window_end = (vpos + verb.len() + 60).min(fix_lower.len());
+            let window = &fix_lower[vpos..window_end];
+            if subject_tokens.iter().any(|t| window.contains(t)) {
+                return Some(format!(
+                    "the finding's detail says \"{marker}\" but the fix tells the client to \
+                     {verb} the same thing — that's already done, address what's ACTUALLY \
+                     still wrong"
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Phrases that describe HOW Camerata found a finding rather than WHAT to change — the
+/// no-methodology-leak invariant (FIX-1, carried into `fix_specific`: see
+/// `report_export::resolve_fix`'s doc comment for the original instance of this rule over
+/// the rule-authored `fix` field). A client-facing fix must never read like a scanner's
+/// self-description.
+const METHODOLOGY_LEAK_PHRASES: &[&str] = &[
+    "camerata",
+    "this rule detects",
+    "this rule checks",
+    "this rule flags",
+    "the scanner",
+    "the audit tool",
+    "our scan",
+    "our tool",
+    "the scan flagged",
+    "detected by",
+    "regex-scan",
+    "regex scan",
+    "static analysis",
+    "the gate",
+    "flagged this finding",
+    "the audit found",
+];
+
+/// **Methodology-leak guard (pure).** Returns the first offending phrase found in `fix`
+/// (case-insensitive), or `None` when the fix describes only the remediation.
+pub(crate) fn fix_leaks_methodology(fix: &str) -> Option<String> {
+    let lower = fix.to_ascii_lowercase();
+    METHODOLOGY_LEAK_PHRASES
+        .iter()
+        .find(|p| lower.contains(*p))
+        .map(|p| p.to_string())
+}
+
+/// Run the P2 fix-specific generation pass: for every non-dependency finding in `findings`,
+/// generate a codebase-specific `fix_specific` (see [`fix_specific_system_prompt`]), then
+/// validate it (identifier grounding + non-contradiction + no-methodology-leak) and
+/// regenerate up to [`MAX_FIX_REGENERATIONS`] times for anything that fails. A finding whose
+/// fix STILL doesn't pass after every retry is marked `needs_review = true` with a
+/// `[needs review: fix not generated]` `detail` tag (mirroring `apply_verdicts`'s own
+/// free-text tagging convention) and its `fix_specific` stays `None` — NEVER an empty or
+/// fabricated string. `report_export::fix_generation_failed` reads that same tag to exclude
+/// such a finding from `do_now`: a same-week action item must come with an actual fix.
+///
+/// Modeled on [`verify_findings`] above: same `&dyn LlmPort` seam, same [`UsageMeter`]
+/// folding, same non-streaming total-backstop timeout. Dependency-audit findings
+/// (`DEP_AUDIT_RULE_ID`) are skipped — they're carved into their own §7 lane and never flow
+/// through `resolve_fix`/`CuratedSiteJson` either (see that carve-out's doc comment in
+/// `report_export.rs`). Graceful: a finding the model never responds about at all (a whole
+/// round times out, or every attempt is rejected) still gets the needs-review fallback
+/// rather than being silently dropped — recall-first discovery, matching every other pass in
+/// this module.
+pub async fn generate_fix_specifics(
+    llm: &dyn LlmPort,
+    repo: &str,
+    mut findings: Vec<Finding>,
+    files: &[(String, String)],
+    fix_model: Option<&str>,
+    meter: Option<&UsageMeter>,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<Finding> {
+    let indices: Vec<usize> = findings
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| f.rule_id != crate::dep_audit::DEP_AUDIT_RULE_ID)
+        .map(|(i, _)| i)
+        .collect();
+    if indices.is_empty() {
+        return findings;
+    }
+
+    let system = fix_specific_system_prompt();
+    // The subset of `indices` still needing a valid fix this round; shrinks as findings
+    // pass their self-check or exhaust retries. Original-index -> rejection reason, fed
+    // back into the NEXT round's prompt for that finding only.
+    let mut pending = indices;
+    let mut feedback: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+
+    for _attempt in 0..=MAX_FIX_REGENERATIONS {
+        if pending.is_empty() {
+            break;
+        }
+        let prompt = {
+            let refs: Vec<&Finding> = pending.iter().map(|&i| &findings[i]).collect();
+            let local_feedback: std::collections::HashMap<usize, String> = pending
+                .iter()
+                .enumerate()
+                .filter_map(|(pos, orig)| feedback.get(orig).cloned().map(|r| (pos, r)))
+                .collect();
+            format!(
+                "Repository: {repo}\n\nWrite a concrete fix for each finding below:\n\n{}",
+                build_fix_specific_block(&refs, files, corpus, &local_feedback)
+            )
+        };
+        let mut req = LlmRequest::new(prompt)
+            .with_system(system.clone())
+            .with_max_tokens(4096);
+        if let Some(m) = fix_model {
+            req = req.with_model(m.to_string());
+        }
+        let cap = total_backstop();
+        let resp = match tokio::time::timeout(cap, llm.complete(req)).await {
+            Ok(Ok(r)) => r,
+            // Transport/timeout failure: nothing to validate this round. `pending` is left
+            // untouched so the next round retries the same set (or, on the last round, so
+            // the needs-review fallback below picks them all up).
+            _ => continue,
+        };
+        if let Some(m) = meter {
+            m.record(&resp);
+        }
+        let parsed = parse_fix_specifics(&resp.text);
+
+        let mut still_pending = Vec::new();
+        for (pos, &orig_idx) in pending.iter().enumerate() {
+            let Some(text) = parsed.get(&pos) else {
+                feedback
+                    .entry(orig_idx)
+                    .or_insert_with(|| "you did not return a fix for this finding".to_string());
+                still_pending.push(orig_idx);
+                continue;
+            };
+            let evidence = fix_evidence_blob(&findings[orig_idx], files);
+            if let Some(bad) = find_ungrounded_identifier(text, &evidence) {
+                feedback.insert(
+                    orig_idx,
+                    format!(
+                        "you named `{bad}`, which doesn't appear anywhere in this finding's \
+                         evidence"
+                    ),
+                );
+                still_pending.push(orig_idx);
+                continue;
+            }
+            if let Some(reason) = fix_contradicts_detail(text, &findings[orig_idx].detail) {
+                feedback.insert(orig_idx, reason);
+                still_pending.push(orig_idx);
+                continue;
+            }
+            if let Some(leak) = fix_leaks_methodology(text) {
+                feedback.insert(
+                    orig_idx,
+                    format!(
+                        "you described detection methodology (\"{leak}\") — describe only the \
+                         fix, never how it was found"
+                    ),
+                );
+                still_pending.push(orig_idx);
+                continue;
+            }
+            findings[orig_idx].fix_specific = Some(text.clone());
+        }
+        pending = still_pending;
+    }
+
+    // Never emit an empty fix: anything still pending after every retry gets an honest
+    // needs-review marker instead of a null/blank Fix block downstream.
+    for idx in pending {
+        findings[idx].needs_review = true;
+        findings[idx].detail =
+            format!("{} [needs review: fix not generated]", findings[idx].detail);
+    }
+
+    findings
+}
+
 /// Partition `files` into contiguous chunks each whose RAW size is at most `budget` bytes,
 /// so each chunk's digest fits a single model context and the WHOLE repo gets audited. A
 /// file larger than `budget` becomes its own chunk (its digest then clips at the per-call
@@ -7095,5 +7570,389 @@ mod tests {
                 "{rule_id} must classify as Hygiene"
             );
         }
+    }
+
+    // ── P2: fix-specific generation + self-check ────────────────────────────────────────
+
+    fn fx(rule_id: &str, path: &str, line: usize, detail: &str, snippet: &str) -> Finding {
+        Finding {
+            repo: "o/r".to_string(),
+            path: path.to_string(),
+            line,
+            rule_id: rule_id.to_string(),
+            severity: "high".to_string(),
+            snippet: snippet.to_string(),
+            detail: detail.to_string(),
+            ..Finding::default()
+        }
+    }
+
+    // ── find_ungrounded_identifier (pure) ───────────────────────────────────────────────
+
+    #[test]
+    fn find_ungrounded_identifier_accepts_a_fix_naming_only_evidence_identifiers() {
+        let evidence = "app/auth/signout/route.ts uses `rawRedirect` at line 12; \
+                         lib/redirect.ts exports `safeInternalPath`";
+        let fix = "Replace `rawRedirect` with `safeInternalPath` from lib/redirect.ts, as \
+                    app/auth/signout/route.ts does.";
+        assert_eq!(find_ungrounded_identifier(fix, evidence), None);
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_accepts_prose_with_no_named_identifiers() {
+        let evidence = "some finding evidence";
+        let fix = "Validate the input before using it and return an error otherwise.";
+        assert_eq!(find_ungrounded_identifier(fix, evidence), None);
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_accepts_generic_literals_absent_from_evidence() {
+        let evidence = "the config sets a flag";
+        let fix = "Change the flag from `false` to `true`.";
+        assert_eq!(find_ungrounded_identifier(fix, evidence), None);
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_rejects_a_backticked_symbol_absent_from_evidence() {
+        let evidence = "app/auth/signout/route.ts uses `rawRedirect` at line 12";
+        let fix = "Use `totallyInventedHelper` instead.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("totallyInventedHelper".to_string())
+        );
+    }
+
+    #[test]
+    fn find_ungrounded_identifier_rejects_a_file_path_absent_from_evidence() {
+        let evidence = "app/auth/signout/route.ts uses `rawRedirect` at line 12";
+        let fix = "Move this logic into lib/nonexistent-helper.ts instead.";
+        assert_eq!(
+            find_ungrounded_identifier(fix, evidence),
+            Some("lib/nonexistent-helper.ts".to_string())
+        );
+    }
+
+    // ── fix_contradicts_detail (pure, rule-based) ───────────────────────────────────────
+
+    #[test]
+    fn fix_contradicts_detail_rejects_enabling_a_setting_the_detail_says_is_already_on() {
+        let detail = "Strict mode is already enabled in tsconfig.json; foo.ts still uses \
+                       `any` casts that bypass its checks.";
+        let fix = "Enable strict mode in tsconfig.json for this file.";
+        assert!(
+            fix_contradicts_detail(fix, detail).is_some(),
+            "must flag a fix that tells the client to enable what the detail says is already on"
+        );
+    }
+
+    #[test]
+    fn fix_contradicts_detail_generalizes_beyond_strict_mode() {
+        // Same contradiction SHAPE, a different subject (RLS) — the check must not be
+        // hardcoded to the literal word "strict" (general-fixes-not-fixture-bandaids).
+        let detail = "Row-level security is already enabled on the orders table, but no \
+                       policy restricts SELECT to the owning user.";
+        let fix = "Enable row-level security on the orders table.";
+        assert!(fix_contradicts_detail(fix, detail).is_some());
+    }
+
+    #[test]
+    fn fix_contradicts_detail_spares_a_fix_that_addresses_the_real_gap() {
+        let detail = "Strict mode is already enabled in tsconfig.json; foo.ts still uses \
+                       `any` casts that bypass its checks.";
+        let fix = "Replace the `any` casts in foo.ts with explicit parameter types so strict \
+                    mode's checks actually apply to this file.";
+        assert_eq!(fix_contradicts_detail(fix, detail), None);
+    }
+
+    #[test]
+    fn fix_contradicts_detail_spares_a_detail_with_no_already_marker() {
+        let detail = "This endpoint has no authorization check on the delete path.";
+        let fix = "Add an ownership check before performing the delete.";
+        assert_eq!(fix_contradicts_detail(fix, detail), None);
+    }
+
+    // ── fix_leaks_methodology (pure) ─────────────────────────────────────────────────────
+
+    #[test]
+    fn fix_leaks_methodology_rejects_a_fix_describing_detection() {
+        let fix = "Camerata detected this via a regex scan; fix the SQL concatenation.";
+        assert!(fix_leaks_methodology(fix).is_some());
+    }
+
+    #[test]
+    fn fix_leaks_methodology_accepts_a_clean_remediation_only_fix() {
+        let fix = "Use a parameterized query instead of concatenating `user_id` into the SQL \
+                    string in db/orders.rs.";
+        assert_eq!(fix_leaks_methodology(fix), None);
+    }
+
+    // ── parse_fix_specifics (pure) ───────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_fix_specifics_reads_a_well_formed_response() {
+        let raw =
+            r#"{"fixes":[{"index":0,"fix":"Do the thing."},{"index":2,"fix":"Do another."}]}"#;
+        let out = parse_fix_specifics(raw);
+        assert_eq!(out.get(&0).map(String::as_str), Some("Do the thing."));
+        assert_eq!(out.get(&2).map(String::as_str), Some("Do another."));
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn parse_fix_specifics_is_empty_on_garbage_input() {
+        assert!(parse_fix_specifics("not json at all").is_empty());
+        assert!(parse_fix_specifics(r#"{"nope":true}"#).is_empty());
+        assert!(parse_fix_specifics(r#"{"fixes":[{"index":0,"fix":""}]}"#).is_empty());
+    }
+
+    // ── generate_fix_specifics (async, stubbed LlmPort — no real model calls) ──────────
+
+    /// Returns a DIFFERENT canned response on each successive call (round-robin once
+    /// exhausted) — drives the regenerate-on-rejection path deterministically: round 0
+    /// returns a bad fix, round 1 returns a corrected one.
+    struct SequencedCompleter {
+        responses: std::sync::Mutex<std::collections::VecDeque<String>>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl SequencedCompleter {
+        fn new(responses: &[&str]) -> Self {
+            Self {
+                responses: std::sync::Mutex::new(responses.iter().map(|s| s.to_string()).collect()),
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for SequencedCompleter {
+        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut q = self.responses.lock().unwrap();
+            let text = if q.len() > 1 {
+                q.pop_front().unwrap()
+            } else {
+                q.front().cloned().unwrap_or_default()
+            };
+            Ok(LlmResponse {
+                text,
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: Some(0.01),
+                input_tokens: Some(100),
+                output_tokens: Some(50),
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+            })
+        }
+        async fn complete_streaming(
+            &self,
+            req: LlmRequest,
+            on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            let resp = self.complete(req).await?;
+            on_delta(&resp.text);
+            Ok(resp)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_fix_specifics_happy_path_grounds_and_populates_every_finding() {
+        let files = vec![(
+            "app/auth/signout/route.ts".to_string(),
+            "export function safeInternalPath(p: string) {}\nexport function handler() { \
+             rawRedirect(p) }"
+                .to_string(),
+        )];
+        let f = fx(
+            "SEC-OPEN-REDIRECT-1",
+            "app/auth/signout/route.ts",
+            2,
+            "rawRedirect(p) is called with an unvalidated path — an open redirect.",
+            "rawRedirect(p)",
+        );
+        let completer = SequencedCompleter::new(&[
+            r#"{"fixes":[{"index":0,"fix":"Use `safeInternalPath` instead of `rawRedirect` in app/auth/signout/route.ts."}]}"#,
+        ]);
+        let meter = UsageMeter::default();
+        let out =
+            generate_fix_specifics(&completer, "o/r", vec![f], &files, None, Some(&meter), None)
+                .await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(
+            out[0].fix_specific.as_deref(),
+            Some("Use `safeInternalPath` instead of `rawRedirect` in app/auth/signout/route.ts.")
+        );
+        assert!(!out[0].needs_review);
+        assert_eq!(meter.snapshot().calls, 1);
+    }
+
+    #[tokio::test]
+    async fn generate_fix_specifics_skips_dependency_audit_findings() {
+        let f = fx(
+            crate::dep_audit::DEP_AUDIT_RULE_ID,
+            "package-lock.json",
+            0,
+            "some-pkg@1.0.0 has a known CVE",
+            "some-pkg@1.0.0",
+        );
+        let completer = FailingCompleter;
+        let out = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].fix_specific, None);
+        // No model call was ever attempted — FailingCompleter would have surfaced it as a
+        // needs-review tag if `generate_fix_specifics` had tried and failed; it never tried.
+        assert!(!out[0].needs_review);
+    }
+
+    #[tokio::test]
+    async fn generate_fix_specifics_empty_fix_guard_marks_needs_review_on_total_failure() {
+        let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
+        // A completer that returns unparseable junk every time — every round yields nothing
+        // usable, so the finding must fall through to the needs-review fallback rather than
+        // an empty/`None` fix silently reaching the report.
+        let completer = StubCompleter {
+            text: "complete garbage, not json".to_string(),
+        };
+        let out = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].fix_specific, None, "must never fabricate a fix");
+        assert!(
+            out[0].needs_review,
+            "must be marked needs-review on total failure"
+        );
+        assert!(
+            out[0].detail.contains("[needs review: fix not generated]"),
+            "detail must carry the fix-not-generated tag, got: {}",
+            out[0].detail
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_fix_specifics_empty_fix_guard_on_transport_failure() {
+        // The OTHER failure mode: the LLM is unreachable entirely (not just returning junk).
+        let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
+        let out =
+            generate_fix_specifics(&FailingCompleter, "o/r", vec![f], &[], None, None, None).await;
+        assert_eq!(out[0].fix_specific, None);
+        assert!(out[0].needs_review);
+        assert!(out[0].detail.contains("[needs review: fix not generated]"));
+    }
+
+    #[tokio::test]
+    async fn generate_fix_specifics_regenerates_when_the_fix_names_an_ungrounded_identifier() {
+        let f = fx(
+            "ARCH-1",
+            "a.rs",
+            10,
+            "the handler never checks ownership before deleting",
+            "delete_order(id)",
+        );
+        let completer = SequencedCompleter::new(&[
+            // Round 0: names a symbol nowhere in the evidence — must be rejected.
+            r#"{"fixes":[{"index":0,"fix":"Use `totallyInventedGuard` before the delete."}]}"#,
+            // Round 1 (after feedback): a grounded correction.
+            r#"{"fixes":[{"index":0,"fix":"Check the caller owns `id` before calling delete_order(id)."}]}"#,
+        ]);
+        let out = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        assert_eq!(
+            out[0].fix_specific.as_deref(),
+            Some("Check the caller owns `id` before calling delete_order(id).")
+        );
+        assert!(!out[0].needs_review);
+    }
+
+    #[tokio::test]
+    async fn generate_fix_specifics_regenerates_when_the_fix_contradicts_the_detail() {
+        let f = fx(
+            "JAVASCRIPT-TS-STRICT-1",
+            "tsconfig.json",
+            1,
+            "Strict mode is already enabled in tsconfig.json; foo.ts still uses `any` casts \
+             that bypass its checks.",
+            "\"strict\": true",
+        );
+        let completer = SequencedCompleter::new(&[
+            // Round 0: contradicts the detail (tells the client to do what's already done).
+            r#"{"fixes":[{"index":0,"fix":"Enable strict mode in tsconfig.json."}]}"#,
+            // Round 1: addresses the real gap instead.
+            r#"{"fixes":[{"index":0,"fix":"Replace the `any` casts in foo.ts with explicit types."}]}"#,
+        ]);
+        let out = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        assert_eq!(
+            out[0].fix_specific.as_deref(),
+            Some("Replace the `any` casts in foo.ts with explicit types.")
+        );
+        assert!(!out[0].needs_review);
+    }
+
+    #[tokio::test]
+    async fn generate_fix_specifics_never_leaks_methodology_in_the_saved_fix() {
+        let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
+        let completer = SequencedCompleter::new(&[
+            r#"{"fixes":[{"index":0,"fix":"Camerata detected this via a regex scan; fix the concatenation."}]}"#,
+            r#"{"fixes":[{"index":0,"fix":"Use a parameterized query in a.rs instead of concatenation."}]}"#,
+        ]);
+        let out = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        let saved = out[0].fix_specific.as_deref().unwrap_or_default();
+        assert!(!saved.to_ascii_lowercase().contains("camerata"));
+        assert!(!saved.to_ascii_lowercase().contains("regex"));
+        assert_eq!(
+            saved,
+            "Use a parameterized query in a.rs instead of concatenation."
+        );
+    }
+
+    #[tokio::test]
+    async fn generate_fix_specifics_gives_up_after_max_regenerations_and_folds_usage_every_round() {
+        let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
+        // Always returns an ungrounded fix — every round is rejected, so after
+        // MAX_FIX_REGENERATIONS retries the finding must land in the needs-review fallback,
+        // and every round's call must still have folded into the meter (spend isn't lost
+        // just because the content was rejected).
+        let completer = StubCompleter {
+            text: r#"{"fixes":[{"index":0,"fix":"Use `neverInEvidence` here."}]}"#.to_string(),
+        };
+        let meter = UsageMeter::default();
+        let out =
+            generate_fix_specifics(&completer, "o/r", vec![f], &[], None, Some(&meter), None).await;
+        assert_eq!(out[0].fix_specific, None);
+        assert!(out[0].needs_review);
+        assert_eq!(meter.snapshot().calls as usize, MAX_FIX_REGENERATIONS + 1);
+    }
+
+    #[tokio::test]
+    async fn generate_fix_specifics_uses_surrounding_context_to_ground_identifiers() {
+        // The fix names a symbol that's NOT in the finding's own snippet/detail but IS in the
+        // surrounding file content passed via `files` — proving the context window (not just
+        // the bare snippet) grounds the identifier check.
+        let files = vec![(
+            "lib/redirect.ts".to_string(),
+            "// ...\n// ...\n// ...\n// ...\n// ...\nexport function safeInternalPath(p: string) \
+             { return p; }\n// ...\n// ...\n// ...\n// ...\n"
+                .to_string(),
+        )];
+        let f = fx(
+            "SEC-OPEN-REDIRECT-1",
+            "lib/redirect.ts",
+            6,
+            "this module has no validated-path helper in use at the call site",
+            "return p;",
+        );
+        let completer = SequencedCompleter::new(&[
+            r#"{"fixes":[{"index":0,"fix":"Route the redirect through `safeInternalPath`, defined right here in lib/redirect.ts."}]}"#,
+        ]);
+        let out =
+            generate_fix_specifics(&completer, "o/r", vec![f], &files, None, None, None).await;
+        assert!(
+            out[0].fix_specific.is_some(),
+            "the context window must ground `safeInternalPath` even though it's not in the \
+             bare snippet/detail"
+        );
     }
 }
