@@ -734,13 +734,18 @@ pub struct CuratedSiteJson {
     /// rule's default option has no authored `remediation` yet: the template must omit the Fix
     /// block entirely in that case rather than render an empty line.
     pub fix: Option<String>,
-    /// An optional, SINGLE labeled line to render UNDER the authored `fix` block ("For this
-    /// finding: …") when the model-written `detail` carries a finding-specific remediation
-    /// sentence distinct from both `fix` and the body `detail` text. `None` in every case as of
-    /// this pass (see [`resolve_fix`]'s module doc for why: a reliable distinct-sentence
-    /// extractor was judged not worth the risk of rendering duplicated/low-quality text) — the
-    /// field exists so the template layer has a stable place to read from once/if that
-    /// extraction is built. Never rendered in place of `fix`; only ever alongside it.
+    /// **P2 (2026-09-29): the PRIMARY fix.** A codebase-specific remediation for THIS
+    /// finding — names the real file/symbol/column from the finding's own evidence, and
+    /// points at the repo's own correct pattern elsewhere when one exists. Generated at scan
+    /// time by [`crate::ai_audit::generate_fix_specifics`] (this layer stays pure/
+    /// synchronous — it only reads `Finding::fix_specific`, never calls a model) with a
+    /// bounded validate-and-regenerate self-check (identifier grounding + non-contradiction;
+    /// see that function's doc comment). The template renders this ABOVE `fix` — the rule's
+    /// generic authored remediation above is now SECONDARY context only, never the lead line.
+    /// `None` when fix-generation never ran (a deterministic-only scan makes no model calls
+    /// at all) or gave up after retries (`fix_generation_failed`, which is also what keeps
+    /// such a finding out of `do_now`) — the template must render `fix` alone in that case,
+    /// never a bare "Fix:" label with nothing after it.
     pub fix_for_this_finding: Option<String>,
 }
 
@@ -1273,6 +1278,26 @@ pub(crate) fn matrix_bucket(
     }
 }
 
+/// True when [`crate::ai_audit::generate_fix_specifics`] (P2) exhausted its retries and gave
+/// up on this finding — it carries NO usable `fix_specific`, so `CuratedSiteJson::
+/// fix_for_this_finding` stays `None` for it. Never `do_now`: a same-week action item must
+/// come with an actual fix, not a promise the report doesn't keep — see `matrix_bucket`'s two
+/// call sites in [`build_report_json`], which downgrade a would-be `do_now` bucket to
+/// `do_next` when this is true.
+///
+/// Detected from the `"[needs review: fix not generated]"` `detail` tag
+/// `generate_fix_specifics` appends on failure — the same free-text-tag convention
+/// `apply_verdicts` already uses for its own needs-review reasons (see that function's doc
+/// comment). Deliberately a substring check rather than a dedicated bool field: it keys ONLY
+/// on the fix-generation failure path, so a finding that is `needs_review` for any OTHER
+/// reason (a debatable calibration verdict, an in-test flag, …) is untouched — this must
+/// never widen into a blanket "no `fix_specific` yet" gate, which would also catch every
+/// finding from a deterministic-only scan (fix-generation is itself an AI pass, gated off
+/// entirely when `run_ai_review` is false) and wrongly pull them out of `do_now`.
+pub(crate) fn fix_generation_failed(finding: &Finding) -> bool {
+    finding.detail.contains("fix not generated")
+}
+
 /// A style rule needs an established corpus before deviations are findings (Bug 4 §2d). A
 /// repo with fewer than this many test files has no test corpus to speak of, so
 /// `testing-style` deviations are conventions-to-consider, not defects.
@@ -1637,6 +1662,14 @@ pub fn build_report_json(
         } else {
             matrix_bucket(*disposition, severity, f.effort.as_deref())
         };
+        // P2: a finding whose fix-generation gave up must never sit in `do_now` — a
+        // same-week action item without an actual fix would falsify the report's own
+        // promise. See `fix_generation_failed`'s doc comment.
+        let bucket = if bucket == "do_now" && fix_generation_failed(f) {
+            "do_next"
+        } else {
+            bucket
+        };
         let target = match bucket {
             "do_now" => &mut matrix.do_now,
             "do_next" => &mut matrix.do_next,
@@ -1686,6 +1719,14 @@ pub fn build_report_json(
                     } else {
                         matrix_bucket(*disposition, severity, f.effort.as_deref())
                     };
+                // P2: keep this site's own disposition label in lockstep with the matrix
+                // override above — never claim "Open (recommended: Do now)" on a site whose
+                // fix-generation failed.
+                let bucket = if bucket == "do_now" && fix_generation_failed(f) {
+                    "do_next"
+                } else {
+                    bucket
+                };
                 let confirmed_by_client = dispositions
                     .get(&finding_key(f))
                     .map(|d| d.confirmed_by_client)
@@ -1708,9 +1749,15 @@ pub fn build_report_json(
                         f,
                         opts.chosen_options.get(&rule_id.to_ascii_uppercase()).map(String::as_str),
                     ),
-                    // See `CuratedSiteJson::fix_for_this_finding`'s doc comment: deliberately
-                    // never populated in this pass.
-                    fix_for_this_finding: None,
+                    // P2: `f.fix_specific` was generated at SCAN time by
+                    // `ai_audit::generate_fix_specifics` (this layer stays pure/synchronous —
+                    // no model access here, just a read) — a codebase-specific fix that the
+                    // template renders ABOVE `fix` (the rule's generic remediation is now
+                    // secondary context only). `None` when generation never ran (a
+                    // deterministic-only scan) or gave up after retries (see
+                    // `fix_generation_failed`, which is what keeps such a finding out of
+                    // `do_now` above).
+                    fix_for_this_finding: f.fix_specific.clone(),
                 }
             })
             .collect();
@@ -3057,6 +3104,98 @@ mod tests {
         );
     }
 
+    // ── P2: fix_specific shown as the PRIMARY fix, generic `fix` secondary ──────────────
+
+    #[test]
+    fn curated_finding_site_shows_fix_specific_as_fix_for_this_finding() {
+        let mut f = finding("ARCH-1", "app/auth/signout/route.ts", 12, "high");
+        f.fix_specific = Some(
+            "Use `safeInternalPath` from lib/redirect.ts, as app/auth/signin/route.ts does."
+                .to_string(),
+        );
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(
+            json.curated_findings[0].sites[0]
+                .fix_for_this_finding
+                .as_deref(),
+            Some("Use `safeInternalPath` from lib/redirect.ts, as app/auth/signin/route.ts does.")
+        );
+    }
+
+    #[test]
+    fn curated_finding_site_fix_for_this_finding_is_none_when_never_generated() {
+        // Back-compat / deterministic-only-scan case: `fix_specific` was never set.
+        let f = finding("ARCH-1", "a.rs", 1, "high");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.curated_findings[0].sites[0].fix_for_this_finding, None);
+    }
+
+    // ── P2: fix_generation_failed (pure) + the do_now gate it drives ────────────────────
+
+    #[test]
+    fn fix_generation_failed_detects_the_tag_generate_fix_specifics_appends() {
+        let mut f = finding("ARCH-1", "a.rs", 1, "high");
+        f.detail = "some real defect [needs review: fix not generated]".to_string();
+        assert!(fix_generation_failed(&f));
+    }
+
+    #[test]
+    fn fix_generation_failed_is_false_with_no_tag() {
+        let f = finding("ARCH-1", "a.rs", 1, "high");
+        assert!(!fix_generation_failed(&f));
+    }
+
+    #[test]
+    fn fix_generation_failed_does_not_false_positive_on_an_unrelated_needs_review_reason() {
+        // Calibration's OWN needs-review tag (a debatable-preference verdict) must never be
+        // mistaken for the fix-generation failure tag — the do_now gate is scoped to fix
+        // generation specifically, not every needs-review reason.
+        let mut f = finding("ARCH-1", "a.rs", 1, "high");
+        f.needs_review = true;
+        f.detail = "an over-engineering note on a small codebase [needs review: debatable \
+                     architectural preference]"
+            .to_string();
+        assert!(!fix_generation_failed(&f));
+    }
+
+    #[test]
+    fn a_critical_finding_whose_fix_generation_failed_is_excluded_from_do_now() {
+        let mut f = finding("ARCH-1", "a.rs", 1, "critical");
+        f.detail = format!("{} [needs review: fix not generated]", f.detail);
+        f.needs_review = true;
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert!(
+            json.matrix.do_now.is_empty(),
+            "a finding with no valid fix must never sit in do_now, even at critical severity: \
+             {:?}",
+            json.matrix.do_now
+        );
+        assert_eq!(
+            json.matrix.do_next.len(),
+            1,
+            "it still surfaces — just not as do_now"
+        );
+        assert_eq!(
+            json.curated_findings[0].sites[0].fix_for_this_finding, None,
+            "and it carries no fix line to promise, matching the downgrade"
+        );
+    }
+
+    #[test]
+    fn a_critical_finding_with_a_valid_fix_still_lands_in_do_now() {
+        // Regression pin: the P2 gate must not widen into "no fix_specific -> never do_now"
+        // — only the EXPLICIT fix-generation-failed tag downgrades a finding. A critical
+        // finding that simply never went through fix-generation (e.g. a deterministic-only
+        // scan) keeps today's behavior.
+        let f = finding("ARCH-1", "a.rs", 1, "critical");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.matrix.do_now.len(), 1);
+    }
+
     // ── Placeholder substitution helper ─────────────────────────────────────────
 
     #[test]
@@ -3350,6 +3489,50 @@ mod tests {
             pdf.starts_with(b"%PDF"),
             "output must start with the PDF magic bytes"
         );
+    }
+
+    /// P2: the real Typst template must compile cleanly with `fix_for_this_finding` SET
+    /// (the new primary-fix branch), alongside a generic `fix` from the corpus — exercising
+    /// the "both present" path this pass added, not just the pre-existing "neither present"
+    /// path the test above already covers.
+    #[tokio::test]
+    async fn compile_pdf_renders_fix_specific_and_generic_fix_together() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_renders_fix_specific_and_generic_fix_together: typst not \
+                 on PATH"
+            );
+            return;
+        }
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let mut f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        f.captures
+            .insert("table".to_string(), "profiles".to_string());
+        f.fix_specific = Some(
+            "Enable RLS on `profiles` directly (see supabase/migrations/2.sql for the pattern \
+             this repo already uses on `orders`)."
+                .to_string(),
+        );
+        let report = report_with(vec![f], vec!["SUPABASE-RLS-ENABLED-1"]);
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        assert!(json.curated_findings[0].sites[0]
+            .fix_for_this_finding
+            .is_some());
+        assert!(json.curated_findings[0].sites[0].fix.is_some());
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed with both fix_for_this_finding and fix set");
+        assert!(pdf.starts_with(b"%PDF"));
     }
 
     /// Best-effort `typst` presence check for the compile test's skip gate (mirrors the
@@ -3853,8 +4036,41 @@ mod tests {
         );
         assert!(
             template.contains("site.fix_for_this_finding != none"),
-            "the template must be wired to render `fix_for_this_finding` under the Fix block \
-             once it's ever populated"
+            "the template must gate on `fix_for_this_finding`'s presence, not just `fix`'s"
+        );
+    }
+
+    /// P2 (2026-09-29): `fix_for_this_finding` (the codebase-specific fix) must be the
+    /// PRIMARY "Fix:" line, with the rule's generic `fix` demoted to a secondary line
+    /// UNDER it — never the reverse order this template used before fix-generation existed.
+    #[test]
+    fn shipped_template_renders_fix_specific_before_the_generic_fix() {
+        let template = include_str!("../templates/audit_report.typ");
+        let primary_idx = template
+            .find(r#"if site.fix_for_this_finding != none ["#)
+            .expect("the primary branch must gate on fix_for_this_finding first");
+        let fix_label_idx = template[primary_idx..]
+            .find(r#"[Fix: ]#site.fix_for_this_finding"#)
+            .expect("the PRIMARY Fix: line must render fix_for_this_finding, not fix");
+        let secondary_idx = template[primary_idx..]
+            .find("General guidance: ")
+            .expect("the rule's generic fix must render as secondary \"General guidance\" text");
+        assert!(
+            fix_label_idx < secondary_idx,
+            "fix_for_this_finding's Fix: line must render BEFORE the generic General guidance \
+             line"
+        );
+    }
+
+    /// The fallback path (fix-generation never ran or gave up) must still show the rule's
+    /// generic remediation as the ONLY Fix line — never silently drop it.
+    #[test]
+    fn shipped_template_falls_back_to_the_generic_fix_when_no_fix_specific() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(
+            template.contains("] else if site.fix != none ["),
+            "the fallback branch must still render the generic fix alone when \
+             fix_for_this_finding is none"
         );
     }
 

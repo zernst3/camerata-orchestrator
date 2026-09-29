@@ -180,21 +180,27 @@
     ]
     #site.detail
     // FIX 1 contract (report_export.rs's `CuratedSiteJson.fix`): `Option<String>` serializes
-    // to JSON `null`, which Typst's `json()` parses as `none` — NOT an empty string. The
-    // check must be `!= none`; a `!= ""` check (the earlier bug here) would let a `none` value
-    // fall into the branch and render a bare "Fix:" label with nothing after it. `none` means
-    // no remediation is authored for this rule yet: render NOTHING, not an empty Fix block.
-    #if site.fix != none [
+    // to JSON `null`, which Typst's `json()` parses as `none` — NOT an empty string. Every
+    // check below must be `!= none`; a `!= ""` check would let a `none` value fall into the
+    // branch and render a bare "Fix:" label with nothing after it.
+    //
+    // P2 (2026-09-29): `fix_for_this_finding` (the codebase-specific fix — see that field's
+    // doc comment in report_export.rs) is now the PRIMARY "Fix:" line whenever it's present;
+    // the rule's generic authored `fix` demotes to a secondary "General guidance:" line
+    // underneath it. When fix-generation never ran or gave up (`fix_for_this_finding ==
+    // none` — a deterministic-only scan, or a needs-review "fix not generated" finding), the
+    // generic `fix` — if any — is still shown, as the ONLY "Fix:" line, exactly like before
+    // this pass. Nothing renders when BOTH are `none`.
+    #if site.fix_for_this_finding != none [
+      #v(0.1cm)
+      #text(size: 8.5pt)[#text(weight: "bold")[Fix: ]#site.fix_for_this_finding]
+      #if site.fix != none [
+        #v(0.05cm)
+        #text(size: 8pt, fill: rgb("#888888"))[General guidance: #site.fix]
+      ]
+    ] else if site.fix != none [
       #v(0.1cm)
       #text(size: 8.5pt)[#text(weight: "bold")[Fix: ]#site.fix]
-      // `fix_for_this_finding` is always `none` as of this pass (see the field's own doc
-      // comment in report_export.rs) but the branch is wired so a future finding-specific
-      // remediation sentence renders correctly without touching this template again: a
-      // SINGLE labeled line UNDER the authored Fix block, never in place of it.
-      #if site.fix_for_this_finding != none [
-        #v(0.05cm)
-        #text(size: 8.5pt)[#text(weight: "bold")[For this finding: ]#site.fix_for_this_finding]
-      ]
     ]
     #v(0.1cm)
     #text(size: 8.5pt)[

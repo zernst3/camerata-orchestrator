@@ -1157,6 +1157,29 @@ pub async fn audit_repos(
                 let mut repo_findings =
                     crate::ai_audit::merge_semantic_groups(repo_findings, &files);
                 classify_repo_findings(&mut repo_findings, spec, &files);
+                // P2: generate a codebase-specific `fix_specific` for every finding in this
+                // repo (deterministic floor + architectural + AI alike — see the design
+                // doc's "for EVERY curated finding"). This is itself a model call over
+                // client code, so it is gated on `run_ai_review` exactly like every other
+                // AI pass above: a deterministic-only scan (`run_ai_review == false`) makes
+                // ZERO model calls anywhere in this loop, `fix_specific` generation
+                // included — those findings simply keep the rule's generic `fix` in the
+                // report until a later AI-reviewed scan fills this in. Uses the SAME
+                // already-resolved `llm` (built from `backend_resolution` above) and folds
+                // usage into the SAME `meter` as calibration/audit, so its spend is never
+                // invisible to the actual-vs-estimated readout.
+                if run_ai_review && !repo_findings.is_empty() {
+                    repo_findings = crate::ai_audit::generate_fix_specifics(
+                        &llm,
+                        spec,
+                        repo_findings,
+                        &files,
+                        calibration_model.or(model),
+                        Some(&meter),
+                        corpus,
+                    )
+                    .await;
+                }
                 all_findings.extend(repo_findings);
                 repos_ok.push(spec.to_string());
                 if truncated {
