@@ -501,6 +501,7 @@ mod tests {
             located: true,
             captures: Default::default(),
             evaluated_option_id: None,
+            also_locations: Vec::new(),
         }];
         // Must not panic or error.
         capture_scan_findings(&ledger, &findings).await;
@@ -566,6 +567,7 @@ mod tests {
                 located: true,
                 captures: Default::default(),
                 evaluated_option_id: None,
+                also_locations: Vec::new(),
             },
             // Suppressed finding → skipped silently (no panic).
             crate::onboard::Finding {
@@ -588,6 +590,7 @@ mod tests {
                 located: true,
                 captures: Default::default(),
                 evaluated_option_id: None,
+                also_locations: Vec::new(),
             },
             // Non-floor rule → skipped silently (no panic).
             crate::onboard::Finding {
@@ -610,6 +613,7 @@ mod tests {
                 located: true,
                 captures: Default::default(),
                 evaluated_option_id: None,
+                also_locations: Vec::new(),
             },
         ];
 

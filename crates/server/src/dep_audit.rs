@@ -224,6 +224,7 @@ pub fn parse_osv_json(
                     // Not a multi-option semantic rule finding — never evaluated under an
                     // alternative option.
                     evaluated_option_id: None,
+                    also_locations: Vec::new(),
                 });
             }
         }

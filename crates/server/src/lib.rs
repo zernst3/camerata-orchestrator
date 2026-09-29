@@ -22312,6 +22312,7 @@ mod tests {
                 located: true,
                 captures: Default::default(),
                 evaluated_option_id: None,
+                also_locations: Vec::new(),
             }],
             proposed_rules: Vec::new(),
             gated: false,

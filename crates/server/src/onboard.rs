@@ -190,6 +190,42 @@ pub struct Finding {
     /// matches the option the finding was actually evaluated under, never a stale default.
     #[serde(default)]
     pub evaluated_option_id: Option<String>,
+    /// Evidence sites ABSORBED from other findings merged into this one during cross-tier /
+    /// cross-file dedup ([`crate::ai_audit::merge_by_location`] /
+    /// [`crate::ai_audit::merge_semantic_groups`], P1 — the deduplication + cross-tier merge
+    /// design). A finding that survives a merge as the cluster's PRIMARY keeps its own
+    /// `repo`/`path`/`line`/`snippet` as before, but every OTHER cluster member's own evidence
+    /// site is preserved here instead of being silently discarded — a merged row still
+    /// discloses every location the underlying defect touches. Empty for an un-merged finding
+    /// (back-compatible serde default).
+    #[serde(default)]
+    pub also_locations: Vec<MergedLocation>,
+}
+
+/// One evidence site absorbed into a merged finding's [`Finding::also_locations`] during
+/// cross-tier / cross-file dedup. Mirrors the subset of `Finding` fields needed to render the
+/// site as its own evidence row (repo/path/line/rule id/snippet) without duplicating the whole
+/// `Finding` (severity/detail/citations etc. belong to the surviving primary, not to each site).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MergedLocation {
+    /// `owner/repo` this site lives in — may differ from the primary's `repo` in a
+    /// multi-repo scan (a cross-file merge can span two repos in the same scan set).
+    pub repo: String,
+    /// File path within `repo`.
+    pub path: String,
+    /// 1-based line number.
+    pub line: usize,
+    /// The rule id this site was originally flagged under (before being absorbed).
+    pub rule_id: String,
+    /// The offending line/description this site cited, trimmed and length-capped.
+    pub snippet: String,
+    /// True when this site is a pure CONSEQUENCE of the primary's root cause — it has no
+    /// independently-fixable code of its own (the general signal: the absorbed finding's own
+    /// `located == false`, i.e. it cited a description/impact rather than a presence-type
+    /// violation at its own site — see `Finding::located`) — rather than an additional site
+    /// that shares the SAME fix as the primary. A report renders a consequence site under
+    /// "also affects" instead of listing it as a peer evidence location.
+    pub consequence: bool,
 }
 
 /// A finding is presumed presence-type (`located = true`) unless the AI merge pass proves its
@@ -229,6 +265,7 @@ impl Default for Finding {
             located: default_located(),
             captures: std::collections::BTreeMap::new(),
             evaluated_option_id: None,
+            also_locations: Vec::new(),
         }
     }
 }
@@ -2003,6 +2040,7 @@ mod tests {
             located: true,
             captures: Default::default(),
             evaluated_option_id: None,
+            also_locations: Vec::new(),
         };
         let mut findings = vec![
             mk("a.rs", 5, "SEC-NO-HARDCODED-SECRETS-1", snippet), // baselined
@@ -2040,6 +2078,7 @@ mod tests {
                 located: true,
                 captures: Default::default(),
                 evaluated_option_id: None,
+                also_locations: Vec::new(),
             },
             Finding {
                 repo: "me/web".into(),
@@ -2061,6 +2100,7 @@ mod tests {
                 located: true,
                 captures: Default::default(),
                 evaluated_option_id: None,
+                also_locations: Vec::new(),
             },
         ];
         let body = tech_debt_issue_body(&findings);
@@ -2103,6 +2143,7 @@ mod tests {
             located: true,
             captures: Default::default(),
             evaluated_option_id: None,
+            also_locations: Vec::new(),
         }
     }
 
@@ -2248,6 +2289,7 @@ mod tests {
             located: true,
             captures: Default::default(),
             evaluated_option_id: None,
+            also_locations: Vec::new(),
         };
         let csv = tech_debt_csv(&[f]);
         let data_row = csv.lines().nth(1).expect("expected data row");
