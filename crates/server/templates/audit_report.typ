@@ -56,14 +56,32 @@
   brand_title
 }
 #set document(title: doc_title)
+
+// P5: `d.review_state` is `"raw"` when NO finding in this scan carries an explicit
+// THIS-SESSION auditor disposition (see `report_export::ReviewState`'s doc comment) — a nobody-
+// has-looked-at-this-yet export. `is_draft` gates a banner on EVERY page (header, so it survives
+// no matter how many pages the report grows to) so a raw export can never be mistaken for a
+// signed-off deliverable, matching the exec summary's own engine-voice narrative on page 2.
+#let is_draft = d.review_state == "raw"
+
 #set page(
   paper: "us-letter",
   margin: (x: 2.2cm, y: 2cm),
   numbering: "1",
+  header: context [
+    #if is_draft [
+      #align(center)[
+        #box(fill: rgb("#fdeaea"), stroke: 0.75pt + rgb("#c0392b"), inset: (x: 8pt, y: 3pt), radius: 2pt)[
+          #text(size: 8.5pt, weight: "bold", fill: rgb("#c0392b"))[DRAFT: not yet reviewed by the auditor]
+        ]
+      ]
+    ]
+  ],
   footer: context [
     #set text(size: 8pt, fill: rgb("#808080"))
     #align(center)[
       #if d.cover.brand != none [#d.cover.brand ]audit report (advisory, not a certification), page #counter(page).display()
+      #if is_draft [ · DRAFT]
     ]
   ],
 )
@@ -503,7 +521,17 @@
 // above) and never a substitute for the agency's own resolved brand.
 Scanned with Camerata v#or_na(d.cover.camerata_version). Audit model: #or_na(d.cover.audit_model). Calibration model: #or_na(d.cover.calibration_model).
 
-*#str(d.methodology.candidates_reviewed) candidate #plural(d.methodology.candidates_reviewed, "finding", "findings") reviewed; #str(d.methodology.excluded_false_positive) dispositioned as false positives by the auditor and excluded.*
+// P5: this reconciling line must never claim a human "reviewed"/"dispositioned" a finding
+// unless `d.review_state == "reviewed"` (at least one finding this session carries an explicit
+// auditor disposition — see `report_export::ReviewState`'s doc comment). The two branches also
+// each show EVERY number in the partition (curated total is implied by the do-now/next/plan/
+// accepted breakdown above; this line adds the two counts that used to be invisible: held for
+// review and false positives), so `candidates_reviewed` always reconciles on the page.
+#if d.review_state == "reviewed" [
+  *#str(d.methodology.candidates_reviewed) candidate #plural(d.methodology.candidates_reviewed, "finding", "findings") reviewed by the auditor; #str(d.methodology.excluded_false_positive) dispositioned as false positives and excluded; #str(d.methodology.held_for_review) held for further review.*
+] else [
+  *#str(d.methodology.candidates_reviewed) candidate #plural(d.methodology.candidates_reviewed, "finding", "findings") produced by the engine; #str(d.methodology.held_for_review) held for a human reviewer's judgment call; #str(d.methodology.excluded_false_positive) auto-excluded as likely false positives. This export has not yet had a human triage pass.*
+]
 
 #d.methodology.severity_scale_note
 

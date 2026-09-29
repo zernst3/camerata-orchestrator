@@ -3918,4 +3918,345 @@ mod tests {
             "the model/version provenance line must still render, just in Methodology"
         );
     }
+
+    // ── P5: review-state honesty + reconciling narrative ────────────────────────
+
+    /// Pure reconciliation check, independent of `build_report_json`'s much larger fixture
+    /// surface: every candidate finding a scan surfaces lands in exactly one of the four
+    /// top-level buckets (curated — itself do_now + do_next + plan + accepted — held for
+    /// review, excluded as a false positive, or its own dependency-advisory lane).
+    #[allow(clippy::too_many_arguments)]
+    fn reconciles(
+        candidates: usize,
+        curated_total: usize,
+        do_now: usize,
+        do_next: usize,
+        plan: usize,
+        accepted: usize,
+        held_for_review: usize,
+        excluded_false_positive: usize,
+        dependency_advisories: usize,
+    ) -> bool {
+        curated_total == do_now + do_next + plan + accepted
+            && candidates
+                == curated_total + held_for_review + excluded_false_positive + dependency_advisories
+    }
+
+    #[test]
+    fn reconciliation_holds_across_fixtures_including_the_41_18_23_0_shape() {
+        // (candidates, curated_total, do_now, do_next, plan, accepted, held_for_review,
+        //  excluded_false_positive, dependency_advisories)
+        #[allow(clippy::type_complexity)]
+        let fixtures: &[(
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+            usize,
+        )] = &[
+            // The exact bug shape from the P5 writeup: 41 candidates, 18 curated, 23 held for
+            // review (previously invisible), 0 excluded, no dependency advisories in play.
+            (41, 18, 5, 6, 7, 0, 23, 0, 0),
+            // A reviewed run: false positives excluded, one dependency advisory carved out.
+            (10, 6, 2, 1, 2, 1, 0, 3, 1),
+            // Zero-finding scan.
+            (0, 0, 0, 0, 0, 0, 0, 0, 0),
+            // Nothing curated yet, everything held for a human reviewer's judgment call.
+            (5, 0, 0, 0, 0, 0, 5, 0, 0),
+        ];
+        for &(candidates, curated_total, do_now, do_next, plan, accepted, held, excluded, dep) in
+            fixtures
+        {
+            assert!(
+                reconciles(
+                    candidates,
+                    curated_total,
+                    do_now,
+                    do_next,
+                    plan,
+                    accepted,
+                    held,
+                    excluded,
+                    dep
+                ),
+                "fixture failed to reconcile: {:?}",
+                (
+                    candidates,
+                    curated_total,
+                    do_now,
+                    do_next,
+                    plan,
+                    accepted,
+                    held,
+                    excluded,
+                    dep
+                )
+            );
+        }
+        // Deliberately broken shapes must NOT reconcile — proves the check discriminates
+        // rather than vacuously passing everything.
+        assert!(
+            !reconciles(41, 18, 5, 6, 7, 0, 22, 0, 0),
+            "an off-by-one held_for_review must fail to reconcile"
+        );
+        assert!(
+            !reconciles(41, 19, 5, 6, 7, 0, 23, 0, 0),
+            "a curated_total that doesn't match its own do_now+do_next+plan+accepted must fail"
+        );
+    }
+
+    /// A finding the SCAN produced but the AUDITOR has never opened this session (no wire
+    /// dispositions at all) must export as `Raw` — the honest starting state.
+    #[test]
+    fn no_dispositions_at_all_is_raw_review_state() {
+        let f = finding("SEC-1", "a.rs", 1, "critical");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.review_state, ReviewState::Raw);
+        assert!(json.review_state.is_draft());
+    }
+
+    /// `BaselineAccepted` (a PRIOR run's suppression) and `WaivedInline` (an in-code waiver) are
+    /// both sourced from `Finding.status`, not this session's triage — see `ReviewState`'s doc
+    /// comment. Neither may flip the export to `Reviewed`; nobody looked at this finding THIS
+    /// session.
+    #[test]
+    fn baseline_or_inline_disposition_alone_does_not_flip_review_state_to_reviewed() {
+        let mut baseline = finding("SEC-1", "a.rs", 1, "high");
+        baseline.status = "suppressed-baseline".to_string();
+        let mut inline = finding("SEC-2", "b.rs", 2, "high");
+        inline.status = "suppressed-inline".to_string();
+        let report = report_with(vec![baseline, inline], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(
+            json.review_state,
+            ReviewState::Raw,
+            "a prior-run baseline suppression or an in-code waiver is not THIS session's \
+             auditor reviewing anything"
+        );
+    }
+
+    /// An explicit wire disposition of any recognized kind (`Ignored` / `TechDebt` /
+    /// `FalsePositive`) on even ONE finding is enough to flip the whole export to `Reviewed`.
+    #[test]
+    fn a_single_auditor_disposition_flips_the_whole_export_to_reviewed() {
+        let f1 = finding("SEC-1", "a.rs", 1, "critical");
+        let f2 = finding("SEC-2", "b.rs", 2, "critical");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(finding_key(&f1), wire("Ignored", "defense in depth", ""));
+        let report = report_with(vec![f1, f2], vec![]);
+        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        assert_eq!(json.review_state, ReviewState::Reviewed);
+        assert!(!json.review_state.is_draft());
+    }
+
+    /// The core P5 raw-export contract: the JSON carries the draft flag, the narrative
+    /// reconciles with EVERY number shown (candidates == curated + held + excluded), and the
+    /// narrative never claims a human reviewed or dispositioned anything.
+    #[test]
+    fn raw_export_carries_the_draft_flag_and_a_fully_reconciling_engine_voiced_narrative() {
+        let mut f1 = finding("SEC-1", "a.rs", 1, "critical"); // -> do_now, curated
+        f1.detail = "The profiles table has no RLS.".to_string();
+        let mut f2 = finding("SEC-2", "b.rs", 2, "medium"); // -> needs-review, held
+        f2.confidence = Some("needs-review".to_string());
+        let report = report_with(vec![f1, f2], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        // The flag.
+        assert_eq!(json.review_state, ReviewState::Raw);
+        assert!(json.review_state.is_draft());
+
+        // The reconciling numbers, each present on the JSON.
+        assert_eq!(json.executive_summary.candidates_reviewed, 2);
+        assert_eq!(json.executive_summary.curated_total, 1);
+        assert_eq!(json.executive_summary.held_for_review, 1);
+        assert_eq!(json.executive_summary.excluded_false_positive, 0);
+        assert!(reconciles(
+            json.executive_summary.candidates_reviewed,
+            json.executive_summary.curated_total,
+            json.executive_summary.do_now,
+            json.executive_summary.do_next,
+            json.executive_summary.plan,
+            json.executive_summary.accepted,
+            json.executive_summary.held_for_review,
+            json.executive_summary.excluded_false_positive,
+            json.executive_summary.dependency_advisories,
+        ));
+
+        // Every one of those numbers is actually visible in the prose, not just the JSON.
+        let n = &json.executive_summary.narrative;
+        assert!(n.contains("2 candidate findings"), "{n}");
+        assert!(n.contains('1'), "{n}"); // curated_total / held_for_review both literally "1"
+        assert!(n.contains("0 were auto-excluded"), "{n}");
+
+        // Never claims a human reviewed or dispositioned anything.
+        assert!(!n.contains("reviewed by the auditor"), "{n}");
+        assert!(!n.contains("dispositioned by the auditor"), "{n}");
+        assert!(!n.contains("were reviewed"), "{n}");
+        assert!(
+            !json
+                .methodology
+                .ai_tier_note
+                .contains("reviewed by the auditor"),
+            "{}",
+            json.methodology.ai_tier_note
+        );
+        assert!(
+            !json
+                .methodology
+                .ai_tier_note
+                .contains("dispositioned by the auditor"),
+            "{}",
+            json.methodology.ai_tier_note
+        );
+    }
+
+    /// The P5 reviewed-export contract: auditor dispositions actually appear, the narrative
+    /// reconciles, no draft flag, and auditor-voice phrasing IS allowed (because it's true).
+    #[test]
+    fn reviewed_export_reconciles_in_auditor_voice_with_no_draft_flag() {
+        let mut ignored = finding("SEC-1", "a.rs", 1, "critical"); // -> accepted, curated
+        ignored.detail = "The profiles table has no RLS.".to_string();
+        let mut held = finding("SEC-2", "b.rs", 2, "medium"); // -> needs-review, held
+        held.confidence = Some("needs-review".to_string());
+        let excluded = finding("SEC-3", "c.rs", 3, "critical"); // -> FalsePositive, excluded
+
+        let mut dispositions = HashMap::new();
+        dispositions.insert(
+            finding_key(&ignored),
+            wire("Ignored", "defense in depth only", ""),
+        );
+        dispositions.insert(
+            finding_key(&excluded),
+            wire("FalsePositive", "not exploitable", ""),
+        );
+
+        let report = report_with(vec![ignored, held, excluded], vec![]);
+        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+
+        assert_eq!(json.review_state, ReviewState::Reviewed);
+        assert!(!json.review_state.is_draft());
+
+        assert_eq!(json.executive_summary.candidates_reviewed, 3);
+        assert_eq!(json.executive_summary.excluded_false_positive, 1);
+        assert_eq!(json.executive_summary.curated_total, 1);
+        assert_eq!(json.executive_summary.held_for_review, 1);
+        assert_eq!(json.executive_summary.accepted, 1);
+        assert!(reconciles(
+            json.executive_summary.candidates_reviewed,
+            json.executive_summary.curated_total,
+            json.executive_summary.do_now,
+            json.executive_summary.do_next,
+            json.executive_summary.plan,
+            json.executive_summary.accepted,
+            json.executive_summary.held_for_review,
+            json.executive_summary.excluded_false_positive,
+            json.executive_summary.dependency_advisories,
+        ));
+
+        let n = &json.executive_summary.narrative;
+        assert!(
+            n.contains("3 candidate findings were reviewed by the auditor"),
+            "{n}"
+        );
+        assert!(n.contains("1 was dispositioned as false positives"), "{n}");
+        assert!(n.contains("1 accepted as risk"), "{n}");
+        assert!(n.contains("held for further review"), "{n}");
+        assert!(
+            json.methodology
+                .ai_tier_note
+                .contains("reviewed and dispositioned by a human auditor"),
+            "{}",
+            json.methodology.ai_tier_note
+        );
+    }
+
+    /// Zero-candidate raw scans keep the pre-P5 honest empty-state sentence — no draft-banner
+    /// noise added to a run that surfaced nothing at all.
+    #[test]
+    fn zero_candidates_raw_scan_keeps_the_empty_state_sentence() {
+        let report = report_with(vec![], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.review_state, ReviewState::Raw);
+        assert_eq!(
+            json.executive_summary.narrative,
+            "The scan surfaced no candidate findings to review in this run."
+        );
+    }
+
+    /// The Typst template's per-page draft banner must be gated on `d.review_state`, and the
+    /// literal banner text the design calls for must be present.
+    #[test]
+    fn shipped_template_gates_the_draft_banner_on_review_state() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(
+            template.contains("d.review_state == \"raw\""),
+            "the draft banner (and its footer echo) must be gated on d.review_state"
+        );
+        assert!(
+            template.contains("DRAFT: not yet reviewed by the auditor"),
+            "the required banner text must be present verbatim"
+        );
+        // The gate must live inside `#set page(...)`'s `header:` so it renders on EVERY page,
+        // not just the cover.
+        let page_start = template.find("#set page(").expect("page setup block");
+        let is_draft_def = template
+            .find("#let is_draft")
+            .expect("is_draft let-binding");
+        assert!(
+            is_draft_def < page_start,
+            "is_draft must be defined before the page setup that reads it in header:"
+        );
+    }
+
+    /// The Methodology section's own reconciling line (separate literal text from the exec
+    /// summary) must ALSO be gated — it used to unconditionally say "... reviewed; ...
+    /// dispositioned as false positives by the auditor and excluded" no matter what.
+    #[test]
+    fn shipped_template_methodology_line_is_gated_on_review_state() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(
+            template.contains("if d.review_state == \"reviewed\""),
+            "the methodology reconciling line must branch on review_state"
+        );
+        assert!(
+            template.contains("has not yet had a human triage pass"),
+            "the raw branch must say so explicitly"
+        );
+        assert!(
+            template.contains("held for a human reviewer's judgment call"),
+            "the raw branch must surface held_for_review, not just candidates/excluded"
+        );
+    }
+
+    /// End-to-end smoke test (typst-present-only, mirrors `compile_pdf_produces_a_real_pdf_
+    /// when_typst_is_present`): a REVIEWED export (with a real disposition) must still compile
+    /// cleanly through the gated template — the conditional banner/methodology logic must not
+    /// be a Typst syntax trap that only happens to work on the (more commonly exercised) raw
+    /// path.
+    #[tokio::test]
+    async fn compile_pdf_succeeds_for_a_reviewed_export_with_the_gated_template() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_succeeds_for_a_reviewed_export_with_the_gated_template: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let f = finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 10, "critical");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(finding_key(&f), wire("Ignored", "test fixture only", ""));
+        let report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
+        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        assert_eq!(json.review_state, ReviewState::Reviewed);
+
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed for a reviewed export");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
 }
