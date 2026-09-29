@@ -45,7 +45,8 @@ use crate::report_export::{
 // ── Row model (the intermediate shape shared by every findings-style sheet) ────────
 
 /// One row of the "All Findings" / per-category / "False Positives" sheets — the ~21-column
-/// spec from the design doc, PLUS the Recommended-Fix column (approved addition). Computed
+/// spec from the design doc, PLUS the Fix-specific and Recommended-Fix columns (approved
+/// additions). Computed
 /// once per non-dependency [`crate::onboard::Finding`] in [`partition_rows`], then written
 /// verbatim by every sheet writer (never re-derived per sheet).
 ///
@@ -89,16 +90,19 @@ pub struct FindingRow {
     status: String,
     snippet: String,
     detail: String,
-    /// The rule's AUTHORED, client-facing remediation text (see [`resolve_fix`]), with this
-    /// finding's placeholder tokens already substituted. `None` — rendered as a blank cell /
-    /// JSON `null`, never fabricated and never `directive` — when the rule's default option has
-    /// no authored `remediation` yet.
-    fix: Option<String>,
-    /// Reserved for a future finding-specific "For this finding: …" line (see
-    /// `report_export::CuratedSiteJson::fix_for_this_finding`'s doc comment) — always `None` as
-    /// of this pass; the field exists so `findings.json`'s wire shape doesn't need to change
-    /// again once that extraction is built.
+    /// **P2 (2026-09-29): the PRIMARY fix, shown FIRST** — a codebase-specific remediation
+    /// for THIS finding, generated at scan time by
+    /// [`crate::ai_audit::generate_fix_specifics`] (see `report_export::CuratedSiteJson::
+    /// fix_for_this_finding`'s doc comment, which this field mirrors verbatim). `None` when
+    /// fix-generation never ran (a deterministic-only scan) or gave up after retries
+    /// (`report_export::fix_generation_failed`).
     fix_specific: Option<String>,
+    /// The rule's AUTHORED, client-facing remediation text (see [`resolve_fix`]), with this
+    /// finding's placeholder tokens already substituted — SECONDARY context now that
+    /// `fix_specific` above is the primary fix. `None` — rendered as a blank cell / JSON
+    /// `null`, never fabricated and never `directive` — when the rule's default option has no
+    /// authored `remediation` yet.
+    fix: Option<String>,
     is_fp: bool,
     /// The auditor's FP reason (`DispositionWire.reason`), populated only when `is_fp`.
     fp_reason: String,
@@ -236,8 +240,8 @@ fn partition_rows(
             status: f.status.clone(),
             snippet: cap_snippet_for_workbook(&f.snippet),
             detail: f.detail.clone(),
+            fix_specific: f.fix_specific.clone(),
             fix,
-            fix_specific: None,
             is_fp,
             fp_reason,
         });
@@ -476,9 +480,9 @@ impl Formats {
     }
 }
 
-// ── The ~21(+1)-column findings schema (All Findings / category sheets / False Positives) ──
+// ── The ~21(+2)-column findings schema (All Findings / category sheets / False Positives) ──
 
-const HEADERS: [&str; 22] = [
+const HEADERS: [&str; 23] = [
     "Severity",
     "Headline",
     "Repo",
@@ -500,17 +504,20 @@ const HEADERS: [&str; 22] = [
     "Status",
     "Snippet",
     "Detail",
+    // P2: the PRIMARY fix — codebase-specific, shown BEFORE the rule's generic remediation
+    // (matches the PDF's fix_for_this_finding-first ordering).
+    "Fix (specific to this finding)",
     "Recommended Fix",
 ];
 
-const WIDTHS: [f64; 22] = [
+const WIDTHS: [f64; 23] = [
     10.0, 50.0, 18.0, 40.0, 7.0, 28.0, 16.0, 10.0, 30.0, 9.0, 16.0, 12.0, 12.0, 16.0, 16.0, 34.0,
-    30.0, 24.0, 18.0, 55.0, 70.0, 45.0,
+    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0,
 ];
 
-/// Columns that wrap (matches the design's wrap-column list, plus the new Recommended-Fix
-/// column at the end).
-const WRAP_COLS: [u16; 6] = [1, 8, 15, 16, 20, 21];
+/// Columns that wrap (matches the design's wrap-column list, plus the Fix-specific and
+/// Recommended-Fix columns at the end).
+const WRAP_COLS: [u16; 7] = [1, 8, 15, 16, 20, 21, 22];
 const SNIPPET_COL: u16 = 19;
 const NEEDS_REVIEW_COL: u16 = 12;
 
@@ -565,9 +572,17 @@ fn write_finding_row(
     ws.write_string_with_format(r, 18, &row.status, &fmts.cell(bg, false, false))?;
     ws.write_string_with_format(r, SNIPPET_COL, &row.snippet, &fmts.cell(bg, true, true))?;
     ws.write_string_with_format(r, 20, &row.detail, &fmts.cell(bg, true, false))?;
+    // P2: fix_specific (the PRIMARY, codebase-specific fix) renders in the column BEFORE the
+    // rule's generic Recommended Fix — same first-vs-secondary ordering as the PDF template.
     ws.write_string_with_format(
         r,
         21,
+        row.fix_specific.as_deref().unwrap_or(""),
+        &fmts.cell(bg, true, false),
+    )?;
+    ws.write_string_with_format(
+        r,
+        22,
         row.fix.as_deref().unwrap_or(""),
         &fmts.cell(bg, true, false),
     )?;
@@ -576,7 +591,7 @@ fn write_finding_row(
 }
 
 /// Write one findings-style sheet (All Findings / a category sheet / False Positives).
-/// `fp_reason_col`: appends the "FP Reason" column (col W) — only for the False Positives
+/// `fp_reason_col`: appends the "FP Reason" column (col X) — only for the False Positives
 /// sheet. `tab_color`: applied when present.
 fn write_findings_sheet(
     wb: &mut Workbook,
@@ -596,7 +611,7 @@ fn write_findings_sheet(
         ws.write_string_with_format(0, c as u16, *h, &fmts.header)?;
     }
     if fp_reason_col {
-        ws.write_string_with_format(0, 22, "FP Reason", &fmts.header)?;
+        ws.write_string_with_format(0, 23, "FP Reason", &fmts.header)?;
     }
     ws.set_row_height(0, 28)?;
 
@@ -604,7 +619,7 @@ fn write_findings_sheet(
         ws.set_column_width(c as u16, *w)?;
     }
     if fp_reason_col {
-        ws.set_column_width(22, 40.0)?;
+        ws.set_column_width(23, 40.0)?;
     }
 
     for (i, row) in rows.iter().enumerate() {
@@ -619,12 +634,12 @@ fn write_findings_sheet(
             } else {
                 None
             };
-            ws.write_string_with_format(r, 22, &row.fp_reason, &fmts.cell(bg, true, false))?;
+            ws.write_string_with_format(r, 23, &row.fp_reason, &fmts.cell(bg, true, false))?;
         }
     }
 
     let last_row = rows.len() as u32;
-    let last_col: u16 = if fp_reason_col { 22 } else { 21 };
+    let last_col: u16 = if fp_reason_col { 23 } else { 22 };
     ws.autofilter(0, 0, last_row, last_col)?;
     ws.set_freeze_panes(1, 0)?;
 
@@ -1267,9 +1282,12 @@ mod tests {
 
     #[test]
     fn header_schema_matches_the_design_column_order() {
-        assert_eq!(HEADERS.len(), 22);
+        assert_eq!(HEADERS.len(), 23);
         assert_eq!(HEADERS[0], "Severity");
-        assert_eq!(HEADERS[21], "Recommended Fix");
+        // P2: the specific fix comes BEFORE the generic Recommended Fix — same
+        // primary-then-secondary ordering as the PDF template.
+        assert_eq!(HEADERS[21], "Fix (specific to this finding)");
+        assert_eq!(HEADERS[22], "Recommended Fix");
         assert_eq!(HEADERS.len(), WIDTHS.len());
     }
 
@@ -1403,6 +1421,59 @@ mod tests {
         );
     }
 
+    // ── P2: fix_specific column — primary fix, populated from Finding.fix_specific ──────
+
+    #[test]
+    fn fix_specific_column_is_populated_from_the_finding() {
+        let mut f = finding("ARCH-1", "app/auth/signout/route.ts", 12, "high");
+        f.fix_specific = Some(
+            "Use `safeInternalPath` from lib/redirect.ts, as app/auth/signin/route.ts does."
+                .to_string(),
+        );
+        let report = report_with(vec![f], vec![]);
+        let (rows, _) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        assert_eq!(
+            rows[0].fix_specific.as_deref(),
+            Some("Use `safeInternalPath` from lib/redirect.ts, as app/auth/signin/route.ts does.")
+        );
+    }
+
+    #[test]
+    fn fix_specific_column_is_none_when_never_generated() {
+        let f = finding("ARCH-1", "a.rs", 1, "high");
+        let report = report_with(vec![f], vec![]);
+        let (rows, _) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        assert_eq!(rows[0].fix_specific, None);
+    }
+
+    /// Both fixes land in the workbook — the specific one FIRST (col V), the generic one
+    /// second (col W) — same ordering the PDF template renders.
+    #[tokio::test]
+    async fn fix_specific_and_recommended_fix_both_populate_in_the_workbook() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let mut f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        f.captures
+            .insert("table".to_string(), "profiles".to_string());
+        f.fix_specific = Some("Enable RLS directly on `profiles`.".to_string());
+        let report = report_with(vec![f], vec![]);
+        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        assert_eq!(
+            rows[0].fix_specific.as_deref(),
+            Some("Enable RLS directly on `profiles`.")
+        );
+        assert!(rows[0]
+            .fix
+            .as_deref()
+            .is_some_and(|s| s.contains("profiles")));
+    }
+
     // ── `findings.json` (product export, machine-readable sibling of the workbook) ─────
 
     /// `findings_export.findings` must have the same length as the "All Findings" sheet
@@ -1484,6 +1555,37 @@ mod tests {
             serialized.get("fix"),
             Some(&serde_json::Value::Null),
             "an unauthored fix must serialize as JSON null, not be dropped from the object"
+        );
+    }
+
+    /// P2: `findings.json` must carry `fix_specific` and place it BEFORE `fix` in the
+    /// serialized object — the same primary-then-secondary ordering as the xlsx columns and
+    /// the PDF template. `serde_json::Value`'s map does not preserve field order (it's a
+    /// `BTreeMap` without the `preserve_order` feature), so this asserts on the serialized
+    /// STRING, which a derived `Serialize` always emits in struct declaration order.
+    #[test]
+    fn findings_export_carries_fix_specific_before_fix() {
+        let mut f = finding("ARCH-1", "app/auth/signout/route.ts", 12, "high");
+        f.fix_specific = Some("Use `safeInternalPath` from lib/redirect.ts.".to_string());
+        let report = report_with(vec![f], vec![]);
+        let json =
+            crate::report_export::build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let findings_export =
+            build_findings_export(&report, &HashMap::new(), None, &json, &HashMap::new());
+        assert_eq!(
+            findings_export.findings[0].fix_specific.as_deref(),
+            Some("Use `safeInternalPath` from lib/redirect.ts.")
+        );
+        let serialized = serde_json::to_string(&findings_export.findings[0]).unwrap();
+        let fix_specific_idx = serialized
+            .find("\"fix_specific\":")
+            .expect("fix_specific key must be present");
+        let fix_idx = serialized
+            .find("\"fix\":")
+            .expect("fix key must be present");
+        assert!(
+            fix_specific_idx < fix_idx,
+            "fix_specific must be serialized BEFORE fix, got: {serialized}"
         );
     }
 
