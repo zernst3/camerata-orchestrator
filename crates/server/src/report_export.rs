@@ -1058,6 +1058,236 @@ pub(crate) fn resolve_citation(
     }
 }
 
+// ── P3 (2026-09-29): the citation gate ──────────────────────────────────────────────
+//
+// Several of the report's MOST important findings — a cross-tenant RLS policy, RLS
+// disabled on a payments table, a stored-XSS sink — are produced by the AI tier, which
+// invents its own rule id (an `AI-`-prefixed id; see `is_ai_tier`) the corpus never saw.
+// `resolve_citation` is honest about that: it labels such a finding "AI-advisory,
+// model-inferred." rather than dressing it up. But the product promises every CURATED
+// finding cites the published standard it breaks (the hardening plan's bar item 3) — a
+// citation-less finding sitting in the curated set falsifies that promise, for exactly
+// the findings a client is most likely to act on first.
+//
+// The fix is NOT to invent a bespoke Rust-side citation per finding (that just moves the
+// "trust me" problem into this file instead of a TOML). Instead: classify the AI finding
+// into one of a small, closed set of well-known defect CLASSES by its rule id tokens +
+// `category` + detail-text keywords (never a fixture-specific string — see
+// `classify_ai_finding`'s doc comment), then reuse an EXISTING grounded corpus rule's own
+// citation for that class. Where a class had no corpus rule yet, one was added under
+// `crates/rules/principles/universal/sec-no-*-1.toml` rather than inventing a citation in
+// Rust — grounding always means a published standard or a real linter rule.
+//
+// A finding that still resolves to "advisory" after this fallback (its class has no
+// mapping, or it does not classify into any known class at all) is the CURATION GATE's
+// job: `is_uncited_ai_finding` reports it as uncited, and `build_report_json` routes it
+// to the informational/held-for-review bucket and EXCLUDES it from `curated_findings`
+// entirely. It is never silently dropped (over-tell over under-tell) — it still surfaces
+// as a `FindingRefJson` with an honest "needs review (uncited)" headline, just outside the
+// curated action tiers.
+
+/// Whether `finding` came from the AI tier (the model-inferred prose/deep-audit pass) as
+/// opposed to the deterministic floor or a scan-time preview tool. Mirrors the signal
+/// `ai_audit::finding_origin` already uses to distinguish AI output (an `AI-`-prefixed
+/// invented rule id, or a calibration-set `confidence`) without reaching into that
+/// module's private `Origin` enum — this file only needs the yes/no answer. Deliberately
+/// gates the P3 citation fallback/exclusion to ONLY AI-tier findings: a deterministic
+/// floor rule that happens to lack a corpus citation (a separate, pre-existing gap — e.g.
+/// `SEC-NO-RAW-SQL-CONCAT-1`, which has no TOML entry at all) is untouched by this gate.
+pub(crate) fn is_ai_tier(finding: &Finding) -> bool {
+    finding.rule_id.starts_with("AI-") || finding.confidence.is_some()
+}
+
+/// The closed set of defect classes an otherwise-uncited AI-tier finding is checked
+/// against before being allowed into the curated set (P3). Each variant names a corpus
+/// rule ([`AiFindingClass::grounding_rule_id`]) whose `[[sources]]` are a real published
+/// standard or linter — the class NEVER carries its own bespoke citation text, so there is
+/// exactly one place (`crates/rules/principles/**`) an auditor edits to correct or extend
+/// a citation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AiFindingClass {
+    /// Row Level Security disabled, missing, or permissive on an exposed table (a
+    /// cross-tenant read, RLS disabled on a payments table, an always-true policy, …).
+    Rls,
+    /// Stored or reflected cross-site scripting via a raw-HTML sink
+    /// (`dangerouslySetInnerHTML`, `innerHTML`, `document.write`, `v-html`, …).
+    Xss,
+    /// A redirect target derived from user input with no allowlist check.
+    OpenRedirect,
+    /// A security token/nonce/session id generated from a general-purpose PRNG instead of
+    /// a cryptographically secure source.
+    WeakTokenRandomness,
+    /// User-controlled data concatenated into a query/filter GRAMMAR (PostgREST
+    /// `.or()`/`.filter()`, a NoSQL operator string, an LDAP filter) rather than passed as
+    /// a bound argument.
+    QueryGrammarInjection,
+    /// A CORS policy pairing a wildcard or reflected `Origin` with
+    /// `Access-Control-Allow-Credentials: true`.
+    PermissiveCors,
+}
+
+impl AiFindingClass {
+    /// The corpus rule id whose `sources` ground this class. Reused verbatim via
+    /// `resolve_citation` — never re-derived here — so correcting or extending a citation
+    /// is a one-file TOML change, not a second Rust-side copy to keep in sync.
+    fn grounding_rule_id(self) -> &'static str {
+        match self {
+            AiFindingClass::Rls => "SUPABASE-RLS-ENABLED-1",
+            AiFindingClass::Xss => "SEC-NO-UNSAFE-HTML-SINK-1",
+            AiFindingClass::OpenRedirect => "SEC-NO-OPEN-REDIRECT-1",
+            AiFindingClass::WeakTokenRandomness => "SEC-NO-WEAK-TOKEN-RANDOMNESS-1",
+            AiFindingClass::QueryGrammarInjection => "SEC-NO-QUERY-GRAMMAR-INJECTION-1",
+            AiFindingClass::PermissiveCors => "SEC-NO-PERMISSIVE-CORS-CREDENTIALS-1",
+        }
+    }
+}
+
+/// Classify an AI-tier finding into the P3 closed taxonomy, by RULE-ID TOKENS + the
+/// existing semantic `category` field + DETAIL-TEXT keywords — never a fixture-specific
+/// rule id or file/table name (the AI tier invents its own rule id per finding, so a
+/// fixture-keyed match would only ever fire on one benchmark). General by construction:
+/// every signal here is a defect-family vocabulary word (an OWASP/CWE term or the
+/// framework API a real fix touches — `dangerouslySetInnerHTML`, `.or(`, `Origin`), not
+/// any one repo's own identifiers. Returns `None` when nothing matches — the caller
+/// (`is_uncited_ai_finding`) treats that as genuinely uncited, never guesses.
+pub(crate) fn classify_ai_finding(
+    rule_id: &str,
+    category: Option<&str>,
+    detail: &str,
+) -> Option<AiFindingClass> {
+    let id = rule_id.to_ascii_uppercase();
+    let det = detail.to_ascii_lowercase();
+    let has_id = |needle: &str| id.contains(needle);
+    let has_det = |needle: &str| det.contains(needle);
+
+    // RLS: disabled, missing, or overly permissive Row Level Security on an exposed table.
+    if category == Some("rls-policy")
+        || has_id("RLS")
+        || has_id("ROW-LEVEL")
+        || has_det("row level security")
+        || has_det("row-level security")
+    {
+        return Some(AiFindingClass::Rls);
+    }
+    // Stored/reflected XSS via a raw-HTML sink.
+    if has_id("XSS")
+        || has_id("INNERHTML")
+        || has_det("dangerouslysetinnerhtml")
+        || has_det("innerhtml")
+        || has_det("cross-site scripting")
+        || has_det("cross site scripting")
+        || has_det("stored xss")
+        || has_det("reflected xss")
+    {
+        return Some(AiFindingClass::Xss);
+    }
+    // Open redirect: a redirect target with no allowlist check.
+    if has_id("OPEN-REDIRECT")
+        || has_det("open redirect")
+        || has_det("unvalidated redirect")
+        || (has_det("redirect")
+            && (has_det("attacker")
+                || has_det("untrusted")
+                || has_det("arbitrary")
+                || has_det("user-controlled")
+                || has_det("unvalidated")))
+    {
+        return Some(AiFindingClass::OpenRedirect);
+    }
+    // Insecure randomness backing a security token/nonce/session id.
+    if has_det("math.random")
+        || has_det("random.random(")
+        || has_det("insecure random")
+        || has_det("weak random")
+        || has_det("predictable token")
+        || has_det("prng")
+        || has_det("non-cryptographic")
+        || ((has_id("RANDOM") || has_id("PRNG"))
+            && (has_id("TOKEN") || has_id("SESSION") || has_id("NONCE") || has_id("SECRET")))
+        || (has_det("random")
+            && (has_det("token")
+                || has_det("nonce")
+                || has_det("session id")
+                || has_det("password reset")
+                || has_det("api key")
+                || has_det("share link")))
+    {
+        return Some(AiFindingClass::WeakTokenRandomness);
+    }
+    // Query/filter-grammar injection: PostgREST .or()/.filter(), a NoSQL operator string,
+    // an LDAP filter — built from interpolated user input rather than a bound argument.
+    if has_id("FILTER-INJECT")
+        || has_id("QUERY-GRAMMAR")
+        || has_id("GRAMMAR-INJECT")
+        || has_det(".or(")
+        || has_det(".filter(")
+        || has_det("query grammar")
+        || has_det("filter grammar")
+        || has_det("postgrest")
+        || has_det("$where")
+        || has_det("ldap filter")
+    {
+        return Some(AiFindingClass::QueryGrammarInjection);
+    }
+    // Permissive CORS: a wildcard/reflected origin combined with allowed credentials.
+    let mentions_cors = has_id("CORS") || has_det("cors") || has_det("access-control-allow-origin");
+    let mentions_credentials = has_id("CREDENTIAL")
+        || has_det("credential")
+        || has_det("allow-credentials")
+        || has_det("cookie");
+    if mentions_cors && mentions_credentials {
+        return Some(AiFindingClass::PermissiveCors);
+    }
+    None
+}
+
+/// Resolve `finding`'s citation, applying the P3 class fallback when its OWN rule id has
+/// no grounded corpus citation and no preview tool (`resolve_citation`'s "advisory"
+/// branch) — but ONLY for an AI-tier finding (`is_ai_tier`); a deterministic finding's
+/// advisory citation is a different, pre-existing gap this pass does not touch. Returns
+/// the ORIGINAL citation unchanged in every other case (already grounded, already
+/// preview-labeled, not AI-tier, or AI-tier but unclassifiable).
+pub(crate) fn citation_for_finding(
+    finding: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> CitationJson {
+    let base = resolve_citation(&finding.rule_id, finding.preview_tool.as_deref(), corpus);
+    if base.kind != "advisory" || !is_ai_tier(finding) {
+        return base;
+    }
+    match classify_ai_finding(
+        &finding.rule_id,
+        finding.category.as_deref(),
+        &finding.detail,
+    ) {
+        Some(class) => {
+            let grounded = resolve_citation(class.grounding_rule_id(), None, corpus);
+            if grounded.kind == "grounded" {
+                grounded
+            } else {
+                base
+            }
+        }
+        None => base,
+    }
+}
+
+/// The P3 curation gate: true when `finding` is AI-tier AND its citation is still
+/// "advisory" after the class-fallback attempt above — i.e. it cannot be honestly
+/// presented as grounded. `build_report_json` excludes such a finding from
+/// `curated_findings` entirely and routes it to the informational/held-for-review bucket
+/// with an explicit "needs review (uncited)" headline, REGARDLESS of severity — unlike
+/// `is_informational`'s other four signals, this one is a report-integrity gate, not a
+/// triage-confidence signal, so the "a critical/high finding is never informational"
+/// invariant there does not apply here on purpose: a critical, uncited finding is
+/// PRECISELY the case this gate exists to catch.
+pub(crate) fn is_uncited_ai_finding(
+    finding: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> bool {
+    is_ai_tier(finding) && citation_for_finding(finding, corpus).kind == "advisory"
+}
+
 /// Join `rule_id` against the loaded corpus to recover its DEFAULT option's AUTHORED
 /// `remediation` text, then instantiate that text's placeholder tokens (`<table>`,
 /// `<function-name>`, `<bucket>`, `<path>`, …) from `finding`'s own `path`/`captures`. This is a
@@ -1657,7 +1887,14 @@ pub fn build_report_json(
         // Bug 4: convention-to-consider rows are diverted to the informational appendix BEFORE
         // the severity×effort quadrant — they must never reach do_now/do_next/plan. The
         // invariant that a critical/high is never informational lives in `is_informational`.
-        let bucket = if is_informational(f, *disposition, severity, corpus, report.test_file_count) {
+        // P3: an AI-tier finding with no grounded citation (`is_uncited_ai_finding`) is ALSO
+        // routed here — deliberately independent of severity (see that function's doc
+        // comment), since the whole point is to catch the critical/high findings that would
+        // otherwise sit in the curated set carrying "AI-advisory, model-inferred."
+        let gate_uncited = is_uncited_ai_finding(f, corpus);
+        let bucket = if is_informational(f, *disposition, severity, corpus, report.test_file_count)
+            || gate_uncited
+        {
             "informational"
         } else {
             matrix_bucket(*disposition, severity, f.effort.as_deref())
@@ -1681,7 +1918,15 @@ pub fn build_report_json(
             .and_then(|c| c.get_by_id(&f.rule_id))
             .map(|r| r.title.clone())
             .unwrap_or_else(|| f.rule_id.clone());
-        let headline = defect_headline(&f.detail, &fallback_title);
+        let base_headline = defect_headline(&f.detail, &fallback_title);
+        // P3: an honest "why is this not curated" marker for the appendix row, distinct
+        // from the other informational reasons (which the appendix count doesn't otherwise
+        // distinguish either — see `matrix.informational`'s doc comment).
+        let headline = if gate_uncited {
+            format!("Needs review (uncited — no grounded citation found): {base_headline}")
+        } else {
+            base_headline
+        };
         target.push(finding_ref(f, severity, headline));
     }
 
@@ -1691,6 +1936,14 @@ pub fn build_report_json(
     let mut by_rule: std::collections::BTreeMap<String, Vec<(&Finding, Disposition, String, String)>> =
         std::collections::BTreeMap::new();
     for (f, disposition, reason, severity) in &code_findings {
+        // P3 citation gate: an AI-tier finding with no grounded citation (own rule id, nor
+        // its mapped class) never enters the curated set — see `is_uncited_ai_finding`'s doc
+        // comment. It was already routed to `matrix.informational` above; skipping it here
+        // means no `CuratedGroupJson` is ever built for it, so it is IMPOSSIBLE for
+        // `curated_findings` to carry an "AI-advisory, model-inferred." citation.
+        if is_uncited_ai_finding(f, corpus) {
+            continue;
+        }
         by_rule
             .entry(f.rule_id.clone())
             .or_default()
@@ -1702,7 +1955,18 @@ pub fn build_report_json(
             (&a.0.repo, &a.0.path, a.0.line).cmp(&(&b.0.repo, &b.0.path, b.0.line))
         });
         let preview_tool = sites.iter().find_map(|(f, _, _, _)| f.preview_tool.as_deref());
-        let citation = resolve_citation(&rule_id, preview_tool, corpus);
+        // P3: every site surviving the gate above is EITHER not AI-tier (its citation is
+        // whatever `resolve_citation` alone gives, unchanged from before this pass) OR
+        // AI-tier and grounded via the class fallback (`citation_for_finding`). Reuse the
+        // first non-advisory result any site in the group offers; fall back to the plain
+        // rule-level join for a uniform non-AI-tier group (byte-for-byte the old behavior).
+        let citation = sites
+            .iter()
+            .find_map(|(f, _, _, _)| {
+                let c = citation_for_finding(f, corpus);
+                (c.kind != "advisory").then_some(c)
+            })
+            .unwrap_or_else(|| resolve_citation(&rule_id, preview_tool, corpus));
         let title = corpus
             .and_then(|c| c.get_by_id(&rule_id))
             .map(|r| r.title.clone())
@@ -2710,8 +2974,8 @@ mod tests {
     // real fixture, never a fixture-specific rule/file/table name — then builds the report and
     // asserts the cover's counts reflect the MERGED, distinct-defect set.
 
-    #[test]
-    fn p1_e2e_cover_counts_and_security_finding_survive_post_merge() {
+    #[tokio::test]
+    async fn p1_e2e_cover_counts_and_security_finding_survive_post_merge() {
         // Defect 1: one SQL-injection defect, flagged by BOTH a deterministic floor rule and an
         // AI rule at the exact same location (same file+line+snippet) — must collapse to one
         // critical row, not two.
@@ -2771,8 +3035,20 @@ mod tests {
             "six raw findings, three distinct defects — merging must land on exactly three"
         );
 
+        // P3: the CORS security finding is an AI-tier rule id the corpus never saw (an
+        // invented "AI-CORS-REFLECTED-ORIGIN-CREDENTIALS" id) — the citation gate only lets
+        // it survive in `curated_findings` when its class maps to a REAL grounded corpus
+        // rule (`SEC-NO-PERMISSIVE-CORS-CREDENTIALS-1`), which requires the real corpus to
+        // be loaded rather than `None`.
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, corpus_errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            corpus_errors.is_empty(),
+            "corpus must load cleanly, got errors: {corpus_errors:?}"
+        );
+
         let report = report_with(merged, vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
 
         // Cover critical count == distinct criticals: the SQL-injection defect is the only
         // critical among the three merged defects, and it must count ONCE.
@@ -3082,7 +3358,12 @@ mod tests {
 
     #[test]
     fn curated_finding_site_fix_is_none_not_fabricated_without_a_corpus() {
-        let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+        // Deliberately NOT an `AI-`-prefixed rule id: this test is about `resolve_fix`
+        // (the "Fix:" line), not the P3 citation gate — an `AI-` id with no corpus would
+        // also be held out of `curated_findings` entirely as uncited (see
+        // `citation_gate_holds_an_unclassifiable_ai_finding_out_of_curated_as_uncited`),
+        // which would make `json.curated_findings[0]` panic here for an unrelated reason.
+        let f = finding("CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
         assert_eq!(json.curated_findings[0].sites[0].fix, None);
@@ -3296,8 +3577,13 @@ mod tests {
     }
 
     #[test]
-    fn citation_join_labels_unknown_rule_id_as_ai_advisory() {
-        let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+    fn citation_join_still_labels_a_non_ai_tier_unknown_rule_id_as_ai_advisory() {
+        // P3 scopes the citation gate to AI-TIER findings only (`is_ai_tier`) — a
+        // non-AI-tier finding (no `AI-` rule id, no calibration `confidence`) whose rule id
+        // has no corpus entry is a DIFFERENT, pre-existing gap (e.g. `SEC-NO-RAW-SQL-CONCAT-1`
+        // has no TOML entry at all) that this pass does not touch: it stays exactly as
+        // before, curated with the honest "AI-advisory, model-inferred." label.
+        let f = finding("CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
         assert_eq!(json.curated_findings[0].citation.kind, "advisory");
@@ -3305,6 +3591,338 @@ mod tests {
             json.curated_findings[0].citation.label,
             "AI-advisory, model-inferred."
         );
+    }
+
+    // ── P3 (2026-09-29): the citation gate ──────────────────────────────────────────────
+    // docs/plans/2026-09-29_codebase-inspection-hardening.md, P3.
+
+    /// An AI-tier finding (`AI-`-prefixed rule id) whose defect does not classify into any
+    /// of the P3 closed taxonomy classes must be held OUT of `curated_findings` entirely —
+    /// never rendered with "AI-advisory, model-inferred." on a curated row — and instead
+    /// surfaces in the informational/held-for-review appendix with an honest "uncited"
+    /// headline, counted in the reconciling totals.
+    #[test]
+    fn citation_gate_holds_an_unclassifiable_ai_finding_out_of_curated_as_uncited() {
+        let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert!(
+            json.curated_findings.is_empty(),
+            "an uncited AI finding must never appear in curated_findings: {:?}",
+            json.curated_findings
+        );
+        assert_eq!(
+            json.matrix.informational.len(),
+            1,
+            "the uncited finding must still surface (over-tell), just outside the action tiers"
+        );
+        assert_eq!(
+            json.matrix.informational[0].rule_id,
+            "AI-CUSTOM-ARCH-RULE-1"
+        );
+        assert!(
+            json.matrix.informational[0]
+                .headline
+                .to_lowercase()
+                .contains("uncited"),
+            "the appendix row must say WHY it's held out: {}",
+            json.matrix.informational[0].headline
+        );
+        assert_eq!(json.executive_summary.held_for_review, 1);
+        assert_eq!(json.executive_summary.curated_total, 0);
+        // Reconciliation still holds: nothing is silently dropped.
+        assert_eq!(
+            json.executive_summary.candidates_reviewed,
+            json.executive_summary.curated_total
+                + json.executive_summary.held_for_review
+                + json.executive_summary.excluded_false_positive
+                + json.executive_summary.dependency_advisories
+        );
+    }
+
+    /// The gate applies REGARDLESS of severity — a critical, uncited AI finding (exactly
+    /// the "MOST important findings" the plan's problem statement calls out) must still be
+    /// excluded from curated, unlike `is_informational`'s other four signals which
+    /// deliberately never touch critical/high.
+    #[test]
+    fn citation_gate_excludes_a_critical_uncited_ai_finding_despite_severity() {
+        let f = finding("AI-SOME-NOVEL-DEFECT", "a.rs", 1, "critical");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert!(json.curated_findings.is_empty());
+        assert_eq!(json.matrix.do_now.len(), 0);
+        assert_eq!(json.matrix.informational.len(), 1);
+        // The severity histogram (cover stats) still honestly reflects it — over-tell, not
+        // hidden from the reader entirely, just excluded from the curated action tiers.
+        assert_eq!(json.cover.stats.critical, 1);
+    }
+
+    /// A non-AI-tier finding's own advisory citation is untouched by the gate (see
+    /// `citation_join_still_labels_a_non_ai_tier_unknown_rule_id_as_ai_advisory` above) —
+    /// this is the `is_uncited_ai_finding` unit-level lock-in of that same scoping decision.
+    #[test]
+    fn is_uncited_ai_finding_is_false_for_a_non_ai_tier_finding_even_when_advisory() {
+        let f = finding("CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
+        assert!(!is_ai_tier(&f));
+        assert!(!is_uncited_ai_finding(&f, None));
+    }
+
+    #[test]
+    fn is_ai_tier_detects_the_ai_prefixed_rule_id_or_a_calibration_confidence() {
+        let invented = finding("AI-SOME-DEFECT", "a.rs", 1, "medium");
+        assert!(is_ai_tier(&invented));
+
+        let mut adopted = finding("SUPABASE-RLS-ENABLED-1", "a.rs", 1, "critical");
+        adopted.confidence = Some("high".to_string());
+        assert!(is_ai_tier(&adopted));
+
+        let deterministic = finding("SEC-NO-RAW-SQL-CONCAT-1", "a.rs", 1, "critical");
+        assert!(!is_ai_tier(&deterministic));
+    }
+
+    // ── classify_ai_finding: pure, unit-testable, no model calls ────────────────────────
+
+    #[test]
+    fn classify_ai_finding_maps_each_required_class_by_general_keywords() {
+        // Every signal is a defect-family vocabulary word (an OWASP/CWE term or the real
+        // framework API a fix touches), never a fixture-specific rule id or identifier —
+        // these rule ids are deliberately generic/invented, distinct from any one benchmark.
+        assert_eq!(
+            classify_ai_finding(
+                "AI-DEFECT-1",
+                Some("rls-policy"),
+                "Row Level Security is disabled on the orders table, allowing cross-tenant reads."
+            ),
+            Some(AiFindingClass::Rls)
+        );
+        assert_eq!(
+            classify_ai_finding(
+                "AI-DEFECT-2",
+                None,
+                "User-supplied comment text is passed to dangerouslySetInnerHTML without sanitization, a stored XSS sink."
+            ),
+            Some(AiFindingClass::Xss)
+        );
+        assert_eq!(
+            classify_ai_finding(
+                "AI-DEFECT-3",
+                None,
+                "The `next` query parameter is redirected to without validation, an open redirect to an attacker-controlled host."
+            ),
+            Some(AiFindingClass::OpenRedirect)
+        );
+        assert_eq!(
+            classify_ai_finding(
+                "AI-DEFECT-4",
+                None,
+                "The password-reset token is generated with Math.random(), an insecure randomness source for a security token."
+            ),
+            Some(AiFindingClass::WeakTokenRandomness)
+        );
+        assert_eq!(
+            classify_ai_finding(
+                "AI-DEFECT-5",
+                None,
+                "User input is concatenated directly into a PostgREST .or() filter grammar expression, a query-grammar injection."
+            ),
+            Some(AiFindingClass::QueryGrammarInjection)
+        );
+        assert_eq!(
+            classify_ai_finding(
+                "AI-DEFECT-6",
+                None,
+                "The CORS middleware reflects the request's Origin header while Access-Control-Allow-Credentials is true."
+            ),
+            Some(AiFindingClass::PermissiveCors)
+        );
+    }
+
+    #[test]
+    fn classify_ai_finding_also_matches_on_rule_id_tokens_alone() {
+        assert_eq!(
+            classify_ai_finding("AI-XSS-COMMENT-RENDER-1", None, "unrelated detail text"),
+            Some(AiFindingClass::Xss)
+        );
+        assert_eq!(
+            classify_ai_finding("AI-CORS-REFLECTED-ORIGIN-CREDENTIALS", None, "detail"),
+            Some(AiFindingClass::PermissiveCors)
+        );
+    }
+
+    #[test]
+    fn classify_ai_finding_returns_none_for_an_unmapped_defect() {
+        assert_eq!(
+            classify_ai_finding(
+                "AI-SOME-NOVEL-ARCHITECTURAL-OBSERVATION",
+                None,
+                "The service layer bypasses the repository abstraction in a way nothing above classifies."
+            ),
+            None
+        );
+    }
+
+    // ── The class -> corpus-rule mapping is grounded in the REAL bundled corpus ─────────
+
+    /// A conservative allowlist of real, well-known standards/linter-doc hosts a P3 grounded
+    /// citation is permitted to cite — a Camerata-internal doc citing itself would fail this,
+    /// which is the whole point (see `resolve_citation`'s `is_external_source_url`, which this
+    /// complements with a stronger "is it actually a recognized authority" check).
+    fn is_known_authority_url(url: &str) -> bool {
+        const KNOWN_AUTHORITY_HOSTS: &[&str] = &[
+            "cwe.mitre.org",
+            "owasp.org",
+            "cheatsheetseries.owasp.org",
+            "supabase.com",
+            "react.dev",
+            "developer.mozilla.org",
+            "postgrest.org",
+        ];
+        is_external_source_url(url)
+            && KNOWN_AUTHORITY_HOSTS.iter().any(|host| {
+                url.starts_with(&format!("https://{host}/"))
+                    || url.starts_with(&format!("http://{host}/"))
+            })
+    }
+
+    #[tokio::test]
+    async fn each_required_class_resolves_to_a_grounded_citation_from_a_known_authority() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+
+        for class in [
+            AiFindingClass::Rls,
+            AiFindingClass::Xss,
+            AiFindingClass::OpenRedirect,
+            AiFindingClass::WeakTokenRandomness,
+            AiFindingClass::QueryGrammarInjection,
+            AiFindingClass::PermissiveCors,
+        ] {
+            let rule_id = class.grounding_rule_id();
+            let citation = resolve_citation(rule_id, None, Some(&corpus));
+            assert_eq!(
+                citation.kind, "grounded",
+                "{rule_id} (class {class:?}) must resolve to a grounded citation"
+            );
+            assert!(
+                !citation.label.trim().is_empty(),
+                "{rule_id}'s citation label must not be empty"
+            );
+            assert_ne!(
+                citation.label, "AI-advisory, model-inferred.",
+                "{rule_id} must never render the AI-advisory fallback label"
+            );
+            assert!(
+                !citation.sources.is_empty(),
+                "{rule_id} must carry at least one real source"
+            );
+            for source in &citation.sources {
+                assert!(
+                    is_known_authority_url(&source.url),
+                    "{rule_id}'s source {:?} is not a well-formed, known-authority URL",
+                    source
+                );
+            }
+        }
+    }
+
+    /// Full-report contract test (EXTENSIVE per the plan): a synthetic fixture carries one
+    /// AI-tier finding per required class plus one unmappable AI finding and one
+    /// non-AI-tier finding with no corpus entry. After `build_report_json`, ZERO curated
+    /// findings may carry a model-inferred or empty citation, and the unmapped finding must
+    /// be the only one held out as uncited.
+    #[tokio::test]
+    async fn zero_curated_findings_carry_a_model_inferred_or_empty_citation() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+
+        let mut rls = finding(
+            "AI-CROSS-TENANT-RLS-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        rls.detail = "Row Level Security is disabled on the payments table.".to_string();
+
+        let mut xss = finding("AI-STORED-XSS-1", "web/comment.tsx", 12, "high");
+        xss.detail =
+            "A stored comment body is rendered via dangerouslySetInnerHTML without sanitization."
+                .to_string();
+
+        let mut redirect = finding("AI-LOGIN-REDIRECT-1", "web/login.ts", 40, "medium");
+        redirect.detail =
+            "The `next` redirect target is not validated against an allowlist, an open redirect."
+                .to_string();
+
+        let mut token = finding("AI-RESET-TOKEN-1", "api/reset.ts", 8, "high");
+        token.detail =
+            "The password-reset token uses Math.random(), insecure randomness for a security token."
+                .to_string();
+
+        let mut grammar = finding("AI-FILTER-INJECTION-1", "api/search.ts", 22, "high");
+        grammar.detail =
+            "A search term is concatenated into a PostgREST .or() filter grammar expression."
+                .to_string();
+
+        let mut cors = finding("AI-CORS-CREDS-1", "middleware.ts", 5, "medium");
+        cors.detail =
+            "CORS reflects the request Origin while Access-Control-Allow-Credentials is true."
+                .to_string();
+
+        let unmapped = finding("AI-SOME-NOVEL-DEFECT", "a.rs", 1, "medium");
+
+        let report = report_with(
+            vec![rls, xss, redirect, token, grammar, cors, unmapped],
+            vec![],
+        );
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+
+        assert_eq!(
+            json.curated_findings.len(),
+            6,
+            "the six mapped AI-tier findings must all survive as curated, distinct groups: {:?}",
+            json.curated_findings
+                .iter()
+                .map(|g| &g.rule_id)
+                .collect::<Vec<_>>()
+        );
+        for group in &json.curated_findings {
+            assert_ne!(
+                group.citation.kind, "advisory",
+                "curated rule {} carries an advisory (uncited) citation",
+                group.rule_id
+            );
+            assert!(
+                !group.citation.label.trim().is_empty(),
+                "curated rule {} carries an empty citation label",
+                group.rule_id
+            );
+            assert_ne!(
+                group.citation.label, "AI-advisory, model-inferred.",
+                "curated rule {} renders the model-inferred fallback label",
+                group.rule_id
+            );
+        }
+        assert!(
+            !json
+                .curated_findings
+                .iter()
+                .any(|g| g.rule_id == "AI-SOME-NOVEL-DEFECT"),
+            "the unmapped AI finding must never appear in curated_findings"
+        );
+        assert_eq!(
+            json.matrix.informational.len(),
+            1,
+            "exactly the one unmapped AI finding is held for review"
+        );
+        assert_eq!(json.matrix.informational[0].rule_id, "AI-SOME-NOVEL-DEFECT");
     }
 
     #[test]
