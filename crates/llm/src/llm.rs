@@ -269,6 +269,76 @@ fn cli_overall_timeout() -> std::time::Duration {
     env_secs("CAMERATA_CLI_TIMEOUT_SECS", 300)
 }
 
+// ── W6: heartbeat-based dual timeout for the streaming CLI reader ──────────────────────
+//
+// Bug this fixes: a real headless run hit "Claude CLI timed out after 300s (no output)"
+// on the alternative-recommendation pass even though the pass was a long-but-LIVE call, not
+// a genuine hang. Root cause was in `complete_cli_streaming`'s loop below: `overall_deadline`
+// used to be a FLAT instant computed once at call start and never reset — so any call
+// (however actively it was streaming content) that ran past `overall_timeout` got killed and
+// reported as "(no output)", which was also simply FALSE whenever real content had been
+// streaming the whole time.
+//
+// Fix: two independently-tracked deadlines, extracted into a small pure/testable type so the
+// timing logic is exercisable without spawning a real subprocess (see the tests below).
+// - `idle`: resets ONLY on real model-content progress. Tight (120s default) — this is what
+//   catches a call stuck queued/rate-limited before ever producing a token.
+// - `overall`: resets on ANY streamed line at all, including non-content status/keepalive
+//   events. Wider (300s default) — this is the TRUE "this process is completely silent"
+//   backstop. Because it resets on any activity, a long-but-live call is never killed merely
+//   for running past the nominal window; only a call that goes fully silent for that long
+//   trips it, so its "(no output)" message stays accurate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatTimeout {
+    /// No output of ANY kind (not even a keepalive/status line) for the whole `overall`
+    /// window — the process is genuinely silent. Maps to the actionable "stuck on auth/
+    /// input" message and a hard kill.
+    Silent,
+    /// Real model progress absent for the whole `idle` window — a stall before/mid
+    /// generation (often rate-limiting/queueing). The process is left to `kill_on_drop`.
+    Stalled,
+}
+
+/// Pure decision: given the current instant and the two independently-maintained deadlines,
+/// which timeout (if either) has elapsed. `Silent` takes priority when both have (it is the
+/// stronger claim — total silence, not just an absence of real progress). No I/O, no
+/// `Duration` state beyond what the caller already tracks — trivially unit-testable by
+/// advancing `now` without any real sleeping.
+fn check_heartbeat(
+    now: tokio::time::Instant,
+    idle_deadline: tokio::time::Instant,
+    overall_deadline: tokio::time::Instant,
+) -> Option<HeartbeatTimeout> {
+    if now >= overall_deadline {
+        Some(HeartbeatTimeout::Silent)
+    } else if now >= idle_deadline {
+        Some(HeartbeatTimeout::Stalled)
+    } else {
+        None
+    }
+}
+
+/// Build the actionable error for a heartbeat timeout — shared by both the top-of-loop check
+/// and the `tokio::time::timeout` race below so the message is identical either way.
+fn heartbeat_timeout_error(
+    kind: HeartbeatTimeout,
+    idle: std::time::Duration,
+    overall_timeout: std::time::Duration,
+) -> anyhow::Error {
+    match kind {
+        HeartbeatTimeout::Silent => anyhow::anyhow!(
+            "Claude CLI timed out after {}s (no output). The `claude` process may be \
+             stuck waiting for authentication or input.",
+            overall_timeout.as_secs()
+        ),
+        HeartbeatTimeout::Stalled => anyhow::anyhow!(
+            "claude produced no model output for {}s — treating as a hang (likely \
+             rate-limited/queued; set CAMERATA_LLM_IDLE_SECS to tune)",
+            idle.as_secs()
+        ),
+    }
+}
+
 /// Map a `claude` CLI spawn error to a clear, actionable message. `NotFound` gets a
 /// specific message: a Finder/Dock-launched app inherits a minimal PATH that typically
 /// omits Homebrew's `/opt/homebrew/bin`, so the raw OS error ("No such file or
@@ -1132,13 +1202,14 @@ impl Llm {
         // legitimate large scan keeps emitting content and never trips; a call stuck before
         // (or mid) generation does. `CAMERATA_LLM_IDLE_SECS` overrides the 120s default.
         let idle = env_secs("CAMERATA_LLM_IDLE_SECS", 120);
-        // HARD CAP, independent of the idle/progress detector above: a call that keeps
-        // trickling plausible-looking "progress" forever (or any other wedge the idle
-        // detector doesn't catch) must still terminate. `CAMERATA_CLI_TIMEOUT_SECS`
-        // overrides the 300s default — the same knob and default as the non-streaming
-        // path in `complete_cli`.
+        // W6: the "genuinely silent" backstop, independent of the idle/progress detector
+        // above — see the `check_heartbeat`/`HeartbeatTimeout` doc comments for the full
+        // rationale. `CAMERATA_CLI_TIMEOUT_SECS` overrides the 300s default — the same knob
+        // and default as the non-streaming path in `complete_cli`. Unlike before, this
+        // deadline is RESET on any streamed line (below), not just once at call start, so a
+        // long-but-live call is never killed merely for running past this window.
         let overall_timeout = cli_overall_timeout();
-        let overall_deadline = tokio::time::Instant::now() + overall_timeout;
+        let mut overall_deadline = tokio::time::Instant::now() + overall_timeout;
 
         let mut full = String::new();
         let mut cost = None;
@@ -1149,40 +1220,33 @@ impl Llm {
         let mut deadline = tokio::time::Instant::now() + idle;
         loop {
             let now = tokio::time::Instant::now();
-            if now >= overall_deadline {
-                kill_pid(child.id());
-                anyhow::bail!(
-                    "Claude CLI timed out after {}s (no output). The `claude` process may be \
-                     stuck waiting for authentication or input.",
-                    overall_timeout.as_secs()
-                );
-            }
-            if now >= deadline {
-                // No model progress for the whole window -> a true stall (often a queued /
-                // rate-limited call sitting before its first token). kill_on_drop reaps the
-                // subprocess when this future is dropped on the error path.
-                anyhow::bail!(
-                    "claude produced no model output for {}s — treating as a hang (likely rate-limited/queued; set CAMERATA_LLM_IDLE_SECS to tune)",
-                    idle.as_secs()
-                );
+            if let Some(kind) = check_heartbeat(now, deadline, overall_deadline) {
+                if kind == HeartbeatTimeout::Silent {
+                    kill_pid(child.id());
+                }
+                return Err(heartbeat_timeout_error(kind, idle, overall_timeout));
             }
             let remaining = std::cmp::min(deadline, overall_deadline) - now;
             match tokio::time::timeout(remaining, lines.next_line()).await {
-                Err(_) if tokio::time::Instant::now() >= overall_deadline => {
-                    kill_pid(child.id());
-                    anyhow::bail!(
-                        "Claude CLI timed out after {}s (no output). The `claude` process may \
-                         be stuck waiting for authentication or input.",
-                        overall_timeout.as_secs()
-                    );
+                Err(_) => {
+                    // Re-check which specific deadline actually elapsed (the race above only
+                    // tells us SOME timeout fired) so the message matches the real cause.
+                    let now = tokio::time::Instant::now();
+                    let kind = check_heartbeat(now, deadline, overall_deadline)
+                        .unwrap_or(HeartbeatTimeout::Stalled);
+                    if kind == HeartbeatTimeout::Silent {
+                        kill_pid(child.id());
+                    }
+                    return Err(heartbeat_timeout_error(kind, idle, overall_timeout));
                 }
-                Err(_) => anyhow::bail!(
-                    "claude produced no model output for {}s — treating as a hang (likely rate-limited/queued; set CAMERATA_LLM_IDLE_SECS to tune)",
-                    idle.as_secs()
-                ),
                 Ok(Ok(None)) => break, // EOF — the process finished
                 Ok(Err(e)) => anyhow::bail!("reading claude stdout: {e}"),
                 Ok(Ok(Some(line))) => {
+                    // W6: ANY line at all — even one that fails to parse below, or a plain
+                    // status/keepalive event — is proof the process is alive and writing, so
+                    // it resets the SILENT backstop unconditionally. Only real model progress
+                    // (below) resets the tighter stall window.
+                    overall_deadline = tokio::time::Instant::now() + overall_timeout;
                     let Ok(v) = serde_json::from_str::<serde_json::Value>(&line) else {
                         continue;
                     };
@@ -3277,5 +3341,121 @@ malformed line, not json
             .await
             .expect("should complete well within the timeout");
         assert!(out.status.success());
+    }
+
+    // ── W6: heartbeat-based dual timeout (`check_heartbeat`) ────────────────────────────
+    //
+    // Pure-logic tests: no subprocess, no real sleeping — `now`/the two deadlines are plain
+    // `Instant` arithmetic, so these are deterministic and fast. This is the fake/mock
+    // "backend driver" double for the resilience fix: `check_heartbeat` is exactly the
+    // decision `complete_cli_streaming`'s loop makes on every line it reads, extracted so it
+    // is exercisable without a live `claude` CLI.
+
+    #[test]
+    fn heartbeat_a_slow_but_live_call_is_never_killed_even_past_the_old_flat_cap() {
+        let idle = std::time::Duration::from_secs(120);
+        let overall = std::time::Duration::from_secs(300);
+        let start = tokio::time::Instant::now();
+        let mut idle_deadline = start + idle;
+        let mut overall_deadline = start + overall;
+
+        // Simulate 6 chunks of REAL progress, 80s apart — 480s of total wall-clock, well past
+        // the old flat 300s cap — with every chunk resetting BOTH windows (real progress
+        // always resets `overall` too, since it is itself a line). Under the OLD behavior
+        // (a flat `overall_deadline` computed once) this call would have been killed at the
+        // 300s mark and mislabeled "(no output)" despite streaming the whole time.
+        let mut now = start;
+        for _ in 0..6 {
+            now += std::time::Duration::from_secs(80);
+            assert!(
+                check_heartbeat(now, idle_deadline, overall_deadline).is_none(),
+                "a call with continuous progress every 80s must never time out, even at {:?} \
+                 total elapsed",
+                now - start
+            );
+            idle_deadline = now + idle;
+            overall_deadline = now + overall;
+        }
+        assert!(
+            now - start > overall,
+            "the test must actually exceed the old flat cap"
+        );
+    }
+
+    #[test]
+    fn heartbeat_a_genuinely_silent_call_still_times_out_as_silent() {
+        let idle = std::time::Duration::from_secs(120);
+        let overall = std::time::Duration::from_secs(300);
+        let start = tokio::time::Instant::now();
+        let idle_deadline = start + idle;
+        let overall_deadline = start + overall;
+
+        // Nothing ever resets either deadline — genuine silence.
+        assert_eq!(
+            check_heartbeat(start, idle_deadline, overall_deadline),
+            None
+        );
+        let past_idle_only = start + idle + std::time::Duration::from_secs(1);
+        assert_eq!(
+            check_heartbeat(past_idle_only, idle_deadline, overall_deadline),
+            Some(HeartbeatTimeout::Stalled),
+            "past the idle window but not yet the overall window -> a stall, not silence"
+        );
+        let past_overall = start + overall + std::time::Duration::from_secs(1);
+        assert_eq!(
+            check_heartbeat(past_overall, idle_deadline, overall_deadline),
+            Some(HeartbeatTimeout::Silent),
+            "past BOTH windows with zero activity the whole time -> genuinely silent"
+        );
+    }
+
+    #[test]
+    fn heartbeat_keepalive_only_lines_reset_overall_but_not_idle() {
+        // A process that emits non-progress status/keepalive lines (resetting `overall`, per
+        // the "ANY line" rule) but never real content (never resetting `idle`) still
+        // correctly times out as a STALL once the idle window elapses — the outer window
+        // being alive doesn't paper over a real generation stall.
+        let idle = std::time::Duration::from_secs(120);
+        let overall = std::time::Duration::from_secs(300);
+        let start = tokio::time::Instant::now();
+        let idle_deadline = start + idle; // never reset in this scenario
+        let mut overall_deadline = start + overall;
+
+        // Two keepalive lines, 60s apart, each resetting overall only.
+        let t1 = start + std::time::Duration::from_secs(60);
+        assert!(check_heartbeat(t1, idle_deadline, overall_deadline).is_none());
+        overall_deadline = t1 + overall;
+        let t2 = t1 + std::time::Duration::from_secs(60); // 120s elapsed total -> idle window hit
+        assert_eq!(
+            check_heartbeat(t2, idle_deadline, overall_deadline),
+            Some(HeartbeatTimeout::Stalled),
+            "idle (real progress) must still fire even while overall keeps getting refreshed \
+             by non-progress activity"
+        );
+    }
+
+    #[test]
+    fn heartbeat_timeout_error_messages_are_actionable_and_distinct() {
+        let idle = std::time::Duration::from_secs(120);
+        let overall = std::time::Duration::from_secs(300);
+        let silent = heartbeat_timeout_error(HeartbeatTimeout::Silent, idle, overall).to_string();
+        assert!(
+            silent.contains("timed out after 300s (no output)"),
+            "message: {silent}"
+        );
+        assert!(
+            silent.contains("stuck waiting for authentication or input"),
+            "message: {silent}"
+        );
+
+        let stalled = heartbeat_timeout_error(HeartbeatTimeout::Stalled, idle, overall).to_string();
+        assert!(
+            stalled.contains("no model output for 120s"),
+            "message: {stalled}"
+        );
+        assert!(
+            stalled.contains("CAMERATA_LLM_IDLE_SECS"),
+            "message: {stalled}"
+        );
     }
 }
