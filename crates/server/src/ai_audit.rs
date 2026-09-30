@@ -3582,20 +3582,27 @@ fn origin_rank(o: Origin) -> u8 {
 fn structural_objects(f: &Finding) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     let text = format!("{} {}", f.snippet, f.detail);
-    // Dotted identifiers: schema.table / a.b.c — take each dotted run as one object.
+    // Dotted identifiers: schema.table / a.b.c — take each dotted run as one object. A run's
+    // TRAILING dot is trimmed before the dot-presence test: it is ordinary sentence punctuation
+    // ("...committed to the repository." must not register the bare word "repository" as a
+    // dotted object just because a period follows it), not part of the identifier. A genuine
+    // dotted identifier immediately followed by a sentence-ending period (e.g. "public.orders.")
+    // still keeps its real internal dot after trimming only the outer one.
     let mut cur = String::new();
     for ch in text.chars() {
         if ch.is_alphanumeric() || ch == '_' || ch == '.' {
             cur.push(ch);
         } else {
-            if cur.contains('.') && cur.chars().any(|c| c.is_alphabetic()) {
-                out.insert(cur.to_ascii_lowercase());
+            let trimmed = cur.trim_end_matches('.');
+            if trimmed.contains('.') && trimmed.chars().any(|c| c.is_alphabetic()) {
+                out.insert(trimmed.to_ascii_lowercase());
             }
             cur.clear();
         }
     }
-    if cur.contains('.') && cur.chars().any(|c| c.is_alphabetic()) {
-        out.insert(cur.to_ascii_lowercase());
+    let trimmed = cur.trim_end_matches('.');
+    if trimmed.contains('.') && trimmed.chars().any(|c| c.is_alphabetic()) {
+        out.insert(trimmed.to_ascii_lowercase());
     }
     // Quoted identifiers: "..." or '...' (policy names, quoted table names).
     for (open, close) in [('"', '"'), ('\'', '\'')] {
@@ -3698,14 +3705,71 @@ fn same_construct(content: &str, a: usize, b: usize) -> bool {
     }
 }
 
-/// The pairwise semantic-merge predicate (design §1b, extended by P1 design point 2). `a` and
-/// `b` cluster as the same defect when EITHER of two GENERAL signals fires (never a third,
-/// fixture-specific one):
+/// Normalize a finding's headline text (its `snippet`/title plus `detail`) into a lowercase
+/// alphanumeric word set for [`description_overlap_score`]. Punctuation- and case-insensitive
+/// so cosmetic phrasing differences between a deterministic rule's templated wording and an AI
+/// finding's free-text description of the SAME defect ("Hardcoded API key" vs "hard-coded API
+/// key committed") don't suppress an otherwise-real prose match.
+fn description_word_set(f: &Finding) -> std::collections::HashSet<String> {
+    let text = format!("{} {}", f.snippet, f.detail).to_ascii_lowercase();
+    let mut out = std::collections::HashSet::new();
+    let mut cur = String::new();
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            cur.push(ch);
+        } else if !cur.is_empty() {
+            out.insert(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        out.insert(cur);
+    }
+    out
+}
+
+/// Jaccard similarity (`|intersection| / |union|`) of `a` and `b`'s normalized description word
+/// sets — the GENERAL "near-identical prose describing the same defect" merge signal (design
+/// MERGE gap (i)): a deterministic finding and an AI finding a few lines apart, in different
+/// categories or outside the line-proximity window, whose headline text is nonetheless
+/// substantively the same sentence. Symmetric; `0.0` when either side has no describable text
+/// (never a spurious match off two empty sets).
+fn description_overlap_score(a: &Finding, b: &Finding) -> f64 {
+    let wa = description_word_set(a);
+    let wb = description_word_set(b);
+    if wa.is_empty() || wb.is_empty() {
+        return 0.0;
+    }
+    let intersection = wa.intersection(&wb).count();
+    let union = wa.union(&wb).count();
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f64 / union as f64
+    }
+}
+
+/// Threshold for [`description_overlap_score`] to count as a same-defect merge signal.
+/// Deliberately HIGH — this is a general lexical heuristic with no structural grounding of its
+/// own (unlike [`shared_captured_object`]), so it is reserved for genuinely near-identical prose
+/// and paired with the `path` restriction + `objects_conflict` veto in
+/// [`semantic_pair_merges`] to avoid over-merging findings that merely share common security
+/// vocabulary.
+const DESCRIPTION_OVERLAP_THRESHOLD: f64 = 0.6;
+
+/// The pairwise semantic-merge predicate (design §1b, extended by P1 design point 2 and the
+/// MERGE cycle-2 hardening pass). `a` and `b` cluster as the same defect when ANY of three
+/// GENERAL signals fires (never a fourth, fixture-specific one):
 ///  (a) same file, same (present) category, and within-window-or-same-construct — the original
 ///      cross-family-at-one-site signal; or
 ///  (b) they share a captured structural object ([`shared_captured_object`]) — the "same root
 ///      cause across files" signal (a config flag and the handler that reads it; an RLS policy
-///      and the page that relies on it), which does NOT require the same file or category.
+///      and the page that relies on it), which does NOT require the same file or category; or
+///  (c) same file and near-identical description prose ([`description_overlap_score`] at or
+///      above [`DESCRIPTION_OVERLAP_THRESHOLD`]) — a det+AI (or any-tier) pair describing ONE
+///      defect a few lines apart whose category differs or which sits outside the line window,
+///      but whose headline text is substantively the same sentence. Deliberately same-PATH-only:
+///      this must never fuse a sink finding in one file with an unrelated call-site finding in
+///      another file just because the prose happens to overlap.
 /// Every wrong-fusion guard still applies on top of whichever signal fired.
 fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool {
     // Guard: two deterministic rows are two distinct defects by construction UNLESS they share a
@@ -3732,22 +3796,29 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
     // Signal (b): a shared captured object, general and cross-file (design point 2b).
     let shared_object = shared_captured_object(a, b);
 
-    if !same_file_adjacent && !shared_object {
+    // Signal (c): near-identical description prose, general and same-file-only (design MERGE
+    // gap (i)).
+    let description_overlap =
+        a.path == b.path && description_overlap_score(a, b) >= DESCRIPTION_OVERLAP_THRESHOLD;
+
+    if !same_file_adjacent && !shared_object && !description_overlap {
         return false;
     }
 
     // Guard: disjoint structural objects named in free text (different tables/policies) only
-    // vetoes the LINE-PROXIMITY signal — two same-category findings that merely sit near each
-    // other but visibly name different things. A `shared_captured_object` match is a stronger,
-    // structured same-object proof and is never vetoed by this looser text heuristic.
-    if same_file_adjacent && !shared_object && objects_conflict(a, b) {
+    // vetoes the LINE-PROXIMITY and PROSE-OVERLAP signals — two findings that merely sit near
+    // each other, or use similar wording, but visibly name different things. A
+    // `shared_captured_object` match is a stronger, structured same-object proof and is never
+    // vetoed by this looser text heuristic.
+    if !shared_object && (same_file_adjacent || description_overlap) && objects_conflict(a, b) {
         return false;
     }
 
     // Guard: AI+AI needs corroboration beyond mere proximity — one snippet contains the other,
-    // both are located (real, resolved code) inside the same construct, or they share a
-    // captured object (an equally strong structured proof). Two AI findings citing DIFFERENT
-    // real code that merely sit near each other, with no shared object, stay separate.
+    // both are located (real, resolved code) inside the same construct, they share a captured
+    // object, or the description-overlap signal itself fired (an equally strong, deliberately
+    // high-threshold structured-enough proof). Two AI findings citing DIFFERENT real code that
+    // merely sit near each other, with no shared object and no real prose match, stay separate.
     let both_ai = matches!(finding_origin(a), Origin::AdoptedAi | Origin::InventedAi)
         && matches!(finding_origin(b), Origin::AdoptedAi | Origin::InventedAi);
     if both_ai {
@@ -3756,7 +3827,8 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
         let snippet_corroborated = (!sa.is_empty() && sb.contains(sa))
             || (!sb.is_empty() && sa.contains(sb))
             || (a.located && b.located && in_construct)
-            || shared_object;
+            || shared_object
+            || description_overlap;
         if !snippet_corroborated {
             return false;
         }
@@ -9047,6 +9119,75 @@ mod tests {
             out.len(),
             2,
             "distinct det+det defects with no shared object must stay two rows: {out:?}"
+        );
+    }
+
+    // Gap (i): det+AI describing one defect a few lines apart with near-identical prose, in
+    // different categories, previously missed both semantic signals.
+
+    #[test]
+    fn merge_gap_i_det_and_ai_adjacent_lines_overlapping_description_different_category_merges() {
+        // A deterministic secret-detector and an AI finding, three lines apart, in DIFFERENT
+        // categories (so signal (a) — same-category + window — never fires) but describing the
+        // SAME defect in near-identical prose. The new description-overlap signal must catch
+        // this: exactly one exported row, both rule ids present, both evidence sites kept.
+        let mut det = site_finding("SEC-HARDCODED-API-KEY-1", "src/config.ts", 10, "high", "");
+        det.detail =
+            "A live Stripe secret key is hardcoded in this file and committed to the repository."
+                .to_string();
+        det.category = Some("secrets-hygiene".to_string());
+
+        let mut ai = site_finding("AI-STRIPE-KEY-EXPOSED", "src/config.ts", 12, "medium", "");
+        ai.detail = "A live stripe secret key is hardcoded in this file and committed to the \
+                     repository, risking compromise."
+            .to_string();
+        ai.category = Some("credential-exposure".to_string());
+
+        let out = merge_semantic_groups(vec![det, ai], &[]);
+        assert_eq!(
+            out.len(),
+            1,
+            "near-identical prose on adjacent lines must collapse to one row: {out:?}"
+        );
+        let ids: std::collections::HashSet<String> = std::iter::once(out[0].rule_id.clone())
+            .chain(out[0].also_matches.iter().cloned())
+            .collect();
+        assert!(
+            ids.contains("SEC-HARDCODED-API-KEY-1") && ids.contains("AI-STRIPE-KEY-EXPOSED"),
+            "both rule ids must be recorded on the merged row: {ids:?}"
+        );
+        let lines: std::collections::HashSet<usize> = std::iter::once(out[0].line)
+            .chain(out[0].also_locations.iter().map(|l| l.line))
+            .collect();
+        assert!(
+            lines.contains(&10) && lines.contains(&12),
+            "both evidence lines must be kept, not dropped: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn merge_gap_i_sink_and_call_site_in_different_files_stay_two_rows() {
+        // PRESERVE (design "Do NOT break"): a sink finding and a call-site finding describing
+        // the SAME overarching vulnerability, but in TWO DIFFERENT files, with genuinely
+        // overlapping prose. The new description-overlap signal is deliberately same-path-only,
+        // so this must NOT merge even though the text is near-identical — proving the signal
+        // never crosses files.
+        let mut sink =
+            site_finding("SEC-SQL-INJECTION-SINK-1", "src/db/sink.ts", 50, "critical", "");
+        sink.detail = "User-controlled input flows into a raw SQL query without \
+                       parameterization, enabling SQL injection."
+            .to_string();
+        let mut call_site =
+            site_finding("AI-SQL-INJECTION-CALL-SITE", "src/api/handler.ts", 20, "high", "");
+        call_site.detail = "User-controlled input flows into a raw SQL query without \
+                             parameterization, enabling SQL injection at this call site."
+            .to_string();
+
+        let out = merge_semantic_groups(vec![sink, call_site], &[]);
+        assert_eq!(
+            out.len(),
+            2,
+            "the sink+call-site pair across two files must stay two rows: {out:?}"
         );
     }
 
