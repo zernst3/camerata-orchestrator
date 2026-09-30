@@ -421,12 +421,33 @@ pub struct CoverStatsJson {
     pub dependency_advisories: usize,
 }
 
+/// P6 (2026-09-29): the cover's real "code volume" figure — non-blank source lines (never
+/// characters; a raw char count reads as noise to a non-engineer reader) broken out by
+/// language, straight from [`crate::onboard::ScanReport::code_lines`]/`code_lines_by_language`.
+/// `CoverJson::code_volume` is `None` (never `Some` with a zero `lines`) whenever
+/// `code_lines == 0` — see [`build_report_json`]'s construction of it — so the template can
+/// gate the whole row on presence rather than ever rendering "0 characters"/"0 lines".
+#[derive(Debug, Clone, Serialize)]
+pub struct CodeVolumeJson {
+    pub lines: usize,
+    /// Sorted by line count descending (see `onboard::finalize_language_breakdown`). May be
+    /// empty even when `lines > 0` (every scanned file had an unrecognized extension) — the
+    /// template must render the total either way and only additionally list languages when
+    /// this is non-empty.
+    pub by_language: Vec<crate::onboard::LanguageVolume>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CoverJson {
     pub repos: Vec<String>,
     pub files_scanned: usize,
     pub files_excluded: usize,
     pub code_chars: usize,
+    /// See [`CodeVolumeJson`]'s doc comment: `None` whenever no real code volume is known
+    /// (0 lines), so the template hides the "Code volume" row entirely instead of rendering a
+    /// zero. Never render `d.cover.code_chars` directly in the template for this reason — it
+    /// carries the identical "zero means hide, not print 0" problem this field was added to fix.
+    pub code_volume: Option<CodeVolumeJson>,
     pub audited_refs: Vec<AuditedRefJson>,
     pub audit_model: Option<String>,
     pub calibration_model: Option<String>,
@@ -2384,11 +2405,19 @@ pub fn build_report_json(
         accepted,
         dependency_advisories: dependency_snapshot.rows.len(),
     };
+    // P6: hide the "Code volume" row entirely rather than ever render "0 characters"/"0
+    // lines" — `None` whenever this run genuinely has no real line count (a compliance-blocked
+    // AI-only request, or any other path that never read a local file).
+    let code_volume = (report.code_lines > 0).then(|| CodeVolumeJson {
+        lines: report.code_lines,
+        by_language: report.code_lines_by_language.clone(),
+    });
     let cover = CoverJson {
         repos: report.repos.clone(),
         files_scanned: report.files_scanned,
         files_excluded: report.files_excluded,
         code_chars: report.code_chars,
+        code_volume,
         audited_refs,
         audit_model: report.provenance.audit_model.clone(),
         calibration_model: report.provenance.calibration_model.clone(),
@@ -2527,7 +2556,7 @@ pub async fn compile_pdf(json: &AuditReportJson) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::onboard::{AuditedRef, CoverageNote, ScanProvenance};
+    use crate::onboard::{AuditedRef, CoverageNote, LanguageVolume, ScanProvenance};
 
     fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
         Finding {
@@ -2550,6 +2579,17 @@ mod tests {
             test_file_count: 0,
             files_excluded: 2,
             code_chars: 5000,
+            code_lines: 400,
+            code_lines_by_language: vec![
+                LanguageVolume {
+                    language: "TypeScript".to_string(),
+                    lines: 300,
+                },
+                LanguageVolume {
+                    language: "Rust".to_string(),
+                    lines: 100,
+                },
+            ],
             excluded_mechanical_rules: Vec::new(),
             findings,
             proposed_rules: Vec::new(),

@@ -27,6 +27,29 @@ pub(crate) fn lang_for_ext(path: &str) -> Option<&'static str> {
     })
 }
 
+/// Non-blank source lines in `files`, split by language via [`lang_for_ext`], plus the grand
+/// total across EVERY file — recognized-language extension or not, matching `code_chars`'s
+/// all-files scope (a `.yaml`/`.json` config file still counts toward total code volume even
+/// though it has no language attribution). P6 (2026-09-29): real numbers only — every count
+/// here is `content.lines().filter(not blank).count()` on the exact files the scan already
+/// read (after noise-pruning), never a synthetic average-bytes-per-line guess. Callers merge
+/// the returned per-language map across repos before finalizing into a sorted
+/// `Vec<super::LanguageVolume>`.
+pub(crate) fn count_source_lines(
+    files: &[(String, String)],
+) -> (usize, std::collections::BTreeMap<String, usize>) {
+    let mut by_lang: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut total = 0usize;
+    for (path, content) in files {
+        let lines = content.lines().filter(|l| !l.trim().is_empty()).count();
+        total += lines;
+        if let Some(lang) = lang_for_ext(path) {
+            *by_lang.entry(lang.to_string()).or_insert(0) += lines;
+        }
+    }
+    (total, by_lang)
+}
+
 /// Detect frameworks from a manifest file's path + content.
 pub(crate) fn detect_frameworks(
     path: &str,

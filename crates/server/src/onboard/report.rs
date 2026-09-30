@@ -20,6 +20,8 @@ pub fn build_report(
         files_excluded: 0,
         excluded_mechanical_rules: Vec::new(),
         code_chars: 0,
+        code_lines: 0,
+        code_lines_by_language: Vec::new(),
         findings,
         proposed_rules,
         gated: false,

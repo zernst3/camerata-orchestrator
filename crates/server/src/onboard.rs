@@ -399,6 +399,36 @@ pub struct RepoStack {
     pub frameworks: Vec<String>,
 }
 
+/// Real code-volume for one language (P6, 2026-09-29): non-blank source lines counted from the
+/// exact files the scan read, after the same noise-pruning `code_chars`/`files_excluded` already
+/// apply — never a synthetic average-bytes-per-line guess. See
+/// `propose::count_source_lines`, which produces the totals this is built from, and
+/// `report_export::CoverJson::code_lines_by_language`, which renders it (hidden entirely when
+/// the total is zero, per the "never render 0" cover rule).
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, Default)]
+pub struct LanguageVolume {
+    pub language: String,
+    pub lines: usize,
+}
+
+/// Turn a `language -> line count` accumulator (merged across every repo in the scan) into the
+/// sorted `Vec<LanguageVolume>` the report carries: highest line count first, language name as
+/// the tiebreak so output is deterministic.
+pub(crate) fn finalize_language_breakdown(
+    by_lang: std::collections::BTreeMap<String, usize>,
+) -> Vec<LanguageVolume> {
+    let mut v: Vec<LanguageVolume> = by_lang
+        .into_iter()
+        .map(|(language, lines)| LanguageVolume { language, lines })
+        .collect();
+    v.sort_by(|a, b| {
+        b.lines
+            .cmp(&a.lines)
+            .then_with(|| a.language.cmp(&b.language))
+    });
+    v
+}
+
 /// A scan-coverage note: a tool that was skipped or could not run during the
 /// preview pass. This is informational (not a violation). The UI renders these
 /// in a separate "Scan coverage" section, distinct from the violations table.
@@ -499,6 +529,21 @@ pub struct ScanReport {
     /// honest token base before chunk/batch multipliers.
     #[serde(default)]
     pub code_chars: usize,
+    /// Non-blank source lines across every scannable file this run actually read (same
+    /// noise-pruned file set `code_chars` sums), computed alongside it in `scan_repos`/
+    /// `audit_repos` via `propose::count_source_lines`. P6 (2026-09-29): the cover's "code
+    /// volume" row renders THIS (a real SLOC count), not `code_chars`. 0 when genuinely no
+    /// local file was read this run (e.g. a compliance-blocked AI-only request) — the cover
+    /// must hide the code-volume field entirely rather than render a zero.
+    #[serde(default)]
+    pub code_lines: usize,
+    /// `code_lines` broken out by language (via `propose::lang_for_ext`), sorted by line count
+    /// descending then language name. Files with an unrecognized extension still count toward
+    /// `code_lines` (matching `code_chars`'s all-files scope) but are not attributed to any
+    /// language here — exactly like `stacks.languages` already leaves them out of the
+    /// language list. Empty whenever `code_lines` is 0.
+    #[serde(default)]
+    pub code_lines_by_language: Vec<LanguageVolume>,
     /// Rule ids EXCLUDED from this code-only audit because they're MECHANICAL — enforced in
     /// CI from build/runtime/DB context (query-plan inspection, migration audit, AST lint),
     /// not judgeable from a static code digest. They're wired into `.camerata/ci-checks.json`
@@ -588,6 +633,8 @@ impl ScanReport {
             files_excluded: 0,
             excluded_mechanical_rules: Vec::new(),
             code_chars: 0,
+            code_lines: 0,
+            code_lines_by_language: Vec::new(),
             findings: Vec::new(),
             proposed_rules: Vec::new(),
             gated: true,
@@ -621,6 +668,8 @@ impl ScanReport {
             files_excluded: 0,
             excluded_mechanical_rules: Vec::new(),
             code_chars: 0,
+            code_lines: 0,
+            code_lines_by_language: Vec::new(),
             findings: Vec::new(),
             proposed_rules: Vec::new(),
             gated: false,
@@ -713,6 +762,9 @@ pub async fn scan_repos(
     let mut files_total = 0usize;
     let mut files_excluded = 0usize;
     let mut code_chars = 0usize;
+    let mut code_lines = 0usize;
+    let mut lang_lines: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     let mut repos_ok = Vec::new();
     let mut notes = extra_notes;
 
@@ -732,6 +784,11 @@ pub async fn scan_repos(
                 files_total += files.len();
                 files_excluded += excluded_noise;
                 code_chars += files.iter().map(|(_, c)| c.len()).sum::<usize>();
+                let (repo_lines, repo_lang_lines) = propose::count_source_lines(&files);
+                code_lines += repo_lines;
+                for (lang, n) in repo_lang_lines {
+                    *lang_lines.entry(lang).or_insert(0) += n;
+                }
                 stacks.push(detect_stack(spec, &files));
                 repos_ok.push(spec.to_string());
                 if truncated {
@@ -751,6 +808,8 @@ pub async fn scan_repos(
         .collect();
     let mut report = build_report(repos_ok, stacks, files_total, Vec::new());
     report.code_chars = code_chars;
+    report.code_lines = code_lines;
+    report.code_lines_by_language = finalize_language_breakdown(lang_lines);
     report.files_excluded = files_excluded;
     report.proposed_rules = propose_corpus_rules(&repo_domains).await;
     if !notes.is_empty() {
@@ -880,6 +939,17 @@ pub async fn audit_repos(
     let mut stacks = Vec::new();
     let mut files_total = 0usize;
     let mut test_files_total = 0usize;
+    // P6 (2026-09-29): real code-volume figures for the cover — this function (the full audit
+    // path that actually produces the report the PDF export reads) used to discard
+    // `excluded_noise` and never accumulate `code_chars`/`code_lines` at all, so the exported
+    // cover's "Code volume" row always rendered a hardcoded-looking "0 characters" no matter
+    // how large the repo was. `scan_repos` (the lighter phase-1 preview) already did this
+    // correctly; this mirrors that logic over the SAME `files` this loop already reads.
+    let mut files_excluded_total = 0usize;
+    let mut code_chars_total = 0usize;
+    let mut code_lines_total = 0usize;
+    let mut lang_lines_total: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
     let mut repos_ok = Vec::new();
     let mut notes = extra_notes;
     // Per-rule alternative recommendations, accumulated across every repo this scan touches
@@ -978,9 +1048,16 @@ pub async fn audit_repos(
             Ok(ExtractedRepo {
                 files,
                 truncated,
-                excluded_noise: _,
+                excluded_noise,
             }) => {
                 files_total += files.len();
+                files_excluded_total += excluded_noise;
+                code_chars_total += files.iter().map(|(_, c)| c.len()).sum::<usize>();
+                let (repo_lines, repo_lang_lines) = propose::count_source_lines(&files);
+                code_lines_total += repo_lines;
+                for (lang, n) in repo_lang_lines {
+                    *lang_lines_total.entry(lang).or_insert(0) += n;
+                }
                 test_files_total += files
                     .iter()
                     .filter(|(p, _)| is_test_or_fixture_path(p))
@@ -1232,6 +1309,10 @@ pub async fn audit_repos(
 
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
     report.test_file_count = test_files_total;
+    report.files_excluded = files_excluded_total;
+    report.code_chars = code_chars_total;
+    report.code_lines = code_lines_total;
+    report.code_lines_by_language = finalize_language_breakdown(lang_lines_total);
     report.actual_usage = Some(meter.snapshot());
     report.deep = deep_report;
     report.recommendations = recommendations;

@@ -22291,6 +22291,8 @@ mod tests {
             test_file_count: 0,
             files_excluded: 0,
             code_chars: 100,
+            code_lines: 10,
+            code_lines_by_language: Vec::new(),
             excluded_mechanical_rules: Vec::new(),
             findings: vec![crate::onboard::Finding {
                 repo: "owner/repo".to_string(),

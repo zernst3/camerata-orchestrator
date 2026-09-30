@@ -1203,6 +1203,8 @@ mod tests {
             test_file_count: 0,
             files_excluded: 2,
             code_chars: 5000,
+            code_lines: 400,
+            code_lines_by_language: Vec::new(),
             excluded_mechanical_rules: Vec::new(),
             findings,
             proposed_rules: Vec::new(),

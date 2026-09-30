@@ -38,7 +38,9 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use camerata_server::dep_audit::DEP_AUDIT_RULE_ID;
-use camerata_server::onboard::{AuditedRef, CoverageNote, Finding, ScanProvenance, ScanReport};
+use camerata_server::onboard::{
+    AuditedRef, CoverageNote, Finding, LanguageVolume, ScanProvenance, ScanReport,
+};
 use camerata_server::report_export::{self, DispositionWire, ReportOptions};
 use camerata_server::xlsx_export;
 
@@ -283,6 +285,21 @@ async fn regenerate_sample_report() {
         test_file_count: 0,
         files_excluded: 1188,
         code_chars: 486_203,
+        code_lines: 18_700,
+        code_lines_by_language: vec![
+            LanguageVolume {
+                language: "TypeScript".to_string(),
+                lines: 14_500,
+            },
+            LanguageVolume {
+                language: "SQL".to_string(),
+                lines: 2_800,
+            },
+            LanguageVolume {
+                language: "JavaScript".to_string(),
+                lines: 1_400,
+            },
+        ],
         excluded_mechanical_rules: Vec::new(),
         findings: all_findings,
         proposed_rules: Vec::new(),
