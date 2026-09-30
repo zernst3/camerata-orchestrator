@@ -56,3 +56,7 @@ tempfile = "3"
 # byte-for-byte equivalence without depending on the container's volatile timestamp field.
 # Same version/features pin as `camerata-server`'s own dependency (crates/server/Cargo.toml).
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+# `tests/inspect_export_equivalence.rs`: normalize the ONE wall-clock "generated at" cell
+# `xlsx_export::build_workbook` writes (chrono::Utc::now(), minute precision) before comparing
+# entry content — see that test file's own doc comment.
+regex = "1"

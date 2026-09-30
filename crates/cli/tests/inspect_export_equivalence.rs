@@ -15,13 +15,21 @@
 //! not run through the real scanner — only the PDF/xlsx/zip SERIALIZERS are exercised, which
 //! are pure/synchronous aside from the `compile_pdf` shell-out to `typst`.
 //!
-//! Zip entries are compared by CONTENT, not raw container bytes: `build_product_zip` stamps
-//! each entry with the real wall-clock time (`zip_now()`), so two independent calls a few
-//! milliseconds apart are byte-identical in practice but not guaranteed to be if the call
-//! straddles a 2-second DOS-timestamp boundary. Comparing per-entry content sidesteps that one
-//! known source of nondeterminism (the same category of issue
-//! `crates/server/tests/generate_sample_report.rs` documents for its own zip step) without
-//! weakening what "byte-for-byte" actually means for the product: the four files' bytes.
+//! Zip entries are compared by CONTENT, not raw container bytes, and the `-findings.xlsx`
+//! entry is recursed into (it's itself a zip) and compared at ITS entry level too — two
+//! known, real sources of wall-clock nondeterminism are handled the same way
+//! `crates/server/tests/generate_sample_report.rs` documents for its own zip step, rather
+//! than weakening what "byte-for-byte" means for the product:
+//!   1. `build_product_zip` stamps the OUTER zip's entries with the real time (`zip_now()`);
+//!      two calls a few milliseconds apart usually land in the same 2-second DOS-timestamp
+//!      bucket, but aren't guaranteed to under load — sidestepped by comparing decompressed
+//!      content instead of the container bytes.
+//!   2. `xlsx_export::build_workbook` writes a literal "generated at"
+//!      `chrono::Utc::now().format("%Y-%m-%d %H:%M UTC")` cell into a worksheet (minute
+//!      precision) — under CI/full-suite load the two calls here CAN straddle a minute
+//!      boundary. `normalize_generated_at` blanks that one pattern out of any UTF-8 leaf
+//!      entry before comparing, so this test asserts on everything the product actually
+//!      controls and nothing it doesn't.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -142,21 +150,58 @@ async fn server_path_export(report: &ScanReport) -> (String, Vec<u8>) {
     (stem, zip_bytes)
 }
 
-/// Every zip entry's CONTENT, keyed by name — see this file's module doc comment for why
-/// content (not raw container bytes) is the right equivalence unit here.
+/// The ONE known wall-clock literal `xlsx_export::build_workbook` writes into a worksheet
+/// cell (see this file's module doc comment, point 2) — matched and blanked out before
+/// comparing any UTF-8 leaf entry.
+fn generated_at_pattern() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        regex::Regex::new(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC")
+            .expect("the generated-at pattern must be a valid regex")
+    })
+}
+
+/// Normalize a leaf entry's bytes before comparison: text (UTF-8) entries get the volatile
+/// "generated at" timestamp blanked out; binary entries (a compiled PDF's own internal
+/// structure, for instance) are returned as-is — nothing else in this test's fixture varies
+/// call-to-call, so an unnormalized binary mismatch is a REAL equivalence failure, not noise.
+fn normalize_leaf(bytes: &[u8]) -> Vec<u8> {
+    match std::str::from_utf8(bytes) {
+        Ok(text) => generated_at_pattern()
+            .replace_all(text, "<generated-at>")
+            .into_owned()
+            .into_bytes(),
+        Err(_) => bytes.to_vec(),
+    }
+}
+
+/// Every zip entry's CONTENT, keyed by name, RECURSING into any entry that is itself a zip
+/// (the embedded `-findings.xlsx` workbook, keyed as `<outer-name>::<inner-name>`) and
+/// normalizing every UTF-8 leaf via [`normalize_leaf`]. See this file's module doc comment for
+/// why content (not raw container bytes) is the right equivalence unit, and why the xlsx needs
+/// its OWN entries compared rather than being treated as one opaque blob.
 fn zip_entry_contents(bytes: &[u8]) -> BTreeMap<String, Vec<u8>> {
+    let mut out = BTreeMap::new();
+    flatten_zip_entries(bytes, "", &mut out);
+    out
+}
+
+fn flatten_zip_entries(bytes: &[u8], prefix: &str, out: &mut BTreeMap<String, Vec<u8>>) {
     use std::io::Read;
     let mut archive =
         zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).expect("must be a valid zip");
-    let mut out = BTreeMap::new();
     for i in 0..archive.len() {
         let mut file = archive.by_index(i).expect("zip entry by index");
         let name = file.name().to_string();
         let mut buf = Vec::new();
         file.read_to_end(&mut buf).expect("read zip entry content");
-        out.insert(name, buf);
+        let key = format!("{prefix}{name}");
+        if name.ends_with(".xlsx") {
+            flatten_zip_entries(&buf, &format!("{key}::"), out);
+        } else {
+            out.insert(key, normalize_leaf(&buf));
+        }
     }
-    out
 }
 
 #[tokio::test]

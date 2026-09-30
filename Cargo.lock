@@ -665,6 +665,7 @@ dependencies = [
  "chrono",
  "clap",
  "dotenvy",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
