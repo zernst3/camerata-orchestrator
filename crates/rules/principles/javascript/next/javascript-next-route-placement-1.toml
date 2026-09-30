@@ -1,3 +1,13 @@
+# OPT-IN ONLY (docs/plans/2026-09-29_codebase-inspection-hardening.md P7, per the July corpus
+# audit docs/audits/2026-07-18_rule-corpus-audit.md Part 1b): this rule's option set is
+# incomplete doctrine, not a general invariant. It offers only two positions — "route groups by
+# access tier, enforced in middleware/data layer" (the default) or "no grouping convention AND
+# folder placement is (wrongly) treated as the auth mechanism" — but conflates those as if they
+# always go together. A repo that correctly enforces auth via middleware/the data layer while
+# organizing routes by FEATURE rather than ACCESS TIER (a common, legitimate pattern) has no
+# matching option here and would be flagged as a violation of a convention it never needed. Kept
+# opt-in (never pre-checked/auto-recommended) until the option set is redesigned to separate
+# "how routes are organized" from "how auth is actually enforced" — see Rule::is_opt_in_only.
 id = "JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1"
 title = "App Router pages are organized into route groups by access tier, but auth is enforced in middleware/data layer, not by folder placement"
 tag = "stack"
@@ -5,6 +15,7 @@ domain = "javascript:next"
 layer = "framework"
 enforcement = "structured"
 default = true
+opt_in_only = true
 verification = "grounded"
 
 [[sources]]

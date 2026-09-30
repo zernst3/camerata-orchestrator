@@ -2600,6 +2600,25 @@ mod tests {
             assert!(rule.options.iter().any(|o| o.id == "codeql-public-free"));
             assert!(rule.options.iter().any(|o| o.id == "codeql-ghas-paid"));
         }
+
+        // P7: JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1 is opt-in only (its option set doesn't yet
+        // separate "how routes are organized" from "how auth is enforced" — see the corpus
+        // audit) — it must never be pre-checked, even though it's grounded and stack-relevant.
+        let route_placement = set
+            .get_by_id("JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1")
+            .expect("JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1 must exist in the bundled corpus");
+        assert!(
+            route_placement.is_opt_in_only(),
+            "the route-placement rule must be opt_in_only until its option set is redesigned"
+        );
+        assert!(
+            route_placement.is_grounded(),
+            "it stays grounded — opt-in only changes recommendation, not provenance"
+        );
+        assert!(
+            !(route_placement.is_auto_recommended() && !route_placement.is_opt_in_only()),
+            "the route-placement rule must never be auto-recommended despite being grounded"
+        );
     }
 
     // ── derive-from-folder (unit tests for the path → domain derivation) ─────

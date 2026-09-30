@@ -2127,6 +2127,55 @@ mod tests {
         );
     }
 
+    /// P7: the real onboarding path (detect_stack -> domains_for_stack -> propose_corpus_rules
+    /// against the real corpus) must NOT recommend JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1 for a
+    /// Next.js repo — it is opt-in only (its option set conflates route organization with auth
+    /// enforcement; see the corpus audit) — even though it's grounded and this repo's stack
+    /// matches its domain exactly. It must still be LISTED (present in the payload) so the
+    /// architect can deliberately opt in.
+    #[tokio::test]
+    async fn propose_corpus_rules_never_recommends_the_opt_in_next_route_placement_rule() {
+        let files = vec![
+            (
+                "app/page.tsx".to_string(),
+                "export default function Page() {}".to_string(),
+            ),
+            (
+                "package.json".to_string(),
+                r#"{ "dependencies": { "next": "14.0.0", "react": "18" } }"#.to_string(),
+            ),
+        ];
+        let stack = detect_stack("acme/web", &files);
+        assert!(
+            stack.frameworks.contains(&"Next.js".to_string()),
+            "sanity: this fixture must detect as Next.js: {stack:?}"
+        );
+        let domains = domains_for_stack(&stack);
+        assert!(
+            domains.contains(&"javascript:next".to_string()),
+            "sanity: must map to the javascript:next domain: {domains:?}"
+        );
+        let repo_domains = vec![("acme/web".to_string(), domains)];
+        let proposed = propose_corpus_rules(&repo_domains).await;
+
+        let rule = proposed
+            .iter()
+            .find(|r| r.id == "JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1")
+            .expect("the rule must still be LISTED for the architect to opt into manually");
+        assert!(
+            rule.repos.contains(&"acme/web".to_string()),
+            "it must still be domain-matched to this Next.js repo: {rule:?}"
+        );
+        assert!(
+            !rule.recommended,
+            "an opt-in-only rule must never be pre-recommended, even when stack-matched: {rule:?}"
+        );
+        assert!(
+            !rule.is_auto_recommended,
+            "an opt-in-only rule must never be pre-checked, even when grounded: {rule:?}"
+        );
+    }
+
     #[tokio::test]
     async fn propose_corpus_rules_does_not_propose_supabase_rules_for_a_plain_react_repo() {
         // No-false-positive guard: a plain TypeScript/React repo with zero Supabase
