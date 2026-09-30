@@ -558,9 +558,16 @@ pub async fn propose_corpus_rules(
             let matched_repos: Vec<String> = if r.domain == "universal" {
                 all_repos.clone()
             } else {
+                // A repo matches when its domain set contains the rule's own folder-derived
+                // `domain` OR any of the rule's `extra_domains` (e.g. SUPABASE-FUNC-SEARCH-
+                // PATH-1 lives under `supabase:database-functions` but also carries
+                // `extra_domains = ["sql"]` so a plain-Postgres repo — no Supabase layout, just
+                // hand-written `.sql` — still proposes+arms it; see Rule::extra_domains).
                 repo_domains
                     .iter()
-                    .filter(|(_, ds)| ds.iter().any(|d| d == &r.domain))
+                    .filter(|(_, ds)| {
+                        ds.iter().any(|d| d == &r.domain || r.extra_domains.iter().any(|ed| ed == d))
+                    })
                     .map(|(repo, _)| repo.clone())
                     .collect()
             };
