@@ -944,7 +944,13 @@ pub async fn audit_repos(
     // The set ACTUALLY audited this run (NOT `proposed_rules`, which is only the starter-set
     // proposal) — powers the "what's healthy" (audited rules with zero findings) derivation.
     let audited_rule_ids: Vec<String> = selected.iter().map(|r| r.id.clone()).collect();
-    let effective_prior = incremental_prior.filter(|m| m.matches_rules(&rules_fp));
+    // A prior manifest is only a usable AI baseline when it ALSO records that the AI actually
+    // ran and completed on the scan that produced it (`ai_covered`). A manifest from an AI-off,
+    // blocked, or AI-errored run carries an empty/stale-shaped `findings` set that must never be
+    // mistaken for "the AI looked and found nothing" — so it is filtered out here exactly like a
+    // rule-set mismatch is, and every file is treated as changed (a full AI audit) below.
+    let effective_prior =
+        incremental_prior.filter(|m| m.matches_rules(&rules_fp) && m.ai_covered);
     let mut manifest_builder =
         crate::scan_cache::ManifestBuilder::new().with_rules_fingerprint(rules_fp.clone());
     let mut all_findings = Vec::new();
@@ -1390,7 +1396,16 @@ pub async fn audit_repos(
         started_at,
         finished_at: chrono::Utc::now().to_rfc3339(),
     };
-    (report, manifest_builder.finish())
+    // Stamp `ai_covered` exactly here, not earlier: `run_ai_review` may have been forced false
+    // above (the `Blocked` gate), and `report.ai_error` (from `first_ai_error`) only reaches its
+    // final value once the per-repo loop has finished and it's been assigned onto `report` above.
+    // A manifest is `ai_covered = true` only when the AI review was actually ON for this run AND
+    // no repo hit a fatal AI error — an AI-off, blocked, or AI-errored run still stamps a
+    // manifest (the file fingerprints are always worth caching), but with `ai_covered = false` so
+    // a later AI-on scan ignores its (empty/partial) AI findings as a baseline rather than
+    // trusting them (see `effective_prior` above).
+    let ai_covered = run_ai_review && report.ai_error.is_none();
+    (report, manifest_builder.with_ai_covered(ai_covered).finish())
 }
 
 /// P4 (floor findings get finding-level treatment): whether a committed-secret finding ALSO
@@ -3191,6 +3206,297 @@ mod tests {
         );
         assert!(!report.blocked, "Api (not Blocked) must never mark the scan as blocked");
         assert!(report.ai_blocked_reason.is_none(), "Api must never carry a block reason");
+    }
+
+    // ── ai_covered: incremental-cache "poisoned by an AI-less run" fix ─────────
+    //
+    // Every test below stays TOKEN-FREE / NETWORK-FREE on purpose (matching this whole file's
+    // convention — see the "stay token-free" comments throughout): a real per-file AI pass is
+    // only ever exercised when the file is actually CHANGED relative to the effective prior. The
+    // "reuse" tests below instead seed a prior whose file fingerprints EXACTLY match the current
+    // content, so `partition` reports zero changed files and `audit_repo` is never invoked at
+    // all (see its `if files.is_empty() { return ... }` guard) — the incremental-cache mechanics
+    // are fully exercised without ever making a model call.
+
+    /// An AI-off run (`run_ai_review: false`) must still stamp a fresh manifest — file
+    /// fingerprints are always worth caching — but the manifest must be marked
+    /// `ai_covered == false` so a LATER AI-on scan never mistakes "the AI didn't run" for
+    /// "the AI ran and found nothing". This is the core bug: before this fix the manifest was
+    /// indistinguishable from a real AI-covered scan.
+    #[tokio::test]
+    async fn ai_off_run_stamps_manifest_ai_covered_false_but_still_records_fingerprints() {
+        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (_dir, sources) = scratch_repo_with_secret();
+        let (_report, manifest) = audit_repos(
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,  // incremental_prior: first-ever scan
+            false,
+            true,
+            false, // run_ai_review off — the toggle was off for this run
+            true,  // run_deterministic on — the floor still runs and is still cached
+            None,
+            crate::llm::BackendResolution::Api,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+        assert!(
+            !manifest.ai_covered,
+            "an AI-off run's manifest must be stamped ai_covered = false"
+        );
+        assert!(
+            manifest.files.get("me/api").is_some_and(|m| m.contains_key("config.rs")),
+            "file fingerprints must still be recorded even though the AI didn't run: {:?}",
+            manifest.files
+        );
+    }
+
+    /// A compliance-`Blocked` run with the deterministic floor requested runs the floor (see
+    /// `blocked_resolution_with_deterministic_requested_still_runs_the_floor` above) but forces
+    /// `run_ai_review` off internally — so its manifest must ALSO be `ai_covered == false`,
+    /// exactly like a manually-toggled AI-off run. A blocked project must never poison the cache
+    /// with a false "AI found nothing" baseline either.
+    #[tokio::test]
+    async fn blocked_run_stamps_manifest_ai_covered_false() {
+        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (_dir, sources) = scratch_repo_with_secret();
+        let (report, manifest) = audit_repos(
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            true, // run_ai_review requested...
+            true, // ...but forced off internally by the Blocked gate
+            None,
+            crate::llm::BackendResolution::Blocked {
+                message: "blocked".to_string(),
+            },
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+        assert!(
+            report.ai_blocked_reason.is_some(),
+            "sanity: this must be the blocked-but-floor-ran path"
+        );
+        assert!(
+            !manifest.ai_covered,
+            "a blocked run's manifest must be stamped ai_covered = false, never true"
+        );
+    }
+
+    /// The self-heal + gate end-to-end through `audit_repos` itself (not just the lower-level
+    /// `scan_cache` unit tests): a prior manifest whose RULE fingerprint matches the current
+    /// scan's, but whose `ai_covered` is `false`, must be treated as NO usable AI baseline —
+    /// exactly the same "no cache" path as a rule-set mismatch. Proven via the same observable
+    /// the rule-mismatch case uses (`effective_prior.is_none()` produces the "full re-scan"
+    /// note): a matching rules_fingerprint with `ai_covered = false` produces that SAME note,
+    /// which is only possible if the `ai_covered` gate (not the rules check) rejected the prior.
+    /// `run_ai_review` is kept `false` here so the test stays network-free — the note this
+    /// asserts on is pushed unconditionally before the `run_ai_review` gate is even consulted,
+    /// so it faithfully proves the `effective_prior`/`partition` decision regardless.
+    #[tokio::test]
+    async fn ai_covered_false_prior_is_ignored_even_when_rules_match() {
+        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (dir, sources) = scratch_repo_with_secret();
+        let content = std::fs::read_to_string(dir.path().join("config.rs")).unwrap();
+
+        // The exact rules_fingerprint `audit_repos` will compute for `selected: &[]`.
+        let rules_fp = crate::scan_cache::rules_fingerprint(std::iter::empty());
+        let mut b = crate::scan_cache::ManifestBuilder::new()
+            .with_rules_fingerprint(rules_fp)
+            .with_ai_covered(false); // the poisoned case: rules match, AI coverage doesn't
+        b.record_repo(
+            "me/api",
+            &[("config.rs".to_string(), content)],
+            &[], // an AI-off run has no AI findings to carry
+        );
+        let prior = b.finish();
+
+        let (report, manifest) = audit_repos(
+            &sources,
+            &[], // matches the empty rule selection used to build `prior` above
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            Some(&prior),
+            false,
+            true,
+            false, // run_ai_review off (network-free); the note asserted below fires regardless
+            true,  // run_deterministic on
+            None,
+            crate::llm::BackendResolution::Api,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+
+        let msg = report.message.unwrap_or_default();
+        assert!(
+            msg.contains("full re-scan"),
+            "a matching-rules but ai_covered=false prior must be treated as no usable cache \
+             (the SAME 'no effective prior' path a rules mismatch takes), not silently reused: {msg}"
+        );
+        // A fresh manifest is still produced (and, since this run's AI was off, still correctly
+        // stamped ai_covered = false again).
+        assert!(!manifest.ai_covered);
+    }
+
+    /// Normal incremental reuse keeps working: a prior manifest with `ai_covered == true` whose
+    /// file fingerprint EXACTLY matches the current content is a usable AI baseline —
+    /// `effective_prior` accepts it, `partition` reports the file unchanged, its carried finding
+    /// survives into the report, and the resulting fresh manifest is stamped `ai_covered == true`
+    /// again (the run had AI review ON and no error — see `audit_repos`'s doc comment on exactly
+    /// where that's computed). `run_ai_review: true` is used here (unlike the tests above) and is
+    /// still network-free: with the file reported unchanged, `part.changed` is empty and the
+    /// `audit_repo` call is skipped entirely (see its own `files.is_empty()` guard) — zero model
+    /// calls, proving reuse rather than a fresh audit is what produced the finding.
+    #[tokio::test]
+    async fn ai_covered_true_prior_is_reused_when_rules_and_content_match() {
+        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (dir, sources) = scratch_repo_with_secret();
+        let content = std::fs::read_to_string(dir.path().join("config.rs")).unwrap();
+
+        let rules_fp = crate::scan_cache::rules_fingerprint(std::iter::empty());
+        let carried_finding = Finding {
+            repo: "me/api".to_string(),
+            path: "config.rs".to_string(),
+            line: 2,
+            rule_id: "ARCH-CARRIED-1".to_string(),
+            severity: "medium".to_string(),
+            snippet: "carried from last scan".to_string(),
+            detail: "d".to_string(),
+            ..Finding::default()
+        };
+        let mut b = crate::scan_cache::ManifestBuilder::new()
+            .with_rules_fingerprint(rules_fp)
+            .with_ai_covered(true); // the healthy case: AI ran and completed last time
+        b.record_repo(
+            "me/api",
+            &[("config.rs".to_string(), content)],
+            std::slice::from_ref(&carried_finding),
+        );
+        let prior = b.finish();
+
+        let (report, manifest) = audit_repos(
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            Some(&prior),
+            false,
+            true,
+            true, // run_ai_review ON — safe here because nothing changed (see doc comment)
+            true, // run_deterministic on
+            None,
+            crate::llm::BackendResolution::Api,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+
+        assert!(
+            report.findings.iter().any(|f| f.rule_id == "ARCH-CARRIED-1"),
+            "the cached AI finding must be carried forward into the report: {:?}",
+            report.findings
+        );
+        let msg = report.message.unwrap_or_default();
+        assert!(
+            msg.contains("fully cached") || msg.contains("reused from cache"),
+            "the report must show the incremental reuse actually happened: {msg}"
+        );
+        assert!(
+            report.actual_usage.as_ref().map(|u| u.calls).unwrap_or(0) == 0,
+            "reuse must make ZERO model calls — proves the finding came from cache, not a fresh \
+             (impossible-in-this-test) audit"
+        );
+        assert!(
+            manifest.ai_covered,
+            "an AI-on run with no fatal AI error must stamp ai_covered = true again"
+        );
+    }
+
+    /// The self-heal in practice, exercised through `audit_repos`: a manifest deserialized from
+    /// LEGACY JSON that predates the `ai_covered` field (no such key at all) must be treated
+    /// identically to an explicit `ai_covered: false` manifest — ignored as an AI baseline, full
+    /// re-scan — with no migration step. `run_ai_review` stays off to keep this network-free; see
+    /// `ai_covered_false_prior_is_ignored_even_when_rules_match` for why that note still proves
+    /// the gate fired.
+    #[tokio::test]
+    async fn legacy_manifest_json_self_heals_through_audit_repos() {
+        std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+        let (dir, sources) = scratch_repo_with_secret();
+        let content = std::fs::read_to_string(dir.path().join("config.rs")).unwrap();
+        let fp = crate::scan_cache::content_fingerprint(&content);
+        let rules_fp = crate::scan_cache::rules_fingerprint(std::iter::empty());
+
+        // Hand-built JSON with NO "ai_covered" key — simulates a manifest written before the
+        // field existed.
+        let legacy_json = format!(
+            r#"{{
+                "version": 1,
+                "rules_fingerprint": "{rules_fp}",
+                "files": {{"me/api": {{"config.rs": "{fp}"}}}},
+                "findings": []
+            }}"#
+        );
+        let legacy: crate::scan_cache::ScanManifest =
+            serde_json::from_str(&legacy_json).expect("legacy manifest JSON must still parse");
+        assert!(!legacy.ai_covered, "sanity: self-heals to false at the deserialize step");
+
+        let (report, manifest) = audit_repos(
+            &sources,
+            &[],
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            Some(&legacy),
+            false,
+            true,
+            false, // network-free
+            true,
+            None,
+            crate::llm::BackendResolution::Api,
+            None,
+            &std::collections::HashMap::new(),
+        )
+        .await;
+
+        let msg = report.message.unwrap_or_default();
+        assert!(
+            msg.contains("full re-scan"),
+            "a self-healed (ai_covered=false) legacy manifest must be ignored as a baseline: {msg}"
+        );
+        assert!(!manifest.ai_covered);
     }
 
     // ── corpus-rules wire payload carries full content ────────────────────────
