@@ -3708,9 +3708,14 @@ fn same_construct(content: &str, a: usize, b: usize) -> bool {
 ///      and the page that relies on it), which does NOT require the same file or category.
 /// Every wrong-fusion guard still applies on top of whichever signal fired.
 fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool {
-    // Guard: two deterministic rows are two distinct defects by construction — never merge,
-    // regardless of which clustering signal below would otherwise fire.
-    if finding_origin(a) == Origin::Deterministic && finding_origin(b) == Origin::Deterministic {
+    // Guard: two deterministic rows are two distinct defects by construction UNLESS they share a
+    // captured structural object (design MERGE gap (ii)) — e.g. two independent secret-detectors
+    // both naming the SAME committed secret/file are the same root cause, not two. With no
+    // shared object, they stay distinct regardless of which clustering signal below would
+    // otherwise fire — this preserves the distinct-defects invariant.
+    let both_deterministic =
+        finding_origin(a) == Origin::Deterministic && finding_origin(b) == Origin::Deterministic;
+    if both_deterministic && !shared_captured_object(a, b) {
         return false;
     }
 
@@ -8986,6 +8991,62 @@ mod tests {
             out.len(),
             2,
             "two distinct defects survive as exactly two rows — nothing dropped, nothing over-merged"
+        );
+    }
+
+    // ── MERGE (cycle-2 queue-hardening, docs/plans/2026-09-30_cycle2-queue-hardening.md) ────
+    // Gap (ii): two deterministic findings sharing a captured object (same root cause — e.g. two
+    // secret-detectors naming the SAME committed secret) were blocked from ever merging by the
+    // unconditional det+det guard. Synthetic findings only, fixture-independent.
+
+    #[test]
+    fn merge_gap_ii_two_deterministic_findings_sharing_captured_object_merge() {
+        // Two DIFFERENT deterministic secret-detectors independently flag the SAME committed
+        // secret value in the same file — same root cause, not two distinct defects. The
+        // relaxed det+det guard (only blocks when there is NO shared captured object) must let
+        // this merge, proving gap (ii) is fixed.
+        let mut det_a = site_finding("SEC-SECRET-SCANNER-A-1", "src/config.ts", 10, "high", "");
+        det_a
+            .captures
+            .insert("secret".to_string(), "sk_live_abc123xyz".to_string());
+        let mut det_b =
+            site_finding("SEC-SECRET-SCANNER-B-1", "src/config.ts", 10, "critical", "");
+        det_b
+            .captures
+            .insert("value".to_string(), "sk_live_abc123xyz".to_string());
+
+        let out = merge_semantic_groups(vec![det_a, det_b], &[]);
+        assert_eq!(
+            out.len(),
+            1,
+            "two det findings naming the SAME captured secret must merge into one row: {out:?}"
+        );
+        let ids: std::collections::HashSet<String> = std::iter::once(out[0].rule_id.clone())
+            .chain(out[0].also_matches.iter().cloned())
+            .collect();
+        assert!(
+            ids.contains("SEC-SECRET-SCANNER-A-1") && ids.contains("SEC-SECRET-SCANNER-B-1"),
+            "both rule ids must be recorded on the merged row: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn merge_gap_ii_two_deterministic_findings_with_no_shared_object_stay_distinct() {
+        // Two deterministic findings in the same file with NO shared captured object and
+        // non-overlapping descriptions are genuinely different defects — the relaxed guard must
+        // NOT open the door to merging det+det pairs in general, only the shared-object case.
+        let mut det_a = site_finding("SEC-A-1", "src/config.ts", 10, "high", "");
+        det_a.detail =
+            "Missing input validation on the signup form allows arbitrary payloads.".to_string();
+        let mut det_b = site_finding("SEC-B-1", "src/config.ts", 11, "high", "");
+        det_b.detail =
+            "Outbound webhook requests do not verify the TLS certificate chain.".to_string();
+
+        let out = merge_semantic_groups(vec![det_a, det_b], &[]);
+        assert_eq!(
+            out.len(),
+            2,
+            "distinct det+det defects with no shared object must stay two rows: {out:?}"
         );
     }
 
