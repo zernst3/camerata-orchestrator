@@ -1261,6 +1261,74 @@ pub fn apply_severity_ceiling_rules(findings: Vec<Finding>) -> Vec<Finding> {
         .collect()
 }
 
+// ════════════════════════════════════════════════════════════════════════════════════
+// AGGREGATE-PASS TUNING (calibration / fix-generation / alternative-recommendation)
+// ════════════════════════════════════════════════════════════════════════════════════
+//
+// `verify_findings`, `generate_fix_specifics`, and `recommend_alternatives` each used to
+// bundle EVERY finding/rule in the scan into a single completion with a flat
+// `max_tokens(4096)`. Two failure modes that never affected the small per-(chunk,
+// rule-batch) `audit_pass` calls: (1) on the CLI backend, one giant non-streaming call had
+// no progress signal, so a slow-but-live run tripped the flat 300s subprocess timeout with
+// no partial-output salvage; (2) on the API backend, a large finding set's response
+// legitimately needs more than 4096 output tokens and got silently truncated instead. Both
+// passes now (a) route through `LlmPort::complete_streaming` even when there is no
+// transcript to feed — the CLI leg's heartbeat resets on any progress and SALVAGES partial
+// output on a late kill, instead of the flat non-streaming path's fixed deadline — and (b)
+// split their input into bounded chunks, each an independent streamed call with a
+// per-chunk `max_tokens` that scales with that chunk's item count, so no single call is
+// asked to describe more than one bounded batch's worth of findings/rules.
+
+/// Floor for [`scaled_max_tokens`] — the ORIGINAL flat budget every aggregate pass
+/// hardcoded before this fix, kept as the minimum so a small finding/rule set (the common
+/// case) sees zero behavior change.
+const AGGREGATE_MAX_TOKENS_FLOOR: u32 = 4096;
+
+/// Ceiling for [`scaled_max_tokens`] — bounds a single call's requested budget regardless
+/// of how many items land in one chunk. The per-pass `*_BATCH_SIZE` constants below keep
+/// any one call's item count well under what would reach this in practice; the ceiling is
+/// a second, independent guard against requesting an unreasonably large budget from the
+/// API (e.g. if a caller ever skips chunking).
+const AGGREGATE_MAX_TOKENS_CEILING: u32 = 32_000;
+
+/// `max_tokens` for a call describing `n_items` things, given a per-item token estimate —
+/// clamped to `[AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING]` so small batches
+/// keep today's flat budget and large batches never request more than the ceiling.
+fn scaled_max_tokens(n_items: usize, per_item_tokens: u32) -> u32 {
+    (n_items as u32)
+        .saturating_mul(per_item_tokens)
+        .clamp(AGGREGATE_MAX_TOKENS_FLOOR, AGGREGATE_MAX_TOKENS_CEILING)
+}
+
+/// Per-finding token estimate for the CALIBRATION pass's response — each verdict is a
+/// compact JSON object (`{"index","severity","confidence","reason"}`) with a one-sentence
+/// `reason`, so a modest per-item budget covers it comfortably.
+const VERIFY_TOKENS_PER_FINDING: u32 = 150;
+
+/// How many findings fit in ONE calibration call. Chosen so a FULL chunk already needs
+/// more than [`AGGREGATE_MAX_TOKENS_FLOOR`] (`CALIBRATION_BATCH_SIZE *
+/// VERIFY_TOKENS_PER_FINDING` > 4096) — the exact shape of the truncation bug this fixes —
+/// while staying well short of [`AGGREGATE_MAX_TOKENS_CEILING`]. A chunk whose call fails
+/// or times out passes through uncalibrated (see the `votes.is_empty()` branch below) —
+/// NEVER dropped — so a smaller chunk size only costs calibration precision on failure,
+/// never completeness.
+const CALIBRATION_BATCH_SIZE: usize = 40;
+
+/// Per-finding token estimate for the FIX-GENERATION pass's response — each entry is a
+/// full prose sentence describing a concrete, codebase-specific change, materially longer
+/// than a calibration verdict.
+const FIX_TOKENS_PER_FINDING: u32 = 250;
+
+/// How many findings fit in ONE fix-generation call. Same rationale as
+/// `CALIBRATION_BATCH_SIZE` (a full chunk already exceeds the old flat floor); smaller
+/// than the calibration batch because each response entry is longer prose.
+const FIX_BATCH_SIZE: usize = 25;
+
+/// How many rules fit in ONE alternative-recommendation call. Each rule's block lists
+/// every option with its own rationale — comparable prose volume to a fix — so it's sized
+/// like `FIX_BATCH_SIZE`.
+const ALTERNATIVES_BATCH_SIZE: usize = 25;
+
 /// Run the skeptic pass over a repo's AI findings (a fresh, reasoning-based perspective —
 /// deliberately NOT re-sent the whole digest, so it judges exploitability/context, not
 /// code minutiae). Graceful: on any model failure the findings pass through unchanged.
@@ -1272,6 +1340,12 @@ pub fn apply_severity_ceiling_rules(findings: Vec<Finding>) -> Vec<Finding> {
 /// prompt/output instead of "no output captured" — a transcript-recording failure (lock
 /// poisoning etc., handled inside `TranscriptStore` itself) can never affect calibration,
 /// which stays best-effort exactly as before.
+///
+/// LARGE finding sets are split into [`CALIBRATION_BATCH_SIZE`]-sized chunks, each its own
+/// streamed call (see the "AGGREGATE-PASS TUNING" section above) — a chunk that fails only
+/// loses ITS findings' calibration (they pass through uncalibrated, never dropped), not the
+/// whole scan's. The single-chunk case (the common one) is byte-for-byte the same prompt
+/// and transcript session id this function always used.
 #[allow(clippy::too_many_arguments)]
 pub async fn verify_findings(
     llm: &dyn LlmPort,
@@ -1290,107 +1364,136 @@ pub async fn verify_findings(
     if findings.is_empty() {
         return findings;
     }
-    let mut prompt = format!("Repository: {repo}\n");
-    // Proportionality signal (#51, Bug 4 §2b): ALWAYS given now (was thorough-only) — a
-    // small/young codebase must not be held to the architecture of a large one, and this feeds
-    // the informational bucketing of stance/YAGNI notes downstream. Over-engineering / YAGNI
-    // notes auto-hedge to low confidence + capped severity.
-    prompt.push_str(&format!(
-        "{repo_shape} Judge each finding PROPORTIONALLY to the codebase's size and maturity: an \
-         'over-engineering'/'missing abstraction'/YAGNI note on a small codebase is a debatable \
-         preference (low confidence, capped severity), not a violation.\n"
-    ));
-    prompt.push_str("\nScrutinize these findings:\n");
-    for (i, f) in findings.iter().enumerate() {
-        prompt.push_str(&format!(
-            "[{i}] (severity {}) {}:{} — {} :: {}\n",
-            f.severity, f.path, f.line, f.snippet, f.detail
-        ));
-    }
-    // Calibration runs on its OWN selected model (the UI exposes it). Build a fresh request per
-    // pass (LlmRequest is consumed by complete).
     let system = verify_system_prompt();
-    let build_req = || {
-        let mut req = LlmRequest::new(prompt.clone())
-            .with_system(system.clone())
-            // Aggregated findings across all chunks can be many; one verdict each.
-            .with_max_tokens(4096);
-        if let Some(m) = calibration_model {
-            req = req.with_model(m.to_string());
-        }
-        req
-    };
+    // Split into bounded chunks (see `CALIBRATION_BATCH_SIZE`'s doc comment) — each is an
+    // independent streamed call with LOCAL indices `0..chunk.len()`, so a failure in one
+    // chunk never touches another's verdicts. The common case (findings.len() <=
+    // CALIBRATION_BATCH_SIZE) produces exactly one chunk equal to the whole input, so the
+    // prompt/session/output shape below is byte-for-byte what this function always sent.
+    let owned_chunks: Vec<Vec<Finding>> = findings
+        .chunks(CALIBRATION_BATCH_SIZE)
+        .map(<[Finding]>::to_vec)
+        .collect();
+    let n_chunks = owned_chunks.len();
+    let mut calibrated: Vec<Finding> = Vec::with_capacity(findings.len());
 
-    // Register (or replace) this pass's transcript entry with the REAL prompt before the
-    // first call — mirrors `audit_pass`/`run_prose_lens`'s register-then-record pattern. Same
-    // session id + role convention the caller previously registered a placeholder under
-    // (`audit-{repo}-calibrate`), so this now carries the actual prompt from the start instead
-    // of the empty one the placeholder shipped with.
-    let session = format!("audit-{repo}-calibrate");
-    if let Some((store, key)) = feedback {
-        store.register(
-            key,
-            crate::transcript::AgentTranscript {
-                session_id: session.clone(),
-                role: format!(
-                    "calibrating {} findings on {} — {repo}",
-                    findings.len(),
-                    calibration_model.unwrap_or("default")
-                ),
-                prompt: prompt.clone(),
-                output: String::new(),
-                status: "running".to_string(),
-            },
-        );
-    }
-
-    // THOROUGH mode (#51): run the calibration verdict MULTIPLE times and take the conservative
-    // consensus, so a single over-confident pass can't push a debatable finding to HIGH. Costs
-    // ~3x the calibration tokens (opt-in). Default mode is a single pass (unchanged behavior).
-    let passes = if thorough { 3 } else { 1 };
-    let mut votes: Vec<String> = Vec::new();
-    for pass_idx in 0..passes {
-        // Non-streaming, so use the coarse total backstop; a failed pass is simply skipped
-        // (calibration is best-effort, never load-bearing).
-        if let Ok(Ok(resp)) =
-            tokio::time::timeout(total_backstop(), llm.complete(build_req())).await
-        {
-            if let Some(m) = meter {
-                m.record(&resp);
-            }
-            if let Some((store, key)) = feedback {
-                // Single-pass (the common case) records the raw response as-is, so the
-                // transcript's output is exactly the model's text. THOROUGH mode's 3 votes are
-                // each appended with a pass label so no vote is left silent.
-                if passes > 1 {
-                    store.append_output(
-                        key,
-                        &session,
-                        &format!("── pass {}/{passes} ──\n{}", pass_idx + 1, resp.text),
-                    );
-                } else {
-                    store.append_output(key, &session, &resp.text);
-                }
-            }
-            votes.push(resp.text);
+    for (chunk_idx, chunk) in owned_chunks.into_iter().enumerate() {
+        let chunk_len = chunk.len();
+        let mut prompt = format!("Repository: {repo}\n");
+        // Proportionality signal (#51, Bug 4 §2b): ALWAYS given now (was thorough-only) — a
+        // small/young codebase must not be held to the architecture of a large one, and this
+        // feeds the informational bucketing of stance/YAGNI notes downstream. Over-engineering
+        // / YAGNI notes auto-hedge to low confidence + capped severity.
+        prompt.push_str(&format!(
+            "{repo_shape} Judge each finding PROPORTIONALLY to the codebase's size and maturity: \
+             an 'over-engineering'/'missing abstraction'/YAGNI note on a small codebase is a \
+             debatable preference (low confidence, capped severity), not a violation.\n"
+        ));
+        prompt.push_str("\nScrutinize these findings:\n");
+        for (i, f) in chunk.iter().enumerate() {
+            prompt.push_str(&format!(
+                "[{i}] (severity {}) {}:{} — {} :: {}\n",
+                f.severity, f.path, f.line, f.snippet, f.detail
+            ));
         }
-    }
-    let calibrated = match votes.len() {
-        0 => findings, // every pass failed — pass findings through unchanged
-        1 => apply_verdicts(&votes[0], findings),
-        _ => apply_verdicts(&consensus_verdicts(&votes, findings.len()), findings),
-    };
-    if let Some((store, key)) = feedback {
-        if votes.is_empty() {
-            store.append_output(
-                key,
-                &session,
-                "every calibration pass failed or timed out — findings pass through unchanged.",
-            );
-            store.set_status(key, &session, "blocked");
+        // Calibration runs on its OWN selected model (the UI exposes it). Build a fresh
+        // request per pass (LlmRequest is consumed by complete_streaming).
+        let build_req = || {
+            let mut req = LlmRequest::new(prompt.clone())
+                .with_system(system.clone())
+                .with_max_tokens(scaled_max_tokens(chunk_len, VERIFY_TOKENS_PER_FINDING));
+            if let Some(m) = calibration_model {
+                req = req.with_model(m.to_string());
+            }
+            req
+        };
+
+        // Register (or replace) this pass's transcript entry with the REAL prompt before the
+        // first call — mirrors `audit_pass`/`run_prose_lens`'s register-then-record pattern.
+        // Single-chunk runs keep the EXACT session id + role convention this function always
+        // used (`audit-{repo}-calibrate`); a `-bN` suffix + batch label only appears once
+        // there's more than one chunk, a shape no pre-existing caller depended on.
+        let session = if n_chunks > 1 {
+            format!("audit-{repo}-calibrate-b{chunk_idx}")
         } else {
-            store.set_status(key, &session, "done");
+            format!("audit-{repo}-calibrate")
+        };
+        if let Some((store, key)) = feedback {
+            store.register(
+                key,
+                crate::transcript::AgentTranscript {
+                    session_id: session.clone(),
+                    role: format!(
+                        "calibrating {chunk_len} findings on {} — {repo}{}",
+                        calibration_model.unwrap_or("default"),
+                        if n_chunks > 1 {
+                            format!(" (batch {}/{n_chunks})", chunk_idx + 1)
+                        } else {
+                            String::new()
+                        }
+                    ),
+                    prompt: prompt.clone(),
+                    output: String::new(),
+                    status: "running".to_string(),
+                },
+            );
         }
+
+        // THOROUGH mode (#51): run the calibration verdict MULTIPLE times and take the
+        // conservative consensus, so a single over-confident pass can't push a debatable
+        // finding to HIGH. Costs ~3x the calibration tokens (opt-in). Default mode is a
+        // single pass (unchanged behavior).
+        let passes = if thorough { 3 } else { 1 };
+        let mut votes: Vec<String> = Vec::new();
+        for pass_idx in 0..passes {
+            // Routed through the STREAMING transport (not the flat `complete`) even when
+            // there is no live transcript to feed — the CLI leg's heartbeat resets on any
+            // progress and SALVAGES partial output on a late kill, instead of the flat
+            // non-streaming path's fixed 300s deadline with no partial credit for a
+            // near-complete run. `on_delta` is a no-op here: the transcript (when present)
+            // is still recorded post-hoc below, unchanged, so `feedback = Some` behavior is
+            // byte-for-byte identical to before this change.
+            let mut on_delta = |_: &str| {};
+            if let Ok(resp) = llm.complete_streaming(build_req(), &mut on_delta).await {
+                if let Some(m) = meter {
+                    m.record(&resp);
+                }
+                if let Some((store, key)) = feedback {
+                    // Single-pass (the common case) records the raw response as-is, so the
+                    // transcript's output is exactly the model's text. THOROUGH mode's 3
+                    // votes are each appended with a pass label so no vote is left silent.
+                    if passes > 1 {
+                        store.append_output(
+                            key,
+                            &session,
+                            &format!("── pass {}/{passes} ──\n{}", pass_idx + 1, resp.text),
+                        );
+                    } else {
+                        store.append_output(key, &session, &resp.text);
+                    }
+                }
+                votes.push(resp.text);
+            }
+        }
+        let chunk_calibrated = match votes.len() {
+            0 => chunk, // every pass for this chunk failed — pass its findings through unchanged
+            1 => apply_verdicts(&votes[0], chunk),
+            _ => apply_verdicts(&consensus_verdicts(&votes, chunk_len), chunk),
+        };
+        if let Some((store, key)) = feedback {
+            if votes.is_empty() {
+                store.append_output(
+                    key,
+                    &session,
+                    "every calibration pass failed or timed out — findings pass through \
+                     unchanged.",
+                );
+                store.set_status(key, &session, "blocked");
+            } else {
+                store.set_status(key, &session, "done");
+            }
+        }
+        calibrated.extend(chunk_calibrated);
     }
     // D5: the deterministic severity floor runs regardless of whether the LLM calibration
     // pass succeeded — it re-derives its verdict from the finding's own text, not the model's,
@@ -1875,49 +1978,90 @@ async fn recommend_alternatives(
         return Ok(Vec::new());
     }
     let repo_map = build_repo_map(map_files);
-    let chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
-    let digest = chunks.first().map(|c| build_digest(c)).unwrap_or_default();
-    let prompt = format!(
-        "Repository: {repo}\n\n{repo_map}{digest}\n\n{}",
-        build_alternatives_block(alternatives)
-    );
-    let session = format!("audit-{repo}-alternatives");
-    if let Some((store, key)) = feedback {
-        store.register(
-            key,
-            crate::transcript::AgentTranscript {
-                session_id: session.clone(),
-                role: format!(
-                    "recommending {} alternative(s) — {repo}",
-                    alternatives.len()
-                ),
-                prompt: prompt.clone(),
-                output: String::new(),
-                status: "running".to_string(),
-            },
+    let file_chunks = chunk_files(files, CHUNK_DIGEST_CHARS);
+    let digest = file_chunks
+        .first()
+        .map(|c| build_digest(c))
+        .unwrap_or_default();
+
+    // Bounded chunks (see `ALTERNATIVES_BATCH_SIZE`'s doc comment) — each rule-batch is an
+    // independent streamed call, so no single completion is asked to decide every
+    // multi-option rule in the scan at once. The common case (alternatives.len() <=
+    // ALTERNATIVES_BATCH_SIZE) is exactly one chunk equal to the whole input, so the
+    // prompt/session/role shape below is byte-for-byte what this function always sent.
+    let rule_chunks: Vec<&[RuleAlternatives]> =
+        alternatives.chunks(ALTERNATIVES_BATCH_SIZE).collect();
+    let n_chunks = rule_chunks.len();
+    let mut recommendations = Vec::with_capacity(alternatives.len());
+
+    for (chunk_idx, alt_chunk) in rule_chunks.into_iter().enumerate() {
+        let prompt = format!(
+            "Repository: {repo}\n\n{repo_map}{digest}\n\n{}",
+            build_alternatives_block(alt_chunk)
         );
+        // Single-chunk runs keep the EXACT session id + role this function always used
+        // (`audit-{repo}-alternatives`); the `-bN` suffix + batch label only appears once
+        // there's more than one chunk.
+        let session = if n_chunks > 1 {
+            format!("audit-{repo}-alternatives-b{chunk_idx}")
+        } else {
+            format!("audit-{repo}-alternatives")
+        };
+        if let Some((store, key)) = feedback {
+            store.register(
+                key,
+                crate::transcript::AgentTranscript {
+                    session_id: session.clone(),
+                    role: format!(
+                        "recommending {} alternative(s) — {repo}{}",
+                        alt_chunk.len(),
+                        if n_chunks > 1 {
+                            format!(" (batch {}/{n_chunks})", chunk_idx + 1)
+                        } else {
+                            String::new()
+                        }
+                    ),
+                    prompt: prompt.clone(),
+                    output: String::new(),
+                    status: "running".to_string(),
+                },
+            );
+        }
+        let mut req = LlmRequest::new(prompt)
+            .with_system(alternatives_system_prompt())
+            .with_max_tokens(4096);
+        if let Some(m) = audit_model {
+            req = req.with_model(m.to_string());
+        }
+        // Routed through the STREAMING transport EVEN WHEN there is no live transcript to
+        // feed (`feedback = None`) — the CLI leg's heartbeat resets on any progress and
+        // SALVAGES partial output on a late kill, instead of the flat non-streaming path's
+        // fixed 300s deadline with no partial credit for a near-complete run.
+        let resp_result = if let Some((store, key)) = feedback {
+            let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
+            llm.complete_streaming(req, &mut on_delta).await
+        } else {
+            let mut on_delta = |_: &str| {};
+            llm.complete_streaming(req, &mut on_delta).await
+        };
+        if let Some((store, key)) = feedback {
+            store.set_status(
+                key,
+                &session,
+                if resp_result.is_ok() {
+                    "done"
+                } else {
+                    "blocked"
+                },
+            );
+        }
+        let resp = resp_result?;
+        if let Some(m) = meter {
+            m.record(&resp);
+        }
+        recommendations.extend(parse_alternative_recommendations(&resp.text, alt_chunk));
     }
-    let mut req = LlmRequest::new(prompt).with_system(alternatives_system_prompt()).with_max_tokens(4096);
-    if let Some(m) = audit_model {
-        req = req.with_model(m.to_string());
-    }
-    let resp_result = if let Some((store, key)) = feedback {
-        let mut on_delta = |t: &str| store.append_output_raw(key, &session, t);
-        llm.complete_streaming(req, &mut on_delta).await
-    } else {
-        let cap = total_backstop();
-        tokio::time::timeout(cap, llm.complete(req))
-            .await
-            .map_err(|_| anyhow::anyhow!("LLM call exceeded the {}s backstop", cap.as_secs()))?
-    };
-    if let Some((store, key)) = feedback {
-        store.set_status(key, &session, if resp_result.is_ok() { "done" } else { "blocked" });
-    }
-    let resp = resp_result?;
-    if let Some(m) = meter {
-        m.record(&resp);
-    }
-    Ok(parse_alternative_recommendations(&resp.text, alternatives))
+    Ok(recommendations)
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -2274,11 +2418,12 @@ pub(crate) fn fix_leaks_methodology(fix: &str) -> Option<String> {
 /// such a finding from `do_now`: a same-week action item must come with an actual fix.
 ///
 /// Modeled on [`verify_findings`] above: same `&dyn LlmPort` seam, same [`UsageMeter`]
-/// folding, same non-streaming total-backstop timeout. Dependency-audit findings
-/// (`DEP_AUDIT_RULE_ID`) are skipped — they're carved into their own §7 lane and never flow
-/// through `resolve_fix`/`CuratedSiteJson` either (see that carve-out's doc comment in
-/// `report_export.rs`). Graceful: a finding the model never responds about at all (a whole
-/// round times out, or every attempt is rejected) still gets the needs-review fallback
+/// folding, same streamed-call + bounded-chunk shape (`FIX_BATCH_SIZE`, in the
+/// "AGGREGATE-PASS TUNING" section). Dependency-audit findings (`DEP_AUDIT_RULE_ID`) are
+/// skipped — they're carved into their own §7 lane and never flow through
+/// `resolve_fix`/`CuratedSiteJson` either (see that carve-out's doc comment in
+/// `report_export.rs`). Graceful: a finding the model never responds about at all (its
+/// chunk's call fails, or every attempt is rejected) still gets the needs-review fallback
 /// rather than being silently dropped — recall-first discovery, matching every other pass in
 /// this module.
 pub async fn generate_fix_specifics(
@@ -2311,75 +2456,90 @@ pub async fn generate_fix_specifics(
         if pending.is_empty() {
             break;
         }
-        let prompt = {
-            let refs: Vec<&Finding> = pending.iter().map(|&i| &findings[i]).collect();
-            let local_feedback: std::collections::HashMap<usize, String> = pending
-                .iter()
-                .enumerate()
-                .filter_map(|(pos, orig)| feedback.get(orig).cloned().map(|r| (pos, r)))
-                .collect();
-            format!(
-                "Repository: {repo}\n\nWrite a concrete fix for each finding below:\n\n{}",
-                build_fix_specific_block(&refs, files, corpus, &local_feedback)
-            )
-        };
-        let mut req = LlmRequest::new(prompt)
-            .with_system(system.clone())
-            .with_max_tokens(4096);
-        if let Some(m) = fix_model {
-            req = req.with_model(m.to_string());
-        }
-        let cap = total_backstop();
-        let resp = match tokio::time::timeout(cap, llm.complete(req)).await {
-            Ok(Ok(r)) => r,
-            // Transport/timeout failure: nothing to validate this round. `pending` is left
-            // untouched so the next round retries the same set (or, on the last round, so
-            // the needs-review fallback below picks them all up).
-            _ => continue,
-        };
-        if let Some(m) = meter {
-            m.record(&resp);
-        }
-        let parsed = parse_fix_specifics(&resp.text);
-
         let mut still_pending = Vec::new();
-        for (pos, &orig_idx) in pending.iter().enumerate() {
-            let Some(text) = parsed.get(&pos) else {
-                feedback
-                    .entry(orig_idx)
-                    .or_insert_with(|| "you did not return a fix for this finding".to_string());
-                still_pending.push(orig_idx);
-                continue;
+        // Bounded chunks (see `FIX_BATCH_SIZE`'s doc comment) — each is an independent
+        // streamed call, so a failure/timeout in ONE chunk only re-queues ITS findings for
+        // the next attempt, never the whole still-pending set. `pending.chunks(..)` yields
+        // exactly one chunk (the whole set) in the common case, so the request/self-check
+        // shape below is unchanged from before this fix in that case.
+        for batch in pending.chunks(FIX_BATCH_SIZE) {
+            let prompt = {
+                let refs: Vec<&Finding> = batch.iter().map(|&i| &findings[i]).collect();
+                let local_feedback: std::collections::HashMap<usize, String> = batch
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(pos, orig)| feedback.get(orig).cloned().map(|r| (pos, r)))
+                    .collect();
+                format!(
+                    "Repository: {repo}\n\nWrite a concrete fix for each finding below:\n\n{}",
+                    build_fix_specific_block(&refs, files, corpus, &local_feedback)
+                )
             };
-            let evidence = fix_evidence_blob(&findings[orig_idx], files);
-            if let Some(bad) = find_ungrounded_identifier(text, &evidence) {
-                feedback.insert(
-                    orig_idx,
-                    format!(
-                        "you named `{bad}`, which doesn't appear anywhere in this finding's \
-                         evidence"
-                    ),
-                );
-                still_pending.push(orig_idx);
-                continue;
+            let mut req = LlmRequest::new(prompt)
+                .with_system(system.clone())
+                .with_max_tokens(scaled_max_tokens(batch.len(), FIX_TOKENS_PER_FINDING));
+            if let Some(m) = fix_model {
+                req = req.with_model(m.to_string());
             }
-            if let Some(reason) = fix_contradicts_detail(text, &findings[orig_idx].detail) {
-                feedback.insert(orig_idx, reason);
-                still_pending.push(orig_idx);
-                continue;
+            // Routed through the STREAMING transport (not the flat `complete`) so a large
+            // batch gets the CLI heartbeat + partial-output salvage instead of a flat,
+            // non-reset 300s deadline. `on_delta` is a no-op: this pass has no live
+            // transcript sink to feed.
+            let mut on_delta = |_: &str| {};
+            let resp = match llm.complete_streaming(req, &mut on_delta).await {
+                Ok(r) => r,
+                // Transport/timeout failure: nothing to validate for this chunk this round.
+                // Re-queue exactly this chunk's findings so the next round retries them (or,
+                // on the last round, the needs-review fallback below picks them up) — a
+                // failure never re-queues findings OUTSIDE this chunk.
+                Err(_) => {
+                    still_pending.extend(batch.iter().copied());
+                    continue;
+                }
+            };
+            if let Some(m) = meter {
+                m.record(&resp);
             }
-            if let Some(leak) = fix_leaks_methodology(text) {
-                feedback.insert(
-                    orig_idx,
-                    format!(
-                        "you described detection methodology (\"{leak}\") — describe only the \
-                         fix, never how it was found"
-                    ),
-                );
-                still_pending.push(orig_idx);
-                continue;
+            let parsed = parse_fix_specifics(&resp.text);
+
+            for (pos, &orig_idx) in batch.iter().enumerate() {
+                let Some(text) = parsed.get(&pos) else {
+                    feedback
+                        .entry(orig_idx)
+                        .or_insert_with(|| "you did not return a fix for this finding".to_string());
+                    still_pending.push(orig_idx);
+                    continue;
+                };
+                let evidence = fix_evidence_blob(&findings[orig_idx], files);
+                if let Some(bad) = find_ungrounded_identifier(text, &evidence) {
+                    feedback.insert(
+                        orig_idx,
+                        format!(
+                            "you named `{bad}`, which doesn't appear anywhere in this finding's \
+                             evidence"
+                        ),
+                    );
+                    still_pending.push(orig_idx);
+                    continue;
+                }
+                if let Some(reason) = fix_contradicts_detail(text, &findings[orig_idx].detail) {
+                    feedback.insert(orig_idx, reason);
+                    still_pending.push(orig_idx);
+                    continue;
+                }
+                if let Some(leak) = fix_leaks_methodology(text) {
+                    feedback.insert(
+                        orig_idx,
+                        format!(
+                            "you described detection methodology (\"{leak}\") — describe only \
+                             the fix, never how it was found"
+                        ),
+                    );
+                    still_pending.push(orig_idx);
+                    continue;
+                }
+                findings[orig_idx].fix_specific = Some(text.clone());
             }
-            findings[orig_idx].fix_specific = Some(text.clone());
         }
         pending = still_pending;
     }
@@ -6806,6 +6966,355 @@ mod tests {
         assert_eq!(entry.status, "done");
     }
 
+    /// Records which `LlmPort` method was actually invoked — `complete` (flat, no progress
+    /// signal, hard 300s CLI deadline) vs `complete_streaming` (heartbeat + salvage on the
+    /// CLI leg). Used to prove the three aggregate passes route through the tolerant
+    /// streaming seam EVEN WHEN there is no live transcript to feed (`feedback = None`),
+    /// which used to force them onto the flat `complete` path.
+    struct SeamRecordingCompleter {
+        complete_calls: std::sync::atomic::AtomicUsize,
+        streaming_calls: std::sync::atomic::AtomicUsize,
+        text: String,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for SeamRecordingCompleter {
+        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            self.complete_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(LlmResponse {
+                text: self.text.clone(),
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+            })
+        }
+        async fn complete_streaming(
+            &self,
+            _req: LlmRequest,
+            on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            self.streaming_calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            on_delta(&self.text);
+            Ok(LlmResponse {
+                text: self.text.clone(),
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+            })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    /// GUARD (this fix): `feedback: None` (the headless `camerata inspect` shape — see
+    /// `crates/cli/src/inspect_cmd.rs`) used to force `verify_findings` onto the flat,
+    /// non-streaming `complete` path, which has a hard 300s CLI subprocess deadline with no
+    /// progress reset and no partial-output salvage. It must now route through
+    /// `complete_streaming` regardless of whether a transcript is attached.
+    #[tokio::test]
+    async fn verify_findings_with_no_feedback_uses_the_streaming_seam_not_flat_complete() {
+        let resp_text =
+            r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":"x"}]}"#;
+        let completer = SeamRecordingCompleter {
+            complete_calls: 0.into(),
+            streaming_calls: 0.into(),
+            text: resp_text.to_string(),
+        };
+        let findings = vec![finding("AI-X", "medium")];
+
+        let _ = verify_findings(
+            &completer,
+            "me/api",
+            findings,
+            None,
+            None, // feedback: None — the headless-CLI shape
+            None,
+            false,
+            "This repository has 1 code files.",
+        )
+        .await;
+
+        assert_eq!(
+            completer
+                .complete_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "must never use the flat non-streaming path"
+        );
+        assert_eq!(
+            completer
+                .streaming_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "must route through complete_streaming even with feedback = None"
+        );
+    }
+
+    /// Same guard for `recommend_alternatives`.
+    #[tokio::test]
+    async fn recommend_alternatives_with_no_feedback_uses_the_streaming_seam_not_flat_complete() {
+        let resp_text = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","recommended_option_id":"opt-a","applicable":true,"evidence":"a.rs:1"}]}"#;
+        let completer = SeamRecordingCompleter {
+            complete_calls: 0.into(),
+            streaming_calls: 0.into(),
+            text: resp_text.to_string(),
+        };
+        let files = vec![("a.rs".to_string(), "fn f() {}".to_string())];
+        let alt = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
+
+        let res = recommend_alternatives(
+            &completer,
+            "me/api",
+            &files,
+            &files,
+            &[alt],
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(
+            res.is_ok(),
+            "the streaming call succeeded, so this must be Ok: {res:?}"
+        );
+        assert_eq!(
+            completer
+                .complete_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "must never use the flat non-streaming path"
+        );
+        assert_eq!(
+            completer
+                .streaming_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "must route through complete_streaming even with feedback = None"
+        );
+    }
+
+    /// Same guard for `generate_fix_specifics` — it never took a `feedback`/transcript
+    /// parameter at all, so it always hit the flat `complete` path before this fix.
+    #[tokio::test]
+    async fn generate_fix_specifics_uses_the_streaming_seam_not_flat_complete() {
+        let resp_text = r#"{"fixes":[{"index":0,"fix":"Validate the input before using it and return an error otherwise."}]}"#;
+        let completer = SeamRecordingCompleter {
+            complete_calls: 0.into(),
+            streaming_calls: 0.into(),
+            text: resp_text.to_string(),
+        };
+        let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
+
+        let out = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+
+        assert_eq!(
+            completer
+                .complete_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "must never use the flat non-streaming path"
+        );
+        assert_eq!(
+            completer
+                .streaming_calls
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "must route through complete_streaming"
+        );
+        assert_eq!(
+            out[0].fix_specific.as_deref(),
+            Some("Validate the input before using it and return an error otherwise.")
+        );
+    }
+
+    /// max_tokens must SCALE with the finding count instead of the old hardcoded flat 4096 —
+    /// a large finding set legitimately needs more output tokens than that, and the API
+    /// backend (unlike the CLI) actually enforces the cap, silently truncating the response
+    /// otherwise. A FULL `CALIBRATION_BATCH_SIZE` chunk is deliberately sized (see that
+    /// constant's doc comment) to already exceed the old flat floor.
+    #[tokio::test]
+    async fn verify_findings_scales_max_tokens_with_finding_count() {
+        let completer = CapturingCompleter::default();
+        let findings: Vec<Finding> = (0..CALIBRATION_BATCH_SIZE)
+            .map(|_| finding("AI-X", "medium"))
+            .collect();
+
+        let _ = verify_findings(
+            &completer,
+            "me/api",
+            findings,
+            None,
+            None,
+            None,
+            false,
+            "This repository has many code files.",
+        )
+        .await;
+
+        let seen = completer.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1, "a full single chunk makes exactly one call");
+        let expected = scaled_max_tokens(CALIBRATION_BATCH_SIZE, VERIFY_TOKENS_PER_FINDING);
+        assert!(
+            expected > 4096,
+            "test setup must exercise the scaled-above-floor branch, got {expected}"
+        );
+        assert_eq!(seen[0].max_tokens, expected);
+    }
+
+    /// A SMALL finding set must see ZERO behavior change — it stays pinned at the original
+    /// flat 4096 floor.
+    #[tokio::test]
+    async fn verify_findings_max_tokens_floor_unchanged_for_small_finding_sets() {
+        let completer = CapturingCompleter::default();
+        let findings = vec![finding("AI-X", "medium")];
+
+        let _ = verify_findings(
+            &completer,
+            "me/api",
+            findings,
+            None,
+            None,
+            None,
+            false,
+            "This repository has 1 code files.",
+        )
+        .await;
+
+        let seen = completer.seen.lock().unwrap();
+        assert_eq!(seen[0].max_tokens, 4096);
+    }
+
+    /// A fake that streams a FEW tokens of real output and then returns `Ok` with only that
+    /// PARTIAL text — exactly the shape `complete_cli_streaming`'s SALVAGE path returns when
+    /// the subprocess is killed mid-response after producing something usable (see that
+    /// function's own SALVAGE doc comment in `crates/llm/src/llm.rs`). The first call
+    /// "dies" after covering only finding 0; later calls (the automatic next-round retry)
+    /// are fully healthy. Proves the pass extracts whatever a partial/salvaged response
+    /// actually contains — recovering finding 0 in the SAME round — instead of discarding
+    /// the whole round because the stream never finished cleanly.
+    struct SalvagingFixCompleter {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for SalvagingFixCompleter {
+        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            anyhow::bail!("this fake only supports the streaming path")
+        }
+        async fn complete_streaming(
+            &self,
+            _req: LlmRequest,
+            on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            let call = self
+                .calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let text = if call == 0 {
+                // Streamed a few real tokens, then the process died — SALVAGE returns `Ok`
+                // with only what was actually produced, never an `Err` that discards it.
+                on_delta(r#"{"fixes":[{"index":0,"fix":"Validate the"#);
+                r#"{"fixes":[{"index":0,"fix":"Validate the input before using it and return an error otherwise."}]}"#.to_string()
+            } else {
+                // Recovered: every subsequent call (the automatic retry round) answers in
+                // full for every plausible local index.
+                let entries: Vec<String> = (0..50)
+                    .map(|i| {
+                        format!(
+                            r#"{{"index":{i},"fix":"Validate the input before using it and return an error otherwise."}}"#
+                        )
+                    })
+                    .collect();
+                format!(r#"{{"fixes":[{}]}}"#, entries.join(","))
+            };
+            on_delta(&text);
+            Ok(LlmResponse {
+                text,
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+            })
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_fix_specifics_recovers_partial_output_from_a_salvaged_stream() {
+        let findings = vec![
+            fx("ARCH-1", "a.rs", 1, "some real defect", "let x = 1;"),
+            fx("ARCH-1", "b.rs", 2, "some real defect", "let y = 2;"),
+            fx("ARCH-1", "c.rs", 3, "some real defect", "let z = 3;"),
+        ];
+        let completer = SalvagingFixCompleter { calls: 0.into() };
+
+        let out = generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
+
+        assert_eq!(
+            out[0].fix_specific.as_deref(),
+            Some("Validate the input before using it and return an error otherwise."),
+            "the salvaged partial round alone must recover finding 0's fix"
+        );
+        assert!(
+            out[1].fix_specific.is_some() && out[2].fix_specific.is_some(),
+            "findings missing from the salvaged round must be recovered by the automatic \
+             next-round retry, not lost: {out:?}"
+        );
+        assert!(out.iter().all(|f| !f.needs_review));
+    }
+
+    /// A large finding set is split into bounded chunks and every finding survives the
+    /// round trip — no finding is dropped at a chunk boundary.
+    #[tokio::test]
+    async fn verify_findings_chunks_large_finding_sets_and_merges_without_dropping() {
+        let n = CALIBRATION_BATCH_SIZE * 2 + 4;
+        let findings: Vec<Finding> = (0..n).map(|_| finding("AI-X", "medium")).collect();
+        // `CapturingCompleter` always returns `"{}"` (no `verdicts` key) — `apply_verdicts`
+        // degrades that to "findings unchanged", which is fine: this test's assertions are
+        // about COUNT and CHUNK-COUNT (no finding dropped, no chunk skipped), not verdict
+        // content.
+        let completer = CapturingCompleter::default();
+
+        let out = verify_findings(
+            &completer,
+            "me/api",
+            findings,
+            None,
+            None,
+            None,
+            false,
+            "This repository has many code files.",
+        )
+        .await;
+
+        assert_eq!(out.len(), n, "no finding dropped across chunk boundaries");
+        let expected_chunks = n.div_ceil(CALIBRATION_BATCH_SIZE);
+        assert_eq!(
+            completer.seen.lock().unwrap().len(),
+            expected_chunks,
+            "M findings must be split into the expected number of bounded chunks"
+        );
+    }
+
     /// Calibration must ACCEPT an explicit `"critical"` verdict and apply it to the finding —
     /// this is the D5-shaped case: an AI-tier finding starts at "high" from the raw audit pass,
     /// and the calibration pass upgrades it to "critical" when it judges the finding clears the
@@ -10147,5 +10656,119 @@ mod tests {
             "the context window must ground `safeInternalPath` even though it's not in the \
              bare snippet/detail"
         );
+    }
+
+    /// max_tokens must SCALE with the finding count instead of the old hardcoded flat 4096 —
+    /// a full `FIX_BATCH_SIZE` chunk is deliberately sized (see that constant's doc comment)
+    /// to already exceed the old flat floor, since each fix is a full prose sentence.
+    #[tokio::test]
+    async fn generate_fix_specifics_scales_max_tokens_with_finding_count() {
+        let completer = CapturingCompleter::default();
+        let findings: Vec<Finding> = (0..FIX_BATCH_SIZE)
+            .map(|i| fx("ARCH-1", "a.rs", i, "some real defect", "let x = 1;"))
+            .collect();
+
+        let _ = generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
+
+        let seen = completer.seen.lock().unwrap();
+        assert!(!seen.is_empty());
+        let expected = scaled_max_tokens(FIX_BATCH_SIZE, FIX_TOKENS_PER_FINDING);
+        assert!(
+            expected > 4096,
+            "test setup must exercise the scaled-above-floor branch, got {expected}"
+        );
+        for req in seen.iter() {
+            assert_eq!(req.max_tokens, expected);
+        }
+    }
+
+    /// A SMALL finding set must see ZERO behavior change — it stays pinned at the original
+    /// flat 4096 floor.
+    #[tokio::test]
+    async fn generate_fix_specifics_max_tokens_floor_unchanged_for_small_finding_sets() {
+        let completer = CapturingCompleter::default();
+        let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
+
+        let _ = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+
+        let seen = completer.seen.lock().unwrap();
+        assert_eq!(seen[0].max_tokens, 4096);
+    }
+
+    /// A large finding set is split into bounded chunks and every finding survives the round
+    /// trip — no finding is dropped at a chunk boundary, and the completer sees the expected
+    /// chunk count.
+    #[tokio::test]
+    async fn generate_fix_specifics_chunks_large_finding_sets_and_merges_without_dropping() {
+        let n = FIX_BATCH_SIZE * 2 + 3;
+        let findings: Vec<Finding> = (0..n)
+            .map(|i| fx("ARCH-1", "a.rs", i, "some real defect", "let x = 1;"))
+            .collect();
+        let entries: Vec<String> = (0..FIX_BATCH_SIZE)
+            .map(|i| {
+                format!(
+                    r#"{{"index":{i},"fix":"Validate the input before using it and return an error otherwise."}}"#
+                )
+            })
+            .collect();
+        let canned = format!(r#"{{"fixes":[{}]}}"#, entries.join(","));
+        let completer = CountingFixCompleter {
+            calls: 0.into(),
+            canned,
+        };
+
+        let out = generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
+
+        assert_eq!(out.len(), n, "no finding dropped across chunk boundaries");
+        assert!(
+            out.iter()
+                .all(|f| f.fix_specific.is_some() && !f.needs_review),
+            "every finding must get a fix: {out:?}"
+        );
+        let expected_chunks = n.div_ceil(FIX_BATCH_SIZE);
+        assert_eq!(
+            completer.calls.load(std::sync::atomic::Ordering::Relaxed),
+            expected_chunks,
+            "M findings must be split into the expected number of bounded chunks"
+        );
+    }
+
+    /// A `LlmPort` that returns the SAME canned text on every call and counts how many
+    /// times it was invoked — used to assert the exact number of bounded chunks a large
+    /// finding/rule set is split into.
+    struct CountingFixCompleter {
+        calls: std::sync::atomic::AtomicUsize,
+        canned: String,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmPort for CountingFixCompleter {
+        async fn complete(&self, _req: LlmRequest) -> anyhow::Result<LlmResponse> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(LlmResponse {
+                text: self.canned.clone(),
+                model: "stub".to_string(),
+                backend: "stub".to_string(),
+                cost_usd: None,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                or_cache_discount: None,
+            })
+        }
+        async fn complete_streaming(
+            &self,
+            req: LlmRequest,
+            on_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
+        ) -> anyhow::Result<LlmResponse> {
+            let resp = self.complete(req).await?;
+            on_delta(&resp.text);
+            Ok(resp)
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 }
