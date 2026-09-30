@@ -187,15 +187,30 @@ pub fn classify_statement(text: &str) -> Option<ParsedStmt> {
         let k = match_kw_seq(&upper, k, &["FUNCTION"])?;
         let k = skip_ws(&upper, k);
         let ((schema, name), after_name) = parse_qualified_name(&raw, k)?;
-        // Only scan the SIGNATURE portion (up to the first dollar-quoted body, if any) for
-        // SECURITY DEFINER / SET search_path — a match inside the function BODY (e.g. a
-        // string literal the function builds) must never be mistaken for the real clause.
-        let sig_end = first_dollar_quote_start(&raw, after_name).unwrap_or(raw.len());
-        let sig_upper = upper
-            .get(after_name.min(sig_end)..sig_end.max(after_name))
+        // Scan the SIGNATURE — never the function's dollar-quoted BODY itself (e.g. a string
+        // literal it builds) — for SECURITY DEFINER / SET search_path. The signature is
+        // everything BEFORE the body ("header") AND everything AFTER it ("trailer"): Postgres
+        // allows CREATE FUNCTION's options (LANGUAGE, SECURITY, SET, ...) in ANY order
+        // relative to `AS`, so `... AS $$ ... $$ LANGUAGE plpgsql SECURITY DEFINER SET
+        // search_path = ...;` — options placed AFTER the body, which is the form Supabase's
+        // own docs recommend — is valid and must be scanned too, not just the leading
+        // `SECURITY DEFINER SET search_path ... AS $$...$$` form the original scan assumed.
+        // Only the body's own interior stays excluded, so a string literal the function
+        // builds (e.g. `return 'set search_path = public'`) is still never mistaken for the
+        // real clause.
+        let body_start = first_dollar_quote_start(&raw, after_name);
+        let header_end = body_start.unwrap_or(raw.len());
+        let header_upper = upper
+            .get(after_name.min(header_end)..header_end.max(after_name))
             .unwrap_or(&[]);
-        let security_definer = contains_kw_seq(sig_upper, &["SECURITY", "DEFINER"]);
-        let has_search_path = contains_kw_seq(sig_upper, &["SET", "SEARCH_PATH"]);
+        let trailer_upper: &[char] = match body_start.and_then(|start| dollar_quote_end(&raw, start)) {
+            Some(end) => upper.get(end.min(upper.len())..).unwrap_or(&[]),
+            None => &[],
+        };
+        let security_definer = contains_kw_seq(header_upper, &["SECURITY", "DEFINER"])
+            || contains_kw_seq(trailer_upper, &["SECURITY", "DEFINER"]);
+        let has_search_path = contains_kw_seq(header_upper, &["SET", "SEARCH_PATH"])
+            || contains_kw_seq(trailer_upper, &["SET", "SEARCH_PATH"]);
         return Some(ParsedStmt::CreateFunction {
             schema,
             name,
@@ -331,6 +346,23 @@ fn parse_qualified_name(chars: &[char], i: usize) -> Option<((String, String), u
 fn first_dollar_quote_start(chars: &[char], from: usize) -> Option<usize> {
     (from..chars.len())
         .find(|&i| chars[i] == '$' && super::splitter::parse_dollar_tag(chars, i).is_some())
+}
+
+/// Given `body_start` (a dollar-quote OPEN index, as returned by [`first_dollar_quote_start`]),
+/// return the index just past its matching CLOSING delimiter — the point where any trailing
+/// signature clauses resume (see the `CREATE FUNCTION` branch of [`classify_statement`]).
+/// `None` for an unterminated dollar-quote (best-effort, never panics: no trailer to scan) or
+/// if `body_start` doesn't actually open a valid dollar-quote (defensive; callers only ever
+/// pass a value `first_dollar_quote_start` already confirmed).
+fn dollar_quote_end(chars: &[char], body_start: usize) -> Option<usize> {
+    let (tag, after_open) = super::splitter::parse_dollar_tag(chars, body_start)?;
+    (after_open..chars.len()).find_map(|i| {
+        if chars[i] != '$' {
+            return None;
+        }
+        let (tag2, after2) = super::splitter::parse_dollar_tag(chars, i)?;
+        (tag2 == tag).then_some(after2)
+    })
 }
 
 #[cfg(test)]
@@ -535,6 +567,44 @@ mod tests {
                 schema: "public".into(),
                 name: "f".into(),
                 security_definer: false,
+                has_search_path: false,
+            })
+        );
+    }
+
+    #[test]
+    fn create_function_security_definer_and_search_path_after_the_body_are_detected() {
+        // Postgres allows CREATE FUNCTION's options in ANY order relative to `AS` — placing
+        // `LANGUAGE ... SECURITY DEFINER SET search_path = ...` AFTER the dollar-quoted body
+        // (rather than before it) is valid syntax and is exactly the style Supabase's own
+        // docs recommend. The original header-only scan missed this entirely.
+        let stmt = "create function public.f() returns void as $$ begin end; $$ language plpgsql security definer set search_path = '';";
+        let got = classify_statement(stmt);
+        assert_eq!(
+            got,
+            Some(ParsedStmt::CreateFunction {
+                schema: "public".into(),
+                name: "f".into(),
+                security_definer: true,
+                has_search_path: true,
+            }),
+            "SECURITY DEFINER / SET search_path placed AFTER the body must still be detected"
+        );
+    }
+
+    #[test]
+    fn create_function_definer_after_body_without_search_path_still_fires() {
+        // The trailing-clause form WITHOUT search_path must still read as the vulnerable
+        // shape (security_definer=true, has_search_path=false) — not silently miss it because
+        // the scan only looked before the body.
+        let stmt = "create function public.f() returns void as $$ begin end; $$ language plpgsql security definer;";
+        let got = classify_statement(stmt);
+        assert_eq!(
+            got,
+            Some(ParsedStmt::CreateFunction {
+                schema: "public".into(),
+                name: "f".into(),
+                security_definer: true,
                 has_search_path: false,
             })
         );
