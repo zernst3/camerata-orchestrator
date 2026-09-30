@@ -4733,12 +4733,25 @@ mod tests {
         );
     }
 
-    // ── D6 ceiling interaction — R2 (2026-09-30 cycle-2 queue-hardening) ───────────
+    // ── D6 ceiling interaction (2026-09-30 cycle-2 queue-hardening) ────────────────
     //
-    // R2 (`ai_audit::apply_severity_ceiling_rule`) clamps a browser-mediated CORS
-    // misconfiguration to exactly Medium. This pins the OUTPUT side here: that Medium buckets
-    // into "plan" — never "do_now" — so it can never displace a genuine critical from the top
-    // action tier.
+    // R1 (`ai_audit::apply_severity_ceiling_rule`) re-routes a self-hedged finding to
+    // needs-review + Low severity; R2 clamps a browser-mediated CORS misconfiguration to
+    // exactly Medium. These pin the OUTPUT side here: that the R1 shape is what
+    // `is_informational` keys on, and that R2's medium landing spot buckets into "plan" —
+    // never "do_now" — so it can never displace a genuine critical from the top action tier.
+
+    /// An R1-shaped finding (severity capped to Low, confidence flagged needs-review by the D6
+    /// ceiling) routes to the informational appendix, out of every action bucket.
+    #[test]
+    fn r1_shaped_low_needs_review_finding_is_informational() {
+        let mut f = finding("AI-HEDGE-1", "a.rs", 1, "low");
+        f.confidence = Some("needs-review".to_string());
+        assert!(
+            is_informational(&f, Disposition::Unresolved, "low", None, 0),
+            "an R1-shaped (low + needs-review) finding must route to the informational appendix"
+        );
+    }
 
     /// A medium-severity CORS finding (the R2 ceiling's landing severity) buckets into "plan" —
     /// never "do_now" — so it can never displace a genuine critical finding from the top tier.

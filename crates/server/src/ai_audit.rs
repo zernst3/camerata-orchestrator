@@ -1113,14 +1113,19 @@ pub fn apply_severity_calibration_rules(findings: Vec<Finding>) -> Vec<Finding> 
 }
 
 // ── D6: the severity CEILING — a downward calibration direction (2026-09-30 cycle-2
-// queue-hardening, R2). D5's floor above only ever RAISES severity. R2 needs the opposite
-// correction, and it never drops a finding — it stays in the queue, re-routed and re-badged: a
-// browser-mediated CORS/cross-origin header misconfiguration (exploitable only through a
-// victim's browser + session, never a direct unauthenticated fetch) is clamped to exactly
-// Medium, bidirectionally — lowering an inflated Critical/High AND raising a re-buried Low/Info.
-// Re-burying it at Low was the prior failure just as much as inflating it to Critical was. The
-// rule derives entirely from the finding's own text (like the floor), so this pass is safe to
-// run over ANY finding set, and must run immediately after `apply_severity_calibration_rules`
+// queue-hardening, R1/R2). D5's floor above only ever RAISES severity. Two classes need the
+// opposite correction, and neither one ever drops a finding — both stay in the queue, re-routed
+// and re-badged:
+//   - R1: a finding whose OWN text self-hedges "this is probably intentional, just confirm" is
+//     capped to Low + flagged `needs-review`, which routes it to the informational appendix
+//     (`report_export::is_informational`) instead of an action bucket.
+//   - R2: a browser-mediated CORS/cross-origin header misconfiguration (exploitable only through
+//     a victim's browser + session, never a direct unauthenticated fetch) is clamped to exactly
+//     Medium, bidirectionally — lowering an inflated Critical/High AND raising a re-buried
+//     Low/Info. Re-burying it at Low was the prior failure just as much as inflating it to
+//     Critical was.
+// Both rules derive entirely from the finding's own text (like the floor), so this pass is safe
+// to run over ANY finding set, and must run immediately after `apply_severity_calibration_rules`
 // everywhere that runs (today: the one production call site in `verify_findings`, plus tests).
 
 /// Phrases identifying a browser-mediated CORS / cross-origin header misconfiguration (R2).
@@ -1147,13 +1152,52 @@ fn mentions_cors_misconfig(text: &str) -> bool {
     CORS_MISCONFIG_PHRASES.iter().any(|p| text.contains(p))
 }
 
-/// Apply the R2 severity ceiling to ONE finding. When the CORS class matches, it is
-/// AUTHORITATIVE for that finding — it overrides whatever the D5 floor already did (including a
-/// floor-critical), because a browser-mediated CORS misconfiguration is never the "direct
-/// unauthenticated exposure" class the floor polices, even if the finding's prose happens to
-/// also brush against floor vocabulary. A finding that does NOT mention CORS is completely
-/// untouched, so a genuinely unauthenticated-exposure finding keeps the floor's Critical rating
-/// unchanged.
+/// Self-hedged "probably intentional / confirmation-only" phrases (R1) — the finding's OWN
+/// analysis concluding the pattern is likely fine and only needs a human to confirm intent,
+/// rather than a confirmed defect.
+const SELF_HEDGE_CONFIRMATION_PHRASES: &[&str] = &[
+    "likely intentional",
+    "appears intentional",
+    "appears to be intentional",
+    "probably intentional",
+    "may be intentional",
+    "might be intentional",
+    "could be intentional",
+    "if this is intentional",
+    "if this behavior is intentional",
+    "confirm whether",
+    "confirmation only",
+    "intended behavior",
+];
+
+/// Negation guards for the R1 phrase set above — "not intentional" / "clearly not intended"
+/// mean the OPPOSITE conclusion (a confirmed defect, not "probably fine"), so these must NEVER
+/// be swept up by the self-hedge phrases even though some share the word "intentional"/"intended".
+const SELF_HEDGE_NEGATION_PHRASES: &[&str] = &[
+    "not intentional",
+    "not intended",
+    "isn't intentional",
+    "isn't intended",
+];
+
+/// Whether `f`'s own text is a self-hedged "probably intentional, just confirm" conclusion (R1),
+/// with the negation guard applied first.
+fn mentions_self_hedged_confirmation_only(text: &str) -> bool {
+    if SELF_HEDGE_NEGATION_PHRASES.iter().any(|p| text.contains(p)) {
+        return false;
+    }
+    SELF_HEDGE_CONFIRMATION_PHRASES
+        .iter()
+        .any(|p| text.contains(p))
+}
+
+/// Apply the R1/R2 severity ceiling to ONE finding. R2 (CORS) is checked first and, when it
+/// matches, is AUTHORITATIVE for that finding — it overrides whatever the D5 floor already did
+/// (including a floor-critical), because a browser-mediated CORS misconfiguration is never the
+/// "direct unauthenticated exposure" class the floor polices, even if the finding's prose happens
+/// to also brush against floor vocabulary. A finding that does NOT mention CORS is completely
+/// untouched by this branch, so a genuinely unauthenticated-exposure finding keeps the floor's
+/// Critical rating unchanged. R1 is checked only when R2 didn't match.
 fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
     let text = calibration_floor_scan_text(&f);
 
@@ -1166,15 +1210,30 @@ fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
              exactly Medium."
                 .to_string(),
         );
+        return f;
+    }
+
+    if mentions_self_hedged_confirmation_only(&text) {
+        f.confidence = Some("needs-review".to_string());
+        f.needs_review = true;
+        if severity_rank(&f.severity) > severity_rank("low") {
+            f.severity = "low".to_string();
+        }
+        f.calibration_rationale = Some(
+            "Severity ceiling: the finding's own analysis concludes the pattern is likely \
+             intentional / confirmation-only — capped to Low and flagged needs-review rather \
+             than left in an action bucket. It stays in the queue for a human to confirm."
+                .to_string(),
+        );
     }
 
     f
 }
 
-/// Apply the R2 severity ceiling to a whole finding set — run immediately after
+/// Apply the R1/R2 severity ceiling to a whole finding set — run immediately after
 /// `apply_severity_calibration_rules` (the D5 floor) everywhere that runs. Safe over ANY finding
-/// set (deterministic-floor findings included), since the ceiling rule derives entirely from the
-/// finding's own text rather than the model's verdict.
+/// set (deterministic-floor findings included), since both ceiling rules derive entirely from
+/// the finding's own text rather than the model's verdict.
 pub fn apply_severity_ceiling_rules(findings: Vec<Finding>) -> Vec<Finding> {
     findings
         .into_iter()
@@ -7043,11 +7102,13 @@ mod tests {
         assert_eq!(unrelated.calibration_rationale, None);
     }
 
-    // ── D6: severity ceiling — R2 (2026-09-30 cycle-2 queue-hardening) ────────────
+    // ── D6: severity ceiling — R1/R2 (2026-09-30 cycle-2 queue-hardening) ─────────
     //
-    // The D5 floor above only ever raises severity. R2 pins the opposite direction: it clamps a
-    // browser-mediated CORS misconfiguration to exactly Medium in BOTH directions, without
-    // disturbing the floor's Critical rating for a genuinely unauthenticated-exposure finding.
+    // The D5 floor above only ever raises severity. These pin the opposite direction: R1
+    // re-routes a self-hedged "probably intentional" finding to needs-review + Low (out of every
+    // action bucket, but never dropped); R2 clamps a browser-mediated CORS misconfiguration to
+    // exactly Medium in BOTH directions, without disturbing the floor's Critical rating for a
+    // genuinely unauthenticated-exposure finding.
 
     const CORS_CREDENTIALS_TEXT: &str =
         "The API's CORS policy reflects the request's Origin header back verbatim and sets \
@@ -7107,6 +7168,55 @@ mod tests {
             out.severity, "critical",
             "a non-CORS unauthenticated-exposure finding keeps the floor's critical rating"
         );
+    }
+
+    const SELF_HEDGE_TEXT: &str =
+        "This debug endpoint skips the auth middleware, but it appears intentional and is \
+         likely only used for internal load-testing; confirm whether this is expected before \
+         treating it as a defect.";
+
+    /// R1: a self-hedged "probably intentional / confirmation-only" finding is capped to Low
+    /// AND flagged needs-review — routing it to the informational appendix without dropping it.
+    #[test]
+    fn severity_ceiling_self_hedged_confirmation_only_caps_to_low_and_needs_review() {
+        let f = finding_with_detail("AI-HEDGE-1", "high", SELF_HEDGE_TEXT);
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(out.severity, "low");
+        assert_eq!(out.confidence.as_deref(), Some("needs-review"));
+        assert!(out.calibration_rationale.is_some());
+    }
+
+    /// Safe twin: an actionable finding at the SAME base severity whose text is NOT self-hedged
+    /// is left completely unchanged by the ceiling pass.
+    #[test]
+    fn severity_ceiling_non_hedged_twin_is_unchanged() {
+        let f = finding_with_detail(
+            "AI-HEDGE-2",
+            "high",
+            "This debug endpoint skips the auth middleware in production with no mitigating \
+             control; it must be removed before release.",
+        );
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f.clone()));
+        assert_eq!(out.severity, "high");
+        assert_eq!(out.confidence, None);
+    }
+
+    /// R1 negation guard: text that explicitly says the pattern is NOT intentional (a confirmed
+    /// defect, not a hedge) must never be swept up by the self-hedge phrase set.
+    #[test]
+    fn severity_ceiling_self_hedge_negation_guard_does_not_downgrade() {
+        let f = finding_with_detail(
+            "AI-HEDGE-3",
+            "high",
+            "The team confirmed this is NOT intentional — it's a genuine authorization bug that \
+             must be fixed.",
+        );
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(
+            out.severity, "high",
+            "negated hedge language must not downgrade severity"
+        );
+        assert_eq!(out.confidence, None);
     }
 
     // ── Structured confidence + effort (Part 1 §3) ────────────────────────────
