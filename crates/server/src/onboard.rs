@@ -219,6 +219,17 @@ pub struct Finding {
     /// that layer is pure/synchronous with no model access.
     #[serde(default)]
     pub fix_specific: Option<String>,
+    /// A short, deterministic explanation of WHY this finding's severity was floored/adjusted by
+    /// [`crate::ai_audit::apply_severity_calibration_rules`] (D5 — severity calibration rules of
+    /// thumb): unauthenticated access / full-account compromise is always Critical; an
+    /// authenticated cross-tenant read floors at High (Critical when the data class escalates —
+    /// payment, credentials/secrets, sensitive PII); an access-control/injection finding is never
+    /// under-rated on an "RLS probably contains it" rationale. `None` when none of these rules of
+    /// thumb apply to this finding (back-compatible serde default). Recorded so the calibrated
+    /// severity is auditable — the SAME input yields the SAME severity and a human can see why,
+    /// rather than it being a per-run model whim.
+    #[serde(default)]
+    pub calibration_rationale: Option<String>,
 }
 
 /// One evidence site absorbed into a merged finding's [`Finding::also_locations`] during
@@ -286,6 +297,7 @@ impl Default for Finding {
             evaluated_option_id: None,
             also_locations: Vec::new(),
             fix_specific: None,
+            calibration_rationale: None,
         }
     }
 }
@@ -2301,6 +2313,7 @@ mod tests {
             evaluated_option_id: None,
             also_locations: Vec::new(),
             fix_specific: None,
+            calibration_rationale: None,
         };
         let mut findings = vec![
             mk("a.rs", 5, "SEC-NO-HARDCODED-SECRETS-1", snippet), // baselined
@@ -2340,6 +2353,7 @@ mod tests {
                 evaluated_option_id: None,
                 also_locations: Vec::new(),
                 fix_specific: None,
+                calibration_rationale: None,
             },
             Finding {
                 repo: "me/web".into(),
@@ -2363,6 +2377,7 @@ mod tests {
                 evaluated_option_id: None,
                 also_locations: Vec::new(),
                 fix_specific: None,
+                calibration_rationale: None,
             },
         ];
         let body = tech_debt_issue_body(&findings);
@@ -2407,6 +2422,7 @@ mod tests {
             evaluated_option_id: None,
             also_locations: Vec::new(),
             fix_specific: None,
+            calibration_rationale: None,
         }
     }
 
@@ -2554,6 +2570,7 @@ mod tests {
             evaluated_option_id: None,
             also_locations: Vec::new(),
             fix_specific: None,
+            calibration_rationale: None,
         };
         let csv = tech_debt_csv(&[f]);
         let data_row = csv.lines().nth(1).expect("expected data row");

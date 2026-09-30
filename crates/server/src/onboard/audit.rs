@@ -255,6 +255,8 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                         evaluated_option_id: None,
                         also_locations: Vec::new(),
                         fix_specific: None,
+                        // The deterministic floor never runs through calibration.
+                        calibration_rationale: None,
                     });
                 }
             }
@@ -309,6 +311,8 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                 evaluated_option_id: None,
                 also_locations: Vec::new(),
                 fix_specific: None,
+                // The deterministic floor never runs through calibration.
+                calibration_rationale: None,
             });
         }
     }
@@ -491,6 +495,7 @@ pub(crate) fn classify_repo_findings(
             evaluated_option_id: None,
             also_locations: Vec::new(),
             fix_specific: None,
+            calibration_rationale: None,
         });
     }
 }

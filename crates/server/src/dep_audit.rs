@@ -229,6 +229,8 @@ pub fn parse_osv_json(
                     // entirely (see the `captures` comment above) — no fix-generation pass
                     // ever runs over them.
                     fix_specific: None,
+                    // Dependency findings never flow through calibration either.
+                    calibration_rationale: None,
                 });
             }
         }

@@ -551,6 +551,9 @@ pub fn parse_ai_findings(
                 // Set by `generate_fix_specifics` in a later pass; a raw pre-generation
                 // finding has no fix opinion yet.
                 fix_specific: None,
+                // Set by `apply_severity_calibration_rules` (D5) once the calibration pass
+                // runs; a raw pre-calibration finding has no floor rationale yet.
+                calibration_rationale: None,
             });
         }
     }
@@ -3555,6 +3558,7 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
         evaluated_option_id: primary.evaluated_option_id.clone(),
         also_locations,
         fix_specific: None,
+        calibration_rationale: None,
     }
 }
 
@@ -5173,6 +5177,7 @@ mod tests {
             evaluated_option_id: None,
             also_locations: Vec::new(),
             fix_specific: None,
+            calibration_rationale: None,
         }
     }
 
@@ -6026,6 +6031,7 @@ mod tests {
             evaluated_option_id: None,
             also_locations: Vec::new(),
             fix_specific: None,
+            calibration_rationale: None,
         }
     }
 
@@ -6737,6 +6743,7 @@ mod tests {
             evaluated_option_id: None,
             also_locations: Vec::new(),
             fix_specific: None,
+            calibration_rationale: None,
         };
         // Three AI- findings with equal severity — earliest (index 0) must win.
         let group = vec![

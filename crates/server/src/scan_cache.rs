@@ -348,6 +348,7 @@ mod tests {
             evaluated_option_id: None,
             also_locations: Vec::new(),
             fix_specific: None,
+            calibration_rationale: None,
         }
     }
 
