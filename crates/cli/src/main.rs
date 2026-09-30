@@ -1,6 +1,6 @@
 //! camerata orchestrator binary.
 //!
-//! Two families of subcommand:
+//! Three families of subcommand:
 //! - The original in-process demo/eval harness (`acceptance`, `gate-probe`, `eval`,
 //!   `*-demo`, `*-live`) — each calls a backend crate directly in-process (no HTTP).
 //! - The HTTP-adapter subcommands (`stories`, `run`, `uows`, `assign`, `start-run`;
@@ -9,14 +9,22 @@
 //!   holds the handlers). This is the SAME client the MCP adapter (`crates/mcp`) and
 //!   the Dioxus cockpit (`crates/ui`) use — the CLI is just another adapter over the
 //!   one capability contract.
+//! - `inspect` — a real, in-process HEADLESS product command (not a demo): runs the full
+//!   brownfield inspection pipeline and writes the same product-export ZIP the cockpit's
+//!   UI produces, with no BFF/UI involved. See `camerata::inspect_cmd`'s module doc comment
+//!   for the pipeline and which server functions it reuses.
 //!
 //! `acceptance` in particular: run the in-process, no-network planted-violation
 //! acceptance scenario and print the gate's verdict. Exit 0 if the gate denied the
 //! planted violation and allowed the control write; exit 1 otherwise.
 
+use std::path::PathBuf;
+
 use camerata::acceptance::{run_acceptance, AcceptanceResult};
+use camerata::inspect_cmd::{self, InspectArgs};
 use camerata_client::{Client, ClientError};
 use camerata_core::Decision;
+use camerata_server::llm::ProjectBackend;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -106,6 +114,51 @@ enum Command {
         /// Which app/project to list defect reports for.
         project_id: String,
     },
+
+    /// Headless brownfield inspection: runs the full cockpit scan pipeline over `--repo` and
+    /// writes the SAME product-export ZIP (PDF + xlsx + findings.json + README.txt) the UI's
+    /// export button produces to `--export`. No BFF, no UI — see
+    /// `camerata::inspect_cmd`'s module doc comment.
+    Inspect {
+        /// The repo's local working tree to inspect.
+        #[arg(long)]
+        repo: PathBuf,
+        /// Where to write the product-export ZIP. Its parent directory must already exist.
+        #[arg(long)]
+        export: PathBuf,
+        /// `cli` (the operator's own Claude Code subscription, default) or `api` (the
+        /// Anthropic Messages API, needs `ANTHROPIC_API_KEY`) — same compliance-safety
+        /// setting a project's `backend` field carries.
+        #[arg(long, default_value = "cli", value_parser = parse_backend)]
+        backend: ProjectBackend,
+        /// Use the Anthropic Message Batches path (~50% cheaper; latency is not returned
+        /// until the whole batch completes). Requires `--backend api` plus a configured key.
+        #[arg(long)]
+        batch: bool,
+        /// Model override for the audit pass. Defaults to the project-less model floor.
+        #[arg(long)]
+        model: Option<String>,
+        /// Model override for the calibration pass. Defaults to the project-less model floor.
+        #[arg(long = "calibration-model")]
+        calibration_model: Option<String>,
+        /// Ignore the on-disk incremental-scan cache and force a full re-scan of every file.
+        #[arg(long)]
+        full: bool,
+    },
+}
+
+/// `--backend`'s `value_parser`: `ProjectBackend` lives in `camerata-api-types`, a foreign
+/// crate, so it can't derive `clap::ValueEnum` here (the orphan rule blocks a local derive
+/// implementing a foreign trait for a foreign type) — a small manual parser is the standard
+/// clap workaround.
+fn parse_backend(s: &str) -> Result<ProjectBackend, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "cli" => Ok(ProjectBackend::Cli),
+        "api" => Ok(ProjectBackend::Api),
+        other => Err(format!(
+            "unknown --backend `{other}` (expected `cli` or `api`)"
+        )),
+    }
 }
 
 #[tokio::main]
@@ -169,6 +222,42 @@ async fn main() -> anyhow::Result<()> {
         Command::Feedback { project_id } => {
             let client = make_client(bff_url);
             print_result(camerata::http_cmd::handle_feedback(&client, &project_id).await)
+        }
+        Command::Inspect {
+            repo,
+            export,
+            backend,
+            batch,
+            model,
+            calibration_model,
+            full,
+        } => {
+            run_inspect_cmd(InspectArgs {
+                repo,
+                export,
+                backend,
+                batch,
+                model,
+                calibration_model,
+                full,
+            })
+            .await
+        }
+    }
+}
+
+/// `inspect`'s handler: run the headless pipeline and print its report, or fail loudly with
+/// a non-zero exit — never a silent partial result (matches every other subcommand's
+/// error-handling shape in this file).
+async fn run_inspect_cmd(args: InspectArgs) -> anyhow::Result<()> {
+    match inspect_cmd::run_inspect(args).await {
+        Ok(outcome) => {
+            println!("{}", inspect_cmd::format_outcome_report(&outcome));
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("camerata inspect: {e}");
+            std::process::exit(1);
         }
     }
 }
@@ -471,5 +560,127 @@ mod cli_parse_tests {
             other => panic!("expected Command::Feedback, got a different variant: {other:?}"),
         }
         assert!(Cli::try_parse_from(["camerata", "feedback"]).is_err());
+    }
+
+    // ── inspect ──────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn inspect_requires_both_repo_and_export() {
+        assert!(Cli::try_parse_from(["camerata", "inspect"]).is_err());
+        assert!(Cli::try_parse_from(["camerata", "inspect", "--repo", "/tmp/r"]).is_err());
+        assert!(Cli::try_parse_from(["camerata", "inspect", "--export", "/tmp/o.zip"]).is_err());
+        assert!(Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip"
+        ])
+        .is_ok());
+    }
+
+    #[test]
+    fn inspect_defaults_backend_to_cli_and_every_flag_to_off() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Inspect {
+                repo,
+                export,
+                backend,
+                batch,
+                model,
+                calibration_model,
+                full,
+            } => {
+                assert_eq!(repo, PathBuf::from("/tmp/r"));
+                assert_eq!(export, PathBuf::from("/tmp/o.zip"));
+                assert_eq!(backend, ProjectBackend::Cli);
+                assert!(!batch);
+                assert!(model.is_none());
+                assert!(calibration_model.is_none());
+                assert!(!full);
+            }
+            other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_parses_backend_batch_model_and_full() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--backend",
+            "api",
+            "--batch",
+            "--model",
+            "claude-sonnet-5",
+            "--calibration-model",
+            "claude-opus-5",
+            "--full",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Inspect {
+                backend,
+                batch,
+                model,
+                calibration_model,
+                full,
+                ..
+            } => {
+                assert_eq!(backend, ProjectBackend::Api);
+                assert!(batch);
+                assert_eq!(model.as_deref(), Some("claude-sonnet-5"));
+                assert_eq!(calibration_model.as_deref(), Some("claude-opus-5"));
+                assert!(full);
+            }
+            other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inspect_backend_is_case_insensitive_and_rejects_unknown_values() {
+        let cli = Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--backend",
+            "API",
+        ])
+        .expect("must parse");
+        match cli.command {
+            Command::Inspect { backend, .. } => assert_eq!(backend, ProjectBackend::Api),
+            other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
+        }
+
+        match Cli::try_parse_from([
+            "camerata",
+            "inspect",
+            "--repo",
+            "/tmp/r",
+            "--export",
+            "/tmp/o.zip",
+            "--backend",
+            "azure",
+        ]) {
+            Ok(_) => panic!("an unknown --backend value must fail to parse"),
+            Err(err) => assert!(err.to_string().contains("azure"), "{err}"),
+        }
     }
 }
