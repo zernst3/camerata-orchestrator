@@ -3,10 +3,12 @@
 //! RLS rule ids over the FINAL state per table, scoped by `supabase/config.toml`'s exposed
 //! schemas.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::config::parse_exposed_schemas;
-use super::timeline::{build_timeline, TableState};
+use super::timeline::{
+    build_timeline, find_wrong_table_reenable, ProtectionEvent, ProtectionKind, TableState,
+};
 use crate::arch_checker::{
     ArchChecker, ArchViolation, RepoView, SEVERITY_CRITICAL, SEVERITY_INFO, SEVERITY_MEDIUM,
 };
@@ -15,7 +17,11 @@ pub const RULE_RLS_ENABLED: &str = "SUPABASE-RLS-ENABLED-1";
 pub const RULE_RLS_NO_POLICY: &str = "SUPABASE-RLS-NO-POLICY-1";
 pub const RULE_RLS_POLICY_DISABLED: &str = "SUPABASE-RLS-POLICY-DISABLED-1";
 
-const RULE_IDS: &[&str] = &[RULE_RLS_ENABLED, RULE_RLS_NO_POLICY, RULE_RLS_POLICY_DISABLED];
+const RULE_IDS: &[&str] = &[
+    RULE_RLS_ENABLED,
+    RULE_RLS_NO_POLICY,
+    RULE_RLS_POLICY_DISABLED,
+];
 
 const INTEREST_GLOBS: &[&str] = &[
     "supabase/migrations/*.sql",
@@ -47,7 +53,7 @@ impl ArchChecker for SupabaseRlsChecker {
 
         let mut violations = Vec::new();
         for state in timeline.tables.values() {
-            violations.extend(check_table(state, &exposed));
+            violations.extend(check_table(state, &exposed, &timeline.events_by_file));
         }
         violations
     }
@@ -72,7 +78,49 @@ fn display_name(schema: &str, table: &str) -> String {
     }
 }
 
-fn check_table(state: &TableState, exposed_schemas: &BTreeSet<String>) -> Vec<ArchViolation> {
+/// D4: when `(schema, table)`'s current RLS-disabled state traces to an explicit `ALTER
+/// TABLE ... DISABLE ROW LEVEL SECURITY` at `est_file:est_line`, and that same migration file
+/// LATER re-enables RLS on a DIFFERENT table, build the extra sentence naming both tables and
+/// both locations — the "meant to turn it back on, turned it on for the wrong table" causal
+/// story. Returns `""` when there is nothing to add: the table was never explicitly disabled
+/// (its established-at line is a `CREATE TABLE` default, not a disable statement), it was
+/// correctly re-enabled in the same file, or no re-enable was attempted at all anywhere in the
+/// file — in every one of those cases the plain "never re-enabled" framing already stands and
+/// must not be embellished with an unearned wrong-table claim.
+fn wrong_table_narrative(
+    events_by_file: &BTreeMap<String, Vec<ProtectionEvent>>,
+    est_file: &str,
+    est_line: usize,
+    schema: &str,
+    table: &str,
+) -> String {
+    let Some(hit) = find_wrong_table_reenable(
+        events_by_file,
+        est_file,
+        est_line,
+        ProtectionKind::Rls,
+        None,
+        schema,
+        table,
+    ) else {
+        return String::new();
+    };
+    let this_name = display_name(schema, table);
+    let other_name = display_name(&hit.wrong_schema, &hit.wrong_object);
+    format!(
+        " This migration disabled RLS on {this_name} at {est_file}:{est_line}, and the next RLS-enabling \
+         statement in that same file — {est_file}:{} — turned RLS back on for {other_name} instead of \
+         {this_name}. That reads like a wrong-table typo in the re-enable: {this_name} was never actually \
+         re-protected.",
+        hit.line
+    )
+}
+
+fn check_table(
+    state: &TableState,
+    exposed_schemas: &BTreeSet<String>,
+    events_by_file: &BTreeMap<String, Vec<ProtectionEvent>>,
+) -> Vec<ArchViolation> {
     let mut out = Vec::new();
     let name = display_name(&state.schema, &state.table);
     let (est_file, est_line) = state
@@ -80,6 +128,20 @@ fn check_table(state: &TableState, exposed_schemas: &BTreeSet<String>) -> Vec<Ar
         .as_ref()
         .map(|l| (l.file.clone(), l.line))
         .unwrap_or_default();
+    // Computed once — both `!rls_enabled` branches below (the exposed/critical finding and
+    // the non-exposed/info one) and the policy-disabled finding further down all share the
+    // exact same "is this table's current disabled state a wrong-table typo victim" fact.
+    let narrative = if !state.rls_enabled {
+        wrong_table_narrative(
+            events_by_file,
+            &est_file,
+            est_line,
+            &state.schema,
+            &state.table,
+        )
+    } else {
+        String::new()
+    };
 
     if !state.rls_enabled {
         let exposed = exposed_schemas.contains(&state.schema);
@@ -94,7 +156,7 @@ fn check_table(state: &TableState, exposed_schemas: &BTreeSet<String>) -> Vec<Ar
                     "Your {name} table has no Row Level Security. Anyone holding your public API key — which \
                      ships in your frontend — can read and write every row. No evidence of RLS being enabled for \
                      {name} was found anywhere in the migration history (last relevant statement: \
-                     {est_file}:{est_line}). {HONESTY_CAVEAT}"
+                     {est_file}:{est_line}).{narrative} {HONESTY_CAVEAT}"
                 ),
             });
         } else {
@@ -118,7 +180,7 @@ fn check_table(state: &TableState, exposed_schemas: &BTreeSet<String>) -> Vec<Ar
                     "Defense-in-depth note: your {name} table has no Row Level Security, but the `{}` schema is \
                      not listed as API-exposed in supabase/config.toml, so this is not directly reachable through \
                      PostgREST today. Still worth enabling RLS in case the schema is exposed later (last relevant \
-                     statement: {est_file}:{est_line}). {HONESTY_CAVEAT}",
+                     statement: {est_file}:{est_line}).{narrative} {HONESTY_CAVEAT}",
                     state.schema
                 ),
             });
@@ -144,7 +206,12 @@ fn check_table(state: &TableState, exposed_schemas: &BTreeSet<String>) -> Vec<Ar
         let policy_locs: Vec<String> = state
             .policies
             .iter()
-            .map(|p| format!("`{}` at {}:{}", p.name, p.established_at.file, p.established_at.line))
+            .map(|p| {
+                format!(
+                    "`{}` at {}:{}",
+                    p.name, p.established_at.file, p.established_at.line
+                )
+            })
             .collect();
         out.push(ArchViolation {
             rule_id: RULE_RLS_POLICY_DISABLED.to_string(),
@@ -155,7 +222,7 @@ fn check_table(state: &TableState, exposed_schemas: &BTreeSet<String>) -> Vec<Ar
             message: format!(
                 "You wrote access rules for {name}, but they are switched off. The table looks protected in your \
                  code and is fully open in production. Policies found: {}. RLS state last established at \
-                 {est_file}:{est_line} (disabled). {HONESTY_CAVEAT}",
+                 {est_file}:{est_line} (disabled).{narrative} {HONESTY_CAVEAT}",
                 policy_locs.join(", ")
             ),
         });
@@ -169,11 +236,17 @@ mod tests {
     use super::*;
 
     fn view<'a>(files: &'a [(String, String)]) -> RepoView<'a> {
-        RepoView { spec: "test/repo", files }
+        RepoView {
+            spec: "test/repo",
+            files,
+        }
     }
 
     fn files(pairs: Vec<(&str, &str)>) -> Vec<(String, String)> {
-        pairs.into_iter().map(|(p, c)| (p.to_string(), c.to_string())).collect()
+        pairs
+            .into_iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect()
     }
 
     #[test]
@@ -232,7 +305,10 @@ mod tests {
     #[test]
     fn config_toml_multi_schema_widens_exposure_scope() {
         let f = files(vec![
-            ("supabase/config.toml", "[api]\nschemas = [\"public\", \"app\"]\n"),
+            (
+                "supabase/config.toml",
+                "[api]\nschemas = [\"public\", \"app\"]\n",
+            ),
             (
                 "supabase/migrations/20240101000000_init.sql",
                 "create table app.orders (id uuid primary key);",
@@ -240,7 +316,10 @@ mod tests {
         ]);
         let vs = SupabaseRlsChecker.check(&view(&f));
         assert_eq!(vs.len(), 1);
-        assert_eq!(vs[0].severity, SEVERITY_CRITICAL, "app schema is exposed via config.toml");
+        assert_eq!(
+            vs[0].severity, SEVERITY_CRITICAL,
+            "app schema is exposed via config.toml"
+        );
     }
 
     #[test]
@@ -270,7 +349,10 @@ mod tests {
         let rule_ids: Vec<&str> = vs.iter().map(|v| v.rule_id.as_str()).collect();
         assert!(rule_ids.contains(&RULE_RLS_ENABLED));
         assert!(rule_ids.contains(&RULE_RLS_POLICY_DISABLED));
-        let disabled = vs.iter().find(|v| v.rule_id == RULE_RLS_POLICY_DISABLED).unwrap();
+        let disabled = vs
+            .iter()
+            .find(|v| v.rule_id == RULE_RLS_POLICY_DISABLED)
+            .unwrap();
         assert_eq!(disabled.severity, SEVERITY_CRITICAL);
         assert!(disabled.message.contains("p1"));
     }
@@ -290,13 +372,19 @@ mod tests {
             ),
         ]);
         let vs = SupabaseRlsChecker.check(&view(&f));
-        assert!(vs.is_empty(), "declarative snapshot must be authoritative: {vs:#?}");
+        assert!(
+            vs.is_empty(),
+            "declarative snapshot must be authoritative: {vs:#?}"
+        );
     }
 
     #[test]
     fn no_supabase_files_yields_no_findings_zero_matching_files_never_a_false_clean() {
         let f = files(vec![("README.md", "hello")]);
-        assert!(!crate::arch_checker::checker_applies(&SupabaseRlsChecker, &f));
+        assert!(!crate::arch_checker::checker_applies(
+            &SupabaseRlsChecker,
+            &f
+        ));
         // check() itself is also safe to call and returns nothing to fold over.
         assert!(SupabaseRlsChecker.check(&view(&f)).is_empty());
     }
@@ -352,8 +440,176 @@ mod tests {
         // fires regardless of exposure (that rule isn't exposure-scoped); the bare
         // RLS-ENABLED-1 finding is present but INFORMATIONAL because `internal` isn't exposed.
         let enabled = vs.iter().find(|v| v.rule_id == RULE_RLS_ENABLED).unwrap();
-        assert_eq!(enabled.severity, SEVERITY_INFO, "non-exposed schema stays informational even with a policy present");
-        let disabled = vs.iter().find(|v| v.rule_id == RULE_RLS_POLICY_DISABLED).unwrap();
+        assert_eq!(
+            enabled.severity, SEVERITY_INFO,
+            "non-exposed schema stays informational even with a policy present"
+        );
+        let disabled = vs
+            .iter()
+            .find(|v| v.rule_id == RULE_RLS_POLICY_DISABLED)
+            .unwrap();
         assert_eq!(disabled.severity, SEVERITY_CRITICAL);
+    }
+
+    // ── D4: wrong-table re-enable narrative ─────────────────────────────────────────
+
+    #[test]
+    fn wrong_table_reenable_is_narrated_on_the_exposed_critical_finding() {
+        // The canonical D4 bug: this migration disables RLS on `profiles` for a backfill,
+        // and its own re-enable statement typos the table — turning RLS on for `accounts`
+        // instead. `profiles` stays exposed, and the finding must say WHY.
+        let f = files(vec![(
+            "supabase/migrations/20240101000000_init.sql",
+            "create table public.profiles (id uuid primary key);\n\
+             alter table public.profiles enable row level security;\n\
+             create table public.accounts (id uuid primary key);\n\
+             alter table public.profiles disable row level security;\n\
+             alter table public.accounts enable row level security;",
+        )]);
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        let profiles = vs
+            .iter()
+            .find(|v| {
+                v.rule_id == RULE_RLS_ENABLED && v.object.as_deref() == Some("public.profiles")
+            })
+            .expect("profiles must still be flagged — it was never actually re-enabled");
+        assert_eq!(profiles.severity, SEVERITY_CRITICAL);
+        assert!(
+            profiles.message.contains("profiles") && profiles.message.contains("accounts"),
+            "narrative must name both the exposed table and the wrong table it re-enabled instead: {}",
+            profiles.message
+        );
+        assert!(
+            profiles.message.to_lowercase().contains("wrong-table"),
+            "narrative must explicitly call out the wrong-table typo: {}",
+            profiles.message
+        );
+        // `accounts` itself is now correctly protected (just no policy yet — a separate,
+        // already-covered finding) and must NOT carry any wrong-table claim about itself.
+        let accounts_findings: Vec<_> = vs
+            .iter()
+            .filter(|v| v.object.as_deref() == Some("public.accounts"))
+            .collect();
+        for v in accounts_findings {
+            assert!(!v.message.to_lowercase().contains("wrong-table"), "{v:#?}");
+        }
+    }
+
+    #[test]
+    fn correct_reenable_in_same_file_yields_no_finding_and_no_narrative() {
+        // Disabled for a backfill, then correctly re-enabled on the SAME table in the same
+        // file, policy still present — fully clean, nothing to flag at all.
+        let f = files(vec![(
+            "supabase/migrations/20240101000000_init.sql",
+            "create table public.profiles (id uuid primary key);\n\
+             alter table public.profiles enable row level security;\n\
+             create policy p1 on public.profiles for select using (true);\n\
+             alter table public.profiles disable row level security;\n\
+             alter table public.profiles enable row level security;",
+        )]);
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        assert!(
+            vs.is_empty(),
+            "correctly re-enabled with a policy in place must be fully clean: {vs:#?}"
+        );
+    }
+
+    #[test]
+    fn never_reenabled_anywhere_keeps_the_plain_narrative_with_no_wrong_table_claim() {
+        let f = files(vec![(
+            "supabase/migrations/20240101000000_init.sql",
+            "create table public.profiles (id uuid primary key);\n\
+             alter table public.profiles enable row level security;\n\
+             alter table public.profiles disable row level security;",
+        )]);
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert!(
+            vs[0].message.contains("No evidence of RLS being enabled"),
+            "{}",
+            vs[0].message
+        );
+        assert!(
+            !vs[0].message.to_lowercase().contains("wrong-table"),
+            "no re-enable was attempted anywhere — must not fabricate a wrong-table claim: {}",
+            vs[0].message
+        );
+    }
+
+    #[test]
+    fn a_table_never_touched_by_rls_is_not_mistaken_for_a_wrong_table_victim() {
+        // The critical false-positive guard at the checker level: a migration creates two
+        // tables and enables RLS on only one of them (ordinary, extremely common migration
+        // shape) — the untouched table's finding must read as the plain "no RLS" case, never
+        // as if some OTHER statement's enable was "meant for it."
+        let f = files(vec![(
+            "supabase/migrations/20240101000000_init.sql",
+            "create table public.audit_log (id uuid primary key);\n\
+             create table public.accounts (id uuid primary key);\n\
+             alter table public.accounts enable row level security;\n\
+             create policy p1 on public.accounts for select using (true);",
+        )]);
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        let audit = vs
+            .iter()
+            .find(|v| v.object.as_deref() == Some("public.audit_log"))
+            .expect("audit_log must still be flagged for missing RLS");
+        assert!(
+            !audit.message.to_lowercase().contains("wrong-table"),
+            "a table that was never explicitly disabled must not borrow an unrelated enable: {}",
+            audit.message
+        );
+    }
+
+    #[test]
+    fn wrong_table_reenable_is_narrated_on_the_policy_disabled_finding_too() {
+        // Same wrong-table shape, but this time `profiles` also has a policy written for it —
+        // exercising RULE_RLS_POLICY_DISABLED's own message, not just RULE_RLS_ENABLED's.
+        let f = files(vec![(
+            "supabase/migrations/20240101000000_init.sql",
+            "create table public.profiles (id uuid primary key);\n\
+             alter table public.profiles enable row level security;\n\
+             create policy p1 on public.profiles for select using (true);\n\
+             create table public.accounts (id uuid primary key);\n\
+             alter table public.profiles disable row level security;\n\
+             alter table public.accounts enable row level security;",
+        )]);
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        let disabled = vs
+            .iter()
+            .find(|v| v.rule_id == RULE_RLS_POLICY_DISABLED)
+            .expect("policy-disabled finding must still fire");
+        assert!(
+            disabled.message.to_lowercase().contains("wrong-table")
+                && disabled.message.contains("accounts"),
+            "{}",
+            disabled.message
+        );
+    }
+
+    #[test]
+    fn non_exposed_schema_info_finding_also_carries_the_narrative() {
+        let f = files(vec![
+            ("supabase/config.toml", "[api]\nschemas = [\"public\"]\n"),
+            (
+                "supabase/migrations/20240101000000_init.sql",
+                "create table internal.secrets (id uuid primary key);\n\
+                 alter table internal.secrets enable row level security;\n\
+                 create table internal.other (id uuid primary key);\n\
+                 alter table internal.secrets disable row level security;\n\
+                 alter table internal.other enable row level security;",
+            ),
+        ]);
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        let info = vs
+            .iter()
+            .find(|v| v.object.as_deref() == Some("internal.secrets"))
+            .expect("secrets must still be flagged (informationally — internal isn't exposed)");
+        assert_eq!(info.severity, SEVERITY_INFO);
+        assert!(
+            info.message.to_lowercase().contains("wrong-table") && info.message.contains("other"),
+            "{}",
+            info.message
+        );
     }
 }
