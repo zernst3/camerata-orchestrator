@@ -129,6 +129,60 @@ struct CoverageRow {
     findings_count: usize,
 }
 
+/// One row of the Coverage sheet's "Rules applied" appendix (P7 — evidence-based alternative
+/// selection): a client-visible audit trail of every multi-option rule this scan decided an
+/// alternative for, so a WRONG pick costs a glance at this table rather than a false finding
+/// buried in the report. Built from `ScanReport::recommendations` — see
+/// [`build_rules_applied_rows`].
+struct RulesAppliedRow {
+    rule_id: String,
+    /// The human label of the chosen option (resolved against the corpus when available,
+    /// else the bare option id) — or an explicit "Not applicable" note when the rule's
+    /// concern was judged not to apply to this codebase at all (P7: `applicable == false`),
+    /// in which case NO option was actually checked against.
+    chosen: String,
+    /// The `file:line` evidence backing the pick, or a blank cell when none was recorded
+    /// (an operator-forced pick, a not-applicable rule, or a pre-P7 recommendation).
+    evidence: String,
+    applicable: bool,
+}
+
+/// Build the Coverage sheet's "Rules applied" appendix rows from every recommendation this
+/// scan recorded (`ScanReport::recommendations` — one entry per multi-option rule the audit
+/// decided an alternative for). Sorted by rule id for a deterministic, diffable sheet.
+fn build_rules_applied_rows(
+    report: &ScanReport,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<RulesAppliedRow> {
+    let mut rows: Vec<RulesAppliedRow> = report
+        .recommendations
+        .values()
+        .map(|rec| {
+            let chosen = if !rec.applicable {
+                "Not applicable — no evidence this concern applies here".to_string()
+            } else {
+                corpus
+                    .and_then(|c| c.get_by_id(&rec.rule_id))
+                    .and_then(|r| {
+                        r.options
+                            .iter()
+                            .find(|o| o.id == rec.recommended_option_id)
+                            .map(|o| o.label.clone())
+                    })
+                    .unwrap_or_else(|| rec.recommended_option_id.clone())
+            };
+            RulesAppliedRow {
+                rule_id: rec.rule_id.clone(),
+                chosen,
+                evidence: rec.evidence.clone().unwrap_or_default(),
+                applicable: rec.applicable,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
+    rows
+}
+
 /// One row of the Index sheet's hyperlinked table of contents.
 struct SheetSummary {
     display_name: String,
@@ -711,11 +765,13 @@ fn write_dependencies_sheet(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_coverage_sheet(
     wb: &mut Workbook,
     name: &str,
     coverage_rows: &[CoverageRow],
     excluded_mechanical_rules: &[String],
+    rules_applied: &[RulesAppliedRow],
     fmts: &Formats,
 ) -> Result<(), XlsxError> {
     let ws = wb.add_worksheet();
@@ -757,18 +813,56 @@ fn write_coverage_sheet(
     ws.autofilter(0, 0, last_row, 5)?;
     ws.set_freeze_panes(1, 0)?;
 
+    let mut next_r = last_row + 2;
+
     if !excluded_mechanical_rules.is_empty() {
-        let mut r = last_row + 2;
         ws.write_string_with_format(
-            r,
+            next_r,
             0,
             "Excluded from this code-only audit (mechanical, CI-enforced instead)",
             &fmts.section_title,
         )?;
-        r += 1;
+        next_r += 1;
         for rid in excluded_mechanical_rules {
-            ws.write_string(r, 0, rid)?;
-            r += 1;
+            ws.write_string(next_r, 0, rid)?;
+            next_r += 1;
+        }
+        next_r += 1;
+    }
+
+    // P7: "Rules applied" appendix — every multi-option rule this scan decided an
+    // alternative for, with the chosen option, the evidence backing it, and whether the
+    // rule's concern was even judged applicable. A wrong pick costs a glance at this table
+    // instead of surfacing as a false finding in the report body.
+    if !rules_applied.is_empty() {
+        ws.write_string_with_format(
+            next_r,
+            0,
+            "Rules applied (alternative selection)",
+            &fmts.section_title,
+        )?;
+        next_r += 1;
+        let ra_headers = ["Rule ID", "Chosen alternative", "Evidence", "Applicable"];
+        for (c, h) in ra_headers.iter().enumerate() {
+            ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
+        }
+        next_r += 1;
+        let ra_header_row = next_r - 1;
+        for row in rules_applied {
+            ws.write_string_with_format(next_r, 0, &row.rule_id, &fmts.cell(None, false, false))?;
+            ws.write_string_with_format(next_r, 1, &row.chosen, &fmts.cell(None, true, false))?;
+            ws.write_string_with_format(next_r, 2, &row.evidence, &fmts.cell(None, true, false))?;
+            ws.write_string_with_format(
+                next_r,
+                3,
+                if row.applicable { "Yes" } else { "No" },
+                &fmts.cell(None, false, false),
+            )?;
+            next_r += 1;
+        }
+        let ra_last_row = next_r.saturating_sub(1);
+        if ra_last_row > ra_header_row {
+            ws.autofilter(ra_header_row, 0, ra_last_row, 3)?;
         }
     }
 
@@ -1121,11 +1215,13 @@ pub fn build_workbook(
         .context("writing the Dependencies sheet")?;
     write_findings_sheet(&mut wb, &fp_name, &fp_rows, &fmts, true, Some("#6B7280"))
         .context("writing the False Positives sheet")?;
+    let rules_applied_rows = build_rules_applied_rows(report, corpus);
     write_coverage_sheet(
         &mut wb,
         &coverage_name,
         &coverage_rows,
         &report.excluded_mechanical_rules,
+        &rules_applied_rows,
         &fmts,
     )
     .context("writing the Coverage sheet")?;
@@ -1329,6 +1425,78 @@ mod tests {
                 "workbook.xml missing {expected}: {workbook_xml}"
             );
         }
+    }
+
+    // ── P7: Coverage sheet's "Rules applied" appendix ────────────────────────────
+
+    /// The Coverage sheet must carry a "Rules applied" appendix listing rule id, chosen
+    /// alternative, evidence, and applicable yes/no for every recorded recommendation — so a
+    /// wrong pick costs a glance at the workbook rather than surfacing as a false finding.
+    #[test]
+    fn coverage_sheet_lists_rules_applied_with_chosen_evidence_and_applicability() {
+        let mut report = report_with(vec![], vec!["MULTI-RULE-1", "MULTI-RULE-2"]);
+        report.recommendations.insert(
+            "MULTI-RULE-1".to_string(),
+            crate::ai_audit::RuleRecommendation {
+                rule_id: "MULTI-RULE-1".to_string(),
+                recommended_option_id: "opt-b".to_string(),
+                recommendation_reasoning: "the repo already does it the B way".to_string(),
+                hallucinated: false,
+                operator_chosen: false,
+                evidence: Some("src/api/list_users.rs:42 — cursor already threaded".to_string()),
+                applicable: true,
+            },
+        );
+        report.recommendations.insert(
+            "MULTI-RULE-2".to_string(),
+            crate::ai_audit::RuleRecommendation {
+                rule_id: "MULTI-RULE-2".to_string(),
+                recommended_option_id: String::new(),
+                recommendation_reasoning: "no evidence of this anywhere in the codebase"
+                    .to_string(),
+                hallucinated: false,
+                operator_chosen: false,
+                evidence: None,
+                applicable: false,
+            },
+        );
+        let bytes = build_workbook(&report, &HashMap::new(), None, &empty_opts()).unwrap();
+
+        let shared_strings = read_zip_entry(&bytes, "xl/sharedStrings.xml");
+        let contains = |needle: &str| {
+            shared_strings.contains(needle) || any_worksheet_xml_containing(&bytes, needle)
+        };
+
+        assert!(
+            contains("Rules applied (alternative selection)"),
+            "appendix section header"
+        );
+        assert!(contains("MULTI-RULE-1"), "applicable rule id");
+        assert!(
+            contains("src/api/list_users.rs:42"),
+            "the evidence line must be recoverable from the workbook"
+        );
+        assert!(contains("MULTI-RULE-2"), "not-applicable rule id");
+        assert!(
+            contains("Not applicable"),
+            "a not-applicable rule's chosen column must say so plainly"
+        );
+        assert!(contains("Yes"), "the applicable column for the evidenced rule");
+        assert!(contains("No"), "the applicable column for the not-applicable rule");
+    }
+
+    /// No recommendations recorded (a scan with no multi-option rules, or one predating P7) —
+    /// the appendix must simply be absent, never an empty/broken header.
+    #[test]
+    fn coverage_sheet_omits_rules_applied_appendix_when_there_are_no_recommendations() {
+        let report = report_with(vec![], vec!["SEC-1"]);
+        let bytes = build_workbook(&report, &HashMap::new(), None, &empty_opts()).unwrap();
+        assert!(
+            !any_worksheet_xml_containing(&bytes, "Rules applied (alternative selection)")
+                && !read_zip_entry(&bytes, "xl/sharedStrings.xml")
+                    .contains("Rules applied (alternative selection)"),
+            "no recommendations recorded — the appendix must not render"
+        );
     }
 
     // ── Category sheets match `category_for` (the PDF's own scorecard grouping) ──
