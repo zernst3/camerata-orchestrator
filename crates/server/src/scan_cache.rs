@@ -62,6 +62,21 @@ pub struct ScanManifest {
     /// NOT cached here — they are cheap to recompute and must never go stale.
     #[serde(default)]
     pub findings: Vec<Finding>,
+    /// Whether the AI (semantic) review actually ran and completed on THIS manifest's scan —
+    /// i.e. `run_ai_review` was on AND no fatal AI error occurred. An AI-off run (the toggle was
+    /// off), a compliance-`Blocked` run, or a run where the AI pass errored out still stamps a
+    /// manifest (file fingerprints are always worth caching), but with `ai_covered = false` — its
+    /// `findings` are empty/stale-shaped AI-wise and must never be treated as a real "AI found
+    /// nothing" baseline.
+    ///
+    /// `#[serde(default)]` makes the zero value `false`, which is the SAFE default and doubles as
+    /// a self-heal for every manifest written before this field existed: those legacy JSON blobs
+    /// have no `ai_covered` key at all, so they deserialize with `ai_covered = false` and are
+    /// automatically treated as "no AI baseline" by the next AI-on scan (see `matches_rules`'s
+    /// caller in `onboard::audit_repos`, which additionally requires `ai_covered` before reusing
+    /// a prior manifest) — no migration or manual cache-bust needed.
+    #[serde(default)]
+    pub ai_covered: bool,
 }
 
 /// Fingerprint the selected rule set (ids + their repo bindings) so a change to the selection
@@ -182,6 +197,7 @@ pub struct ManifestBuilder {
     rules_fingerprint: String,
     files: BTreeMap<String, BTreeMap<String, String>>,
     findings: Vec<Finding>,
+    ai_covered: bool,
 }
 
 impl ManifestBuilder {
@@ -193,6 +209,15 @@ impl ManifestBuilder {
     /// scan under a different selection invalidates this manifest.
     pub fn with_rules_fingerprint(mut self, fp: String) -> Self {
         self.rules_fingerprint = fp;
+        self
+    }
+
+    /// Stamp whether the AI review actually ran and completed on this scan (see
+    /// [`ScanManifest::ai_covered`]'s doc comment for exactly what that means). Defaults to
+    /// `false` (the safe value) when never called, so a caller that forgets this stamp produces a
+    /// manifest that is correctly treated as "no AI baseline" rather than silently trusted.
+    pub fn with_ai_covered(mut self, covered: bool) -> Self {
+        self.ai_covered = covered;
         self
     }
 
@@ -215,6 +240,7 @@ impl ManifestBuilder {
             rules_fingerprint: self.rules_fingerprint,
             files: self.files,
             findings: self.findings,
+            ai_covered: self.ai_covered,
         }
     }
 }
@@ -555,6 +581,123 @@ mod tests {
         assert_eq!(m.findings[0].rule_id, "R1");
     }
 
+    // ── ai_covered: stamping + self-heal ────────────────────────────────────────
+
+    #[test]
+    fn manifest_builder_defaults_ai_covered_to_false() {
+        // A caller that forgets to call `with_ai_covered` must get the SAFE default (false),
+        // not an implicitly-trusted manifest.
+        let mut b = ManifestBuilder::new();
+        b.record_repo("me/api", &[file("a.rs", "x")], &[]);
+        let m = b.finish();
+        assert!(
+            !m.ai_covered,
+            "ai_covered must default to false when the builder never stamps it"
+        );
+    }
+
+    #[test]
+    fn manifest_builder_stamps_ai_covered_true_when_told() {
+        let mut b = ManifestBuilder::new().with_ai_covered(true);
+        b.record_repo(
+            "me/api",
+            &[file("a.rs", "x")],
+            &[finding("me/api", "a.rs", "R1")],
+        );
+        let m = b.finish();
+        assert!(m.ai_covered, "with_ai_covered(true) must stamp true");
+    }
+
+    #[test]
+    fn manifest_builder_stamps_ai_covered_false_when_told() {
+        // Simulates an AI-off / blocked / errored run: the manifest is still built (file
+        // fingerprints recorded) but explicitly marked as having no AI baseline.
+        let mut b = ManifestBuilder::new().with_ai_covered(false);
+        b.record_repo("me/api", &[file("a.rs", "x")], &[]);
+        let m = b.finish();
+        assert!(
+            !m.ai_covered,
+            "an AI-off run's manifest must be stamped ai_covered = false"
+        );
+        assert_eq!(
+            m.files["me/api"].len(),
+            1,
+            "file fingerprints are still recorded even when the AI didn't run"
+        );
+    }
+
+    #[test]
+    fn ai_covered_round_trips_through_json_serde() {
+        let mut b = ManifestBuilder::new().with_ai_covered(true);
+        b.record_repo(
+            "me/api",
+            &[file("a.rs", "x")],
+            &[finding("me/api", "a.rs", "R1")],
+        );
+        let m = b.finish();
+        let json = serde_json::to_string(&m).expect("serialize");
+        let back: ScanManifest = serde_json::from_str(&json).expect("deserialize");
+        assert!(
+            back.ai_covered,
+            "ai_covered = true must round-trip through JSON"
+        );
+    }
+
+    #[test]
+    fn legacy_manifest_json_without_ai_covered_self_heals_to_false() {
+        // A manifest persisted BEFORE the `ai_covered` field existed has no such key in its
+        // JSON at all. `#[serde(default)]` must deserialize that as `false` — the safe
+        // value — so every already-written (potentially AI-poisoned) manifest on disk
+        // self-heals the moment it's loaded, with no migration step required.
+        let legacy_json = r#"{
+            "version": 1,
+            "rules_fingerprint": "abc123",
+            "files": {"me/api": {"a.rs": "deadbeefdeadbeef"}},
+            "findings": []
+        }"#;
+        let m: ScanManifest = serde_json::from_str(legacy_json)
+            .expect("legacy manifest JSON (no ai_covered key) must still deserialize");
+        assert!(
+            !m.ai_covered,
+            "a legacy manifest with no ai_covered key must self-heal to false"
+        );
+        assert_eq!(
+            m.rules_fingerprint, "abc123",
+            "other fields still parse normally"
+        );
+    }
+
+    #[test]
+    fn legacy_manifest_without_ai_covered_is_ignored_by_ai_on_gate() {
+        // End-to-end proof of the self-heal: a legacy manifest (no ai_covered key, so it
+        // deserializes false) must fail the caller's `ai_covered` gate exactly like a
+        // freshly-stamped ai_covered=false manifest would — full AI audit, not a reused
+        // empty result.
+        let legacy_json = r#"{
+            "version": 1,
+            "rules_fingerprint": "RULES-V1",
+            "files": {"me/api": {"a.rs": "deadbeefdeadbeef"}},
+            "findings": []
+        }"#;
+        let legacy: ScanManifest = serde_json::from_str(legacy_json).expect("deserialize");
+
+        // Mirrors onboard::audit_repos's `effective_prior` gate.
+        let effective_prior = Some(&legacy).filter(|m| m.matches_rules("RULES-V1") && m.ai_covered);
+        assert!(
+            effective_prior.is_none(),
+            "a legacy (ai_covered=false) manifest must be treated as no AI baseline"
+        );
+
+        let files = vec![file("a.rs", "unchanged content")];
+        let p = partition(effective_prior, "me/api", &files);
+        assert_eq!(
+            p.changed.len(),
+            1,
+            "with no usable AI baseline, the file is treated as changed → re-audited"
+        );
+        assert_eq!(p.unchanged_count, 0);
+    }
+
     #[test]
     fn store_round_trips_a_manifest() {
         let store = ScanCacheStore::new();
@@ -715,6 +858,7 @@ mod tests {
                 m
             },
             findings: vec![],
+            ai_covered: true,
         };
 
         let p = partition(Some(&stale), "me/api", &files);
