@@ -611,6 +611,28 @@ pub(super) struct RuleRecommendationView {
     /// recommended" in the review panel.
     #[serde(default)]
     pub operator_chosen: bool,
+    /// The `file:line` (or `file:line — short note`) citation in the repo the model grounded its
+    /// pick in (P7, docs/plans/2026-09-29_codebase-inspection-hardening.md). `None` when the
+    /// model gave no evidence for this rule (or, for an operator-forced pick, no evidence is
+    /// expected). Mirrors `camerata_server::ai_audit::RuleRecommendation::evidence`.
+    /// `#[serde(default)]` so a report from before this field existed still deserializes as
+    /// `None` (no evidence line shown, not an error).
+    #[serde(default)]
+    pub evidence: Option<String>,
+    /// False when the model itself judged this rule NOT applicable to the repo (e.g. a rule
+    /// aimed at a stack the codebase doesn't use) — surfaced as "Not applicable to this repo" so
+    /// a wrong pick costs a glance rather than reading as a real finding. Mirrors
+    /// `camerata_server::ai_audit::RuleRecommendation::applicable`, whose own default is `true`
+    /// (`default_recommendation_applicable`): a report from before this field existed carries no
+    /// applicability signal at all, and defaulting THAT case to `false` would wrongly flag every
+    /// legacy recommendation as not-applicable, so the UI default matches the server's `true`
+    /// rather than `bool`'s own `false` default.
+    #[serde(default = "default_recommendation_applicable")]
+    pub applicable: bool,
+}
+
+fn default_recommendation_applicable() -> bool {
+    true
 }
 
 #[derive(Clone, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -3000,11 +3022,21 @@ pub(super) fn RuleAlternativesPanel(
                                     if is_accepted {
                                         span { class: "rec-badge rec-badge-accepted", "Accepted" }
                                     }
+                                    if !rec.applicable {
+                                        span { class: "rec-not-applicable", "Not applicable to this repo" }
+                                    }
                                     button {
                                         class: "btn-edit-sm",
                                         onclick: move |_| why_open.set(Some(rid_for_why.clone())),
                                         "Why?"
                                     }
+                                }
+                                // Evidence (P7): the file:line citation the model grounded its
+                                // pick in — "a wrong pick costs a glance, not a false finding".
+                                // Absent for legacy reports / operator-forced picks with no
+                                // model evidence, so this line only renders when present.
+                                if let Some(ev) = rec.evidence.as_ref().filter(|e| !e.is_empty()) {
+                                    span { class: "rec-evidence", "Evidence: {ev}" }
                                 }
                                 select {
                                     class: "rec-select",
@@ -5517,7 +5549,9 @@ mod tests {
                     "recommended_option_id": "layered",
                     "recommendation_reasoning": "The repo already separates controllers from services.",
                     "hallucinated": false,
-                    "operator_chosen": false
+                    "operator_chosen": false,
+                    "evidence": "src/api/handler.rs:42 — controller calls service.method directly",
+                    "applicable": false
                 },
                 "ARCH-2": {
                     "recommended_option_id": "fallback-opt",
@@ -5537,9 +5571,24 @@ mod tests {
         );
         assert!(!arch1.hallucinated);
         assert!(!arch1.operator_chosen);
+        assert_eq!(
+            arch1.evidence.as_deref(),
+            Some("src/api/handler.rs:42 — controller calls service.method directly"),
+            "evidence (P7) must survive the round trip"
+        );
+        assert!(
+            !arch1.applicable,
+            "explicit applicable:false must survive the round trip"
+        );
         let arch2 = &r.recommendations["ARCH-2"];
         assert!(arch2.hallucinated, "hallucinated flag must survive the round trip");
         assert!(arch2.operator_chosen, "operator_chosen flag must survive the round trip");
+        // ARCH-2's JSON predates P7 (no evidence/applicable keys at all) — legacy-absent case:
+        // must deserialize as no-evidence + applicable defaulting to TRUE (matching the server's
+        // own `default_recommendation_applicable`), not `bool::default()`'s `false`, so an old
+        // persisted report never renders every recommendation as "Not applicable".
+        assert_eq!(arch2.evidence, None, "absent evidence deserializes as None");
+        assert!(arch2.applicable, "absent applicable must default to true, not false");
     }
 
     #[test]
@@ -5569,6 +5618,8 @@ mod tests {
             recommendation_reasoning: "because".to_string(),
             hallucinated: false,
             operator_chosen,
+            evidence: None,
+            applicable: true,
         }
     }
 
@@ -6769,6 +6820,26 @@ mod render_tests {
             recommendation_reasoning: reasoning.to_string(),
             hallucinated,
             operator_chosen,
+            evidence: None,
+            applicable: true,
+        }
+    }
+
+    /// Like [`recommendation`] but with explicit `evidence`/`applicable` (P7) for the tests that
+    /// exercise the evidence line + not-applicable marker specifically.
+    fn recommendation_with_evidence(
+        option_id: &str,
+        reasoning: &str,
+        evidence: Option<&str>,
+        applicable: bool,
+    ) -> RuleRecommendationView {
+        RuleRecommendationView {
+            recommended_option_id: option_id.to_string(),
+            recommendation_reasoning: reasoning.to_string(),
+            hallucinated: false,
+            operator_chosen: false,
+            evidence: evidence.map(str::to_string),
+            applicable,
         }
     }
 
@@ -6968,6 +7039,92 @@ mod render_tests {
                 "rule {i} rendered; html=\n{html}"
             );
         }
+    }
+
+    /// P7 (docs/plans/2026-09-29_codebase-inspection-hardening.md): each rule's card must show
+    /// the evidence `file:line` the pick was grounded in, and an applicability marker when the
+    /// model judged the rule not applicable to this repo — "a wrong pick costs a glance, not a
+    /// false finding".
+    #[test]
+    fn rule_alternatives_panel_renders_evidence_and_not_applicable_marker() {
+        fn harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            use_context_provider(
+                || Signal::new(std::collections::HashMap::<String, String>::new()),
+            );
+            let audit = use_signal(|| None::<ScanReportView>);
+            let proposed_rules = vec![
+                proposed_rule_with_options(
+                    "ARCH-1",
+                    "Layering",
+                    &[
+                        ("layered", "Layered architecture"),
+                        ("hexagonal", "Hexagonal architecture"),
+                    ],
+                ),
+                proposed_rule_with_options(
+                    "ARCH-2",
+                    "Error handling",
+                    &[
+                        ("result", "Result-based"),
+                        ("exceptions", "Exception-based"),
+                    ],
+                ),
+            ];
+            let mut recommendations = std::collections::HashMap::new();
+            recommendations.insert(
+                "ARCH-1".to_string(),
+                recommendation_with_evidence(
+                    "layered",
+                    "The repo already separates controllers from services.",
+                    Some("src/api/handler.rs:42 — controller calls service.method directly"),
+                    true,
+                ),
+            );
+            recommendations.insert(
+                "ARCH-2".to_string(),
+                recommendation_with_evidence(
+                    "result",
+                    "This rule targets a stack this repo doesn't use.",
+                    None,
+                    false,
+                ),
+            );
+            rsx! {
+                RuleAlternativesPanel {
+                    project_id: "proj-1".to_string(),
+                    proposed_rules,
+                    findings: vec![],
+                    repos: vec!["owner/repo".to_string()],
+                    recommendations,
+                    audit,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        // ARCH-1: evidenced + applicable — shows the evidence line, no "not applicable" marker
+        // anywhere near it (checked precisely below via the ARCH-2-only assertion).
+        assert!(
+            html.contains("src/api/handler.rs:42"),
+            "evidence file:line rendered; html=\n{html}"
+        );
+        assert!(
+            html.contains("rec-evidence"),
+            "evidence line uses its own class; html=\n{html}"
+        );
+        // ARCH-2: not applicable — marker rendered, and it has no evidence line of its own
+        // (only ARCH-1 contributes an occurrence of the evidence class/text).
+        assert!(
+            html.contains("Not applicable to this repo"),
+            "not-applicable marker rendered; html=\n{html}"
+        );
+        assert_eq!(
+            html.matches("rec-evidence").count(),
+            1,
+            "only the evidenced rule (ARCH-1) renders an evidence line; html=\n{html}"
+        );
     }
 
     #[test]
