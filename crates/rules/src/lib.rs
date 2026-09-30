@@ -362,6 +362,18 @@ struct RuleToml {
     /// staleness pass can demote on drift.
     #[serde(default)]
     verified: Option<VerifiedProvenance>,
+    /// Stack exceptions (`[[stack_exception]]` blocks) — see [`StackException`]. Absent →
+    /// empty (no exceptions; the rule applies uniformly regardless of detected stack).
+    #[serde(default, rename = "stack_exception")]
+    stack_exceptions: Vec<StackExceptionToml>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StackExceptionToml {
+    framework: String,
+    path_glob: String,
+    #[serde(default)]
+    note: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -534,6 +546,71 @@ pub struct Rule {
     /// layer-2 or at scan time (too heavy / not locally runnable). Carried for the
     /// runners + scan-time preview. See [`Rule::is_layer3_only`]. Defaults to `false`.
     pub layer3_only: bool,
+    /// Stack exceptions (`[[stack_exception]]` TOML blocks) — see [`StackException`]'s doc
+    /// comment for the general mechanism. Empty for the overwhelming majority of rules, whose
+    /// premise never conflicts with a platform-idiomatic pattern. See [`Rule::stack_exception_for`].
+    pub stack_exceptions: Vec<StackException>,
+}
+
+/// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`): a GENERAL mechanism for a
+/// rule whose premise conflicts with an idiomatic pattern of a DETECTED platform to be
+/// suppressed for that stack, rather than firing a false violation. Declared per-rule in the
+/// corpus TOML as `[[stack_exception]]` blocks — a rule can carry any number of them (one per
+/// idiomatic pattern it needs to except), and any rule in the corpus can declare one; this is
+/// not wired to any specific rule id.
+///
+/// Example (`fullstack/arch-monolith-first-1.toml`):
+/// ```toml
+/// [[stack_exception]]
+/// framework = "Supabase"
+/// path_glob = "supabase/functions/**"
+/// note = "Supabase Edge Functions are the idiomatic second deployable for webhooks on this stack — not a monolith-topology violation."
+/// ```
+///
+/// Both conditions must hold for the exception to apply to a given finding: the DETECTED
+/// stack (`RepoStack::frameworks` in `camerata-server`) must contain `framework`, AND the
+/// finding's file path must match `path_glob` (see [`glob_match`]). A rule with no
+/// `stack_exceptions` behaves exactly as before this field existed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackException {
+    /// The framework/language marker (matched against the detected stack's framework list,
+    /// e.g. `"Supabase"`, `"Next.js"`) that must be present for this exception to apply.
+    pub framework: String,
+    /// A glob pattern (`*` matches any run of characters, including `/`; see [`glob_match`])
+    /// matched against a finding's file path. Both `framework` present AND a path match are
+    /// required.
+    pub path_glob: String,
+    /// Why this is idiomatic for the stack — internal documentation for whoever authors or
+    /// reviews the exception; not currently rendered client-facing.
+    pub note: String,
+}
+
+/// A minimal, dependency-free glob matcher: `*` matches any run of characters (zero or more),
+/// including `/` — so a single `*` behaves like `**` in more featureful glob dialects. This is
+/// deliberately simple (classic recursive wildcard matching, no character classes, no `?`)
+/// because [`StackException::path_glob`] only ever needs "does this path sit under this
+/// idiomatic-pattern directory" style patterns (e.g. `"supabase/functions/**"`,
+/// `"app/api/**/route.ts"`) — not a full glob grammar.
+pub fn glob_match(pattern: &str, text: &str) -> bool {
+    fn helper(p: &[u8], t: &[u8]) -> bool {
+        match p.first() {
+            None => t.is_empty(),
+            Some(b'*') => {
+                // Collapse consecutive `*` (equivalent to one) then try consuming
+                // 0..=all of the remaining text before it.
+                let mut rest = p;
+                while rest.first() == Some(&b'*') {
+                    rest = &rest[1..];
+                }
+                (0..=t.len()).any(|i| helper(rest, &t[i..]))
+            }
+            Some(pc) => match t.first() {
+                Some(tc) if pc == tc => helper(&p[1..], &t[1..]),
+                _ => false,
+            },
+        }
+    }
+    helper(pattern.as_bytes(), text.as_bytes())
 }
 
 impl Rule {
@@ -542,6 +619,24 @@ impl Rule {
     pub fn resolved_option(&self, chosen_option: Option<&str>) -> Option<&RuleOption> {
         let target = chosen_option.or(self.default_option.as_deref())?;
         self.options.iter().find(|o| o.id == target)
+    }
+
+    /// The first [`StackException`] on this rule whose `framework` is present in
+    /// `detected_frameworks` AND whose `path_glob` matches `path` — `None` when no exception
+    /// applies (the common case). The caller (`camerata-server`'s finding-filtering pass)
+    /// treats a `Some` result as "suppress this finding: it names an idiomatic platform
+    /// pattern for the detected stack, not a violation."
+    pub fn stack_exception_for<S: AsRef<str>>(
+        &self,
+        detected_frameworks: &[S],
+        path: &str,
+    ) -> Option<&StackException> {
+        self.stack_exceptions.iter().find(|se| {
+            detected_frameworks
+                .iter()
+                .any(|f| f.as_ref().eq_ignore_ascii_case(&se.framework))
+                && glob_match(&se.path_glob, path)
+        })
     }
 
     /// The ACTIVE escalation spec for this rule given the project's `chosen_option`: the SELECTED
@@ -683,7 +778,12 @@ impl RuleSet {
         self.by_domain.keys().map(String::as_str)
     }
 
-    fn push(&mut self, rule: Rule) {
+    /// Add a rule into this set, indexing it by id and domain. Public so downstream crates
+    /// (e.g. `camerata-server`'s tests) can build a synthetic, multi-rule [`RuleSet`] —
+    /// `ruleset_with_unauthored_rule` only ever builds one fixed rule shape; this is the
+    /// general escape hatch for a test that needs a rule with arbitrary fields (e.g. a
+    /// `stack_exceptions` list) without going through the async file-based corpus loader.
+    pub fn push(&mut self, rule: Rule) {
         let idx = self.rules.len();
         self.by_domain
             .entry(rule.domain.clone())
@@ -691,6 +791,35 @@ impl RuleSet {
             .push(idx);
         self.by_id.insert(rule.id.0.clone(), idx);
         self.rules.push(rule);
+    }
+}
+
+/// Test-support constructor: a minimal, otherwise-empty [`Rule`] with only `id` and `domain`
+/// set (no options, no sources, `draft` verification, no stack exceptions) — for a test that
+/// needs a real `Rule` value to mutate (e.g. push a [`StackException`] onto `stack_exceptions`)
+/// without hand-spelling every field of the struct. Combine with [`RuleSet::push`] to build a
+/// synthetic multi-rule set: `let mut set = RuleSet::default(); set.push(bare_rule(id, domain));`.
+///
+/// `#[doc(hidden)]`: this is test scaffolding, not a production API — production code always
+/// goes through [`load_corpus`] / [`load_corpus_lenient`] against the real bundled corpus.
+#[doc(hidden)]
+pub fn bare_rule(id: &str, domain: &str) -> Rule {
+    Rule {
+        id: RuleId(id.to_owned()),
+        title: format!("Test-fixture rule {id}"),
+        enforcement: EnforcementKind::Structured,
+        domain: domain.to_owned(),
+        summary: format!("Synthetic test-only rule ({id})."),
+        decision_question: None,
+        decision_why: None,
+        options: Vec::new(),
+        default_option: None,
+        verification: Verification::Draft,
+        sources: Vec::new(),
+        verified: None,
+        opt_in_only: false,
+        layer3_only: false,
+        stack_exceptions: Vec::new(),
     }
 }
 
@@ -738,6 +867,7 @@ pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
         verified: None,
         opt_in_only: false,
         layer3_only: false,
+        stack_exceptions: Vec::new(),
     };
     let mut set = RuleSet::default();
     set.push(rule);
@@ -967,6 +1097,16 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
         })
         .collect();
 
+    let stack_exceptions = raw
+        .stack_exceptions
+        .into_iter()
+        .map(|se| StackException {
+            framework: se.framework,
+            path_glob: se.path_glob,
+            note: se.note,
+        })
+        .collect();
+
     Ok(Rule {
         id: RuleId(raw.id),
         title: raw.title,
@@ -982,6 +1122,7 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
         verified: raw.verified,
         opt_in_only: raw.opt_in_only,
         layer3_only: raw.layer3_only,
+        stack_exceptions,
     })
 }
 
@@ -1224,6 +1365,7 @@ mod tests {
             verified: None,
             opt_in_only: false,
             layer3_only: false,
+            stack_exceptions: Vec::new(),
         }
     }
 
@@ -1291,6 +1433,15 @@ mod tests {
             verified: raw.verified,
             opt_in_only: raw.opt_in_only,
             layer3_only: raw.layer3_only,
+            stack_exceptions: raw
+                .stack_exceptions
+                .into_iter()
+                .map(|se| StackException {
+                    framework: se.framework,
+                    path_glob: se.path_glob,
+                    note: se.note,
+                })
+                .collect(),
         }
     }
 
@@ -2222,6 +2373,105 @@ mod tests {
         let rule = parse_rule(src);
         assert!(rule.is_opt_in_only(), "opt_in_only = true parses");
         assert!(rule.is_layer3_only(), "layer3_only = true parses");
+    }
+
+    // ── P7: stack exceptions ────────────────────────────────────────────────────────
+
+    #[test]
+    fn glob_match_matches_a_trailing_double_star_directory() {
+        assert!(glob_match(
+            "supabase/functions/**",
+            "supabase/functions/send-invite/index.ts"
+        ));
+        assert!(glob_match("supabase/functions/**", "supabase/functions/x"));
+        assert!(!glob_match(
+            "supabase/functions/**",
+            "supabase/migrations/1.sql"
+        ));
+    }
+
+    #[test]
+    fn glob_match_matches_a_mid_pattern_wildcard() {
+        assert!(glob_match("app/api/*/route.ts", "app/api/users/route.ts"));
+        assert!(!glob_match("app/api/*/route.ts", "app/api/users/route.js"));
+    }
+
+    #[test]
+    fn glob_match_exact_pattern_requires_exact_text() {
+        assert!(glob_match("exact/path.rs", "exact/path.rs"));
+        assert!(!glob_match("exact/path.rs", "exact/path.rs.bak"));
+        assert!(!glob_match("exact/path.rs", "exact/pathXrs"));
+    }
+
+    #[test]
+    fn no_stack_exceptions_declared_means_no_exception_ever_applies() {
+        let rule = make_rule("SOME-RULE-1", "fullstack", EnforcementKind::Structured);
+        assert!(rule
+            .stack_exception_for(&["Supabase"], "supabase/functions/x/index.ts")
+            .is_none());
+    }
+
+    /// The corpus-declared shape: a rule whose `[[stack_exception]]` block requires BOTH the
+    /// framework AND the path glob to match. Proves parsing round-trips through `parse_rule`
+    /// (the same field wiring `load_one` uses in production).
+    #[test]
+    fn stack_exception_parses_and_requires_both_framework_and_path_match() {
+        let src = r#"
+            id = "ARCH-EXAMPLE-STACK-EXCEPTION-1"
+            title = "Example rule with a stack exception"
+            enforcement = "structured"
+            domain = "fullstack"
+
+            [[stack_exception]]
+            framework = "Supabase"
+            path_glob = "supabase/functions/**"
+            note = "Supabase Edge Functions are the idiomatic second deployable for webhooks."
+        "#;
+        let rule = parse_rule(src);
+        assert_eq!(rule.stack_exceptions.len(), 1);
+        assert_eq!(rule.stack_exceptions[0].framework, "Supabase");
+
+        // Framework present AND path matches -> excepted.
+        assert!(rule
+            .stack_exception_for(&["Supabase", "Next.js"], "supabase/functions/x/index.ts")
+            .is_some());
+        // Framework present but path does NOT match the glob -> not excepted.
+        assert!(rule
+            .stack_exception_for(&["Supabase"], "src/main.rs")
+            .is_none());
+        // Path matches but the framework is NOT in the detected stack -> not excepted (proves
+        // the mechanism needs BOTH conditions, not just a path match).
+        assert!(rule
+            .stack_exception_for(&["Next.js"], "supabase/functions/x/index.ts")
+            .is_none());
+    }
+
+    /// GENERALITY: the mechanism is not hardcoded to Supabase/monolith-first — an entirely
+    /// different rule + framework pair works identically, proving a rule can declare stack
+    /// exceptions for ANY platform pattern, not just the one wired instance.
+    #[test]
+    fn stack_exception_mechanism_generalizes_to_a_different_rule_and_framework() {
+        let src = r#"
+            id = "SOME-OTHER-RULE-1"
+            title = "A rule unrelated to monolith-first or Supabase"
+            enforcement = "structured"
+            domain = "javascript"
+
+            [[stack_exception]]
+            framework = "Next.js"
+            path_glob = "app/api/**/route.ts"
+            note = "Route Handlers are the idiomatic REST surface in the Next.js App Router."
+        "#;
+        let rule = parse_rule(src);
+        assert!(rule
+            .stack_exception_for(&["Next.js"], "app/api/users/route.ts")
+            .is_some());
+        assert!(rule
+            .stack_exception_for(&["Next.js"], "pages/api/users.ts")
+            .is_none());
+        assert!(rule
+            .stack_exception_for(&["Vue"], "app/api/users/route.ts")
+            .is_none());
     }
 
     #[test]

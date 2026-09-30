@@ -1071,6 +1071,7 @@ mod tests {
             verified: None,
             opt_in_only: false,
             layer3_only: layer3,
+            stack_exceptions: Vec::new(),
         }
     }
 

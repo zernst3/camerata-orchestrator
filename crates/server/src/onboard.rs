@@ -1098,7 +1098,10 @@ pub async fn audit_repos(
                 if deep && run_ai_review {
                     deep_inputs.push((spec.to_string(), files.clone()));
                 }
-                stacks.push(detect_stack(spec, &files));
+                // Kept as a local (not just pushed into `stacks`) so the stack-exception filter
+                // below (P7) can read `repo_stack.frameworks` for THIS repo specifically.
+                let repo_stack = detect_stack(spec, &files);
+                stacks.push(repo_stack.clone());
                 // Deterministic security floor (always-on, every repo): ENFORCED findings.
                 // This is the non-deselectable critical floor, so it is NOT repo-scoped —
                 // hardcoded secrets / raw-SQL concat are unsafe in any code repo. It is
@@ -1236,6 +1239,19 @@ pub async fn audit_repos(
                 manifest_builder.record_repo(spec, &files, &ai_for_repo);
 
                 repo_findings.extend(ai_for_repo);
+                // P7: drop any finding whose rule carries a stack exception that applies to
+                // THIS repo's detected stack + the finding's own path (e.g. monolith-first vs.
+                // a Supabase Edge Functions directory) — the finding names an idiomatic
+                // platform pattern, not a violation. General over the whole corpus (works for
+                // any rule/stack pair a `[[stack_exception]]` block declares), so this runs
+                // unconditionally whenever a corpus is loaded, not just for the one wired rule.
+                if let Some(c) = corpus {
+                    repo_findings = crate::ai_audit::apply_stack_exceptions(
+                        repo_findings,
+                        &repo_stack.frameworks,
+                        c,
+                    );
+                }
                 // Bug 3: second, cross-FAMILY merge pass over the COMBINED floor + arch + AI set
                 // (exact-location merge + snippet anchoring already ran inside the AI tier). Fuses
                 // the same defect flagged by two rule families a few lines apart, keeping the
@@ -3178,6 +3194,7 @@ mod tests {
             verified: None,
             opt_in_only,
             layer3_only: false,
+            stack_exceptions: Vec::new(),
         }
     }
 

@@ -3414,6 +3414,40 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
     primary
 }
 
+/// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`): drop any finding whose rule
+/// carries a [`camerata_rules::StackException`] that applies to the repo's DETECTED stack +
+/// this finding's own file path — e.g. `ARCH-MONOLITH-FIRST-1` flagging a `supabase/functions/`
+/// directory on a Supabase-stack repo, where a second Edge Functions deployable is the
+/// idiomatic pattern, not a monolith-topology violation. GENERAL by construction: this checks
+/// every finding against whatever `[[stack_exception]]` blocks its own rule declares in the
+/// corpus — it is not special-cased to any one rule or framework (see
+/// [`camerata_rules::StackException`]'s doc comment for the mechanism). A finding whose rule id
+/// isn't in the corpus (an AI-invented `AI-`-prefixed name, or a rule id the loaded corpus
+/// doesn't contain) is never excepted — only a real corpus rule can declare an exception.
+pub fn apply_stack_exceptions(
+    findings: Vec<Finding>,
+    detected_frameworks: &[String],
+    corpus: &camerata_rules::RuleSet,
+) -> Vec<Finding> {
+    if detected_frameworks.is_empty() {
+        return findings;
+    }
+    findings
+        .into_iter()
+        .filter(|f| {
+            let rule = corpus
+                .get_by_id(&f.rule_id)
+                .or_else(|| corpus.get_by_id(f.rule_id.trim_start_matches("AI-")));
+            match rule {
+                Some(rule) => rule
+                    .stack_exception_for(detected_frameworks, &f.path)
+                    .is_none(),
+                None => true,
+            }
+        })
+        .collect()
+}
+
 /// The SECOND merge pass (design §1, extended by P1 — see
 /// `docs/plans/2026-09-29_codebase-inspection-hardening.md`): after `resolve_finding_lines` +
 /// `merge_by_location` have collapsed exact-location duplicates, fuse cross-TIER duplicates —
@@ -5030,6 +5064,122 @@ mod tests {
             also_locations: Vec::new(),
             fix_specific: None,
         }
+    }
+
+    // ── P7: stack exceptions ────────────────────────────────────────────────────────────
+
+    /// THE WIRED INSTANCE, against the REAL corpus: `ARCH-MONOLITH-FIRST-1` must not flag a
+    /// `supabase/functions/` finding on a repo whose detected stack includes Supabase — Edge
+    /// Functions are the idiomatic second deployable for webhooks on that platform, not a
+    /// monolith-topology violation.
+    #[tokio::test]
+    async fn stack_exception_spares_monolith_first_on_supabase_edge_functions() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        assert!(
+            corpus.get_by_id("ARCH-MONOLITH-FIRST-1").is_some(),
+            "the wired rule must exist in the real corpus"
+        );
+
+        let excepted = site_finding(
+            "ARCH-MONOLITH-FIRST-1",
+            "supabase/functions/send-invite/index.ts",
+            1,
+            "medium",
+            "a second deployable exists",
+        );
+        let unrelated = site_finding("ARCH-MONOLITH-FIRST-1", "src/server.rs", 5, "medium", "");
+        let frameworks = vec!["Supabase".to_string()];
+        let out = apply_stack_exceptions(vec![excepted, unrelated], &frameworks, &corpus);
+
+        assert_eq!(
+            out.len(),
+            1,
+            "the Edge Functions finding must be suppressed: {out:?}"
+        );
+        assert_eq!(
+            out[0].path, "src/server.rs",
+            "a monolith-first violation OUTSIDE supabase/functions/ must still fire"
+        );
+    }
+
+    /// The SAME rule, on a repo that does NOT have Supabase in its detected stack: the
+    /// exception must never apply just because the path happens to match — both conditions
+    /// (framework present AND path match) are required.
+    #[tokio::test]
+    async fn stack_exception_does_not_apply_without_the_framework_present() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty());
+        let f = site_finding(
+            "ARCH-MONOLITH-FIRST-1",
+            "supabase/functions/send-invite/index.ts",
+            1,
+            "medium",
+            "",
+        );
+        let frameworks = vec!["Next.js".to_string()]; // Supabase NOT detected
+        let out = apply_stack_exceptions(vec![f], &frameworks, &corpus);
+        assert_eq!(
+            out.len(),
+            1,
+            "no Supabase in the stack ⇒ the exception must not apply"
+        );
+    }
+
+    /// GENERALITY: an entirely different rule + framework pair, via a SYNTHETIC ruleset (never
+    /// touching the real corpus), proves the mechanism is not special-cased to monolith-first
+    /// or Supabase — any rule that declares a `stack_exceptions` entry gets the same treatment.
+    #[test]
+    fn stack_exception_mechanism_generalizes_beyond_the_one_wired_rule() {
+        let mut rule = camerata_rules::bare_rule("SOME-OTHER-RULE-1", "javascript");
+        rule.stack_exceptions.push(camerata_rules::StackException {
+            framework: "Next.js".to_string(),
+            path_glob: "app/api/**/route.ts".to_string(),
+            note: "Route Handlers are idiomatic in the Next.js App Router.".to_string(),
+        });
+        let mut set = camerata_rules::RuleSet::default();
+        set.push(rule);
+
+        let excepted = site_finding("SOME-OTHER-RULE-1", "app/api/users/route.ts", 1, "low", "");
+        let unrelated = site_finding("SOME-OTHER-RULE-1", "pages/api/users.ts", 1, "low", "");
+        let frameworks = vec!["Next.js".to_string()];
+        let out = apply_stack_exceptions(vec![excepted, unrelated], &frameworks, &set);
+
+        assert_eq!(
+            out.len(),
+            1,
+            "the app-router-idiomatic path must be suppressed: {out:?}"
+        );
+        assert_eq!(out[0].path, "pages/api/users.ts");
+    }
+
+    /// A rule with NO `stack_exceptions` declared (the overwhelming majority of the corpus)
+    /// behaves exactly as before this feature existed — nothing is ever suppressed for it.
+    #[test]
+    fn apply_stack_exceptions_is_a_no_op_for_a_rule_with_no_declared_exceptions() {
+        let mut set = camerata_rules::RuleSet::default();
+        set.push(camerata_rules::bare_rule("PLAIN-RULE-1", "rust"));
+        let f = site_finding("PLAIN-RULE-1", "supabase/functions/x.ts", 1, "medium", "");
+        let out = apply_stack_exceptions(vec![f], &["Supabase".to_string()], &set);
+        assert_eq!(out.len(), 1);
+    }
+
+    /// An AI-invented rule id (no corresponding corpus entry, `AI-` prefixed) can never be
+    /// excepted — only a real corpus rule's own declared exceptions apply.
+    #[test]
+    fn apply_stack_exceptions_never_excepts_an_uncorpused_ai_invented_rule_id() {
+        let set = camerata_rules::RuleSet::default();
+        let f = site_finding(
+            "AI-SOME-NOVEL-DEFECT",
+            "supabase/functions/x.ts",
+            1,
+            "medium",
+            "",
+        );
+        let out = apply_stack_exceptions(vec![f], &["Supabase".to_string()], &set);
+        assert_eq!(out.len(), 1, "an uncorpused rule id is never excepted");
     }
 
     #[test]
