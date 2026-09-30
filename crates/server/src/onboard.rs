@@ -3573,6 +3573,7 @@ mod tests {
             opt_in_only,
             layer3_only: false,
             stack_exceptions: Vec::new(),
+            extra_domains: Vec::new(),
         }
     }
 

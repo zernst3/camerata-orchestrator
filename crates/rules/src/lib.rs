@@ -366,6 +366,10 @@ struct RuleToml {
     /// empty (no exceptions; the rule applies uniformly regardless of detected stack).
     #[serde(default, rename = "stack_exception")]
     stack_exceptions: Vec<StackExceptionToml>,
+    /// Additional domains this rule should ALSO be proposed/armed for, beyond its own
+    /// folder-derived domain — see [`Rule::extra_domains`]. Absent → empty.
+    #[serde(default)]
+    extra_domains: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -550,6 +554,16 @@ pub struct Rule {
     /// comment for the general mechanism. Empty for the overwhelming majority of rules, whose
     /// premise never conflicts with a platform-idiomatic pattern. See [`Rule::stack_exception_for`].
     pub stack_exceptions: Vec<StackException>,
+    /// Additional domains this rule should ALSO be proposed/armed for, beyond its own
+    /// folder-derived [`Rule::domain`] (`extra_domains = ["sql"]` in the TOML). `domain` is
+    /// strictly one-per-rule (derived from the corpus folder path — see [`load_one`]), so a
+    /// rule whose premise generalizes beyond its home folder (e.g. a `supabase/database-
+    /// functions/` rule that is really about ANY Postgres `SECURITY DEFINER` function, not
+    /// just a Supabase-detected repo) needs a second, explicit way to match a broader stack
+    /// without moving the file (which would also move it out of its corpus family grouping).
+    /// Empty for the overwhelming majority of rules. See `propose_corpus_rules`'s domain-match
+    /// step, which treats `domain == d || extra_domains.contains(d)` as one match test.
+    pub extra_domains: Vec<String>,
 }
 
 /// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`): a GENERAL mechanism for a
@@ -820,6 +834,7 @@ pub fn bare_rule(id: &str, domain: &str) -> Rule {
         opt_in_only: false,
         layer3_only: false,
         stack_exceptions: Vec::new(),
+        extra_domains: Vec::new(),
     }
 }
 
@@ -868,6 +883,7 @@ pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
         opt_in_only: false,
         layer3_only: false,
         stack_exceptions: Vec::new(),
+        extra_domains: Vec::new(),
     };
     let mut set = RuleSet::default();
     set.push(rule);
@@ -1123,6 +1139,7 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
         opt_in_only: raw.opt_in_only,
         layer3_only: raw.layer3_only,
         stack_exceptions,
+        extra_domains: raw.extra_domains,
     })
 }
 
@@ -1366,6 +1383,7 @@ mod tests {
             opt_in_only: false,
             layer3_only: false,
             stack_exceptions: Vec::new(),
+            extra_domains: Vec::new(),
         }
     }
 
@@ -1442,6 +1460,7 @@ mod tests {
                     note: se.note,
                 })
                 .collect(),
+            extra_domains: raw.extra_domains,
         }
     }
 
