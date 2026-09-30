@@ -11,6 +11,7 @@ pub mod eval_cmd;
 pub mod fleet_support;
 pub mod gate_probe;
 pub mod http_cmd;
+pub mod inspect_cmd;
 pub mod live_demo;
 pub mod maintenance_demo;
 pub mod po_demo;

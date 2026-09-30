@@ -5041,6 +5041,7 @@ const SCAN_AUDIT_KEY: &str = "scan-audit";
 /// plus the AI audit parameterized by the chosen rules). Returns the findings report. The
 /// AI activity (prompts and output) registers into the transcript store so the UI can
 /// show, live, that the model is actually working.
+///
 /// Partition selected audit rules into the ones the code-only AI scan should check
 /// (prose / structured) and the CI-tier ones it should NOT (mechanical / architectural).
 /// CI-tier rules are enforced in CI from build/runtime/DB context (query-plan, migration audit,
@@ -5055,7 +5056,11 @@ const SCAN_AUDIT_KEY: &str = "scan-audit";
 /// can run locally: mechanical, and NOT `layer3_only` (CodeQL / paid tiers never
 /// preview). The loaded `corpus` is returned so the caller can resolve each rule's
 /// linter source without re-loading it.
-async fn split_scannable_rules(
+///
+/// `pub`: also called directly by `camerata inspect` (the headless CLI, mirroring
+/// `onboard_audit`'s own pipeline so the two never drift — see
+/// `crates/cli/src/inspect_cmd.rs`).
+pub async fn split_scannable_rules(
     selected: Vec<crate::onboard::SelectedRule>,
 ) -> (
     Vec<crate::onboard::SelectedRule>,
@@ -5579,7 +5584,16 @@ pub(crate) fn dedup_preview_against_floor(
 /// Stack-gating: for each repo the set of languages present (from its file extensions)
 /// is derived and passed to `run_scan_tools` so tools whose required language is absent
 /// are omitted entirely — they never appear as a passing "✓ 0".
-async fn merge_scan_preview(
+/// Scan-time deterministic PREVIEW pass: run every CI-tier mechanical rule's own tool
+/// (`crate::scan_tools::run_scan_tools`) that is locally previewable ([`split_scannable_rules`]'s
+/// `preview_rules`) and fold its (deduped) findings into `report` as advisory preview
+/// findings — never enforced, just surfaced early. A no-op when `preview_rules` is empty or
+/// no corpus loaded.
+///
+/// `pub`: also called directly by `camerata inspect` (the headless CLI), so the SAME
+/// preview-linter pass the interactive `onboard_audit` handler runs also runs headlessly —
+/// see `crates/cli/src/inspect_cmd.rs`.
+pub async fn merge_scan_preview(
     report: &mut crate::onboard::ScanReport,
     sources: &[(String, std::path::PathBuf)],
     preview_rules: &[crate::onboard::SelectedRule],
@@ -14981,7 +14995,11 @@ async fn export_audit_report(
 /// different names for what is, underneath, the exact same scan. P6 (2026-09-29): renamed from
 /// `camerata-audit-*` — the product is "Codebase Inspection" and this stem is client-visible
 /// (the actual downloaded filename), not an internal-only identifier.
-fn report_filename_stem(report: &crate::onboard::ScanReport) -> String {
+///
+/// `pub`: also called directly by `camerata inspect` (the headless CLI export path,
+/// `camerata-cli/src/inspect_cmd.rs`) so its zip's filename stem can never drift from this
+/// HTTP handler's — same function, not a re-derived copy.
+pub fn report_filename_stem(report: &crate::onboard::ScanReport) -> String {
     let repo_slug = report
         .repos
         .first()
@@ -15154,7 +15172,10 @@ async fn export_product(
 /// it's for, the repo(s)/SHA/generated-at, and the advisory disclaimer (verbatim, reused
 /// from `report_export::AUDIT_REPORT_DISCLAIMER` — never a second, drifting copy of that
 /// paragraph).
-fn product_export_readme(stem: &str, json: &crate::report_export::AuditReportJson) -> String {
+///
+/// `pub`: reused verbatim by `camerata inspect` (see [`report_filename_stem`]'s doc comment)
+/// so the headless export's README text can never diverge from the HTTP product-export's.
+pub fn product_export_readme(stem: &str, json: &crate::report_export::AuditReportJson) -> String {
     format!(
         "Codebase Inspection - Product Export\n\
          =====================================\n\
@@ -15223,7 +15244,12 @@ fn zip_now() -> zip::DateTime {
 /// compression) for the product-export response body. The ONLY I/O here is the in-memory
 /// `Cursor<Vec<u8>>` — no temp files, matching `report_export`'s own "tiny, no persistence"
 /// contract.
-fn build_product_zip(
+///
+/// `pub`: this is the ONE zip-assembly function — both `export_product` (HTTP) and
+/// `camerata inspect --export` (headless CLI) call it directly over their own
+/// pdf/xlsx/findings.json/README bytes, so the two entry points can never produce
+/// different zip layouts. See `crates/cli/src/inspect_cmd.rs`.
+pub fn build_product_zip(
     stem: &str,
     pdf_bytes: &[u8],
     xlsx_bytes: &[u8],

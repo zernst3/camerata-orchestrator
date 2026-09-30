@@ -49,3 +49,10 @@ tokio = { workspace = true }
 # tested against a known request/response contract without a real server — same idiom as
 # `crates/client` and `crates/mcp`.
 wiremock = "0.6"
+# `inspect_cmd` / `tests/inspect_export_equivalence.rs`: temp dirs for --repo/--export
+# validation tests and the tiny fixture-repo e2e test.
+tempfile = "3"
+# `tests/inspect_export_equivalence.rs`: read back the product-export ZIP's entries to prove
+# byte-for-byte equivalence without depending on the container's volatile timestamp field.
+# Same version/features pin as `camerata-server`'s own dependency (crates/server/Cargo.toml).
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }

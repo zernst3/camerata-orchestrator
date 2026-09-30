@@ -667,8 +667,10 @@ dependencies = [
  "dotenvy",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "wiremock",
+ "zip 8.6.0",
 ]
 
 [[package]]
