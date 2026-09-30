@@ -2951,56 +2951,60 @@ pub(super) fn RuleAlternativesPanel(
             p { class: "rec-panel-sub",
                 "For every rule with more than one adopted alternative, the audit picked the option it judged best fitting and evaluated the codebase against it (shown below as \"Evaluated against\"). Review each one; change any you disagree with, then rescan just the ones you changed."
             }
-            for r in rows.iter() {
-                {
-                    let rid = r.id.clone();
-                    let rid_for_select = rid.clone();
-                    let rid_for_why = rid.clone();
-                    let rec = recommendations.get(&rid).cloned().unwrap_or_default();
-                    let count = finding_counts.get(&rid).copied().unwrap_or(0);
-                    let staged = pending.read().get(&rid).cloned();
-                    let is_pending = staged.is_some();
-                    let evaluated_id = staged
-                        .clone()
-                        .or_else(|| evaluated_by_rule.get(&rid).cloned())
-                        .or_else(|| Some(rec.recommended_option_id.clone()).filter(|s| !s.is_empty()))
-                        .or_else(|| r.default_option.clone())
-                        .unwrap_or_default();
-                    let evaluated_label = r
-                        .options
-                        .iter()
-                        .find(|o| o.id == evaluated_id)
-                        .map(|o| o.label.clone())
-                        .unwrap_or_else(|| "(none)".to_string());
-                    let is_accepted = accepted_ids.read().contains(&rid);
-                    let (badge_cls, badge_text) = if is_pending {
-                        ("rec-badge rec-badge-pending", "Override, pending rescan")
-                    } else if rec.operator_chosen {
-                        ("rec-badge rec-badge-yours", "Your choice")
-                    } else {
-                        ("rec-badge rec-badge-ai", "AI recommended")
-                    };
-                    let select_value = staged.unwrap_or_else(|| evaluated_id.clone());
-                    rsx! {
-                        div { class: "rec-row", key: "{rid}",
-                            div { class: "rec-row-main",
-                                span { class: "rec-row-id", "{r.id}" }
-                                span { class: "rec-row-title", "{r.title}" }
-                                span { class: "rec-row-count",
-                                    if count == 0 { "0 findings" } else { "{count} finding(s)" }
+            div { class: "rec-rows",
+                for r in rows.iter() {
+                    {
+                        let rid = r.id.clone();
+                        let rid_for_select = rid.clone();
+                        let rid_for_why = rid.clone();
+                        let rec = recommendations.get(&rid).cloned().unwrap_or_default();
+                        let count = finding_counts.get(&rid).copied().unwrap_or(0);
+                        let staged = pending.read().get(&rid).cloned();
+                        let is_pending = staged.is_some();
+                        let evaluated_id = staged
+                            .clone()
+                            .or_else(|| evaluated_by_rule.get(&rid).cloned())
+                            .or_else(|| {
+                                Some(rec.recommended_option_id.clone()).filter(|s| !s.is_empty())
+                            })
+                            .or_else(|| r.default_option.clone())
+                            .unwrap_or_default();
+                        let evaluated_label = r
+                            .options
+                            .iter()
+                            .find(|o| o.id == evaluated_id)
+                            .map(|o| o.label.clone())
+                            .unwrap_or_else(|| "(none)".to_string());
+                        let is_accepted = accepted_ids.read().contains(&rid);
+                        let (badge_cls, badge_text) = if is_pending {
+                            ("rec-badge rec-badge-pending", "Override, pending rescan")
+                        } else if rec.operator_chosen {
+                            ("rec-badge rec-badge-yours", "Your choice")
+                        } else {
+                            ("rec-badge rec-badge-ai", "AI recommended")
+                        };
+                        let select_value = staged.unwrap_or_else(|| evaluated_id.clone());
+                        rsx! {
+                            div { class: "rec-row", key: "{rid}",
+                                div { class: "rec-row-main",
+                                    span { class: "rec-row-id", "{r.id}" }
+                                    span { class: "rec-row-title", "{r.title}" }
+                                    span { class: "rec-row-count",
+                                        if count == 0 { "0 findings" } else { "{count} finding(s)" }
+                                    }
                                 }
-                            }
-                            div { class: "rec-line",
-                                "Evaluated against: "
-                                strong { "{evaluated_label}" }
-                                span { class: "{badge_cls}", "{badge_text}" }
-                                if is_accepted {
-                                    span { class: "rec-badge rec-badge-accepted", "Accepted" }
-                                }
-                                button {
-                                    class: "btn-edit-sm",
-                                    onclick: move |_| why_open.set(Some(rid_for_why.clone())),
-                                    "Why?"
+                                div { class: "rec-line",
+                                    "Evaluated against: "
+                                    strong { "{evaluated_label}" }
+                                    span { class: "{badge_cls}", "{badge_text}" }
+                                    if is_accepted {
+                                        span { class: "rec-badge rec-badge-accepted", "Accepted" }
+                                    }
+                                    button {
+                                        class: "btn-edit-sm",
+                                        onclick: move |_| why_open.set(Some(rid_for_why.clone())),
+                                        "Why?"
+                                    }
                                 }
                                 select {
                                     class: "rec-select",
@@ -6845,6 +6849,125 @@ mod render_tests {
         assert!(html.contains("Accept alternatives"), "accept button; html=\n{html}");
         // No sticky bar yet — nothing staged.
         assert!(!html.contains("rec-sticky-bar"), "no sticky bar before any override is staged; html=\n{html}");
+    }
+
+    /// Bounded internal scroll (46-rule regression): the panel used to grow one row per rule and
+    /// drag the whole page down. `.rec-rows` (the wrapper around the row list, NOT `.rec-panel`
+    /// itself) must declare both a `max-height` and `overflow-y: auto` so only the row list
+    /// scrolls while the panel head/sub, the sticky rescan bar, and the Accept button (siblings
+    /// rendered after `.rec-rows` closes) stay pinned. Style-source assertion — no render
+    /// harness computes CSS, so this is the only way to pin the rule down.
+    #[test]
+    fn rec_rows_wrapper_has_bounded_scroll() {
+        let css = crate::style::GLOBAL_CSS;
+        let rule = css
+            .lines()
+            .find(|l| l.trim_start().starts_with(".rec-rows "))
+            .unwrap_or_else(|| panic!(".rec-rows rule not found in GLOBAL_CSS"));
+        assert!(
+            rule.contains("max-height"),
+            ".rec-rows must cap its height; rule={rule}"
+        );
+        assert!(
+            rule.contains("overflow-y: auto"),
+            ".rec-rows must scroll internally; rule={rule}"
+        );
+        // `.rec-panel` itself (the outer shell) must NOT carry its own max-height/overflow — only
+        // the inner `.rec-rows` list scrolls, so the header/sub stay outside the scroll region.
+        let panel_rule = css
+            .lines()
+            .find(|l| l.trim_start().starts_with(".rec-panel "))
+            .unwrap_or_else(|| panic!(".rec-panel rule not found in GLOBAL_CSS"));
+        assert!(
+            !panel_rule.contains("overflow"),
+            ".rec-panel must not itself scroll; rule={panel_rule}"
+        );
+    }
+
+    /// Uniform card layout: `.rec-row` must lay its children out in a COLUMN (header block, then
+    /// the "Evaluated against" line, then the Change dropdown on its own line) rather than the
+    /// old `flex-wrap: wrap`, which let the "Evaluated against" block land beside OR below the
+    /// header depending on content width. `.rec-select` must be full-width so the dropdown reads
+    /// as its own line rather than an inline control.
+    #[test]
+    fn rec_row_is_column_layout_and_select_is_full_width() {
+        let css = crate::style::GLOBAL_CSS;
+        let row_rule: String = {
+            let start = css
+                .find(".rec-row {")
+                .expect(".rec-row rule not found in GLOBAL_CSS");
+            let end = css[start..].find('}').expect("unterminated .rec-row rule") + start;
+            css[start..=end].to_string()
+        };
+        assert!(
+            row_rule.contains("flex-direction: column"),
+            ".rec-row must be a column; rule={row_rule}"
+        );
+        assert!(
+            !row_rule.contains("flex-wrap"),
+            ".rec-row must not wrap children; rule={row_rule}"
+        );
+        let select_rule = css
+            .lines()
+            .find(|l| l.trim_start().starts_with(".rec-select "))
+            .unwrap_or_else(|| panic!(".rec-select rule not found in GLOBAL_CSS"));
+        assert!(
+            select_rule.contains("width: 100%"),
+            ".rec-select must be full-width; rule={select_rule}"
+        );
+    }
+
+    /// Render-level proof that many rules (well past the small 2-row fixture above) still render
+    /// as uniform column cards inside the bounded `.rec-rows` wrapper — the actual shape that
+    /// regressed with 46 real rules, not just a CSS-source assertion.
+    #[test]
+    fn rule_alternatives_panel_renders_many_rules_inside_bounded_rows_wrapper() {
+        fn many_rules_harness() -> Element {
+            use_context_provider(|| Signal::new(Vec::<crate::toast::Toast>::new()));
+            use_context_provider(
+                || Signal::new(std::collections::HashMap::<String, String>::new()),
+            );
+            let audit = use_signal(|| None::<ScanReportView>);
+            let mut proposed_rules = Vec::new();
+            let mut recommendations = std::collections::HashMap::new();
+            for i in 0..20 {
+                let id = format!("ARCH-{i}");
+                proposed_rules.push(proposed_rule_with_options(
+                    &id,
+                    &format!("Rule {i}"),
+                    &[("a", "Option A"), ("b", "Option B")],
+                ));
+                recommendations.insert(id, recommendation("a", "reasoning", false, false));
+            }
+            rsx! {
+                RuleAlternativesPanel {
+                    project_id: "proj-1".to_string(),
+                    proposed_rules,
+                    findings: vec![],
+                    repos: vec!["owner/repo".to_string()],
+                    recommendations,
+                    audit,
+                }
+            }
+        }
+        let mut vdom = VirtualDom::new(many_rules_harness);
+        vdom.rebuild_in_place();
+        let html = dioxus_ssr::render(&vdom);
+        assert!(
+            html.contains("rec-rows"),
+            "bounded rows wrapper; html=\n{html}"
+        );
+        assert_eq!(
+            html.matches("rec-row\"").count(),
+            20,
+            "one card per rule; html=\n{html}"
+        );
+        for i in 0..20 {
+            assert!(
+                html.contains(&format!("ARCH-{i}")),
+                "rule {i} rendered; html=\n{html}"
+            );
+        }
     }
 
     #[test]

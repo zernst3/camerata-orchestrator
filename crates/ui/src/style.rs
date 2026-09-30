@@ -1166,15 +1166,28 @@ html, body {
 .rec-panel { margin: 4px 0 16px; padding: 12px 14px; border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--surface); }
 .rec-panel-head { font-size: 13px; font-weight: 700; color: var(--ink); margin-bottom: 2px; }
 .rec-panel-sub { font-size: 12px; color: var(--ink-soft); margin-bottom: 10px; line-height: 1.5; }
-.rec-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); }
-.rec-row:last-child { border-bottom: none; }
-.rec-row-main { display: flex; flex-direction: column; gap: 2px; min-width: 200px; }
+/* Bounded internal scroll (matches `.op-list` / `.mem-list`): with up to ~46 rules the list used
+   to grow one row per rule and drag the whole page down, pushing the sticky rescan bar and
+   Accept button out of easy reach. Only this inner list scrolls; the panel head/sub, the
+   `RescanStickyBar`, and the Accept button (both rendered as siblings AFTER this div) stay put. */
+.rec-rows { display: flex; flex-direction: column; gap: 8px; max-height: 360px; overflow-y: auto; padding-right: 3px; }
+/* Uniform card: column layout (header block, then "Evaluated against" line, then the Change
+   dropdown on its own full-width line) so every row reads the same regardless of content width —
+   previously `flex-wrap: wrap` let the "Evaluated against" block land beside OR below the header
+   depending on how long the title/evidence text was. */
+.rec-row {
+  display: flex; flex-direction: column; gap: 8px; padding: 10px 12px;
+  border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--paper);
+}
+.rec-row-main { display: flex; flex-direction: column; gap: 2px; }
 .rec-row-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 700; color: var(--ink); }
 .rec-row-title { font-size: 12px; color: var(--ink-soft); }
 .rec-row-count { font-size: 11px; color: var(--ink-faint); }
-.rec-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-soft); flex: 1 1 260px; }
+.rec-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-soft); }
 .rec-line strong { color: var(--ink); }
-.rec-select { padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; font: inherit; font-size: 12px; background: var(--paper); color: var(--ink); }
+.rec-evidence { display: block; font-size: 11.5px; color: var(--ink-faint); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.rec-not-applicable { display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: .03em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; background: rgba(217,158,22,0.18); color: #b8860b; }
+.rec-select { width: 100%; box-sizing: border-box; padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; font: inherit; font-size: 12px; background: var(--paper); color: var(--ink); }
 .rec-badge { font-size: 10px; font-weight: 800; letter-spacing: .03em; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
 .rec-badge-ai { background: var(--accent-wash); color: var(--ink-soft); border: 1px solid var(--line); }
 .rec-badge-yours { background: rgba(47,95,158,0.18); color: #7ca8e0; }
