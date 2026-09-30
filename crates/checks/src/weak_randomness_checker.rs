@@ -1,9 +1,11 @@
 //! `WeakTokenRandomnessChecker`: LEXICAL (comment-aware, not a bare regex) detection of
 //! `SEC-NO-WEAK-TOKEN-RANDOMNESS-1` — a general-purpose PRNG (`Math.random`, Python's
-//! `random.*`, C-family `rand()`, `new Random()`, Go's `math/rand`) feeding a value whose
-//! surrounding NAME (the variable/field/function it flows into) marks it security-relevant:
-//! a token, secret, password, nonce, session id, CSRF value, OTP, reset code, API key, or a
-//! share-link / access identifier. See
+//! `random.*`, C-family `rand()`, `new Random()`, Go's `math/rand`) OR another non-crypto,
+//! low-entropy/guessable source (a wall-clock timestamp — `Date.now`, `performance.now`,
+//! `new Date().getTime()`, Python's `time.time()` — or a process id — `os.getpid()`) feeding a
+//! value whose surrounding NAME (the variable/field/function it flows into) marks it
+//! security-relevant: a token, secret, password, nonce, session id, CSRF value, OTP, reset
+//! code, API key, or a share-link / access identifier. See
 //! `docs/plans/2026-09-29_codebase-inspection-hardening.md` D2 and
 //! `crates/rules/principles/universal/sec-no-weak-token-randomness-1.toml` (P3 already
 //! grounded this rule id with CWE-330/338 + the OWASP Cryptographic Storage cheat sheet — this
@@ -65,12 +67,22 @@ const SKIP_PATH_FRAGMENTS: &[&str] = &[
     "vendor/",
 ];
 
-/// Non-crypto PRNG call shapes this checker recognizes. Every match is boundary-checked — the
-/// character immediately BEFORE the match must not be an identifier character (letter/digit/
-/// `_`/`$`) — which is load-bearing for short, generic needles like `rand(` that would
-/// otherwise match inside an unrelated longer identifier (`errand(`, `grandTotal(`); the
-/// longer, already-distinctive needles (`Math.random(`, `random.random(`) don't strictly need
-/// it, but it costs nothing to apply uniformly (see [`find_prng_call`]).
+/// Non-crypto PRNG call shapes AND other low-entropy/guessable value sources this checker
+/// recognizes. Every match is boundary-checked — the character immediately BEFORE the match
+/// must not be an identifier character (letter/digit/`_`/`$`) — which is load-bearing for
+/// short, generic needles like `rand(` that would otherwise match inside an unrelated longer
+/// identifier (`errand(`, `grandTotal(`), and for `time.time(` which would otherwise match
+/// inside Python's unrelated `datetime.time(` constructor; the longer, already-distinctive
+/// needles (`Math.random(`, `random.random(`) don't strictly need it, but it costs nothing to
+/// apply uniformly (see [`find_prng_call`]).
+///
+/// The timestamp/pid entries (`Date.now(`, `performance.now(`, `new Date().getTime(`,
+/// `time.time(`, `os.getpid(`) are not PRNGs at all — they're even MORE predictable, since
+/// they're not random-shaped in the first place, just a coarse clock reading or a small
+/// sequential id an attacker can often observe or narrow to a small window directly. They
+/// belong in this same needle list because the vulnerable CLASS is "any easily-guessable, non-
+/// cryptographic value used to build a token/secret/id," not "specifically calls a PRNG
+/// function" — see [`entropy_source_kind`] for the wording split used in the finding message.
 const PRNG_NEEDLES: &[&str] = &[
     "Math.random(",
     "random.random(",
@@ -85,6 +97,11 @@ const PRNG_NEEDLES: &[&str] = &[
     "rand.Int31(",
     "rand.Float64(",
     "rand(",
+    "Date.now(",
+    "performance.now(",
+    "new Date().getTime(",
+    "time.time(",
+    "os.getpid(",
 ];
 
 /// Substrings that, once found inside a NORMALIZED (lowercased, non-alphanumeric stripped)
@@ -209,8 +226,32 @@ fn violations_in_file(path: &str, content: &str) -> Vec<ArchViolation> {
     violations
 }
 
+/// The clause describing WHY `needle`'s output is guessable, tailored to whether it's a PRNG
+/// call (small/predictable internal state) or a bare clock/pid read (not random-shaped at all —
+/// directly observable or narrow-window-guessable). Keeps [`message_for`] honest: calling
+/// `Date.now()` "a pseudo-random number generator" would be inaccurate — it's not random in any
+/// sense, which is arguably worse for a value used as a credential.
+fn entropy_source_kind(needle: &str) -> &'static str {
+    match needle {
+        "Date.now(" | "performance.now(" | "new Date().getTime(" | "time.time(" => {
+            "a wall-clock timestamp — not random at all, and often guessable to within a narrow \
+             window from other observable signals (request timing, log timestamps, HTTP `Date` \
+             headers)"
+        }
+        "os.getpid(" => {
+            "the operating system's process id — a small, often sequential, externally \
+             observable integer, not a source of unpredictability"
+        }
+        _ => {
+            "a general-purpose pseudo-random number generator, designed for statistical \
+             distribution rather than unpredictability"
+        }
+    }
+}
+
 fn message_for(needle: &str, identifier: &str, severity: &'static str) -> String {
     let call = needle.trim_end_matches('(');
+    let source_desc = entropy_source_kind(needle);
     let escalation = if severity == SEVERITY_HIGH {
         " This value alone grants access (an unauthenticated share link or access token) — \
          anyone who can predict or brute-force the generator's output space forges a valid \
@@ -220,11 +261,10 @@ fn message_for(needle: &str, identifier: &str, severity: &'static str) -> String
         ""
     };
     format!(
-        "`{call}` — a general-purpose pseudo-random number generator, designed for statistical \
-         distribution rather than unpredictability — is used to build `{identifier}`, whose name \
-         marks it as a security-relevant credential (a token, secret, password, session id, or \
-         similar access value). Its internal state is small and often seeded from a predictable \
-         source (the current time), so an attacker who observes or brute-forces a handful of \
+        "`{call}` — {source_desc} — is used to build `{identifier}`, whose name marks it as a \
+         security-relevant credential (a token, secret, password, session id, or similar access \
+         value). Its output is either drawn from a small, often time-seeded internal state or is \
+         itself directly observable, so an attacker who observes or brute-forces a handful of \
          outputs can forge a valid value without ever compromising the account it protects. \
          Replace this with a cryptographically secure random source (crypto.randomBytes/\
          crypto.randomUUID in Node, Python's `secrets` module, SecureRandom on the JVM, or the \
@@ -829,5 +869,95 @@ mod tests {
             "// 日本語のコメント\nconst shareToken = crypto.randomUUID();\n",
         )]);
         assert!(rule_hits(&WeakTokenRandomnessChecker.check(&view(&f))).is_empty());
+    }
+
+    // ── widened entropy sources: non-PRNG, low-entropy value builders ─────────
+
+    #[test]
+    fn flags_date_now_based_access_id_as_high() {
+        let f = files(vec![(
+            "src/links/access.ts",
+            "const accessId = Date.now().toString(36);\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].severity, SEVERITY_HIGH);
+    }
+
+    #[test]
+    fn flags_new_date_get_time_based_reset_code() {
+        let f = files(vec![(
+            "src/auth/reset.ts",
+            "const resetCode = new Date().getTime().toString().slice(-6);\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].severity, SEVERITY_MEDIUM);
+    }
+
+    #[test]
+    fn flags_performance_now_based_session_token() {
+        let f = files(vec![(
+            "src/ui/session.ts",
+            "const sessionToken = performance.now().toString(36);\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+    }
+
+    #[test]
+    fn flags_python_time_time_based_api_secret() {
+        let f = files(vec![("app/tokens.py", "api_secret = str(time.time())\n")]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+    }
+
+    #[test]
+    fn python_datetime_time_constructor_is_not_confused_with_time_time() {
+        // `datetime.time(10, 30)` builds a time-of-day object — it contains the literal bytes
+        // "time.time(" but must NOT be treated as the entropy-source needle: the identifier
+        // boundary check (char before the match can't be an identifier char) rejects it because
+        // the preceding char is the "e" of "datetime".
+        let f = files(vec![(
+            "app/scheduling.py",
+            "share_token = datetime.time(10, 30)\n",
+        )]);
+        assert!(rule_hits(&WeakTokenRandomnessChecker.check(&view(&f))).is_empty());
+    }
+
+    #[test]
+    fn flags_os_getpid_based_share_link() {
+        let f = files(vec![(
+            "src/links/pid_link.py",
+            "share_link_id = str(os.getpid())\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(
+            vs[0].severity, SEVERITY_HIGH,
+            "share + link/id credential shape: {vs:#?}"
+        );
+    }
+
+    #[test]
+    fn flags_math_random_to_string_36_share_link_idiom() {
+        // The exact idiom named in the design spec: `Math.random().toString(36)` feeding a
+        // share-link value (as opposed to the existing coverage of the same idiom feeding a
+        // "...Token"-named identifier) — exercises the "link" branch of the credential-name
+        // check, not just "token".
+        let f = files(vec![(
+            "src/links/shareLink.ts",
+            "const shareLink = Math.random().toString(36).slice(2);\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].severity, SEVERITY_HIGH);
+        assert_eq!(vs[0].object.as_deref(), Some("shareLink"));
     }
 }
