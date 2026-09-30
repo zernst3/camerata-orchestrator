@@ -16,8 +16,8 @@
 
 use std::collections::BTreeMap;
 
-use super::sql_parse::{classify_statement, ParsedStmt};
 use super::splitter::split_statements;
+use super::sql_parse::{classify_statement, ParsedStmt};
 use crate::arch_checker::RepoView;
 
 /// Where a fact was last established: the file + 1-based line of the statement.
@@ -67,6 +67,122 @@ pub struct FunctionState {
 pub struct Timeline {
     pub tables: BTreeMap<(String, String), TableState>,
     pub functions: BTreeMap<(String, String), FunctionState>,
+    /// Every boolean-style protection toggle statement (today: RLS enable/disable, trigger
+    /// enable/disable), in FILE ORDER, keyed by the file it appeared in. `tables`/`functions`
+    /// above answer "what is the CURRENT end-state" — this answers the different question the
+    /// D4 wrong-table re-enable narrative needs: "what happened right after THIS statement, in
+    /// this SAME file?" See [`find_wrong_table_reenable`].
+    pub events_by_file: BTreeMap<String, Vec<ProtectionEvent>>,
+}
+
+/// Which disable/enable-pair protection a [`ProtectionEvent`] records. `Rls` is a per-table
+/// singleton (no name); `Trigger` is per-trigger-name (a table can have several, each toggled
+/// independently, so identity requires the name too — see [`ProtectionEvent::name`]).
+///
+/// Extension point: a constraint checker would need its own variant, but Postgres has no
+/// clean boolean toggle for constraints the way it does for RLS/triggers (`DROP CONSTRAINT` +
+/// `ADD CONSTRAINT` changes the constraint's identity, not just a flag), so it isn't modeled
+/// here — [`find_wrong_table_reenable`] is generic over `ProtectionKind` and needs no changes
+/// once a `Constraint` variant and its event-recording arm are added.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProtectionKind {
+    Rls,
+    Trigger,
+}
+
+/// One `{ENABLE|DISABLE}`-style toggle statement, recorded in the file it appeared in, at the
+/// line it appeared on. `name` disambiguates WHICH protection this is when more than one can
+/// coexist on the same table (a trigger's name); `None` for RLS, which has exactly one
+/// per table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProtectionEvent {
+    pub kind: ProtectionKind,
+    pub schema: String,
+    pub object: String,
+    pub name: Option<String>,
+    pub enabled: bool,
+    pub line: usize,
+}
+
+/// A detected "wrong-table re-enable" (design doc D4): within one migration file, the
+/// protection identified by `kind`/`name` on some object was explicitly DISABLED, and the
+/// LAST subsequent same-identity ENABLE statement in that same file targeted a DIFFERENT
+/// object (`wrong_schema`.`wrong_object`, at `line`) instead of the one that was disabled —
+/// the classic "meant to turn it back on, turned it on for the wrong table" typo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrongTableReenable {
+    pub kind: ProtectionKind,
+    pub name: Option<String>,
+    pub wrong_schema: String,
+    pub wrong_object: String,
+    pub line: usize,
+}
+
+/// Look for a wrong-table re-enable affecting the `kind`/`name` protection on `(schema,
+/// object)`, whose disabling statement is at `disable_line` in `file`.
+///
+/// Two guards keep this from over-firing:
+/// - **Precondition**: `disable_line` must itself be a recorded, explicit DISABLE event for
+///   this exact `(kind, name, schema, object)`. A table whose current disabled state traces to
+///   a `CREATE TABLE` default (RLS simply never touched) has nothing to narrate — the file's
+///   unrelated `ENABLE ...` statements for OTHER objects are ordinary migration work, not a
+///   typo, and must never be mistaken for one. Without this check, any migration that creates
+///   several tables and enables RLS on only some of them would falsely read as "wrong table."
+/// - **Identity**: candidate re-enables must match both `kind` AND `name` (`None` only matches
+///   `None`) — a disabled `audit_trg` trigger is not "the same protection" as an unrelated
+///   `log_trg` trigger enabled elsewhere, even on the same kind of object.
+///
+/// Returns `None` when: the object itself was correctly re-enabled later in the file (nothing
+/// to narrate — the plain end-state already reflects "protected"); no re-enable of this
+/// identity was attempted anywhere in the file (the existing "never re-enabled" framing
+/// already covers that honestly); or the precondition above isn't met.
+pub fn find_wrong_table_reenable(
+    events_by_file: &BTreeMap<String, Vec<ProtectionEvent>>,
+    file: &str,
+    disable_line: usize,
+    kind: ProtectionKind,
+    name: Option<&str>,
+    schema: &str,
+    object: &str,
+) -> Option<WrongTableReenable> {
+    let events = events_by_file.get(file)?;
+
+    let was_explicitly_disabled = events.iter().any(|ev| {
+        ev.kind == kind
+            && ev.name.as_deref() == name
+            && ev.schema == schema
+            && ev.object == object
+            && !ev.enabled
+            && ev.line == disable_line
+    });
+    if !was_explicitly_disabled {
+        return None;
+    }
+
+    let mut last_wrong: Option<&ProtectionEvent> = None;
+    for ev in events {
+        if ev.kind != kind || ev.name.as_deref() != name || !ev.enabled || ev.line <= disable_line {
+            continue;
+        }
+        if ev.schema == schema && ev.object == object {
+            // Correctly re-enabled later in this same file — nothing to narrate.
+            return None;
+        }
+        let is_later = match last_wrong {
+            None => true,
+            Some(w) => ev.line > w.line,
+        };
+        if is_later {
+            last_wrong = Some(ev);
+        }
+    }
+    last_wrong.map(|ev| WrongTableReenable {
+        kind: ev.kind,
+        name: ev.name.clone(),
+        wrong_schema: ev.schema.clone(),
+        wrong_object: ev.object.clone(),
+        line: ev.line,
+    })
 }
 
 /// Build the replayed [`Timeline`] from a [`RepoView`]: gather `supabase/migrations/*.sql`
@@ -158,8 +274,24 @@ fn apply_statement(timeline: &mut Timeline, file: &str, line: usize, stmt: Parse
                 );
             }
         }
-        ParsedStmt::AlterRls { schema, table, enabled } => {
+        ParsedStmt::AlterRls {
+            schema,
+            table,
+            enabled,
+        } => {
             let key = (schema.clone(), table.clone());
+            timeline
+                .events_by_file
+                .entry(file.to_string())
+                .or_default()
+                .push(ProtectionEvent {
+                    kind: ProtectionKind::Rls,
+                    schema: schema.clone(),
+                    object: table.clone(),
+                    name: None,
+                    enabled,
+                    line,
+                });
             let entry = timeline.tables.entry(key).or_insert_with(|| TableState {
                 schema,
                 table,
@@ -170,7 +302,32 @@ fn apply_statement(timeline: &mut Timeline, file: &str, line: usize, stmt: Parse
             entry.rls_enabled = enabled;
             entry.rls_established_at = Some(loc());
         }
-        ParsedStmt::CreatePolicy { schema, table, name } => {
+        ParsedStmt::AlterTrigger {
+            schema,
+            table,
+            trigger,
+            enabled,
+        } => {
+            // No checker tracks trigger end-state today (see `ProtectionKind::Trigger`'s doc
+            // comment) — this only feeds the D4 wrong-table re-enable event log.
+            timeline
+                .events_by_file
+                .entry(file.to_string())
+                .or_default()
+                .push(ProtectionEvent {
+                    kind: ProtectionKind::Trigger,
+                    schema,
+                    object: table,
+                    name: Some(trigger),
+                    enabled,
+                    line,
+                });
+        }
+        ParsedStmt::CreatePolicy {
+            schema,
+            table,
+            name,
+        } => {
             let key = (schema.clone(), table.clone());
             let entry = timeline.tables.entry(key).or_insert_with(|| TableState {
                 schema,
@@ -185,7 +342,11 @@ fn apply_statement(timeline: &mut Timeline, file: &str, line: usize, stmt: Parse
                 established_at: loc(),
             });
         }
-        ParsedStmt::DropPolicy { schema, table, name } => {
+        ParsedStmt::DropPolicy {
+            schema,
+            table,
+            name,
+        } => {
             if let Some(entry) = timeline.tables.get_mut(&(schema, table)) {
                 entry.policies.retain(|p| p.name != name);
             }
@@ -215,8 +376,14 @@ mod tests {
     use super::*;
 
     fn timeline_from(files: Vec<(&str, &str)>) -> Timeline {
-        let files: Vec<(String, String)> = files.into_iter().map(|(p, c)| (p.to_string(), c.to_string())).collect();
-        let repo = RepoView { spec: "test/repo", files: &files };
+        let files: Vec<(String, String)> = files
+            .into_iter()
+            .map(|(p, c)| (p.to_string(), c.to_string()))
+            .collect();
+        let repo = RepoView {
+            spec: "test/repo",
+            files: &files,
+        };
         build_timeline(&repo)
     }
 
@@ -226,7 +393,10 @@ mod tests {
             "supabase/migrations/20240101000000_init.sql",
             "create table public.profiles (id uuid primary key);",
         )]);
-        let st = t.tables.get(&("public".to_string(), "profiles".to_string())).unwrap();
+        let st = t
+            .tables
+            .get(&("public".to_string(), "profiles".to_string()))
+            .unwrap();
         assert!(!st.rls_enabled);
         assert!(st.policies.is_empty());
     }
@@ -239,8 +409,14 @@ mod tests {
              alter table public.profiles enable row level security;\n\
              alter table public.profiles disable row level security;",
         )]);
-        let st = t.tables.get(&("public".to_string(), "profiles".to_string())).unwrap();
-        assert!(!st.rls_enabled, "final state must be DISABLED, not a per-statement OR");
+        let st = t
+            .tables
+            .get(&("public".to_string(), "profiles".to_string()))
+            .unwrap();
+        assert!(
+            !st.rls_enabled,
+            "final state must be DISABLED, not a per-statement OR"
+        );
     }
 
     #[test]
@@ -255,8 +431,14 @@ mod tests {
                 "alter table public.profiles enable row level security;",
             ),
         ]);
-        let st = t.tables.get(&("public".to_string(), "profiles".to_string())).unwrap();
-        assert!(st.rls_enabled, "a per-file scan would miss the later migration; replay must not");
+        let st = t
+            .tables
+            .get(&("public".to_string(), "profiles".to_string()))
+            .unwrap();
+        assert!(
+            st.rls_enabled,
+            "a per-file scan would miss the later migration; replay must not"
+        );
         assert_eq!(
             st.rls_established_at.as_ref().unwrap().file,
             "supabase/migrations/20240201000000_secure.sql"
@@ -272,10 +454,19 @@ mod tests {
              create policy p1 on public.profiles for select using (true);\n\
              alter table public.profiles rename to accounts;",
         )]);
-        assert!(!t.tables.contains_key(&("public".to_string(), "profiles".to_string())));
-        let st = t.tables.get(&("public".to_string(), "accounts".to_string())).unwrap();
+        assert!(!t
+            .tables
+            .contains_key(&("public".to_string(), "profiles".to_string())));
+        let st = t
+            .tables
+            .get(&("public".to_string(), "accounts".to_string()))
+            .unwrap();
         assert!(st.rls_enabled, "rename must carry forward the RLS state");
-        assert_eq!(st.policies.len(), 1, "rename must carry forward existing policies");
+        assert_eq!(
+            st.policies.len(),
+            1,
+            "rename must carry forward existing policies"
+        );
     }
 
     #[test]
@@ -287,8 +478,14 @@ mod tests {
              drop table public.profiles;\n\
              create table public.profiles (id uuid primary key);",
         )]);
-        let st = t.tables.get(&("public".to_string(), "profiles".to_string())).unwrap();
-        assert!(!st.rls_enabled, "a dropped-and-recreated table must NOT inherit the old RLS state");
+        let st = t
+            .tables
+            .get(&("public".to_string(), "profiles".to_string()))
+            .unwrap();
+        assert!(
+            !st.rls_enabled,
+            "a dropped-and-recreated table must NOT inherit the old RLS state"
+        );
         assert!(st.policies.is_empty());
     }
 
@@ -300,8 +497,14 @@ mod tests {
              alter table public.profiles enable row level security;\n\
              create table if not exists public.profiles (id uuid primary key);",
         )]);
-        let st = t.tables.get(&("public".to_string(), "profiles".to_string())).unwrap();
-        assert!(st.rls_enabled, "an idempotent IF NOT EXISTS re-declaration must not wipe RLS state");
+        let st = t
+            .tables
+            .get(&("public".to_string(), "profiles".to_string()))
+            .unwrap();
+        assert!(
+            st.rls_enabled,
+            "an idempotent IF NOT EXISTS re-declaration must not wipe RLS state"
+        );
     }
 
     #[test]
@@ -319,7 +522,10 @@ mod tests {
                  alter table public.profiles enable row level security;",
             ),
         ]);
-        let st = t.tables.get(&("public".to_string(), "profiles".to_string())).unwrap();
+        let st = t
+            .tables
+            .get(&("public".to_string(), "profiles".to_string()))
+            .unwrap();
         assert!(st.rls_enabled);
     }
 
@@ -339,7 +545,10 @@ mod tests {
             ),
         ]);
         // orders is untouched by the schema file — migration-derived state (no RLS) stands.
-        let orders = t.tables.get(&("public".to_string(), "orders".to_string())).unwrap();
+        let orders = t
+            .tables
+            .get(&("public".to_string(), "orders".to_string()))
+            .unwrap();
         assert!(!orders.rls_enabled);
     }
 
@@ -352,7 +561,10 @@ mod tests {
              create policy p1 on public.profiles for select using (true);\n\
              drop policy p1 on public.profiles;",
         )]);
-        let st = t.tables.get(&("public".to_string(), "profiles".to_string())).unwrap();
+        let st = t
+            .tables
+            .get(&("public".to_string(), "profiles".to_string()))
+            .unwrap();
         assert!(st.policies.is_empty());
     }
 
@@ -362,7 +574,9 @@ mod tests {
             "supabase/migrations/20240101000000_init.sql",
             "create table internal.audit_log (id uuid primary key);",
         )]);
-        assert!(t.tables.contains_key(&("internal".to_string(), "audit_log".to_string())));
+        assert!(t
+            .tables
+            .contains_key(&("internal".to_string(), "audit_log".to_string())));
     }
 
     #[test]
@@ -372,8 +586,14 @@ mod tests {
             "create function public.f() returns void security definer as $$ begin end; $$ language plpgsql;\n\
              create or replace function public.f() returns void security definer set search_path = public as $$ begin end; $$ language plpgsql;",
         )]);
-        let f = t.functions.get(&("public".to_string(), "f".to_string())).unwrap();
-        assert!(f.has_search_path, "the LATER definition (with search_path) must win");
+        let f = t
+            .functions
+            .get(&("public".to_string(), "f".to_string()))
+            .unwrap();
+        assert!(
+            f.has_search_path,
+            "the LATER definition (with search_path) must win"
+        );
     }
 
     #[test]
@@ -390,5 +610,205 @@ mod tests {
     fn no_supabase_files_at_all_yields_an_empty_timeline() {
         let t = timeline_from(vec![("README.md", "hello")]);
         assert!(t.tables.is_empty());
+    }
+
+    // ── D4: wrong-table re-enable narrative — `find_wrong_table_reenable` ──────────────
+
+    const MIGRATION: &str = "supabase/migrations/20240101000000_init.sql";
+
+    fn disable_line_for(t: &Timeline, schema: &str, table: &str) -> usize {
+        t.tables
+            .get(&(schema.to_string(), table.to_string()))
+            .and_then(|st| st.rls_established_at.as_ref())
+            .expect("table must exist with an established RLS location")
+            .line
+    }
+
+    #[test]
+    fn disable_x_then_wrong_table_enable_y_is_detected() {
+        // The canonical D4 bug: RLS disabled on `profiles` for a backfill, and the
+        // migration's later re-enable statement targets `accounts` instead — a wrong-table
+        // typo that leaves `profiles` exposed.
+        let t = timeline_from(vec![(
+            MIGRATION,
+            "create table public.profiles (id uuid primary key);\n\
+             alter table public.profiles enable row level security;\n\
+             create table public.accounts (id uuid primary key);\n\
+             alter table public.profiles disable row level security;\n\
+             alter table public.accounts enable row level security;",
+        )]);
+        assert!(
+            !t.tables
+                .get(&("public".to_string(), "profiles".to_string()))
+                .unwrap()
+                .rls_enabled
+        );
+        let disable_line = disable_line_for(&t, "public", "profiles");
+        let hit = find_wrong_table_reenable(
+            &t.events_by_file,
+            MIGRATION,
+            disable_line,
+            ProtectionKind::Rls,
+            None,
+            "public",
+            "profiles",
+        )
+        .expect("must detect the wrong-table re-enable");
+        assert_eq!(hit.wrong_schema, "public");
+        assert_eq!(hit.wrong_object, "accounts");
+        assert!(hit.line > disable_line);
+    }
+
+    #[test]
+    fn disable_x_then_correct_enable_x_is_not_mis_narrated() {
+        let t = timeline_from(vec![(
+            MIGRATION,
+            "create table public.profiles (id uuid primary key);\n\
+             alter table public.profiles enable row level security;\n\
+             alter table public.profiles disable row level security;\n\
+             alter table public.profiles enable row level security;",
+        )]);
+        // The final state is correctly enabled again — a real disable/enable-pair caller
+        // would never reach the narrative for this table (there is no finding), but the
+        // detector itself must also refuse to narrate: probing with the disable statement's
+        // OWN line must find the SAME-table re-enable and return None.
+        let disable_line = t
+            .events_by_file
+            .get(MIGRATION)
+            .unwrap()
+            .iter()
+            .find(|e| e.kind == ProtectionKind::Rls && !e.enabled)
+            .unwrap()
+            .line;
+        let hit = find_wrong_table_reenable(
+            &t.events_by_file,
+            MIGRATION,
+            disable_line,
+            ProtectionKind::Rls,
+            None,
+            "public",
+            "profiles",
+        );
+        assert!(
+            hit.is_none(),
+            "correct same-table re-enable must not be mis-narrated: {hit:#?}"
+        );
+    }
+
+    #[test]
+    fn disable_x_with_no_enable_anywhere_is_not_wrong_table() {
+        let t = timeline_from(vec![(
+            MIGRATION,
+            "create table public.profiles (id uuid primary key);\n\
+             alter table public.profiles enable row level security;\n\
+             alter table public.profiles disable row level security;",
+        )]);
+        let disable_line = disable_line_for(&t, "public", "profiles");
+        let hit = find_wrong_table_reenable(
+            &t.events_by_file,
+            MIGRATION,
+            disable_line,
+            ProtectionKind::Rls,
+            None,
+            "public",
+            "profiles",
+        );
+        assert!(
+            hit.is_none(),
+            "no re-enable attempted at all — plain 'never re-enabled' stands: {hit:#?}"
+        );
+    }
+
+    #[test]
+    fn a_table_never_touched_by_rls_is_never_mistaken_for_a_wrong_table_victim() {
+        // The critical false-positive guard: migrations routinely create several tables and
+        // enable RLS on only SOME of them. A table that was simply never touched (its
+        // established-at line is its CREATE TABLE, not an explicit DISABLE) must never read
+        // as "disabled, and the enable over there was meant for it."
+        let t = timeline_from(vec![(
+            MIGRATION,
+            "create table public.audit_log (id uuid primary key);\n\
+             create table public.accounts (id uuid primary key);\n\
+             alter table public.accounts enable row level security;",
+        )]);
+        let never_touched_line = disable_line_for(&t, "public", "audit_log");
+        let hit = find_wrong_table_reenable(
+            &t.events_by_file,
+            MIGRATION,
+            never_touched_line,
+            ProtectionKind::Rls,
+            None,
+            "public",
+            "audit_log",
+        );
+        assert!(hit.is_none(), "a table that was never explicitly disabled must not borrow an unrelated enable: {hit:#?}");
+    }
+
+    #[test]
+    fn generalizes_to_trigger_disable_enable_pairs_by_name() {
+        // Same shape as RLS, but the "protection" is a named trigger: disabling
+        // `sync_totals` on `orders` and re-enabling a trigger of the SAME NAME on
+        // `invoices` is the identical wrong-table typo pattern.
+        let t = timeline_from(vec![(
+            MIGRATION,
+            "create table public.orders (id uuid primary key);\n\
+             create table public.invoices (id uuid primary key);\n\
+             alter table public.orders disable trigger sync_totals;\n\
+             alter table public.invoices enable trigger sync_totals;",
+        )]);
+        let disable_line = t
+            .events_by_file
+            .get(MIGRATION)
+            .unwrap()
+            .iter()
+            .find(|e| e.kind == ProtectionKind::Trigger && !e.enabled)
+            .unwrap()
+            .line;
+        let hit = find_wrong_table_reenable(
+            &t.events_by_file,
+            MIGRATION,
+            disable_line,
+            ProtectionKind::Trigger,
+            Some("sync_totals"),
+            "public",
+            "orders",
+        )
+        .expect("trigger disable/enable-pair mismatch must be detected identically to RLS");
+        assert_eq!(hit.wrong_object, "invoices");
+        assert_eq!(hit.name.as_deref(), Some("sync_totals"));
+    }
+
+    #[test]
+    fn differently_named_triggers_are_unrelated_protections_not_a_wrong_table_pair() {
+        // Disabling trigger `a` on X and separately enabling an UNRELATED trigger `b`
+        // elsewhere must never be narrated as a wrong-table re-enable of `a`.
+        let t = timeline_from(vec![(
+            MIGRATION,
+            "create table public.orders (id uuid primary key);\n\
+             create table public.invoices (id uuid primary key);\n\
+             alter table public.orders disable trigger trg_a;\n\
+             alter table public.invoices enable trigger trg_b;",
+        )]);
+        let disable_line = t
+            .events_by_file
+            .get(MIGRATION)
+            .unwrap()
+            .iter()
+            .find(|e| e.kind == ProtectionKind::Trigger && !e.enabled)
+            .unwrap()
+            .line;
+        let hit = find_wrong_table_reenable(
+            &t.events_by_file,
+            MIGRATION,
+            disable_line,
+            ProtectionKind::Trigger,
+            Some("trg_a"),
+            "public",
+            "orders",
+        );
+        assert!(
+            hit.is_none(),
+            "a differently-named trigger enable is not the same protection: {hit:#?}"
+        );
     }
 }

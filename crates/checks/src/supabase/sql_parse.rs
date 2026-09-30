@@ -32,6 +32,16 @@ pub enum ParsedStmt {
         table: String,
         enabled: bool,
     },
+    /// `ALTER TABLE [ONLY] name {ENABLE|DISABLE} TRIGGER trigger_name`. Recorded ONLY as a
+    /// timeline event (see `timeline::ProtectionEvent`) for the D4 wrong-table re-enable
+    /// narrative's extension point — no checker currently tracks trigger end-state the way
+    /// `SupabaseRlsChecker` tracks RLS, so this never drives a finding on its own today.
+    AlterTrigger {
+        schema: String,
+        table: String,
+        trigger: String,
+        enabled: bool,
+    },
     CreatePolicy {
         schema: String,
         table: String,
@@ -78,7 +88,8 @@ pub fn classify_statement(text: &str) -> Option<ParsedStmt> {
         if let Some(j2) = match_kw_seq(&upper, j, &["IF", "EXISTS"]) {
             j = skip_ws(&upper, j2);
         }
-        return parse_qualified_name(&raw, j).map(|((schema, table), _)| ParsedStmt::DropTable { schema, table });
+        return parse_qualified_name(&raw, j)
+            .map(|((schema, table), _)| ParsedStmt::DropTable { schema, table });
     }
 
     // ALTER TABLE [ONLY] name  { ENABLE|DISABLE ROW LEVEL SECURITY | RENAME TO name }
@@ -103,6 +114,24 @@ pub fn classify_statement(text: &str) -> Option<ParsedStmt> {
                 enabled: false,
             });
         }
+        if let Some(k2) = match_kw_seq(&upper, k, &["ENABLE", "TRIGGER"]) {
+            let k2 = skip_ws(&upper, k2);
+            return parse_ident(&raw, k2).map(|(trigger, _)| ParsedStmt::AlterTrigger {
+                schema,
+                table,
+                trigger,
+                enabled: true,
+            });
+        }
+        if let Some(k2) = match_kw_seq(&upper, k, &["DISABLE", "TRIGGER"]) {
+            let k2 = skip_ws(&upper, k2);
+            return parse_ident(&raw, k2).map(|(trigger, _)| ParsedStmt::AlterTrigger {
+                schema,
+                table,
+                trigger,
+                enabled: false,
+            });
+        }
         if let Some(k2) = match_kw_seq(&upper, k, &["RENAME", "TO"]) {
             let k2 = skip_ws(&upper, k2);
             if let Some((new_name, _)) = parse_ident(&raw, k2) {
@@ -123,10 +152,12 @@ pub fn classify_statement(text: &str) -> Option<ParsedStmt> {
         let k = skip_ws(&upper, after_name);
         let k2 = match_kw_seq(&upper, k, &["ON"])?;
         let k2 = skip_ws(&upper, k2);
-        return parse_qualified_name(&raw, k2).map(|((schema, table), _)| ParsedStmt::CreatePolicy {
-            schema,
-            table,
-            name,
+        return parse_qualified_name(&raw, k2).map(|((schema, table), _)| {
+            ParsedStmt::CreatePolicy {
+                schema,
+                table,
+                name,
+            }
         });
     }
 
@@ -160,7 +191,9 @@ pub fn classify_statement(text: &str) -> Option<ParsedStmt> {
         // SECURITY DEFINER / SET search_path — a match inside the function BODY (e.g. a
         // string literal the function builds) must never be mistaken for the real clause.
         let sig_end = first_dollar_quote_start(&raw, after_name).unwrap_or(raw.len());
-        let sig_upper = upper.get(after_name.min(sig_end)..sig_end.max(after_name)).unwrap_or(&[]);
+        let sig_upper = upper
+            .get(after_name.min(sig_end)..sig_end.max(after_name))
+            .unwrap_or(&[]);
         let security_definer = contains_kw_seq(sig_upper, &["SECURITY", "DEFINER"]);
         let has_search_path = contains_kw_seq(sig_upper, &["SET", "SEARCH_PATH"]);
         return Some(ParsedStmt::CreateFunction {
@@ -296,7 +329,8 @@ fn parse_qualified_name(chars: &[char], i: usize) -> Option<((String, String), u
 /// index; else `None`. Delegates the actual tag grammar to the splitter's own parser so the
 /// two modules agree on what counts as a dollar-quote open.
 fn first_dollar_quote_start(chars: &[char], from: usize) -> Option<usize> {
-    (from..chars.len()).find(|&i| chars[i] == '$' && super::splitter::parse_dollar_tag(chars, i).is_some())
+    (from..chars.len())
+        .find(|&i| chars[i] == '$' && super::splitter::parse_dollar_tag(chars, i).is_some())
 }
 
 #[cfg(test)]
@@ -331,7 +365,10 @@ mod tests {
 
     #[test]
     fn create_table_does_not_match_tablespace() {
-        assert_eq!(classify_statement("create tablespace fast location '/data'"), None);
+        assert_eq!(
+            classify_statement("create tablespace fast location '/data'"),
+            None
+        );
     }
 
     #[test]
@@ -373,6 +410,34 @@ mod tests {
     }
 
     #[test]
+    fn alter_table_disable_trigger() {
+        let got = classify_statement("alter table public.orders disable trigger sync_totals");
+        assert_eq!(
+            got,
+            Some(ParsedStmt::AlterTrigger {
+                schema: "public".into(),
+                table: "orders".into(),
+                trigger: "sync_totals".into(),
+                enabled: false,
+            })
+        );
+    }
+
+    #[test]
+    fn alter_table_enable_trigger() {
+        let got = classify_statement("alter table only invoices enable trigger sync_totals");
+        assert_eq!(
+            got,
+            Some(ParsedStmt::AlterTrigger {
+                schema: "public".into(),
+                table: "invoices".into(),
+                trigger: "sync_totals".into(),
+                enabled: true,
+            })
+        );
+    }
+
+    #[test]
     fn alter_table_rename_to() {
         let got = classify_statement("alter table profiles rename to accounts");
         assert_eq!(
@@ -387,7 +452,9 @@ mod tests {
 
     #[test]
     fn create_policy_on_table() {
-        let got = classify_statement("create policy \"read own\" on public.profiles for select using (true)");
+        let got = classify_statement(
+            "create policy \"read own\" on public.profiles for select using (true)",
+        );
         assert_eq!(
             got,
             Some(ParsedStmt::CreatePolicy {
