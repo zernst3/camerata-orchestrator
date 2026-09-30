@@ -1346,6 +1346,17 @@ const ALTERNATIVES_BATCH_SIZE: usize = 25;
 /// loses ITS findings' calibration (they pass through uncalibrated, never dropped), not the
 /// whole scan's. The single-chunk case (the common one) is byte-for-byte the same prompt
 /// and transcript session id this function always used.
+///
+/// C3-1b: this pass is also the ONLY source of the `effort` (hour-estimation) field, so it
+/// returns a second `Vec<FailedPass>` alongside the (never-dropped) findings — a single
+/// `FailedPass{pass: "hour estimation", ..}` entry when the pass produced NO usable effort
+/// estimate for ANY finding in this call (every chunk's every attempt failed, or every
+/// response came back without a parseable `effort`), so the export can disclose the gap
+/// explicitly (`report_export::failed_pass_disclosures`) instead of silently rendering every
+/// row as if "no estimate" were a settled answer. A PARTIAL failure (some findings estimated,
+/// some not) is not disclosed here — only a genuine run-wide miss — the per-finding rendering
+/// (`effort: None` -> "not estimated this run" in the Typst template) already covers the
+/// individual-row case honestly.
 #[allow(clippy::too_many_arguments)]
 pub async fn verify_findings(
     llm: &dyn LlmPort,
@@ -1360,9 +1371,9 @@ pub async fn verify_findings(
     // model real context to hedge stance/YAGNI findings, instead of a hardcoded size threshold
     // deciding whether a rule fires. Empty string is fine (the paragraph still reads).
     repo_shape: &str,
-) -> Vec<Finding> {
+) -> (Vec<Finding>, Vec<FailedPass>) {
     if findings.is_empty() {
-        return findings;
+        return (findings, Vec::new());
     }
     let system = verify_system_prompt();
     // Split into bounded chunks (see `CALIBRATION_BATCH_SIZE`'s doc comment) — each is an
@@ -1495,12 +1506,27 @@ pub async fn verify_findings(
         }
         calibrated.extend(chunk_calibrated);
     }
+    // C3-1b: a run-wide (not per-chunk/per-finding) disclosure — every finding calibration
+    // was handed came back with NO usable effort estimate at all. Neither D5 (severity floor)
+    // nor D6 (severity ceiling) below ever sets `effort`, so checking it here, before those
+    // text-derived passes run, is equivalent to checking the final output and reads clearer.
+    let mut estimation_failed_passes = Vec::new();
+    if !calibrated.is_empty() && calibrated.iter().all(|f| f.effort.is_none()) {
+        estimation_failed_passes.push(FailedPass {
+            repo: repo.to_string(),
+            pass: "hour estimation".to_string(),
+            reason: "the calibration pass returned no usable remediation-effort estimate for \
+                     any finding this run"
+                .to_string(),
+        });
+    }
     // D5: the deterministic severity floor runs regardless of whether the LLM calibration
     // pass succeeded — it re-derives its verdict from the finding's own text, not the model's,
     // so it is exactly as available when every pass failed as when one succeeded.
     // D6: the severity ceiling (R1/R2) runs immediately after, over the SAME set, for the same
     // reason — both are text-derived and safe regardless of whether calibration ran.
-    apply_severity_ceiling_rules(apply_severity_calibration_rules(calibrated))
+    let calibrated = apply_severity_ceiling_rules(apply_severity_calibration_rules(calibrated));
+    (calibrated, estimation_failed_passes)
 }
 
 /// Merge several calibration passes into one CONSERVATIVE consensus verdict set (#51 thorough
@@ -2411,11 +2437,18 @@ pub(crate) fn fix_leaks_methodology(fix: &str) -> Option<String> {
 /// generate a codebase-specific `fix_specific` (see [`fix_specific_system_prompt`]), then
 /// validate it (identifier grounding + non-contradiction + no-methodology-leak) and
 /// regenerate up to [`MAX_FIX_REGENERATIONS`] times for anything that fails. A finding whose
-/// fix STILL doesn't pass after every retry is marked `needs_review = true` with a
-/// `[needs review: fix not generated]` `detail` tag (mirroring `apply_verdicts`'s own
-/// free-text tagging convention) and its `fix_specific` stays `None` — NEVER an empty or
-/// fabricated string. `report_export::fix_generation_failed` reads that same tag to exclude
-/// such a finding from `do_now`: a same-week action item must come with an actual fix.
+/// fix STILL doesn't pass after every retry keeps `fix_specific` at `None` — NEVER an empty or
+/// fabricated string — and the failure is only LOGGED (stderr), never written into any
+/// client-facing field. This is a PIPELINE failure (the model never produced a validated,
+/// codebase-specific fix), not a confidence judgement about the finding itself, so it must
+/// NEVER set `needs_review`, NEVER hedge, and NEVER tag `detail` with pipeline-state text
+/// (C3-1b, `docs/plans/2026-09-30_cycle2-queue-hardening.md`) — the ONLY thing that sets
+/// `needs_review`/`confidence = "needs-review"` is a calibration doubt verdict
+/// (`apply_verdicts`). The row still ships a usable fix: `report_export::resolve_fix` renders
+/// the RULE's own authored remediation (`RuleOption::remediation`) as the finding's generic
+/// `fix` whether or not `fix_specific` generated, and the Typst template renders that generic
+/// `fix` as the primary "Fix:" line whenever `fix_for_this_finding` is `None` — see both
+/// functions' doc comments.
 ///
 /// Modeled on [`verify_findings`] above: same `&dyn LlmPort` seam, same [`UsageMeter`]
 /// folding, same streamed-call + bounded-chunk shape (`FIX_BATCH_SIZE`, in the
@@ -2544,12 +2577,17 @@ pub async fn generate_fix_specifics(
         pending = still_pending;
     }
 
-    // Never emit an empty fix: anything still pending after every retry gets an honest
-    // needs-review marker instead of a null/blank Fix block downstream.
+    // C3-1b: never emit an empty/fabricated fix, but also never let this PIPELINE failure
+    // masquerade as a CONFIDENCE judgement — no `needs_review`, no `detail` tag. Operators see
+    // the gap in the logs; the client sees the rule's own authored remediation instead (see
+    // this function's doc comment).
     for idx in pending {
-        findings[idx].needs_review = true;
-        findings[idx].detail =
-            format!("{} [needs review: fix not generated]", findings[idx].detail);
+        eprintln!(
+            "[camerata-server] fix-specific generation gave up for {repo} {}:{} ({}) after \
+             {MAX_FIX_REGENERATIONS} retries — the finding still ships with the rule's \
+             authored remediation as its Fix line, not a client-facing hedge.",
+            findings[idx].path, findings[idx].line, findings[idx].rule_id
+        );
     }
 
     findings
@@ -5004,7 +5042,7 @@ pub async fn audit_repo(
                 files.len()
             )
         };
-        verify_findings(
+        let (verified, estimation_failed) = verify_findings(
             llm,
             repo,
             all_findings,
@@ -5014,7 +5052,11 @@ pub async fn audit_repo(
             thorough,
             &repo_shape,
         )
-        .await
+        .await;
+        // C3-1b: disclose a run-wide estimation-pass failure the same way the
+        // alternative-recommendation pass already does — see `FailedPass`'s doc comment.
+        failed_passes.extend(estimation_failed);
+        verified
     };
     let mut verified = verified;
     // P7: a rule marked NOT APPLICABLE (no evidence its concern applies to this codebase at
@@ -6861,7 +6903,7 @@ mod tests {
         let findings = vec![finding("AI-X", "medium")];
         let store = crate::transcript::TranscriptStore::default();
 
-        let out = verify_findings(
+        let (out, _estimation_failed) = verify_findings(
             &llm,
             "me/api",
             findings,
@@ -6908,7 +6950,7 @@ mod tests {
         };
         let findings = vec![finding("AI-X", "medium")];
 
-        let out = verify_findings(
+        let (out, _estimation_failed) = verify_findings(
             &llm,
             "me/api",
             findings,
@@ -6938,7 +6980,7 @@ mod tests {
         let findings = vec![finding("AI-X", "medium")];
         let store = crate::transcript::TranscriptStore::default();
 
-        let out = verify_findings(
+        let (out, _estimation_failed) = verify_findings(
             &llm,
             "me/api",
             findings,
@@ -7294,7 +7336,7 @@ mod tests {
         // content.
         let completer = CapturingCompleter::default();
 
-        let out = verify_findings(
+        let (out, _estimation_failed) = verify_findings(
             &completer,
             "me/api",
             findings,
@@ -7312,6 +7354,74 @@ mod tests {
             completer.seen.lock().unwrap().len(),
             expected_chunks,
             "M findings must be split into the expected number of bounded chunks"
+        );
+    }
+
+    // ── C3-1b: run-wide estimation-pass failure is disclosed, never silently dropped ────
+
+    /// When the calibration pass fails OUTRIGHT (every call, every finding), no finding gets
+    /// an effort estimate — this must surface as a `FailedPass{pass: "hour estimation", ..}`
+    /// so the export can disclose the gap, AND every finding must still ship (calibration
+    /// never drops anything, estimated or not).
+    #[tokio::test]
+    async fn verify_findings_records_a_failed_pass_when_estimation_fails_run_wide() {
+        let findings = vec![finding("AI-X", "medium"), finding("AI-Y", "high")];
+        let (out, failed_passes) = verify_findings(
+            &FailingCompleter,
+            "me/api",
+            findings,
+            None,
+            None,
+            None,
+            false,
+            "This repository has 2 code files.",
+        )
+        .await;
+
+        assert_eq!(
+            out.len(),
+            2,
+            "a failed estimation pass must never drop a finding"
+        );
+        assert!(
+            out.iter().all(|f| f.effort.is_none()),
+            "no finding got an estimate: {out:?}"
+        );
+        assert_eq!(
+            failed_passes.len(),
+            1,
+            "a run-wide estimation miss must be disclosed exactly once: {failed_passes:?}"
+        );
+        assert_eq!(failed_passes[0].repo, "me/api");
+        assert_eq!(failed_passes[0].pass, "hour estimation");
+    }
+
+    /// The sanity counterpart: when calibration succeeds and returns real effort estimates,
+    /// NO failed pass is fabricated.
+    #[tokio::test]
+    async fn verify_findings_records_no_failed_pass_when_estimates_land() {
+        let resp_text = r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","effort":"low","reason":"x"}]}"#;
+        let llm = StubCompleter {
+            text: resp_text.to_string(),
+        };
+        let findings = vec![finding("AI-X", "medium")];
+        let (out, failed_passes) = verify_findings(
+            &llm,
+            "me/api",
+            findings,
+            None,
+            None,
+            None,
+            false,
+            "This repository has 1 code files.",
+        )
+        .await;
+
+        assert_eq!(out[0].effort.as_deref(), Some("low"));
+        assert!(
+            failed_passes.is_empty(),
+            "a successful estimation pass must not fabricate a failure disclosure: \
+             {failed_passes:?}"
         );
     }
 
@@ -10513,11 +10623,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generate_fix_specifics_empty_fix_guard_marks_needs_review_on_total_failure() {
+    async fn generate_fix_specifics_total_failure_never_hedges_or_tags_detail() {
+        // C3-1b: fix-generation exhausting every retry is a PIPELINE failure, not a
+        // confidence judgement — it must never set `needs_review`, never touch `confidence`,
+        // and never write pipeline-state text into the client-facing `detail`. Only
+        // `fix_specific` stays `None` (never fabricated).
         let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
         // A completer that returns unparseable junk every time — every round yields nothing
-        // usable, so the finding must fall through to the needs-review fallback rather than
-        // an empty/`None` fix silently reaching the report.
+        // usable.
         let completer = StubCompleter {
             text: "complete garbage, not json".to_string(),
         };
@@ -10525,25 +10638,33 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].fix_specific, None, "must never fabricate a fix");
         assert!(
-            out[0].needs_review,
-            "must be marked needs-review on total failure"
+            !out[0].needs_review,
+            "a fix-generation failure must never hedge the finding"
         );
-        assert!(
-            out[0].detail.contains("[needs review: fix not generated]"),
-            "detail must carry the fix-not-generated tag, got: {}",
+        assert_eq!(
+            out[0].confidence, None,
+            "a fix-generation failure must never touch calibration confidence"
+        );
+        assert_eq!(
+            out[0].detail, "some real defect",
+            "detail must be untouched — no bracketed pipeline-state text: {}",
             out[0].detail
         );
     }
 
     #[tokio::test]
-    async fn generate_fix_specifics_empty_fix_guard_on_transport_failure() {
+    async fn generate_fix_specifics_transport_failure_never_hedges_or_tags_detail() {
         // The OTHER failure mode: the LLM is unreachable entirely (not just returning junk).
         let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
         let out =
             generate_fix_specifics(&FailingCompleter, "o/r", vec![f], &[], None, None, None).await;
         assert_eq!(out[0].fix_specific, None);
-        assert!(out[0].needs_review);
-        assert!(out[0].detail.contains("[needs review: fix not generated]"));
+        assert!(!out[0].needs_review);
+        assert_eq!(out[0].detail, "some real defect");
+        assert!(
+            !out[0].detail.contains("["),
+            "no bracketed pipeline-state text"
+        );
     }
 
     #[tokio::test]
@@ -10614,9 +10735,10 @@ mod tests {
     async fn generate_fix_specifics_gives_up_after_max_regenerations_and_folds_usage_every_round() {
         let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
         // Always returns an ungrounded fix — every round is rejected, so after
-        // MAX_FIX_REGENERATIONS retries the finding must land in the needs-review fallback,
-        // and every round's call must still have folded into the meter (spend isn't lost
-        // just because the content was rejected).
+        // MAX_FIX_REGENERATIONS retries the finding falls through with `fix_specific` still
+        // `None` (never hedged — see the total/transport-failure tests above), and every
+        // round's call must still have folded into the meter (spend isn't lost just because
+        // the content was rejected).
         let completer = StubCompleter {
             text: r#"{"fixes":[{"index":0,"fix":"Use `neverInEvidence` here."}]}"#.to_string(),
         };
@@ -10624,7 +10746,7 @@ mod tests {
         let out =
             generate_fix_specifics(&completer, "o/r", vec![f], &[], None, Some(&meter), None).await;
         assert_eq!(out[0].fix_specific, None);
-        assert!(out[0].needs_review);
+        assert!(!out[0].needs_review);
         assert_eq!(meter.snapshot().calls as usize, MAX_FIX_REGENERATIONS + 1);
     }
 
