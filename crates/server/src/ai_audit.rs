@@ -59,7 +59,7 @@ pub struct RuleAlternatives {
 /// One rule's recommendation: which option the AI judged best-fitting for this codebase (or
 /// the operator's forced choice for a targeted rescan), plus the reasoning, plus whether the
 /// raw model answer had to be corrected.
-#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RuleRecommendation {
     /// The rule id this recommendation is for (uppercased).
     pub rule_id: String,
@@ -80,6 +80,50 @@ pub struct RuleRecommendation {
     /// this to render "your choice" (locked) instead of "AI recommended".
     #[serde(default)]
     pub operator_chosen: bool,
+    /// The `file:line` (or `file:line — short note`) citation in the REPO that actually
+    /// FOLLOWS or NEEDS the recommended option — e.g. `src/api/list_users.rs:42` for a
+    /// cursor-pagination pick, grounding the recommendation in real code rather than a model
+    /// assertion. `None` when the model found no such evidence (or the field was blank/absent)
+    /// — see `applicable`'s doc comment: an absent evidence line FORCES `applicable = false`
+    /// for a model-sourced recommendation, because an unevidenced "this codebase does/needs X"
+    /// claim is never trusted (P7, `docs/plans/2026-09-29_codebase-inspection-hardening.md`).
+    /// Always `None` for an operator-forced pick (`operator_chosen: true`) — the operator's
+    /// explicit choice needs no repo evidence to be trusted.
+    #[serde(default)]
+    pub evidence: Option<String>,
+    /// Whether this rule's underlying CONCERN applies to this codebase at all. `false` means
+    /// the codebase neither follows nor needs this rule's decision (e.g. no pagination
+    /// anywhere, no API versioning anywhere) — `audit_repo` then drops the rule from the
+    /// directive set actually checked, so it emits ZERO findings instead of a false "this
+    /// project adopted the X model" claim. Defaults to `true` (back-compat: an
+    /// operator-forced pick, or a recommendation that predates this field, is treated as
+    /// applicable — the pre-existing behavior of always checking every selected multi-option
+    /// rule). See [`parse_alternative_recommendations`] for how a model's `applicable: true`
+    /// claim is validated against `evidence` before being trusted.
+    #[serde(default = "default_recommendation_applicable")]
+    pub applicable: bool,
+}
+
+/// Serde default for [`RuleRecommendation::applicable`] — see that field's doc comment.
+fn default_recommendation_applicable() -> bool {
+    true
+}
+
+impl Default for RuleRecommendation {
+    /// Manual (not derived) so `applicable` defaults to `true` here too — the same value the
+    /// serde default produces — rather than `bool::default() == false`, which would silently
+    /// contradict the field's own documented default.
+    fn default() -> Self {
+        RuleRecommendation {
+            rule_id: String::new(),
+            recommended_option_id: String::new(),
+            recommendation_reasoning: String::new(),
+            hallucinated: false,
+            operator_chosen: false,
+            evidence: None,
+            applicable: true,
+        }
+    }
 }
 
 /// Aggregated REAL usage across every LLM call in one audit — all chunk×rule passes, the
@@ -1028,24 +1072,45 @@ The user message lists one or more rules. Each rule shows EVERY alternative opti
 for it — plus a marker for whichever option is CURRENTLY selected (the project's own choice,
 the corpus default, or "none selected" when neither exists).
 
-For EACH rule listed, pick EXACTLY ONE option id: the one that best matches how this codebase
-already does things, or — if the codebase is inconsistent or does not do the thing at all —
-the one that is the best-practice fit given the stack and code you can see. You are free to
-keep the currently-selected option, or pick a different one; ground the choice in the actual
-code, not a coin flip. Cite what you observed in the reasoning.
+For EACH rule listed, first decide whether the rule's underlying CONCERN even applies to this
+codebase. Some rules govern something that may simply not exist here at all (no pagination
+anywhere, no API versioning anywhere, no background jobs anywhere) — if you cannot point to a
+SPECIFIC file and line where the codebase either already follows this rule's concern or
+concretely needs it, the rule is NOT APPLICABLE. Set `"applicable": false` and do not pick an
+option for it. Only set `"applicable": true` when you can cite the exact evidence.
+
+When the rule IS applicable, pick EXACTLY ONE option id: the one that best matches how this
+codebase already does things, or — if the codebase is inconsistent — the one that is the
+best-practice fit given the stack and code you can see. You are free to keep the
+currently-selected option, or pick a different one; ground the choice in the actual code, not
+a coin flip.
+
+CRITICAL RULE — never assert an unevidenced convention: you must NEVER say a codebase has
+"adopted" a pattern, or describe ANY convention as already in use, unless you cite the EXACT
+`path:line` where that is true. If you cannot cite a real file:line, either say the rule is not
+applicable (see above) or, if it applies but nothing in the repo yet follows it, say so plainly
+("no existing pattern; recommending X as the best-practice fit for this stack") rather than
+inventing an "adopted" claim.
 
 Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
 {
   "recommendations": [
     {
       "rule_id": "EXACT rule id as given, copied verbatim",
+      "applicable": true,
       "recommended_option_id": "EXACT option id from THAT rule's own list, copied verbatim",
+      "evidence": "path/to/file.ext:42 — one short phrase on what's there",
       "recommendation_reasoning": "1-3 sentences grounded in the codebase evidence you saw"
     }
   ]
 }
+When `"applicable"` is `false`, omit `"recommended_option_id"` and `"evidence"` (or leave them
+empty) — there is nothing to recommend against for a concern that doesn't apply here.
+
 Include exactly one entry per rule listed, even when you are keeping the currently-selected
-option. NEVER invent an option id that was not listed for that specific rule."#
+option or marking it not applicable. NEVER invent an option id that was not listed for that
+specific rule. NEVER set `"applicable": true` without a real `"evidence"` file:line — an
+unevidenced applicability claim will be discarded and treated as not applicable."#
         .to_string()
 }
 
@@ -1094,9 +1159,24 @@ fn fallback_recommendations(alternatives: &[RuleAlternatives], reason: &str) -> 
                 recommendation_reasoning: reason.to_string(),
                 hallucinated: true,
                 operator_chosen: false,
+                // A total parse failure is a MODEL-PIPELINE failure, not evidence that the
+                // rule's concern doesn't apply — fail open exactly as before P7 (keep checking
+                // the currently-selected option) rather than silently dropping the rule.
+                evidence: None,
+                applicable: true,
             })
         })
         .collect()
+}
+
+/// A non-blank `evidence` string after trimming, or `None`. Shared by the "does this entry
+/// carry real evidence" check on both branches of [`parse_alternative_recommendations`].
+fn trimmed_evidence(v: &serde_json::Value) -> Option<String> {
+    v["evidence"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 /// Parse the recommendation pass's raw model output into one [`RuleRecommendation`] per
@@ -1111,6 +1191,20 @@ fn fallback_recommendations(alternatives: &[RuleAlternatives], reason: &str) -> 
 /// The fallback target is the rule's OWN `selected_option_id` (the project's chosen option,
 /// else the corpus default) — never a hardcoded/arbitrary id — so a fallback still resolves
 /// to something the architect already considered reasonable.
+///
+/// # P7 — evidence-gated applicability
+/// Two checks are ORTHOGONAL to the option-id validation above:
+/// - **Applicability.** The model reports `"applicable": true|false` per rule — `false` means
+///   the codebase neither follows nor needs this rule's concern at all (no evidence for it
+///   anywhere), and the caller (`audit_repo`) must then drop the rule from the directive set
+///   actually checked so it emits zero findings, rather than checking violations against a
+///   convention nothing in the repo actually established.
+/// - **Evidence-gates-applicability.** A model claiming `applicable: true` WITHOUT a non-blank
+///   `evidence` file:line is never trusted at face value — that is exactly the "describes a
+///   convention as adopted without citing where" failure mode this pass exists to prevent. Such
+///   an entry is forcibly downgraded to `applicable: false` and flagged `hallucinated: true`
+///   (the model's applicability claim, not just its option id, was corrected). This check is
+///   independent of whether the `recommended_option_id` itself was valid.
 pub fn parse_alternative_recommendations(
     raw: &str,
     alternatives: &[RuleAlternatives],
@@ -1151,13 +1245,64 @@ pub fn parse_alternative_recommendations(
                     .unwrap_or("")
                     .trim()
                     .to_string();
-                if !raw_id.is_empty() && real_ids.contains(raw_id.as_str()) {
+                // Applicability, gated on evidence — independent of the option-id check below.
+                // `applicable` absent entirely (an older-shaped/malformed entry) fails OPEN
+                // (treated as applicable) so a rule is never silently skipped just because the
+                // model omitted a field; only an EXPLICIT `true` without evidence is corrected.
+                // `applicable` ABSENT entirely (the key was never sent — an older-shaped
+                // response, or a test fixture predating P7) is NOT the same as the model
+                // EXPLICITLY claiming `true`: only an explicit, unevidenced `true` gets
+                // corrected. An absent field fails open exactly like pre-P7 behavior (checked,
+                // no evidence requirement) — the current prompt always sends the field for a
+                // real model call, so this only matters for legacy/malformed output.
+                let raw_applicable = r.get("applicable").and_then(|v| v.as_bool());
+                let raw_evidence = trimmed_evidence(r);
+                let (applicable, evidence, evidence_corrected) =
+                    match (raw_applicable, raw_evidence) {
+                        (None, ev) => (true, ev, false),
+                        (Some(true), Some(ev)) => (true, Some(ev), false),
+                        (Some(true), None) => (false, None, true),
+                        (Some(false), _) => (false, None, false),
+                    };
+                if !applicable {
+                    // NOT APPLICABLE — there is no option to validate (an explicit, honest
+                    // "this concern doesn't apply here" answer names no option at all, and the
+                    // evidence-corrected case's `raw_id`/`raw_evidence`, if any, are moot: the
+                    // whole point is nothing will be checked against this rule). Never run the
+                    // option-id validation below — an empty/missing `recommended_option_id` here
+                    // is EXPECTED, not a hallucination in its own right.
+                    let recommendation_reasoning = if evidence_corrected {
+                        format!(
+                            "The model claimed this rule's concern applies to the codebase but \
+                             did not cite a file:line where it does — never trusting an \
+                             unevidenced \"adopted\" claim, treating as not applicable instead. \
+                             Model reasoning was: {reasoning}"
+                        )
+                    } else {
+                        reasoning
+                    };
+                    RuleRecommendation {
+                        rule_id: a.rule_id.clone(),
+                        recommended_option_id: fallback_id(),
+                        recommendation_reasoning,
+                        // Only the evidence-correction case is a genuine hallucination (the
+                        // model's OWN claim had to be overridden). An honest, explicit
+                        // `applicable: false` is not — the model correctly declined to assert
+                        // an unevidenced convention.
+                        hallucinated: evidence_corrected,
+                        operator_chosen: false,
+                        evidence,
+                        applicable,
+                    }
+                } else if !raw_id.is_empty() && real_ids.contains(raw_id.as_str()) {
                     RuleRecommendation {
                         rule_id: a.rule_id.clone(),
                         recommended_option_id: raw_id,
                         recommendation_reasoning: reasoning,
                         hallucinated: false,
                         operator_chosen: false,
+                        evidence,
+                        applicable,
                     }
                 } else if raw_id.is_empty() {
                     RuleRecommendation {
@@ -1168,6 +1313,8 @@ pub fn parse_alternative_recommendations(
                             .to_string(),
                         hallucinated: true,
                         operator_chosen: false,
+                        evidence,
+                        applicable,
                     }
                 } else {
                     RuleRecommendation {
@@ -1180,6 +1327,8 @@ pub fn parse_alternative_recommendations(
                         ),
                         hallucinated: true,
                         operator_chosen: false,
+                        evidence,
+                        applicable,
                     }
                 }
             }
@@ -1191,6 +1340,10 @@ pub fn parse_alternative_recommendations(
                     .to_string(),
                 hallucinated: true,
                 operator_chosen: false,
+                // Missing from the model's output entirely — a pipeline gap, not evidence the
+                // concern is inapplicable. Fail open (keep checking) exactly as before P7.
+                evidence: None,
+                applicable: true,
             },
         };
         out.push(rec);
@@ -3619,6 +3772,10 @@ pub async fn audit_repo(
                 },
                 hallucinated,
                 operator_chosen: true,
+                // An operator's explicit forced pick needs no repo evidence — they already
+                // decided the rule applies (that's what forcing a choice for it means).
+                evidence: None,
+                applicable: true,
             });
             if let Some(opt) = a.options.iter().find(|o| o.id == final_id) {
                 if let Some(entry) = effective_selected
@@ -3651,6 +3808,16 @@ pub async fn audit_repo(
                         let Some(a) = ask_alts.iter().find(|a| a.rule_id == rec.rule_id) else {
                             continue;
                         };
+                        if !rec.applicable {
+                            // P7: no evidence this rule's concern applies to this codebase at
+                            // all (no pagination anywhere, no API versioning anywhere, …) —
+                            // drop it from the directive set the violation passes actually
+                            // check, so it emits ZERO findings instead of checking violations
+                            // against a convention nothing in the repo established.
+                            effective_selected
+                                .retain(|(id, _)| !id.eq_ignore_ascii_case(&a.rule_id));
+                            continue;
+                        }
                         if let Some(opt) =
                             a.options.iter().find(|o| o.id == rec.recommended_option_id)
                         {
@@ -3912,12 +4079,31 @@ pub async fn audit_repo(
         }
         out
     };
+    let mut verified = verified;
+    // P7: a rule marked NOT APPLICABLE (no evidence its concern applies to this codebase at
+    // all) must emit ZERO findings. Dropping it from `effective_selected` earlier stops the
+    // per-chunk prompt from asking about it at all, but this hard filter is the actual
+    // guarantee — it also catches the rare case where a model free-associates a violation
+    // under that rule id anyway (the prompt's "flag any other genuine issues you find"
+    // catch-all), whether cited under the bare adopted id or the `AI-` invented-name prefix.
+    if !recommendations.is_empty() {
+        let not_applicable: std::collections::HashSet<String> = recommendations
+            .iter()
+            .filter(|r| !r.applicable)
+            .map(|r| r.rule_id.to_ascii_uppercase())
+            .collect();
+        if !not_applicable.is_empty() {
+            verified.retain(|f| {
+                let bare = f.rule_id.trim_start_matches("AI-").to_ascii_uppercase();
+                !not_applicable.contains(&bare)
+            });
+        }
+    }
     // Tag every finding under a multi-option rule with the option it was actually judged
     // against — the report layer (`report_export::resolve_fix`) reads this so the Fix text
     // matches the evaluated option, never a stale default. Every finding for a given rule_id
     // in THIS response was checked against the SAME directive (the rewrite above), so this is
     // a safe blanket tag, not a per-finding guess.
-    let mut verified = verified;
     if !recommendations.is_empty() {
         let by_rule: std::collections::HashMap<&str, &str> = recommendations
             .iter()
@@ -6929,6 +7115,111 @@ mod tests {
         }
     }
 
+    // ── P7: evidence-gated applicability ────────────────────────────────────────────────
+
+    /// A genuine, evidenced pick: `applicable: true` WITH a real evidence line is trusted
+    /// as-is — `applicable` stays true, `evidence` is carried through, and this is NOT
+    /// `hallucinated` (a real, evidenced answer, not a correction).
+    #[test]
+    fn parse_alternative_recommendations_accepts_an_evidenced_applicable_pick() {
+        let alt = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
+        let raw = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","applicable":true,"recommended_option_id":"opt-b","evidence":"src/api/list_users.rs:42 — cursor param already threaded through","recommendation_reasoning":"the codebase already does it the B way"}]}"#;
+        let recs = parse_alternative_recommendations(raw, &[alt]);
+        assert_eq!(recs.len(), 1);
+        assert!(recs[0].applicable);
+        assert_eq!(
+            recs[0].evidence.as_deref(),
+            Some("src/api/list_users.rs:42 — cursor param already threaded through")
+        );
+        assert_eq!(recs[0].recommended_option_id, "opt-b");
+        assert!(!recs[0].hallucinated, "an evidenced applicable pick is not a hallucination");
+    }
+
+    /// THE CORE P7 GUARANTEE: a model claiming `applicable: true` but citing NO evidence line
+    /// must never be trusted at face value — it is corrected to `applicable: false` (no
+    /// findings will be checked against it) and flagged `hallucinated: true` so the UI can show
+    /// the correction happened. This is what stops the report from asserting "the adopted
+    /// offset-pagination model" when nothing in the repo actually establishes any convention.
+    #[test]
+    fn parse_alternative_recommendations_corrects_an_unevidenced_applicable_claim() {
+        let alt = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
+        let raw = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","applicable":true,"recommended_option_id":"opt-b","recommendation_reasoning":"the codebase adopts the B model"}]}"#;
+        let recs = parse_alternative_recommendations(raw, &[alt]);
+        assert_eq!(recs.len(), 1);
+        assert!(
+            !recs[0].applicable,
+            "an unevidenced applicability claim must be corrected to not-applicable"
+        );
+        assert_eq!(recs[0].evidence, None);
+        assert!(recs[0].hallucinated, "the correction must be flagged");
+        assert!(
+            recs[0].recommendation_reasoning.contains("did not cite"),
+            "the correction note must explain WHY it was downgraded: {}",
+            recs[0].recommendation_reasoning
+        );
+    }
+
+    /// An empty-string `evidence` field is treated identically to an absent one — never
+    /// accepted as "evidence" just because the key was present.
+    #[test]
+    fn parse_alternative_recommendations_rejects_blank_evidence_as_no_evidence() {
+        let alt = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
+        let raw = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","applicable":true,"recommended_option_id":"opt-b","evidence":"   ","recommendation_reasoning":"vague"}]}"#;
+        let recs = parse_alternative_recommendations(raw, &[alt]);
+        assert!(!recs[0].applicable);
+        assert_eq!(recs[0].evidence, None);
+        assert!(recs[0].hallucinated);
+    }
+
+    /// The model explicitly saying `applicable: false` (no evidence anywhere for the concern)
+    /// is trusted as a genuine "not applicable" answer — NOT flagged hallucinated, since the
+    /// model correctly declined to assert an unevidenced convention.
+    #[test]
+    fn parse_alternative_recommendations_accepts_an_explicit_not_applicable() {
+        let alt = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
+        let raw = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","applicable":false,"recommendation_reasoning":"no pagination anywhere in this codebase"}]}"#;
+        let recs = parse_alternative_recommendations(raw, &[alt]);
+        assert!(!recs[0].applicable);
+        assert_eq!(recs[0].evidence, None);
+        assert!(
+            !recs[0].hallucinated,
+            "an honest, explicit not-applicable answer is not a hallucination"
+        );
+        assert_eq!(recs[0].recommendation_reasoning, "no pagination anywhere in this codebase");
+    }
+
+    /// Back-compat: a response that omits the `applicable` key entirely (pre-P7 shape) is NOT
+    /// penalized — it fails OPEN to `applicable: true` with no evidence requirement, exactly
+    /// the pre-existing behavior. Only an EXPLICIT `true` claim is evidence-gated.
+    #[test]
+    fn parse_alternative_recommendations_treats_absent_applicable_key_as_back_compat_applicable() {
+        let alt = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
+        let raw = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","recommended_option_id":"opt-b","recommendation_reasoning":"fine"}]}"#;
+        let recs = parse_alternative_recommendations(raw, &[alt]);
+        assert!(recs[0].applicable);
+        assert!(!recs[0].hallucinated);
+    }
+
+    /// A fallback recommendation (total parse failure, or a rule the model never answered) is
+    /// ALWAYS `applicable: true` — a pipeline failure is not evidence the rule's concern is
+    /// inapplicable, so the rule keeps being checked exactly as before P7.
+    #[test]
+    fn fallback_recommendations_are_always_applicable() {
+        let alts = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
+        let recs = parse_alternative_recommendations("not json at all", &alts);
+        assert!(recs[0].applicable);
+        assert_eq!(recs[0].evidence, None);
+
+        let alts2 = vec![
+            two_option_alternatives("MULTI-RULE-1", Some("opt-a")),
+            two_option_alternatives("MULTI-RULE-2", Some("opt-b")),
+        ];
+        let raw = r#"{"recommendations":[{"rule_id":"MULTI-RULE-1","recommended_option_id":"opt-a","recommendation_reasoning":"fine"}]}"#;
+        let recs2 = parse_alternative_recommendations(raw, &alts2);
+        let missing = recs2.iter().find(|r| r.rule_id == "MULTI-RULE-2").unwrap();
+        assert!(missing.applicable, "a rule the model never answered stays applicable");
+    }
+
     /// HAPPY PATH end-to-end: `audit_repo` fed one multi-option rule (via `alternatives`)
     /// recommends an option AND tags the finding under that rule with `evaluated_option_id`
     /// — one scan, two outputs per rule, per the design doc. The `StubCompleter` serves the
@@ -6987,6 +7278,57 @@ mod tests {
             f.evaluated_option_id.as_deref(),
             Some("opt-b"),
             "the finding must be tagged with the option it was actually judged under: {f:?}"
+        );
+    }
+
+    /// P7 CORE GUARANTEE, end-to-end: when the recommendation pass marks a rule NOT
+    /// APPLICABLE (no evidence its concern exists in this repo at all), `audit_repo` emits
+    /// ZERO findings for it — even though the stub's canned response includes a "finding"
+    /// under that exact rule id (proving the hard post-filter works, not merely that the rule
+    /// was left out of the prompt, which a stub ignores anyway).
+    #[tokio::test]
+    async fn audit_repo_emits_no_findings_for_a_not_applicable_rule() {
+        let canned = r#"{
+            "recommendations": [
+                {"rule_id": "MULTI-RULE-1", "applicable": false, "recommendation_reasoning": "no evidence of pagination anywhere in this codebase"}
+            ],
+            "findings": [
+                {"rule": "MULTI-RULE-1", "severity": "medium", "path": "src/lib.rs", "code": "old pattern here", "title": "does it the A way", "detail": "should be B"}
+            ],
+            "proposed_rules": []
+        }"#;
+        let llm = StubCompleter { text: canned.to_string() };
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "fn handler() { old pattern here; }\n".to_string(),
+        )];
+        let selected = vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
+        let alternatives = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
+        let (findings, _proposed, recs) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            &alternatives,
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("stub completer never errors");
+
+        assert_eq!(recs.len(), 1);
+        assert!(!recs[0].applicable);
+        assert!(
+            findings.iter().all(|f| f.rule_id != "MULTI-RULE-1"),
+            "a not-applicable rule must emit ZERO findings, even one the model cited anyway: \
+             {findings:?}"
         );
     }
 

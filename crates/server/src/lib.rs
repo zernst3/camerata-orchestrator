@@ -15973,6 +15973,8 @@ mod tests {
                         recommendation_reasoning: "test reasoning".to_string(),
                         hallucinated: false,
                         operator_chosen: false,
+                        evidence: Some("src/lib.rs:1 — test evidence".to_string()),
+                        applicable: true,
                     },
                 )
             })
