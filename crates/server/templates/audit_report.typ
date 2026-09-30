@@ -582,11 +582,23 @@ Not performed in this engagement:
 // signature block naming the real preparer. `d.cover.prepared_by` is resolved server-side
 // (`report_export::resolve_prepared_by`) with a real default name as its final fallback — it
 // is NEVER blank, so this block always names an actual person, never "N/A".
+//
+// W5 (2026-09-30): this block used to render the same NAME-plus-DATE attestation no matter
+// what, including on a raw (nobody-has-looked-at-this-yet) export — contradicting the DRAFT
+// banner above and reading to a client as a completed human sign-off that never happened. Now
+// gated on `is_draft` (the exact same `d.review_state` signal the draft banner reads, defined
+// once near the top of this file) so the banner and this block can never disagree again: a
+// reviewed run keeps the real name+date sign-off below; a raw/unreviewed draft gets no
+// name+date attestation at all, just an explicit unreviewed-draft label.
 #v(0.5cm)
 #block(stroke: 0.75pt + rgb("#333333"), inset: 10pt, radius: 2pt, width: 100%)[
   #text(size: 9pt)[
-    Prepared and signed off by: #text(weight: "bold")[#d.cover.prepared_by]
-    #linebreak()
-    #text(fill: rgb("#666666"))[#d.cover.generated_at]
+    #if is_draft [
+      Prepared by: #text(weight: "bold")[#d.cover.prepared_by] (unreviewed draft, not signed off)
+    ] else [
+      Prepared and signed off by: #text(weight: "bold")[#d.cover.prepared_by]
+      #linebreak()
+      #text(fill: rgb("#666666"))[#d.cover.generated_at]
+    ]
   ]
 ]

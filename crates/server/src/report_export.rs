@@ -5718,11 +5718,39 @@ mod tests {
         );
     }
 
+    /// W5: a RAW (unreviewed) export must compile cleanly through the now-gated sign-off
+    /// block — the new `if is_draft [...] else [...]` branch in the signature block must not be
+    /// a Typst syntax trap on the raw path, the one that is actually exercised by default (no
+    /// disposition ever recorded).
+    #[tokio::test]
+    async fn compile_pdf_succeeds_for_an_unreviewed_draft_with_the_gated_signoff() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_succeeds_for_an_unreviewed_draft_with_the_gated_signoff: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let f = finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 10, "critical");
+        let report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
+        // No dispositions recorded at all -> Raw/unreviewed, same source of truth the draft
+        // banner and the sign-off block both read.
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.review_state, ReviewState::Raw);
+        assert!(json.review_state.is_draft());
+
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed for an unreviewed draft export");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
     /// End-to-end smoke test (typst-present-only, mirrors `compile_pdf_produces_a_real_pdf_
     /// when_typst_is_present`): a REVIEWED export (with a real disposition) must still compile
     /// cleanly through the gated template — the conditional banner/methodology logic must not
     /// be a Typst syntax trap that only happens to work on the (more commonly exercised) raw
-    /// path.
+    /// path. W5 companion to the test above: the sign-off block's reviewed branch must also
+    /// still be valid Typst.
     #[tokio::test]
     async fn compile_pdf_succeeds_for_a_reviewed_export_with_the_gated_template() {
         if which_typst().is_none() {
@@ -5783,6 +5811,52 @@ mod tests {
         let template = include_str!("../templates/audit_report.typ");
         assert!(template.contains("Prepared and signed off by"));
         assert!(template.contains("d.cover.prepared_by"));
+    }
+
+    /// W5: the sign-off block used to render "Prepared and signed off by: NAME / DATE"
+    /// unconditionally — including on a raw (nobody-has-looked-at-this-yet) export, directly
+    /// contradicting the per-page DRAFT banner above it. It must now be gated on the exact same
+    /// `is_draft` signal the draft banner reads (not a second, independently-derived flag), so
+    /// the two can never disagree again.
+    #[test]
+    fn shipped_template_signoff_is_gated_on_the_same_is_draft_signal_as_the_draft_banner() {
+        let template = include_str!("../templates/audit_report.typ");
+        let signoff_pos = template
+            .find("Prepared and signed off by")
+            .expect("signature block must exist");
+
+        // The nearest `is_draft` check ABOVE the sign-off line must be the one that guards it
+        // (`#if is_draft [ ... ] else [ ... Prepared and signed off by ... ]`) — found via
+        // `rfind` on the (byte-boundary-safe, since `signoff_pos` came from `find`) prefix, so
+        // this can't accidentally match the draft banner's own `is_draft` check way up in the
+        // page header.
+        let if_draft_pos = template[..signoff_pos]
+            .rfind("if is_draft")
+            .expect("an `if is_draft` branch must guard the sign-off block");
+        let between = &template[if_draft_pos..signoff_pos];
+        assert!(
+            between.len() < 300,
+            "the `if is_draft` guarding the sign-off block must sit directly above it, not be \
+             some unrelated earlier use of the signal; gap was {} bytes: {between:?}",
+            between.len()
+        );
+        assert!(
+            between.contains("] else ["),
+            "the sign-off line must be in the `else` (reviewed) branch of the is_draft check"
+        );
+        assert!(
+            between.contains("unreviewed draft"),
+            "the draft branch must explicitly say this is an unreviewed draft"
+        );
+        assert!(
+            between.contains("not signed off"),
+            "the draft branch must not claim a sign-off happened"
+        );
+
+        // The reviewed branch (only) still pairs the preparer name with a date.
+        let reviewed_branch_end = template.len().min(signoff_pos + 200);
+        let reviewed_branch = &template[signoff_pos..reviewed_branch_end];
+        assert!(reviewed_branch.contains("d.cover.generated_at"));
     }
 
     /// Contract test: no CLIENT-FACING string in the shipped template says "audit"/"Audit".
