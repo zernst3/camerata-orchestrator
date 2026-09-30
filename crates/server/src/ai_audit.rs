@@ -636,6 +636,19 @@ For EACH finding, do two things:
     internet-exposed surface; remote code execution or injection with a real, reachable path.
     When in doubt between "high" and "critical", use "high" — do not inflate an ordinary high
     into critical out of general alarm, and never assign "critical" to a debatable preference.
+  * RULES OF THUMB (apply these consistently — the SAME shape of finding must get the SAME
+    severity every run, not a per-run judgment call):
+    - Unauthenticated access to ANY protected resource or operation, OR a path to full-account
+      compromise (takeover, impersonation, assuming any user's identity) — ALWAYS "critical".
+    - An AUTHENTICATED user reading another tenant's/user's data they should not see (cross-
+      tenant read) is "high" by default — NOT "critical" — unless the data class itself escalates
+      it: payment data, credentials/secrets, or PII of the sensitive kind (SSN, health records,
+      government ID). Only then does a cross-tenant READ clear the critical bar.
+    - Do NOT downgrade an access-control or injection finding because "RLS probably covers it" or
+      similar defense-in-depth speculation — a check failing at the boundary the finding actually
+      names is real regardless of what a deeper layer might also do. If you invoke RLS (or any
+      other layer) as a mitigating factor, it must be a CONFIRMED fact from the evidence you were
+      given, not a guess, and it does not excuse a boundary that has already failed.
   * A concrete, demonstrable SECURITY or CORRECTNESS break that does NOT clear the critical bar
     above (injection needing extra steps to reach, missing auth on a write path with contained
     blast radius, data loss/corruption, a real but non-catastrophic exploit) is "high".
@@ -836,6 +849,269 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
     out
 }
 
+// ── D5: severity calibration rules of thumb ──────────────────────────────────────────────
+//
+// docs/plans/2026-09-29_codebase-inspection-hardening.md, D5. The calibration MODEL already
+// carries these rules of thumb in its own system prompt (`verify_system_prompt`, above), but a
+// model's application of a rule of thumb is, by construction, a per-run judgment call — the same
+// finding phrased identically twice is not guaranteed the same verdict twice. This section is
+// the DETERMINISTIC backstop: a pure post-calibration pass that re-derives the floor severity
+// from the finding's own text and enforces it regardless of what the model said, recording WHY
+// on the finding (`Finding::calibration_rationale`) so the calibrated severity is auditable, not
+// a coin flip. It only ever RAISES severity to a floor — it never lowers a severity the model (or
+// the deterministic origin) already assigned above the floor.
+
+/// Phrases that mark a finding as unauthenticated access to a protected resource/operation, or a
+/// path to full-account compromise (takeover/impersonation) — the plan's "Critical" class.
+/// Deliberately phrase-based (not a single keyword) so a finding merely mentioning the word
+/// "authentication" in passing (e.g. "the authentication middleware also logs...") doesn't
+/// trip the floor — every phrase here asserts the ABSENCE of auth or a completed compromise.
+const UNAUTHENTICATED_OR_FULL_COMPROMISE_PHRASES: &[&str] = &[
+    "unauthenticated",
+    "without authentication",
+    "without any authentication",
+    "no authentication",
+    "no authentication required",
+    "no authentication is required",
+    "missing authentication",
+    "not authenticated",
+    "without logging in",
+    "without needing to log in",
+    "no login required",
+    "requires no login",
+    "full account compromise",
+    "full account takeover",
+    "complete account takeover",
+    "complete account compromise",
+    "account takeover",
+    "take over any account",
+    "take over any user's account",
+    "impersonate any user",
+    "assume any user's identity",
+];
+
+/// Phrases marking an AUTHENTICATED cross-tenant/cross-user READ — the plan's "High by default"
+/// class. Requires BOTH a cross-tenant/cross-user phrase AND a read-shaped verb so a finding
+/// about a cross-tenant WRITE (already its own, typically higher, class) or an unrelated mention
+/// of "another organization" doesn't spuriously floor to High via this rule.
+const CROSS_TENANT_PHRASES: &[&str] = &[
+    "cross-tenant",
+    "cross tenant",
+    "cross-organization",
+    "cross organization",
+    "cross-org",
+    "another organization's",
+    "other organizations'",
+    "another tenant's",
+    "other tenants'",
+    "another user's",
+    "other users'",
+    "belonging to another user",
+    "belonging to a different organization",
+    "data from another account",
+];
+const READ_VERBS: &[&str] = &[
+    "read", "view", "fetch", "access", "download", "list", "see", "retrieve",
+];
+
+/// Data-class phrases that escalate an authenticated cross-tenant read from High to Critical:
+/// payment data, credentials/secrets, and sensitive PII — the plan's explicit escalation list.
+const PAYMENT_DATA_PHRASES: &[&str] = &[
+    "payment",
+    "credit card",
+    "card number",
+    "cvv",
+    "bank account",
+    "routing number",
+    "ach transfer",
+    "stripe secret",
+];
+const CREDENTIAL_DATA_PHRASES: &[&str] = &[
+    "password",
+    "api key",
+    "secret key",
+    "private key",
+    "access token",
+    "session token",
+    "credential",
+    "oauth token",
+    "refresh token",
+];
+const SENSITIVE_PII_PHRASES: &[&str] = &[
+    "social security",
+    "ssn",
+    "passport number",
+    "driver's license",
+    "medical record",
+    "health record",
+    "government id",
+];
+
+/// Hedge phrases that speculate a deeper layer (RLS, or defense-in-depth generally) already
+/// covers a finding — the exact rationalization D3/D5 forbid as a reason to under-rate an
+/// access-control or injection finding. Requires the text to mention RLS/row-level-security AT
+/// ALL, AND one of these hedges, so a finding that CONFIRMS (not speculates) a mitigating RLS
+/// policy is unaffected — this only catches speculative language ("probably", "likely", ...).
+const RLS_HEDGE_PHRASES: &[&str] = &[
+    "probably",
+    "likely",
+    "presumably",
+    "should prevent",
+    "should mitigate",
+    "should cover",
+    "should catch",
+    "may prevent",
+    "may mitigate",
+    "might prevent",
+    "could prevent",
+    "defense in depth",
+    "defense-in-depth",
+    "is likely covered",
+    "is probably covered",
+];
+
+/// The lowercased text a D5 floor rule scans: `detail` + `snippet` + `category`, concatenated —
+/// the model's phrasing can land in the summary prose (`detail`) or, for a deterministic/floor
+/// finding, in the description-shaped `snippet`. Case-folded once so every phrase table above can
+/// stay lowercase.
+fn calibration_floor_scan_text(f: &Finding) -> String {
+    format!(
+        "{} {} {}",
+        f.detail,
+        f.snippet,
+        f.category.as_deref().unwrap_or("")
+    )
+    .to_ascii_lowercase()
+}
+
+fn mentions_unauthenticated_or_full_compromise(text: &str) -> bool {
+    UNAUTHENTICATED_OR_FULL_COMPROMISE_PHRASES
+        .iter()
+        .any(|p| text.contains(p))
+}
+
+fn mentions_authenticated_cross_tenant_read(text: &str) -> bool {
+    CROSS_TENANT_PHRASES.iter().any(|p| text.contains(p))
+        && READ_VERBS.iter().any(|v| text.contains(v))
+}
+
+fn mentions_escalating_data_class(text: &str) -> bool {
+    PAYMENT_DATA_PHRASES
+        .iter()
+        .chain(CREDENTIAL_DATA_PHRASES)
+        .chain(SENSITIVE_PII_PHRASES)
+        .any(|p| text.contains(p))
+}
+
+fn mentions_speculative_rls_hedge(text: &str) -> bool {
+    let mentions_rls = text.contains("rls")
+        || text.contains("row-level security")
+        || text.contains("row level security");
+    mentions_rls && RLS_HEDGE_PHRASES.iter().any(|h| text.contains(h))
+}
+
+/// Whether `f` is in the access-control / injection family D3 already treats as a class that
+/// must never be softened by "RLS probably contains it" reasoning: RLS policy, authorization, or
+/// injection (query-grammar injection included). Checks the finding's OWN `category` first (set
+/// by calibration or an earlier merge pass), falling back to `categorize_rule_id` over its rule
+/// id — reusing the same word-boundary-matched categorization D5's own Part B hardened, rather
+/// than re-deriving a separate notion of "is this access-control".
+fn is_access_control_or_injection_class(f: &Finding) -> bool {
+    let cat = f
+        .category
+        .clone()
+        .or_else(|| categorize_rule_id(&f.rule_id));
+    matches!(
+        cat.as_deref(),
+        Some("rls-policy") | Some("authorization") | Some("injection")
+    )
+}
+
+/// The deterministic D5 severity floor for ONE finding: `None` when no rule of thumb applies,
+/// else the floor severity plus the rationale to record. Order matters — unauthenticated/full-
+/// compromise is checked first (it is the highest floor and the two conditions are mutually
+/// exclusive by construction: an unauthenticated finding is never ALSO the "authenticated
+/// cross-tenant" case), then the authenticated-cross-tenant-read floor, then the RLS-hedge guard
+/// (which can only RAISE whatever floor is already computed, never lower it — see the combine
+/// step in `apply_severity_calibration_rule`).
+fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, String)> {
+    let text = calibration_floor_scan_text(f);
+    let mut floor = if mentions_unauthenticated_or_full_compromise(&text) {
+        Some((
+            "critical",
+            "Severity floor: unauthenticated access or a path to full-account compromise is \
+             always Critical."
+                .to_string(),
+        ))
+    } else if mentions_authenticated_cross_tenant_read(&text) {
+        if mentions_escalating_data_class(&text) {
+            Some((
+                "critical",
+                "Severity floor: an authenticated cross-tenant read escalates to Critical — the \
+                 exposed data class (payment, credentials/secrets, or sensitive PII) crosses the \
+                 escalation threshold."
+                    .to_string(),
+            ))
+        } else {
+            Some((
+                "high",
+                "Severity floor: an authenticated cross-tenant read is High by default, not \
+                 Critical, absent an escalating data class."
+                    .to_string(),
+            ))
+        }
+    } else {
+        None
+    };
+
+    // The RLS-hedge guard: an access-control/injection finding must never rank below High
+    // because the calibration reasoning speculates a deeper layer (RLS) probably already
+    // covers it — defense-in-depth failing at the boundary the finding actually names still
+    // stands (ties to D3). This can only RAISE the floor already computed above, never lower it.
+    if is_access_control_or_injection_class(f) && mentions_speculative_rls_hedge(&text) {
+        let hedge_floor = (
+            "high",
+            "Severity floor: an access-control/injection finding is not under-rated on an \"RLS \
+             probably contains it\" rationale — defense-in-depth failing at the boundary still \
+             stands."
+                .to_string(),
+        );
+        floor = Some(match floor {
+            Some((sev, reason)) if severity_rank(sev) >= severity_rank(hedge_floor.0) => {
+                (sev, reason)
+            }
+            _ => hedge_floor,
+        });
+    }
+    floor
+}
+
+/// Apply the D5 severity floor to one finding: raises `severity` to the floor when the finding's
+/// current severity ranks below it, and ALWAYS records the rationale when a rule of thumb
+/// touched the finding (even when the floor didn't change anything — the architect can see the
+/// rule considered it and found the existing severity already sufficient). Never lowers a
+/// severity that already ranks at or above the floor.
+fn apply_severity_calibration_rule(mut f: Finding) -> Finding {
+    if let Some((floor_sev, reason)) = severity_calibration_floor(&f) {
+        if severity_rank(&f.severity) < severity_rank(floor_sev) {
+            f.severity = floor_sev.to_string();
+        }
+        f.calibration_rationale = Some(reason);
+    }
+    f
+}
+
+/// Apply the D5 severity floor to a whole finding set — the deterministic pass run after
+/// `apply_verdicts`/`consensus_verdicts` in `verify_findings` (and safe to run over ANY finding
+/// set, including deterministic-floor findings that never see the LLM calibration pass at all,
+/// since it derives everything from the finding's own text rather than the model's verdict).
+pub fn apply_severity_calibration_rules(findings: Vec<Finding>) -> Vec<Finding> {
+    findings
+        .into_iter()
+        .map(apply_severity_calibration_rule)
+        .collect()
+}
+
 /// Run the skeptic pass over a repo's AI findings (a fresh, reasoning-based perspective —
 /// deliberately NOT re-sent the whole digest, so it judges exploitability/context, not
 /// code minutiae). Graceful: on any model failure the findings pass through unchanged.
@@ -903,11 +1179,15 @@ pub async fn verify_findings(
             votes.push(resp.text);
         }
     }
-    match votes.len() {
+    let calibrated = match votes.len() {
         0 => findings, // every pass failed — pass findings through unchanged
         1 => apply_verdicts(&votes[0], findings),
         _ => apply_verdicts(&consensus_verdicts(&votes, findings.len()), findings),
-    }
+    };
+    // D5: the deterministic severity floor runs regardless of whether the LLM calibration
+    // pass succeeded — it re-derives its verdict from the finding's own text, not the model's,
+    // so it is exactly as available when every pass failed as when one succeeded.
+    apply_severity_calibration_rules(calibrated)
 }
 
 /// Merge several calibration passes into one CONSERVATIVE consensus verdict set (#51 thorough
@@ -6093,6 +6373,295 @@ mod tests {
         assert_eq!(ordinary.severity, "high", "an explicit high verdict must stay high, never inflate to critical");
         let untouched = out.iter().find(|f| f.rule_id == "AI-UNTOUCHED").unwrap();
         assert_eq!(untouched.severity, "high", "no severity field in the verdict leaves the finding's prior severity as-is");
+    }
+
+    // ── D5: severity calibration rules of thumb ───────────────────────────────
+
+    fn finding_with_detail(rule: &str, sev: &str, detail: &str) -> Finding {
+        Finding {
+            detail: detail.to_string(),
+            ..finding(rule, sev)
+        }
+    }
+
+    fn finding_with_category(rule: &str, sev: &str, detail: &str, category: &str) -> Finding {
+        Finding {
+            detail: detail.to_string(),
+            category: Some(category.to_string()),
+            ..finding(rule, sev)
+        }
+    }
+
+    /// An unauthenticated-access finding must floor at Critical regardless of what severity the
+    /// scanner/calibration model assigned it, and the rationale must be recorded.
+    #[test]
+    fn severity_floor_unauthenticated_access_is_critical() {
+        let f = finding_with_detail(
+            "AI-EXPORT-ENDPOINT",
+            "medium",
+            "The /api/export endpoint is reachable without authentication and returns every \
+             user's records.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "critical",
+            "unauthenticated access must floor to critical"
+        );
+        let rationale = out
+            .calibration_rationale
+            .expect("a calibration rationale must be recorded");
+        assert!(
+            rationale.to_lowercase().contains("unauthenticated")
+                || rationale.to_lowercase().contains("critical"),
+            "rationale must explain the unauthenticated/critical floor: {rationale}"
+        );
+    }
+
+    /// A path to full-account compromise (not merely unauthenticated) must ALSO floor at
+    /// Critical — the plan's second qualifying clause for the Critical tier.
+    #[test]
+    fn severity_floor_full_account_compromise_is_critical() {
+        let f = finding_with_detail(
+            "AI-SESSION-FIXATION",
+            "high",
+            "An attacker can achieve full account takeover by replaying a pre-auth session id.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "critical",
+            "full-account compromise must floor to critical"
+        );
+        assert!(out.calibration_rationale.is_some());
+    }
+
+    /// An AUTHENTICATED cross-tenant READ of ordinary (non-sensitive) data floors at High, NOT
+    /// Critical — the plan's explicit "High by default" rule, guarding against inflation.
+    #[test]
+    fn severity_floor_authenticated_cross_tenant_read_is_high_not_critical() {
+        let f = finding_with_detail(
+            "AI-ORG-SETTINGS-LEAK",
+            "medium",
+            "An authenticated user can view another organization's settings by changing the org \
+             id in the URL.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "high",
+            "an authenticated cross-tenant read of non-sensitive data floors at High, not Critical"
+        );
+        let rationale = out.calibration_rationale.expect("rationale recorded");
+        assert!(
+            rationale.to_lowercase().contains("high"),
+            "the rationale for a High floor must say so: {rationale}"
+        );
+        assert!(
+            !rationale.to_lowercase().contains("escalates to critical"),
+            "a non-escalated High floor must not use the escalation-branch wording: {rationale}"
+        );
+    }
+
+    /// A cross-tenant read that exposes PAYMENT data escalates all the way to Critical — the
+    /// plan's explicit escalation class.
+    #[test]
+    fn severity_floor_cross_tenant_read_of_payment_data_escalates_to_critical() {
+        let f = finding_with_detail(
+            "AI-INVOICE-LEAK",
+            "medium",
+            "An authenticated user can view another organization's stored payment method and \
+             card number.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "critical",
+            "cross-tenant read of payment data must escalate to Critical"
+        );
+    }
+
+    /// A cross-tenant read that exposes CREDENTIALS/secrets also escalates to Critical.
+    #[test]
+    fn severity_floor_cross_tenant_read_of_credentials_escalates_to_critical() {
+        let f = finding_with_detail(
+            "AI-API-KEY-LEAK",
+            "low",
+            "An authenticated user can fetch another tenant's stored api key from the settings \
+             endpoint.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "critical",
+            "cross-tenant read of a credential/secret must escalate to Critical"
+        );
+    }
+
+    /// A cross-tenant read that exposes sensitive PII (SSN) also escalates to Critical.
+    #[test]
+    fn severity_floor_cross_tenant_read_of_sensitive_pii_escalates_to_critical() {
+        let f = finding_with_detail(
+            "AI-PROFILE-LEAK",
+            "medium",
+            "An authenticated user can view another user's social security number through the \
+             profile API.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "critical",
+            "cross-tenant read of sensitive PII must escalate to Critical"
+        );
+    }
+
+    /// The floor only ever RAISES severity — a finding already calibrated ABOVE the computed
+    /// floor must not be lowered back down to it.
+    #[test]
+    fn severity_floor_never_lowers_an_already_higher_severity() {
+        let f = finding_with_detail(
+            "AI-ORG-SETTINGS-LEAK-2",
+            "critical", // already critical from an earlier, more specific verdict
+            "An authenticated user can view another organization's settings.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "critical",
+            "the floor (high) must never lower a severity already above it"
+        );
+    }
+
+    /// A finding whose text matches none of the D5 signals is left completely untouched —
+    /// no rationale is fabricated for a finding the rule doesn't apply to.
+    #[test]
+    fn severity_floor_does_not_touch_unrelated_findings() {
+        let f = finding_with_detail(
+            "ARCH-STRICT-LAYERING-1",
+            "medium",
+            "The controller calls the repository directly, skipping the service layer.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(out.severity, "medium", "severity must be untouched");
+        assert_eq!(
+            out.calibration_rationale, None,
+            "no rationale is recorded when no rule of thumb applies"
+        );
+    }
+
+    /// THE FLOOR/DETERMINISTIC-ORIGIN CASE (ties to D3): an RLS-policy finding must NOT be
+    /// under-rated to below High merely because the write-up hedges that RLS probably contains
+    /// it — defense-in-depth speculation must never excuse a boundary that has already failed.
+    /// This is exactly the class of finding the deterministic floor/native RLS checker produces
+    /// (never touched by LLM calibration at all), so the function is exercised directly over a
+    /// floor-shaped finding — low severity, `confidence: None`, exactly as the floor emits it.
+    #[test]
+    fn severity_floor_rls_finding_not_downgraded_on_rls_probably_contains_it_hedge() {
+        let f = finding_with_category(
+            "SUPABASE-RLS-NO-POLICY-1",
+            "low", // e.g. a merge/consequence pass had already softened this
+            "The profiles table has RLS enabled but no policy defined; row-level security \
+             probably contains unauthorized access, so real-world risk is limited.",
+            "rls-policy",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "high",
+            "an RLS-hedged access-control finding must floor at High, never stay low"
+        );
+        let rationale = out.calibration_rationale.expect("rationale recorded");
+        assert!(
+            rationale.to_lowercase().contains("rls"),
+            "rationale must name the RLS-hedge guard: {rationale}"
+        );
+    }
+
+    /// The RLS-hedge guard also covers an injection-class finding (D3's query-grammar-injection
+    /// family) that hedges the same way, not just rls-policy — both are access-control-adjacent.
+    #[test]
+    fn severity_floor_injection_finding_not_downgraded_on_rls_hedge() {
+        let f = finding_with_category(
+            "SEC-NO-QUERY-GRAMMAR-INJECTION-1",
+            "medium",
+            "User input is concatenated into a PostgREST .or() filter string; this is likely \
+             covered by RLS on the underlying table.",
+            "injection",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "high",
+            "an RLS-hedged injection finding must floor at High"
+        );
+    }
+
+    /// A finding that CONFIRMS (not speculates) a mitigating RLS policy — no hedge language at
+    /// all — is NOT touched by the RLS-hedge guard; only speculative "probably"/"likely"/
+    /// "should" language trips it.
+    #[test]
+    fn severity_floor_rls_hedge_guard_does_not_fire_without_speculative_language() {
+        let f = finding_with_category(
+            "SUPABASE-RLS-ENABLED-1",
+            "low",
+            "The profiles table has RLS enabled with an owner-scoped SELECT policy confirmed in \
+             the migration.",
+            "rls-policy",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "low",
+            "a confirmed (non-speculative) mitigation is not overridden by the hedge guard"
+        );
+        assert_eq!(out.calibration_rationale, None);
+    }
+
+    /// The RLS-hedge guard is scoped to access-control/injection findings — an unrelated
+    /// (e.g. testing-style) finding that happens to mention "RLS" and "probably" in passing is
+    /// not swept up into a High floor.
+    #[test]
+    fn severity_floor_rls_hedge_guard_does_not_fire_outside_access_control_class() {
+        let f = finding_with_category(
+            "TESTING-PYRAMID-1",
+            "low",
+            "This test module probably doesn't need the RLS fixture it imports.",
+            "testing-style",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "low",
+            "a non-access-control finding is unaffected by the hedge guard"
+        );
+    }
+
+    /// `apply_severity_calibration_rules` (plural) must apply the floor across a whole finding
+    /// set — the shape `verify_findings` actually calls it with, after `apply_verdicts`.
+    #[test]
+    fn severity_floor_applies_across_a_finding_set_after_apply_verdicts() {
+        let findings = vec![
+            finding_with_detail(
+                "AI-UNAUTH-EXPORT",
+                "high",
+                "The export endpoint requires no authentication and returns all records.",
+            ),
+            finding_with_detail("AI-UNRELATED", "medium", "A minor style inconsistency."),
+        ];
+        // Calibration itself did not escalate the unauthenticated finding (a plausible
+        // under-rated model verdict) — the deterministic floor must catch it anyway.
+        let raw = r#"{"verdicts":[
+            {"index":0,"severity":"high","confidence":"high","reason":"no auth check"},
+            {"index":1,"severity":"medium","confidence":"high","reason":"style"}
+        ]}"#;
+        let calibrated = apply_verdicts(raw, findings);
+        let floored = apply_severity_calibration_rules(calibrated);
+        let unauth = floored
+            .iter()
+            .find(|f| f.rule_id == "AI-UNAUTH-EXPORT")
+            .unwrap();
+        assert_eq!(
+            unauth.severity, "critical",
+            "the deterministic floor overrides an under-rated model verdict"
+        );
+        let unrelated = floored
+            .iter()
+            .find(|f| f.rule_id == "AI-UNRELATED")
+            .unwrap();
+        assert_eq!(
+            unrelated.severity, "medium",
+            "an unrelated finding passes through the floor untouched"
+        );
+        assert_eq!(unrelated.calibration_rationale, None);
     }
 
     // ── Structured confidence + effort (Part 1 §3) ────────────────────────────
