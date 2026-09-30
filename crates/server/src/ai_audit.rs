@@ -7810,6 +7810,35 @@ mod tests {
         assert!(!out[0].needs_review);
     }
 
+    /// P4 (floor findings get finding-level treatment): confirms `generate_fix_specifics`'s
+    /// `indices` filter excludes ONLY `DEP_AUDIT_RULE_ID` — a deterministic FLOOR finding (a
+    /// real `AUDIT_RULES` rule id, not an `AI-`-prefixed one) is NOT skipped, so every curated
+    /// floor finding still gets a `fix_specific` on a run where the AI review tier is enabled
+    /// (the gate is `run_ai_review`, checked one layer up in `onboard::audit_repos` — this
+    /// function itself carries no AI-vs-floor distinction at all).
+    #[tokio::test]
+    async fn generate_fix_specifics_includes_deterministic_floor_findings_not_just_ai_tier() {
+        let files = vec![(".env".to_string(), "SERVICE_ROLE_KEY=abc\n".to_string())];
+        let f = fx(
+            "SEC-NO-SECRET-FILE-1",
+            ".env",
+            0,
+            "SEC-NO-SECRET-FILE-1: path `.env` is a secret-bearing file type",
+            ".env",
+        );
+        let completer = SequencedCompleter::new(&[
+            r#"{"fixes":[{"index":0,"fix":"Remove .env from the repository and its git history, and rotate the exposed credential."}]}"#,
+        ]);
+        let out =
+            generate_fix_specifics(&completer, "o/r", vec![f], &files, None, None, None).await;
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0].fix_specific.is_some(),
+            "a deterministic floor finding must be included in the fix-generation pass, not \
+             silently skipped alongside dependency-audit findings"
+        );
+    }
+
     #[tokio::test]
     async fn generate_fix_specifics_empty_fix_guard_marks_needs_review_on_total_failure() {
         let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");

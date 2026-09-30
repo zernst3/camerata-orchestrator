@@ -1346,6 +1346,73 @@ pub(crate) fn resolve_fix(
     ))
 }
 
+// ── P4 (2026-09-29): floor findings get finding-level treatment ────────────────────
+//
+// A deterministic/floor finding's `detail` is set at scan time
+// (`onboard::audit::title_for`) from the GATE's own rule description — internal, agent-facing
+// enforcement prose ("Deny writing a file whose path marks it as secret-bearing…"), never
+// authored for a client to read. Left alone, that text flows straight into both the headline
+// (`defect_headline` takes its first sentence) and the detail of every curated site for a
+// floor rule. [`resolve_floor_finding_text`] is the render-time escape hatch, mirroring
+// [`resolve_fix`] exactly: an AUTHORED template lives on the rule's resolved option in the
+// corpus (`RuleOption::finding_headline` / `finding_detail`), instantiated from the SAME
+// `<path>`/`<file>`/capture placeholders `resolve_fix` already substitutes, so a rule author
+// writes ONE specific, plain-language pair per rule and every finding of that rule gets a
+// repo-specific rendering for free. `is_ai_tier` findings never reach this function in
+// practice (they invent their own rule id, which the corpus never resolves) but nothing here
+// assumes that — it degrades to `None` for any rule id the corpus doesn't know, same as
+// `resolve_fix`.
+
+/// Resolve the authored, client-facing (headline, detail) pair for a DETERMINISTIC FLOOR
+/// finding (P4), instantiating `<path>`/`<file>`/capture placeholders exactly as
+/// [`resolve_fix`] does for `remediation`. Returns `None` — the caller then falls back to the
+/// pre-P4 `defect_headline(&finding.detail, …)` / `finding.detail.clone()` behavior — when: the
+/// corpus is absent, the rule id has no corpus entry, the rule has no resolvable option, or
+/// either `finding_headline` or `finding_detail` is absent/blank on that option (authored as a
+/// PAIR; never render one half authored and the other the gate's raw text). This is the ONLY
+/// path by which a floor finding's client-facing headline/detail can differ from its raw
+/// `Finding::detail` — see the module-level comment above for why that indirection exists.
+pub(crate) fn resolve_floor_finding_text(
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    finding: &Finding,
+    chosen_option: Option<&str>,
+) -> Option<(String, String)> {
+    let rule = corpus.and_then(|c| c.get_by_id(rule_id))?;
+    let evaluated = finding.evaluated_option_id.as_deref().or(chosen_option);
+    let option = rule.resolved_option(evaluated)?;
+    let headline_tpl = option.finding_headline.as_deref()?.trim();
+    let detail_tpl = option.finding_detail.as_deref()?.trim();
+    if headline_tpl.is_empty() || detail_tpl.is_empty() {
+        return None;
+    }
+    let headline = instantiate_remediation(headline_tpl, &finding.path, &finding.captures);
+    let detail = instantiate_remediation(detail_tpl, &finding.path, &finding.captures);
+    Some((headline, detail))
+}
+
+/// Client-facing (headline, detail) for ONE finding, preferring the P4 authored floor
+/// template ([`resolve_floor_finding_text`]) and falling back to the pre-P4 derivation
+/// (`defect_headline` over `finding.detail`, `finding.detail` verbatim) when no authored
+/// template is available for this rule/option — an AI-tier finding (whose own prose already
+/// leads with a plain-language sentence by house convention) or a floor rule not yet authored.
+/// Centralizing this join means the matrix headline and the curated site's headline+detail can
+/// never drift onto two different derivations of the same finding.
+pub(crate) fn client_headline_and_detail(
+    finding: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+    fallback_title: &str,
+    chosen_option: Option<&str>,
+) -> (String, String) {
+    match resolve_floor_finding_text(&finding.rule_id, corpus, finding, chosen_option) {
+        Some((headline, detail)) => (headline, detail),
+        None => (
+            defect_headline(&finding.detail, fallback_title),
+            finding.detail.clone(),
+        ),
+    }
+}
+
 /// The readable, never-internal-sounding generic noun phrase substituted for a placeholder
 /// token when the finding carries no captured value for it. Keyed by the token's bare name
 /// (angle brackets stripped) exactly as it appears in authored `remediation` (and, before it,
@@ -1365,6 +1432,14 @@ fn generic_placeholder_filler(token: &str) -> &'static str {
         "schema" => "the affected schema",
         "policy" => "the affected policy",
         "path" | "file" => "the affected file",
+        // P4: the secret-shaped floor rules' context-fact tokens (`onboard::audit::
+        // enrich_secret_context` / `onboard::attach_secret_history_capture`). The first two
+        // are always populated once the rule fires (the enrichment is unconditional and
+        // pure); `history-status` is best-effort (needs a real local git checkout), so this
+        // fallback is its realistic path, not just defensive dead code.
+        "secret-kind" => "a hardcoded credential",
+        "gitignore-status" => "not confirmed against this repository's `.gitignore`",
+        "history-status" => "not checked against this repository's commit history",
         _ => "the affected resource",
     }
 }
@@ -1918,7 +1993,16 @@ pub fn build_report_json(
             .and_then(|c| c.get_by_id(&f.rule_id))
             .map(|r| r.title.clone())
             .unwrap_or_else(|| f.rule_id.clone());
-        let base_headline = defect_headline(&f.detail, &fallback_title);
+        // P4: a deterministic floor finding renders its AUTHORED, repo-specific headline
+        // (never the gate's raw "Deny…" directive) when the corpus has one for this rule;
+        // an AI-tier / not-yet-authored finding falls back to the pre-P4 derivation exactly
+        // as before. See `client_headline_and_detail`'s doc comment.
+        let chosen_option_for_rule = opts
+            .chosen_options
+            .get(&f.rule_id.to_ascii_uppercase())
+            .map(String::as_str);
+        let (base_headline, _) =
+            client_headline_and_detail(f, corpus, &fallback_title, chosen_option_for_rule);
         // P3: an honest "why is this not curated" marker for the appendix row, distinct
         // from the other informational reasons (which the appendix count doesn't otherwise
         // distinguish either — see `matrix.informational`'s doc comment).
@@ -1995,24 +2079,30 @@ pub fn build_report_json(
                     .get(&finding_key(f))
                     .map(|d| d.confirmed_by_client)
                     .unwrap_or(false);
+                let chosen_option_for_rule = opts
+                    .chosen_options
+                    .get(&rule_id.to_ascii_uppercase())
+                    .map(String::as_str);
+                // P4: prefer the authored, repo-specific (headline, detail) pair over the raw
+                // gate text — see `client_headline_and_detail`'s doc comment. `detail` here is
+                // NOT `f.detail.clone()` unconditionally anymore: for a floor finding with an
+                // authored template, it's the authored client-facing detail instead of the
+                // gate's own "Deny…" enforcement prose.
+                let (headline, detail) =
+                    client_headline_and_detail(f, corpus, &title, chosen_option_for_rule);
                 CuratedSiteJson {
                     repo: f.repo.clone(),
                     path: f.path.clone(),
                     line: f.line,
                     snippet: cap_snippet(&f.snippet),
-                    detail: f.detail.clone(),
+                    detail,
                     severity: severity.clone(),
                     effort: f.effort.clone(),
                     confidence: f.confidence.clone(),
                     disposition: disposition_label(*disposition, reason, bucket, confirmed_by_client),
                     also_matches: f.also_matches.clone(),
-                    headline: defect_headline(&f.detail, &title),
-                    fix: resolve_fix(
-                        &rule_id,
-                        corpus,
-                        f,
-                        opts.chosen_options.get(&rule_id.to_ascii_uppercase()).map(String::as_str),
-                    ),
+                    headline,
+                    fix: resolve_fix(&rule_id, corpus, f, chosen_option_for_rule),
                     // P2: `f.fix_specific` was generated at SCAN time by
                     // `ai_audit::generate_fix_specifics` (this layer stays pure/synchronous —
                     // no model access here, just a read) — a codebase-specific fix that the
@@ -3385,6 +3475,213 @@ mod tests {
         );
     }
 
+    // ── P4: floor findings get finding-level treatment ──────────────────────────────────
+
+    /// Every AUDIT_RULES floor rule fired against a synthetic (never a fixture/benchmark)
+    /// snippet, run through the REAL bundled corpus — no client-facing string (a curated
+    /// site's `headline`, its `detail`, or any matrix `FindingRefJson::headline`) may ever
+    /// start with "Deny": that word is the gate's own internal enforcement directive
+    /// (`camerata_gateway::RULE_REGISTRY`), never authored client prose. General over the
+    /// whole floor, not one rule — this is the P4 contract test the plan calls for.
+    #[tokio::test]
+    async fn no_client_facing_string_begins_with_deny_for_any_floor_rule_that_fires() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+
+        let files = vec![
+            (".env".to_string(), "SERVICE_ROLE_KEY=abc\n".to_string()),
+            (
+                "a.py".to_string(),
+                "API_KEY = \"hardcoded-not-a-real-secret-abcdefgh\"\n".to_string(),
+            ),
+            (
+                "b.py".to_string(),
+                concat!("token = \"sk_li", "ve_abcdefghijklmnopqrstuvwx\"\n").to_string(),
+            ),
+            (
+                "c.pem".to_string(),
+                concat!("-----BEGIN RSA PRIV", "ATE KEY-----\nMIIBFAKEFAKEFAKE\n-----END RSA PRIV", "ATE KEY-----\n")
+                    .to_string(),
+            ),
+            (
+                "d.py".to_string(),
+                "q = \"SELECT * FROM users WHERE id = \" + user_id\n".to_string(),
+            ),
+            (
+                "e.py".to_string(),
+                "url = f\"https://api.example.com/x?api_key={key}\"\n".to_string(),
+            ),
+            ("f.py".to_string(), "requests.get(url, verify=False)\n".to_string()),
+            ("g.py".to_string(), "yaml.load(data)\n".to_string()),
+        ];
+        let findings = crate::onboard::audit_files("owner/repo", &files);
+        assert!(
+            findings.len() >= 6,
+            "fixture must actually trip most of the floor rules under test, got: {findings:?}"
+        );
+
+        let report = report_with(findings, Vec::new());
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+
+        let mut offenders = Vec::new();
+        for group in &json.curated_findings {
+            for site in &group.sites {
+                if site.headline.starts_with("Deny") {
+                    offenders.push(format!("{} headline: {:?}", group.rule_id, site.headline));
+                }
+                if site.detail.starts_with("Deny") {
+                    offenders.push(format!("{} detail: {:?}", group.rule_id, site.detail));
+                }
+            }
+        }
+        let matrix_buckets: [&Vec<FindingRefJson>; 5] = [
+            &json.matrix.do_now,
+            &json.matrix.do_next,
+            &json.matrix.plan,
+            &json.matrix.accepted,
+            &json.matrix.informational,
+        ];
+        for bucket in matrix_buckets {
+            for f in bucket {
+                if f.headline.starts_with("Deny") {
+                    offenders.push(format!("matrix headline: {:?}", f.headline));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "client-facing strings must never start with \"Deny\" (the gate's own internal \
+             directive): {offenders:#?}"
+        );
+    }
+
+    /// Every curated finding (floor or AI-tier) must carry a non-empty `est_hours` label — a
+    /// deterministic floor finding must never render "not yet estimated" (see
+    /// `default_effort_for` in `onboard::audit` and `effort_hours_bounds` above).
+    #[tokio::test]
+    async fn every_curated_finding_has_a_non_empty_est_hours() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        let files = vec![(".env".to_string(), "SERVICE_ROLE_KEY=abc\n".to_string())];
+        let findings = crate::onboard::audit_files("owner/repo", &files);
+        assert!(!findings.is_empty());
+        let report = report_with(findings, Vec::new());
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        for group in &json.curated_findings {
+            for site in &group.sites {
+                let (_, hours_label) = effort_hours_bounds(site.effort.as_deref());
+                assert_ne!(
+                    hours_label, "not yet estimated",
+                    "{}: curated finding must carry a real estimate, not the honest-gap label",
+                    group.rule_id
+                );
+            }
+        }
+    }
+
+    /// A committed-secret floor finding (`SEC-NO-SECRET-FILE-1` on a real `.env`) renders a
+    /// headline naming the actual file, PLUS a `.gitignore`-coverage context fact in its
+    /// detail — never the gate's own "Deny writing a file whose path marks it as
+    /// secret-bearing…" directive.
+    #[tokio::test]
+    async fn committed_secret_finding_renders_a_specific_headline_and_a_context_fact() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        let files = vec![
+            (".gitignore".to_string(), "node_modules/\n".to_string()),
+            (".env".to_string(), "SERVICE_ROLE_KEY=abc\n".to_string()),
+        ];
+        let findings = crate::onboard::audit_files("owner/repo", &files);
+        let report = report_with(findings, Vec::new());
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let group = json
+            .curated_findings
+            .iter()
+            .find(|g| g.rule_id == "SEC-NO-SECRET-FILE-1")
+            .expect("SEC-NO-SECRET-FILE-1 must be curated for a real committed .env");
+        let site = &group.sites[0];
+        assert!(
+            site.headline.contains(".env"),
+            "headline must name the actual file, got: {:?}",
+            site.headline
+        );
+        assert!(
+            !site.headline.starts_with("Deny") && !site.detail.starts_with("Deny"),
+            "must never render the gate directive: headline={:?} detail={:?}",
+            site.headline,
+            site.detail
+        );
+        assert!(
+            site.detail.contains("gitignore") || site.detail.contains(".gitignore"),
+            "detail must carry the gitignore-coverage context fact, got: {:?}",
+            site.detail
+        );
+    }
+
+    /// `SEC-NO-RAW-SQL-CONCAT-1` had NO corpus entry at all before P4 (flagged by P3's own
+    /// doc comment on `is_ai_tier`) — it must now resolve to a GROUNDED citation (CWE-89 +
+    /// OWASP), never "AI-advisory, model-inferred." (it isn't even AI-tier — it's a
+    /// deterministic floor rule, which makes the pre-P4 "advisory" label doubly wrong).
+    #[tokio::test]
+    async fn sec_no_raw_sql_concat_1_resolves_to_a_grounded_citation() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        let citation = resolve_citation("SEC-NO-RAW-SQL-CONCAT-1", None, Some(&corpus));
+        assert_eq!(
+            citation.kind, "grounded",
+            "SEC-NO-RAW-SQL-CONCAT-1 must resolve to a grounded citation, got: {citation:?}"
+        );
+        assert!(
+            citation
+                .sources
+                .iter()
+                .any(|s| s.url.contains("cwe.mitre.org/data/definitions/89")),
+            "must cite CWE-89 (SQL Injection), got: {:?}",
+            citation.sources
+        );
+        assert!(
+            citation.sources.iter().any(|s| s.url.contains("owasp.org")),
+            "must also cite OWASP, got: {:?}",
+            citation.sources
+        );
+
+        // End-to-end: a real finding of this rule, run through the curated-set builder,
+        // must carry that same grounded citation — not fall through to "advisory".
+        let f = finding("SEC-NO-RAW-SQL-CONCAT-1", "a.py", 1, "critical");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let group = json
+            .curated_findings
+            .iter()
+            .find(|g| g.rule_id == "SEC-NO-RAW-SQL-CONCAT-1")
+            .expect("SEC-NO-RAW-SQL-CONCAT-1 must be curated, not held out as uncited");
+        assert_eq!(group.citation.kind, "grounded");
+    }
+
+    /// A clean repo (no floor findings at all) must still render without panicking, with an
+    /// empty curated set and empty matrix — the P4 machinery must never assume at least one
+    /// floor finding exists.
+    #[tokio::test]
+    async fn a_clean_repo_with_no_floor_findings_still_renders_fine() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        let files = vec![("a.py".to_string(), "print('hello world')\n".to_string())];
+        let findings = crate::onboard::audit_files("owner/repo", &files);
+        assert!(findings.is_empty(), "fixture must genuinely be clean");
+        let report = report_with(findings, Vec::new());
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        assert!(json.curated_findings.is_empty());
+        assert_eq!(json.matrix.do_now.len(), 0);
+        assert_eq!(json.matrix.do_next.len(), 0);
+        assert_eq!(json.matrix.plan.len(), 0);
+        assert_eq!(json.matrix.informational.len(), 0);
+    }
+
     // ── P2: fix_specific shown as the PRIMARY fix, generic `fix` secondary ──────────────
 
     #[test]
@@ -3527,6 +3824,25 @@ mod tests {
         );
         assert!(!text.contains('<') && !text.contains('>'), "raw token escaped: {text:?}");
         assert_eq!(text, "Check the affected resource before shipping.");
+    }
+
+    #[test]
+    fn instantiate_remediation_fills_p4_context_fact_tokens_from_captures_and_generic_fallback() {
+        let mut captures = std::collections::BTreeMap::new();
+        captures.insert(
+            "secret-kind".to_string(),
+            "a live Stripe secret key".to_string(),
+        );
+        let filled = instantiate_remediation(
+            "Found <secret-kind> in <path>, which is <gitignore-status>.",
+            ".env",
+            &captures,
+        );
+        assert_eq!(
+            filled,
+            "Found a live Stripe secret key in .env, which is not confirmed against this \
+             repository's `.gitignore`."
+        );
     }
 
     #[test]

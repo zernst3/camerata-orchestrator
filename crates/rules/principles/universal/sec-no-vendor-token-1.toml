@@ -69,6 +69,10 @@ directive = "AWS access key IDs, GitHub PATs, Slack tokens, Stripe live keys, Go
 remediation = """
 Remove the hardcoded vendor credential (an AWS key, GitHub PAT, Slack token, Stripe key, Google API key, Anthropic API key, Supabase key, or a Postgres connection string with an inline password) from the source or config file, and load it from an environment variable or secrets manager instead. Rotate the exposed token, since it was committed to version control. Verify by searching the codebase for the literal token value and confirming it no longer appears, while the integration still authenticates using the externally-loaded value.
 """
+finding_headline = "Your `<path>` file contains a live <secret-kind>."
+finding_detail = """
+Anyone with read access to this code — including anyone who has ever cloned this repository — can use this key to act as your application, which can mean full access to whatever service it authenticates against. The key was found in `<path>`, which is <gitignore-status> and is <history-status>. Rotate the key with the vendor immediately, then remove it from the repository and its git history.
+"""
 why = "Vendor tokens in source are immediately exposed on push. Automated scanning services index public GitHub in near-real time; rotations after an exposure are slower than the attacker's first request. The Supabase additions close a gap the original AWS/GitHub/Slack/Stripe/Google/Anthropic match-set didn't cover: a service_role JWT or an inline-password connection string is exactly as damaging as any other vendor secret, but neither has the fixed-length-alphanumeric-after-a-prefix shape the other vendors share, which is why the JWT arm needs the decode step and the connection-string arm needs its own dedicated pattern."
 
 [[option]]

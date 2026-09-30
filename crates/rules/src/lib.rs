@@ -392,6 +392,16 @@ struct OptionToml {
     /// `report_export::resolve_fix`).
     #[serde(default)]
     remediation: Option<String>,
+    /// Authored, client-facing HEADLINE for a DETERMINISTIC FLOOR finding evaluated against
+    /// this option (P4 — floor findings get finding-level treatment). See
+    /// [`RuleOption::finding_headline`] for the full contract.
+    #[serde(default)]
+    finding_headline: Option<String>,
+    /// Authored, client-facing DETAIL for a DETERMINISTIC FLOOR finding evaluated against this
+    /// option (P4), paired with `finding_headline`. See [`RuleOption::finding_detail`] for the
+    /// full contract.
+    #[serde(default)]
+    finding_detail: Option<String>,
     /// Optional `escalation = { condition = "…", severity = "…" }` inline table: present when
     /// choosing this option calls for escalation. Absent → this option does not escalate.
     #[serde(default)]
@@ -420,6 +430,29 @@ pub struct RuleOption {
     /// `<function-name>`, `<bucket>`, `<path>`); the report layer substitutes those from the
     /// finding at render time (see `report_export::resolve_fix`).
     pub remediation: Option<String>,
+    /// Authored, client-facing HEADLINE for a DETERMINISTIC FLOOR finding evaluated against
+    /// this option (P4 — floor findings get finding-level treatment: `docs/plans/
+    /// 2026-09-29_codebase-inspection-hardening.md` §P4). A short, specific sentence naming
+    /// what's wrong IN THIS REPO — never the gate's own "Deny…" enforcement phrasing
+    /// (`camerata_gateway::RULE_REGISTRY`'s `description` is an internal directive the AGENT
+    /// reads, not client prose; leaking it into a report is exactly the defect this field
+    /// fixes). May contain the same placeholder tokens `remediation` does (`<path>`/`<file>`
+    /// plus any rule-specific capture the detector populates, e.g. `<key-kind>`),
+    /// instantiated the same way (`report_export::instantiate_remediation`) from the finding's
+    /// own `path`/`captures`. `None` when not yet authored — the report falls back to its
+    /// pre-existing `defect_headline`-over-`detail` derivation (see
+    /// `report_export::resolve_floor_finding_text`), so an unauthored floor rule degrades to
+    /// today's behavior rather than panicking or rendering an empty headline. Never consulted
+    /// for an AI-tier finding — those invent their own rule id the corpus never sees.
+    pub finding_headline: Option<String>,
+    /// Authored, client-facing DETAIL for a DETERMINISTIC FLOOR finding, paired with
+    /// `finding_headline` — authored together or not at all (`resolve_floor_finding_text`
+    /// requires both non-blank before using either, so a rule can't render half an authored
+    /// pair and half the gate-text fallback). Convention: a ONE-SENTENCE plain-language line
+    /// first (what this means for a non-technical founder), then 1-2 sentences of
+    /// what/where/impact detail — never the gate's enforcement phrasing. Same placeholder
+    /// mechanism as `finding_headline`. `None` when not yet authored.
+    pub finding_detail: Option<String>,
     /// Present when CHOOSING this option calls for escalation: it carries a condition the agent
     /// watches for + a severity. `None` means this option does NOT escalate (the agent proceeds, or
     /// the gate denies + bounces as normal). Option-scoped so a rule can offer an escalating option
@@ -686,6 +719,8 @@ pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
         directive: format!("Test-fixture detection directive for {rule_id}."),
         why: "Test-fixture rationale.".to_owned(),
         remediation: None,
+        finding_headline: None,
+        finding_detail: None,
         escalation: None,
     };
     let rule = Rule {
@@ -926,6 +961,8 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
             directive: o.directive,
             why: o.why,
             remediation: o.remediation.filter(|s| !s.trim().is_empty()),
+            finding_headline: o.finding_headline.filter(|s| !s.trim().is_empty()),
+            finding_detail: o.finding_detail.filter(|s| !s.trim().is_empty()),
             escalation: o.escalation,
         })
         .collect();
@@ -1244,6 +1281,8 @@ mod tests {
                     directive: o.directive,
                     why: o.why,
                     remediation: o.remediation.filter(|s| !s.trim().is_empty()),
+                    finding_headline: o.finding_headline.filter(|s| !s.trim().is_empty()),
+                    finding_detail: o.finding_detail.filter(|s| !s.trim().is_empty()),
                     escalation: o.escalation,
                 })
                 .collect(),

@@ -964,6 +964,10 @@ pub async fn audit_repos(
             .filter(|r| r.applies_to(spec))
             .map(|r| r.id.as_str())
             .collect();
+        // P4: a separately-named clone, taken BEFORE the `dir` shadow below moves its own
+        // clone into `spawn_blocking`, so the repo's local checkout root is still reachable
+        // later in this iteration for `attach_secret_history_capture`'s git plumbing.
+        let repo_root_for_history = dir.clone();
         // Clone `dir` for spawn_blocking (which moves it); the outer `dir` ref
         // comes from the loop binding and is the PathBuf we're iterating.
         let dir = dir.clone();
@@ -1034,7 +1038,13 @@ pub async fn audit_repos(
                     if let Some((jstore, jid)) = job {
                         jstore.det_tool_running(jid, "floor");
                     }
-                    let floor = audit_files(spec, &files);
+                    let mut floor = audit_files(spec, &files);
+                    // P4: the ONE context fact that needs real git plumbing (whether a
+                    // committed secret also appears in an EARLIER commit) rather than just
+                    // the already-fetched file set `audit_files` works from — see
+                    // `attach_secret_history_capture`'s doc comment for why it lives here,
+                    // in the impure orchestration layer, instead of `onboard::audit`.
+                    attach_secret_history_capture(&mut floor, &repo_root_for_history).await;
                     if let Some((jstore, jid)) = job {
                         jstore.det_tool_done(jid, "floor", floor.len());
                         jstore.add_findings(jid, floor.clone());
@@ -1266,6 +1276,60 @@ pub async fn audit_repos(
         finished_at: chrono::Utc::now().to_rfc3339(),
     };
     (report, manifest_builder.finish())
+}
+
+/// P4 (floor findings get finding-level treatment): whether a committed-secret finding ALSO
+/// appears in an EARLIER commit — the one cheap context fact that needs real git plumbing,
+/// unlike `onboard::audit::enrich_secret_context`'s `.gitignore`/secret-kind facts, which work
+/// from the already-fetched file set alone and stay pure. Mirrors `capture_audited_ref`'s
+/// async git-shelling pattern below (`tokio::process::Command`, fail-soft): a non-git
+/// `repo_root`, no `git` on PATH, or an unparseable result all just leave the finding's
+/// `history-status` capture unset rather than failing the scan. Purely additive — never
+/// removes or overwrites a capture a caller already set.
+async fn attach_secret_history_capture(findings: &mut [Finding], repo_root: &std::path::Path) {
+    let secret_indices: Vec<usize> = findings
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| audit::SECRET_SHAPED_RULES.contains(&f.rule_id.as_str()))
+        .map(|(i, _)| i)
+        .collect();
+    for i in secret_indices {
+        if findings[i].captures.contains_key("history-status") {
+            continue;
+        }
+        let path = findings[i].path.clone();
+        if let Some(count) = commits_touching_path(repo_root, &path).await {
+            let status = if count > 1 {
+                format!(
+                    "also present in {} earlier commit(s) in this repository's history — \
+                     removing it from the current tree alone will not remove it from history",
+                    count - 1
+                )
+            } else {
+                "committed once so far in this repository's history".to_string()
+            };
+            findings[i]
+                .captures
+                .insert("history-status".to_string(), status);
+        }
+    }
+}
+
+/// `git rev-list --all --count -- <path>`, run in `repo_root`. `None` on any failure (no
+/// `.git` in `repo_root`, no `git` on PATH, non-zero exit, non-UTF8/unparseable output) — the
+/// caller treats that as "unknown," never a hard error.
+async fn commits_touching_path(repo_root: &std::path::Path, path: &str) -> Option<usize> {
+    let output = tokio::process::Command::new("git")
+        .args(["rev-list", "--all", "--count", "--", path])
+        .current_dir(repo_root)
+        .kill_on_drop(true)
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8(output.stdout).ok()?.trim().parse().ok()
 }
 
 /// Capture ONE source dir's git identity for the `ScanProvenance` stamp: full commit SHA
@@ -3524,6 +3588,96 @@ mod tests {
         assert!(
             paths.iter().any(|p| *p == ".env"),
             "tracked .env must be scanned when not gitignored: {paths:?}"
+        );
+    }
+
+    /// Helper: `git commit` in `dir` with an inline identity (no global `user.name`/
+    /// `user.email` config needed in a sandboxed test environment).
+    fn git_commit(dir: &std::path::Path, message: &str) {
+        let status = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-m",
+                message,
+            ])
+            .current_dir(dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git commit failed");
+        assert!(status.success(), "git commit must succeed");
+    }
+
+    // ── P4: attach_secret_history_capture ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn attach_secret_history_capture_flags_a_secret_present_in_an_earlier_commit() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        git_init(root);
+        std::fs::write(root.join(".env"), "SECRET=first\n").expect("write .env v1");
+        git_add(root, &[".env"]);
+        git_commit(root, "add secret v1");
+        std::fs::write(root.join(".env"), "SECRET=second\n").expect("write .env v2");
+        git_add(root, &[".env"]);
+        git_commit(root, "rotate secret v2");
+
+        let mut findings = vec![Finding {
+            repo: "me/api".to_string(),
+            path: ".env".to_string(),
+            rule_id: "SEC-NO-SECRET-FILE-1".to_string(),
+            ..Finding::default()
+        }];
+        attach_secret_history_capture(&mut findings, root).await;
+        let status = findings[0]
+            .captures
+            .get("history-status")
+            .expect("history-status must be set: a real git repo with 2 commits touching .env");
+        assert!(
+            status.contains("earlier commit"),
+            "expected an earlier-commit note, got: {status:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_secret_history_capture_is_a_noop_without_a_git_repo() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path(); // no git_init — not a git repo at all
+        let mut findings = vec![Finding {
+            repo: "me/api".to_string(),
+            path: ".env".to_string(),
+            rule_id: "SEC-NO-SECRET-FILE-1".to_string(),
+            ..Finding::default()
+        }];
+        attach_secret_history_capture(&mut findings, root).await;
+        assert!(
+            findings[0].captures.get("history-status").is_none(),
+            "no git repo — must degrade gracefully, never fabricate a history status"
+        );
+    }
+
+    #[tokio::test]
+    async fn attach_secret_history_capture_ignores_non_secret_shaped_findings() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let root = dir.path();
+        git_init(root);
+        std::fs::write(root.join("a.py"), "x = 1\n").unwrap();
+        git_add(root, &["a.py"]);
+        git_commit(root, "init");
+        let mut findings = vec![Finding {
+            repo: "me/api".to_string(),
+            path: "a.py".to_string(),
+            rule_id: "SEC-NO-DISABLED-TLS-1".to_string(),
+            ..Finding::default()
+        }];
+        attach_secret_history_capture(&mut findings, root).await;
+        assert!(
+            findings[0].captures.get("history-status").is_none(),
+            "a structural (non-secret-shaped) rule must never get a history-status capture"
         );
     }
 

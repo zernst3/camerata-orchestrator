@@ -1,0 +1,54 @@
+id = "SEC-NO-RAW-SQL-CONCAT-1"
+title = "SQL queries are never built by string concatenation or format-string interpolation; use parameterized queries or a query builder"
+tag = "universal"
+domain = "universal"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "docs/ENFORCEMENT.md"
+title = "docs/ENFORCEMENT.md — RULE_REGISTRY §SEC-NO-RAW-SQL-CONCAT-1 (enforced gate rule)"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/89.html"
+title = "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/SQL_Injection_Prevention_Cheat_Sheet.html"
+title = "OWASP SQL Injection Prevention Cheat Sheet"
+
+[decision]
+question = "How does a query's text get built when part of it comes from outside the code that writes the query?"
+default = "parameterized-queries"
+why = """
+A DML statement (SELECT/INSERT/UPDATE/DELETE) string that is built by concatenating a variable
+into it, or by interpolating a value into a format string (`{}`/`{name}` inside the quoted SQL,
+or a closing quote immediately followed by `+`), lets whatever supplied that value influence the
+query's GRAMMAR, not just its data. This is CWE-89 (SQL Injection) — a query that reads
+"SELECT * FROM users WHERE id = " + user_input executes ATTACKER-CHOSEN SQL the moment the
+input contains SQL syntax rather than a plain id. Parameterized queries (bound placeholders:
+`$1`/`?`/named parameters) or a query builder that emits them keep every external value in the
+DATA channel, never the grammar channel, regardless of what characters it contains — the
+database driver, not string formatting, decides where the value's boundaries are.
+"""
+
+[[option]]
+id = "parameterized-queries"
+label = "Parameterized queries / a query builder — external values are always bound, never concatenated"
+directive = "A SQL statement string containing a DML keyword (SELECT/INSERT/UPDATE/DELETE) plus a confirming clause (FROM/INTO/SET/VALUES/JOIN/WHERE) is never built via string concatenation (`\"...\" + value`) or format-string interpolation (`{}`/`{name}` inside the quoted SQL). External values are passed as bound parameters ($1/?/named placeholders) or through a query-builder API that emits them, so the database driver — not string formatting — decides the value's boundary. The gate enforces this with a string-literal heuristic (DML keyword + clause + concatenation/interpolation signal inside the same quoted string); it complements, not replaces, a parameterized-query lint and does not catch raw string literals or non-`{}`/`+` interpolation styles."
+remediation = """
+Rewrite the query in the affected file to use a parameterized placeholder ($1/?/a named parameter) or a query-builder method instead of concatenating or interpolating the value directly into the SQL string. Pass the external value as a bound argument to the query call rather than as part of the string. Verify by feeding the affected input a value containing SQL syntax (e.g. a quote character or a SQL keyword) and confirming it is treated as literal data, not executed as part of the query.
+"""
+finding_headline = "Your `<path>` file builds a SQL query by pasting a value directly into the query text."
+finding_detail = """
+When part of a query's text comes from outside input pasted straight into the SQL string, an attacker can rewrite the query itself — reading other users' data, bypassing a login check, or changing and deleting records (a SQL injection). Rewrite the query in `<path>` to use a parameterized placeholder or a query-builder method, so untrusted values are always passed as data, never as part of the query text.
+"""
+why = "Bound parameters are the industry-standard defense (OWASP's #1 SQL-injection prevention) because they remove the ambiguity entirely: the database driver receives the query grammar and the data values through separate channels, so no value — regardless of its content — can ever be interpreted as part of the grammar. String concatenation and format interpolation put both in the SAME channel, so escaping is the only defense, and escaping is routinely incomplete (encoding edge cases, a forgotten call site, a new special character in a future DB version)."
+
+[[option]]
+id = "escape-then-concatenate"
+label = "Escape special characters, then concatenate as before"
+directive = "external values are escaped (quotes/special characters neutralized) before being concatenated into the SQL string, rather than passed as bound parameters"
+why = "Rejected: escaping is a per-database, per-encoding, per-context correctness problem (a driver upgrade, an unusual client encoding, or a missed special character re-opens the hole), and every call site must remember to do it correctly and consistently. Parameterized queries make the class of bug structurally impossible instead of relying on a human getting every escape right every time."
