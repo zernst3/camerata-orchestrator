@@ -11,10 +11,16 @@
 //! module does NOT re-derive classification math independently — it calls the exact same
 //! `pub(crate)` helpers `report_export::build_report_json` uses internally (`classify`,
 //! `normalize_severity`, `category_for`, `matrix_bucket`, `disposition_label`,
-//! `defect_headline`, `resolve_citation`, `resolve_fix`, `effort_hours_bounds`,
+//! `client_headline_and_detail`, `resolve_citation`, `resolve_fix`, `effort_hours_bounds`,
 //! `finding_key`, `bucket_title`, `Disposition`). A finding's severity, category, matrix
 //! bucket, disposition label, citation, and recommended fix are computed identically in
-//! both places; only the OUTPUT SHAPE differs.
+//! both places; only the OUTPUT SHAPE differs. W3 (2026-09-30): the headline in particular
+//! goes through `client_headline_and_detail` — the SAME plain-language rewrite the PDF uses
+//! (preferring a floor rule's authored `finding_headline` template, falling back to
+//! `defect_headline` over the raw `detail` only when no template is authored) — so the
+//! product export (`findings.json` / xlsx) can never leak raw internal rule prose that the
+//! PDF has already rewritten. The raw `detail` string is still carried verbatim in
+//! `FindingRow::detail` (an internal-completeness field, not client-facing headline text).
 //!
 //! # Why this is fed from `ScanReport`, not `AuditReportJson`
 //! `AuditReportJson` already excludes false positives, caps snippets/what's-healthy, and
@@ -37,7 +43,7 @@ use serde::Serialize;
 use crate::dep_audit::DEP_AUDIT_RULE_ID;
 use crate::onboard::ScanReport;
 use crate::report_export::{
-    bucket_title, category_for, classify, defect_headline, disposition_label,
+    bucket_title, category_for, classify, client_headline_and_detail, disposition_label,
     effort_hours_bounds, finding_key, matrix_bucket, normalize_severity, resolve_citation,
     resolve_fix, Disposition, DispositionWire, ReportOptions,
 };
@@ -229,7 +235,15 @@ fn partition_rows(
             .and_then(|c| c.get_by_id(&f.rule_id))
             .map(|r| r.title.clone())
             .unwrap_or_else(|| f.rule_id.clone());
-        let headline = defect_headline(&f.detail, &title);
+        let chosen_option_for_rule = chosen_options
+            .get(&f.rule_id.to_ascii_uppercase())
+            .map(String::as_str);
+        // W3 (2026-09-30): the SAME plain-language rewrite the PDF uses for its curated-site
+        // headline — never the raw gate/rule-detail derivation `defect_headline` alone would
+        // give. `f.detail` (raw internal rule prose for a floor finding) stays available
+        // verbatim in `FindingRow::detail` below, so nothing is lost — only the client-facing
+        // headline column changes.
+        let (headline, _) = client_headline_and_detail(f, corpus, &title, chosen_option_for_rule);
         let citation = resolve_citation(&f.rule_id, f.preview_tool.as_deref(), corpus);
         let provenance = match citation.kind.as_str() {
             "preview" => format!(
@@ -245,12 +259,7 @@ fn partition_rows(
             .map(|s| s.url.clone())
             .collect::<Vec<_>>()
             .join("\n");
-        let fix = resolve_fix(
-            &f.rule_id,
-            corpus,
-            f,
-            chosen_options.get(&f.rule_id.to_ascii_uppercase()).map(String::as_str),
-        );
+        let fix = resolve_fix(&f.rule_id, corpus, f, chosen_option_for_rule);
         let (_, est_hours) = effort_hours_bounds(f.effort.as_deref());
 
         let (bucket, disposition_kind, disposition_label_str, fp_reason) = if is_fp {
@@ -1376,6 +1385,53 @@ mod tests {
         false
     }
 
+    /// Resolve one cell's ACTUAL text, following the shared-string pool `rust_xlsxwriter` uses
+    /// for every repeated/non-numeric cell (`<c r="B2" t="s"><v>N</v></c>` — `N` indexes into
+    /// `xl/sharedStrings.xml`, it is never the literal text). Needed whenever a test must pin
+    /// which COLUMN a string landed in (e.g. "Headline", not "Detail") rather than merely
+    /// whether the string appears anywhere in the workbook.
+    fn cell_text(bytes: &[u8], sheet_name: &str, cell_ref: &str) -> String {
+        let sheet_xml = read_zip_entry(bytes, sheet_name);
+        let marker = format!("r=\"{cell_ref}\"");
+        let cell_start = sheet_xml
+            .find(&marker)
+            .unwrap_or_else(|| panic!("cell {cell_ref} not found in {sheet_name}: {sheet_xml}"));
+        let tail = &sheet_xml[cell_start..];
+        let cell_end = tail
+            .find("</c>")
+            .unwrap_or_else(|| panic!("cell {cell_ref} has no closing </c>: {tail}"));
+        let cell_xml = &tail[..cell_end];
+        let v_start = cell_xml
+            .find("<v>")
+            .unwrap_or_else(|| panic!("cell {cell_ref} has no <v> value: {cell_xml}"))
+            + 3;
+        let v_end = cell_xml[v_start..]
+            .find("</v>")
+            .unwrap_or_else(|| panic!("cell {cell_ref}'s <v> has no closing tag: {cell_xml}"))
+            + v_start;
+        let idx: usize = cell_xml[v_start..v_end].parse().unwrap_or_else(|_| {
+            panic!(
+                "cell {cell_ref} value {:?} is not a shared-string index",
+                &cell_xml[v_start..v_end]
+            )
+        });
+
+        let shared_xml = read_zip_entry(bytes, "xl/sharedStrings.xml");
+        let entry = shared_xml
+            .split("<si>")
+            .skip(1) // first chunk is the <sst ...> header, before the first <si>
+            .nth(idx)
+            .unwrap_or_else(|| {
+                panic!("shared-string index {idx} out of range for cell {cell_ref}")
+            });
+        let t_open = entry.find('>').map(|i| i + 1).unwrap_or(0);
+        let after_t_open = &entry[t_open..];
+        let t_close = after_t_open
+            .find("</t>")
+            .unwrap_or_else(|| panic!("malformed <t> in shared string {idx}: {entry}"));
+        after_t_open[..t_close].to_string()
+    }
+
     // ── Header schema is stable and in order ───────────────────────────────────
 
     #[test]
@@ -1805,6 +1861,162 @@ mod tests {
         );
         serde_json::to_vec_pretty(&findings_export)
             .expect("all-FP input must still serialize to valid JSON");
+    }
+
+    // ── W3 (2026-09-30): the plain-language headline must reach JSON + xlsx, not just the
+    // PDF ──────────────────────────────────────────────────────────────────────────────
+
+    /// A single-rule synthetic corpus whose default option carries an AUTHORED, plain-language
+    /// `finding_headline`/`finding_detail` pair — the same P4 mechanism `resolve_floor_finding_
+    /// text` reads. Built via `bare_rule` + `RuleSet::push` (the general escape hatch, per its
+    /// own doc comment) rather than `ruleset_with_unauthored_rule`, which deliberately leaves
+    /// both fields `None`.
+    fn ruleset_with_authored_floor_headline(
+        rule_id: &str,
+        headline: &str,
+        detail: &str,
+    ) -> camerata_rules::RuleSet {
+        let mut rule = camerata_rules::bare_rule(rule_id, "test-fixture");
+        rule.options = vec![camerata_rules::RuleOption {
+            id: "default".to_string(),
+            label: "Default".to_string(),
+            directive: format!("Test-fixture detection directive for {rule_id}."),
+            why: "Test-fixture rationale.".to_string(),
+            remediation: None,
+            finding_headline: Some(headline.to_string()),
+            finding_detail: Some(detail.to_string()),
+            escalation: None,
+        }];
+        rule.default_option = Some("default".to_string());
+        let mut set = camerata_rules::RuleSet::default();
+        set.push(rule);
+        set
+    }
+
+    /// W3: a floor finding whose raw `Finding::detail` is internal, imperative gate prose
+    /// ("Deny …") must export its AUTHORED plain-language headline in BOTH `findings.json`
+    /// and the xlsx's "Headline" column — the exact same rewrite the PDF already applies via
+    /// `client_headline_and_detail` — never the raw gate directive. The raw text must still be
+    /// recoverable (completeness): it stays verbatim in `FindingRow::detail`/the "Detail"
+    /// column.
+    #[test]
+    fn findings_export_and_xlsx_headline_use_the_plain_language_rewrite_not_raw_rule_text() {
+        const AUTHORED_HEADLINE: &str = "A live secret key is committed to this repository.";
+        const AUTHORED_DETAIL: &str =
+            "A live secret key is committed to this repository and must be rotated.";
+        const RAW_GATE_TEXT: &str = "Deny writing a file whose path marks it as secret-bearing.";
+
+        let corpus = ruleset_with_authored_floor_headline(
+            "SEC-TEST-HEADLINE-1",
+            AUTHORED_HEADLINE,
+            AUTHORED_DETAIL,
+        );
+        let mut f = finding("SEC-TEST-HEADLINE-1", "a.env", 1, "critical");
+        f.detail = RAW_GATE_TEXT.to_string();
+        let report = report_with(vec![f], vec![]);
+        let json = crate::report_export::build_report_json(
+            &report,
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let findings_export = build_findings_export(
+            &report,
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+        let xlsx_bytes =
+            build_workbook(&report, &HashMap::new(), Some(&corpus), &empty_opts()).unwrap();
+
+        assert_eq!(
+            findings_export.findings.len(),
+            1,
+            "fixture must produce exactly one exported finding"
+        );
+        let exported_headline = &findings_export.findings[0].headline;
+        assert_eq!(
+            exported_headline, AUTHORED_HEADLINE,
+            "findings.json headline must be the authored plain-language rewrite, not the raw \
+             gate directive, got: {exported_headline:?}"
+        );
+        assert!(
+            !exported_headline.starts_with("Deny"),
+            "findings.json headline must never be the raw gate directive verbatim"
+        );
+        // Completeness: the raw internal text is still carried, just not as the headline.
+        assert_eq!(findings_export.findings[0].detail, RAW_GATE_TEXT);
+
+        // "All Findings" is the second worksheet added (after Index) -> sheet2.xml; row 1 is
+        // the header, so the finding lands on row 2. Column B is "Headline" (index 1), column
+        // U is "Detail" (index 20) per the `HEADERS` array. Resolve through the shared-string
+        // pool (`cell_text`) rather than a whole-workbook substring search, so this pins which
+        // COLUMN the rewrite landed in — the raw text legitimately still appears in "Detail".
+        let headline_cell = cell_text(&xlsx_bytes, "xl/worksheets/sheet2.xml", "B2");
+        assert_eq!(
+            headline_cell, AUTHORED_HEADLINE,
+            "xlsx Headline column must carry the same plain-language rewrite, got: {headline_cell:?}"
+        );
+        assert!(
+            !headline_cell.starts_with("Deny"),
+            "xlsx Headline column must never be the raw gate directive verbatim"
+        );
+        let detail_cell = cell_text(&xlsx_bytes, "xl/worksheets/sheet2.xml", "U2");
+        assert_eq!(
+            detail_cell, RAW_GATE_TEXT,
+            "completeness: the raw internal text must still be recoverable from the Detail column"
+        );
+    }
+
+    /// General guard (not fixture-specific): across a MIX of findings — one whose rule has an
+    /// authored plain-language template and one whose rule the corpus doesn't know at all (so
+    /// it falls back to the pre-P4 `defect_headline`-over-`detail` derivation) — no exported
+    /// headline in `findings.json` may begin with an internal imperative rule-text pattern.
+    /// This pins the CLASS of bug (any floor rule's raw directive leaking as a client-facing
+    /// headline), not one specific rule id or wording.
+    #[test]
+    fn no_findings_export_headline_matches_the_imperative_rule_text_pattern() {
+        let corpus = ruleset_with_authored_floor_headline(
+            "SEC-TEST-HEADLINE-2",
+            "A vendor API token is exposed in this file.",
+            "Rotate the token and move it to a secret manager.",
+        );
+        let mut authored = finding("SEC-TEST-HEADLINE-2", "a.py", 3, "high");
+        authored.detail =
+            "Require that secret values never be committed to source control.".to_string();
+        // No corpus entry at all for this rule id — exercises the pre-P4 fallback path, whose
+        // own `detail` (via the shared `finding()` helper) is not itself imperative, same as
+        // any real AI-tier finding's house-convention prose.
+        let unauthored = finding("SEC-TEST-NOT-IN-CORPUS-1", "b.py", 4, "medium");
+
+        let report = report_with(vec![authored, unauthored], vec![]);
+        let json = crate::report_export::build_report_json(
+            &report,
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let findings_export = build_findings_export(
+            &report,
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+
+        const IMPERATIVE_PREFIXES: &[&str] =
+            &["Deny ", "Require ", "Disallow ", "Forbid ", "Enforce "];
+        for row in &findings_export.findings {
+            assert!(
+                !IMPERATIVE_PREFIXES
+                    .iter()
+                    .any(|p| row.headline.starts_with(p)),
+                "findings.json headline must never start with an internal imperative rule-text \
+                 pattern, got: {:?}",
+                row.headline
+            );
+        }
     }
 
     // ── Conditional formatting / autofilter / freeze panes are actually applied ────
