@@ -6451,6 +6451,124 @@ mod tests {
         assert_eq!(authz.severity, "low", "recalibrated down");
     }
 
+    /// GUARD (this fix): `verify_findings` must record its OWN transcript entry — a
+    /// non-empty REAL prompt and the model's verbatim response as output, terminating in a
+    /// "done" status — rather than leaving the "calibrating…" agent with an empty prompt and
+    /// "no output captured" the way `audit_repo`'s old placeholder registration did.
+    #[tokio::test]
+    async fn verify_findings_records_prompt_and_output_to_transcript() {
+        let resp_text = r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":"stub verdict"}]}"#;
+        let llm = StubCompleter {
+            text: resp_text.to_string(),
+        };
+        let findings = vec![finding("AI-X", "medium")];
+        let store = crate::transcript::TranscriptStore::default();
+
+        let out = verify_findings(
+            &llm,
+            "me/api",
+            findings,
+            None,
+            Some((&store, "run-1")),
+            None,
+            false, // thorough
+            "This repository has 1 code files.",
+        )
+        .await;
+
+        // Calibration itself still applies as before.
+        assert_eq!(out[0].severity, "critical", "verdict still applied");
+
+        let transcripts = store.get("run-1");
+        let entry = transcripts
+            .iter()
+            .find(|a| a.session_id == "audit-me/api-calibrate")
+            .expect("calibration pass registers its own transcript entry");
+        assert!(
+            !entry.prompt.is_empty(),
+            "the generated prompt must be recorded, not left empty"
+        );
+        assert!(
+            entry.prompt.contains("Scrutinize these findings"),
+            "the recorded prompt should be the ACTUAL prompt sent, got: {}",
+            entry.prompt
+        );
+        assert_eq!(
+            entry.output, resp_text,
+            "output must equal the stub's response — no 'no output captured'"
+        );
+        assert_eq!(entry.status, "done");
+    }
+
+    /// `feedback: None` (the pre-existing, non-cockpit call path) must still calibrate
+    /// findings exactly as before — no panic, no behavior change — since transcript
+    /// recording is purely additive.
+    #[tokio::test]
+    async fn verify_findings_with_no_feedback_still_calibrates() {
+        let resp_text = r#"{"verdicts":[{"index":0,"severity":"critical","confidence":"high","reason":"stub verdict"}]}"#;
+        let llm = StubCompleter {
+            text: resp_text.to_string(),
+        };
+        let findings = vec![finding("AI-X", "medium")];
+
+        let out = verify_findings(
+            &llm,
+            "me/api",
+            findings,
+            None,
+            None, // feedback
+            None,
+            false,
+            "This repository has 1 code files.",
+        )
+        .await;
+
+        assert_eq!(
+            out[0].severity, "critical",
+            "calibration still applies without a transcript store"
+        );
+    }
+
+    /// THOROUGH mode runs 3 calibration passes; every one of them must land in the
+    /// transcript (none left silent) even though `apply_verdicts` only ever sees the
+    /// merged consensus.
+    #[tokio::test]
+    async fn verify_findings_thorough_mode_records_every_pass() {
+        let resp_text = r#"{"verdicts":[{"index":0,"severity":"high","confidence":"high","reason":"stub verdict"}]}"#;
+        let llm = StubCompleter {
+            text: resp_text.to_string(),
+        };
+        let findings = vec![finding("AI-X", "medium")];
+        let store = crate::transcript::TranscriptStore::default();
+
+        let out = verify_findings(
+            &llm,
+            "me/api",
+            findings,
+            None,
+            Some((&store, "run-2")),
+            None,
+            true, // thorough — 3 passes
+            "This repository has 1 code files.",
+        )
+        .await;
+        assert_eq!(out[0].severity, "high");
+
+        let transcripts = store.get("run-2");
+        let entry = transcripts
+            .iter()
+            .find(|a| a.session_id == "audit-me/api-calibrate")
+            .expect("calibration pass registers its own transcript entry");
+        for i in 1..=3 {
+            assert!(
+                entry.output.contains(&format!("pass {i}/3")),
+                "pass {i} must be recorded, got: {}",
+                entry.output
+            );
+        }
+        assert_eq!(entry.status, "done");
+    }
+
     /// Calibration must ACCEPT an explicit `"critical"` verdict and apply it to the finding —
     /// this is the D5-shaped case: an AI-tier finding starts at "high" from the raw audit pass,
     /// and the calibration pass upgrades it to "critical" when it judges the finding clears the
