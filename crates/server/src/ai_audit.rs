@@ -3375,32 +3375,103 @@ fn is_known_category(c: &str) -> bool {
 /// order matters: more specific families (RLS, TLS, secrets) are checked before the broad
 /// authorization/arch buckets so a `SUPABASE-RLS-*` id lands in `rls-policy`, not `authorization`.
 /// No token matches → `None` (which makes the finding un-mergeable — fail-open to over-telling).
+///
+/// WORD-BOUNDARY matched (`security_token_matches`, the same helper/approach `finding_class`'s
+/// `SECURITY_RULE_TOKENS` uses — see that const's doc comment), not raw substring, for the exact
+/// reason that fix exists: cross-checked against every real rule id in
+/// `crates/rules/principles/**`, a naive `id.contains(token)` scan produced real false positives
+/// here too. The one that prompted this fix: bare `"ARCH"` matched inside `"SEARCH"` (from
+/// `"SEARCH-PATH"`), so `SUPABASE-FUNC-SEARCH-PATH-1` — a SECURITY DEFINER / search-path-hijacking
+/// rule (D1) — was miscategorized `arch-conformance`. The corpus audit found three more of the
+/// SAME class `finding_class` already fixed, now fixed here too: bare `"RCE"` matched inside
+/// `"RESOURCE"`/`"INTERCEPTORS"` (`ARCH-RESOURCE-LIFECYCLE-1`, `JAVA-RESOURCE-MANAGEMENT-1`,
+/// `JAVASCRIPT-NEST-INTERCEPTORS-CROSS-CUTTING-1`, `GO-GRPC-INTERCEPTORS-AUTH-LOGGING-1` — none
+/// injection); bare `"INJECT"` matched dependency-injection pattern rules
+/// (`JAVA-SPRING-CONSTRUCTOR-INJECTION-1`, `JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1`, not
+/// injection vulnerabilities — replaced with the same explicit `*-INJECTION`/`*-SQL` compounds
+/// `SECURITY_RULE_TOKENS` uses); bare `"SESSION"` matched `PYTHON-FASTAPI-DI-SESSION-1`, a
+/// database-session lifecycle rule, not an authentication session (dropped; the real case is
+/// already caught via `"GETSESSION"`). One new compound was added rather than dropping coverage:
+/// `"GRAMMAR-INJECTION"`, so `SEC-NO-QUERY-GRAMMAR-INJECTION-1` (D3's query-grammar-injection
+/// class) still lands in `injection` once bare `"INJECT"` is gone. And `"-DI-"` (dependency-
+/// injection abbreviation) is dropped entirely rather than word-boundary-adapted: as a hyphen-
+/// wrapped substring it was already boundary-safe (hyphens on both sides can only occur around a
+/// standalone `DI` component), but there is no safe way to express "exact word DI, not a prefix"
+/// through the shared prefix-matching single-word semantics without reintroducing a false-
+/// positive class of its own (`"DIRECT"`, `"DISABLED"`, `"DIGEST"` all start with `"DI"|`) — the
+/// one real corpus id that relied on it (`JAVASCRIPT-NEST-MODULES-PROVIDERS-DI-1`) simply falls
+/// through to `None` now, the fail-open direction this function already commits to.
 fn categorize_rule_id(rule_id: &str) -> Option<String> {
     let id = rule_id.to_ascii_uppercase();
-    let has = |needle: &str| id.contains(needle);
+    let words: Vec<&str> = id.split('-').collect();
+    let has = |token: &str| security_token_matches(&words, token);
     let cat = if has("RLS") || has("POLICY") || has("ROW-LEVEL") {
         "rls-policy"
     } else if has("TLS") || has("SSL") || has("HTTPS") || has("CERT") {
         "transport-security"
-    } else if has("SECRET") || has("HARDCODED") || has("CREDENTIAL") || has("API-KEY") || has("APIKEY") || has("PASSWORD") {
+    } else if has("SECRET")
+        || has("HARDCODED")
+        || has("CREDENTIAL")
+        || has("API-KEY")
+        || has("APIKEY")
+        || has("PASSWORD")
+    {
         "secret-exposure"
-    } else if has("SQL") || has("INJECT") || has("XSS") || has("SSRF") || has("DESERIAL") || has("RCE") {
+    } else if has("RAW-SQL")
+        || has("STRING-SQL")
+        || has("PARAMETERIZED")
+        || has("SQL-INJECTION")
+        || has("COMMAND-INJECTION")
+        || has("CODE-INJECTION")
+        || has("GRAMMAR-INJECTION")
+        || has("XSS")
+        || has("SSRF")
+        || has("DESERIAL")
+        || has("RCE")
+    {
         "injection"
-    } else if has("SESSION") || has("LOGIN") || has("GETUSER") || has("GETSESSION") || has("AUTHN") || has("AUTHENTICAT") {
+    } else if has("LOGIN")
+        || has("GETUSER")
+        || has("GETSESSION")
+        || has("AUTHN")
+        || has("AUTHENTICAT")
+    {
         "authentication"
-    } else if has("AUTHZ") || has("AUTHORIZ") || has("BYPASS") || has("SERVICE-ROLE") || has("RBAC") || has("PERMISSION") || has("ACCESS-CONTROL") {
+    } else if has("AUTHZ")
+        || has("AUTHORIZ")
+        || has("BYPASS")
+        || has("SERVICE-ROLE")
+        || has("RBAC")
+        || has("PERMISSION")
+        || has("ACCESS-CONTROL")
+    {
         "authorization"
     } else if has("VALIDAT") || has("SANITIZE") || has("INPUT") {
         "input-validation"
-    } else if has("PANIC") || has("UNWRAP") || has("EXPECT") || has("ERROR-HANDL") || has("FALLIBLE") {
+    } else if has("PANIC")
+        || has("UNWRAP")
+        || has("EXPECT")
+        || has("ERROR-HANDLER")
+        || has("ERROR-HANDLERS")
+        || has("ERROR-HANDLING")
+        || has("FALLIBLE")
+    {
         "error-handling"
     } else if has("TEST") || has("SPEC") || has("FIXTURE") {
         "testing-style"
     } else if has("PERF") || has("N-PLUS") || has("NPLUS") || has("HOT-READ") || has("CACHE") || has("PAGINATION") {
         "performance"
-    } else if has("EXPOSE") || has("EXPOSED") || has("EXPOSURE") || has("CORS") || has("PUBLIC-") {
+    } else if has("EXPOSE") || has("EXPOSED") || has("EXPOSURE") || has("CORS") || has("PUBLIC") {
         "resource-exposure"
-    } else if has("ARCH") || has("LAYER") || has("-DI-") || has("MONOLITH") || has("MIDDLEWARE") || has("REPO-PER") || has("ROUTE-PLACEMENT") || has("QUERY-LIBRARY") || has("VERSIONING") {
+    } else if has("ARCH")
+        || has("LAYER")
+        || has("MONOLITH")
+        || has("MIDDLEWARE")
+        || has("REPO-PER")
+        || has("ROUTE-PLACEMENT")
+        || has("QUERY-LIBRARY")
+        || has("VERSIONING")
+    {
         "arch-conformance"
     } else {
         return None;
@@ -8865,6 +8936,166 @@ mod tests {
                 "{rule_id} must classify as Hygiene"
             );
         }
+    }
+
+    // ── D5 pt.2: categorize_rule_id word-boundary matching ────────────────────────────────
+    //
+    // Mirrors the p1_finding_class_* tests above: `categorize_rule_id` had the SAME raw-
+    // substring bug `finding_class`'s `SECURITY_RULE_TOKENS` was fixed for (commit f80ad83),
+    // never propagated to this function. Cross-checked against every real rule id in
+    // `crates/rules/principles/**`.
+
+    /// THE bug this fix exists for: bare "ARCH" must not match merely because "SEARCH" (from
+    /// "SEARCH-PATH") happens to contain the letters a-r-c-h as a substring.
+    /// `SUPABASE-FUNC-SEARCH-PATH-1` (D1 — SECURITY DEFINER without a pinned search_path) must
+    /// not be miscategorized `arch-conformance`.
+    #[test]
+    fn categorize_rule_id_arch_substring_inside_search_path_is_not_arch_conformance() {
+        // "SEARCH-PATH" spells S-E-ARCH: the letters "ARCH" sit inside "SEARCH" (its "SE-ARCH"
+        // shape) as a pure substring artifact, not a standalone hyphen-delimited word — a raw
+        // substring scan for "ARCH" matches it anyway. Word-boundary matching must not.
+        assert_ne!(
+            categorize_rule_id("SUPABASE-FUNC-SEARCH-PATH-1").as_deref(),
+            Some("arch-conformance"),
+            "ARCH must not match inside SEARCH-PATH via substring"
+        );
+        // Contrast: a rule id where ARCH genuinely IS its own standalone word must still match.
+        assert_eq!(
+            categorize_rule_id("ARCH-STRICT-LAYERING-1").as_deref(),
+            Some("arch-conformance"),
+            "ARCH as a real standalone word must still categorize as arch-conformance"
+        );
+    }
+
+    /// "RCE" (remote code execution) must not match merely because "RESOURCE" or
+    /// "INTERCEPTORS" contains the letters r-c-e as a substring — none of these are injection
+    /// concerns, the same corpus false positives `finding_class` was fixed for.
+    #[test]
+    fn categorize_rule_id_rce_substring_inside_resource_or_interceptors_is_not_injection() {
+        for rule_id in [
+            "ARCH-RESOURCE-LIFECYCLE-1",
+            "JAVA-RESOURCE-MANAGEMENT-1",
+            "JAVASCRIPT-NEST-INTERCEPTORS-CROSS-CUTTING-1",
+            "GO-GRPC-INTERCEPTORS-AUTH-LOGGING-1",
+        ] {
+            assert_ne!(
+                categorize_rule_id(rule_id).as_deref(),
+                Some("injection"),
+                "{rule_id} must not categorize as injection via bare RCE"
+            );
+        }
+    }
+
+    /// Bare "INJECT" must not match a dependency-injection PATTERN rule — "constructor
+    /// injection" is a DI pattern, not an injection vulnerability. The real injection-
+    /// vulnerability shapes the corpus uses are explicit compounds (RAW-SQL, PARAMETERIZED,
+    /// SQL-INJECTION, ...), not the bare word.
+    #[test]
+    fn categorize_rule_id_dependency_injection_pattern_is_not_injection_vulnerability() {
+        for rule_id in [
+            "JAVA-SPRING-CONSTRUCTOR-INJECTION-1",
+            "CSHARP-DEPENDENCY-INJECTION-CONSTRUCTOR-1",
+            "JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1",
+        ] {
+            assert_ne!(
+                categorize_rule_id(rule_id).as_deref(),
+                Some("injection"),
+                "{rule_id} is a DI pattern rule, not an injection vulnerability"
+            );
+        }
+    }
+
+    /// Bare "SESSION" must not promote a DATABASE-session lifecycle rule to `authentication` —
+    /// `PYTHON-FASTAPI-DI-SESSION-1` is about a FastAPI DB-session dependency, not an auth
+    /// session. The real auth-session case is caught via "GETSESSION" (a distinct, unambiguous
+    /// compound word), which must keep working.
+    #[test]
+    fn categorize_rule_id_database_session_is_not_authentication() {
+        assert_ne!(
+            categorize_rule_id("PYTHON-FASTAPI-DI-SESSION-1").as_deref(),
+            Some("authentication"),
+            "a DB-session lifecycle rule must not categorize as authentication"
+        );
+        assert_eq!(
+            categorize_rule_id("SUPABASE-AUTH-GETSESSION-SERVER-1").as_deref(),
+            Some("authentication"),
+            "a real auth-session rule (GETSESSION) must still categorize as authentication"
+        );
+    }
+
+    /// Positive cases: real, unambiguous corpus ids for EVERY category must still categorize
+    /// correctly after the word-boundary fix — the fix must not have thrown out real coverage.
+    #[test]
+    fn categorize_rule_id_positive_cases_across_every_category_still_match() {
+        for (rule_id, expected) in [
+            ("SUPABASE-RLS-ENABLED-1", "rls-policy"),
+            ("SEC-NO-DISABLED-TLS-1", "transport-security"),
+            ("SEC-NO-HARDCODED-SECRETS-1", "secret-exposure"),
+            ("SEC-NO-RAW-SQL-CONCAT-1", "injection"),
+            ("SEC-NO-QUERY-GRAMMAR-INJECTION-1", "injection"),
+            ("SEC-NO-UNSAFE-DESERIALIZATION-1", "injection"),
+            ("PYTHON-FLASK-PARAMETERIZED-SQL-1", "injection"),
+            ("SUPABASE-AUTH-GETSESSION-SERVER-1", "authentication"),
+            ("SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1", "authorization"),
+            ("JAVASCRIPT-EXPRESS-VALIDATE-INPUT-1", "input-validation"),
+            ("RUST-NO-UNWRAP-1", "error-handling"),
+            (
+                "JAVASCRIPT-EXPRESS-CENTRAL-ERROR-HANDLER-1",
+                "error-handling",
+            ),
+            ("PYTHON-FLASK-ERROR-HANDLERS-1", "error-handling"),
+            ("RUST-TESTING-1", "testing-style"),
+            ("SQL-DB-NPLUSONE-1", "performance"),
+            ("SUPABASE-STORAGE-PUBLIC-BUCKET-1", "resource-exposure"),
+            ("ARCH-STRICT-LAYERING-1", "arch-conformance"),
+            ("ARCH-MONOLITH-FIRST-1", "arch-conformance"),
+        ] {
+            assert_eq!(
+                categorize_rule_id(rule_id).as_deref(),
+                Some(expected),
+                "{rule_id} must categorize as {expected}"
+            );
+        }
+    }
+
+    /// `RUST-SQLX-CONNECTION-POOL-SIZED-1` and its SQLX-family siblings must NOT categorize as
+    /// `injection` — that was a pre-existing bug independent of the ARCH/SEARCH-PATH shape (bare
+    /// "SQL" matching the "SQLX" word via prefix), the same class of false positive the corpus
+    /// audit was asked to surface. `SQL-DB-NPLUSONE-1` is a performance rule, not injection,
+    /// for the same reason.
+    #[test]
+    fn categorize_rule_id_sqlx_family_and_nplusone_are_not_injection() {
+        for rule_id in [
+            "RUST-SQLX-CONNECTION-POOL-SIZED-1",
+            "RUST-SQLX-COMPILE-CHECKED-QUERIES-1",
+            "RUST-SQLX-MIGRATIONS-CHECKED-IN-1",
+            "RUST-SQLX-TRANSACTIONS-MULTI-WRITE-1",
+            "SQL-DB-NPLUSONE-1",
+        ] {
+            assert_ne!(
+                categorize_rule_id(rule_id).as_deref(),
+                Some("injection"),
+                "{rule_id} must not categorize as injection via bare SQL matching SQLX/SQL-DB"
+            );
+        }
+    }
+
+    /// Corpus-verification test pinning the exact real ids named in the task as having
+    /// motivated this fix — a regression here means the fix was reverted or narrowed.
+    #[test]
+    fn categorize_rule_id_corpus_verification_pins_the_motivating_ids() {
+        assert_ne!(
+            categorize_rule_id("SUPABASE-FUNC-SEARCH-PATH-1").as_deref(),
+            Some("arch-conformance")
+        );
+        assert_ne!(
+            categorize_rule_id("PYTHON-FASTAPI-DI-SESSION-1").as_deref(),
+            Some("authentication")
+        );
+        assert_ne!(
+            categorize_rule_id("JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1").as_deref(),
+            Some("injection")
+        );
     }
 
     // ── P2: fix-specific generation + self-check ────────────────────────────────────────
