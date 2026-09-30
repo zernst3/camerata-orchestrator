@@ -1115,11 +1115,21 @@ pub fn apply_severity_calibration_rules(findings: Vec<Finding>) -> Vec<Finding> 
 /// Run the skeptic pass over a repo's AI findings (a fresh, reasoning-based perspective —
 /// deliberately NOT re-sent the whole digest, so it judges exploitability/context, not
 /// code minutiae). Graceful: on any model failure the findings pass through unchanged.
+///
+/// `feedback`, when present, records this pass into the transcript the same way the scan
+/// passes do (`audit_pass`/`run_prose_lens`): register the agent with its REAL generated
+/// prompt up front, append each vote's raw response as it lands, then set a terminal
+/// status. This is what makes the cockpit's "calibrating N findings" entry show an actual
+/// prompt/output instead of "no output captured" — a transcript-recording failure (lock
+/// poisoning etc., handled inside `TranscriptStore` itself) can never affect calibration,
+/// which stays best-effort exactly as before.
+#[allow(clippy::too_many_arguments)]
 pub async fn verify_findings(
     llm: &dyn LlmPort,
     repo: &str,
     findings: Vec<Finding>,
     calibration_model: Option<&str>,
+    feedback: Option<(&crate::transcript::TranscriptStore, &str)>,
     meter: Option<&UsageMeter>,
     thorough: bool,
     // One repo-shape sentence — detected stack + code-file count (e.g. "This is a Next.js repo
@@ -1162,12 +1172,35 @@ pub async fn verify_findings(
         req
     };
 
+    // Register (or replace) this pass's transcript entry with the REAL prompt before the
+    // first call — mirrors `audit_pass`/`run_prose_lens`'s register-then-record pattern. Same
+    // session id + role convention the caller previously registered a placeholder under
+    // (`audit-{repo}-calibrate`), so this now carries the actual prompt from the start instead
+    // of the empty one the placeholder shipped with.
+    let session = format!("audit-{repo}-calibrate");
+    if let Some((store, key)) = feedback {
+        store.register(
+            key,
+            crate::transcript::AgentTranscript {
+                session_id: session.clone(),
+                role: format!(
+                    "calibrating {} findings on {} — {repo}",
+                    findings.len(),
+                    calibration_model.unwrap_or("default")
+                ),
+                prompt: prompt.clone(),
+                output: String::new(),
+                status: "running".to_string(),
+            },
+        );
+    }
+
     // THOROUGH mode (#51): run the calibration verdict MULTIPLE times and take the conservative
     // consensus, so a single over-confident pass can't push a debatable finding to HIGH. Costs
     // ~3x the calibration tokens (opt-in). Default mode is a single pass (unchanged behavior).
     let passes = if thorough { 3 } else { 1 };
     let mut votes: Vec<String> = Vec::new();
-    for _ in 0..passes {
+    for pass_idx in 0..passes {
         // Non-streaming, so use the coarse total backstop; a failed pass is simply skipped
         // (calibration is best-effort, never load-bearing).
         if let Ok(Ok(resp)) =
@@ -1175,6 +1208,20 @@ pub async fn verify_findings(
         {
             if let Some(m) = meter {
                 m.record(&resp);
+            }
+            if let Some((store, key)) = feedback {
+                // Single-pass (the common case) records the raw response as-is, so the
+                // transcript's output is exactly the model's text. THOROUGH mode's 3 votes are
+                // each appended with a pass label so no vote is left silent.
+                if passes > 1 {
+                    store.append_output(
+                        key,
+                        &session,
+                        &format!("── pass {}/{passes} ──\n{}", pass_idx + 1, resp.text),
+                    );
+                } else {
+                    store.append_output(key, &session, &resp.text);
+                }
             }
             votes.push(resp.text);
         }
@@ -1184,6 +1231,18 @@ pub async fn verify_findings(
         1 => apply_verdicts(&votes[0], findings),
         _ => apply_verdicts(&consensus_verdicts(&votes, findings.len()), findings),
     };
+    if let Some((store, key)) = feedback {
+        if votes.is_empty() {
+            store.append_output(
+                key,
+                &session,
+                "every calibration pass failed or timed out — findings pass through unchanged.",
+            );
+            store.set_status(key, &session, "blocked");
+        } else {
+            store.set_status(key, &session, "done");
+        }
+    }
     // D5: the deterministic severity floor runs regardless of whether the LLM calibration
     // pass succeeded — it re-derives its verdict from the finding's own text, not the model's,
     // so it is exactly as available when every pass failed as when one succeeded.
@@ -4528,29 +4587,14 @@ pub async fn audit_repo(
     //
     // This pass runs AFTER every chunk×rule pass has reported "done", and it's a single
     // synchronous round-trip over all findings — so without its own visible agent the UI
-    // showed every pass "done" while the spinner kept turning for another minute. Register
-    // it as its own transcript agent so the cockpit shows "calibrating N findings" instead
-    // of a mystery hang. (Dedup/merge also shrinks N, so this round is now faster too.)
+    // showed every pass "done" while the spinner kept turning for another minute.
+    // `verify_findings` registers its OWN transcript agent (real prompt, real output —
+    // see its doc comment) so the cockpit shows "calibrating N findings" with actual
+    // content instead of a mystery hang or an empty placeholder. (Dedup/merge also
+    // shrinks N, so this round is now faster too.)
     let verified = if all_findings.is_empty() {
         all_findings
     } else {
-        let session = format!("audit-{repo}-calibrate");
-        if let Some((store, key)) = feedback {
-            store.register(
-                key,
-                crate::transcript::AgentTranscript {
-                    session_id: session.clone(),
-                    role: format!(
-                        "calibrating {} findings on {} — {repo}",
-                        all_findings.len(),
-                        calib_model.as_deref().unwrap_or("default")
-                    ),
-                    prompt: String::new(),
-                    output: String::new(),
-                    status: "running".to_string(),
-                },
-            );
-        }
         // Repo-shape line for the proportionality signal (Bug 4 §2b): detected stack + code-file
         // count, from signals already computed. detect_stack is the same one grounding uses.
         let stack = crate::onboard::detect_stack(repo, files);
@@ -4563,20 +4607,17 @@ pub async fn audit_repo(
                 files.len()
             )
         };
-        let out = verify_findings(
+        verify_findings(
             llm,
             repo,
             all_findings,
             calib_model.as_deref(),
+            feedback,
             meter,
             thorough,
             &repo_shape,
         )
-        .await;
-        if let Some((store, key)) = feedback {
-            store.set_status(key, &session, "done");
-        }
-        out
+        .await
     };
     let mut verified = verified;
     // P7: a rule marked NOT APPLICABLE (no evidence its concern applies to this codebase at
