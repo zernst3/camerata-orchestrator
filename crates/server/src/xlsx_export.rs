@@ -100,8 +100,9 @@ pub struct FindingRow {
     /// for THIS finding, generated at scan time by
     /// [`crate::ai_audit::generate_fix_specifics`] (see `report_export::CuratedSiteJson::
     /// fix_for_this_finding`'s doc comment, which this field mirrors verbatim). `None` when
-    /// fix-generation never ran (a deterministic-only scan) or gave up after retries
-    /// (`report_export::fix_generation_failed`).
+    /// fix-generation never ran (a deterministic-only scan) or gave up after retries — the
+    /// latter is a pipeline gap only (C3-1b), never a hedge; the `fix` column below still
+    /// carries the rule's authored remediation in that case.
     fix_specific: Option<String>,
     /// The rule's AUTHORED, client-facing remediation text (see [`resolve_fix`]), with this
     /// finding's placeholder tokens already substituted — SECONDARY context now that

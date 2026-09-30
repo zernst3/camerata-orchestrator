@@ -5,6 +5,14 @@
 // No em/en dashes in the placeholder itself (house no-dash rule) — "N/A", not "\u{2014}".
 #let or_na(x) = if x == none or x == "" { "N/A" } else { x }
 
+// C3-1b: `effort`/`confidence` are the CALIBRATION pass's OWN outputs — an absent value here
+// means that pass never produced an opinion for THIS finding this run (a failed/timed-out
+// pass, or a malformed response), not a legitimate "not applicable" answer the way a blank
+// cover-page option field is. "N/A" reads as a settled non-answer rather than an honest gap,
+// so these two fields get their own, field-specific placeholders instead of `or_na`.
+#let or_not_estimated(x) = if x == none or x == "" { "not estimated this run" } else { x }
+#let or_not_evaluated(x) = if x == none or x == "" { "not evaluated this run" } else { x }
+
 #let plural(n, singular, plural_form) = if n == 1 { singular } else { plural_form }
 
 // S13: thousands separators so "486203 characters" on the cover reads as "486,203".
@@ -208,7 +216,7 @@
     ]
     #v(0.1cm)
     #text(size: 8.5pt)[
-      #mini_chip("Effort: " + or_na(site.effort)) #mini_chip("Confidence: " + or_na(site.confidence)) #text(weight: "bold")[#site.disposition]
+      #mini_chip("Effort: " + or_not_estimated(site.effort)) #mini_chip("Confidence: " + or_not_evaluated(site.confidence)) #text(weight: "bold")[#site.disposition]
     ]
     #if site.also_matches.len() > 0 [
       #text(size: 8pt, fill: rgb("#888888"))[Also violates: #site.also_matches.join(", ")]

@@ -786,9 +786,11 @@ pub struct CuratedSiteJson {
     /// see that function's doc comment). The template renders this ABOVE `fix` — the rule's
     /// generic authored remediation above is now SECONDARY context only, never the lead line.
     /// `None` when fix-generation never ran (a deterministic-only scan makes no model calls
-    /// at all) or gave up after retries (`fix_generation_failed`, which is also what keeps
-    /// such a finding out of `do_now`) — the template must render `fix` alone in that case,
-    /// never a bare "Fix:" label with nothing after it.
+    /// at all) or gave up after retries — the template must render `fix` alone in that case,
+    /// never a bare "Fix:" label with nothing after it. C3-1b: a fix-generation failure is a
+    /// PIPELINE gap, not a confidence signal — it never hedges the finding or moves it out of
+    /// `do_now`; `fix` (the rule's own authored remediation) still renders as the primary Fix
+    /// line, so the row never ships with no fix at all.
     pub fix_for_this_finding: Option<String>,
 }
 
@@ -1720,25 +1722,18 @@ pub(crate) fn matrix_bucket(
     }
 }
 
-/// True when [`crate::ai_audit::generate_fix_specifics`] (P2) exhausted its retries and gave
-/// up on this finding — it carries NO usable `fix_specific`, so `CuratedSiteJson::
-/// fix_for_this_finding` stays `None` for it. Never `do_now`: a same-week action item must
-/// come with an actual fix, not a promise the report doesn't keep — see `matrix_bucket`'s two
-/// call sites in [`build_report_json`], which downgrade a would-be `do_now` bucket to
-/// `do_next` when this is true.
-///
-/// Detected from the `"[needs review: fix not generated]"` `detail` tag
-/// `generate_fix_specifics` appends on failure — the same free-text-tag convention
-/// `apply_verdicts` already uses for its own needs-review reasons (see that function's doc
-/// comment). Deliberately a substring check rather than a dedicated bool field: it keys ONLY
-/// on the fix-generation failure path, so a finding that is `needs_review` for any OTHER
-/// reason (a debatable calibration verdict, an in-test flag, …) is untouched — this must
-/// never widen into a blanket "no `fix_specific` yet" gate, which would also catch every
-/// finding from a deterministic-only scan (fix-generation is itself an AI pass, gated off
-/// entirely when `run_ai_review` is false) and wrongly pull them out of `do_now`.
-pub(crate) fn fix_generation_failed(finding: &Finding) -> bool {
-    finding.detail.contains("fix not generated")
-}
+// C3-1b (`docs/plans/2026-09-30_cycle2-queue-hardening.md`): there used to be a
+// `fix_generation_failed` gate here that read a `"[needs review: fix not generated]"` tag
+// off `detail` and demoted a would-be `do_now` finding to `do_next` — conflating a PIPELINE
+// failure (the fix-specific generation pass gave up) with a CONFIDENCE judgement about the
+// finding. `crate::ai_audit::generate_fix_specifics` no longer writes that tag (or sets
+// `needs_review`) on failure at all: it only logs to stderr and leaves `fix_specific` at
+// `None`, and the row still ships a usable fix because `resolve_fix` (below) renders the
+// rule's own authored remediation as `CuratedSiteJson::fix` regardless of whether
+// `fix_specific` generated. Bucket placement is therefore driven ONLY by the finding's own
+// severity/effort/disposition (`matrix_bucket`) and calibration's own doubt signal
+// (`is_informational`'s `confidence == "needs-review"` check) — never by whether a SEPARATE
+// AI pass happened to produce prose for it.
 
 /// A style rule needs an established corpus before deviations are findings (Bug 4 §2d). A
 /// repo with fewer than this many test files has no test corpus to speak of, so
@@ -2112,14 +2107,6 @@ pub fn build_report_json(
         } else {
             matrix_bucket(*disposition, severity, f.effort.as_deref())
         };
-        // P2: a finding whose fix-generation gave up must never sit in `do_now` — a
-        // same-week action item without an actual fix would falsify the report's own
-        // promise. See `fix_generation_failed`'s doc comment.
-        let bucket = if bucket == "do_now" && fix_generation_failed(f) {
-            "do_next"
-        } else {
-            bucket
-        };
         let target = match bucket {
             "do_now" => &mut matrix.do_now,
             "do_next" => &mut matrix.do_next,
@@ -2205,14 +2192,6 @@ pub fn build_report_json(
                     } else {
                         matrix_bucket(*disposition, severity, f.effort.as_deref())
                     };
-                // P2: keep this site's own disposition label in lockstep with the matrix
-                // override above — never claim "Open (recommended: Do now)" on a site whose
-                // fix-generation failed.
-                let bucket = if bucket == "do_now" && fix_generation_failed(f) {
-                    "do_next"
-                } else {
-                    bucket
-                };
                 let confirmed_by_client = dispositions
                     .get(&finding_key(f))
                     .map(|d| d.confirmed_by_client)
@@ -2246,9 +2225,10 @@ pub fn build_report_json(
                     // no model access here, just a read) — a codebase-specific fix that the
                     // template renders ABOVE `fix` (the rule's generic remediation is now
                     // secondary context only). `None` when generation never ran (a
-                    // deterministic-only scan) or gave up after retries (see
-                    // `fix_generation_failed`, which is what keeps such a finding out of
-                    // `do_now` above).
+                    // deterministic-only scan) or gave up after retries — in the latter case
+                    // `fix` (resolved just above from the rule's own authored remediation)
+                    // still renders as the primary "Fix:" line (C3-1b: a pipeline failure here
+                    // never removes the finding's fix, only its codebase-specific flavor).
                     fix_for_this_finding: f.fix_specific.clone(),
                 }
             })
@@ -3873,64 +3853,118 @@ mod tests {
         assert_eq!(json.curated_findings[0].sites[0].fix_for_this_finding, None);
     }
 
-    // ── P2: fix_generation_failed (pure) + the do_now gate it drives ────────────────────
+    // ── C3-1b: fix-generation failure is a PIPELINE gap, never a confidence hedge ───────
 
-    #[test]
-    fn fix_generation_failed_detects_the_tag_generate_fix_specifics_appends() {
-        let mut f = finding("ARCH-1", "a.rs", 1, "high");
-        f.detail = "some real defect [needs review: fix not generated]".to_string();
-        assert!(fix_generation_failed(&f));
-    }
-
-    #[test]
-    fn fix_generation_failed_is_false_with_no_tag() {
-        let f = finding("ARCH-1", "a.rs", 1, "high");
-        assert!(!fix_generation_failed(&f));
-    }
-
-    #[test]
-    fn fix_generation_failed_does_not_false_positive_on_an_unrelated_needs_review_reason() {
-        // Calibration's OWN needs-review tag (a debatable-preference verdict) must never be
-        // mistaken for the fix-generation failure tag — the do_now gate is scoped to fix
-        // generation specifically, not every needs-review reason.
-        let mut f = finding("ARCH-1", "a.rs", 1, "high");
-        f.needs_review = true;
-        f.detail = "an over-engineering note on a small codebase [needs review: debatable \
-                     architectural preference]"
-            .to_string();
-        assert!(!fix_generation_failed(&f));
-    }
-
-    #[test]
-    fn a_critical_finding_whose_fix_generation_failed_is_excluded_from_do_now() {
-        let mut f = finding("ARCH-1", "a.rs", 1, "critical");
-        f.detail = format!("{} [needs review: fix not generated]", f.detail);
-        f.needs_review = true;
-        let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+    /// The deterministic finding from the C3-1b spec: its specific fix failed to generate
+    /// (`fix_specific: None`, exactly `generate_fix_specifics`' new no-hedge failure state —
+    /// `needs_review: false`, `confidence: None`, `detail` carrying no pipeline-state tag).
+    /// It must export UNHEDGED (confidence stays `None`, disposition is never demoted), it
+    /// must NOT be informational/out-of-bucket, it must still land in `do_now` on its own
+    /// severity/effort merits, and it must carry the RULE-level fix (`resolve_fix`'s authored
+    /// remediation) so the row still ships a usable fix even with no codebase-specific one.
+    #[tokio::test]
+    async fn fix_generation_failure_exports_unhedged_with_the_rule_level_fix_in_do_now() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         assert!(
-            json.matrix.do_now.is_empty(),
-            "a finding with no valid fix must never sit in do_now, even at critical severity: \
-             {:?}",
-            json.matrix.do_now
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
         );
-        assert_eq!(
-            json.matrix.do_next.len(),
+        let mut f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
             1,
-            "it still surfaces — just not as do_now"
+            "critical",
+        );
+        f.captures
+            .insert("table".to_string(), "profiles".to_string());
+        // The exact post-failure state `generate_fix_specifics` now leaves behind: no
+        // fix_specific, no hedge, no tag — see that function's tests in ai_audit.rs.
+        f.fix_specific = None;
+        f.needs_review = false;
+        f.confidence = None;
+
+        let report = report_with(vec![f], vec!["SUPABASE-RLS-ENABLED-1"]);
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+
+        assert_eq!(
+            json.matrix.do_now.len(),
+            1,
+            "a critical finding must stay in do_now even when its specific fix failed to \
+             generate: {:?}",
+            json.matrix
+        );
+        assert!(
+            json.matrix.informational.is_empty(),
+            "a fix-generation failure must never route a finding to the informational \
+             appendix: {:?}",
+            json.matrix.informational
+        );
+        let site = &json.curated_findings[0].sites[0];
+        assert_eq!(
+            site.confidence, None,
+            "confidence must be untouched by a fix-generation failure — the ONLY hedge \
+             source is calibration"
         );
         assert_eq!(
-            json.curated_findings[0].sites[0].fix_for_this_finding, None,
-            "and it carries no fix line to promise, matching the downgrade"
+            site.fix_for_this_finding, None,
+            "no codebase-specific fix was generated"
+        );
+        assert!(
+            site.fix.is_some(),
+            "the row must still carry the rule's own authored remediation as its fix: {:?}",
+            site.fix
+        );
+        assert!(
+            !site.detail.contains('['),
+            "detail must carry no bracketed pipeline-state text: {:?}",
+            site.detail
+        );
+        assert!(
+            site.disposition.to_ascii_lowercase().contains("do now"),
+            "the site's own disposition label must not be demoted either: {:?}",
+            site.disposition
+        );
+    }
+
+    /// The other half of the C3-1b contract: a finding the CALIBRATOR itself explicitly
+    /// flagged doubtful (`confidence: Some("needs-review")`) still exports hedged — proving
+    /// confidence hedging is driven by calibration doubt, not by whether a separate AI pass
+    /// (fix-generation) happened to succeed.
+    #[tokio::test]
+    async fn calibrator_flagged_doubt_still_exports_hedged() {
+        // Setting `confidence` marks a finding AI-tier (`is_ai_tier`), which routes an
+        // uncited AI finding to the informational appendix and OUT of `curated_findings`
+        // entirely (P3's citation gate) — a real corpus rule keeps this finding grounded so
+        // the test exercises the hedge itself, not that unrelated gate.
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+        let mut f = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "high",
+        );
+        f.confidence = Some("needs-review".to_string());
+        f.needs_review = true;
+        let report = report_with(vec![f], vec!["SUPABASE-RLS-ENABLED-1"]);
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        assert_eq!(
+            json.curated_findings[0].sites[0].confidence,
+            Some("needs-review".to_string()),
+            "a genuine calibration doubt verdict must still render as hedged"
         );
     }
 
     #[test]
     fn a_critical_finding_with_a_valid_fix_still_lands_in_do_now() {
-        // Regression pin: the P2 gate must not widen into "no fix_specific -> never do_now"
-        // — only the EXPLICIT fix-generation-failed tag downgrades a finding. A critical
-        // finding that simply never went through fix-generation (e.g. a deterministic-only
-        // scan) keeps today's behavior.
+        // A critical finding whose fix-generation ran and succeeded behaves exactly as one
+        // that never went through fix-generation at all (e.g. a deterministic-only scan) —
+        // bucket placement never depended on `fix_specific` being present.
         let f = finding("ARCH-1", "a.rs", 1, "critical");
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
@@ -5441,6 +5475,84 @@ mod tests {
             1,
             "the methodology section must gate the disclosure block on a non-empty list"
         );
+    }
+
+    // ── C3-1b: no field ever renders a literal "N/A" for a pipeline gap ─────────────
+
+    /// An unestimated `effort`/`confidence` is a PIPELINE gap (the calibration pass never
+    /// produced an opinion for this finding this run), not a legitimate "not applicable"
+    /// value — `or_na`'s "N/A" reads as the latter. Pins that the shipped template uses the
+    /// field-specific placeholders for both fields in the per-finding chip line, never `or_na`.
+    #[test]
+    fn shipped_template_never_renders_na_for_effort_or_confidence() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(
+            template.contains("or_not_estimated(site.effort)"),
+            "an unestimated effort must render \"not estimated this run\", not \"N/A\""
+        );
+        assert!(
+            template.contains("or_not_evaluated(site.confidence)"),
+            "an unevaluated confidence must render \"not evaluated this run\", not \"N/A\""
+        );
+        assert!(
+            !template.contains("or_na(site.effort)"),
+            "the per-finding effort chip must never fall back to the generic N/A placeholder"
+        );
+        assert!(
+            !template.contains("or_na(site.confidence)"),
+            "the per-finding confidence chip must never fall back to the generic N/A placeholder"
+        );
+    }
+
+    /// C3-1b, W6 wiring: a run where `ai_audit::verify_findings` recorded a run-wide "hour
+    /// estimation" `FailedPass` must (a) disclose it in BOTH methodology and summary, exactly
+    /// like the pre-existing alternative-recommendation disclosure, and (b) still ship the
+    /// unestimated finding in the curated set / matrix — a failed estimation pass degrades
+    /// honestly, it never drops a row.
+    #[test]
+    fn a_failed_estimation_pass_is_disclosed_and_unestimated_rows_still_ship() {
+        let f = finding("ARCH-1", "a.rs", 1, "high"); // effort: None (never estimated)
+        assert_eq!(
+            f.effort, None,
+            "test fixture must simulate the unestimated state"
+        );
+        let mut report = report_with(vec![f], vec![]);
+        report.failed_passes = vec![crate::ai_audit::FailedPass {
+            repo: "owner/repo".to_string(),
+            pass: "hour estimation".to_string(),
+            reason: "the calibration pass returned no usable remediation-effort estimate for \
+                     any finding this run"
+                .to_string(),
+        }];
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(json.methodology.failed_passes.len(), 1);
+        assert!(
+            json.methodology.failed_passes[0].contains("not computed"),
+            "methodology must explicitly disclose the estimation pass was not computed: {:?}",
+            json.methodology.failed_passes
+        );
+        assert!(
+            json.methodology.failed_passes[0]
+                .to_ascii_lowercase()
+                .contains("hour estimation"),
+            "the disclosure must name the failed pass: {:?}",
+            json.methodology.failed_passes
+        );
+        assert_eq!(
+            json.executive_summary.failed_passes, json.methodology.failed_passes,
+            "the disclosure must appear identically in both sections"
+        );
+
+        // The row is NOT dropped — it still ships in the matrix and the curated findings,
+        // carrying `effort: None` for the template to render honestly.
+        assert_eq!(
+            json.matrix.do_next.len() + json.matrix.do_now.len(),
+            1,
+            "an unestimated finding must still ship in an action bucket: {:?}",
+            json.matrix
+        );
+        assert_eq!(json.curated_findings[0].sites[0].effort, None);
     }
 
     // ── Template regressions (2026-09-13 review) ────────────────────────────────

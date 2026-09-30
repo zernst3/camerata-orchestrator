@@ -208,15 +208,15 @@ pub struct Finding {
     /// calibration/merge, over every non-dependency finding, with a bounded
     /// validate-and-regenerate self-check (identifier grounding + non-contradiction; see that
     /// module's doc comment). `None` until that pass runs (back-compatible serde default) OR
-    /// when generation still fails its self-check after retries — the latter case ALSO sets
-    /// `needs_review = true` with an explicit `[needs review: fix not generated]` `detail`
-    /// tag (mirroring `apply_verdicts`'s tagging convention) so `report_export::matrix_bucket`
-    /// can exclude it from `do_now` (a curated action item must never promise a fix the report
-    /// doesn't actually contain). Read directly by `report_export::build_report_json` into
-    /// `CuratedSiteJson::fix_for_this_finding` (rendered ABOVE the rule's generic `fix` in both
-    /// the PDF and the xlsx — this is the PRIMARY remediation text, the rule's authored
-    /// `remediation` is secondary context) — never re-generated at report-export time, since
-    /// that layer is pure/synchronous with no model access.
+    /// when generation still fails its self-check after retries. C3-1b: that failure is a
+    /// PIPELINE gap, not a confidence judgement — it is only logged (stderr), and NEVER sets
+    /// `needs_review` or writes anything into `detail`; bucket placement stays driven purely
+    /// by severity/effort/disposition. Read directly by `report_export::build_report_json`
+    /// into `CuratedSiteJson::fix_for_this_finding` (rendered ABOVE the rule's generic `fix`
+    /// in both the PDF and the xlsx — this is the PRIMARY remediation text when present; the
+    /// rule's authored `remediation` renders as the fix regardless, so a failed generation
+    /// still ships a usable fix) — never re-generated at report-export time, since that layer
+    /// is pure/synchronous with no model access.
     #[serde(default)]
     pub fix_specific: Option<String>,
     /// A short, deterministic explanation of WHY this finding's severity was floored/adjusted by
