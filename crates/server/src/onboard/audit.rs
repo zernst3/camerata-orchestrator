@@ -134,12 +134,25 @@ fn gitignore_status_phrase(path: &str, files: &[(String, String)]) -> &'static s
 /// vocabulary (never a fixture-specific string), so it generalizes to any repo the scan
 /// meets. Falls back to an honest generic noun when the evidence doesn't match a known
 /// vocabulary word (a bare hardcoded-secret literal has no further shape to classify).
+///
+/// # Bare noun phrases — NO leading article (W4, 2026-09-30)
+/// Every value returned here (and the `"hardcoded credential"` fallback in
+/// `report_export::generic_placeholder_filler`) is a BARE noun phrase with no leading "a"/"an".
+/// The corpus's authored `finding_headline` templates that splice this in either supply their
+/// OWN fixed article before an adjective (`"a live <secret-kind>"`, `"a committed
+/// <secret-kind>"` — grammatically correct regardless of the noun's own initial sound, since
+/// the article agrees with the ADJECTIVE that follows it, not the noun) or request one dynamically
+/// via the `<a:secret-kind>` token syntax (`report_export::instantiate_remediation`), which
+/// computes "a" vs "an" from the resolved value at substitution time
+/// (`report_export::indefinite_article`). A value that carried its own article here would
+/// double up with either mechanism — see the W4 bug this shape fixes
+/// (`docs/plans/2026-09-30_cycle2-queue-hardening.md`).
 pub(crate) fn classify_secret_kind(rule_id: &str, snippet: &str, path: &str) -> &'static str {
     match rule_id {
         "SEC-NO-SECRET-FILE-1" => secret_file_kind(path),
         "SEC-NO-VENDOR-TOKEN-1" => vendor_token_kind(snippet),
         "SEC-NO-PRIVATE-KEY-1" => private_key_kind(snippet),
-        _ => "a hardcoded credential",
+        _ => "hardcoded credential",
     }
 }
 
@@ -147,17 +160,17 @@ fn secret_file_kind(path: &str) -> &'static str {
     let lower = path.to_ascii_lowercase();
     let name = lower.rsplit('/').next().unwrap_or(lower.as_str());
     if name == ".env" || name.starts_with(".env.") {
-        "a live `.env` file"
+        "live `.env` file"
     } else if name.ends_with(".pem") || name.ends_with(".key") {
-        "a private-key file"
+        "private-key file"
     } else if name.ends_with(".p12") || name.ends_with(".pfx") {
-        "a PKCS#12 key store"
+        "PKCS#12 key store"
     } else if name.ends_with(".jks") || name.ends_with(".keystore") {
-        "a Java key store"
+        "Java key store"
     } else if matches!(name, "id_rsa" | "id_dsa" | "id_ecdsa" | "id_ed25519") {
-        "an SSH private key"
+        "SSH private key"
     } else {
-        "a secret-bearing file"
+        "secret-bearing file"
     }
 }
 
@@ -165,35 +178,35 @@ fn vendor_token_kind(snippet: &str) -> &'static str {
     const GITHUB_PREFIXES: &[&str] = &["ghp_", "gho_", "ghu_", "ghr_", "ghs_", "github_pat_"];
     const SLACK_PREFIXES: &[&str] = &["xoxb-", "xoxp-", "xoxa-", "xoxr-", "xoxs-"];
     if snippet.contains("AKIA") || snippet.contains("ASIA") {
-        "an AWS access key"
+        "AWS access key"
     } else if GITHUB_PREFIXES.iter().any(|p| snippet.contains(p)) {
-        "a GitHub access token"
+        "GitHub access token"
     } else if SLACK_PREFIXES.iter().any(|p| snippet.contains(p)) {
-        "a Slack token"
+        "Slack token"
     } else if snippet.contains("sk_live_") {
-        "a live Stripe secret key"
+        "live Stripe secret key"
     } else if snippet.contains("AIza") {
-        "a Google API key"
+        "Google API key"
     } else if snippet.contains("sk-ant-") {
-        "an Anthropic API key"
+        "Anthropic API key"
     } else if snippet.contains("sb_secret_") {
-        "a Supabase secret key"
+        "Supabase secret key"
     } else {
-        "a vendor credential token"
+        "vendor credential token"
     }
 }
 
 fn private_key_kind(snippet: &str) -> &'static str {
     if snippet.contains("OPENSSH") {
-        "an OpenSSH private key"
+        "OpenSSH private key"
     } else if snippet.contains("EC PRIVATE KEY") {
-        "an EC private key"
+        "EC private key"
     } else if snippet.contains("DSA PRIVATE KEY") {
-        "a DSA private key"
+        "DSA private key"
     } else if snippet.contains("PGP PRIVATE KEY") {
-        "a PGP private key"
+        "PGP private key"
     } else {
-        "a private key"
+        "private key"
     }
 }
 
@@ -592,6 +605,13 @@ mod p4_context_tests {
 
     // ── classify_secret_kind ─────────────────────────────────────────────────────
 
+    // W4 (2026-09-30): every `classify_secret_kind` value is now a BARE noun phrase (no
+    // leading "a"/"an") — see that function's doc comment. The article is supplied either by
+    // the authored template's own fixed adjective phrase ("a live <secret-kind>") or, where the
+    // template has nothing of its own to supply one, dynamically via `<a:secret-kind>`
+    // (`report_export::indefinite_article`). A bare value here can never double an article a
+    // template already provides.
+
     #[test]
     fn classifies_known_vendor_token_shapes_by_prefix() {
         assert_eq!(
@@ -600,7 +620,7 @@ mod p4_context_tests {
                 concat!("key = \"AK", "IAABCDEFGHIJKLMNOP\""),
                 "a.py"
             ),
-            "an AWS access key"
+            "AWS access key"
         );
         assert_eq!(
             classify_secret_kind(
@@ -608,7 +628,7 @@ mod p4_context_tests {
                 concat!("token = \"sk_li", "ve_abcdefghijklmnopqrstuvwx\""),
                 "a.py"
             ),
-            "a live Stripe secret key"
+            "live Stripe secret key"
         );
         assert_eq!(
             classify_secret_kind(
@@ -616,11 +636,11 @@ mod p4_context_tests {
                 concat!("key = \"sb_sec", "ret_abcdef123456\""),
                 "a.py"
             ),
-            "a Supabase secret key"
+            "Supabase secret key"
         );
         assert_eq!(
             classify_secret_kind("SEC-NO-VENDOR-TOKEN-1", "nothing recognizable here", "a.py"),
-            "a vendor credential token",
+            "vendor credential token",
             "an unrecognized shape must still get an honest generic label, never panic"
         );
     }
@@ -629,15 +649,15 @@ mod p4_context_tests {
     fn classifies_secret_file_kind_by_name_and_extension() {
         assert_eq!(
             classify_secret_kind("SEC-NO-SECRET-FILE-1", "", ".env"),
-            "a live `.env` file"
+            "live `.env` file"
         );
         assert_eq!(
             classify_secret_kind("SEC-NO-SECRET-FILE-1", "", "certs/prod.pem"),
-            "a private-key file"
+            "private-key file"
         );
         assert_eq!(
             classify_secret_kind("SEC-NO-SECRET-FILE-1", "", "id_rsa"),
-            "an SSH private key"
+            "SSH private key"
         );
     }
 
@@ -649,7 +669,7 @@ mod p4_context_tests {
                 concat!("-----BEGIN OPENSSH PRIV", "ATE KEY-----"),
                 "a.pem"
             ),
-            "an OpenSSH private key"
+            "OpenSSH private key"
         );
         assert_eq!(
             classify_secret_kind(
@@ -657,7 +677,7 @@ mod p4_context_tests {
                 concat!("-----BEGIN RSA PRIV", "ATE KEY-----"),
                 "a.pem"
             ),
-            "a private key"
+            "private key"
         );
     }
 
@@ -680,7 +700,7 @@ mod p4_context_tests {
         );
         assert_eq!(
             f.captures.get("secret-kind").map(String::as_str),
-            Some("a live `.env` file")
+            Some("live `.env` file")
         );
     }
 

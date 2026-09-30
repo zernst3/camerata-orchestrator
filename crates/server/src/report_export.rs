@@ -1473,10 +1473,51 @@ fn generic_placeholder_filler(token: &str) -> &'static str {
         // are always populated once the rule fires (the enrichment is unconditional and
         // pure); `history-status` is best-effort (needs a real local git checkout), so this
         // fallback is its realistic path, not just defensive dead code.
-        "secret-kind" => "a hardcoded credential",
+        // Bare noun (no leading article) — see `onboard::audit::classify_secret_kind`'s doc
+        // comment (W4, 2026-09-30): this fallback shares that contract so it can never double
+        // an article a template already supplies, and can be safely used with `<a:secret-kind>`
+        // where the template wants one computed dynamically instead.
+        "secret-kind" => "hardcoded credential",
         "gitignore-status" => "not confirmed against this repository's `.gitignore`",
         "history-status" => "not checked against this repository's commit history",
         _ => "the affected resource",
+    }
+}
+
+/// Acronym-initial letters whose NAME (when read letter-by-letter, as an acronym is) begins
+/// with a vowel SOUND even though the letter itself is a consonant: "F" is "ef", "H" is
+/// "aitch", "L" is "el", "M" is "em", "N" is "en", "R" is "ar", "S" is "es", "X" is "ex".
+/// English indefinite-article choice follows the SOUND, not the letter — "an SSH key", "an
+/// FAQ", "an HTML page", "an MRI" are all correct despite S/F/H/M being consonants. Used by
+/// [`indefinite_article`].
+const VOWEL_SOUND_ACRONYM_INITIALS: &[char] = &['F', 'H', 'L', 'M', 'N', 'R', 'S', 'X'];
+
+/// Choose `"a"` or `"an"` for the noun phrase `phrase`, based on its first word. Handles the
+/// two cases the corpus's authored templates actually need: an ordinary word (vowel-LETTER
+/// check) and an ALL-CAPS acronym read letter-by-letter (vowel-SOUND check via
+/// [`VOWEL_SOUND_ACRONYM_INITIALS`]) — e.g. `"SSH private key"` needs `"an"`, not `"a"`,
+/// because "S" is pronounced "ess". Deliberately scoped to this plain technical vocabulary —
+/// no dictionary of irregular exceptions (`"hour"`, `"European"`, …) that this corpus's
+/// substituted values never produce. See [`instantiate_remediation`]'s `<a:token>` handling,
+/// the caller this exists for.
+pub(crate) fn indefinite_article(phrase: &str) -> &'static str {
+    let first_word = phrase.split_whitespace().next().unwrap_or("");
+    let Some(first_char) = first_word.chars().next() else {
+        return "a";
+    };
+    let is_acronym = first_word.len() >= 2 && first_word.chars().all(|c| c.is_ascii_uppercase());
+    let starts_with_vowel_letter =
+        matches!(first_char.to_ascii_lowercase(), 'a' | 'e' | 'i' | 'o' | 'u');
+    // A vowel-LETTER initial sounds like a vowel whether or not the word is an acronym read
+    // letter-by-letter ("AWS" -> "ay") — that case is already covered by the plain check. The
+    // acronym exception set only needs to add the CONSONANT letters whose own name starts with
+    // a vowel sound ("S" -> "ess").
+    let vowel_sound = starts_with_vowel_letter
+        || (is_acronym && VOWEL_SOUND_ACRONYM_INITIALS.contains(&first_char));
+    if vowel_sound {
+        "an"
+    } else {
+        "a"
     }
 }
 
@@ -1491,6 +1532,19 @@ fn generic_placeholder_filler(token: &str) -> &'static str {
 /// with no matching `>` anywhere after it) is passed through unmodified rather than guessed at,
 /// since that is prose, not a token — this can only happen if a rule author literally types an
 /// unmatched `<` in remediation copy, not from anything a detector or the finding data supplies.
+///
+/// # `<a:token>` — a dynamically-chosen indefinite article (W4, 2026-09-30)
+/// A token spelled `<a:token>` (e.g. `<a:secret-kind>`) resolves `token` exactly as above, then
+/// prepends `"a "`/`"an "` (via [`indefinite_article`]) to the resolved value. Every substituted
+/// value in this corpus is now a bare noun phrase with NO leading article of its own (see
+/// `onboard::audit::classify_secret_kind`'s doc comment) — a template either supplies its own
+/// fixed article ahead of an adjective (`"a live <secret-kind>"`, correct regardless of the
+/// noun's own sound, since the article agrees with "live") or, when the placeholder opens the
+/// clause with nothing of its own in front of it, requests `<a:token>` so the RESOLVED value's
+/// own initial sound picks the right article. Before this existed, a template could only
+/// hardcode a literal article, which silently DOUBLED whenever the substituted value already
+/// carried one of its own (`"a live a vendor credential token"`) — the exact W4 bug class this
+/// mechanism removes structurally, for this token and any future one.
 pub(crate) fn instantiate_remediation(
     remediation: &str,
     path: &str,
@@ -1508,7 +1562,11 @@ pub(crate) fn instantiate_remediation(
             rest = "";
             break;
         };
-        let token = after_open[..end].trim();
+        let raw_token = after_open[..end].trim();
+        let (token, want_article) = match raw_token.strip_prefix("a:") {
+            Some(bare) => (bare.trim(), true),
+            None => (raw_token, false),
+        };
         let filled = if matches!(token, "path" | "file") && !path.trim().is_empty() {
             path.to_string()
         } else {
@@ -1518,6 +1576,11 @@ pub(crate) fn instantiate_remediation(
                 .filter(|v| !v.is_empty())
                 .map(str::to_string)
                 .unwrap_or_else(|| generic_placeholder_filler(token).to_string())
+        };
+        let filled = if want_article {
+            format!("{} {filled}", indefinite_article(&filled))
+        } else {
+            filled
         };
         out.push_str(&filled);
         rest = &after_open[end + 1..];
@@ -3907,6 +3970,129 @@ mod tests {
         captures.insert("table".to_string(), "orders".to_string());
         let text = instantiate_remediation("Review <table> now.", "a.sql", &captures);
         assert_eq!(text, "Review orders now.");
+    }
+
+    // ── W4 (2026-09-30): headline-rewriter grammar bugs ─────────────────────────────
+    //
+    // Doubled article ("a live a <vendor> secret key") and a self-referential substitution
+    // ("a live .env file that is committed to this repository" — the file described as
+    // containing itself). Both were template/variable-substitution bugs: every value
+    // `classify_secret_kind` (onboard::audit) returns is now a BARE noun phrase, and
+    // `instantiate_remediation`'s `<a:token>` syntax computes the correct article at
+    // substitution time via `indefinite_article` rather than a template hardcoding one that
+    // can collide with a value that already carries its own.
+
+    #[test]
+    fn indefinite_article_uses_the_vowel_letter_for_an_ordinary_word() {
+        assert_eq!(indefinite_article("vendor credential token"), "a");
+        assert_eq!(indefinite_article("Anthropic API key"), "an");
+        assert_eq!(indefinite_article("Java key store"), "a");
+    }
+
+    #[test]
+    fn indefinite_article_uses_the_vowel_sound_for_an_acronym_read_letter_by_letter() {
+        // "SSH" is pronounced "ess-ess-aitch" — a vowel SOUND despite "S" being a consonant
+        // LETTER. A naive first-letter check would wrongly pick "a".
+        assert_eq!(indefinite_article("SSH private key"), "an");
+        // "AWS" ("ay-double-u-ess") already starts on a vowel LETTER too, so both checks agree.
+        assert_eq!(indefinite_article("AWS access key"), "an");
+        // "PKCS#12 key store" — acronym, but "P" is not in the vowel-sound exception set.
+        assert_eq!(indefinite_article("PKCS#12 key store"), "a");
+    }
+
+    #[test]
+    fn instantiate_remediation_a_token_prepends_the_correct_article_without_doubling() {
+        let mut captures = std::collections::BTreeMap::new();
+        captures.insert("secret-kind".to_string(), "live `.env` file".to_string());
+        let text = instantiate_remediation(
+            "Your `<path>` file is <a:secret-kind> committed to this repository.",
+            ".env",
+            &captures,
+        );
+        assert_eq!(
+            text,
+            "Your `.env` file is a live `.env` file committed to this repository."
+        );
+        assert!(!text.contains("a a") && !text.contains("an a") && !text.contains("a an"));
+    }
+
+    #[test]
+    fn instantiate_remediation_a_token_falls_back_to_the_generic_bare_noun() {
+        // No "secret-kind" capture at all — `<a:secret-kind>` must still resolve through the
+        // generic fallback (also a bare noun, per its own doc comment) and prepend one article,
+        // never leave a raw token or double up.
+        let captures = std::collections::BTreeMap::new();
+        let text = instantiate_remediation("Found <a:secret-kind> here.", "a.py", &captures);
+        assert_eq!(text, "Found a hardcoded credential here.");
+    }
+
+    /// Golden-string, secret-FILE case (the self-referential bug's original shape): a real
+    /// `.env` committed to the repo. The old template read "…contains a live `.env` file that
+    /// is committed to this repository" — describing the file as containing itself. Pinned to
+    /// the exact rewritten sentence so a future edit can't reintroduce either bug silently.
+    #[tokio::test]
+    async fn w4_golden_secret_file_headline_has_no_doubled_article_and_is_not_self_referential() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let files = vec![(".env".to_string(), "SERVICE_ROLE_KEY=abc\n".to_string())];
+        let findings = crate::onboard::audit_files("owner/repo", &files);
+        let f = findings
+            .iter()
+            .find(|f| f.rule_id == "SEC-NO-SECRET-FILE-1")
+            .expect("a real committed .env must fire SEC-NO-SECRET-FILE-1")
+            .clone();
+        let (headline, _detail) =
+            resolve_floor_finding_text("SEC-NO-SECRET-FILE-1", Some(&corpus), &f, None)
+                .expect("SEC-NO-SECRET-FILE-1 must have an authored floor template");
+        assert_eq!(
+            headline,
+            "Your `.env` file is a live `.env` file committed to this repository."
+        );
+        for doubled in ["a a ", "an a ", "a an ", "a live a ", "an an "] {
+            assert!(
+                !headline.contains(doubled),
+                "doubled article {doubled:?} in {headline:?}"
+            );
+        }
+        assert!(
+            !headline.contains("contains") || !headline.contains("that is committed"),
+            "must not describe the file as containing a committed copy of itself: {headline:?}"
+        );
+    }
+
+    /// Golden-string, vendor-TOKEN case (the doubled-article bug's original shape): a
+    /// hardcoded AWS access key. The old template read "…contains a live an AWS access key"
+    /// (`"a live <secret-kind>"` with a secret-kind value that already carried its own
+    /// article) — pinned to the exact rewritten sentence.
+    #[tokio::test]
+    async fn w4_golden_vendor_token_headline_has_no_doubled_article() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let files = vec![(
+            "config.py".to_string(),
+            concat!("aws_key = \"AK", "IAABCDEFGHIJKLMNOP\"\n").to_string(),
+        )];
+        let findings = crate::onboard::audit_files("owner/repo", &files);
+        let f = findings
+            .iter()
+            .find(|f| f.rule_id == "SEC-NO-VENDOR-TOKEN-1")
+            .expect("a hardcoded AWS key must fire SEC-NO-VENDOR-TOKEN-1")
+            .clone();
+        let (headline, _detail) =
+            resolve_floor_finding_text("SEC-NO-VENDOR-TOKEN-1", Some(&corpus), &f, None)
+                .expect("SEC-NO-VENDOR-TOKEN-1 must have an authored floor template");
+        assert_eq!(
+            headline,
+            "Your `config.py` file contains a live AWS access key."
+        );
+        for doubled in ["a a ", "an a ", "a an ", "a live a ", "a live an "] {
+            assert!(
+                !headline.contains(doubled),
+                "doubled article {doubled:?} in {headline:?}"
+            );
+        }
     }
 
     // ── Item 3: what's-healthy / curated-finding citations are EXTERNAL authorities only ──
