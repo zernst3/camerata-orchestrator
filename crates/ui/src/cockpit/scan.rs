@@ -4177,7 +4177,17 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                         let incremental = !audit_full_scan();
                         // Deep tier only runs with AI; force it off in the estimate when AI is off.
                         let deep = audit_deep() && ai_on;
-                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, &audit_mode(), a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep);
+                        // The project's AI backend (docs/design/2026-09-22_per-project-backend.md)
+                        // changes how the estimator prices the shared repo digest's prompt cache
+                        // (CLI can't reuse a prior call's cache; API/batch can) — defaults to Cli,
+                        // the safe/zero-setup default, when no active project has loaded yet.
+                        let backend = active_project.as_ref().map(|p| p.backend).unwrap_or_default();
+                        // Best-effort count of multi-option rules in the proposed corpus (the
+                        // live per-rule selection set isn't available here) — sizes the one-off
+                        // alternative-recommendation pass the audit will run.
+                        let multi_option_selected =
+                            report.proposed_rules.iter().filter(|r| r.options.len() >= 2).count();
+                        let (toks, dollars, passes) = estimate_audit_cost(report.code_chars, sel, &audit_mode(), a_in, a_out, c_in, c_out, audit_thorough(), incremental, deep, backend, multi_option_selected);
                         let code_toks = human_tokens((report.code_chars as f64 / 4.0) as u64);
                         let dollar_str = if dollars < 0.01 { "<$0.01".to_string() } else { format!("~${dollars:.2}") };
                         // ACTUAL, once the audit finished and the backend reported usage.
@@ -4222,13 +4232,24 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                         span { class: "audit-cost-meta", "~{human_tokens(toks)} tokens · {passes} pass(es) · {sel} rule(s)" }
                                     }
                                     p { class: "audit-cost-note",
-                                        "Approximate, biased high (input + output priced separately; output bills ~5× and dominates findings-heavy scans). "
+                                        // Approximate in both directions now, not uniformly "biased high": output
+                                        // tokens (found issues) dominate findings-heavy scans regardless of backend,
+                                        // but the input side differs by backend. On CLI, every call is a fresh
+                                        // `claude` subprocess that can't reuse another call's prompt cache, so each
+                                        // pass pays the cache-write surcharge with no read discount to offset it —
+                                        // this estimate already prices that in, it isn't a caching UPSIDE to expect.
+                                        // On API/batch, prompt-caching across batches keeps the input side down, so
+                                        // the real bill can land below this figure.
+                                        if backend == ProjectBackend::Cli {
+                                            "Approximate — output tokens (found issues) dominate findings-heavy scans. This is priced for the CLI backend: each call is a separate subprocess with its own fresh prompt cache, so there's no cross-call caching discount to expect here (switching to the API backend, with a key configured, usually costs less for the same scan). "
+                                        } else {
+                                            "Approximate — output tokens (found issues) dominate findings-heavy scans; prompt-caching across batches keeps the input side down, so the real bill can land below this figure. "
+                                        }
                                         if incremental {
                                             "Scope: INCREMENTAL — only files changed since the last scan are billed, so the real cost is usually well below this whole-repo figure (priced over ~{code_toks} tokens, {report.files_scanned} files). Tick Full scan to re-audit everything. "
                                         } else {
                                             "Scope: FULL — every file is re-audited (~{code_toks} tokens, {report.files_scanned} files). "
                                         }
-                                        "Prompt-caching can make the actual bill lower. "
                                         "The deterministic security floor (secrets / raw-SQL / secret-URLs) runs free. "
                                         "After this, you audit PR diffs — pennies. Cheaper model or Sequential mode lowers this."
                                         if deep {
