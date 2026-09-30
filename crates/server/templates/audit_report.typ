@@ -43,11 +43,15 @@
 // already fully resolved (per-report ReportOptions.brand > CAMERATA_REPORT_BRAND env var > no
 // brand at all) by `report_export::build_report_json` — this template just renders it, never
 // invents a fallback agency name. Hyphen, not an em/en dash (house no-dash rule, see `or_na`
-// above) — "Cantus Works - Codebase Audit", not "Cantus Works \u{2014} Codebase Audit".
+// above) — "Cantus Works - Codebase Inspection", not "Cantus Works \u{2014} Codebase Inspection".
+//
+// P6 (2026-09-29): the product is "Codebase Inspection" — this literal must stay in sync with
+// `report_export::NEUTRAL_COVER_TITLE` (a Rust const the template cannot import directly; a
+// test pins the two together — see `shipped_template_has_no_hardcoded_cover_title`).
 #let brand_title = if d.cover.brand != none {
-  d.cover.brand + " - Codebase Audit"
+  d.cover.brand + " - Codebase Inspection"
 } else {
-  "Codebase Audit Report"
+  "Codebase Inspection Report"
 }
 
 #let doc_title = if d.cover.project_title != "" {
@@ -72,7 +76,7 @@
     #if is_draft [
       #align(center)[
         #box(fill: rgb("#fdeaea"), stroke: 0.75pt + rgb("#c0392b"), inset: (x: 8pt, y: 3pt), radius: 2pt)[
-          #text(size: 8.5pt, weight: "bold", fill: rgb("#c0392b"))[DRAFT: not yet reviewed by the auditor]
+          #text(size: 8.5pt, weight: "bold", fill: rgb("#c0392b"))[DRAFT: not yet reviewed by a human reviewer]
         ]
       ]
     ]
@@ -80,7 +84,7 @@
   footer: context [
     #set text(size: 8pt, fill: rgb("#808080"))
     #align(center)[
-      #if d.cover.brand != none [#d.cover.brand ]audit report (advisory, not a certification), page #counter(page).display()
+      #if d.cover.brand != none [#d.cover.brand ]inspection report (advisory, not a certification), page #counter(page).display()
       #if is_draft [ · DRAFT]
     ]
   ],
@@ -232,15 +236,37 @@
   #v(1cm)
 ]
 
+// P6 (2026-09-29): real code volume, never "0 characters". `d.cover.code_volume` is `none`
+// whenever `report_export::build_report_json` has no real line count for this run (see that
+// field's doc comment) — the row is OMITTED entirely in that case, never rendered as a zero.
+// `d.cover.code_chars` (raw character count) is deliberately NOT used here any more: a bare
+// character count reads as noise to a non-engineer reader next to a real line-count figure.
+#let code_volume_label(cv) = {
+  let base = thousands(cv.lines) + " " + plural(cv.lines, "line", "lines") + " of code"
+  if cv.by_language.len() == 0 {
+    base
+  } else {
+    base + " (" + cv.by_language.map(l => l.language + ": " + thousands(l.lines)).join(", ") + ")"
+  }
+}
+#let code_volume_rows = if d.cover.code_volume != none {
+  (([*Code volume*], [#code_volume_label(d.cover.code_volume)]),)
+} else {
+  ()
+}
+
 #table(
   columns: (auto, 1fr),
   stroke: none,
   inset: 4pt,
-  [*Repos audited*], [#d.cover.repos.join(", ")],
+  [*Repos inspected*], [#d.cover.repos.join(", ")],
   [*Files scanned*], [#thousands(d.cover.files_scanned) (#thousands(d.cover.files_excluded) excluded as noise)],
-  [*Code volume*], [#thousands(d.cover.code_chars) characters],
+  ..code_volume_rows.flatten(),
   [*Generated*], [#d.cover.generated_at],
-  [*Prepared by*], [#or_na(d.cover.prepared_by)],
+  // P6: `d.cover.prepared_by` is resolved server-side (`resolve_prepared_by`) with a real
+  // default name as the final fallback — it is NEVER blank, so this must NEVER render "N/A"
+  // (promise 1: "one person reads every finding and signs the report").
+  [*Prepared by*], [#d.cover.prepared_by],
 )
 
 // Nice-to-have: a cover stat strip so the story starts on page 1, not page 2.
@@ -252,7 +278,7 @@
 // Nice-to-have: gate the heading when there is nothing under it.
 #if d.cover.audited_refs.len() > 0 [
   #v(0.4cm)
-  #text(weight: "bold")[Audited git state]
+  #text(weight: "bold")[Inspected git state]
   #for r in d.cover.audited_refs [
     #block(above: 2pt, below: 2pt)[
       - *#r.repo*: #if r.sha == none and r.branch == none [
@@ -277,7 +303,7 @@
 #d.executive_summary.narrative
 
 #if d.executive_summary.is_override [
-  #text(size: 8.5pt, style: "italic", fill: rgb("#666666"))[Summary text supplied by the auditor.]
+  #text(size: 8.5pt, style: "italic", fill: rgb("#666666"))[Summary text supplied by the reviewer.]
 ]
 
 // FIX 4 (2026-09-13 review, "page 3 states the top-3 three times"): the executive summary used
@@ -326,7 +352,7 @@
 = Category scorecard
 
 #if d.scorecard.rows.len() == 0 [
-  No findings were produced by any audited category.
+  No findings were produced by any inspected category.
 ] else [
   #table(
     // Item 6: the critical/high/medium/low columns get a FIXED width (not "auto") because
@@ -522,10 +548,10 @@
 #d.methodology.ai_tier_note
 
 // Branding (2026-09-13 review): Audit model / Calibration model / Camerata version used to sit
-// on the cover; they now render here instead. Camerata is the auditing INSTRUMENT, legitimately
-// named where methodology is discussed, never on the client-facing cover (see `brand_title`
-// above) and never a substitute for the agency's own resolved brand.
-Scanned with Camerata v#or_na(d.cover.camerata_version). Audit model: #or_na(d.cover.audit_model). Calibration model: #or_na(d.cover.calibration_model).
+// on the cover; they now render here instead. Camerata is the inspecting INSTRUMENT,
+// legitimately named where methodology is discussed, never on the client-facing cover (see
+// `brand_title` above) and never a substitute for the agency's own resolved brand.
+Scanned with Camerata v#or_na(d.cover.camerata_version). Inspection model: #or_na(d.cover.audit_model). Calibration model: #or_na(d.cover.calibration_model).
 
 // P5: this reconciling line must never claim a human "reviewed"/"dispositioned" a finding
 // unless `d.review_state == "reviewed"` (at least one finding this session carries an explicit
@@ -534,7 +560,7 @@ Scanned with Camerata v#or_na(d.cover.camerata_version). Audit model: #or_na(d.c
 // accepted breakdown above; this line adds the two counts that used to be invisible: held for
 // review and false positives), so `candidates_reviewed` always reconciles on the page.
 #if d.review_state == "reviewed" [
-  *#str(d.methodology.candidates_reviewed) candidate #plural(d.methodology.candidates_reviewed, "finding", "findings") reviewed by the auditor; #str(d.methodology.excluded_false_positive) dispositioned as false positives and excluded; #str(d.methodology.held_for_review) held for further review.*
+  *#str(d.methodology.candidates_reviewed) candidate #plural(d.methodology.candidates_reviewed, "finding", "findings") reviewed by a human reviewer; #str(d.methodology.excluded_false_positive) dispositioned as false positives and excluded; #str(d.methodology.held_for_review) held for further review.*
 ] else [
   *#str(d.methodology.candidates_reviewed) candidate #plural(d.methodology.candidates_reviewed, "finding", "findings") produced by the engine; #str(d.methodology.held_for_review) held for a human reviewer's judgment call; #str(d.methodology.excluded_false_positive) auto-excluded as likely false positives. This export has not yet had a human triage pass.*
 ]
@@ -550,4 +576,17 @@ Not performed in this engagement:
 
 #block(stroke: 0.5pt + rgb("#cccccc"), inset: 10pt, radius: 2pt)[
   #d.disclaimer
+]
+
+// P6 (2026-09-29), promise 1 ("one person reads every finding and signs the report"): a
+// signature block naming the real preparer. `d.cover.prepared_by` is resolved server-side
+// (`report_export::resolve_prepared_by`) with a real default name as its final fallback — it
+// is NEVER blank, so this block always names an actual person, never "N/A".
+#v(0.5cm)
+#block(stroke: 0.75pt + rgb("#333333"), inset: 10pt, radius: 2pt, width: 100%)[
+  #text(size: 9pt)[
+    Prepared and signed off by: #text(weight: "bold")[#d.cover.prepared_by]
+    #linebreak()
+    #text(fill: rgb("#666666"))[#d.cover.generated_at]
+  ]
 ]

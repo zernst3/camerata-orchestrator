@@ -14974,11 +14974,13 @@ async fn export_audit_report(
         .into_response()
 }
 
-/// `camerata-audit-{repo-slug}-{short-sha}` (no extension) — the shared filename stem for
-/// EVERY audit-export artifact (the standalone PDF, and the product-export ZIP; the
+/// `camerata-inspection-{repo-slug}-{short-sha}` (no extension) — the shared filename stem for
+/// EVERY inspection-export artifact (the standalone PDF, and the product-export ZIP; the
 /// workbook inside the zip gets its own `-findings` infix, see [`export_product`]). Kept as
 /// ONE function so the PDF route and the product-export route can never derive two
-/// different names for what is, underneath, the exact same scan.
+/// different names for what is, underneath, the exact same scan. P6 (2026-09-29): renamed from
+/// `camerata-audit-*` — the product is "Codebase Inspection" and this stem is client-visible
+/// (the actual downloaded filename), not an internal-only identifier.
 fn report_filename_stem(report: &crate::onboard::ScanReport) -> String {
     let repo_slug = report
         .repos
@@ -14993,7 +14995,7 @@ fn report_filename_stem(report: &crate::onboard::ScanReport) -> String {
         .and_then(|r| r.sha.as_deref())
         .map(|s| s.chars().take(7).collect::<String>())
         .unwrap_or_else(|| "nosha".to_string());
-    format!("camerata-audit-{repo_slug}-{short_sha}")
+    format!("camerata-inspection-{repo_slug}-{short_sha}")
 }
 
 /// `POST /api/projects/:id/product-export` — the primary export button's target: a ZIP
@@ -15154,10 +15156,10 @@ async fn export_product(
 /// paragraph).
 fn product_export_readme(stem: &str, json: &crate::report_export::AuditReportJson) -> String {
     format!(
-        "Camerata Audit — Product Export\n\
-         ================================\n\
+        "Codebase Inspection - Product Export\n\
+         =====================================\n\
          \n\
-         This ZIP contains three artifacts derived from the SAME audit scan:\n\
+         This ZIP contains three artifacts derived from the SAME inspection scan:\n\
          \n\
          {stem}.pdf\n\
          \x20 The curated NARRATIVE report: cover, executive summary, category scorecard,\n\
@@ -15169,8 +15171,8 @@ fn product_export_readme(stem: &str, json: &crate::report_export::AuditReportJso
          {stem}-findings.xlsx\n\
          \x20 The COMPLETE working dataset: every finding as its own row, sortable and\n\
          \x20 filterable, with a per-category sheet, a Dependencies sheet, a Coverage sheet\n\
-         \x20 (every rule audited this run, found or not), and a False Positives sheet\n\
-         \x20 (with the auditor's exclusion reasons — nothing is silently dropped). Intended\n\
+         \x20 (every rule inspected this run, found or not), and a False Positives sheet\n\
+         \x20 (with the reviewer's exclusion reasons, nothing is silently dropped). Intended\n\
          \x20 for the engineers doing remediation.\n\
          \n\
          findings.json\n\
@@ -15178,10 +15180,10 @@ fn product_export_readme(stem: &str, json: &crate::report_export::AuditReportJso
          \x20 rows (severity, category, repo/path/line, snippet, detail, recommended fix,\n\
          \x20 disposition, effort, confidence, citation, ...), wrapped with the report's\n\
          \x20 provenance and summary counts. Intended for scripting / CI ingestion / a\n\
-         \x20 client's own tooling — never disagrees with the xlsx, since both are built\n\
+         \x20 client's own tooling. Never disagrees with the xlsx, since both are built\n\
          \x20 from the same pass over the scan.\n\
          \n\
-         Repos audited: {}\n\
+         Repos inspected: {}\n\
          Generated: {}\n\
          \n\
          {}\n",
@@ -22516,6 +22518,36 @@ mod tests {
         assert!(readme.contains(&pdf_name), "{readme}");
         assert!(readme.contains(&xlsx_name), "{readme}");
         assert!(readme.contains("findings.json"), "{readme}");
+        // P6 (2026-09-29): the product is "Codebase Inspection" — the README names it and
+        // never says "audit"/"Audit" (the disclaimer paragraph it embeds verbatim is itself
+        // audit-free per `report_export`'s own contract test).
+        assert!(readme.contains("Codebase Inspection"), "{readme}");
+        assert!(readme.contains("Repos inspected:"), "{readme}");
+        assert!(
+            !readme.to_lowercase().contains("audit"),
+            "README.txt still says audit: {readme}"
+        );
+    }
+
+    /// Pure unit test for `product_export_readme` — doesn't need `typst` on PATH (unlike the
+    /// full-zip e2e test above), so it always runs. P6 (2026-09-29): product name + no "audit".
+    #[test]
+    fn product_export_readme_names_the_product_and_never_says_audit() {
+        let report = make_scan_report("SEC-NO-HARDCODED-SECRETS-1");
+        let json = crate::report_export::build_report_json(
+            &report,
+            &std::collections::HashMap::new(),
+            None,
+            &crate::report_export::ReportOptions::default(),
+        );
+        let readme = product_export_readme("acme-inspection", &json);
+        assert!(readme.contains("Codebase Inspection"), "{readme}");
+        assert!(readme.contains("Repos inspected:"), "{readme}");
+        assert!(readme.contains("acme-inspection.pdf"), "{readme}");
+        assert!(
+            !readme.to_lowercase().contains("audit"),
+            "README.txt still says audit: {readme}"
+        );
     }
 
     /// Regression for the zip-crate-default-timestamp bug: with `SimpleFileOptions::default()`

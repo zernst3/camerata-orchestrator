@@ -106,7 +106,18 @@ pub const REPORT_PREPARED_BY_ENV: &str = "CAMERATA_REPORT_PREPARED_BY";
 /// and NEVER the word "Camerata" (Camerata is the instrument, named only in Methodology; see
 /// the Branding section of the design doc). Exported so the template-generation site and any
 /// test asserting on the exact fallback string share one literal.
-pub const NEUTRAL_COVER_TITLE: &str = "Codebase Audit Report";
+///
+/// P6 (2026-09-29): the product is "Codebase Inspection" — client-facing copy says
+/// "inspection"/"Inspection", never "audit"/"Audit" (internal code identifiers, rule ids, and
+/// doc-comment cross-references are exempt; see the product-hardening plan's P6 section).
+pub const NEUTRAL_COVER_TITLE: &str = "Codebase Inspection Report";
+
+/// The standing default for [`ReportOptions::prepared_by`] / [`REPORT_PREPARED_BY_ENV`] when
+/// NEITHER resolves to a non-blank value — P6 (2026-09-29): the cover's "Prepared by" row must
+/// NEVER render "N/A" (promise 1: "one person reads every finding and signs the report"), so
+/// the ultimate fallback is a real name, not an empty string. A per-report `prepared_by` or the
+/// env var still wins over this (see [`resolve_prepared_by`]'s precedence).
+pub const DEFAULT_PREPARED_BY: &str = "Zachary Ernst, Cantus Works";
 
 /// Precedence resolver: the per-report field wins when non-blank, else the env value when
 /// non-blank, else `None`/empty. Pure — takes the env value as an explicit `Option<&str>`
@@ -132,10 +143,13 @@ pub(crate) fn resolve_brand(opts: &ReportOptions, env_brand: Option<&str>) -> Op
 }
 
 /// Resolve the report's "prepared by" line: per-report `ReportOptions::prepared_by` >
-/// `CAMERATA_REPORT_PREPARED_BY` env var > empty (the cover table's `or_na` already renders an
-/// empty string as "N/A").
+/// `CAMERATA_REPORT_PREPARED_BY` env var > [`DEFAULT_PREPARED_BY`]. P6 (2026-09-29): the last
+/// step used to be an empty string, which the cover table's `or_na` rendered as "Prepared by
+/// N/A" — a report promising "one person reads every finding and signs the report" must never
+/// say nobody prepared it, so the floor is a real name now, never blank.
 pub(crate) fn resolve_prepared_by(opts: &ReportOptions, env_prepared_by: Option<&str>) -> String {
-    resolve_with_env_default(&opts.prepared_by, env_prepared_by).unwrap_or_default()
+    resolve_with_env_default(&opts.prepared_by, env_prepared_by)
+        .unwrap_or_else(|| DEFAULT_PREPARED_BY.to_string())
 }
 
 impl ReportOptions {
@@ -252,10 +266,10 @@ pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Dis
 ///
 /// Gates two things:
 /// - The narrative voice (`default_narrative`): `Raw` describes what the ENGINE did and never
-///   claims a human reviewed or dispositioned anything; `Reviewed` describes the auditor's
+///   claims a human reviewed or dispositioned anything; `Reviewed` describes the reviewer's
 ///   actual dispositions.
-/// - The PDF's per-page "DRAFT: not yet reviewed by the auditor" banner (`Raw` only) — see the
-///   Typst template's `d.review_state` read.
+/// - The PDF's per-page "DRAFT: not yet reviewed" banner (`Raw` only) — see the Typst
+///   template's `d.review_state` read.
 ///
 /// See `docs/plans/2026-09-29_codebase-inspection-hardening.md`'s P5 section: the bug this
 /// fixes is a raw (nobody-reviewed) export whose narrative said "N were reviewed... 0 were
@@ -286,15 +300,16 @@ impl ReviewState {
 /// bucket by construction; see `matrix_bucket`'s doc comment).
 ///
 /// # Never fabricate a client disposition
-/// A real audit often ships before any client conversation has happened (e.g. a pre-engagement
-/// scan of an OSS repo, or the very first draft of a fresh engagement) — there is no "team" to
-/// have confirmed anything. `confirmed_by_client` (from `DispositionWire`, default `false`) is
-/// the ONLY thing that unlocks "Accepted risk: {reason}" wording for an `Ignored` finding; when
-/// it is `false` (the safe default), the reader sees "Needs client confirmation" instead, no
-/// matter how confident the auditor's own `reason` prose reads — the auditor's proposed
-/// rationale is still surfaced, but honestly attributed to the auditor, never invented as a
-/// client's words. This is a deliberate rendering constraint, not just a fixture-content fix:
-/// the serializer itself cannot produce "confirmed" language without that explicit flag.
+/// A real inspection often ships before any client conversation has happened (e.g. a
+/// pre-engagement scan of an OSS repo, or the very first draft of a fresh engagement) — there
+/// is no "team" to have confirmed anything. `confirmed_by_client` (from `DispositionWire`,
+/// default `false`) is the ONLY thing that unlocks "Accepted risk: {reason}" wording for an
+/// `Ignored` finding; when it is `false` (the safe default), the reader sees "Needs client
+/// confirmation" instead, no matter how confident the reviewer's own `reason` prose reads — the
+/// reviewer's proposed rationale is still surfaced, but honestly attributed to the reviewer,
+/// never invented as a client's words. This is a deliberate rendering constraint, not just a
+/// fixture-content fix: the serializer itself cannot produce "confirmed" language without that
+/// explicit flag.
 ///
 /// No em/en dashes (house style for this client deliverable) — see `bucket_title`.
 pub(crate) fn disposition_label(
@@ -318,7 +333,7 @@ pub(crate) fn disposition_label(
             } else if reason.trim().is_empty() {
                 "Needs client confirmation".to_string()
             } else {
-                format!("Needs client confirmation (auditor's proposed rationale: {reason})")
+                format!("Needs client confirmation (reviewer's proposed rationale: {reason})")
             }
         }
         Disposition::TechDebtNow => "Tech debt, resolve now".to_string(),
@@ -870,9 +885,9 @@ pub const AUDIT_REPORT_DISCLAIMER: &str =
     "This report is an advisory architectural and security assessment based on static \
      analysis of the repository state identified on the cover page. It is not a \
      certification, warranty, or guarantee of security. Findings reflect evidence present in \
-     the audited code at scan time and may not represent the live production system. All \
+     the inspected code at scan time and may not represent the live production system. All \
      remediation should be validated by the client's engineering team against the live \
-     environment. The preparing auditor accepts no liability for actions taken on the basis \
+     environment. The preparing reviewer accepts no liability for actions taken on the basis \
      of this report.";
 
 /// FIX 3 (2026-09-13 review) — a short, FACTUAL "what happens next" paragraph, rendered in a
@@ -883,11 +898,11 @@ pub const AUDIT_REPORT_DISCLAIMER: &str =
 /// comment).
 pub const NEXT_STEPS_NOTE: &str =
     "There are three steps from here. First, the do-now items above get fixed, by your own \
-     team, an outside contractor, or the auditor, at the rate set out in the engagement. \
-     Second, a retest: the auditor re-scans the repository once the fixes are in and signs a \
-     short addendum confirming each item is closed. Third, ongoing coverage: a monthly delta \
-     rescan plus on-call architect availability for anything new the codebase introduces \
-     between engagements.";
+     team, an outside contractor, or the reviewing engineer, at the rate set out in the \
+     engagement. Second, a retest: the reviewing engineer re-scans the repository once the \
+     fixes are in and signs a short addendum confirming each item is closed. Third, ongoing \
+     coverage: a monthly delta rescan plus on-call architect availability for anything new the \
+     codebase introduces between engagements.";
 
 // ── FIX 7 business-impact map (§"If you only do three things this week") ───────────
 
@@ -1750,13 +1765,14 @@ pub(crate) fn defect_headline(detail: &str, fallback: &str) -> String {
 /// # P5: review-state honesty + full reconciliation
 /// `default_narrative` now takes `review_state` and branches on it — this is the fix for a
 /// raw (nobody has reviewed anything this run) export whose narrative used to claim "N were
-/// reviewed... 0 were dispositioned as false positives by the auditor" no matter what, even
-/// when NO auditor had ever opened the report. See [`ReviewState`]'s doc comment for the
+/// reviewed... 0 were dispositioned as false positives by the reviewer" no matter what, even
+/// when NO reviewer had ever opened the report. See [`ReviewState`]'s doc comment for the
 /// derivation.
 /// - `Raw`: describes what the ENGINE did ("The engine analyzed N files and produced C
-///   candidate findings..."). NEVER the phrase "reviewed by the auditor" or "dispositioned by
-///   the auditor" — grep-tested (`raw_narrative_never_claims_auditor_review`).
-/// - `Reviewed`: describes the auditor's actual dispositions, same voice as before this pass.
+///   candidate findings..."). NEVER the phrase "reviewed by a human reviewer" or
+///   "dispositioned by a human reviewer" — grep-tested (see
+///   `raw_export_carries_the_draft_flag_and_a_fully_reconciling_engine_voiced_narrative`).
+/// - `Reviewed`: describes the reviewer's actual dispositions, same voice as before this pass.
 ///
 /// In BOTH states the narrative reconciles EVERY candidate finding, with each number shown:
 /// `candidates_reviewed == curated_total + held_for_review + excluded_fp +
@@ -1812,7 +1828,7 @@ fn default_narrative(
             if excluded_fp == 1 { "was" } else { "were" },
         ),
         ReviewState::Reviewed => format!(
-            "{} were reviewed by the auditor; {} {} dispositioned as false positives and \
+            "{} were reviewed by a human reviewer; {} {} dispositioned as false positives and \
              excluded entirely from this report. Of the remaining {}, {curated_total} {} \
              curated for action ({do_now} do now, {do_next} do next, {plan} planned, \
              {accepted} accepted as risk) and {held_for_review} {} held for further review.\
@@ -1833,24 +1849,24 @@ fn default_narrative(
 
 /// P5: the AI-tier Methodology paragraph must never claim a human already reviewed advisory
 /// findings when this export is [`ReviewState::Raw`] — the paragraph used to unconditionally
-/// say "Every advisory finding is reviewed and dispositioned by a human auditor before it
+/// say "Every advisory finding is reviewed and dispositioned by a human reviewer before it
 /// appears here", which is a flat fabrication on a raw, pre-review export. Neither branch
-/// contains the literal phrases "reviewed by the auditor" or "dispositioned by the auditor" in
-/// the `Raw` case — grep-tested alongside `default_narrative`'s own gate.
+/// contains the literal phrases "reviewed by a human reviewer" or "dispositioned by a human
+/// reviewer" in the `Raw` case — grep-tested alongside `default_narrative`'s own gate.
 fn ai_tier_note_for(review_state: ReviewState) -> String {
     match review_state {
         ReviewState::Reviewed => {
-            "A second, advisory tier uses a calibrated language-model audit for findings that \
+            "A second, advisory tier uses a calibrated language-model review for findings that \
              require semantic judgment. Every advisory finding in this export has been \
-             reviewed and dispositioned by a human auditor; lower-confidence items are marked \
+             reviewed and dispositioned by a human reviewer; lower-confidence items are marked \
              needs-review."
                 .to_string()
         }
         ReviewState::Raw => {
-            "A second, advisory tier uses a calibrated language-model audit for findings that \
+            "A second, advisory tier uses a calibrated language-model review for findings that \
              require semantic judgment. This export has not yet had a human triage pass: every \
-             advisory finding here is the engine's own calibrated output, awaiting the \
-             auditor's review before any is accepted, marked tech debt, or ruled out. \
+             advisory finding here is the engine's own calibrated output, awaiting a human \
+             reviewer's judgment before any is accepted, marked tech debt, or ruled out. \
              Lower-confidence items are marked needs-review."
                 .to_string()
         }
@@ -1895,7 +1911,7 @@ fn total_hours_label(items: &[&FindingRefJson]) -> String {
     }
     let counted = items.len() - uncounted;
     if counted == 0 {
-        return "None of these items has a calibrated effort estimate yet; ask the auditor for \
+        return "None of these items has a calibrated effort estimate yet; ask the reviewer for \
                 a rough scoping pass before pricing remediation."
             .to_string();
     }
@@ -2721,7 +2737,7 @@ mod tests {
 
         assert_eq!(
             json.curated_findings[0].sites[0].disposition,
-            "Needs client confirmation (auditor's proposed rationale: looks like defense-in-depth only)"
+            "Needs client confirmation (reviewer's proposed rationale: looks like defense-in-depth only)"
         );
         assert_eq!(json.matrix.accepted.len(), 1, "still an accepted-bucket disposition");
     }
@@ -4799,7 +4815,10 @@ mod tests {
         );
         let empty = empty_opts();
         assert_eq!(resolve_prepared_by(&empty, Some("Someone Else")), "Someone Else");
-        assert_eq!(resolve_prepared_by(&empty, None), "");
+        // P6: with neither the per-report field nor the env var set, the resolver falls all
+        // the way to the real default name, never an empty string ("Prepared by N/A" is the
+        // bug this closes).
+        assert_eq!(resolve_prepared_by(&empty, None), DEFAULT_PREPARED_BY);
     }
 
     #[test]
@@ -4827,7 +4846,7 @@ mod tests {
 
     #[test]
     fn neutral_cover_title_constant_matches_the_documented_fallback_string() {
-        assert_eq!(NEUTRAL_COVER_TITLE, "Codebase Audit Report");
+        assert_eq!(NEUTRAL_COVER_TITLE, "Codebase Inspection Report");
     }
 
     #[test]
@@ -5284,14 +5303,14 @@ mod tests {
         assert!(n.contains("0 were auto-excluded"), "{n}");
 
         // Never claims a human reviewed or dispositioned anything.
-        assert!(!n.contains("reviewed by the auditor"), "{n}");
-        assert!(!n.contains("dispositioned by the auditor"), "{n}");
+        assert!(!n.contains("reviewed by a human reviewer"), "{n}");
+        assert!(!n.contains("dispositioned by a human reviewer"), "{n}");
         assert!(!n.contains("were reviewed"), "{n}");
         assert!(
             !json
                 .methodology
                 .ai_tier_note
-                .contains("reviewed by the auditor"),
+                .contains("reviewed by a human reviewer"),
             "{}",
             json.methodology.ai_tier_note
         );
@@ -5299,14 +5318,14 @@ mod tests {
             !json
                 .methodology
                 .ai_tier_note
-                .contains("dispositioned by the auditor"),
+                .contains("dispositioned by a human reviewer"),
             "{}",
             json.methodology.ai_tier_note
         );
     }
 
-    /// The P5 reviewed-export contract: auditor dispositions actually appear, the narrative
-    /// reconciles, no draft flag, and auditor-voice phrasing IS allowed (because it's true).
+    /// The P5 reviewed-export contract: reviewer dispositions actually appear, the narrative
+    /// reconciles, no draft flag, and reviewed-voice phrasing IS allowed (because it's true).
     #[test]
     fn reviewed_export_reconciles_in_auditor_voice_with_no_draft_flag() {
         let mut ignored = finding("SEC-1", "a.rs", 1, "critical"); // -> accepted, curated
@@ -5350,7 +5369,7 @@ mod tests {
 
         let n = &json.executive_summary.narrative;
         assert!(
-            n.contains("3 candidate findings were reviewed by the auditor"),
+            n.contains("3 candidate findings were reviewed by a human reviewer"),
             "{n}"
         );
         assert!(n.contains("1 was dispositioned as false positives"), "{n}");
@@ -5359,7 +5378,7 @@ mod tests {
         assert!(
             json.methodology
                 .ai_tier_note
-                .contains("reviewed and dispositioned by a human auditor"),
+                .contains("reviewed and dispositioned by a human reviewer"),
             "{}",
             json.methodology.ai_tier_note
         );
@@ -5388,7 +5407,7 @@ mod tests {
             "the draft banner (and its footer echo) must be gated on d.review_state"
         );
         assert!(
-            template.contains("DRAFT: not yet reviewed by the auditor"),
+            template.contains("DRAFT: not yet reviewed by a human reviewer"),
             "the required banner text must be present verbatim"
         );
         // The gate must live inside `#set page(...)`'s `header:` so it renders on EVERY page,
@@ -5448,5 +5467,228 @@ mod tests {
             .await
             .expect("compile_pdf must succeed for a reviewed export");
         assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    // ── P6 (2026-09-29): cover, branding, product name ──────────────────────────────
+
+    /// The cover title: brand_title (both the branded and neutral forms) must say
+    /// "Codebase Inspection", never "Codebase Audit" — see `NEUTRAL_COVER_TITLE` and the
+    /// template's `brand_title` binding.
+    #[test]
+    fn shipped_template_brand_title_says_codebase_inspection_not_audit() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(template.contains(NEUTRAL_COVER_TITLE));
+        assert!(template.contains(" - Codebase Inspection"));
+        assert!(!template.contains("Codebase Audit"));
+    }
+
+    /// The per-page footer keeps "(advisory, not a certification)" verbatim (explicitly
+    /// required to survive the rebrand) but the word in front of it is now "inspection".
+    #[test]
+    fn shipped_template_footer_says_inspection_report_and_keeps_the_advisory_caveat() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(template.contains("inspection report (advisory, not a certification)"));
+        assert!(!template.contains("audit report (advisory"));
+    }
+
+    /// The draft banner (raw-export only) no longer attributes the pending review to "the
+    /// auditor" — client-facing role language is "a human reviewer" throughout.
+    #[test]
+    fn shipped_template_draft_banner_says_reviewer_not_auditor() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(template.contains("DRAFT: not yet reviewed by a human reviewer"));
+        assert!(!template.contains("reviewed by the auditor"));
+    }
+
+    /// A signature block exists (promise 1: "one person reads every finding and signs the
+    /// report") and it renders the real, resolved preparer name.
+    #[test]
+    fn shipped_template_has_a_signature_block_naming_the_preparer() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(template.contains("Prepared and signed off by"));
+        assert!(template.contains("d.cover.prepared_by"));
+    }
+
+    /// Contract test: no CLIENT-FACING string in the shipped template says "audit"/"Audit".
+    /// Typst line comments (developer-facing design commentary, never rendered) are stripped
+    /// first; the three JSON field-accessor tokens that happen to spell "audit" as part of a
+    /// Rust struct field name (`d.cover.audited_refs`, `d.cover.audit_model`,
+    /// `row.audited_rules` — internal identifiers, exempt per the plan) are scrubbed before the
+    /// word-boundary scan so they don't produce a false positive.
+    #[test]
+    fn shipped_template_client_facing_text_has_no_audit_word() {
+        let template = include_str!("../templates/audit_report.typ");
+        let code_only: String = template
+            .lines()
+            .map(|line| line.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let scrubbed = code_only
+            .replace("d.cover.audited_refs", "")
+            .replace("d.cover.audit_model", "")
+            .replace("row.audited_rules", "");
+        let re = regex::Regex::new(r"(?i)\baudit\w*\b").unwrap();
+        let hits: Vec<&str> = re.find_iter(&scrubbed).map(|m| m.as_str()).collect();
+        assert!(
+            hits.is_empty(),
+            "client-facing template text still says audit: {hits:?}"
+        );
+    }
+
+    /// Contract test: none of the authored, client-facing prose this module PRODUCES (the
+    /// disclaimer, the next-steps note, both methodology AI-tier notes, both narrative voices,
+    /// and the disposition labels) says "audit"/"Audit". Internal identifiers/rule ids are a
+    /// separate, non-rendered surface and are exempt.
+    #[test]
+    fn no_client_facing_authored_string_contains_the_word_audit() {
+        let candidates: Vec<String> = vec![
+            AUDIT_REPORT_DISCLAIMER.to_string(),
+            NEXT_STEPS_NOTE.to_string(),
+            ai_tier_note_for(ReviewState::Raw),
+            ai_tier_note_for(ReviewState::Reviewed),
+            default_narrative(ReviewState::Raw, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0),
+            default_narrative(ReviewState::Reviewed, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0),
+            disposition_label(Disposition::Ignored, "some reason", "accepted", false),
+            disposition_label(Disposition::Ignored, "some reason", "accepted", true),
+            disposition_label(Disposition::Unresolved, "", "do_now", false),
+        ];
+        for s in &candidates {
+            assert!(
+                !s.to_lowercase().contains("audit"),
+                "client-facing string still says audit: {s}"
+            );
+        }
+    }
+
+    /// "Prepared by" must never render blank/"N/A" with default (un-mutated) options — the
+    /// resolver's floor is a real name (promise 1).
+    #[test]
+    fn cover_prepared_by_is_never_blank_with_default_options() {
+        let f = finding("SEC-1", "a.rs", 1, "low");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.cover.prepared_by, DEFAULT_PREPARED_BY);
+        assert_ne!(json.cover.prepared_by, "");
+    }
+
+    /// Zero real code volume (no local file was ever read this run) must HIDE the cover's
+    /// code-volume field entirely — never render a zero.
+    #[test]
+    fn cover_code_volume_is_none_when_the_scan_has_no_real_line_count() {
+        let f = finding("SEC-1", "a.rs", 1, "low");
+        let mut report = report_with(vec![f], vec![]);
+        report.code_lines = 0;
+        report.code_lines_by_language = Vec::new();
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert!(
+            json.cover.code_volume.is_none(),
+            "zero code_lines must hide the row, not print a zero"
+        );
+    }
+
+    /// A real line count produces `Some(CodeVolumeJson)` with the per-language breakdown
+    /// carried straight through from the scan (`report_with`'s fixture sets 400 lines split
+    /// TypeScript 300 / Rust 100).
+    #[test]
+    fn cover_code_volume_is_some_with_real_lines_and_language_breakdown_when_known() {
+        let f = finding("SEC-1", "a.rs", 1, "low");
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let cv = json
+            .cover
+            .code_volume
+            .expect("a nonzero code_lines must produce Some");
+        assert_eq!(cv.lines, 400);
+        assert_eq!(cv.by_language.len(), 2);
+        assert_eq!(cv.by_language[0].language, "TypeScript");
+        assert_eq!(cv.by_language[0].lines, 300);
+        assert_eq!(cv.by_language[1].language, "Rust");
+        assert_eq!(cv.by_language[1].lines, 100);
+    }
+
+    /// The template never has an unconditional "characters"-suffixed render of the raw char
+    /// count any more (the bug: "0 characters" always rendered regardless of value) — the row
+    /// is now built from the gated `code_volume_rows` array.
+    #[test]
+    fn shipped_template_never_unconditionally_renders_code_chars_as_characters() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(
+            !template.contains("thousands(d.cover.code_chars) characters"),
+            "the old unconditional zero-prone render must be gone"
+        );
+        assert!(template.contains("code_volume_rows"));
+        assert!(template.contains("d.cover.code_volume"));
+    }
+
+    /// P6: extends the existing P1 e2e coverage
+    /// (`p1_e2e_cover_counts_and_security_finding_survive_post_merge`, which already pins
+    /// `cover.stats.critical`) to the high/medium buckets: two raw findings at the exact same
+    /// file+line must merge into ONE finding before the cover ever counts severities, so
+    /// `cover.stats.high` reads 1, not 2.
+    #[tokio::test]
+    async fn cover_stats_high_bucket_also_reflects_post_merge_counts() {
+        let cors_code = "app.use(cors())";
+        let mut det = finding("ARCH-MIDDLEWARE-FIRST-1", "middleware.ts", 12, "high");
+        det.snippet = cors_code.to_string();
+        let mut sibling = finding("SOME-OTHER-HIGH-RULE", "middleware.ts", 12, "high");
+        sibling.snippet = cors_code.to_string();
+        let files = vec![("middleware.ts".to_string(), cors_code.to_string())];
+        let merged = crate::ai_audit::merge_semantic_groups(
+            crate::ai_audit::merge_by_location(vec![det, sibling], &files),
+            &files,
+        );
+        assert_eq!(
+            merged.len(),
+            1,
+            "two raw findings at the same file+line must merge to one before counting"
+        );
+        let report = report_with(merged, vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(
+            json.cover.stats.high, 1,
+            "the merged high finding must count once, not twice"
+        );
+        assert_eq!(json.cover.stats.critical, 0);
+        assert_eq!(json.cover.stats.medium, 0);
+    }
+
+    /// End-to-end (typst-present-only): a scan with NO real code-volume figure must still
+    /// compile cleanly through the template — the `code_volume_rows` conditional is not a
+    /// Typst syntax trap on the empty-array branch.
+    #[tokio::test]
+    async fn compile_pdf_succeeds_with_zero_code_lines_hiding_the_code_volume_row() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_succeeds_with_zero_code_lines_hiding_the_code_volume_row: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let f = finding("SEC-NO-HARDCODED-SECRETS-1", "src/a.rs", 10, "critical");
+        let mut report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
+        report.code_lines = 0;
+        report.code_lines_by_language = Vec::new();
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert!(json.cover.code_volume.is_none());
+
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed with the code-volume row hidden");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
+    /// `sample-report/audit_report.typ` is a PREVIEW COPY of the shipped template (used to
+    /// regenerate the sample PDF/PNGs) and must stay byte-identical to it — a drifted copy
+    /// means the sample deliverable stops representing what the app actually ships. This
+    /// caught real drift as of this pass (the sample copy predated the P2/P6 template edits).
+    #[test]
+    fn sample_report_template_copy_is_byte_identical_to_the_shipped_template() {
+        let shipped = include_str!("../templates/audit_report.typ");
+        let sample = include_str!("../../../sample-report/audit_report.typ");
+        assert_eq!(
+            shipped, sample,
+            "sample-report/audit_report.typ has drifted from the shipped template — copy the \
+             shipped file over it"
+        );
     }
 }
