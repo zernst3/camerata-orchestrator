@@ -505,6 +505,13 @@ pub struct ExecutiveSummaryJson {
     pub plan: usize,
     pub accepted: usize,
     pub open: usize,
+    /// W6: one explicit sentence per audit pass that FAILED or timed out this run (e.g. the
+    /// alternative-recommendation pass hitting the CLI hang timeout) — see
+    /// `failed_pass_disclosures`'s doc comment. Empty on the happy path. Rendered in the
+    /// summary so a reader never has to infer a gap from an absence; the SAME strings also
+    /// render in `MethodologyJson::failed_passes` for the more technical section.
+    #[serde(default)]
+    pub failed_passes: Vec<String>,
 }
 
 /// Item 7: "If you only do three things this week" — a half-page box right after the
@@ -848,6 +855,12 @@ pub struct MethodologyJson {
     pub ai_tier_note: String,
     pub not_done: Vec<String>,
     pub severity_scale_note: String,
+    /// W6: same disclosure list as `ExecutiveSummaryJson::failed_passes` — see
+    /// `failed_pass_disclosures`'s doc comment. Rendered here too (never JUST in the
+    /// summary) so the more technical Methodology section also states explicitly that a pass
+    /// did not run, rather than the reader having to notice its absence from the findings.
+    #[serde(default)]
+    pub failed_passes: Vec<String>,
 }
 
 /// The serializer's single output type — mirrors the §4 anatomy sections in
@@ -889,6 +902,31 @@ pub const AUDIT_REPORT_DISCLAIMER: &str =
      remediation should be validated by the client's engineering team against the live \
      environment. The preparing reviewer accepts no liability for actions taken on the basis \
      of this report.";
+
+/// W6: turn every [`crate::ai_audit::FailedPass`] this scan recorded into ONE explicit,
+/// factual disclosure sentence — e.g. "Rule-alternative recommendations for owner/repo: not
+/// computed — pass failed (Claude CLI timed out after 300s...)." Shared verbatim between
+/// `ExecutiveSummaryJson::failed_passes` and `MethodologyJson::failed_passes` (see
+/// [`build_report_json`]) so a reader hits the same honest statement whether they read the
+/// summary or the methodology — never a silent gap in either. Empty input yields an empty
+/// list, which both sections render as nothing (no fabricated "everything ran cleanly"
+/// claim needed — the absence of a disclosure IS the claim, because every real gap here is
+/// always disclosed when one exists).
+fn failed_pass_disclosures(failed_passes: &[crate::ai_audit::FailedPass]) -> Vec<String> {
+    failed_passes
+        .iter()
+        .map(|f| {
+            let mut pass = f.pass.clone();
+            if let Some(first) = pass.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            format!(
+                "{pass} for {}: not computed — pass failed ({}).",
+                f.repo, f.reason
+            )
+        })
+        .collect()
+}
 
 /// FIX 3 (2026-09-13 review) — a short, FACTUAL "what happens next" paragraph, rendered in a
 /// new section before Methodology. Deliberately non-pitch: no urgency language, no claim about
@@ -2404,6 +2442,9 @@ pub fn build_report_json(
     // `default_narrative`'s doc comment).
     let top3_do_now: Vec<&FindingRefJson> = do_now_sorted.iter().take(3).collect();
     let dependency_advisories = dependency_snapshot.rows.len();
+    // W6: never a silent omission — one explicit sentence per pass that failed/timed out
+    // this scan, shared verbatim between the summary and the methodology below.
+    let failed_pass_notes = failed_pass_disclosures(&report.failed_passes);
     let (narrative, is_override) = match &opts.executive_summary_override {
         Some(text) if !text.trim().is_empty() => (text.clone(), true),
         _ => (
@@ -2436,6 +2477,7 @@ pub fn build_report_json(
         plan,
         accepted,
         open,
+        failed_passes: failed_pass_notes.clone(),
     };
 
     // ── Item 7: "If you only do three things this week" ───────────────────────
@@ -2550,6 +2592,7 @@ pub fn build_report_json(
              grade: a grade hides which specific object is exposed, which is exactly what a \
              remediation team needs to know."
                 .to_string(),
+        failed_passes: failed_pass_notes,
     };
 
     let priority_grid = build_priority_grid(&matrix);
@@ -2700,6 +2743,7 @@ mod tests {
                 finished_at: "2026-07-23T00:05:00Z".to_string(),
             },
             recommendations: std::collections::HashMap::new(),
+            failed_passes: Vec::new(),
         }
     }
 
@@ -4667,6 +4711,41 @@ mod tests {
         );
     }
 
+    /// W6: the real Typst template must compile cleanly with a non-empty `failed_passes` list
+    /// — exercising the new disclosure block in BOTH the summary and the methodology section,
+    /// not just the gated-off "empty list" path every other `compile_pdf_*` test above covers.
+    #[tokio::test]
+    async fn compile_pdf_renders_the_failed_pass_disclosure_block() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_renders_the_failed_pass_disclosure_block: typst not on PATH"
+            );
+            return;
+        }
+        let mut report = report_with(
+            vec![finding(
+                "SEC-NO-HARDCODED-SECRETS-1",
+                "src/a.rs",
+                10,
+                "critical",
+            )],
+            vec!["SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        report.failed_passes = vec![crate::ai_audit::FailedPass {
+            repo: "acme/widgets".to_string(),
+            pass: "rule-alternative recommendations".to_string(),
+            reason: "Claude CLI timed out after 300s (no output).".to_string(),
+        }];
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.executive_summary.failed_passes.len(), 1);
+        assert_eq!(json.methodology.failed_passes.len(), 1);
+
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed with a failed-pass disclosure present");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
     /// P2: the real Typst template must compile cleanly with `fix_for_this_finding` SET
     /// (the new primary-fix branch), alongside a generic `fix` from the corpus — exercising
     /// the "both present" path this pass added, not just the pre-existing "neither present"
@@ -5282,6 +5361,86 @@ mod tests {
         let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
         assert_eq!(json.methodology.next_steps, NEXT_STEPS_NOTE);
         assert!(!json.methodology.next_steps.is_empty());
+    }
+
+    // ── W6: a failed/timed-out pass must be disclosed, never omitted silently ──────
+
+    #[test]
+    fn a_failed_pass_renders_the_not_computed_disclosure_in_both_methodology_and_summary() {
+        let mut report = report_with(vec![], vec![]);
+        report.failed_passes = vec![crate::ai_audit::FailedPass {
+            repo: "acme/widgets".to_string(),
+            pass: "rule-alternative recommendations".to_string(),
+            reason: "Claude CLI timed out after 300s (no output).".to_string(),
+        }];
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(json.methodology.failed_passes.len(), 1);
+        assert!(
+            json.methodology.failed_passes[0].contains("not computed"),
+            "methodology must explicitly state the pass was not computed: {:?}",
+            json.methodology.failed_passes
+        );
+        assert!(
+            json.methodology.failed_passes[0].contains("acme/widgets"),
+            "methodology disclosure must name the affected repo: {:?}",
+            json.methodology.failed_passes
+        );
+        assert!(
+            json.methodology.failed_passes[0].contains("Claude CLI timed out after 300s"),
+            "methodology disclosure must carry the real reason verbatim: {:?}",
+            json.methodology.failed_passes
+        );
+
+        // The SAME disclosure also renders in the executive summary — never JUST the
+        // methodology (a reader of only the summary must not be left in the dark either).
+        assert_eq!(
+            json.executive_summary.failed_passes, json.methodology.failed_passes,
+            "the summary and methodology must carry the identical disclosure text"
+        );
+    }
+
+    #[test]
+    fn no_failed_pass_means_no_not_computed_disclosure_anywhere() {
+        let report = report_with(vec![], vec![]);
+        assert!(
+            report.failed_passes.is_empty(),
+            "sanity: the base fixture has no failed pass"
+        );
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        assert!(
+            json.methodology.failed_passes.is_empty(),
+            "a clean run must not fabricate a not-computed disclosure: {:?}",
+            json.methodology.failed_passes
+        );
+        assert!(
+            json.executive_summary.failed_passes.is_empty(),
+            "a clean run must not fabricate a not-computed disclosure: {:?}",
+            json.executive_summary.failed_passes
+        );
+    }
+
+    /// The Typst template only renders the disclosure block when the list is non-empty, and
+    /// renders it in BOTH sections when it is — pins the gating + duplication so a future
+    /// edit can't silently drop one of the two renders.
+    #[test]
+    fn shipped_template_gates_the_failed_pass_disclosure_on_both_sections() {
+        let template = include_str!("../templates/audit_report.typ");
+        assert_eq!(
+            template
+                .matches("d.executive_summary.failed_passes.len() > 0")
+                .count(),
+            1,
+            "the summary section must gate the disclosure block on a non-empty list"
+        );
+        assert_eq!(
+            template
+                .matches("d.methodology.failed_passes.len() > 0")
+                .count(),
+            1,
+            "the methodology section must gate the disclosure block on a non-empty list"
+        );
     }
 
     // ── Template regressions (2026-09-13 review) ────────────────────────────────

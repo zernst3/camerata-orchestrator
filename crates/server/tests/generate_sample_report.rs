@@ -348,6 +348,7 @@ async fn regenerate_sample_report() {
             finished_at: "2026-07-26T15:42:00Z".to_string(),
         },
         recommendations: std::collections::HashMap::new(),
+        failed_passes: Vec::new(),
     };
 
     // ═══ Load the REAL bundled rule corpus so citations/domains/titles resolve for real ═══

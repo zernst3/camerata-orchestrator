@@ -56,6 +56,26 @@ pub struct RuleAlternatives {
     pub selected_option_id: Option<String>,
 }
 
+/// A named audit pass that failed or timed out for a repo — e.g. the alternative-
+/// recommendation pass hitting the CLI's hang timeout. Captured here instead of only
+/// `eprintln!`-ing to stderr, so the report export (`report_export::build_report_json`) can
+/// disclose the gap EXPLICITLY in the methodology and summary rather than silently shipping
+/// a report that never mentions the pass ran at all. `pass` is a short, stable, general name
+/// (never a fixture-specific string) — any pass this fail-soft pattern applies to can push
+/// one of these. See `ScanReport::failed_passes` and W6 in
+/// `docs/plans/2026-09-30_cycle2-queue-hardening.md`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FailedPass {
+    /// The repo this pass failed for (`owner/repo`).
+    pub repo: String,
+    /// A short, stable, human-readable pass name (e.g. "rule-alternative recommendations")
+    /// used verbatim in the disclosure text.
+    pub pass: String,
+    /// The error text, verbatim (e.g. the CLI timeout message), so the operator sees the
+    /// real reason rather than a generic placeholder.
+    pub reason: String,
+}
+
 /// One rule's recommendation: which option the AI judged best-fitting for this codebase (or
 /// the operator's forced choice for a targeted rescan), plus the reasoning, plus whether the
 /// raw model answer had to be corrected.
@@ -4457,9 +4477,9 @@ pub async fn audit_repo(
     // incremental scan `files` is only the CHANGED bodies, but the repo map should still cover
     // the WHOLE repo so cross-file rules keep their architectural view. `None` → use `files`.
     map_files: Option<&[(String, String)]>,
-) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<RuleRecommendation>)> {
+) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<RuleRecommendation>, Vec<FailedPass>)> {
     if files.is_empty() {
-        return Ok((Vec::new(), Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
     // Cross-file context for every chunk (which dirs are which layer, where types live). On an
     // incremental scan this is built from the whole repo, not just the changed files.
@@ -4507,6 +4527,9 @@ pub async fn audit_repo(
     // grounding tradeoff.
     let mut effective_selected: Vec<(String, String)> = selected.to_vec();
     let mut recommendations: Vec<RuleRecommendation> = Vec::new();
+    // W6: any pass that fails/times out for this repo, captured so the export can disclose it
+    // explicitly instead of only logging to stderr. See `FailedPass`'s doc comment.
+    let mut failed_passes: Vec<FailedPass> = Vec::new();
     if !alternatives.is_empty() {
         let (forced_alts, ask_alts): (Vec<RuleAlternatives>, Vec<RuleAlternatives>) = alternatives
             .iter()
@@ -4601,6 +4624,12 @@ pub async fn audit_repo(
                     eprintln!(
                         "[camerata-server] alternative-recommendation pass failed for {repo}: {e}"
                     );
+                    // W6: never a SILENT omission — the export must say this pass did not run.
+                    failed_passes.push(FailedPass {
+                        repo: repo.to_string(),
+                        pass: "rule-alternative recommendations".to_string(),
+                        reason: e.to_string(),
+                    });
                 }
             }
         }
@@ -4863,7 +4892,7 @@ pub async fn audit_repo(
             }
         }
     }
-    Ok((verified, all_proposed, recommendations))
+    Ok((verified, all_proposed, recommendations, failed_passes))
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -8482,7 +8511,7 @@ mod tests {
             "ARCH-NO-DIRECT-DB-1".to_string(),
             "Controllers must not call the database directly.".to_string(),
         )];
-        let (findings, _proposed, _recs) = audit_repo(
+        let (findings, _proposed, _recs, _failed) = audit_repo(
             &llm,
             "me/api",
             &files,
@@ -8754,7 +8783,7 @@ mod tests {
         )];
         let selected = vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
         let alternatives = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
-        let (findings, _proposed, recs) = audit_repo(
+        let (findings, _proposed, recs, _failed) = audit_repo(
             &llm,
             "me/api",
             &files,
@@ -8812,7 +8841,7 @@ mod tests {
         )];
         let selected = vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
         let alternatives = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
-        let (findings, _proposed, recs) = audit_repo(
+        let (findings, _proposed, recs, _failed) = audit_repo(
             &llm,
             "me/api",
             &files,
@@ -8865,7 +8894,7 @@ mod tests {
         let mut forced = std::collections::HashMap::new();
         forced.insert("MULTI-RULE-1".to_string(), "opt-b".to_string());
 
-        let (findings, _proposed, recs) = audit_repo(
+        let (findings, _proposed, recs, _failed) = audit_repo(
             &llm,
             "me/api",
             &files,
@@ -8905,7 +8934,7 @@ mod tests {
         let mut forced = std::collections::HashMap::new();
         forced.insert("MULTI-RULE-1".to_string(), "opt-does-not-exist".to_string());
 
-        let (_findings, _proposed, recs) = audit_repo(
+        let (_findings, _proposed, recs, _failed) = audit_repo(
             &llm,
             "me/api",
             &files,
@@ -8969,7 +8998,7 @@ mod tests {
             // the removed "must choose an alternative" gate used to block on.
             two_option_alternatives("MULTI-NO-DEFAULT-1", None),
         ];
-        let (findings, _proposed, recs) = audit_repo(
+        let (findings, _proposed, recs, _failed) = audit_repo(
             &llm,
             "me/api",
             &files,

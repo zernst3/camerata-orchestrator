@@ -1341,6 +1341,7 @@ mod tests {
                 finished_at: "2026-07-23T00:05:00Z".to_string(),
             },
             recommendations: std::collections::HashMap::new(),
+            failed_passes: Vec::new(),
         }
     }
 

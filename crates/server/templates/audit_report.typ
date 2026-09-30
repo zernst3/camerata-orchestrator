@@ -306,6 +306,19 @@
   #text(size: 8.5pt, style: "italic", fill: rgb("#666666"))[Summary text supplied by the reviewer.]
 ]
 
+// W6: a failed/timed-out pass must be disclosed, never omitted silently. Rendered here
+// (the summary) AND again in Methodology & limitations below — the same strings both times,
+// see `report_export::failed_pass_disclosures`. Gated on non-empty so a clean run renders
+// nothing extra.
+#if d.executive_summary.failed_passes.len() > 0 [
+  #block(above: 8pt, below: 4pt, stroke: 0.6pt + rgb("#c0392b"), inset: 8pt, radius: 3pt)[
+    #text(weight: "bold", size: 9pt)[Not computed this run]
+    #for note in d.executive_summary.failed_passes [
+      - #note
+    ]
+  ]
+]
+
 // FIX 4 (2026-09-13 review, "page 3 states the top-3 three times"): the executive summary used
 // to ALSO restate the top do-now findings as its own bulleted "priority items" list right
 // here — on top of the narrative's own blast-radius lead sentence (dropped, see
@@ -570,6 +583,17 @@ Scanned with Camerata v#or_na(d.cover.camerata_version). Inspection model: #or_n
 Not performed in this engagement:
 #for item in d.methodology.not_done [
   - #item
+]
+
+// W6: a failed/timed-out pass must be disclosed, never omitted silently — same strings as
+// the Executive summary's box above (see `report_export::failed_pass_disclosures`), restated
+// here for the more technical Methodology reader. Gated on non-empty.
+#if d.methodology.failed_passes.len() > 0 [
+  #v(0.2cm)
+  Not computed this run (pass failed or timed out):
+  #for note in d.methodology.failed_passes [
+    - #note
+  ]
 ]
 
 = Disclaimer

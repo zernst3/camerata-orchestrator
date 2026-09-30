@@ -34,6 +34,7 @@ pub fn build_report(
         coverage_notes: Vec::new(),
         provenance: ScanProvenance::default(),
         recommendations: std::collections::HashMap::new(),
+        failed_passes: Vec::new(),
     }
 }
 

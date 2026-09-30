@@ -632,6 +632,15 @@ pub struct ScanReport {
     /// `operator_chosen`. See `docs/design/2026-09-22_audit-integrated-alternatives.md`.
     #[serde(default)]
     pub recommendations: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation>,
+    /// W6: every audit pass that FAILED or timed out during this scan (e.g. the alternative-
+    /// recommendation pass hitting the CLI hang timeout), never silently swallowed. The
+    /// export (`report_export::build_report_json`) turns each entry into an explicit
+    /// disclosure line in BOTH the methodology and the executive summary — a scan must never
+    /// ship a report that quietly omits a pass's output. Empty on the happy path (no pass
+    /// failed). `#[serde(default)]` so a report persisted before this field existed still
+    /// deserializes as empty rather than failing to load.
+    #[serde(default)]
+    pub failed_passes: Vec<crate::ai_audit::FailedPass>,
 }
 
 impl ScanReport {
@@ -662,6 +671,7 @@ impl ScanReport {
             coverage_notes: Vec::new(),
             provenance: ScanProvenance::default(),
             recommendations: std::collections::HashMap::new(),
+            failed_passes: Vec::new(),
         }
     }
 
@@ -694,6 +704,7 @@ impl ScanReport {
             coverage_notes: Vec::new(),
             provenance: ScanProvenance::default(),
             recommendations: std::collections::HashMap::new(),
+            failed_passes: Vec::new(),
         }
     }
 }
@@ -975,6 +986,9 @@ pub async fn audit_repos(
     // when a project-level rule is scanned in more than one repo).
     let mut recommendations: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation> =
         std::collections::HashMap::new();
+    // W6: any pass that failed/timed out for a repo, across the whole scan — see
+    // `ScanReport::failed_passes`'s doc comment. Never omitted from the export.
+    let mut all_failed_passes: Vec<crate::ai_audit::FailedPass> = Vec::new();
     // Provenance (P1): the git identity of every source dir this run touched (sha/branch/
     // dirty), captured unconditionally per source — even a repo whose file-read later fails
     // still gets its ref recorded, since the dir is what was attempted. A dirty tree never
@@ -1233,11 +1247,15 @@ pub async fn audit_repos(
                         )
                         .await
                         {
-                            Ok((ai_findings, _ai_rules, repo_recs)) => {
+                            Ok((ai_findings, _ai_rules, repo_recs, repo_failed_passes)) => {
                                 ai_for_repo.extend(ai_findings);
                                 for rec in repo_recs {
                                     recommendations.insert(rec.rule_id.clone(), rec);
                                 }
+                                // W6: a sub-pass (e.g. alternative recommendations) can fail
+                                // without failing the whole audit_repo call — never let that
+                                // be silent. Accumulated across every repo into the report.
+                                all_failed_passes.extend(repo_failed_passes);
                             }
                             Err(e) => {
                                 let msg = format!("{spec}: AI audit skipped ({e})");
@@ -1356,6 +1374,10 @@ pub async fn audit_repos(
     report.actual_usage = Some(meter.snapshot());
     report.deep = deep_report;
     report.recommendations = recommendations;
+    // W6: never a silent omission — surface every failed/timed-out pass so the export's
+    // methodology and summary can disclose it explicitly instead of shipping quietly
+    // incomplete.
+    report.failed_passes = all_failed_passes;
     // Surface the compliance block (if any) and the first fatal AI error (if any) as their
     // own structured fields — never just buried inside `notes`/`message` — so the UI can
     // render an unmissable banner. `blocked` stays false here: this path only runs when a

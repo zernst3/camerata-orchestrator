@@ -4342,6 +4342,9 @@ async fn rescan_alternatives_handler(
     let mut all_findings: Vec<crate::onboard::Finding> = Vec::new();
     let mut all_recs: std::collections::HashMap<String, crate::ai_audit::RuleRecommendation> =
         std::collections::HashMap::new();
+    // W6: a sub-pass (e.g. a nested alternative-recommendation call) failing here must never
+    // be silent either — surfaced in `run_notes` below and merged into the stored report.
+    let mut all_failed_passes: Vec<crate::ai_audit::FailedPass> = Vec::new();
     for (spec, dir) in &sources {
         let applicable_ids: Vec<String> = alternatives_by_rule
             .keys()
@@ -4402,11 +4405,15 @@ async fn rescan_alternatives_handler(
         )
         .await
         {
-            Ok((findings, _proposed, recs)) => {
+            Ok((findings, _proposed, recs, failed)) => {
                 all_findings.extend(findings);
                 for r in recs {
                     all_recs.insert(r.rule_id.clone(), r);
                 }
+                for f in &failed {
+                    run_notes.push(format!("{spec}: {} not computed ({})", f.pass, f.reason));
+                }
+                all_failed_passes.extend(failed);
             }
             Err(e) => run_notes.push(format!("{spec}: rescan failed ({e})")),
         }
@@ -4424,6 +4431,9 @@ async fn rescan_alternatives_handler(
         for (rid, rec) in &all_recs {
             report.recommendations.insert(rid.clone(), rec.clone());
         }
+        // W6: fold any freshly-failed pass into the stored report so a LATER export still
+        // discloses it — never let a rescan's failure disappear once this handler returns.
+        report.failed_passes.extend(all_failed_passes.clone());
         state.set_last_scan(id.clone(), report);
     }
 
@@ -22359,6 +22369,7 @@ mod tests {
             coverage_notes: Vec::new(),
             provenance: crate::onboard::ScanProvenance::default(),
             recommendations: std::collections::HashMap::new(),
+            failed_passes: Vec::new(),
         }
     }
 
