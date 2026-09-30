@@ -85,6 +85,18 @@ impl LoadingGuard {
     /// Increment the in-flight count.  When the loading context is present (provided by
     /// `provide_loading_context()` at an ancestor) this drives the Bombe animation; when it is
     /// absent (e.g. a unit test with no runtime) it is a no-op.
+    ///
+    /// PITFALL — do NOT call this from inside a `spawn(async move { .. })` (or any future handed
+    /// to Dioxus's task spawner) that runs a long-lived background job (a job poll loop, a
+    /// detached audit run). `try_consume_context` resolves the count via
+    /// `Runtime::try_current()` + the CURRENT scope's context map; that lookup is only reliably
+    /// populated in the synchronous render-scope call stack. A long-running detached task is not
+    /// guaranteed to keep that association across `.await` points / executor handoffs, and when
+    /// it doesn't, this degrades to the same silent no-op as "no runtime at all" — the count
+    /// never increments and the Bombe never animates, with no panic or log to say so. Call
+    /// [`LoadingGuard::from_count`] instead, with a [`LoadingCount`] captured in the component's
+    /// render body (via `use_context::<LoadingCount>()`) BEFORE the `spawn`, and moved in. See
+    /// `cockpit::scan::audit_job_start`'s spawn call site and `poll_job` for the pattern.
     pub fn new() -> Self {
         // `try_consume_context` still requires an active runtime (it calls
         // `Runtime::with_current_scope`, which panics with no VirtualDom), so gate on
@@ -99,6 +111,17 @@ impl LoadingGuard {
             c += 1;
         }
         Self { count }
+    }
+
+    /// Increment an EXPLICITLY-provided [`LoadingCount`] — the fix for the pitfall documented on
+    /// [`LoadingGuard::new`]. Takes the signal directly instead of resolving it from Dioxus
+    /// context, so it works correctly from inside a `spawn`ed background task: capture the count
+    /// with `use_context::<LoadingCount>()` in the component's render body (context resolution
+    /// is reliable there) and move the captured `Copy` signal into the `spawn`.
+    pub fn from_count(count: LoadingCount) -> Self {
+        let mut c = count;
+        c += 1;
+        Self { count: Some(c) }
     }
 }
 
@@ -241,12 +264,18 @@ mod tests {
     }
 
     /// Auditable proof for the reported miss (owner: the Bombe did not animate for "Audit code
-    /// against selected rules"). `cockpit::scan::audit_against` and `cockpit::scan::poll_job`
-    /// (`crates/ui/src/cockpit/scan.rs`) both declare `let _guard = LoadingGuard::new();` as
-    /// their FIRST statement, before doing any network work, and let normal Rust scope-exit
-    /// drop it after the work resolves (success or failure) — the exact shape this test drives.
-    /// Re-running this test after any future edit to those two functions' guard placement is
-    /// the regression check: moving the guard to only wrap part of the call, or dropping it
+    /// against selected rules"). `cockpit::scan::audit_against` (`crates/ui/src/cockpit/scan.rs`)
+    /// declares `let _guard = LoadingGuard::new();` as its FIRST statement, before doing any
+    /// network work, and lets normal Rust scope-exit drop it after the work resolves (success or
+    /// failure) — the exact shape this test drives. `cockpit::scan::poll_job` follows the SAME
+    /// "declared first, held through return" shape but now takes its guard via
+    /// `LoadingGuard::from_count(loading_count)`, with `loading_count` captured by its caller in
+    /// render scope rather than resolved via `new()`'s own context lookup — see
+    /// `spawned_task_guard_via_from_count_moves_the_real_bombe_count` below for the regression
+    /// test that shape actually needed (this one only drives the guard SYNCHRONOUSLY in-scope,
+    /// which never exercises the detached-task context-resolution gap `from_count` fixes).
+    /// Re-running this test after any future edit to `audit_against`'s guard placement is the
+    /// regression check for IT: moving the guard to only wrap part of the call, or dropping it
     /// early, would no longer match this "declared first, held through return" shape.
     #[test]
     fn guard_declared_first_covers_the_whole_call_like_audit_against_and_poll_job() {
@@ -268,5 +297,85 @@ mod tests {
         }
         let mut vdom = VirtualDom::new(harness);
         vdom.rebuild_in_place();
+    }
+
+    // ── BOMBE-SILENT-MISS regression: a guard driven from inside a REAL spawned task ─────────
+    //
+    // Every test above drives `LoadingGuard` SYNCHRONOUSLY, inside the render call stack — that
+    // proves the Drop/RAII bookkeeping is correct but never exercises an actual async task
+    // boundary. `cockpit::scan`'s audit-job spawn (and `poll_job`, which it awaits) build their
+    // guard from INSIDE a real `spawn(async move { .. })` task body that lives across a genuine
+    // `.await` suspension/wake/resume cycle — not a single synchronous call. This test drives
+    // that exact shape with Dioxus's OWN task spawner (`dioxus::prelude::spawn`), not
+    // `tokio::spawn`: Dioxus tasks are `!Send` (a `LoadingCount`/`Signal` is `!Send`), so they run
+    // on Dioxus's own single-threaded task queue, polled via `VirtualDom::process_events`. It
+    // captures `LoadingCount` in the harness's render body (mirroring every real call site) and
+    // proves `LoadingGuard::from_count` still moves the count correctly across a real suspend
+    // (`tokio::time::sleep`) and a real wake, not just a same-stack synchronous call.
+
+    thread_local! {
+        // Scratch slot for handing a `LoadingCount` captured during `rebuild_in_place` back out
+        // to the surrounding test body, which runs outside that render call. `VirtualDom::new`
+        // only accepts a bare `fn() -> Element` (no captures), so a thread-local is the plumbing
+        // — safe here because each `#[test]` fn runs start-to-finish on one thread and always
+        // writes before it reads.
+        static CAPTURED_COUNT: std::cell::RefCell<Option<LoadingCount>> = const { std::cell::RefCell::new(None) };
+    }
+
+    fn harness_spawning_a_guarded_task() -> Element {
+        provide_loading_context();
+        let count = use_context::<LoadingCount>();
+        CAPTURED_COUNT.with(|c| *c.borrow_mut() = Some(count));
+        // The real call-site shape (`cockpit::scan`'s on_audit spawn / `poll_job`): a
+        // `LoadingCount` captured in render scope, moved into a `spawn`ed task, and the guard
+        // built from it with `from_count` INSIDE that task rather than resolved via context
+        // lookup in there.
+        spawn(async move {
+            let _guard = LoadingGuard::from_count(count);
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            // `_guard` drops here, inside the spawned task, after a REAL async suspension —
+            // not synchronously in the same call stack as the render.
+        });
+        rsx! { div {} }
+    }
+
+    #[tokio::test]
+    async fn spawned_task_guard_via_from_count_moves_the_real_bombe_count() {
+        let mut vdom = VirtualDom::new(harness_spawning_a_guarded_task);
+        vdom.rebuild_in_place();
+        let count = CAPTURED_COUNT
+            .with(|c| c.borrow_mut().take())
+            .expect("harness captured LoadingCount during render");
+        assert_eq!(
+            *count.read(),
+            0,
+            "idle before the spawned task's first poll"
+        );
+        // `rebuild_in_place` documents that "tasks will not be polled with this method" — the
+        // spawned task above is queued but has not run a single line of its body yet.
+        assert!(
+            dioxus::core::Runtime::try_current().is_none(),
+            "sanity: no ambient Dioxus runtime in plain test code between render calls"
+        );
+
+        // Drive the task's FIRST poll. A just-spawned task is already queued (Dioxus notifies
+        // its own scheduler the instant `spawn` is called), so this runs synchronously up to
+        // `tokio::time::sleep(..).await`, which is where the guard gets created.
+        vdom.process_events();
+        assert_eq!(
+            *count.read(),
+            1,
+            "guard created inside the spawned task's first poll -> Bombe running"
+        );
+
+        // Let the real timer elapse, then drive the task's SECOND poll (woken by the timer),
+        // which resumes past the sleep and drops the guard as the async block ends.
+        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+        vdom.process_events();
+        assert_eq!(
+            *count.read(),
+            0,
+            "guard dropped when the spawned task completed -> back to idle"
+        );
     }
 }

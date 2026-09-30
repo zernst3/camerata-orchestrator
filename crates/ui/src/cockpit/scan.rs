@@ -1373,6 +1373,15 @@ pub(super) async fn audit_job_poll(job_id: &str) -> Option<JobStatusEnvelope> {
 /// Both paths now set `job_failed_message`, which `ScanJobFailedBanner` renders
 /// unconditionally (not gated on a report existing, since a failed/vanished job never
 /// produces one).
+///
+/// BOMBE-SILENT-MISS FIX: this used to take its guard via `LoadingGuard::new()`, resolving the
+/// `LoadingCount` context from WITHIN this function's own body — which runs inside a detached
+/// `spawn`ed task (both call sites `.await` this from inside `spawn(async move { .. })` / a
+/// `use_future`). Context resolution there is not reliable (see the pitfall note on
+/// `LoadingGuard::new`), so the guard could silently no-op and the Bombe would never animate for
+/// a running scan. `loading_count` is now REQUIRED and must be captured by the caller in its own
+/// render-scope body (`use_context::<LoadingCount>()`) before the `spawn`/`use_future`, then
+/// passed straight through here.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn poll_job(
     jid: String,
@@ -1387,10 +1396,13 @@ pub(super) async fn poll_job(
     // Set on `failed` (with the server's reason) or when the job vanishes mid-poll; cleared
     // by the caller when a fresh scan starts. `None` renders nothing (`ScanJobFailedBanner`).
     mut job_failed_message: Signal<Option<String>>,
+    // Captured by the CALLER in its component render scope (never resolved from context in
+    // here) — see the BOMBE-SILENT-MISS note above.
+    loading_count: crate::loading::LoadingCount,
 ) {
     // Loading guard held for the ENTIRE poll loop so the Bombe machine stays
     // active until the background job reports done/failed/cancelled.
-    let _guard = crate::loading::LoadingGuard::new();
+    let _guard = crate::loading::LoadingGuard::from_count(loading_count);
     let mut misses = 0u32;
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
@@ -3378,10 +3390,25 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
     // already running when this view (re)mounted, re-attach the poll instead of losing it.
     let active_audit_job = use_context::<Signal<Option<String>>>();
     let scan_idle_ms = use_signal(|| Option::<u128>::None);
+    // Captured HERE, in the component's render body, where `LoadingCount` context resolution is
+    // guaranteed — never resolved from inside `poll_job`'s own body, which runs detached inside
+    // this `use_future`'s async block (see the BOMBE-SILENT-MISS note on `poll_job`).
+    let loading_count = use_context::<crate::loading::LoadingCount>();
     use_future(move || async move {
         if let Some(jid) = active_audit_job.peek().clone() {
             auditing.set(true);
-            poll_job(jid, audit, auditing, job_progress, det_progress, active_audit_job, scan_idle_ms, job_failed_message).await;
+            poll_job(
+                jid,
+                audit,
+                auditing,
+                job_progress,
+                det_progress,
+                active_audit_job,
+                scan_idle_ms,
+                job_failed_message,
+                loading_count,
+            )
+            .await;
         }
     });
     // Selected-rule count, set by ProposedRulesTable and read here for the cost estimate
@@ -3951,8 +3978,16 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                 // mount can resume), then poll. The server runs it decoupled
                                 // from any single request.
                                 let mut active_audit_job = active_audit_job;
+                                // `loading_count` was captured in the component's render body
+                                // (see its `use_context` above) — NOT resolved from context in
+                                // here, since this closure body runs inside a detached `spawn`
+                                // where that resolution is unreliable (BOMBE-SILENT-MISS note on
+                                // `poll_job`). `LoadingCount` is `Copy`, so capturing it in this
+                                // `move` closure and again in the inner `spawn` below is just two
+                                // cheap copies of the same signal, same as `job_progress` etc.
+                                let loading_count = loading_count;
                                 spawn(async move {
-                                    let _guard = crate::loading::LoadingGuard::new();
+                                    let _guard = crate::loading::LoadingGuard::from_count(loading_count);
                                     let Some(jid) = audit_job_start(&repos, &rules, &model, &calib, "parallel", thorough, incremental, deep, ai, det).await else {
                                         auditing.set(false);
                                         job_failed_message.set(Some(
@@ -3963,7 +3998,18 @@ pub(super) fn ScanResults(report: ScanReportView) -> Element {
                                         return;
                                     };
                                     active_audit_job.set(Some(jid.clone()));
-                                    poll_job(jid, audit, auditing, job_progress, det_progress, active_audit_job, scan_idle_ms, job_failed_message).await;
+                                    poll_job(
+                                        jid,
+                                        audit,
+                                        auditing,
+                                        job_progress,
+                                        det_progress,
+                                        active_audit_job,
+                                        scan_idle_ms,
+                                        job_failed_message,
+                                        loading_count,
+                                    )
+                                    .await;
                                 });
                             } else {
                                 // Synchronous: hold the request until the (shorter) run finishes.
