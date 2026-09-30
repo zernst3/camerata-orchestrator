@@ -35,10 +35,14 @@
 //! # What this deliberately does NOT do
 //!
 //! No string-literal awareness (mirrors [`crate::ui_dates::UtcDatesChecker`]'s documented
-//! discipline) and no cross-file identifier tracking — the context window is the current line
-//! plus a bounded lookback within the SAME file. A PRNG value whose security-relevant name only
-//! appears several functions away, or in a different file, is a false negative by design
-//! (explicitly preferred over a false positive per the plan).
+//! discipline) and no cross-file identifier tracking — the context window is the current line,
+//! a bounded lookback within the SAME file for the enclosing function name, and ONE forward hop
+//! through a same-function intermediate local (see [`forward_taint_identifiers`]): `const raw =
+//! Math.random(); ...; const shareToken = 'x_' + raw;` still classifies even though neither the
+//! PRNG line's own target nor the enclosing function name names a credential. A PRNG value
+//! whose security-relevant name only surfaces two hops away, several functions away, or in a
+//! different file, is a false negative by design (explicitly preferred over a false positive
+//! per the plan) — completeness-over-precision widens the taint window, not removes its bound.
 
 use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_HIGH, SEVERITY_MEDIUM};
 
@@ -197,20 +201,34 @@ fn is_hash_comment_language(path: &str) -> bool {
 fn violations_in_file(path: &str, content: &str) -> Vec<ArchViolation> {
     let hash_comments = is_hash_comment_language(path);
     let lines: Vec<&str> = content.lines().collect();
-    let mut violations = Vec::new();
-    let mut in_block_comment = false;
 
-    for (idx, raw_line) in lines.iter().enumerate() {
+    // Comment-strip the whole file up front (not lazily inside the scan loop below) because the
+    // forward-taint step needs RANDOM ACCESS to later lines' comment-stripped code, not just a
+    // running cursor over the current line.
+    let mut stripped: Vec<String> = Vec::with_capacity(lines.len());
+    let mut in_block_comment = false;
+    for raw_line in &lines {
         let (code, next_in_block) = strip_comments(raw_line, in_block_comment, hash_comments);
         in_block_comment = next_in_block;
+        stripped.push(code);
+    }
 
-        if let Some((needle, match_start)) = find_prng_call(&code) {
-            let identifiers = candidate_identifiers(&lines, idx, &code, match_start);
-            if let Some(severity) = classify(&identifiers) {
-                let named = identifiers
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| "(unnamed)".to_string());
+    let mut violations = Vec::new();
+
+    for (idx, code) in stripped.iter().enumerate() {
+        if let Some((needle, match_start)) = find_prng_call(code) {
+            let mut identifiers = candidate_identifiers(&lines, idx, code, match_start);
+            if classify_named(&identifiers).is_none() {
+                // Same-line target, enclosing call, and enclosing function name all came up
+                // empty. One more shot: if the PRNG value was assigned to an INTERMEDIATE local
+                // (e.g. `const raw = Math.random()`), follow that local forward through the rest
+                // of the function for a line that consumes it while building a security-named
+                // value (`const shareToken = 'x_' + raw`).
+                if let Some(intermediate) = assignment_target(&code[..match_start]) {
+                    identifiers.extend(forward_taint_identifiers(&stripped, idx, &intermediate));
+                }
+            }
+            if let Some((severity, named)) = classify_named(&identifiers) {
                 violations.push(ArchViolation {
                     rule_id: RULE_WEAK_TOKEN_RANDOMNESS.to_string(),
                     file: path.to_string(),
@@ -224,6 +242,75 @@ fn violations_in_file(path: &str, content: &str) -> Vec<ArchViolation> {
     }
 
     violations
+}
+
+/// One-hop forward taint: given `intermediate` (a local variable the PRNG/weak-entropy value on
+/// line `from_line_idx` was assigned to), scan forward through up to 40 subsequent lines of the
+/// SAME file for a line that both mentions `intermediate` as a whole word and either assigns it
+/// into another identifier (`const shareToken = 'x_' + raw`) or passes it into a call
+/// (`buildAccessToken(raw)`) — recovering that OTHER identifier as an additional classification
+/// candidate. Lexical, not AST: `declaration_name` on a scanned line is treated as "a new
+/// function/method starts here," which stops the scan — the same bounded, no-brace-counting
+/// discipline [`enclosing_function_name`] already uses for its own backward lookback, so this
+/// stays cheap and doesn't chase `intermediate` across an unrelated sibling function that
+/// happens to reuse the same short local name.
+fn forward_taint_identifiers(
+    stripped_lines: &[String],
+    from_line_idx: usize,
+    intermediate: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if intermediate.is_empty() {
+        return out;
+    }
+    let bound = (from_line_idx + 1 + 40).min(stripped_lines.len());
+    for line in &stripped_lines[from_line_idx + 1..bound] {
+        if declaration_name(line).is_some() {
+            break;
+        }
+        let Some(pos) = find_word(line, intermediate) else {
+            continue;
+        };
+        let before = &line[..pos];
+        if let Some(id) = assignment_target(before) {
+            out.push(id);
+        }
+        if let Some(id) = enclosing_call_name(before) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// Whether `text` contains `word` as a standalone identifier occurrence — the character
+/// immediately before and after the match must not be an identifier character (letter/digit/
+/// `_`/`$`) — mirroring [`find_prng_call`]'s own boundary discipline so `raw` doesn't match
+/// inside `rawToken` or `drawnValue`. Returns the BYTE offset of the first such occurrence.
+fn find_word(text: &str, word: &str) -> Option<usize> {
+    if word.is_empty() {
+        return None;
+    }
+    let is_ident_char = |c: char| c.is_alphanumeric() || c == '_' || c == '$';
+    let mut start = 0;
+    while let Some(rel) = text[start..].find(word) {
+        let pos = start + rel;
+        let before_ok = text[..pos]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !is_ident_char(c));
+        let after_ok = text[pos + word.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !is_ident_char(c));
+        if before_ok && after_ok {
+            return Some(pos);
+        }
+        // Advance past this occurrence's start by at least one byte so we make forward
+        // progress even when `word` is a single character (never zero-length here, guarded
+        // above, but this keeps the step correct regardless of `word`'s length).
+        start = pos + 1;
+    }
+    None
 }
 
 /// The clause describing WHY `needle`'s output is guessable, tailored to whether it's a PRNG
@@ -479,39 +566,42 @@ fn is_high_severity_identifier(norm: &str) -> bool {
     has_share_or_access && names_credential
 }
 
-/// Classify a list of candidate identifiers (already produced by [`candidate_identifiers`]):
-/// `None` when no candidate is security-relevant (the common case — most PRNG calls in a repo
-/// are legitimately non-security), `Some(SEVERITY_HIGH)` / `Some(SEVERITY_MEDIUM)` otherwise.
-fn classify(identifiers: &[String]) -> Option<&'static str> {
-    let mut matched = false;
-    let mut high = false;
+/// Classify a list of candidate identifiers (already produced by [`candidate_identifiers`],
+/// possibly extended by [`forward_taint_identifiers`]): `None` when no candidate is
+/// security-relevant (the common case — most PRNG calls in a repo are legitimately
+/// non-security), `Some((severity, identifier))` otherwise, naming the SPECIFIC identifier
+/// responsible for the match rather than always the first-computed candidate — once the
+/// forward-taint hop is in play, `identifiers[0]` may be a boring intermediate (`raw`) while a
+/// LATER entry (`shareToken`) is the one that actually earned the finding, and the emitted
+/// message should name that one. Precedence across identifiers, in order: any
+/// [`is_high_severity_identifier`] hit wins outright; otherwise the first
+/// [`STRONG_SECURITY_KEYWORDS`] hit; otherwise the first [`WEAK_SECURITY_KEYWORDS`] hit not
+/// suppressed by a co-occurring [`DISCRIMINATOR_KEYWORDS`] hit on that SAME identifier.
+fn classify_named(identifiers: &[String]) -> Option<(&'static str, String)> {
+    for ident in identifiers {
+        let norm = normalize(ident);
+        if !norm.is_empty() && is_high_severity_identifier(&norm) {
+            return Some((SEVERITY_HIGH, ident.clone()));
+        }
+    }
+    for ident in identifiers {
+        let norm = normalize(ident);
+        if !norm.is_empty() && STRONG_SECURITY_KEYWORDS.iter().any(|k| norm.contains(k)) {
+            return Some((SEVERITY_MEDIUM, ident.clone()));
+        }
+    }
     for ident in identifiers {
         let norm = normalize(ident);
         if norm.is_empty() {
             continue;
         }
-        if is_high_severity_identifier(&norm) {
-            matched = true;
-            high = true;
-            continue;
-        }
-        if STRONG_SECURITY_KEYWORDS.iter().any(|k| norm.contains(k)) {
-            matched = true;
-            continue;
-        }
         let is_weak = WEAK_SECURITY_KEYWORDS.iter().any(|k| norm.contains(k));
         let has_discriminator = DISCRIMINATOR_KEYWORDS.iter().any(|k| norm.contains(k));
         if is_weak && !has_discriminator {
-            matched = true;
+            return Some((SEVERITY_MEDIUM, ident.clone()));
         }
     }
-    if high {
-        Some(SEVERITY_HIGH)
-    } else if matched {
-        Some(SEVERITY_MEDIUM)
-    } else {
-        None
-    }
+    None
 }
 
 /// Strip a trailing line comment and any block-comment span from `line`. For `//`/`/* */`
@@ -959,5 +1049,90 @@ mod tests {
         assert_eq!(vs.len(), 1, "{vs:#?}");
         assert_eq!(vs[0].severity, SEVERITY_HIGH);
         assert_eq!(vs[0].object.as_deref(), Some("shareLink"));
+    }
+
+    // ── widened taint window: intermediate variable feeding a token a few lines later ──
+
+    #[test]
+    fn flags_weak_prng_via_intermediate_variable_assigned_to_a_token_later_same_function() {
+        // Neither the PRNG line's own assignment target ("raw") nor the enclosing function name
+        // ("nextId") names a credential — the ONLY way to catch this is following `raw` forward
+        // to the line that folds it into `shareToken` a couple of lines down, still inside the
+        // same function. A sibling function in the SAME file reuses "raw" for a benign
+        // jitter/backoff value and must NOT fire — proving the widened taint window still
+        // discriminates.
+        let f = files(vec![(
+            "src/links/id.ts",
+            "function nextId(): string {\n  const raw = Math.random();\n  // a couple of unrelated lines in between\n  const shareToken = 'tok_' + raw.toString(36);\n  return shareToken;\n}\n\nfunction scheduleBackoff(): number {\n  const raw = Math.random();\n  const sessionJitterMs = raw * 100 + 50;\n  return sessionJitterMs;\n}\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(
+            vs[0].line, 2,
+            "must attribute to the Math.random() call site"
+        );
+        assert_eq!(
+            vs[0].severity, SEVERITY_HIGH,
+            "share+token credential shape reached via the intermediate: {vs:#?}"
+        );
+        assert_eq!(
+            vs[0].object.as_deref(),
+            Some("shareToken"),
+            "must name the credential the taint actually reached, not the boring intermediate: {vs:#?}"
+        );
+    }
+
+    #[test]
+    fn flags_weak_prng_via_intermediate_variable_passed_as_a_call_argument_later() {
+        // Same one-hop taint, but the intermediate is consumed as a CALL ARGUMENT rather than an
+        // assignment RHS (`buildAccessToken(raw)` instead of `const x = ...raw...`).
+        let f = files(vec![(
+            "src/links/id.ts",
+            "function nextValue(): string {\n  const raw = Math.random();\n  return buildAccessToken(raw);\n}\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].line, 2);
+        assert_eq!(vs[0].severity, SEVERITY_HIGH);
+        assert_eq!(vs[0].object.as_deref(), Some("buildAccessToken"));
+    }
+
+    #[test]
+    fn intermediate_variable_taint_does_not_cross_into_a_later_sibling_function() {
+        // `raw` in `otherHelper` is unrelated to the `raw` declared (and never consumed) inside
+        // `unrelatedNoise` — the scan must stop at the new `function` declaration rather than
+        // reading forward across the function boundary.
+        let f = files(vec![(
+            "src/links/id.ts",
+            "function unrelatedNoise(): number {\n  const raw = Math.random();\n  return raw;\n}\n\nfunction otherHelper(): string {\n  const shareToken = 'tok_' + raw;\n  return shareToken;\n}\n",
+        )]);
+        assert!(rule_hits(&WeakTokenRandomnessChecker.check(&view(&f))).is_empty());
+    }
+
+    // ── discrimination preserved: CSPRNG safe twin alongside a positive, one module ────
+
+    #[test]
+    fn crypto_random_bytes_and_secrets_token_hex_twins_do_not_suppress_the_real_positive() {
+        let f = files(vec![(
+            "src/links/mixed.ts",
+            "export function createShareToken(): string {\n  const shareToken = Math.random().toString(36).slice(2);\n  return shareToken;\n}\n\nexport function createShareTokenSecure(): string {\n  return crypto.randomBytes(32).toString('hex');\n}\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].line, 2);
+    }
+
+    #[test]
+    fn python_secrets_token_hex_twin_alongside_a_weak_prng_password() {
+        let f = files(vec![(
+            "app/accounts.py",
+            "def make_temp_password():\n    return random.random()\n\n\ndef make_api_token():\n    return secrets.token_hex(32)\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
     }
 }
