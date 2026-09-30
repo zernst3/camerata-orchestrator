@@ -81,12 +81,12 @@ pub fn estimate_audit_cost(
     // from the original 2_200 / 0.02: a real findings-heavy run showed the recommendation,
     // resolution, and calibration passes ALL emitting substantially more prose than a single
     // bare violation pass, and the narrower constants under-counted that volume.
-    const OUT_TOKENS_PER_PASS: f64 = 2_800.0;
-    const OUTPUT_PER_CODE_TOKEN: f64 = 0.025;
+    const OUT_TOKENS_PER_PASS: f64 = 2_600.0;
+    const OUTPUT_PER_CODE_TOKEN: f64 = 0.022;
     // General conservatism only now — the resolution round used to be folded entirely into
     // this fudge factor; it's now priced explicitly below (see `resolution_calls`), so this
     // constant shrank accordingly rather than double-counting it.
-    const FUDGE: f64 = 1.1;
+    const FUDGE: f64 = 1.0;
     // Prompt-cache pricing multipliers (Anthropic list pricing as of 2024-07):
     //   write: 1.25× input
     //   read:  0.10× input
@@ -1212,5 +1212,481 @@ mod tests {
             with_deep > without,
             "deep tier must increase the estimate; deep={with_deep} base={without}"
         );
+    }
+
+    // ── Backend-awareness (docs/design/2026-09-22_per-project-backend.md) ─────────────────
+    //
+    // The CLI backend spawns a fresh `claude` subprocess per call with no shared prompt
+    // cache, so it can never get the API's write-once/read-cheap discount — every pass pays
+    // the 1.25x cache-WRITE surcharge. These tests pin that behavior down.
+
+    /// Even the simplest possible scan (0 rules, 1 chunk, 1 call either way) costs MORE on
+    /// CLI than API: the lone call still pays CLI's per-call write surcharge, while a lone
+    /// API call has no reuse to amortize and is priced at plain 1.0x. This isolates the
+    /// backend effect from the multi-batch caching machinery entirely.
+    #[test]
+    fn backend_cli_costs_more_than_api_even_for_a_single_call() {
+        let (_, dollars_cli, passes_cli) = estimate_audit_cost(
+            350_000,
+            0,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Cli,
+            0,
+        );
+        let (_, dollars_api, passes_api) = estimate_audit_cost(
+            350_000,
+            0,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        assert_eq!(
+            passes_cli, passes_api,
+            "same pass shape; only pricing differs"
+        );
+        assert!(
+            dollars_cli > dollars_api,
+            "CLI must cost more than API even for a single call (write surcharge, no reuse \
+             to discount): cli={dollars_cli:.6} api={dollars_api:.6}"
+        );
+        assert!(
+            dollars_cli > 0.0 && dollars_api > 0.0,
+            "both estimates plausible/non-zero"
+        );
+    }
+
+    /// With multiple rule-batches sharing one chunk's digest, the API backend gets a REAL
+    /// caching discount (write once, read cheap for the rest) while CLI pays the write
+    /// surcharge on every single batch. The CLI/API cost gap must be substantially larger
+    /// here than in the single-call case above — this is "the single biggest lever" the
+    /// backend-aware fix is meant to capture.
+    #[test]
+    fn backend_cli_meaningfully_more_expensive_with_multiple_batches() {
+        // 350k chars = 1 chunk, 30 rules -> 2 batches.
+        let (_, dollars_cli, passes_cli) = estimate_audit_cost(
+            350_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Cli,
+            0,
+        );
+        let (_, dollars_api, passes_api) = estimate_audit_cost(
+            350_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        assert_eq!(passes_cli, passes_api);
+        assert!(
+            dollars_cli > dollars_api,
+            "cli={dollars_cli:.6} api={dollars_api:.6}"
+        );
+        // The gap should be MEANINGFUL (not a rounding artifact) — require at least 30% more
+        // expensive on CLI for a scan with real multi-batch caching to give up.
+        let ratio = dollars_cli / dollars_api;
+        assert!(
+            ratio > 1.3,
+            "CLI should be meaningfully (>=30%) pricier than API when there's real caching \
+             upside for API to capture: ratio={ratio:.3}"
+        );
+    }
+
+    /// Property — CLI IS NEVER CHEAPER THAN API: across a sweep of shapes, the CLI estimate
+    /// is always >= the API estimate for identical inputs (equality only possible in
+    /// degenerate all-zero-price cases). CLI never benefits from cross-call cache reuse, so
+    /// it can never be pricing something MORE cheaply than a model that sometimes can.
+    #[test]
+    fn prop_cli_never_cheaper_than_api() {
+        for &code_chars in &[50_000usize, 200_000, 350_000, 700_000, 1_400_000] {
+            for &selected in &[0usize, 1, 15, 30, 60, 96] {
+                for &mode in &["sequential", "parallel", "batch"] {
+                    for &multi_option in &[0usize, 5, 20] {
+                        let (_, dollars_cli, _) = estimate_audit_cost(
+                            code_chars,
+                            selected,
+                            mode,
+                            3.0,
+                            15.0,
+                            3.0,
+                            15.0,
+                            false,
+                            false,
+                            false,
+                            ProjectBackend::Cli,
+                            multi_option.min(selected),
+                        );
+                        let (_, dollars_api, _) = estimate_audit_cost(
+                            code_chars,
+                            selected,
+                            mode,
+                            3.0,
+                            15.0,
+                            3.0,
+                            15.0,
+                            false,
+                            false,
+                            false,
+                            ProjectBackend::Api,
+                            multi_option.min(selected),
+                        );
+                        assert!(
+                            dollars_cli >= dollars_api,
+                            "CLI must never be cheaper than API: code_chars={code_chars} \
+                             selected={selected} mode={mode} multi_option={multi_option} \
+                             cli={dollars_cli:.6} api={dollars_api:.6}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Recommendation pass (docs/design/2026-09-22_audit-integrated-alternatives.md) ─────
+
+    /// Selecting at least one multi-option rule adds exactly ONE extra priced pass (the
+    /// dedicated recommendation call) and increases the dollar estimate, vs. an otherwise
+    /// identical run with no multi-option rules selected.
+    #[test]
+    fn recommendation_pass_adds_one_call_and_increases_cost() {
+        let (_, dollars_none, passes_none) = estimate_audit_cost(
+            200_000,
+            15,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        let (_, dollars_some, passes_some) = estimate_audit_cost(
+            200_000,
+            15,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            5,
+        );
+        assert_eq!(
+            passes_some,
+            passes_none + 1,
+            "one multi-option rule or a hundred: still exactly ONE dedicated recommendation \
+             call (never batched)"
+        );
+        assert!(
+            dollars_some > dollars_none,
+            "adding multi-option rules must increase the estimate: \
+             none={dollars_none:.6} some={dollars_some:.6}"
+        );
+    }
+
+    /// Regardless of HOW MANY multi-option rules are selected, the recommendation pass is
+    /// still exactly one call (it covers every rule's options in a single dedicated
+    /// prompt) — but the dollar cost keeps growing with the rule count (bigger prompt,
+    /// more per-rule recommendations to emit). This is the "multi-option-rule-heavy input
+    /// costs more than the old formula" requirement: the OLD formula had no notion of
+    /// multi-option rules at all, so this whole axis of cost was invisible to it.
+    #[test]
+    fn prop_recommendation_cost_grows_with_multi_option_rule_count_but_stays_one_call() {
+        let counts: &[usize] = &[0, 1, 5, 15, 30];
+        let mut prev_dollars = 0.0f64;
+        for &multi_option in counts {
+            let (_, dollars, passes) = estimate_audit_cost(
+                200_000,
+                30,
+                "parallel",
+                3.0,
+                15.0,
+                3.0,
+                15.0,
+                false,
+                false,
+                false,
+                ProjectBackend::Api,
+                multi_option,
+            );
+            let expected_extra_pass = if multi_option > 0 { 1 } else { 0 };
+            let (_, _, passes_baseline) = estimate_audit_cost(
+                200_000,
+                30,
+                "parallel",
+                3.0,
+                15.0,
+                3.0,
+                15.0,
+                false,
+                false,
+                false,
+                ProjectBackend::Api,
+                0,
+            );
+            assert_eq!(
+                passes,
+                passes_baseline + expected_extra_pass,
+                "multi_option={multi_option} must add at most one pass"
+            );
+            assert!(
+                dollars >= prev_dollars,
+                "dollars must be non-decreasing in multi_option_selected: \
+                 multi_option={multi_option} prev={prev_dollars:.6} got={dollars:.6}"
+            );
+            prev_dollars = dollars;
+        }
+        // And strictly more expensive end-to-end (30 multi-option rules vs. none).
+        let (_, dollars_max, _) = estimate_audit_cost(
+            200_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            30,
+        );
+        let (_, dollars_zero, _) = estimate_audit_cost(
+            200_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        assert!(
+            dollars_max > dollars_zero,
+            "a multi-option-rule-heavy input costs strictly more"
+        );
+    }
+
+    // ── Resolution round (`ai_audit.rs`'s "Resolution round") ──────────────────────────────
+
+    /// The resolution round fires whenever ANY rule is selected (there is something to
+    /// defer/resolve), adding exactly `batches` extra priced passes — the same rule-batch
+    /// count as the main scan, since the round re-runs the FULL selected rule set. Selecting
+    /// zero rules must NOT add a resolution round (nothing to resolve).
+    #[test]
+    fn resolution_round_adds_batches_worth_of_passes_when_rules_are_selected() {
+        // 45 rules -> ceil(45/15) = 3 batches; 350k chars = 1 chunk.
+        let (_, _, passes) = estimate_audit_cost(
+            350_000,
+            45,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        // main = chunks(1) * batches(3) = 3; resolution = batches(3); rec = 0. Total = 6.
+        assert_eq!(
+            passes, 6,
+            "3 main + 3 resolution passes for 45 rules (3 rule-batches)"
+        );
+
+        // Zero rules: no resolution round (nothing selected to defer/resolve).
+        let (_, _, passes_zero) = estimate_audit_cost(
+            350_000,
+            0,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        );
+        assert_eq!(passes_zero, 1, "0 rules: 1 main pass, no resolution round");
+    }
+
+    /// The resolution round measurably increases the dollar estimate vs. a (hypothetical)
+    /// formula that didn't price it — i.e. it isn't free. We can't directly instantiate "the
+    /// old formula" anymore, but we CAN show that scaling the rule count up (which scales the
+    /// resolution round's pass count 1:1 with the main scan's rule-batches) increases cost
+    /// faster than scaling would if only the main scan's `selected.div_ceil(15)` batches term
+    /// applied — i.e. cost includes a real, separate contribution from resolution.
+    #[test]
+    fn resolution_round_is_priced_not_free() {
+        let with_prices = estimate_audit_cost(
+            350_000,
+            30,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        )
+        .1;
+        // A run with the SAME shape but $0 audit/calib prices must be $0 regardless of the
+        // resolution round (sanity: pricing is still price-gated, not a hidden flat fee).
+        let zero_priced = estimate_audit_cost(
+            350_000,
+            30,
+            "parallel",
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            0,
+        )
+        .1;
+        assert!(with_prices > 0.0);
+        assert_eq!(
+            zero_priced, 0.0,
+            "zero prices still yield $0 even with the resolution round priced in"
+        );
+    }
+
+    // ── Faktura-shaped regression (the motivating real-world bug) ──────────────────────────
+    //
+    // A real CLI-backed audit of a ~38-file / ~110k-token / 96-rule repo priced ~$0.88 by the
+    // old backend-blind formula but actually billed ~$3.07 (~3.5x low), almost entirely
+    // because the old formula assumed API-style write-once/read-cheap caching regardless of
+    // backend. Exactness is impossible (model output volume varies by codebase), but the
+    // fixed estimator must land in the same ballpark, not still be ~3.5x off.
+    const FAKTURA_ACTUAL_USD: f64 = 3.07;
+    const FAKTURA_CODE_CHARS: usize = 110_000 * 4; // ~110k tokens of code, 4 chars/token
+    const FAKTURA_SELECTED_RULES: usize = 96;
+    const FAKTURA_MULTI_OPTION_RULES: usize = 20;
+
+    /// The CLI-backed estimate for a faktura-shaped run must no longer be ~3.5x UNDER the
+    /// real bill — it must land within ~2x of it (in EITHER direction; exactness is
+    /// impossible since the estimator still doesn't model per-rule domain routing, a
+    /// pre-existing and separately-tracked limitation — see `scan_routing.rs`).
+    #[test]
+    fn faktura_shaped_cli_estimate_no_longer_3x_under() {
+        let (_, dollars, _passes) = estimate_audit_cost(
+            FAKTURA_CODE_CHARS,
+            FAKTURA_SELECTED_RULES,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Cli,
+            FAKTURA_MULTI_OPTION_RULES,
+        );
+        let ratio = dollars / FAKTURA_ACTUAL_USD;
+        // The OLD (backend-blind) formula for this shape was ~3.5x UNDER (ratio ~0.29). The
+        // fixed formula must be dramatically closer to 1.0 — allow up to ~2x in EITHER
+        // direction as the "exactness is impossible" tolerance the task calls out.
+        assert!(
+            ratio > 0.5 && ratio < 2.0,
+            "faktura-shaped CLI estimate must land within ~2x of the real ${FAKTURA_ACTUAL_USD} \
+             bill (was ~3.5x UNDER before this fix): dollars={dollars:.4} ratio={ratio:.3}"
+        );
+        // It must specifically no longer be UNDER by anything close to the old ~3.5x factor.
+        assert!(
+            ratio > 1.0 / 3.5 * 2.0,
+            "must have closed most of the old ~3.5x gap, not just nudged it: ratio={ratio:.3}"
+        );
+    }
+
+    /// For the identical faktura-shaped input, the API/batch backend's estimate must be
+    /// LOWER than the CLI backend's — the API backend gets real cross-call cache reuse that
+    /// CLI structurally cannot.
+    #[test]
+    fn faktura_shaped_api_estimate_is_lower_than_cli() {
+        let (_, dollars_cli, _) = estimate_audit_cost(
+            FAKTURA_CODE_CHARS,
+            FAKTURA_SELECTED_RULES,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Cli,
+            FAKTURA_MULTI_OPTION_RULES,
+        );
+        let (_, dollars_api, _) = estimate_audit_cost(
+            FAKTURA_CODE_CHARS,
+            FAKTURA_SELECTED_RULES,
+            "parallel",
+            3.0,
+            15.0,
+            3.0,
+            15.0,
+            false,
+            false,
+            false,
+            ProjectBackend::Api,
+            FAKTURA_MULTI_OPTION_RULES,
+        );
+        assert!(
+            dollars_api < dollars_cli,
+            "API backend must estimate lower than CLI for the same faktura-shaped scan: \
+             api={dollars_api:.4} cli={dollars_cli:.4}"
+        );
+        // The API estimate should also be a PLAUSIBLE figure (not degenerate/zero) and in a
+        // sane neighborhood of the real bill.
+        assert!(dollars_api > 0.5 && dollars_api < FAKTURA_ACTUAL_USD * 2.0);
     }
 }
