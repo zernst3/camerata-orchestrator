@@ -1112,6 +1112,76 @@ pub fn apply_severity_calibration_rules(findings: Vec<Finding>) -> Vec<Finding> 
         .collect()
 }
 
+// ── D6: the severity CEILING — a downward calibration direction (2026-09-30 cycle-2
+// queue-hardening, R2). D5's floor above only ever RAISES severity. R2 needs the opposite
+// correction, and it never drops a finding — it stays in the queue, re-routed and re-badged: a
+// browser-mediated CORS/cross-origin header misconfiguration (exploitable only through a
+// victim's browser + session, never a direct unauthenticated fetch) is clamped to exactly
+// Medium, bidirectionally — lowering an inflated Critical/High AND raising a re-buried Low/Info.
+// Re-burying it at Low was the prior failure just as much as inflating it to Critical was. The
+// rule derives entirely from the finding's own text (like the floor), so this pass is safe to
+// run over ANY finding set, and must run immediately after `apply_severity_calibration_rules`
+// everywhere that runs (today: the one production call site in `verify_findings`, plus tests).
+
+/// Phrases identifying a browser-mediated CORS / cross-origin header misconfiguration (R2).
+/// Deliberately specific to cross-origin vocabulary (not just "credentials", which appears in
+/// countless unrelated findings) so this never fires outside the actual CORS class.
+const CORS_MISCONFIG_PHRASES: &[&str] = &[
+    "cors",
+    "cross-origin",
+    "cross origin",
+    "access-control-allow-origin",
+    "access-control-allow-credentials",
+    "reflected origin",
+    "reflects the origin",
+    "reflects any origin",
+    "reflects the request's origin",
+    "echoes the origin",
+    "echoed origin",
+    "echoes back the origin",
+];
+
+/// Whether `f`'s own text (detail/snippet/category) names the browser-mediated CORS/cross-origin
+/// misconfiguration class R2 targets.
+fn mentions_cors_misconfig(text: &str) -> bool {
+    CORS_MISCONFIG_PHRASES.iter().any(|p| text.contains(p))
+}
+
+/// Apply the R2 severity ceiling to ONE finding. When the CORS class matches, it is
+/// AUTHORITATIVE for that finding — it overrides whatever the D5 floor already did (including a
+/// floor-critical), because a browser-mediated CORS misconfiguration is never the "direct
+/// unauthenticated exposure" class the floor polices, even if the finding's prose happens to
+/// also brush against floor vocabulary. A finding that does NOT mention CORS is completely
+/// untouched, so a genuinely unauthenticated-exposure finding keeps the floor's Critical rating
+/// unchanged.
+fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
+    let text = calibration_floor_scan_text(&f);
+
+    if mentions_cors_misconfig(&text) {
+        f.severity = "medium".to_string();
+        f.calibration_rationale = Some(
+            "Severity ceiling: a browser-mediated CORS/cross-origin misconfiguration requires a \
+             victim's browser and an active session to exploit — it is neither a direct \
+             unauthenticated exposure (Critical) nor safe to leave buried (Low). Calibrated to \
+             exactly Medium."
+                .to_string(),
+        );
+    }
+
+    f
+}
+
+/// Apply the R2 severity ceiling to a whole finding set — run immediately after
+/// `apply_severity_calibration_rules` (the D5 floor) everywhere that runs. Safe over ANY finding
+/// set (deterministic-floor findings included), since the ceiling rule derives entirely from the
+/// finding's own text rather than the model's verdict.
+pub fn apply_severity_ceiling_rules(findings: Vec<Finding>) -> Vec<Finding> {
+    findings
+        .into_iter()
+        .map(apply_severity_ceiling_rule)
+        .collect()
+}
+
 /// Run the skeptic pass over a repo's AI findings (a fresh, reasoning-based perspective —
 /// deliberately NOT re-sent the whole digest, so it judges exploitability/context, not
 /// code minutiae). Graceful: on any model failure the findings pass through unchanged.
@@ -1246,7 +1316,9 @@ pub async fn verify_findings(
     // D5: the deterministic severity floor runs regardless of whether the LLM calibration
     // pass succeeded — it re-derives its verdict from the finding's own text, not the model's,
     // so it is exactly as available when every pass failed as when one succeeded.
-    apply_severity_calibration_rules(calibrated)
+    // D6: the severity ceiling (R1/R2) runs immediately after, over the SAME set, for the same
+    // reason — both are text-derived and safe regardless of whether calibration ran.
+    apply_severity_ceiling_rules(apply_severity_calibration_rules(calibrated))
 }
 
 /// Merge several calibration passes into one CONSERVATIVE consensus verdict set (#51 thorough
@@ -6969,6 +7041,72 @@ mod tests {
             "an unrelated finding passes through the floor untouched"
         );
         assert_eq!(unrelated.calibration_rationale, None);
+    }
+
+    // ── D6: severity ceiling — R2 (2026-09-30 cycle-2 queue-hardening) ────────────
+    //
+    // The D5 floor above only ever raises severity. R2 pins the opposite direction: it clamps a
+    // browser-mediated CORS misconfiguration to exactly Medium in BOTH directions, without
+    // disturbing the floor's Critical rating for a genuinely unauthenticated-exposure finding.
+
+    const CORS_CREDENTIALS_TEXT: &str =
+        "The API's CORS policy reflects the request's Origin header back verbatim and sets \
+         Access-Control-Allow-Credentials: true, so any origin can make authenticated \
+         cross-origin requests riding the victim's session cookies.";
+
+    /// R2, downward direction: a CORS-with-credentials finding that started at Critical (the
+    /// current over-rating failure) must land at exactly Medium — not left at Critical.
+    #[test]
+    fn severity_ceiling_cors_credentials_lowers_critical_to_medium() {
+        let f = finding_with_detail("AI-CORS-1", "critical", CORS_CREDENTIALS_TEXT);
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(out.severity, "medium");
+        assert!(out.calibration_rationale.is_some());
+    }
+
+    /// R2, upward direction: the SAME class starting at Low (the prior re-burial failure) must
+    /// ALSO land at exactly Medium — not stay at Low.
+    #[test]
+    fn severity_ceiling_cors_credentials_raises_low_to_medium() {
+        let f = finding_with_detail("AI-CORS-2", "low", CORS_CREDENTIALS_TEXT);
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(out.severity, "medium");
+    }
+
+    /// Bidirectional guard, spelled out explicitly: the CORS class must never be observed at
+    /// either extreme after both passes run, whichever extreme it started at.
+    #[test]
+    fn severity_ceiling_cors_credentials_is_never_low_or_critical() {
+        for start in ["critical", "high", "medium", "low", "info"] {
+            let f = finding_with_detail("AI-CORS-3", start, CORS_CREDENTIALS_TEXT);
+            let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+            assert_ne!(
+                out.severity, "low",
+                "starting severity {start:?} must not stay Low"
+            );
+            assert_ne!(
+                out.severity, "critical",
+                "starting severity {start:?} must not become Critical"
+            );
+            assert_eq!(out.severity, "medium");
+        }
+    }
+
+    /// Non-interference: a genuinely unauthenticated-exposure finding (no CORS vocabulary at
+    /// all) must still floor to Critical after BOTH the floor and the ceiling run — the D6
+    /// ceiling must never reintroduce the old under-rating for a class it doesn't target.
+    #[test]
+    fn severity_ceiling_does_not_touch_unauthenticated_exposure_floor() {
+        let f = finding_with_detail(
+            "AI-UNAUTH-EXPORT-2",
+            "medium",
+            "The export endpoint requires no authentication and returns every user's records.",
+        );
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(
+            out.severity, "critical",
+            "a non-CORS unauthenticated-exposure finding keeps the floor's critical rating"
+        );
     }
 
     // ── Structured confidence + effort (Part 1 §3) ────────────────────────────

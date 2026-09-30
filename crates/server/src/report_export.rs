@@ -4733,6 +4733,28 @@ mod tests {
         );
     }
 
+    // ── D6 ceiling interaction — R2 (2026-09-30 cycle-2 queue-hardening) ───────────
+    //
+    // R2 (`ai_audit::apply_severity_ceiling_rule`) clamps a browser-mediated CORS
+    // misconfiguration to exactly Medium. This pins the OUTPUT side here: that Medium buckets
+    // into "plan" — never "do_now" — so it can never displace a genuine critical from the top
+    // action tier.
+
+    /// A medium-severity CORS finding (the R2 ceiling's landing severity) buckets into "plan" —
+    /// never "do_now" — so it can never displace a genuine critical finding from the top tier.
+    #[test]
+    fn r2_medium_cors_finding_lands_in_plan_not_do_now() {
+        let bucket = matrix_bucket(Disposition::Unresolved, "medium", None);
+        assert_eq!(
+            bucket, "plan",
+            "a medium finding (R2's landing severity) belongs in Plan"
+        );
+        assert_ne!(
+            bucket, "do_now",
+            "a medium finding must never displace a critical in do_now"
+        );
+    }
+
     /// End-to-end at the `build_report_json` level: an `info`-severity finding lands in the
     /// `informational` appendix, NEVER in an action tier, and the curated four-bucket invariant
     /// `do_now + do_next + plan + accepted == curated_total` still holds exactly (informational
