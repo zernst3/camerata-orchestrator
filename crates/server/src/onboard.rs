@@ -2154,6 +2154,61 @@ mod tests {
         );
     }
 
+    /// W1 (docs/plans/2026-09-30_cycle2-queue-hardening.md): SUPABASE-FUNC-SEARCH-PATH-1 must
+    /// arm for a PLAIN Postgres repo too — a SECURITY DEFINER function without a pinned
+    /// search_path is exploitable regardless of whether the repo uses Supabase at all. Before
+    /// the `extra_domains` fix, this repo (hand-written `.sql`, no `supabase/` layout, no
+    /// `@supabase/*` dependency — so `detect_frameworks` never adds "Supabase" and
+    /// `domains_for_stack` only emits the generic `sql` domain) never matched the rule's
+    /// folder-derived `supabase:database-functions` domain, so it was never proposed and
+    /// therefore `is_auto_recommended` was permanently false for it — the rule could never be
+    /// pre-checked / armed no matter how obviously the repo needed it.
+    #[tokio::test]
+    async fn propose_corpus_rules_arms_search_path_rule_for_a_plain_postgres_repo() {
+        let files = vec![(
+            "db/migrations/0001_functions.sql".to_string(),
+            "create function public.grant_access(target uuid) returns void \
+             language plpgsql security definer as $$ begin update public.accounts \
+             set access_level = 'elevated' where id = target; end; $$;"
+                .to_string(),
+        )];
+        let stack = detect_stack("acme/plain-pg", &files);
+        assert!(
+            !stack.frameworks.contains(&"Supabase".to_string()),
+            "sanity: this fixture must NOT detect as Supabase: {stack:?}"
+        );
+        let domains = domains_for_stack(&stack);
+        assert!(
+            domains.contains(&"sql".to_string()),
+            "sanity: a .sql file must still map to the generic sql domain: {domains:?}"
+        );
+        assert!(
+            !domains.iter().any(|d| d.starts_with("supabase")),
+            "sanity: no supabase:* domain should be present for a non-Supabase repo: {domains:?}"
+        );
+
+        let repo_domains = vec![("acme/plain-pg".to_string(), domains)];
+        let proposed = propose_corpus_rules(&repo_domains).await;
+
+        let rule = proposed
+            .iter()
+            .find(|r| r.id == "SUPABASE-FUNC-SEARCH-PATH-1")
+            .expect("SUPABASE-FUNC-SEARCH-PATH-1 must be present in the corpus-rules payload");
+        assert!(
+            rule.repos.contains(&"acme/plain-pg".to_string()),
+            "must be domain-matched (bound) to the plain-Postgres repo via extra_domains: {rule:?}"
+        );
+        assert!(
+            rule.recommended,
+            "must be recommended for a plain-Postgres repo, not just for Supabase repos: {rule:?}"
+        );
+        assert!(
+            rule.is_auto_recommended,
+            "must be auto-recommended (pre-checked) for a plain-Postgres repo — this is the exact \
+             arming gap W1 closes: {rule:?}"
+        );
+    }
+
     /// P7: the real onboarding path (detect_stack -> domains_for_stack -> propose_corpus_rules
     /// against the real corpus) must NOT recommend JAVASCRIPT-NEXT-ROUTE-PLACEMENT-1 for a
     /// Next.js repo — it is opt-in only (its option set conflates route organization with auth

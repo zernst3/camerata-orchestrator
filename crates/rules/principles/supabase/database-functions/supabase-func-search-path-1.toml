@@ -2,6 +2,16 @@ id = "SUPABASE-FUNC-SEARCH-PATH-1"
 title = "A SECURITY DEFINER function must set search_path explicitly to prevent search-path hijacking"
 tag = "stack"
 domain = "supabase:database-functions"
+# General Postgres, not just Supabase: a SECURITY DEFINER function without a pinned
+# search_path is exploitable in ANY Postgres database, whether or not the repo also uses
+# Supabase. Without this, a plain-Postgres repo (hand-written .sql, no supabase/ layout, no
+# @supabase/* dependency) gets only the generic `sql` domain from domains_for_stack, which
+# never matches this rule's folder-derived `supabase:database-functions` domain — so the
+# rule is never proposed/armed for it. `extra_domains` (crates/rules/src/lib.rs) is the
+# general mechanism: this rule stays filed under supabase/database-functions/ (keeping its
+# existing supabase:* grouping/behavior), but ALSO matches any repo whose stack carries the
+# `sql` domain.
+extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
 default = true
