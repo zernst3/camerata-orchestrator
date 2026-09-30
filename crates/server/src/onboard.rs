@@ -1323,6 +1323,12 @@ pub async fn audit_repos(
         None
     };
 
+    // P7: collapse needs-review STRUCTURAL findings (one rule flagged as a debatable
+    // structural/consistency preference at many unrelated locations) into ONE grouped,
+    // informational finding per rule — see `group_structural_needs_review`'s doc comment. Runs
+    // ACROSS THE WHOLE SCAN (every repo), after every per-repo pass, so a rule that fires in
+    // more than one repo still collapses to a single row.
+    let all_findings = crate::ai_audit::group_structural_needs_review(all_findings);
     let mut report = build_report(repos_ok, stacks, files_total, all_findings);
     report.test_file_count = test_files_total;
     report.files_excluded = files_excluded_total;

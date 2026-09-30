@@ -4769,6 +4769,61 @@ mod tests {
         assert_eq!(curated, 1, "only the critical is curated; the info note is appendix-only");
     }
 
+    /// P7 end-to-end: N occurrences of one needs-review STRUCTURAL rule, grouped by
+    /// `crate::ai_audit::group_structural_needs_review` into ONE finding, land as a SINGLE row
+    /// in the informational appendix — never one row per occurrence, and never in a curated
+    /// action tier — while a genuine critical finding in the same report is untouched.
+    #[test]
+    fn grouped_structural_needs_review_finding_is_a_single_informational_row() {
+        let mut occ1 = finding("ARCH-SOME-PREFERENCE-1", "a.rs", 10, "medium");
+        occ1.category = Some("arch-conformance".to_string());
+        occ1.confidence = Some("needs-review".to_string());
+        let mut occ2 = finding("ARCH-SOME-PREFERENCE-1", "b.rs", 20, "medium");
+        occ2.category = Some("arch-conformance".to_string());
+        occ2.confidence = Some("needs-review".to_string());
+        let mut occ3 = finding("ARCH-SOME-PREFERENCE-1", "c.rs", 30, "medium");
+        occ3.category = Some("arch-conformance".to_string());
+        occ3.confidence = Some("needs-review".to_string());
+        let critical = finding("SEC-NO-HARDCODED-SECRETS-1", "d.rs", 1, "critical");
+
+        // Run the SAME grouping pass the real scan pipeline runs before build_report, proving
+        // this test exercises the actual N-rows-to-one-row behavior, not just is_informational.
+        let grouped =
+            crate::ai_audit::group_structural_needs_review(vec![occ1, occ2, occ3, critical]);
+        assert_eq!(
+            grouped.len(),
+            2,
+            "three structural occurrences + one critical must collapse to 2 findings: {grouped:?}"
+        );
+
+        let report = report_with(
+            grouped,
+            vec!["ARCH-SOME-PREFERENCE-1", "SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(
+            json.matrix.informational.len(),
+            1,
+            "the grouped structural finding is ONE informational row, not N: {:?}",
+            json.matrix.informational
+        );
+        assert_eq!(
+            json.matrix.informational[0].rule_id,
+            "ARCH-SOME-PREFERENCE-1"
+        );
+        // None of the three original locations leak into an action tier as separate rows.
+        for tier in [&json.matrix.do_now, &json.matrix.do_next, &json.matrix.plan] {
+            assert!(
+                tier.iter().all(|r| r.rule_id != "ARCH-SOME-PREFERENCE-1"),
+                "the grouped rule must never appear in a curated action tier: {tier:?}"
+            );
+        }
+        // The critical finding is unaffected — still curated, still do_now.
+        assert_eq!(json.matrix.do_now.len(), 1);
+        assert_eq!(json.matrix.do_now[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
+    }
+
     // ── Branding (2026-09-13 review): precedence + neutral fallback ────────────────
 
     #[test]

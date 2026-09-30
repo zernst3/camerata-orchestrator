@@ -3448,6 +3448,116 @@ pub fn apply_stack_exceptions(
         .collect()
 }
 
+/// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`, item 4 — needs-review noise):
+/// a rule the calibrator flagged as a debatable STRUCTURAL/consistency preference
+/// (`category == "arch-conformance"`, `confidence == "needs-review"`) commonly fires at many
+/// unrelated locations across a repo — one row per occurrence drowns the report ("23
+/// needs-review rows, mostly structural preferences"). This collapses every such occurrence of
+/// ONE rule into a SINGLE grouped finding, `severity = "low"`, listing every location, instead
+/// of one row per occurrence.
+///
+/// Deliberately NARROW — only `arch-conformance` + `confidence == "needs-review"` + a
+/// non-critical/high severity qualifies, and only an `active` (non-suppressed, not already
+/// dispositioned by a waiver) finding is grouped, so:
+/// - a genuine security/floor finding (never `arch-conformance`, or never `needs-review`) is
+///   NEVER touched — no security finding is ever lost in this pass;
+/// - a critical/high finding is never grouped away, matching the same hard invariant
+///   `report_export::is_informational` already enforces;
+/// - a finding an auditor already suppressed/waived keeps its own explicit disposition rather
+///   than disappearing into a group.
+///
+/// The grouped finding's `severity = "low"` + `confidence = Some("needs-review")` together are
+/// exactly what routes it to the informational appendix, OUTSIDE the curated do_now/do_next/
+/// plan action tiers, via the PRE-EXISTING `report_export::is_informational` §2c rule — no new
+/// bucketing logic needed on that side.
+///
+/// Runs across the WHOLE scan (every repo the caller passes in), so a rule flagged in more than
+/// one repo still collapses to one row with every repo's site listed.
+pub fn group_structural_needs_review(findings: Vec<Finding>) -> Vec<Finding> {
+    let mut groups: std::collections::BTreeMap<String, Vec<Finding>> =
+        std::collections::BTreeMap::new();
+    let mut rest = Vec::with_capacity(findings.len());
+    for f in findings {
+        let severity = crate::report_export::normalize_severity(&f.severity);
+        let is_structural_needs_review = f.status == "active"
+            && f.category.as_deref() == Some("arch-conformance")
+            && f.confidence.as_deref() == Some("needs-review")
+            && !matches!(severity.as_str(), "critical" | "high");
+        if is_structural_needs_review {
+            groups.entry(f.rule_id.clone()).or_default().push(f);
+        } else {
+            rest.push(f);
+        }
+    }
+    for (rule_id, mut occurrences) in groups {
+        occurrences.sort_by(|a, b| {
+            (a.repo.as_str(), a.path.as_str(), a.line).cmp(&(
+                b.repo.as_str(),
+                b.path.as_str(),
+                b.line,
+            ))
+        });
+        rest.push(build_structural_group_finding(rule_id, occurrences));
+    }
+    rest
+}
+
+/// Build the single grouped [`Finding`] for `rule_id`'s `occurrences` — see
+/// [`group_structural_needs_review`]'s doc comment for the full contract. `occurrences` must be
+/// non-empty (the caller only calls this from a populated group).
+fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) -> Finding {
+    let n = occurrences.len();
+    let primary = occurrences
+        .first()
+        .expect("build_structural_group_finding is only called with a non-empty group");
+    let also_locations: Vec<MergedLocation> = occurrences[1..]
+        .iter()
+        .map(|f| MergedLocation {
+            repo: f.repo.clone(),
+            path: f.path.clone(),
+            line: f.line,
+            rule_id: f.rule_id.clone(),
+            snippet: f.snippet.clone(),
+            consequence: false,
+        })
+        .collect();
+    let locations_text = occurrences
+        .iter()
+        .map(|f| format!("{}:{}", f.path, f.line))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let detail = format!(
+        "Structure and consistency observations: {rule_id} was flagged as a debatable \
+         structural or stylistic preference in {n} place{} across the codebase — {locations_text}. \
+         These are informational consistency notes, not confirmed defects; review at your own \
+         discretion.",
+        if n == 1 { "" } else { "s" }
+    );
+    Finding {
+        repo: primary.repo.clone(),
+        path: primary.path.clone(),
+        line: primary.line,
+        rule_id,
+        severity: "low".to_string(),
+        snippet: format!("{n} location(s)"),
+        detail,
+        status: "active".to_string(),
+        also_matches: Vec::new(),
+        preview: false,
+        preview_tool: None,
+        in_test: false,
+        needs_review: true,
+        confidence: Some("needs-review".to_string()),
+        effort: None,
+        category: Some("arch-conformance".to_string()),
+        located: true,
+        captures: std::collections::BTreeMap::new(),
+        evaluated_option_id: primary.evaluated_option_id.clone(),
+        also_locations,
+        fix_specific: None,
+    }
+}
+
 /// The SECOND merge pass (design §1, extended by P1 — see
 /// `docs/plans/2026-09-29_codebase-inspection-hardening.md`): after `resolve_finding_lines` +
 /// `merge_by_location` have collapsed exact-location duplicates, fuse cross-TIER duplicates —
@@ -5180,6 +5290,123 @@ mod tests {
         );
         let out = apply_stack_exceptions(vec![f], &["Supabase".to_string()], &set);
         assert_eq!(out.len(), 1, "an uncorpused rule id is never excepted");
+    }
+
+    // ── P7: needs-review structural grouping ────────────────────────────────────────────
+
+    fn structural_needs_review(path: &str, line: usize) -> Finding {
+        let mut f = site_finding("ARCH-SOME-PREFERENCE-1", path, line, "medium", "differs");
+        f.category = Some("arch-conformance".to_string());
+        f.confidence = Some("needs-review".to_string());
+        f
+    }
+
+    /// N occurrences of ONE structural needs-review rule collapse into exactly ONE grouped
+    /// finding, listing every location — not N separate rows.
+    #[test]
+    fn n_structural_occurrences_of_one_rule_collapse_into_one_grouped_finding() {
+        let findings = vec![
+            structural_needs_review("a.rs", 10),
+            structural_needs_review("b.rs", 20),
+            structural_needs_review("c.rs", 30),
+        ];
+        let out = group_structural_needs_review(findings);
+        assert_eq!(
+            out.len(),
+            1,
+            "three occurrences of one rule must become ONE row: {out:?}"
+        );
+        let grouped = &out[0];
+        assert_eq!(grouped.rule_id, "ARCH-SOME-PREFERENCE-1");
+        assert_eq!(grouped.severity, "low");
+        assert_eq!(grouped.confidence.as_deref(), Some("needs-review"));
+        assert!(grouped.needs_review);
+        // Every location must be listed somewhere (the primary's own site + also_locations).
+        assert!(grouped.detail.contains("a.rs:10"));
+        assert!(grouped.detail.contains("b.rs:20"));
+        assert!(grouped.detail.contains("c.rs:30"));
+        assert_eq!(
+            grouped.also_locations.len(),
+            2,
+            "the two non-primary occurrences must be listed as also_locations: {:?}",
+            grouped.also_locations
+        );
+    }
+
+    /// Different RULES never merge into the same group — grouping is per-rule.
+    #[test]
+    fn different_structural_rules_get_separate_groups() {
+        let mut a = structural_needs_review("a.rs", 10);
+        a.rule_id = "ARCH-RULE-A-1".to_string();
+        let mut b = structural_needs_review("b.rs", 20);
+        b.rule_id = "ARCH-RULE-B-1".to_string();
+        let out = group_structural_needs_review(vec![a, b]);
+        assert_eq!(
+            out.len(),
+            2,
+            "distinct rule ids must not be merged together: {out:?}"
+        );
+    }
+
+    /// A CRITICAL or HIGH severity finding is NEVER swept into the grouped/informational
+    /// bucket, even if it happens to carry `arch-conformance` + `needs-review` — a real
+    /// security finding must never disappear into this noise-reduction pass.
+    #[test]
+    fn a_high_or_critical_finding_is_never_grouped_away() {
+        for sev in ["critical", "high"] {
+            let mut f = structural_needs_review("secret.rs", 5);
+            f.severity = sev.to_string();
+            let out = group_structural_needs_review(vec![f.clone()]);
+            assert_eq!(
+                out.len(),
+                1,
+                "a {sev} finding must survive ungrouped: {out:?}"
+            );
+            assert_eq!(out[0].severity, sev, "severity must not be downgraded to low");
+            assert_eq!(out[0].path, "secret.rs", "must remain its own individual row");
+        }
+    }
+
+    /// A finding that isn't `arch-conformance`, isn't `needs-review`, or was already
+    /// dispositioned (`status != "active"`) is left completely untouched — passes through
+    /// unchanged, never folded into a group.
+    #[test]
+    fn unrelated_findings_pass_through_unchanged() {
+        let wrong_category = {
+            let mut f = structural_needs_review("a.rs", 1);
+            f.category = Some("rls-policy".to_string());
+            f
+        };
+        let wrong_confidence = {
+            let mut f = structural_needs_review("b.rs", 2);
+            f.confidence = Some("high".to_string());
+            f
+        };
+        let already_suppressed = {
+            let mut f = structural_needs_review("c.rs", 3);
+            f.status = "suppressed-inline".to_string();
+            f
+        };
+        let out = group_structural_needs_review(vec![
+            wrong_category.clone(),
+            wrong_confidence.clone(),
+            already_suppressed.clone(),
+        ]);
+        assert_eq!(out.len(), 3, "none of these three should be grouped: {out:?}");
+        assert!(out.contains(&wrong_category));
+        assert!(out.contains(&wrong_confidence));
+        assert!(out.contains(&already_suppressed));
+    }
+
+    /// A SINGLE occurrence of a structural needs-review rule still goes through the grouping
+    /// shape (severity forced to low, confidence stays needs-review) — uniform behavior
+    /// whether there's one occurrence or many.
+    #[test]
+    fn a_single_structural_occurrence_still_produces_the_grouped_shape() {
+        let out = group_structural_needs_review(vec![structural_needs_review("only.rs", 7)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].severity, "low");
+        assert!(out[0].detail.contains("only.rs:7"));
     }
 
     #[test]
