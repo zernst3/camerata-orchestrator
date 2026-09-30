@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::config::parse_exposed_schemas;
 use super::timeline::{
-    build_timeline, find_wrong_table_reenable, ProtectionEvent, ProtectionKind, TableState,
+    build_timeline, build_timeline_from_globs, find_wrong_table_reenable, ProtectionEvent,
+    ProtectionKind, TableState,
 };
 use crate::arch_checker::{
     ArchChecker, ArchViolation, RepoView, SEVERITY_CRITICAL, SEVERITY_INFO, SEVERITY_MEDIUM,
@@ -16,18 +17,31 @@ use crate::arch_checker::{
 pub const RULE_RLS_ENABLED: &str = "SUPABASE-RLS-ENABLED-1";
 pub const RULE_RLS_NO_POLICY: &str = "SUPABASE-RLS-NO-POLICY-1";
 pub const RULE_RLS_POLICY_DISABLED: &str = "SUPABASE-RLS-POLICY-DISABLED-1";
+/// A table whose replayed end-state shows Row Level Security EXPLICITLY disabled (not merely
+/// never enabled) and never correctly restored — either nobody wrote a matching re-enable at
+/// all, or the migration's own re-enable statement targeted a DIFFERENT object (the D4
+/// wrong-table copy-paste typo). Unlike [`RULE_RLS_ENABLED`], this fires independent of
+/// `supabase/config.toml` exposure scoping: an explicit disable that is never restored is a
+/// security-relevant authoring defect in its own right, not a PostgREST-reachability question
+/// — see the module doc and [`check_disabled_not_restored`] for the full rationale.
+pub const RULE_RLS_DISABLED_NOT_RESTORED: &str = "SUPABASE-RLS-DISABLED-NOT-RESTORED-1";
 
 const RULE_IDS: &[&str] = &[
     RULE_RLS_ENABLED,
     RULE_RLS_NO_POLICY,
     RULE_RLS_POLICY_DISABLED,
+    RULE_RLS_DISABLED_NOT_RESTORED,
 ];
 
-const INTEREST_GLOBS: &[&str] = &[
-    "supabase/migrations/*.sql",
-    "supabase/schemas/*.sql",
-    "supabase/config.toml",
-];
+/// `supabase/config.toml` is still needed (it drives `exposed_schemas` for the three
+/// PostgREST-exposure-scoped rules above), but SQL discovery itself is `**/*.sql` — NOT
+/// scoped to `supabase/`. [`RULE_RLS_DISABLED_NOT_RESTORED`]'s defect (an explicit RLS
+/// disable that is never correctly restored) is general Postgres, not a Supabase/PostgREST
+/// concept, exactly like `SUPABASE-FUNC-SEARCH-PATH-1`'s own breadth widening (see
+/// `search_path_checker.rs` and `docs/plans/2026-09-30_cycle2-queue-hardening.md` §W1) — a
+/// hand-rolled `db/migrations/*.sql` layout with no Supabase project at all can still disable
+/// RLS mid-migration and never turn it back on.
+const INTEREST_GLOBS: &[&str] = &["**/*.sql", "supabase/config.toml"];
 
 /// The honesty caveat every RLS finding carries (design memo §3 step 7 / spec §4): a repo
 /// scan can only prove what the migration HISTORY says, never what the live database
@@ -55,6 +69,22 @@ impl ArchChecker for SupabaseRlsChecker {
         for state in timeline.tables.values() {
             violations.extend(check_table(state, &exposed, &timeline.events_by_file));
         }
+
+        // RULE_RLS_DISABLED_NOT_RESTORED replays over a SEPARATE, general-SQL timeline
+        // (`**/*.sql`, not just `supabase/migrations|schemas/*.sql`) — its defect is general
+        // Postgres, not Supabase/PostgREST-exposure-specific, so it must see migration
+        // layouts the Supabase-scoped `timeline` above never looks at. A single migration
+        // glob (no separate schema pass) is enough: a real Supabase repo's
+        // `supabase/schemas/*.sql` still naturally sorts after `supabase/migrations/*.sql`
+        // ('m' < 's'), preserving the "declarative snapshot overrides migration history" fold
+        // order — see `search_path_checker.rs`'s identical precedent.
+        let general_timeline = build_timeline_from_globs(repo, &["**/*.sql"], &[]);
+        for state in general_timeline.tables.values() {
+            if let Some(v) = check_disabled_not_restored(state, &general_timeline.events_by_file) {
+                violations.push(v);
+            }
+        }
+
         violations
     }
 }
@@ -229,6 +259,95 @@ fn check_table(
     }
 
     out
+}
+
+/// `RULE_RLS_DISABLED_NOT_RESTORED`: mint a security-tier finding, independent of
+/// `supabase/config.toml` exposure scoping and independent of any other rule that happens to
+/// touch the same lines, when a table's replayed end-state is RLS-disabled AND that disabled
+/// state traces to an EXPLICIT `ALTER TABLE ... DISABLE ROW LEVEL SECURITY` statement (not
+/// merely a table that was never touched by RLS at all — `RULE_RLS_ENABLED` already covers
+/// that plain case, gated by exposure).
+///
+/// Two sub-shapes both count, and both mint the SAME rule at the SAME severity:
+/// - **(a) never restored**: the disable statement was never followed by a matching re-enable
+///   anywhere the D4 same-file search (`find_wrong_table_reenable`) or the timeline replay's
+///   own cross-file fold could find one.
+/// - **(b) wrong-table re-enable**: the migration's own subsequent re-enable statement in the
+///   SAME file targeted a DIFFERENT object — the classic copy-paste typo — so this table was
+///   never actually re-protected even though an `ENABLE ROW LEVEL SECURITY` statement exists
+///   right there in the diff.
+///
+/// Severity is always `SEVERITY_CRITICAL` — a security conclusion this deterministic must
+/// never be downgraded by PostgREST-exposure scoping (unlike `RULE_RLS_ENABLED`) and must
+/// never inherit a co-located rule's severity (a schema-hygiene or architecture rule matching
+/// the same disable/enable lines does not change what THIS rule concludes). This is also what
+/// lets a later cross-tier merge treat this rule as primary over an unrelated same-line hit
+/// without the merge itself having to reason about severity provenance.
+fn check_disabled_not_restored(
+    state: &TableState,
+    events_by_file: &BTreeMap<String, Vec<ProtectionEvent>>,
+) -> Option<ArchViolation> {
+    if state.rls_enabled {
+        return None; // Currently protected (possibly re-enabled in a later migration) — clean.
+    }
+    let loc = state.rls_established_at.as_ref()?;
+
+    // Precondition: the CURRENT disabled state must trace to an explicit DISABLE statement at
+    // exactly this file:line, not a `CREATE TABLE` default (a table simply never touched by
+    // RLS is `RULE_RLS_ENABLED`'s plain case, not this rule's concern).
+    let was_explicit_disable = events_by_file.get(&loc.file).is_some_and(|events| {
+        events.iter().any(|ev| {
+            ev.kind == ProtectionKind::Rls
+                && ev.schema == state.schema
+                && ev.object == state.table
+                && !ev.enabled
+                && ev.line == loc.line
+        })
+    });
+    if !was_explicit_disable {
+        return None;
+    }
+
+    let name = display_name(&state.schema, &state.table);
+    let hit = find_wrong_table_reenable(
+        events_by_file,
+        &loc.file,
+        loc.line,
+        ProtectionKind::Rls,
+        None,
+        &state.schema,
+        &state.table,
+    );
+
+    let message = match &hit {
+        Some(wrong) => {
+            let wrong_name = display_name(&wrong.wrong_schema, &wrong.wrong_object);
+            format!(
+                "Row Level Security was explicitly disabled on {name} at {}:{}, and the next RLS-enabling \
+                 statement in that same migration file — {}:{} — turned protection back on for {wrong_name} \
+                 instead of {name}. That is a wrong-table copy-paste in the re-enable statement: {name} was \
+                 never actually re-protected. {HONESTY_CAVEAT}",
+                loc.file, loc.line, loc.file, wrong.line
+            )
+        }
+        None => format!(
+            "Row Level Security was explicitly disabled on {name} at {}:{} and never re-enabled anywhere in \
+             the migration history. A disable that is never restored is a stronger signal than a table that \
+             simply never had RLS in the first place — something intentionally turned protection off (a \
+             backfill, a hotfix, a debugging session) and the matching re-enable was never written. \
+             {HONESTY_CAVEAT}",
+            loc.file, loc.line
+        ),
+    };
+
+    Some(ArchViolation {
+        rule_id: RULE_RLS_DISABLED_NOT_RESTORED.to_string(),
+        file: loc.file.clone(),
+        line: loc.line,
+        object: Some(format!("{}.{}", state.schema, state.table)),
+        severity: SEVERITY_CRITICAL,
+        message,
+    })
 }
 
 #[cfg(test)]
@@ -419,10 +538,21 @@ mod tests {
              alter table public.accounts disable row level security;",
         )]);
         let vs = SupabaseRlsChecker.check(&view(&f));
-        assert_eq!(vs.len(), 1, "{vs:#?}");
+        // Two findings now co-exist by design: the exposure-scoped RULE_RLS_ENABLED (unchanged
+        // by this test's own history) AND RULE_RLS_DISABLED_NOT_RESTORED — this scenario IS an
+        // explicit disable that is never restored, which is exactly that rule's positive case.
+        assert_eq!(vs.len(), 2, "{vs:#?}");
         assert_eq!(vs[0].rule_id, RULE_RLS_ENABLED);
         assert_eq!(vs[0].object.as_deref(), Some("public.accounts"));
         assert_eq!(vs[0].severity, SEVERITY_CRITICAL);
+        let restored = vs
+            .iter()
+            .find(|v| v.rule_id == RULE_RLS_DISABLED_NOT_RESTORED)
+            .expect(
+                "explicit disable under the renamed name must also mint the security-tier finding",
+            );
+        assert_eq!(restored.object.as_deref(), Some("public.accounts"));
+        assert_eq!(restored.severity, SEVERITY_CRITICAL);
     }
 
     #[test]
@@ -523,7 +653,11 @@ mod tests {
              alter table public.profiles disable row level security;",
         )]);
         let vs = SupabaseRlsChecker.check(&view(&f));
-        assert_eq!(vs.len(), 1, "{vs:#?}");
+        // RULE_RLS_ENABLED (the exposure-scoped bare finding) AND
+        // RULE_RLS_DISABLED_NOT_RESTORED (this explicit disable was never restored) both fire —
+        // deliberate over-telling, not a regression of this test's original assertions below.
+        assert_eq!(vs.len(), 2, "{vs:#?}");
+        assert_eq!(vs[0].rule_id, RULE_RLS_ENABLED);
         assert!(
             vs[0].message.contains("No evidence of RLS being enabled"),
             "{}",
@@ -533,6 +667,17 @@ mod tests {
             !vs[0].message.to_lowercase().contains("wrong-table"),
             "no re-enable was attempted anywhere — must not fabricate a wrong-table claim: {}",
             vs[0].message
+        );
+        let restored = vs
+            .iter()
+            .find(|v| v.rule_id == RULE_RLS_DISABLED_NOT_RESTORED)
+            .expect("an explicit disable with no re-enable anywhere must mint the security-tier finding");
+        assert_eq!(restored.severity, SEVERITY_CRITICAL);
+        assert_eq!(restored.object.as_deref(), Some("public.profiles"));
+        assert!(
+            !restored.message.to_lowercase().contains("wrong-table"),
+            "no re-enable was attempted anywhere — must not fabricate a wrong-table claim: {}",
+            restored.message
         );
     }
 
@@ -611,5 +756,148 @@ mod tests {
             "{}",
             info.message
         );
+    }
+
+    // ── C3-2: RULE_RLS_DISABLED_NOT_RESTORED — deterministic, security-tier, independent of
+    // exposure scoping and of any co-located rule's own severity ─────────────────────────────
+    //
+    // A migration that disables row-level protection and never restores it must mint a
+    // top-severity SECURITY finding deterministically — it must never depend on the
+    // non-deterministic AI-advisory tier, and must never inherit an unrelated (or merely
+    // co-located) rule's severity.
+
+    fn restored_findings<'a>(vs: &'a [ArchViolation]) -> Vec<&'a ArchViolation> {
+        vs.iter()
+            .filter(|v| v.rule_id == RULE_RLS_DISABLED_NOT_RESTORED)
+            .collect()
+    }
+
+    #[test]
+    fn positive_a_disabled_with_no_reenable_anywhere_fires_one_critical_finding() {
+        let f = files(vec![(
+            "supabase/migrations/20240101000000_init.sql",
+            "create table public.profiles (id uuid primary key);\n\
+             alter table public.profiles enable row level security;\n\
+             alter table public.profiles disable row level security;",
+        )]);
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        let restored = restored_findings(&vs);
+        assert_eq!(restored.len(), 1, "{vs:#?}");
+        assert_eq!(restored[0].severity, SEVERITY_CRITICAL);
+        assert_eq!(restored[0].object.as_deref(), Some("public.profiles"));
+        assert!(
+            restored[0].message.contains("profiles"),
+            "{}",
+            restored[0].message
+        );
+        assert!(
+            !restored[0].message.to_lowercase().contains("wrong-table"),
+            "case (a) has no wrong-table claim to make: {}",
+            restored[0].message
+        );
+    }
+
+    #[test]
+    fn positive_b_disabled_then_wrong_table_reenable_fires_one_critical_finding_naming_both() {
+        let f = files(vec![(
+            "supabase/migrations/20240101000000_init.sql",
+            "create table public.profiles (id uuid primary key);\n\
+             alter table public.profiles enable row level security;\n\
+             create table public.accounts (id uuid primary key);\n\
+             alter table public.profiles disable row level security;\n\
+             alter table public.accounts enable row level security;",
+        )]);
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        let restored = restored_findings(&vs);
+        assert_eq!(restored.len(), 1, "{vs:#?}");
+        assert_eq!(restored[0].severity, SEVERITY_CRITICAL);
+        assert_eq!(
+            restored[0].object.as_deref(),
+            Some("public.profiles"),
+            "the affected (still-unprotected) object is profiles, not the mismatched accounts"
+        );
+        assert!(
+            restored[0].message.contains("profiles") && restored[0].message.contains("accounts"),
+            "message must name both the affected object and the mismatched object: {}",
+            restored[0].message
+        );
+        assert!(
+            restored[0].message.to_lowercase().contains("wrong-table")
+                || restored[0].message.to_lowercase().contains("copy-paste"),
+            "message must explicitly call out the wrong-table/copy-paste mismatch: {}",
+            restored[0].message
+        );
+    }
+
+    #[test]
+    fn safe_twin_disable_then_correct_same_object_reenable_fires_zero_findings() {
+        let f = files(vec![(
+            "supabase/migrations/20240101000000_init.sql",
+            "create table public.profiles (id uuid primary key);\n\
+             alter table public.profiles enable row level security;\n\
+             alter table public.profiles disable row level security;\n\
+             alter table public.profiles enable row level security;",
+        )]);
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        assert!(
+            restored_findings(&vs).is_empty(),
+            "a disable correctly restored on the SAME object must mint nothing: {vs:#?}"
+        );
+    }
+
+    #[test]
+    fn severity_is_independent_of_a_co_located_lower_severity_finding_on_the_same_lines() {
+        // `internal` is NOT an exposed schema, so RULE_RLS_ENABLED — the OTHER rule that also
+        // fires over these exact same lines/object — is downgraded to SEVERITY_INFO (see
+        // `non_exposed_schema_emits_info_not_a_defect`). RULE_RLS_DISABLED_NOT_RESTORED must
+        // still conclude SEVERITY_CRITICAL for the identical object: a security conclusion must
+        // never inherit, or be shadowed by, a co-located rule's own (lower) severity.
+        let f = files(vec![
+            ("supabase/config.toml", "[api]\nschemas = [\"public\"]\n"),
+            (
+                "supabase/migrations/20240101000000_init.sql",
+                "create table internal.secrets (id uuid primary key);\n\
+                 alter table internal.secrets enable row level security;\n\
+                 alter table internal.secrets disable row level security;",
+            ),
+        ]);
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        let enabled = vs.iter().find(|v| v.rule_id == RULE_RLS_ENABLED).expect(
+            "the co-located, lower-severity rule must still fire for this test to prove anything",
+        );
+        assert_eq!(
+            enabled.severity, SEVERITY_INFO,
+            "sanity check: the co-located rule really is lower severity here"
+        );
+        let restored = restored_findings(&vs);
+        assert_eq!(restored.len(), 1, "{vs:#?}");
+        assert_eq!(
+            restored[0].severity, SEVERITY_CRITICAL,
+            "the security rule's own severity must not be shadowed by the co-located rule's info-tier verdict"
+        );
+        assert_eq!(restored[0].object.as_deref(), Some("internal.secrets"));
+    }
+
+    #[test]
+    fn fires_outside_the_supabase_folder_convention_general_postgres_layout() {
+        // The defect (explicit disable, never restored) is general Postgres, not a
+        // Supabase/PostgREST-exposure concept — a hand-rolled `db/migrations/` layout with no
+        // `supabase/` directory at all must still be inspected, mirroring
+        // `SUPABASE-FUNC-SEARCH-PATH-1`'s own breadth widening.
+        let f = files(vec![(
+            "db/migrations/0001_init.sql",
+            "create table public.widgets (id uuid primary key);\n\
+             alter table public.widgets enable row level security;\n\
+             alter table public.widgets disable row level security;",
+        )]);
+        assert!(
+            crate::arch_checker::checker_applies(&SupabaseRlsChecker, &f),
+            "a plain db/migrations/*.sql layout must arm the checker via the **/*.sql glob"
+        );
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        let restored = restored_findings(&vs);
+        assert_eq!(restored.len(), 1, "{vs:#?}");
+        assert_eq!(restored[0].severity, SEVERITY_CRITICAL);
+        assert_eq!(restored[0].file, "db/migrations/0001_init.sql");
     }
 }
