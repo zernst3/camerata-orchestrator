@@ -2621,6 +2621,41 @@ mod tests {
         );
     }
 
+    /// P7: ARCH-IDEMPOTENCY-KEYS-1's default-option directive — the text the AI audit prompt
+    /// actually reads when checking code against this rule — must explicitly rule out "a helper
+    /// function exists but is unused/uncalled" as evidence of an idempotency defect. Without
+    /// this, the model conflated "an idempotency-key helper is defined but not wired into any
+    /// endpoint" (a dead-code/hygiene observation) with "this endpoint has no idempotency-key
+    /// mechanism" (the actual defect this rule polices).
+    #[tokio::test]
+    async fn idempotency_keys_directive_rules_out_the_unused_helper_false_positive() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return; // skip without the bundled corpus
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let rule = set
+            .get_by_id("ARCH-IDEMPOTENCY-KEYS-1")
+            .expect("ARCH-IDEMPOTENCY-KEYS-1 must exist in the bundled corpus");
+        let default = rule
+            .resolved_option(None)
+            .expect("the rule must resolve to a default option");
+        let directive_lc = default.directive.to_ascii_lowercase();
+        assert!(
+            directive_lc.contains("unused")
+                || directive_lc.contains("not (yet) called")
+                || directive_lc.contains("not called"),
+            "the directive must explicitly rule out an unused/uncalled helper as a violation: {}",
+            default.directive
+        );
+        assert!(
+            directive_lc.contains("endpoint"),
+            "the directive must anchor the violation on the ENDPOINT, not a helper's own \
+             definition: {}",
+            default.directive
+        );
+    }
+
     // ── derive-from-folder (unit tests for the path → domain derivation) ─────
 
     #[tokio::test]
