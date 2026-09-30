@@ -190,18 +190,39 @@ pub fn find_wrong_table_reenable(
 /// fold every statement in each, in order. Never panics — a malformed file just contributes
 /// fewer recognized statements (`classify_statement` returns `None` for anything it can't
 /// place), never an error that aborts the whole fold.
+///
+/// This is [`SupabaseRlsChecker`](super::rls_checker::SupabaseRlsChecker)'s own entry point —
+/// it stays scoped to Supabase's fixed folder convention on purpose (RLS/policy state is a
+/// Supabase-specific concept: PostgREST's exposure model, not a general-Postgres one). A
+/// checker that needs to replay SQL from ANY layout (general Postgres, not just Supabase —
+/// see [`SupabaseFnSearchPathChecker`](super::search_path_checker::SupabaseFnSearchPathChecker))
+/// should call [`build_timeline_from_globs`] instead, with its own glob list.
 pub fn build_timeline(repo: &RepoView<'_>) -> Timeline {
+    build_timeline_from_globs(repo, &["supabase/migrations/*.sql"], &["supabase/schemas/*.sql"])
+}
+
+/// The general form of [`build_timeline`]: gather every file matching `migration_globs`
+/// (sorted by filename, folded first) then every file matching `schema_globs` (sorted by
+/// filename, folded last — the "declarative snapshot overrides migration history" shortcut),
+/// and fold every statement in each, in order. A file matching BOTH sets is folded once per
+/// matching set (migration pass, then schema pass) — callers should keep the two glob lists
+/// disjoint in practice, as `build_timeline`'s own supabase-scoped call does.
+pub fn build_timeline_from_globs(
+    repo: &RepoView<'_>,
+    migration_globs: &[&str],
+    schema_globs: &[&str],
+) -> Timeline {
     let mut migration_files: Vec<&(String, String)> = repo
         .files
         .iter()
-        .filter(|(path, _)| crate::arch_checker::glob_match("supabase/migrations/*.sql", path))
+        .filter(|(path, _)| crate::arch_checker::matches_any_glob(migration_globs, path))
         .collect();
     migration_files.sort_by(|a, b| a.0.cmp(&b.0));
 
     let mut schema_files: Vec<&(String, String)> = repo
         .files
         .iter()
-        .filter(|(path, _)| crate::arch_checker::glob_match("supabase/schemas/*.sql", path))
+        .filter(|(path, _)| crate::arch_checker::matches_any_glob(schema_globs, path))
         .collect();
     schema_files.sort_by(|a, b| a.0.cmp(&b.0));
 
