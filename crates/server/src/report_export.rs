@@ -613,6 +613,19 @@ pub struct FindingRefJson {
     /// (`xlsx_export`, a cross-artifact test) assert the label directly rather than
     /// re-deriving or inferring it from array membership.
     pub bucket: String,
+    /// Calibration-review fix: whether this finding's own text or calibration justification
+    /// records an exploit precondition (`ai_audit::mentions_exploit_precondition`) — e.g.
+    /// "exploitation requires forging a session cookie". `0` for an unconditional finding,
+    /// `1` when a precondition is recorded. Used ONLY as a tie-break in the "do now" ranking
+    /// ([`build_report_json`]'s `do_now_sorted`) so an unconditional critical always outranks
+    /// a critical whose note records a precondition — never to change severity or drop/
+    /// re-bucket the finding itself.
+    pub precondition_count: usize,
+    /// Secondary tie-break for the "do now" ranking, after severity and
+    /// `precondition_count`: `0` for a clear/confident finding (`confidence == Some("high")`,
+    /// or a finding calibration never scored at all — the deterministic floor/preview tier,
+    /// which was never in doubt to begin with) and `1` for `needs-review`. Lower ranks first.
+    pub confidence_rank: u8,
 }
 
 /// The severity×effort action matrix — the money page. Cell membership is driven by the
@@ -1900,6 +1913,29 @@ pub(crate) fn is_informational(
     false
 }
 
+/// Whether `f`'s own calibration justification — its `detail` (which carries any
+/// `[calibrated: reason]`/`[needs review: reason]` tag `ai_audit::apply_verdicts` appends)
+/// plus its `calibration_rationale` (set by the D5/D6 deterministic passes, or by the
+/// upward-calibration guardrail itself) — records an exploit precondition. See
+/// [`FindingRefJson::precondition_count`]'s doc comment: this is a RANKING tie-break only,
+/// never a severity or bucket change.
+fn finding_precondition_count(f: &Finding) -> usize {
+    let text = format!(
+        "{} {}",
+        f.detail,
+        f.calibration_rationale.as_deref().unwrap_or("")
+    );
+    usize::from(crate::ai_audit::mentions_exploit_precondition(&text))
+}
+
+/// See [`FindingRefJson::confidence_rank`]'s doc comment.
+fn finding_confidence_rank(f: &Finding) -> u8 {
+    match f.confidence.as_deref() {
+        Some("needs-review") => 1,
+        _ => 0,
+    }
+}
+
 fn finding_ref(f: &Finding, severity: &str, headline: String, bucket: &str) -> FindingRefJson {
     FindingRefJson {
         rule_id: f.rule_id.clone(),
@@ -1910,6 +1946,8 @@ fn finding_ref(f: &Finding, severity: &str, headline: String, bucket: &str) -> F
         headline,
         effort: f.effort.clone(),
         bucket: bucket.to_string(),
+        precondition_count: finding_precondition_count(f),
+        confidence_rank: finding_confidence_rank(f),
     }
 }
 
@@ -2537,12 +2575,20 @@ pub fn build_report_json(
         .filter(|(_, d, _, _)| *d == Disposition::Unresolved)
         .count()
         - informational;
+    // Calibration-review fix: rank by (severity desc, precondition_count asc, confidence) —
+    // an unconditional critical must always outrank a critical whose own justification
+    // records an exploit precondition (see `FindingRefJson::precondition_count`'s doc
+    // comment), with confidence as the final tie-break. `Vec::sort_by_key` is a STABLE sort,
+    // so two findings tied on all three keys keep their prior relative order (the severity/
+    // provenance/location order the matrix bucket itself was already sorted by) — this is
+    // purely a RANKING change, nothing is dropped or re-bucketed.
     let mut do_now_sorted = matrix.do_now.clone();
-    do_now_sorted.sort_by_key(|f| match f.severity.as_str() {
-        "critical" => 0,
-        "high" => 1,
-        "medium" => 2,
-        _ => 3,
+    do_now_sorted.sort_by_key(|f| {
+        (
+            severity_rank(&f.severity),
+            f.precondition_count,
+            f.confidence_rank,
+        )
     });
     // FIX 4 (2026-09-13 review): `top3_do_now` still feeds the "Three things this week" box
     // below (the ONE place these findings are now named) — the exec-summary's own
@@ -3271,6 +3317,59 @@ mod tests {
         let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
         assert!(json.three_things.items.is_empty());
         assert_eq!(json.three_things.total_hours_label, "No do-now items this run.");
+    }
+
+    // ── Calibration-review fix: precondition tie-break in the do-now ranking ──────────
+    //
+    // The bug this guards: a High "unverified session read" finding whose own note recorded
+    // an exploit precondition was promoted to Critical by calibration and took a top-3
+    // do-now slot from a genuinely unconditional critical (an unauthenticated export
+    // exploitable with one request). `build_report_json`'s `do_now_sorted` must rank an
+    // unconditional critical ahead of a critical whose justification records a precondition,
+    // even though both are the same severity — pure RANKING, no bucket/severity change.
+
+    #[test]
+    fn three_things_ranks_the_unconditional_critical_ahead_of_a_preconditioned_one() {
+        // Alphabetically "a.rs" would naturally sort first in the bucket's own (severity,
+        // provenance, repo, path, line) ordering — deliberately putting the PRECONDITIONED
+        // finding there proves the tie-break actually reorders rather than coincidentally
+        // agreeing with path order.
+        let mut preconditioned = finding("SEC-PRECONDITIONED", "a.rs", 1, "critical");
+        preconditioned.detail =
+            "Server code authorizes from an unverified session read; exploitation requires \
+             forging a session cookie."
+                .to_string();
+        let mut unconditional = finding("SEC-UNCONDITIONAL", "b.rs", 2, "critical");
+        unconditional.detail =
+            "The export endpoint returns every user's records with no authorization check and \
+             is reachable with a single unauthenticated request."
+                .to_string();
+        let report = report_with(vec![preconditioned, unconditional], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(json.matrix.do_now.len(), 2, "both are critical do-now items");
+        assert_eq!(
+            json.three_things.items[0].rule_id, "SEC-UNCONDITIONAL",
+            "the unconditional critical must rank first, ahead of the preconditioned one: {:?}",
+            json.three_things.items
+        );
+        assert_eq!(json.three_things.items[1].rule_id, "SEC-PRECONDITIONED");
+    }
+
+    #[test]
+    fn three_things_order_is_unchanged_for_two_unconditional_criticals() {
+        let f1 = finding("SEC-FIRST", "a.rs", 1, "critical");
+        let f2 = finding("SEC-SECOND", "b.rs", 2, "critical");
+        let report = report_with(vec![f1, f2], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(json.matrix.do_now.len(), 2);
+        assert_eq!(
+            json.three_things.items[0].rule_id, "SEC-FIRST",
+            "with neither finding preconditioned, today's (repo/path/line) order must hold: {:?}",
+            json.three_things.items
+        );
+        assert_eq!(json.three_things.items[1].rule_id, "SEC-SECOND");
     }
 
     // ── S5: fallback categories are title-cased (not raw lowercase tokens) ─────

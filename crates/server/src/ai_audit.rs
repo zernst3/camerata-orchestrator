@@ -788,9 +788,51 @@ fn strip_dedup_pointers(reason: &str) -> String {
         .to_string()
 }
 
+/// Phrases that mark a finding's own text (its authored `detail`/`snippet`) or the
+/// calibration model's own verdict reason as recording an EXPLOIT PRECONDITION — some
+/// additional fact that must hold (forging a cookie, holding another credential, a specific
+/// attacker capability) before the vulnerability is actually reachable, as opposed to an
+/// unconditional exposure exploitable as-is. Deliberately phrase-based and conservative
+/// (clear precondition phrasing, not any use of the word "if") — a finding that merely
+/// contains "if" somewhere in an unrelated sentence must not trip this.
+///
+/// CRITICAL GUARDRAIL (calibration review, docs/plans/2026-09-30_cycle2-queue-hardening.md):
+/// this predicate is used ONLY to (a) block an upward calibration move in [`apply_verdicts`]
+/// and (b) break ties in the "do now" ranking in `report_export`. It must NEVER be used to
+/// LOWER a severity — a genuine critical whose justification merely mentions a mitigation
+/// must never be buried by this logic. See the call sites' own doc comments for the
+/// never-demote invariant.
+const EXPLOIT_PRECONDITION_PHRASES: &[&str] = &[
+    "requires ",
+    "contingent on",
+    "depends on",
+    "only if",
+    "assuming ",
+    "provided that",
+    "an attacker must",
+];
+
+/// Whether `text` records an exploit precondition per [`EXPLOIT_PRECONDITION_PHRASES`].
+/// Case-insensitive; lowercases internally so every caller (both the calibration pass here
+/// and `report_export`'s ranking tie-break) can pass raw, unprocessed text.
+pub(crate) fn mentions_exploit_precondition(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    EXPLOIT_PRECONDITION_PHRASES.iter().any(|p| lower.contains(p))
+}
+
 /// Apply the calibration verdicts: recalibrate severity and annotate confidence/reason.
 /// NEVER drops a finding — recall-first discovery hands every finding to the architect.
 /// Robust: unparseable verdicts keep all findings as-is.
+///
+/// UPWARD-CALIBRATION GUARDRAIL: when applying the model's verdict would RAISE a finding's
+/// severity above its authored/base severity (the severity it carried entering this call)
+/// AND the finding's own text or the verdict's own reason records an exploit precondition
+/// (see [`mentions_exploit_precondition`]), the raise is refused and the base severity is
+/// kept — a High finding whose note says exploitation "requires forging a session cookie"
+/// does not get waved through to Critical and take a do-now slot from an unconditional
+/// critical. This can ONLY hold severity at its base value or let the raise through; it
+/// never lowers a severity below what it already was (an explicit downgrade verdict with no
+/// bearing on this guardrail continues to apply exactly as before).
 pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
     let Some(json) = extract_json_object(raw) else {
         return findings;
@@ -805,13 +847,35 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
     for (i, mut f) in findings.into_iter().enumerate() {
         if let Some(verdict) = arr.iter().find(|x| x["index"].as_u64() == Some(i as u64)) {
             if let Some(sev) = verdict["severity"].as_str() {
-                f.severity = match sev {
+                let candidate = match sev {
                     "critical" => "critical",
                     "high" => "high",
                     "low" => "low",
                     _ => "medium",
+                };
+                // Raising = moving to a MORE severe label. This module's local
+                // `severity_rank` ranks `critical` highest (4) down to unrecognized/`low`
+                // (0/1), so "raise" means the candidate's rank EXCEEDS the base severity's.
+                // The base severity is `f.severity` as it enters this branch — untouched so
+                // far this iteration.
+                let would_raise = severity_rank(candidate) > severity_rank(&f.severity);
+                let raw_reason = verdict["reason"].as_str().unwrap_or("");
+                let precondition_text = format!("{} {} {raw_reason}", f.detail, f.snippet);
+                if would_raise && mentions_exploit_precondition(&precondition_text) {
+                    // BLOCKED: keep the authored/base severity. Never demotes — a verdict
+                    // that does not propose a raise (equal or a genuine downgrade) is
+                    // untouched by this branch and falls through to the assignment below
+                    // exactly as before.
+                    f.calibration_rationale = Some(format!(
+                        "Calibration held at {} (the model proposed {candidate}): the \
+                         finding's own text or the model's own reasoning records an exploit \
+                         precondition, which can only block an upward calibration, never \
+                         justify one.",
+                        f.severity
+                    ));
+                } else {
+                    f.severity = candidate.to_string();
                 }
-                .to_string();
             }
             let low_conf = verdict["confidence"].as_str() == Some("low");
             // Structured confidence (Part 1 §3): promoted out of the string-embedded
@@ -7499,7 +7563,13 @@ mod tests {
         assert_eq!(untouched.severity, "high", "no severity field in the verdict leaves the finding's prior severity as-is");
     }
 
-    // ── D5: severity calibration rules of thumb ───────────────────────────────
+    // ── Upward-calibration precondition guardrail ─────────────────────────────
+    //
+    // Calibration review finding: a High "unverified session read" finding whose own note
+    // says exploitation "requires forging a cookie" was promoted to Critical by calibration
+    // and took a top-3 do-now slot from a genuinely unconditional critical. These guard the
+    // fix: a recorded exploit precondition can BLOCK an upward move, never cause a downward
+    // one.
 
     fn finding_with_detail(rule: &str, sev: &str, detail: &str) -> Finding {
         Finding {
@@ -7507,6 +7577,79 @@ mod tests {
             ..finding(rule, sev)
         }
     }
+
+    /// A High finding whose own text records an exploit precondition ("requires forging a
+    /// session cookie") must NOT be raised to Critical even when the calibration model's
+    /// verdict says so — the raise is refused and the base (authored) severity is kept.
+    #[test]
+    fn apply_verdicts_blocks_upward_raise_when_precondition_is_recorded() {
+        let findings = vec![finding_with_detail(
+            "AI-UNVERIFIED-SESSION-READ",
+            "high",
+            "Server code authorizes from an unverified session read; exploitation requires \
+             forging a session cookie.",
+        )];
+        let raw = r#"{"verdicts":[
+            {"index":0,"severity":"critical","confidence":"high","reason":"escalate to critical"}
+        ]}"#;
+        let out = apply_verdicts(raw, findings);
+        assert_eq!(
+            out[0].severity, "high",
+            "a recorded exploit precondition must block the upward raise to critical"
+        );
+        assert!(
+            out[0]
+                .calibration_rationale
+                .as_deref()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains("precondition"),
+            "the block must be recorded on the finding so it's auditable: {:?}",
+            out[0].calibration_rationale
+        );
+    }
+
+    /// The SAME raising verdict on a High finding with NO precondition language must still
+    /// go through to Critical — the guardrail must not over-block ordinary calibration.
+    #[test]
+    fn apply_verdicts_still_raises_when_no_precondition_is_recorded() {
+        let findings = vec![finding_with_detail(
+            "AI-UNAUTH-EXPORT",
+            "high",
+            "The export endpoint returns every user's records with no authorization check.",
+        )];
+        let raw = r#"{"verdicts":[
+            {"index":0,"severity":"critical","confidence":"high","reason":"unconditionally exploitable with one request"}
+        ]}"#;
+        let out = apply_verdicts(raw, findings);
+        assert_eq!(
+            out[0].severity, "critical",
+            "with no precondition recorded, the raise must still apply"
+        );
+    }
+
+    /// A finding already AT critical, whose text also records a precondition phrase, must
+    /// stay critical — the guardrail only ever blocks a RAISE, it must never be read as
+    /// license to demote an already-critical finding.
+    #[test]
+    fn apply_verdicts_never_demotes_an_already_critical_finding_with_a_precondition() {
+        let findings = vec![finding_with_detail(
+            "AI-ALREADY-CRITICAL",
+            "critical",
+            "Full account takeover is possible; exploitation requires only an unauthenticated \
+             request.",
+        )];
+        let raw = r#"{"verdicts":[
+            {"index":0,"severity":"critical","confidence":"high","reason":"confirmed critical"}
+        ]}"#;
+        let out = apply_verdicts(raw, findings);
+        assert_eq!(
+            out[0].severity, "critical",
+            "an already-critical finding must never be demoted by precondition language"
+        );
+    }
+
+    // ── D5: severity calibration rules of thumb ───────────────────────────────
 
     fn finding_with_category(rule: &str, sev: &str, detail: &str, category: &str) -> Finding {
         Finding {
