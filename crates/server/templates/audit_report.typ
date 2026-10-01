@@ -35,7 +35,12 @@
 // zero-width-space break opportunity every `n` characters so it wraps instead, with zero
 // visual change to the text itself.
 #let breakable(s, n: 40) = {
+  // Guard: a none/empty input must yield an empty string, never `none`. `().join(sep)` returns
+  // `none` in Typst, and `#raw(none)` fails the whole compile ("expected string, found none") —
+  // so any finding with an empty path/snippet/package would crash the report without this.
+  if s == none { return "" }
   let len = s.len()
+  if len == 0 { return "" }
   let i = 0
   let out = ()
   while i < len {

@@ -6163,6 +6163,30 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
+    /// Regression (cycle-3 scan): a finding with an EMPTY path must not crash the PDF compile.
+    /// `breakable("")` used to hit `().join(sep)`, which is `none` in Typst, and `#raw(none)`
+    /// fails the whole compile ("expected string, found none"). A real scan produced a top-3
+    /// do-now finding with an empty path and took the entire export down; the `breakable()` guard
+    /// (none/empty -> "") fixes it. Critical severity routes the finding into the "three things"
+    /// box that renders `#raw(breakable(item.path))`, exercising the crash path.
+    #[tokio::test]
+    async fn compile_pdf_succeeds_when_a_top_finding_has_an_empty_path() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_succeeds_when_a_top_finding_has_an_empty_path: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let f = finding("SEC-NO-HARDCODED-SECRETS-1", "", 0, "critical");
+        let report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed even when a finding has an empty path");
+        assert!(pdf.starts_with(b"%PDF"));
+    }
+
     /// End-to-end smoke test (typst-present-only, mirrors `compile_pdf_produces_a_real_pdf_
     /// when_typst_is_present`): a REVIEWED export (with a real disposition) must still compile
     /// cleanly through the gated template — the conditional banner/methodology logic must not
