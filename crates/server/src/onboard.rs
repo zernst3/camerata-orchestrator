@@ -44,7 +44,7 @@ pub use self_ref::{
 // Pull private/crate-internal helpers into scope for the orchestration functions and
 // test module (via `use super::*`).
 pub(crate) use audit::{
-    build_rule_alternatives, classify_repo_findings, is_code_auditable_rule,
+    build_rule_alternatives, classify_repo_findings, is_ci_tier_rule, is_code_auditable_rule,
     is_semantic_multi_option_rule,
 };
 // Re-export camerata_gateway test-scope primitives so the test module's `use super::*`
@@ -1096,10 +1096,22 @@ pub async fn audit_repos(
                     .count();
                 // The SEMANTIC (LLM-audited) rule set for THIS repo: rules bound to it (or
                 // project-level), minus the deterministic-arm, native-architectural-checker,
-                // and governance/process families. The architectural-checker exclusion is
-                // computed HERE (not before the file read) because it's PER-REPO
-                // CONFIG-AWARE (D3) — it needs this repo's actual files to know whether
-                // `.camerata/architecture.toml` is present.
+                // CI-tier (mechanical/architectural), and governance/process families. The
+                // architectural-checker exclusion is computed HERE (not before the file read)
+                // because it's PER-REPO CONFIG-AWARE (D3) — it needs this repo's actual files
+                // to know whether `.camerata/architecture.toml` is present.
+                //
+                // The CI-tier exclusion (`is_ci_tier_rule`) is computed HERE, from `corpus`,
+                // rather than relying on `selected` having already been stripped of CI-tier
+                // ids by a caller (`split_scannable_rules`) — see that function's own `pub`
+                // doc comment and `is_ci_tier_rule`'s doc comment for why: `selected` also
+                // feeds `repo_selected_ids` above, the deterministic architectural engine's
+                // arming gate, so a caller that pre-strips CI-tier ids out of `selected`
+                // before calling `audit_repos` (every real caller used to) starves that engine
+                // of every CI-tier rule id, INCLUDING every corpus-sourced Supabase
+                // RLS/search-path rule — this was the C3-3 real-path arming bug. Filtering
+                // here instead makes `audit_repos` correct regardless of what its caller does
+                // with `selected` upstream.
                 let repo_view =
                     camerata_checks::arch_checker::RepoView { spec, files: &files };
                 let arch_checker_rule_ids =
@@ -1109,6 +1121,7 @@ pub async fn audit_repos(
                     .filter(|r| r.applies_to(spec))
                     .filter(|r| camerata_gateway::lookup_arm(&r.id).is_none())
                     .filter(|r| !arch_checker_rule_ids.contains(r.id.as_str()))
+                    .filter(|r| !is_ci_tier_rule(&r.id, corpus))
                     .filter(|r| is_code_auditable_rule(&r.id))
                     .map(|r| (r.id.clone(), r.directive.clone()))
                     .collect();

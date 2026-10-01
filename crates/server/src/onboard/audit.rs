@@ -354,6 +354,32 @@ pub(crate) fn is_code_auditable_rule(id: &str) -> bool {
     !(id.starts_with("ORCH-") || id.starts_with("SPIRIT-") || id.starts_with("PROC-"))
 }
 
+/// Whether `id` is a CI-tier (mechanical or architectural) corpus rule — i.e. one enforced by
+/// a deterministic CI gate (lint pattern or AST/static-analysis pass), never by the LLM code
+/// audit. Mirrors `crate::split_scannable_rules`'s own `is_ci_tier` closure exactly (same
+/// corpus lookup, same `unwrap_or(false)` fallback for an id the corpus doesn't know about —
+/// an unrecognized id defaults to "scannable" rather than silently excluded).
+///
+/// This exists so `audit_repos`'s own semantic (AI-prompt) filter can exclude CI-tier rules
+/// ITSELF, from the corpus, rather than depending on its `selected` parameter having already
+/// been pre-stripped by a caller. That pre-stripping is exactly the C3-3 bug: `selected` also
+/// feeds `repo_selected_ids` (the deterministic architectural engine's arming gate — see
+/// `audit_repos`'s `repo_selected_ids` local), so a caller that hands `audit_repos` the
+/// ALREADY CI-tier-stripped output of `split_scannable_rules` (as every real caller —
+/// `onboard_audit`, `onboard_audit_start`, `camerata inspect` — did) starves the architectural
+/// engine of every CI-tier rule id, including every corpus-sourced Supabase RLS/search-path
+/// rule: `audit_architectural` never sees them armed, no matter how correctly they are
+/// proposed/selected upstream. Callers now pass the FULL curated selection into `audit_repos`
+/// (so `repo_selected_ids` is complete), and this filter keeps CI-tier rules out of the LLM
+/// prompt exactly like `split_scannable_rules` used to — just computed here instead of by the
+/// caller, so `audit_repos` is self-sufficient regardless of whether its caller pre-strips.
+pub(crate) fn is_ci_tier_rule(id: &str, corpus: Option<&camerata_rules::RuleSet>) -> bool {
+    corpus
+        .and_then(|c| c.get_by_id(id))
+        .map(|r| r.enforcement.is_ci_enforced())
+        .unwrap_or(false)
+}
+
 /// Whether `rule` is a MULTI-OPTION SEMANTIC rule eligible for the audit-integrated
 /// alternative-recommendation feature (see
 /// `docs/design/2026-09-22_audit-integrated-alternatives.md`): AI-judged (NOT CI-tier

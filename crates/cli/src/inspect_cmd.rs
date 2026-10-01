@@ -308,9 +308,18 @@ pub async fn run_inspect_with_key_presence(
     let scan = camerata_server::onboard::scan_repos(&sources, Vec::new()).await;
     let selected = curated_rule_selection(&scan.proposed_rules);
 
-    // ── Phase 2: partition scannable vs CI-tier/preview rules; load the corpus ONCE ─────
-    let (selected, excluded_mechanical, preview_rules, corpus) =
-        camerata_server::split_scannable_rules(selected).await;
+    // ── Phase 2: load the corpus ONCE + derive the excluded-mechanical/preview lists ─────
+    // `split_scannable_rules` is still the source of `excluded_mechanical` (the report's
+    // "enforced in CI, not scanned" disclosure) and `preview_rules` (the scan-time preview
+    // linter pass) — but its first return value (the CI-tier-STRIPPED rule list) is
+    // deliberately discarded here rather than fed into `audit_repos` below. `audit_repos`
+    // needs the FULL curated `selected` (including CI-tier ids) to arm the deterministic
+    // architectural engine (`repo_selected_ids`) correctly; it excludes CI-tier ids from its
+    // OWN LLM-prompt construction itself now (see `onboard::audit::is_ci_tier_rule`). Handing
+    // it the pre-stripped list here — as this function used to — silently starved that engine
+    // of every CI-tier corpus rule id in a real headless scan (the C3-3 bug).
+    let (_ai_scannable_only, excluded_mechanical, preview_rules, corpus) =
+        camerata_server::split_scannable_rules(selected.clone()).await;
 
     // ── Backend resolution + the process-local usage ledger ────────────────────────────
     let backend_resolution = resolve_backend(args.backend, has_api_key);

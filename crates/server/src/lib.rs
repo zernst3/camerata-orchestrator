@@ -5207,11 +5207,17 @@ async fn onboard_audit(
             repos: r.repos,
         })
         .collect();
-    // Mechanical rules are enforced in CI, not by the static code scan — drop them here.
-    // The scan-runnable subset (mechanical, non-layer3_only) feeds the SCAN-TIME PREVIEW
-    // pass below, which runs the rule's deterministic tool itself and folds in preview findings.
-    let (selected, excluded_mechanical, preview_rules, corpus) =
-        split_scannable_rules(selected).await;
+    // `split_scannable_rules` still derives `excluded_mechanical` (the report's "enforced in
+    // CI, not scanned" disclosure) and `preview_rules` (the scan-runnable mechanical subset
+    // that feeds the SCAN-TIME PREVIEW pass below). Its first return value — `selected` with
+    // every CI-tier (mechanical/architectural) id stripped — is deliberately NOT what's passed
+    // to `audit_repos`: that function needs the FULL curated `selected` (CI-tier ids included)
+    // to arm the deterministic architectural engine (`repo_selected_ids`); it excludes CI-tier
+    // ids from its own LLM-prompt construction itself (`onboard::audit::is_ci_tier_rule`).
+    // Feeding it the pre-stripped list — as this handler used to — silently starved that
+    // engine of every CI-tier corpus rule id in every real scan (the C3-3 bug).
+    let (_ai_scannable_only, excluded_mechanical, preview_rules, corpus) =
+        split_scannable_rules(selected.clone()).await;
     // Audit + calibration are UI-PICKED non-fleet steps: an explicit request model wins;
     // otherwise the active project's per-step default applies (DEFAULT_MODEL floor only with
     // no active project). Each is resolved to a concrete id (never `None`) so there is no
@@ -5674,10 +5680,16 @@ async fn onboard_audit_start(
             repos: r.repos,
         })
         .collect();
-    // Mechanical rules are enforced in CI, not by the static code scan — drop them here.
-    // The scan-runnable subset (mechanical, non-layer3_only) feeds the SCAN-TIME PREVIEW.
-    let (selected, excluded_mechanical, preview_rules, corpus) =
-        split_scannable_rules(selected).await;
+    // `split_scannable_rules` still derives `excluded_mechanical` (the "enforced in CI, not
+    // scanned" disclosure) and `preview_rules` (the scan-runnable mechanical subset that feeds
+    // the SCAN-TIME PREVIEW below). Its first return value — CI-tier ids stripped out of
+    // `selected` — is NOT what gets passed to `audit_repos`: see the sync `onboard_audit`
+    // handler's identical comment (a few hundred lines up) for why feeding it the pre-stripped
+    // list silently starves the deterministic architectural engine of every CI-tier corpus
+    // rule id (the C3-3 bug). `audit_repos` filters CI-tier ids out of its own LLM prompt
+    // itself now (`onboard::audit::is_ci_tier_rule`), so the FULL `selected` is what it needs.
+    let (_ai_scannable_only, excluded_mechanical, preview_rules, corpus) =
+        split_scannable_rules(selected.clone()).await;
     // Audit + calibration are UI-PICKED non-fleet steps: an explicit request model wins;
     // otherwise the active project's per-step default applies (DEFAULT_MODEL floor only with
     // no active project). Each is resolved to a concrete id (never `None`) so there is no
