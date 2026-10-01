@@ -4103,11 +4103,27 @@ fn description_overlap_score(a: &Finding, b: &Finding) -> f64 {
 /// and paired with the `path` restriction + `objects_conflict` veto in
 /// [`semantic_pair_merges`] to avoid over-merging findings that merely share common security
 /// vocabulary.
-const DESCRIPTION_OVERLAP_THRESHOLD: f64 = 0.6;
+///
+/// Lowered from `0.6` to `0.5` (MERGE cycle-3, observed-failure 1:
+/// `docs/plans/2026-09-30_cycle3-queue-hardening.md`): a real duplicate pair — one defect
+/// reported under two rule ids/tiers more than [`SEMANTIC_MERGE_WINDOW`] lines apart in the same
+/// file, each paraphrased in the generator's OWN words rather than copy-pasted — routinely lands
+/// in the high-0.5s on raw Jaccard once ordinary paraphrase (synonyms, reordered clauses, a
+/// differently-worded clause for the same fact) is accounted for; `0.6` was proven too strict for
+/// that genuinely-near-identical-but-not-verbatim case (see
+/// `merge_gap_i_near_identical_prose_merges_beyond_window_distance` for the measured score this
+/// was calibrated against). `0.5` is still well clear of the near-zero overlap two UNRELATED
+/// same-file findings produce (see `merge_gap_ii_two_deterministic_findings_with_no_shared_object_
+/// stay_distinct`, `merge_gap_i_sink_and_call_site_in_different_files_stay_two_rows`), and the
+/// `objects_conflict` veto in [`semantic_pair_merges`] still fires independently of this
+/// threshold, so two findings whose prose overlaps only because they share generic
+/// security/hygiene vocabulary but name DISJOINT structural objects (different tables, different
+/// policies) are still kept apart.
+const DESCRIPTION_OVERLAP_THRESHOLD: f64 = 0.5;
 
 /// The pairwise semantic-merge predicate (design §1b, extended by P1 design point 2 and the
-/// MERGE cycle-2 hardening pass). `a` and `b` cluster as the same defect when ANY of three
-/// GENERAL signals fires (never a fourth, fixture-specific one):
+/// MERGE cycle-2/cycle-3 hardening passes). `a` and `b` cluster as the same defect when ANY of
+/// FOUR GENERAL signals fires (never a fifth, fixture-specific one):
 ///  (a) same file, same (present) category, and within-window-or-same-construct — the original
 ///      cross-family-at-one-site signal; or
 ///  (b) they share a captured structural object ([`shared_captured_object`]) — the "same root
@@ -4118,28 +4134,42 @@ const DESCRIPTION_OVERLAP_THRESHOLD: f64 = 0.6;
 ///      defect a few lines apart whose category differs or which sits outside the line window,
 ///      but whose headline text is substantively the same sentence. Deliberately same-PATH-only:
 ///      this must never fuse a sink finding in one file with an unrelated call-site finding in
-///      another file just because the prose happens to overlap.
+///      another file just because the prose happens to overlap; or
+///  (d) the IDENTICAL rule id fired on both, same file, within-window-or-same-construct (MERGE
+///      cycle-3, observed-failure 3) — the literal strongest "same defect" identity signal there
+///      is, so it needs neither a matching `category` (an invented `AI-` id with no taxonomy
+///      mapping still qualifies) nor prose overlap. Scoped exactly like (a) — same path + window/
+///      construct, never cross-file or far-apart-in-one-file — so a rule that legitimately fires
+///      at many unrelated sites across one large file is never silently folded into one row.
 /// Every wrong-fusion guard still applies on top of whichever signal fired.
 fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool {
-    // Guard: two deterministic rows are two distinct defects by construction UNLESS they share a
-    // captured structural object (design MERGE gap (ii)) — e.g. two independent secret-detectors
-    // both naming the SAME committed secret/file are the same root cause, not two. With no
-    // shared object, they stay distinct regardless of which clustering signal below would
-    // otherwise fire — this preserves the distinct-defects invariant.
-    let both_deterministic =
-        finding_origin(a) == Origin::Deterministic && finding_origin(b) == Origin::Deterministic;
-    if both_deterministic && !shared_captured_object(a, b) {
-        return false;
-    }
-
-    // Signal (a): same file + same category + line-window-or-construct overlap.
-    let same_category = matches!((&a.category, &b.category), (Some(ca), Some(cb)) if ca == cb);
     let in_window = a.path == b.path
         && a.line != 0
         && b.line != 0
         && a.line.abs_diff(b.line) <= SEMANTIC_MERGE_WINDOW;
     let in_construct =
         a.path == b.path && content.is_some_and(|c| same_construct(c, a.line, b.line));
+
+    // Signal (d): the identical rule id, same file, within window/construct — see the doc
+    // comment above. Computed up front since it also exempts the det+det guard just below: two
+    // "distinct" deterministic rows that are actually the SAME rule firing twice nearby are one
+    // defect by construction, same as the shared-captured-object case.
+    let same_rule_adjacent = a.rule_id == b.rule_id && (in_window || in_construct);
+
+    // Guard: two deterministic rows are two distinct defects by construction UNLESS they share a
+    // captured structural object (design MERGE gap (ii)) or are the same rule id firing twice
+    // nearby (signal (d)) — e.g. two independent secret-detectors both naming the SAME committed
+    // secret/file are the same root cause, not two. With neither, they stay distinct regardless
+    // of which clustering signal below would otherwise fire — this preserves the
+    // distinct-defects invariant.
+    let both_deterministic =
+        finding_origin(a) == Origin::Deterministic && finding_origin(b) == Origin::Deterministic;
+    if both_deterministic && !shared_captured_object(a, b) && !same_rule_adjacent {
+        return false;
+    }
+
+    // Signal (a): same file + same category + line-window-or-construct overlap.
+    let same_category = matches!((&a.category, &b.category), (Some(ca), Some(cb)) if ca == cb);
     let same_file_adjacent = a.path == b.path && same_category && (in_window || in_construct);
 
     // Signal (b): a shared captured object, general and cross-file (design point 2b).
@@ -4150,24 +4180,31 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
     let description_overlap =
         a.path == b.path && description_overlap_score(a, b) >= DESCRIPTION_OVERLAP_THRESHOLD;
 
-    if !same_file_adjacent && !shared_object && !description_overlap {
+    if !same_file_adjacent && !shared_object && !description_overlap && !same_rule_adjacent {
         return false;
     }
 
     // Guard: disjoint structural objects named in free text (different tables/policies) only
-    // vetoes the LINE-PROXIMITY and PROSE-OVERLAP signals — two findings that merely sit near
-    // each other, or use similar wording, but visibly name different things. A
+    // vetoes the LINE-PROXIMITY, PROSE-OVERLAP and SAME-RULE-ADJACENT signals — two findings
+    // that merely sit near each other, or use similar wording, or share a rule id, but visibly
+    // name different things (e.g. the same RLS-missing rule firing once for `orders` and once for
+    // `profiles`, nearby in one file, is two distinct violations, not one). A
     // `shared_captured_object` match is a stronger, structured same-object proof and is never
     // vetoed by this looser text heuristic.
-    if !shared_object && (same_file_adjacent || description_overlap) && objects_conflict(a, b) {
+    if !shared_object
+        && (same_file_adjacent || description_overlap || same_rule_adjacent)
+        && objects_conflict(a, b)
+    {
         return false;
     }
 
     // Guard: AI+AI needs corroboration beyond mere proximity — one snippet contains the other,
     // both are located (real, resolved code) inside the same construct, they share a captured
-    // object, or the description-overlap signal itself fired (an equally strong, deliberately
-    // high-threshold structured-enough proof). Two AI findings citing DIFFERENT real code that
-    // merely sit near each other, with no shared object and no real prose match, stay separate.
+    // object, the description-overlap signal itself fired (an equally strong, deliberately
+    // high-threshold structured-enough proof), or they are the same rule id firing twice nearby
+    // (signal (d), its own proof). Two AI findings citing DIFFERENT real code that merely sit
+    // near each other, with no shared object, no real prose match, and no shared rule id, stay
+    // separate.
     let both_ai = matches!(finding_origin(a), Origin::AdoptedAi | Origin::InventedAi)
         && matches!(finding_origin(b), Origin::AdoptedAi | Origin::InventedAi);
     if both_ai {
@@ -4177,7 +4214,8 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
             || (!sb.is_empty() && sa.contains(sb))
             || (a.located && b.located && in_construct)
             || shared_object
-            || description_overlap;
+            || description_overlap
+            || same_rule_adjacent;
         if !snippet_corroborated {
             return false;
         }
@@ -10084,6 +10122,174 @@ mod tests {
             out.len(),
             2,
             "the sink+call-site pair across two files must stay two rows: {out:?}"
+        );
+    }
+
+    // ── MERGE (cycle-3 queue-hardening): one defect shipping as 2-3 rows ────────────────────
+    // Synthetic findings only, fixture-independent (observed-failures 1-3 from the cycle-3
+    // triage, never reproduced against the actual scan output).
+
+    #[test]
+    fn merge_gap_i_near_identical_prose_merges_beyond_window_distance() {
+        // Observed failure 1: an unauthenticated-export defect shipped as two critical rows 9
+        // lines apart in the same file — OUTSIDE SEMANTIC_MERGE_WINDOW (5), and in different
+        // (here: both-unassigned) categories, so only the description-overlap signal can catch
+        // it. The prose is realistically paraphrased (not copy-pasted) exactly like a det+AI
+        // pair reporting the same thing in each side's own words — this is the case
+        // DESCRIPTION_OVERLAP_THRESHOLD was recalibrated 0.6 -> 0.5 against (score ~0.58 here;
+        // see the threshold's doc comment).
+        let mut det = site_finding(
+            "SEC-UNAUTH-EXPORT-1",
+            "src/export/handler.ts",
+            10,
+            "critical",
+            "audit export endpoint missing authentication check",
+        );
+        det.detail = "the export handler returns the full audit report with no auth check \
+                       so any caller can read it"
+            .to_string();
+        let mut ai = site_finding(
+            "AI-EXPORT-NO-AUTH-CHECK",
+            "src/export/handler.ts",
+            19,
+            "critical",
+            "audit export route missing auth validation",
+        );
+        ai.detail = "this export handler returns the full audit report without an auth check \
+                      so any user can read it"
+            .to_string();
+
+        let out = merge_semantic_groups(vec![det, ai], &[]);
+        assert_eq!(
+            out.len(),
+            1,
+            "near-identical prose 9 lines apart (outside the window) must still collapse to one row: {out:?}"
+        );
+        let ids: std::collections::HashSet<String> = std::iter::once(out[0].rule_id.clone())
+            .chain(out[0].also_matches.iter().cloned())
+            .collect();
+        assert!(
+            ids.contains("SEC-UNAUTH-EXPORT-1") && ids.contains("AI-EXPORT-NO-AUTH-CHECK"),
+            "both rule ids must be recorded on the merged row: {ids:?}"
+        );
+        let lines: std::collections::HashSet<usize> = std::iter::once(out[0].line)
+            .chain(out[0].also_locations.iter().map(|l| l.line))
+            .collect();
+        assert!(
+            lines.contains(&10) && lines.contains(&19),
+            "both evidence lines (9 apart) must be kept, not dropped: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn merge_cycle3_security_class_wins_primary_and_severity_is_max_over_generic_critical() {
+        // Observed failure 2: a cross-tenant-read defect shipped as a correct SECURITY rule at
+        // LOW ("borderline") plus a generic rule at CRITICAL — the generic row must never shadow
+        // the security finding. `primary_rank` ranks `FindingClass` (Security > Hygiene) ahead
+        // of severity, so the security rule must win the primary slot even though its OWN
+        // severity is lower; `merge_semantic_group` keeps `max_sev` independent of which side won
+        // primary, so the merged row's severity must still be "critical", not the security row's
+        // own "low". Clustered via a shared captured object (design point 2b, general and
+        // line/category-independent) so the test exercises class+severity selection in
+        // isolation, not the line-window signal.
+        let mut sec_low = site_finding(
+            "AUTH-MISSING-TENANT-CHECK-1",
+            "api/orders.rs",
+            15,
+            "low",
+            "org id not verified against the session tenant",
+        );
+        sec_low
+            .captures
+            .insert("table".to_string(), "orders".to_string());
+
+        let mut generic_critical = site_finding(
+            "ARCH-RESOURCE-LEAK-GENERIC-1",
+            "api/orders.rs",
+            400,
+            "critical",
+            "generic resource-handling smell flagged on the same table",
+        );
+        generic_critical
+            .captures
+            .insert("table".to_string(), "orders".to_string());
+
+        assert_eq!(
+            finding_class(&sec_low),
+            FindingClass::Security,
+            "sanity: the AUTH-prefixed rule must classify Security"
+        );
+        assert_eq!(
+            finding_class(&generic_critical),
+            FindingClass::Hygiene,
+            "sanity: the generic ARCH rule must classify Hygiene, not inherit Security"
+        );
+
+        let out = merge_semantic_groups(vec![sec_low, generic_critical], &[]);
+        assert_eq!(out.len(), 1, "the pair must merge into one row: {out:?}");
+        assert_eq!(
+            out[0].rule_id, "AUTH-MISSING-TENANT-CHECK-1",
+            "the SECURITY rule must win the primary slot even at lower severity"
+        );
+        assert_eq!(
+            out[0].severity, "critical",
+            "merged severity must be the MAX of the pair, not the security primary's own (low) severity"
+        );
+        assert!(out[0]
+            .also_matches
+            .contains(&"ARCH-RESOURCE-LEAK-GENERIC-1".to_string()));
+    }
+
+    #[test]
+    fn merge_cycle3_same_rule_id_twice_adjacent_collapses_to_one_row() {
+        // Observed failure 3: the same rule id firing twice on adjacent lines for one response
+        // must collapse to one row. Deliberately NO shared category (an invented AI- id with no
+        // taxonomy mapping — categorize_rule_id backfills both to None) and NO prose overlap
+        // (the two detail strings share essentially no words), so signals (a) and (c) are both
+        // unavailable — only the new same-rule-id-adjacent signal can catch this.
+        let mut first = site_finding(
+            "AI-WIDGET-MISCONFIG-REPEAT-1",
+            "src/widgets/panel.rs",
+            100,
+            "high",
+            "",
+        );
+        first.detail =
+            "A background retry loop hammers the queue with no backoff policy at all.".to_string();
+        let mut second = site_finding(
+            "AI-WIDGET-MISCONFIG-REPEAT-1",
+            "src/widgets/panel.rs",
+            102,
+            "high",
+            "",
+        );
+        second.detail =
+            "Totally unrelated phrasing on a second pass, written differently by the model."
+                .to_string();
+        assert!(
+            description_overlap_score(&first, &second) < DESCRIPTION_OVERLAP_THRESHOLD,
+            "sanity: this pair must NOT merge via description overlap, isolating the same-rule-id signal"
+        );
+        assert_eq!(
+            categorize_rule_id(&first.rule_id),
+            None,
+            "sanity: this invented rule id must have no taxonomy mapping, isolating the \
+             same-rule-id signal from signal (a)'s same-category path"
+        );
+
+        let out = merge_semantic_groups(vec![first, second], &[]);
+        assert_eq!(
+            out.len(),
+            1,
+            "the same rule id firing twice on adjacent lines must collapse to one row: {out:?}"
+        );
+        assert_eq!(out[0].rule_id, "AI-WIDGET-MISCONFIG-REPEAT-1");
+        let lines: std::collections::HashSet<usize> = std::iter::once(out[0].line)
+            .chain(out[0].also_locations.iter().map(|l| l.line))
+            .collect();
+        assert!(
+            lines.contains(&100) && lines.contains(&102),
+            "both evidence sites must be kept: {lines:?}"
         );
     }
 
