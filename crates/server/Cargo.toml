@@ -126,3 +126,8 @@ tempfile = "3"
 # "1" (BUG B rerun-investigation coverage), mirroring `camerata-ui`'s identical
 # `#[serial(bff_env)]` use for its own global-env-var tests.
 serial_test = "3"
+# C4-R3: real PDF text extraction so the compile_pdf tests can assert on what a reader (or a
+# copy-paste / grep workflow) actually sees in the rendered artifact, not just that compilation
+# succeeded — the draft-banner-doubling and zero-width-space bugs this cycle fixes are both
+# invisible to a "starts with %PDF" smoke check.
+pdf-extract = "0.12"
