@@ -582,6 +582,12 @@ pub struct FindingRefJson {
     /// Carried through so item 7's "If you only do three things this week" box can map effort
     /// to a rough hour estimate without re-joining back to the original `Finding`.
     pub effort: Option<String>,
+    /// C3-6: this finding's own [`effective_bucket`] result (`"do_now"` | `"do_next"` |
+    /// `"plan"` | `"accepted"` | `"informational"`) — which `MatrixJson` vec this ref lives
+    /// in is already implied by position, but the explicit field lets every consumer
+    /// (`xlsx_export`, a cross-artifact test) assert the label directly rather than
+    /// re-deriving or inferring it from array membership.
+    pub bucket: String,
 }
 
 /// The severity×effort action matrix — the money page. Cell membership is driven by the
@@ -763,6 +769,11 @@ pub struct CuratedSiteJson {
     pub effort: Option<String>,
     pub confidence: Option<String>,
     pub disposition: String,
+    /// C3-6: the SAME [`effective_bucket`] value `disposition`'s label was derived from (see
+    /// `disposition_label`'s `bucket` parameter) — carried as its own field so a test (or a
+    /// future template revision) can compare this site's bucket against its `FindingRefJson`
+    /// counterpart in `matrix` directly, instead of parsing it back out of the label prose.
+    pub bucket: String,
     pub also_matches: Vec<String>,
     /// The defect at THIS object (see `defect_headline`) — the template renders this as the
     /// bold per-finding heading; the group's own rule id + invariant title (`CuratedGroupJson`)
@@ -1722,6 +1733,67 @@ pub(crate) fn matrix_bucket(
     }
 }
 
+/// THE single bucket computation for a finding (C3-6). Reused UNMODIFIED by all three export
+/// surfaces — `build_report_json`'s matrix pass, that same function's curated-findings
+/// disposition label (both in this file), and `xlsx_export::partition_rows`'s own
+/// `FindingRow::bucket` — so a finding's bucket is computed exactly once and every artifact
+/// renders that one answer. Before this, `matrix_bucket` alone was "the" bucket function in two
+/// of those three call sites, with `is_informational`/`is_uncited_ai_finding` applied as a
+/// separate caller-side gate ahead of it; the xlsx partition had NO such gate at all, so a
+/// hedged (`needs-review`) or uncited-AI-tier row that the PDF/JSON correctly held out of
+/// do_now/do_next/plan could still land in an action tier in the workbook — the root cause of
+/// the three artifacts disagreeing on bucket counts.
+///
+/// This is also the fix for "bucket is a pure function of severity": folding the hedge/
+/// provenance gates INTO the bucket function itself (rather than a pre-check some callers
+/// remembered to apply and one didn't) means a finding's bucket is now genuinely
+/// `f(severity, provenance tier, hedge state, disposition, effort)` — a hedged row, or an
+/// AI-tier finding with no grounded citation, can route out of an action tier even though its
+/// raw severity×effort quadrant alone would have placed it there. See `is_informational` and
+/// `is_uncited_ai_finding` for the individual signals folded in here.
+pub(crate) fn effective_bucket(
+    finding: &Finding,
+    disposition: Disposition,
+    severity: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    test_file_count: usize,
+) -> &'static str {
+    if is_informational(finding, disposition, severity, corpus, test_file_count)
+        || is_uncited_ai_finding(finding, corpus)
+    {
+        "informational"
+    } else {
+        matrix_bucket(disposition, severity, finding.effort.as_deref())
+    }
+}
+
+/// Severity rank for ordering (0 = most severe, ascending). The canonical mapping for any
+/// severity-based sort in this module; `xlsx_export::severity_rank` (same crate) delegates
+/// here rather than keeping its own copy, so the two artifacts' tie-breaks can never drift.
+pub(crate) fn severity_rank(sev: &str) -> u8 {
+    match sev {
+        "critical" => 0,
+        "high" => 1,
+        "medium" => 2,
+        _ => 3,
+    }
+}
+
+/// Provenance-tier rank for the WITHIN-bucket sort (C3-6, item 3): a deterministic/grounded
+/// citation (a published standard, a real linter rule) outranks a scan-time preview tool,
+/// which outranks an ungrounded AI-advisory citation — so a security-floor finding (typically
+/// `"grounded"`) never prints after an architecture/advisory note (typically `"advisory"`) of
+/// the same severity, even though raw severity alone can't tell them apart. 0 sorts first.
+/// Takes a [`CitationJson::kind`] string (`"grounded"` | `"preview"` | `"advisory"`); anything
+/// else is treated as the lowest tier rather than panicking on an unrecognized value.
+pub(crate) fn provenance_tier_rank(citation_kind: &str) -> u8 {
+    match citation_kind {
+        "grounded" => 0,
+        "preview" => 1,
+        _ => 2,
+    }
+}
+
 // C3-1b (`docs/plans/2026-09-30_cycle2-queue-hardening.md`): there used to be a
 // `fix_generation_failed` gate here that read a `"[needs review: fix not generated]"` tag
 // off `detail` and demoted a would-be `do_now` finding to `do_next` — conflating a PIPELINE
@@ -1803,7 +1875,7 @@ pub(crate) fn is_informational(
     false
 }
 
-fn finding_ref(f: &Finding, severity: &str, headline: String) -> FindingRefJson {
+fn finding_ref(f: &Finding, severity: &str, headline: String, bucket: &str) -> FindingRefJson {
     FindingRefJson {
         rule_id: f.rule_id.clone(),
         repo: f.repo.clone(),
@@ -1812,6 +1884,7 @@ fn finding_ref(f: &Finding, severity: &str, headline: String) -> FindingRefJson 
         severity: severity.to_string(),
         headline,
         effort: f.effort.clone(),
+        bucket: bucket.to_string(),
     }
 }
 
@@ -2090,7 +2163,17 @@ pub fn build_report_json(
         .partition(|(f, _, _, _)| f.rule_id == DEP_AUDIT_RULE_ID);
 
     // ── Matrix + curated findings + scorecard, over code_findings only ───────────
-    let mut matrix = MatrixJson::default();
+    // C3-6: ONE bucket computation per finding (`effective_bucket`, which now folds in the
+    // informational/uncited-AI gates below `matrix_bucket` always needed a caller to apply
+    // separately) — buffered per bucket with an explicit (severity, provenance tier, location)
+    // sort key rather than pushed straight into `matrix` in iteration order. Ordering within a
+    // bucket is now a real signal (a security-floor medium must rank ahead of an architecture/
+    // advisory medium of the same severity), so it can no longer be left to insertion order.
+    #[allow(clippy::type_complexity)]
+    let mut bucketed: HashMap<
+        &'static str,
+        Vec<((u8, u8, String, String, usize), FindingRefJson)>,
+    > = HashMap::new();
     for (f, disposition, _, severity) in &code_findings {
         // Bug 4: convention-to-consider rows are diverted to the informational appendix BEFORE
         // the severity×effort quadrant — they must never reach do_now/do_next/plan. The
@@ -2098,22 +2181,11 @@ pub fn build_report_json(
         // P3: an AI-tier finding with no grounded citation (`is_uncited_ai_finding`) is ALSO
         // routed here — deliberately independent of severity (see that function's doc
         // comment), since the whole point is to catch the critical/high findings that would
-        // otherwise sit in the curated set carrying "AI-advisory, model-inferred."
+        // otherwise sit in the curated set carrying "AI-advisory, model-inferred." Both gates
+        // now live INSIDE `effective_bucket` itself (C3-6) — kept as a separate `gate_uncited`
+        // bool here only because the appendix headline below needs to say WHICH reason applied.
         let gate_uncited = is_uncited_ai_finding(f, corpus);
-        let bucket = if is_informational(f, *disposition, severity, corpus, report.test_file_count)
-            || gate_uncited
-        {
-            "informational"
-        } else {
-            matrix_bucket(*disposition, severity, f.effort.as_deref())
-        };
-        let target = match bucket {
-            "do_now" => &mut matrix.do_now,
-            "do_next" => &mut matrix.do_next,
-            "plan" => &mut matrix.plan,
-            "informational" => &mut matrix.informational,
-            _ => &mut matrix.accepted,
-        };
+        let bucket = effective_bucket(f, *disposition, severity, corpus, report.test_file_count);
         let fallback_title = corpus
             .and_then(|c| c.get_by_id(&f.rule_id))
             .map(|r| r.title.clone())
@@ -2136,7 +2208,34 @@ pub fn build_report_json(
         } else {
             base_headline
         };
-        target.push(finding_ref(f, severity, headline));
+        // C3-6 item 3: provenance tier for the within-bucket sort, via `citation_for_finding`
+        // (not the plain `resolve_citation`) so an AI-tier finding upgraded to a grounded class
+        // (P3) sorts by the SAME resolved citation the curated-findings section shows for it.
+        let provenance_rank = provenance_tier_rank(&citation_for_finding(f, corpus).kind);
+        let sort_key = (
+            severity_rank(severity),
+            provenance_rank,
+            f.repo.clone(),
+            f.path.clone(),
+            f.line,
+        );
+        bucketed
+            .entry(bucket)
+            .or_default()
+            .push((sort_key, finding_ref(f, severity, headline, bucket)));
+    }
+    let mut matrix = MatrixJson::default();
+    for (key, target) in [
+        ("do_now", &mut matrix.do_now),
+        ("do_next", &mut matrix.do_next),
+        ("plan", &mut matrix.plan),
+        ("accepted", &mut matrix.accepted),
+        ("informational", &mut matrix.informational),
+    ] {
+        if let Some(mut entries) = bucketed.remove(key) {
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            *target = entries.into_iter().map(|(_, e)| e).collect();
+        }
     }
 
     // Curated findings: grouped by rule (sorted for deterministic output), each rule's
@@ -2183,15 +2282,13 @@ pub fn build_report_json(
         let site_jsons = sites
             .iter()
             .map(|(f, disposition, reason, severity)| {
-                // Bug 4: keep the curated-site LABEL in lockstep with the matrix cell this
-                // finding actually lands in — an informational row reads "Convention to
-                // consider", never "Open (recommended: Plan)".
+                // Bug 4 / C3-6: keep the curated-site LABEL in lockstep with the matrix cell
+                // this finding actually lands in — an informational row reads "Convention to
+                // consider", never "Open (recommended: Plan)". `effective_bucket` is the SAME
+                // call the matrix-building pass above makes for this finding, so the two can
+                // never compute a different answer for the same row.
                 let bucket =
-                    if is_informational(f, *disposition, severity, corpus, report.test_file_count) {
-                        "informational"
-                    } else {
-                        matrix_bucket(*disposition, severity, f.effort.as_deref())
-                    };
+                    effective_bucket(f, *disposition, severity, corpus, report.test_file_count);
                 let confirmed_by_client = dispositions
                     .get(&finding_key(f))
                     .map(|d| d.confirmed_by_client)
@@ -2217,6 +2314,7 @@ pub fn build_report_json(
                     effort: f.effort.clone(),
                     confidence: f.confidence.clone(),
                     disposition: disposition_label(*disposition, reason, bucket, confirmed_by_client),
+                    bucket: bucket.to_string(),
                     also_matches: f.also_matches.clone(),
                     headline,
                     fix: resolve_fix(&rule_id, corpus, f, chosen_option_for_rule),
@@ -5156,6 +5254,55 @@ mod tests {
         // The critical finding is unaffected — still curated, still do_now.
         assert_eq!(json.matrix.do_now.len(), 1);
         assert_eq!(json.matrix.do_now[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
+    }
+
+    // ── C3-6: one bucket computation, read consistently everywhere in the JSON ─────────
+
+    /// `FindingRefJson::bucket` (the matrix entry) and `CuratedSiteJson::bucket` (the SAME
+    /// finding's curated-findings row) must read the SAME value — both come from exactly one
+    /// `effective_bucket` call per finding now (previously two independent `is_informational`
+    /// + `matrix_bucket` call sites in this file, which happened to agree today but had no
+    /// structural guarantee against drifting apart). A hedged (`needs-review`) finding is the
+    /// sharpest case: it must read `"informational"` in BOTH places, never an action bucket —
+    /// and it still ships (over-tell, never dropped), just consistently re-bucketed.
+    #[test]
+    fn matrix_and_curated_site_bucket_fields_agree_and_a_hedged_finding_is_never_an_action_bucket()
+    {
+        let mut hedged = finding("SOME-HEDGED-RULE-1", "a.rs", 1, "medium");
+        hedged.confidence = Some("needs-review".to_string());
+        // A non-`None` `confidence` makes `is_ai_tier` true (it treats any calibrated finding
+        // as AI-tier — see that function's doc comment); without a preview tool or grounded
+        // citation, the SEPARATE P3 "uncited AI finding" gate would exclude this row from
+        // `curated_findings` entirely rather than routing it to the informational appendix.
+        // Giving it a preview tool keeps its citation `"preview"` (not `"advisory"`), isolating
+        // THIS test to the hedge/confidence signal this test is actually about.
+        hedged.preview_tool = Some("clippy".to_string());
+        let report = report_with(vec![hedged], vec!["SOME-HEDGED-RULE-1"]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(json.matrix.informational.len(), 1);
+        assert_eq!(json.matrix.informational[0].bucket, "informational");
+        for tier in [&json.matrix.do_now, &json.matrix.do_next] {
+            assert!(
+                tier.is_empty(),
+                "a hedged finding must never land in an action bucket: {tier:?}"
+            );
+        }
+
+        let group = json
+            .curated_findings
+            .iter()
+            .find(|g| g.rule_id == "SOME-HEDGED-RULE-1")
+            .expect("the hedged finding still ships in curated_findings, as an informational row");
+        assert_eq!(group.sites.len(), 1, "the finding must not be dropped");
+        assert_eq!(
+            group.sites[0].bucket, "informational",
+            "the curated site's own bucket field must read informational too"
+        );
+        assert_eq!(
+            group.sites[0].bucket, json.matrix.informational[0].bucket,
+            "matrix and curated-site bucket fields must never disagree for the same finding"
+        );
     }
 
     // ── Branding (2026-09-13 review): precedence + neutral fallback ────────────────

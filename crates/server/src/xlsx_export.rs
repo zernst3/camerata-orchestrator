@@ -10,11 +10,17 @@
 //! Both artifacts are serializers over the SAME `ScanReport` + dispositions + corpus. This
 //! module does NOT re-derive classification math independently — it calls the exact same
 //! `pub(crate)` helpers `report_export::build_report_json` uses internally (`classify`,
-//! `normalize_severity`, `category_for`, `matrix_bucket`, `disposition_label`,
+//! `normalize_severity`, `category_for`, `effective_bucket`, `disposition_label`,
 //! `client_headline_and_detail`, `resolve_citation`, `resolve_fix`, `effort_hours_bounds`,
-//! `finding_key`, `bucket_title`, `Disposition`). A finding's severity, category, matrix
-//! bucket, disposition label, citation, and recommended fix are computed identically in
-//! both places; only the OUTPUT SHAPE differs. W3 (2026-09-30): the headline in particular
+//! `finding_key`, `bucket_title`, `provenance_tier_rank`, `Disposition`). A finding's severity,
+//! category, matrix bucket, disposition label, citation, and recommended fix are computed
+//! identically in both places; only the OUTPUT SHAPE differs. C3-6 (2026-10-01): `bucket` in
+//! particular used to be this module's OWN `matrix_bucket(...)` call, with none of
+//! `report_export::build_report_json`'s `is_informational`/`is_uncited_ai_finding` gates
+//! applied first — a hedged or uncited-AI row could therefore sit in an action tier here while
+//! the PDF/JSON correctly held it out, and the three artifacts' bucket counts could disagree.
+//! `effective_bucket` (which now folds those two gates in) is the fix: this module calls that
+//! one function, never `matrix_bucket` directly. W3 (2026-09-30): the headline in particular
 //! goes through `client_headline_and_detail` — the SAME plain-language rewrite the PDF uses
 //! (preferring a floor rule's authored `finding_headline` template, falling back to
 //! `defect_headline` over the raw `detail` only when no template is authored) — so the
@@ -44,8 +50,8 @@ use crate::dep_audit::DEP_AUDIT_RULE_ID;
 use crate::onboard::ScanReport;
 use crate::report_export::{
     bucket_title, category_for, classify, client_headline_and_detail, disposition_label,
-    effort_hours_bounds, finding_key, matrix_bucket, normalize_severity, resolve_citation,
-    resolve_fix, Disposition, DispositionWire, ReportOptions,
+    effective_bucket, effort_hours_bounds, finding_key, normalize_severity, provenance_tier_rank,
+    resolve_citation, resolve_fix, Disposition, DispositionWire, ReportOptions,
 };
 
 // ── Row model (the intermediate shape shared by every findings-style sheet) ────────
@@ -70,9 +76,11 @@ pub struct FindingRow {
     line: usize,
     rule_id: String,
     category: String,
-    /// `"do_now"` | `"do_next"` | `"plan"` | `"accepted"` (matches [`matrix_bucket`]), or
-    /// empty for a false-positive row (a FP has no matrix cell — it is excluded from the
-    /// matrix entirely, same as the PDF).
+    /// `"do_now"` | `"do_next"` | `"plan"` | `"accepted"` | `"informational"` (matches
+    /// [`effective_bucket`] — C3-6), or empty for a false-positive row (a FP has no matrix
+    /// cell — it is excluded from the matrix entirely, same as the PDF). `"informational"`
+    /// means the SAME held-for-review appendix the PDF/JSON route a hedged or uncited-AI
+    /// finding to, never an action tier — see the Index sheet's disposition summary line.
     bucket: &'static str,
     /// The classified [`Disposition`] this session, or `None` for a false-positive row
     /// (`classify` must never be called on an FP-dispositioned finding — see
@@ -88,6 +96,13 @@ pub struct FindingRow {
     /// `"Deterministic"` | `"Preview: {tool}"` | `"AI-advisory"` — derived from
     /// `resolve_citation(...).kind`, per the design doc's Provenance column.
     provenance: String,
+    /// C3-6: the RAW citation kind (`"grounded"` | `"preview"` | `"advisory"`) behind
+    /// `provenance`'s display label above — never serialized (the label is the wire value for
+    /// `findings.json`); kept only so the row sort below can call the SAME
+    /// `report_export::provenance_tier_rank` the within-bucket matrix ordering uses, rather
+    /// than re-deriving a rank from the formatted label string.
+    #[serde(skip)]
+    citation_kind: String,
     citation_label: String,
     /// Newline-separated citation source URLs (plain text, not hyperlink objects — a cell
     /// can carry several URLs).
@@ -205,9 +220,12 @@ struct SheetSummary {
 /// `report_export::build_report_json` calls. False positives are KEPT here (with their
 /// reason) rather than dropped — the workbook's False Positives sheet is where they surface.
 ///
-/// Rows are returned PRE-SORTED (severity desc, then repo/path/line) — the one true sort
-/// order both `build_workbook` and `build_findings_export` (`findings.json`) consume as-is,
-/// rather than each sorting its own copy and risking two orderings silently drifting apart.
+/// Rows are returned PRE-SORTED (severity desc, then provenance tier, then repo/path/line —
+/// C3-6 added the provenance tie-break so a security/deterministic finding sorts ahead of an
+/// architecture/advisory one of the same severity, matching the within-bucket order
+/// `report_export::build_report_json`'s matrix now uses) — the one true sort order both
+/// `build_workbook` and `build_findings_export` (`findings.json`) consume as-is, rather than
+/// each sorting its own copy and risking two orderings silently drifting apart.
 fn partition_rows(
     report: &ScanReport,
     dispositions: &HashMap<String, DispositionWire>,
@@ -246,6 +264,7 @@ fn partition_rows(
         // headline column changes.
         let (headline, _) = client_headline_and_detail(f, corpus, &title, chosen_option_for_rule);
         let citation = resolve_citation(&f.rule_id, f.preview_tool.as_deref(), corpus);
+        let citation_kind = citation.kind.clone();
         let provenance = match citation.kind.as_str() {
             "preview" => format!(
                 "Preview: {}",
@@ -275,7 +294,13 @@ fn partition_rows(
         } else {
             let disposition = classify(f, wire);
             let reason = wire.map(|d| d.reason.clone()).unwrap_or_default();
-            let bucket = matrix_bucket(disposition, &severity, f.effort.as_deref());
+            // C3-6: THE single bucket computation, shared verbatim with `build_report_json`'s
+            // matrix pass and curated-findings label — never this module's own
+            // severity-only `matrix_bucket` call (that was the root cause of the xlsx's
+            // bucket counts disagreeing with the PDF/JSON: a hedged or uncited-AI row had no
+            // gate here to hold it out of an action tier).
+            let bucket =
+                effective_bucket(f, disposition, &severity, corpus, report.test_file_count);
             let confirmed = wire.map(|d| d.confirmed_by_client).unwrap_or(false);
             let label = disposition_label(disposition, &reason, bucket, confirmed);
             (bucket, Some(disposition), label, String::new())
@@ -298,6 +323,7 @@ fn partition_rows(
             needs_review: f.needs_review,
             in_test: f.in_test,
             provenance,
+            citation_kind,
             citation_label: citation.label,
             citation_urls,
             also_matches: f.also_matches.join(", "),
@@ -312,12 +338,20 @@ fn partition_rows(
     }
 
     rows.sort_by(|a, b| {
-        (severity_rank(&a.severity), &a.repo, &a.path, a.line).cmp(&(
-            severity_rank(&b.severity),
-            &b.repo,
-            &b.path,
-            b.line,
-        ))
+        (
+            severity_rank(&a.severity),
+            provenance_tier_rank(&a.citation_kind),
+            &a.repo,
+            &a.path,
+            a.line,
+        )
+            .cmp(&(
+                severity_rank(&b.severity),
+                provenance_tier_rank(&b.citation_kind),
+                &b.repo,
+                &b.path,
+                b.line,
+            ))
     });
 
     (rows, dep_rows)
@@ -344,13 +378,12 @@ fn is_still_open(d: Disposition) -> bool {
     )
 }
 
+/// Delegates to `report_export::severity_rank` (C3-6) rather than keeping its own copy of the
+/// mapping — this module's severity-based sorts/ranks (row order, worst-severity labels, tab
+/// colors) must use the exact same rank as the matrix's within-bucket sort, never a second
+/// hand-maintained copy that could silently drift from it.
 fn severity_rank(sev: &str) -> u8 {
-    match sev {
-        "critical" => 0,
-        "high" => 1,
-        "medium" => 2,
-        _ => 3,
-    }
+    crate::report_export::severity_rank(sev)
 }
 
 fn title_case(sev: &str) -> String {
@@ -1008,30 +1041,40 @@ fn write_index_sheet(
     r += 2;
 
     // ── Disposition summary (must reconcile with the PDF's own numbers exactly) ─────
+    // C3-6: `informational` is counted here too (it wasn't before — the old `_ => {}` arm
+    // silently dropped a held-for-review row from every count) and `open` mirrors
+    // `report_export::build_report_json`'s own formula exactly: every `Unresolved` row MINUS
+    // the informational ones (an informational row is always `Unresolved` by construction —
+    // see `is_informational` — so this keeps `open` an ACTION count, not an appendix one),
+    // never just "unresolved rows not routed informational" counted directly, so the two
+    // artifacts can't drift if a future gate ever routes a non-`Unresolved` row informational.
     let mut do_now = 0usize;
     let mut do_next = 0usize;
     let mut plan = 0usize;
     let mut accepted = 0usize;
-    let mut open = 0usize;
+    let mut informational = 0usize;
+    let mut unresolved = 0usize;
     for row in live_rows {
         match row.bucket {
             "do_now" => do_now += 1,
             "do_next" => do_next += 1,
             "plan" => plan += 1,
             "accepted" => accepted += 1,
+            "informational" => informational += 1,
             _ => {}
         }
         if row.disposition_kind == Some(Disposition::Unresolved) {
-            open += 1;
+            unresolved += 1;
         }
     }
+    let open = unresolved.saturating_sub(informational);
     ws.write_string(
         r,
         0,
         format!(
             "Disposition summary: {open} open, {do_now} do now, {do_next} do next, {plan} \
-             planned, {accepted} accepted, {fp_count} excluded as false positives, {} \
-             dependency {}.",
+             planned, {accepted} accepted, {informational} held for review, {fp_count} \
+             excluded as false positives, {} dependency {}.",
             dep_rows.len(),
             if dep_rows.len() == 1 { "advisory" } else { "advisories" }
         ),
@@ -2106,5 +2149,207 @@ mod tests {
         let b = sanitize_sheet_name("Security", &mut used);
         assert_ne!(a, b);
         assert!(b.ends_with(" (2)"));
+    }
+
+    // ── C3-6: one bucket computation, shared by every artifact ───────────────────────
+
+    /// The three export artifacts (PDF, xlsx, `findings.json`) each used to bucket a finding
+    /// independently: `build_report_json`'s matrix pass applied `is_informational`/
+    /// `is_uncited_ai_finding` BEFORE `matrix_bucket`, but this module's `partition_rows`
+    /// called `matrix_bucket` directly with no such gate at all — a hedged (`needs-review`)
+    /// row the PDF/JSON correctly held out of do_now/do_next/plan could still land in an
+    /// action tier in the xlsx, and the three artifacts' bucket counts could disagree (a real
+    /// run showed a JSON 5/10/26 split plus 6 held for review against an xlsx 7/8/32 split —
+    /// exactly the 6 hedged rows the xlsx had no gate to hold back). `effective_bucket` (C3-6)
+    /// is now the ONE function every artifact calls: this pins the fix — every row's bucket
+    /// label is identical across the JSON matrix and the xlsx `FindingRow`, the aggregate
+    /// counts per bucket match exactly, and the hedged row never lands in an action bucket in
+    /// EITHER artifact. No finding is dropped by the fix (over-tell, never under-tell) — the
+    /// hedged row still ships, just consistently routed to `informational` everywhere.
+    #[test]
+    fn bucket_labels_and_counts_are_identical_across_json_and_xlsx() {
+        let critical = finding("SEC-CRIT-1", "src/a.rs", 1, "critical");
+        let high_no_effort = finding("SEC-HIGH-1", "src/b.rs", 2, "high");
+        let mut high_low_effort = finding("SEC-HIGH-2", "src/c.rs", 3, "high");
+        high_low_effort.effort = Some("low".to_string());
+        let medium = finding("SEC-MED-1", "src/d.rs", 4, "medium");
+        let mut hedged_low = finding("SEC-HEDGED-1", "src/e.rs", 5, "low");
+        hedged_low.confidence = Some("needs-review".to_string());
+
+        let findings = vec![
+            critical,
+            high_no_effort,
+            high_low_effort,
+            medium,
+            hedged_low,
+        ];
+        let rule_ids = vec![
+            "SEC-CRIT-1",
+            "SEC-HIGH-1",
+            "SEC-HIGH-2",
+            "SEC-MED-1",
+            "SEC-HEDGED-1",
+        ];
+        let report = report_with(findings, rule_ids);
+        let dispositions = HashMap::new();
+        let opts = empty_opts();
+
+        let json = crate::report_export::build_report_json(&report, &dispositions, None, &opts);
+        let (rows, _dep) = partition_rows(&report, &dispositions, None, &opts.chosen_options);
+        let live_rows: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
+
+        assert_eq!(
+            live_rows.len(),
+            5,
+            "no finding may be dropped from the xlsx partition"
+        );
+
+        // The JSON side's (rule_id, repo, path, line) -> bucket map, read off `matrix`.
+        let mut json_bucket: HashMap<(String, String, String, usize), String> = HashMap::new();
+        for f in json
+            .matrix
+            .do_now
+            .iter()
+            .chain(json.matrix.do_next.iter())
+            .chain(json.matrix.plan.iter())
+            .chain(json.matrix.accepted.iter())
+            .chain(json.matrix.informational.iter())
+        {
+            json_bucket.insert(
+                (f.rule_id.clone(), f.repo.clone(), f.path.clone(), f.line),
+                f.bucket.clone(),
+            );
+        }
+        assert_eq!(
+            json_bucket.len(),
+            5,
+            "no finding may be dropped from the JSON matrix either"
+        );
+
+        for row in &live_rows {
+            let key = (
+                row.rule_id.clone(),
+                row.repo.clone(),
+                row.path.clone(),
+                row.line,
+            );
+            let expected = json_bucket
+                .get(&key)
+                .unwrap_or_else(|| panic!("row {key:?} is missing from the JSON matrix"));
+            assert_eq!(
+                &row.bucket, expected,
+                "xlsx and JSON must compute the SAME bucket for {key:?}"
+            );
+        }
+
+        // Aggregate counts must match exactly, bucket by bucket — this is the fix for the
+        // three artifacts disagreeing on bucket COUNTS, not just individual labels.
+        for (bucket, expected_count) in [
+            ("do_now", json.matrix.do_now.len()),
+            ("do_next", json.matrix.do_next.len()),
+            ("plan", json.matrix.plan.len()),
+            ("accepted", json.matrix.accepted.len()),
+            ("informational", json.matrix.informational.len()),
+        ] {
+            let actual = live_rows.iter().filter(|r| r.bucket == bucket).count();
+            assert_eq!(
+                actual, expected_count,
+                "xlsx and JSON must agree on the {bucket} count"
+            );
+        }
+
+        // Expected shape for THIS fixture: 2 do_now (critical + high/low-effort), 1 do_next
+        // (high/no-effort), 1 plan (medium), 1 informational (the hedged low), 0 accepted.
+        assert_eq!(json.matrix.do_now.len(), 2);
+        assert_eq!(json.matrix.do_next.len(), 1);
+        assert_eq!(json.matrix.plan.len(), 1);
+        assert_eq!(json.matrix.accepted.len(), 0);
+        assert_eq!(json.matrix.informational.len(), 1);
+
+        // The hedged row is NEVER in an action bucket, in EITHER artifact.
+        let hedged_key = (
+            "SEC-HEDGED-1".to_string(),
+            "owner/repo".to_string(),
+            "src/e.rs".to_string(),
+            5,
+        );
+        assert_eq!(
+            json_bucket.get(&hedged_key).map(String::as_str),
+            Some("informational"),
+            "the hedged finding must route to informational in the JSON matrix"
+        );
+        let hedged_row = live_rows
+            .iter()
+            .find(|r| r.rule_id == "SEC-HEDGED-1")
+            .expect("the hedged row must still be present — never dropped, only re-bucketed");
+        assert_eq!(hedged_row.bucket, "informational");
+        assert_ne!(hedged_row.bucket, "do_now");
+        assert_ne!(hedged_row.bucket, "do_next");
+
+        // The PDF template reads these SAME precomputed fields — `d.priority_grid` (built from
+        // this exact `matrix` by `build_priority_grid`) and each curated site's own
+        // `disposition` label — never a second, independent severity-to-bucket pass of its own.
+        let template = include_str!("../templates/audit_report.typ");
+        assert!(
+            template.contains("d.priority_grid"),
+            "the template must render the grid derived from `matrix`, not recompute buckets"
+        );
+        assert!(
+            template.contains("site.disposition"),
+            "the template must render each curated site's own precomputed disposition label"
+        );
+    }
+
+    /// Within a bucket, ordering is now severity THEN provenance tier (C3-6 item 3): a
+    /// deterministic/security-grounded finding ranks ahead of an ungrounded advisory one of
+    /// the SAME severity, so a security-floor medium never prints after an architecture/
+    /// advisory medium just because of scan/insertion order. Checked in BOTH the JSON
+    /// matrix's `plan` vector and the xlsx row order — same comparator, same answer. The two
+    /// findings are deliberately given paths that sort the WRONG way alphabetically (the
+    /// architecture finding's path sorts first) and are inserted architecture-before-security,
+    /// so a passing test can only mean the provenance-tier sort actually fired, not an
+    /// accidental path or insertion-order match.
+    #[tokio::test]
+    async fn security_deterministic_finding_orders_before_architecture_advisory_at_the_same_severity(
+    ) {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        // Not in the corpus at all -> resolves to an "advisory" citation (architecture/stance
+        // observation, no grounded standard behind it).
+        let architecture = finding("ARCH-STANCE-DEMO-1", "src/a-arch.rs", 9, "medium");
+        // A real, grounded corpus rule (used elsewhere as the RLS class's own grounding rule)
+        // -> resolves to a "grounded" citation.
+        let security = finding("SUPABASE-RLS-ENABLED-1", "src/z-sec.rs", 1, "medium");
+        let report = report_with(
+            vec![architecture, security],
+            vec!["ARCH-STANCE-DEMO-1", "SUPABASE-RLS-ENABLED-1"],
+        );
+        let dispositions = HashMap::new();
+        let opts = empty_opts();
+
+        let json =
+            crate::report_export::build_report_json(&report, &dispositions, Some(&corpus), &opts);
+        assert_eq!(
+            json.matrix.plan.len(),
+            2,
+            "both medium findings land in plan"
+        );
+        assert_eq!(
+            json.matrix.plan[0].rule_id, "SUPABASE-RLS-ENABLED-1",
+            "the grounded/security finding must sort before the ungrounded/architecture one"
+        );
+        assert_eq!(json.matrix.plan[1].rule_id, "ARCH-STANCE-DEMO-1");
+
+        let (rows, _dep) =
+            partition_rows(&report, &dispositions, Some(&corpus), &opts.chosen_options);
+        let plan_rows: Vec<&FindingRow> = rows.iter().filter(|r| r.bucket == "plan").collect();
+        assert_eq!(plan_rows.len(), 2);
+        assert_eq!(
+            plan_rows[0].rule_id, "SUPABASE-RLS-ENABLED-1",
+            "the xlsx row order must match the JSON matrix's within-bucket order"
+        );
+        assert_eq!(plan_rows[1].rule_id, "ARCH-STANCE-DEMO-1");
     }
 }
