@@ -376,6 +376,31 @@ pub(crate) fn normalize_severity(raw: &str) -> String {
     }
 }
 
+/// C4-R1: the pipeline-wide null-location safety net. No finding above `informational` (any
+/// normalized severity other than `"info"`) may ship with BOTH an empty `path` AND `line == 0`
+/// — that combination means nothing concrete was ever established for the location this
+/// finding supposedly cites, which reads as "deterministic rule asserting a falsehood" rather
+/// than a real, actionable defect. This was discovered via a Supabase RLS checker over-firing
+/// at `critical` with an empty path/line-0 "last established" fact (see
+/// `camerata_checks::supabase::rls_checker`'s own C4-R1 fix, which now avoids triggering this
+/// at the source by citing a real policy location) — but the invariant is enforced HERE, at the
+/// single place every checker's findings funnel through before bucketing, so any OTHER
+/// checker/producer that ever ships an unlocated above-informational finding is caught too,
+/// not just this one rule.
+///
+/// Downgrades the SEVERITY only (to `"info"`, so `is_informational` routes it to the
+/// `informational` appendix exactly like any other info-tier finding) — never drops the
+/// finding. A client should still see "something was flagged, but the scan couldn't pin down
+/// where," rather than losing the observation entirely (the over-tell rule, applied here at the
+/// pipeline-integrity level rather than a triage-confidence one).
+fn downgrade_unlocated_above_informational(severity: String, f: &Finding) -> String {
+    if severity != "info" && f.path.is_empty() && f.line == 0 {
+        "info".to_string()
+    } else {
+        severity
+    }
+}
+
 /// Real pluralization for a count + noun pair (`"1 site"` / `"3 sites"`), replacing the
 /// `"N thing(s)"` CLI-ism that reads as sloppy in a flagship client PDF.
 fn noun(n: usize, singular: &str, plural: &str) -> String {
@@ -2149,6 +2174,11 @@ pub fn build_report_json(
         let disposition = classify(f, wire);
         let reason = wire.map(|d| d.reason.clone()).unwrap_or_default();
         let severity = normalize_severity(&f.severity);
+        // C4-R1: the null-location safety net — see `downgrade_unlocated_above_informational`'s
+        // doc comment. Applied here (once, alongside normalization) so every downstream section
+        // — matrix bucketing, curated findings, the scorecard — sees the ALREADY-downgraded
+        // severity and can never independently re-derive the pre-downgrade one.
+        let severity = downgrade_unlocated_above_informational(severity, f);
         live.push((f, disposition, reason, severity));
     }
     let review_state = if auditor_touched_any_finding {
@@ -5199,6 +5229,62 @@ mod tests {
             + json.matrix.accepted.len();
         assert_eq!(summed, curated, "do_now+do_next+plan+accepted must equal curated_total");
         assert_eq!(curated, 1, "only the critical is curated; the info note is appendix-only");
+    }
+
+    /// C4-R1: the pipeline-wide null-location safety net. A synthetic `critical` finding with
+    /// an EMPTY path and `line == 0` — the exact shape the Supabase RLS over-firing regression
+    /// produced (a deterministic rule asserting a falsehood with no real evidence behind it) —
+    /// must be DOWNGRADED to `info` (never dropped) by `build_report_json`, landing in the
+    /// `informational` appendix rather than `do_now`. A normally-located critical finding in
+    /// the SAME report is completely unaffected, proving this is a location-shaped gate, not a
+    /// blanket demotion of the rule or severity.
+    #[test]
+    fn build_report_json_downgrades_an_unlocated_above_informational_finding_but_never_drops_it() {
+        let located_critical = finding("SEC-NO-HARDCODED-SECRETS-1", "a.rs", 10, "critical");
+        let unlocated_critical = finding("SUPABASE-RLS-POLICY-DISABLED-1", "", 0, "critical");
+        let report = report_with(
+            vec![located_critical, unlocated_critical],
+            vec![
+                "SEC-NO-HARDCODED-SECRETS-1",
+                "SUPABASE-RLS-POLICY-DISABLED-1",
+            ],
+        );
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        // Still present — downgraded, not dropped.
+        assert_eq!(
+            json.matrix.informational.len(),
+            1,
+            "the unlocated critical must still ship, re-bucketed to informational: {:?}",
+            json.matrix.informational
+        );
+        assert_eq!(
+            json.matrix.informational[0].rule_id,
+            "SUPABASE-RLS-POLICY-DISABLED-1"
+        );
+        assert_eq!(
+            json.matrix.informational[0].severity, "info",
+            "the empty-path/line-0 finding's severity must be downgraded to info"
+        );
+
+        // The normally-located critical is completely unaffected — this is a location-shaped
+        // gate, not a general severity cap.
+        assert_eq!(
+            json.matrix.do_now.len(),
+            1,
+            "the located critical stays an action item"
+        );
+        assert_eq!(json.matrix.do_now[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
+        assert_eq!(json.matrix.do_now[0].severity, "critical");
+
+        // No action tier may ever contain the unlocated finding.
+        for tier in [&json.matrix.do_now, &json.matrix.do_next, &json.matrix.plan] {
+            assert!(
+                tier.iter()
+                    .all(|r| r.rule_id != "SUPABASE-RLS-POLICY-DISABLED-1"),
+                "the unlocated finding must never land in an action tier: {tier:?}"
+            );
+        }
     }
 
     /// P7 end-to-end: N occurrences of one needs-review STRUCTURAL rule, grouped by
