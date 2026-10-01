@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::config::parse_exposed_schemas;
 use super::timeline::{
-    build_timeline, build_timeline_from_globs, find_wrong_table_reenable, ProtectionEvent,
-    ProtectionKind, TableState,
+    build_timeline, build_timeline_from_globs, find_wrong_table_reenable,
+    is_platform_managed_schema, ProtectionEvent, ProtectionKind, TableState,
 };
 use crate::arch_checker::{
     ArchChecker, ArchViolation, RepoView, SEVERITY_CRITICAL, SEVERITY_INFO, SEVERITY_MEDIUM,
@@ -146,6 +146,90 @@ fn wrong_table_narrative(
     )
 }
 
+/// C4-R1: whether `(state.schema, state.table)` is a PLATFORM-OWNED table — one Supabase
+/// itself creates and manages the lifecycle of, that this repo never `CREATE TABLE`s and only
+/// ever adds policies to (`storage.objects`, `auth.users`, ...). A platform-owned table's
+/// baseline RLS posture is "enabled by the platform," not "disabled" — Postgres's own "RLS is
+/// off until a CREATE TABLE's implicit default is overridden" reasoning only holds when the
+/// repo is the one that issued that CREATE TABLE. See [`has_positive_disable_evidence`], which
+/// is what actually gates severity; this is just the ownership test it builds on.
+fn is_platform_owned(state: &TableState) -> bool {
+    !state.repo_created && is_platform_managed_schema(&state.schema)
+}
+
+/// C4-R1 (BLOCKING regression fix): whether `state`'s current `!rls_enabled` reading is
+/// POSITIVE evidence of an actual disable, as opposed to merely "nothing in this repo's
+/// migration history ever turned it on" for a table this repo doesn't own the lifecycle of.
+///
+/// For every table OTHER than a platform-owned one, this is unconditionally `true` — i.e. no
+/// behavior change from before this fix: a repo-created table that's never been enabled, or an
+/// unknown-origin table in some ordinary (non-managed) schema, is read exactly as it always
+/// was (see `RULE_RLS_ENABLED`'s and `RULE_RLS_POLICY_DISABLED`'s own long-standing severity
+/// rules, and the `policy_on_a_non_exposed_schema_table_does_not_crash_and_is_scoped_correctly`
+/// test, which deliberately keeps `internal.audit_log` — a NON-managed, non-repo-created schema
+/// — at full CRITICAL severity).
+///
+/// For a platform-owned table (see [`is_platform_owned`]), the bar is higher: ONLY an explicit
+/// `ALTER TABLE ... DISABLE ROW LEVEL SECURITY` anywhere in the fold for this exact
+/// `(schema, table)` counts. "We never saw an ENABLE statement" is not evidence of anything —
+/// the platform may have already turned RLS on before this repo's first migration ever ran, and
+/// this repo's migrations simply never needed to touch the toggle.
+fn has_positive_disable_evidence(
+    state: &TableState,
+    events_by_file: &BTreeMap<String, Vec<ProtectionEvent>>,
+) -> bool {
+    if !is_platform_owned(state) {
+        return true;
+    }
+    events_by_file.values().flatten().any(|ev| {
+        ev.kind == ProtectionKind::Rls
+            && ev.schema == state.schema
+            && ev.object == state.table
+            && !ev.enabled
+    })
+}
+
+/// C4-R1: the capped, informational finding for a platform-owned table this repo adds
+/// policies to but never `CREATE TABLE`s or explicitly disables — the SAFE counterpart to
+/// `RULE_RLS_POLICY_DISABLED`'s critical finding. Cites the first policy's own location
+/// (never an empty path/line 0 — see `report_export::build_report_json`'s null-location
+/// invariant, which this also satisfies directly rather than relying on as a backstop) so the
+/// finding still points somewhere concrete even though nothing was "established" about RLS
+/// itself in this repo's history.
+fn platform_owned_info_finding(state: &TableState, name: &str) -> ArchViolation {
+    let (file, line, policy_note) = match state.policies.first() {
+        Some(p) => (
+            p.established_at.file.clone(),
+            p.established_at.line,
+            format!(
+                " (for example, the `{}` policy at {}:{})",
+                p.name, p.established_at.file, p.established_at.line
+            ),
+        ),
+        // Defensive fallback: in practice a platform-owned, non-repo-created table only ever
+        // enters the timeline via a CREATE POLICY (see `TableState::repo_created`'s doc
+        // comment), so `policies` is non-empty whenever this function is called. If that ever
+        // stops being true, stay informational rather than ever shipping this as a security
+        // finding with an invented location.
+        None => (String::new(), 0, String::new()),
+    };
+    ArchViolation {
+        rule_id: RULE_RLS_POLICY_DISABLED.to_string(),
+        file,
+        line,
+        object: Some(format!("{}.{}", state.schema, state.table)),
+        severity: SEVERITY_INFO,
+        message: format!(
+            "{name} has at least one access policy, but nothing in this repository's migration history ever \
+             created this table or explicitly enabled or disabled Row Level Security on it — it looks like a \
+             platform-managed table (an auth/storage-style system table Supabase itself creates), which already \
+             ships with RLS enabled by default.{policy_note} This scan cannot confirm the live RLS state for a \
+             table it never saw created, so this is informational only: confirm RLS is still enabled for {name} \
+             directly in the Supabase dashboard before treating this as settled. {HONESTY_CAVEAT}"
+        ),
+    }
+}
+
 fn check_table(
     state: &TableState,
     exposed_schemas: &BTreeSet<String>,
@@ -172,8 +256,21 @@ fn check_table(
     } else {
         String::new()
     };
+    // C4-R1: gate every "RLS disabled" conclusion below on POSITIVE evidence — see
+    // `has_positive_disable_evidence`'s doc comment. `true` for everything except a
+    // platform-owned table (a managed schema this repo never `CREATE TABLE`s) with no explicit
+    // disable statement anywhere, so this changes nothing for the overwhelming majority of
+    // tables this checker has always handled correctly.
+    let evidence = has_positive_disable_evidence(state, events_by_file);
 
-    if !state.rls_enabled {
+    if !state.rls_enabled && !evidence {
+        // Platform-owned, no CREATE TABLE, no explicit disable, no ENABLE either — "disabled"
+        // is not an earned conclusion here (see the module-level C4-R1 doc comments). Emit ONE
+        // capped informational finding instead of the critical/info split below, citing a real
+        // policy location rather than the empty `est_file`/`est_line` this table never actually
+        // established anything at.
+        out.push(platform_owned_info_finding(state, &name));
+    } else if !state.rls_enabled {
         let exposed = exposed_schemas.contains(&state.schema);
         if exposed {
             out.push(ArchViolation {
@@ -232,7 +329,11 @@ fn check_table(
         });
     }
 
-    if !state.policies.is_empty() && !state.rls_enabled {
+    if !state.policies.is_empty() && !state.rls_enabled && evidence {
+        // `evidence` guards this too: when it's `false` (platform-owned, no positive proof of
+        // a disable), `platform_owned_info_finding` above already emitted the single
+        // informational finding for this table — this critical branch must not ALSO fire for
+        // the same underlying fact.
         let policy_locs: Vec<String> = state
             .policies
             .iter()
@@ -899,5 +1000,134 @@ mod tests {
         assert_eq!(restored.len(), 1, "{vs:#?}");
         assert_eq!(restored[0].severity, SEVERITY_CRITICAL);
         assert_eq!(restored[0].file, "db/migrations/0001_init.sql");
+    }
+
+    // ── C4-R1: platform-owned tables must never be read as "RLS disabled" on absence alone ──
+    //
+    // Regression: a repo that only ADDS POLICIES to a table it never `CREATE TABLE`s (the
+    // normal shape for `storage.objects`/`auth.users`) was being read as "RLS disabled" purely
+    // because no CREATE TABLE and no ENABLE statement existed anywhere in the repo — firing
+    // `RULE_RLS_POLICY_DISABLED` at CRITICAL with an EMPTY path and line 0 as the "established
+    // at" evidence. A platform-managed table's baseline is "enabled by the platform," not
+    // "disabled," absent POSITIVE evidence (an explicit DISABLE statement, or — for a table the
+    // repo itself created — a CREATE TABLE with no subsequent ENABLE).
+
+    fn any_above_informational(vs: &[ArchViolation]) -> bool {
+        vs.iter().any(|v| v.severity != SEVERITY_INFO)
+    }
+
+    fn any_empty_location(vs: &[ArchViolation]) -> bool {
+        vs.iter().any(|v| v.file.is_empty() && v.line == 0)
+    }
+
+    #[test]
+    fn positive_repo_created_table_never_enabled_fires_at_full_severity_citing_create_table() {
+        // POSITIVE case: the repo itself creates the table, adds a policy, and never enables
+        // RLS at all — Postgres's own "off by default" IS positive evidence here because the
+        // repo owns the table's entire lifecycle. Must fire at the normal (security) severity,
+        // citing the CREATE TABLE location — completely unaffected by the platform-owned carve
+        // out, which only applies when the repo never created the table.
+        let f = files(vec![(
+            "supabase/migrations/20240101000000_init.sql",
+            "create table public.orders (id uuid primary key);\n\
+             create policy p1 on public.orders for select using (true);",
+        )]);
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        let disabled = vs
+            .iter()
+            .find(|v| v.rule_id == RULE_RLS_POLICY_DISABLED)
+            .expect("a repo-created table with a policy and no enable must still fire critical");
+        assert_eq!(disabled.severity, SEVERITY_CRITICAL);
+        assert_eq!(disabled.file, "supabase/migrations/20240101000000_init.sql");
+        assert_eq!(disabled.line, 1, "must cite the CREATE TABLE location");
+        assert!(!any_empty_location(&vs), "{vs:#?}");
+    }
+
+    #[test]
+    fn safe_twin_platform_managed_table_only_gets_policies_never_fires_above_informational() {
+        // SAFE TWIN: the repo never creates `storage.objects` (a Supabase-managed table) — it
+        // only adds a policy to it, exactly the real-world shape for Supabase Storage access
+        // rules. No CREATE TABLE, no ALTER TABLE ... {ENABLE|DISABLE} ROW LEVEL SECURITY
+        // anywhere. This must NOT read as "RLS disabled": nothing above `info`, and no finding
+        // with an empty path AND line 0 (the exact C4-R1 regression shape).
+        let f = files(vec![(
+            "supabase/migrations/20240101000000_storage_policy.sql",
+            "create policy \"avatar access\" on storage.objects for select using (bucket_id = 'avatars');",
+        )]);
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        assert!(
+            !any_above_informational(&vs),
+            "a platform-managed table with only policies must never fire above informational: {vs:#?}"
+        );
+        assert!(
+            !any_empty_location(&vs),
+            "no finding may ship with an empty path AND line 0: {vs:#?}"
+        );
+        // Still over-tells (never silently drops the observation) — exactly one informational
+        // finding, citing the policy's own location.
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].severity, SEVERITY_INFO);
+        assert_eq!(
+            vs[0].file,
+            "supabase/migrations/20240101000000_storage_policy.sql"
+        );
+        assert_eq!(
+            vs[0].line, 1,
+            "must cite the policy's own location, not an empty/0 one"
+        );
+        assert!(vs[0].message.to_lowercase().contains("dashboard"));
+    }
+
+    #[test]
+    fn safe_twin_platform_managed_table_created_enabled_then_policies_added_is_silent() {
+        // SAFE TWIN: a repo that (unusually, but validly) DOES create the managed-schema table
+        // itself, enables RLS, and adds policies — fully clean, same as any ordinary table.
+        let f = files(vec![(
+            "supabase/migrations/20240101000000_init.sql",
+            "create table auth.my_custom_table (id uuid primary key);\n\
+             alter table auth.my_custom_table enable row level security;\n\
+             create policy p1 on auth.my_custom_table for select using (true);",
+        )]);
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        assert!(vs.is_empty(), "{vs:#?}");
+    }
+
+    #[test]
+    fn platform_owned_table_with_an_explicit_disable_still_fires_critical() {
+        // Positive evidence via an EXPLICIT disable statement still counts even for a
+        // platform-owned table the repo never created: the repo took a deliberate, visible
+        // action here, so "no finding" would be the wrong call. Must still cite a real
+        // location (the disable statement itself), never an empty one.
+        let f = files(vec![(
+            "supabase/migrations/20240101000000_storage.sql",
+            "create policy p1 on storage.objects for select using (true);\n\
+             alter table storage.objects disable row level security;",
+        )]);
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        let disabled = vs
+            .iter()
+            .find(|v| v.rule_id == RULE_RLS_POLICY_DISABLED)
+            .expect("an explicit disable on a platform table is positive evidence — must fire");
+        assert_eq!(disabled.severity, SEVERITY_CRITICAL);
+        assert!(!disabled.file.is_empty());
+    }
+
+    #[test]
+    fn non_platform_schema_table_the_repo_never_created_is_unaffected_by_the_carve_out() {
+        // The platform-owned carve-out is scoped to Supabase's OWN managed schemas — an
+        // ordinary app schema (`internal`, `app`, ...) the repo didn't create a table in is NOT
+        // "platform-owned," so it keeps its pre-existing (correctly alarming) behavior: a
+        // policy on a table nobody ever saw created or enabled is still exactly as suspicious
+        // as before this fix. Regression guard against over-widening the carve-out.
+        let f = files(vec![(
+            "supabase/migrations/20240101000000_init.sql",
+            "create policy p1 on internal.mystery_table for select using (true);",
+        )]);
+        let vs = SupabaseRlsChecker.check(&view(&f));
+        let disabled = vs
+            .iter()
+            .find(|v| v.rule_id == RULE_RLS_POLICY_DISABLED)
+            .expect("a non-platform-schema table must keep its existing critical behavior");
+        assert_eq!(disabled.severity, SEVERITY_CRITICAL);
     }
 }

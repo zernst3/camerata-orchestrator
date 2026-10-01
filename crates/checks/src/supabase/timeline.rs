@@ -27,6 +27,42 @@ pub struct Location {
     pub line: usize,
 }
 
+/// Schema names Supabase itself creates and owns the lifecycle of — a repo's own migrations
+/// routinely add `CREATE POLICY` statements against a table in one of these (most commonly
+/// `storage.objects`, occasionally `auth.users`) WITHOUT ever issuing the `CREATE TABLE`,
+/// because the platform already created it before the project's first migration ever ran.
+/// `TableState::repo_created` tells us whether THIS repo created the table; this list tells us
+/// whether, when it didn't, the table is nonetheless a KNOWN platform object (so "no CREATE
+/// TABLE, no ENABLE statement found" means "we have no opinion," not "RLS is disabled") versus
+/// some arbitrary third-party-owned table we genuinely know nothing about. See
+/// `rls_checker::has_positive_disable_evidence` for how this is used, and C4-R1's regression
+/// writeup for why a managed table must not be read as "RLS disabled" on absence alone.
+///
+/// Deliberately NOT exhaustive of every internal Supabase schema (e.g. `pgbouncer` is a
+/// connection-pooler implementation detail unlikely to ever carry an app policy) — only the
+/// schemas a real project's migrations plausibly add policies against. Widen this list rather
+/// than hardcoding a specific project's table/schema name if a new managed schema surfaces.
+pub const PLATFORM_MANAGED_SCHEMAS: &[&str] = &[
+    "auth",
+    "storage",
+    "realtime",
+    "vault",
+    "extensions",
+    "graphql",
+    "graphql_public",
+    "pgsodium",
+    "pgsodium_masks",
+    "supabase_functions",
+];
+
+/// Whether `schema` is one of Supabase's own platform-managed schemas (see
+/// [`PLATFORM_MANAGED_SCHEMAS`]). Schema-name comparison only — callers combine this with
+/// [`TableState::repo_created`] to decide whether a table is actually platform-owned (see
+/// `rls_checker::has_positive_disable_evidence`).
+pub fn is_platform_managed_schema(schema: &str) -> bool {
+    PLATFORM_MANAGED_SCHEMAS.contains(&schema)
+}
+
 /// One policy currently active on a table (created and not since dropped).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyRecord {
@@ -43,9 +79,25 @@ pub struct TableState {
     pub rls_enabled: bool,
     /// Where `rls_enabled`'s CURRENT value was last established — `None` only when the
     /// table's very first `CREATE TABLE` never had its RLS default statement recorded, which
-    /// should not happen in practice (creation always stamps a location).
+    /// should not happen in practice (creation always stamps a location), OR when this entry
+    /// was minted by a `CREATE POLICY`/similar statement that references a table this repo
+    /// never `CREATE TABLE`s (see `repo_created`) — there is genuinely nothing to point at.
     pub rls_established_at: Option<Location>,
     pub policies: Vec<PolicyRecord>,
+    /// Whether a `CREATE TABLE` for this exact `(schema, table)` identity exists anywhere in
+    /// THIS replay. `false` means every fact this `TableState` carries (including
+    /// `rls_enabled = false`) was inferred from some OTHER statement touching the table (a
+    /// `CREATE POLICY`, an `ALTER TABLE ... {ENABLE|DISABLE}` that happens to name it, a
+    /// rename whose source this replay never saw) — the table itself might be a Supabase/
+    /// platform-managed object (`auth.users`, `storage.objects`, ...) this repo only ever adds
+    /// policies to. See [`is_platform_managed_schema`] and
+    /// `rls_checker::has_positive_disable_evidence` for why this flag exists: Postgres's own
+    /// "RLS is off until a CREATE TABLE's implicit default is overridden" reasoning is only
+    /// valid evidence of an actual disable when the repo is the one that brought the table
+    /// into existence. A table the platform created and the repo merely references has a
+    /// DIFFERENT, unknown-to-us baseline (for a managed schema: "the platform already turned
+    /// it on"), so `rls_enabled = false` here must not be read as "disabled" on its own.
+    pub repo_created: bool,
 }
 
 /// The replayed end-state of one `SECURITY DEFINER` function's search_path posture. Only
@@ -266,6 +318,7 @@ fn apply_statement(timeline: &mut Timeline, file: &str, line: usize, stmt: Parse
                     rls_enabled: false, // Postgres default: RLS is off until explicitly enabled.
                     rls_established_at: Some(loc()),
                     policies: Vec::new(),
+                    repo_created: true, // This replay IS the CREATE TABLE for this identity.
                 },
             );
         }
@@ -291,6 +344,10 @@ fn apply_statement(timeline: &mut Timeline, file: &str, line: usize, stmt: Parse
                         rls_enabled: false,
                         rls_established_at: Some(loc()),
                         policies: Vec::new(),
+                        // No CREATE TABLE for the OLD name exists in this replay either — we
+                        // genuinely don't know whether this repo owns the table's lifecycle, so
+                        // stay conservative (not repo-created) rather than assume it does.
+                        repo_created: false,
                     },
                 );
             }
@@ -319,6 +376,9 @@ fn apply_statement(timeline: &mut Timeline, file: &str, line: usize, stmt: Parse
                 rls_enabled: false,
                 rls_established_at: None,
                 policies: Vec::new(),
+                // Minted purely from an ALTER RLS statement — no CREATE TABLE for it in this
+                // replay, so this identity is not (yet) known to be repo-owned.
+                repo_created: false,
             });
             entry.rls_enabled = enabled;
             entry.rls_established_at = Some(loc());
@@ -356,6 +416,10 @@ fn apply_statement(timeline: &mut Timeline, file: &str, line: usize, stmt: Parse
                 rls_enabled: false,
                 rls_established_at: None,
                 policies: Vec::new(),
+                // Minted purely from a CREATE POLICY statement — the canonical "repo adds
+                // policies to a table it never CREATE TABLEs" shape (e.g. `storage.objects`,
+                // `auth.users`). See `TableState::repo_created`'s doc comment.
+                repo_created: false,
             });
             entry.policies.retain(|p| p.name != name); // CREATE POLICY on an existing name replaces it
             entry.policies.push(PolicyRecord {
