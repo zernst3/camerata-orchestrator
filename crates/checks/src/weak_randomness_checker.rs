@@ -409,10 +409,19 @@ fn candidate_identifiers(
     out
 }
 
-/// The identifier immediately before the nearest `=` (not `==`/`!=`/`<=`/`>=`/`=>`) or `:`
-/// scanning backward through `before` — covers `const shareToken = `, `token = `, and object-
-/// literal `resetCode: `. Returns `None` when no such operator appears (a bare expression
-/// statement, a function argument, a `return` with no local assignment).
+/// The identifier immediately before the nearest `=` (not `==`/`!=`/`<=`/`>=`/`=>`), compound-
+/// assignment operator (`+=`/`-=`/`*=`/`/=`/`%=`/`&=`/`|=`/`^=`), or `:` scanning backward
+/// through `before` — covers `const shareToken = `, `token = `, object-literal `resetCode: `,
+/// AND the loop-accumulate idiom `token += CHARS[...]` (a token/secret built character-by-
+/// character). The compound-assignment case is load-bearing for
+/// [`SEC-NO-WEAK-TOKEN-RANDOMNESS-1`]'s "loop-accumulate" shape — `generateShareToken` building
+/// its result via `token += randomChar()` inside a `for` loop is just as much a credential as
+/// `token = Math.random()...` in one shot, and treating `+=` as a non-assignment (the original
+/// gap) silently dropped the identifier `token` from the candidate list on every iteration-built
+/// token, relying entirely on the enclosing function name instead — which misses the (very
+/// common) case where the function itself has a generic name (`build`, `make`) and only the
+/// accumulator variable is credential-named. Returns `None` when no such operator appears (a
+/// bare expression statement, a function argument, a `return` with no local assignment).
 fn assignment_target(before: &str) -> Option<String> {
     let chars: Vec<char> = before.chars().collect();
     let mut i = chars.len();
@@ -428,7 +437,23 @@ fn assignment_target(before: &str) -> Option<String> {
             if matches!(prev, Some('=') | Some('!') | Some('<') | Some('>')) {
                 continue; // ==, !=, <=, >=
             }
-            let head: String = chars[..i].iter().collect();
+            // Compound/accumulation assignment (`+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`):
+            // the operator character sits between the identifier and `=` and must be excluded
+            // from the identifier scan, or `last_identifier` sees a trailing non-ident char and
+            // returns `None` even though `token` is right there.
+            let is_compound_op = matches!(
+                prev,
+                Some('+')
+                    | Some('-')
+                    | Some('*')
+                    | Some('/')
+                    | Some('%')
+                    | Some('&')
+                    | Some('|')
+                    | Some('^')
+            );
+            let head_end = if is_compound_op { i - 1 } else { i };
+            let head: String = chars[..head_end].iter().collect();
             return last_identifier(&head);
         }
         if c == ':' {
@@ -488,7 +513,20 @@ fn enclosing_function_name(lines: &[&str], from_line_idx: usize) -> Option<Strin
 
 fn declaration_name(line: &str) -> Option<String> {
     let trimmed = line.trim_start();
-    for kw in ["async function ", "function ", "def "] {
+    // `export function NAME(` / `export async function NAME(` are the ordinary way a
+    // module-level token/secret generator is declared in this codebase (and JS/TS generally) —
+    // without these prefixes, every EXPORTED `generateShareToken`-style function was invisible
+    // to the enclosing-function-name lookback, silently falling back to whatever same-line
+    // context existed (often nothing, in the loop-accumulate shape with a generic local name).
+    for kw in [
+        "export default async function ",
+        "export default function ",
+        "export async function ",
+        "export function ",
+        "async function ",
+        "function ",
+        "def ",
+    ] {
         if let Some(rest) = trimmed.strip_prefix(kw) {
             return leading_identifier(rest);
         }
@@ -1130,6 +1168,116 @@ mod tests {
         let f = files(vec![(
             "app/accounts.py",
             "def make_temp_password():\n    return random.random()\n\n\ndef make_api_token():\n    return secrets.token_hex(32)\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+    }
+
+    // ── loop-accumulate shape: PRNG value built character-by-character ────────
+
+    #[test]
+    fn flags_loop_accumulated_share_token_via_compound_assign_and_fn_name() {
+        // The shape from the design doc: a token built via `token += randomChar()` inside a
+        // `for` loop, where BOTH the compound-assignment target (`token`) and the enclosing
+        // function name (`generateShareToken`) independently reveal the credential — exercises
+        // the fixed `+=` handling in `assignment_target`.
+        let f = files(vec![(
+            "src/links/shareLink.ts",
+            "function generateShareToken() {\n  let token = '';\n  for (let i = 0; i < 32; i++) {\n    token += CHARS[Math.floor(Math.random() * CHARS.length)];\n  }\n  return token;\n}\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].severity, SEVERITY_HIGH, "{vs:#?}");
+        assert_eq!(
+            vs[0].line, 4,
+            "must attribute to the Math.random() call site: {vs:#?}"
+        );
+    }
+
+    #[test]
+    fn flags_loop_accumulated_token_via_enclosing_fn_name_only_export_declaration() {
+        // Here the LOCAL accumulator is a generic `result` — no security keyword at all. The
+        // ONLY signal is the enclosing function's name, declared with `export function `, which
+        // `declaration_name` did not previously recognize (it only matched a bare `function `
+        // prefix), so an exported token generator with a generic local would have been missed
+        // even after the `+=` fix.
+        let f = files(vec![(
+            "src/links/apiKey.ts",
+            "export function generateApiKey() {\n  let result = '';\n  for (let i = 0; i < 16; i++) {\n    result += CHARS[Math.floor(Math.random() * CHARS.length)];\n  }\n  return result;\n}\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+    }
+
+    #[test]
+    fn flags_loop_accumulated_token_via_compound_assign_with_generic_fn_name() {
+        // The mirror image of the two tests above: the enclosing function name (`build`) carries
+        // NO security keyword, so the compound-assignment target (`token`) is the only signal —
+        // proving the `+=` fix alone (independent of enclosing-function-name recognition) closes
+        // the gap.
+        let f = files(vec![(
+            "src/links/build.ts",
+            "function build() {\n  let token = '';\n  for (let i = 0; i < 32; i++) {\n    token += CHARS[Math.floor(Math.random() * CHARS.length)];\n  }\n  return token;\n}\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+    }
+
+    #[test]
+    fn loop_accumulated_csprng_twin_does_not_suppress_the_real_loop_accumulate_positive() {
+        // Same module, same loop-accumulate shape: one function builds its token character-by-
+        // character from `Math.random()` (must fire), the sibling builds it from
+        // `crypto.randomBytes` (must NOT fire) — proving the widened accumulation handling still
+        // discriminates CSPRNG usage rather than keying off "a loop that builds a string."
+        let f = files(vec![(
+            "src/links/mixed.ts",
+            "function generateShareToken() {\n  let token = '';\n  for (let i = 0; i < 32; i++) {\n    token += CHARS[Math.floor(Math.random() * CHARS.length)];\n  }\n  return token;\n}\n\nfunction generateShareTokenSecure() {\n  let token = '';\n  const bytes = crypto.randomBytes(32);\n  for (let i = 0; i < bytes.length; i++) {\n    token += CHARS[bytes[i] % CHARS.length];\n  }\n  return token;\n}\n",
+        )]);
+        let hits = WeakTokenRandomnessChecker.check(&view(&f));
+        let vs = rule_hits(&hits);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].line, 4, "{vs:#?}");
+    }
+
+    #[test]
+    fn benign_loop_accumulated_shuffle_string_is_never_flagged() {
+        // Same accumulation shape (`+=` inside a `for` loop fed by `Math.random()`), but neither
+        // the local (`label`) nor the enclosing function name (`shuffleDisplayLabel`) carries any
+        // security keyword — must stay silent despite the widened `+=` handling.
+        let f = files(vec![(
+            "src/ui/shuffleLabel.ts",
+            "function shuffleDisplayLabel() {\n  let label = '';\n  for (let i = 0; i < 8; i++) {\n    label += CHARS[Math.floor(Math.random() * CHARS.length)];\n  }\n  return label;\n}\n",
+        )]);
+        assert!(rule_hits(&WeakTokenRandomnessChecker.check(&view(&f))).is_empty());
+    }
+
+    #[test]
+    fn benign_loop_accumulated_session_jitter_with_compound_assign_is_never_flagged() {
+        // `sessionJitterMs` carries a WEAK keyword (`session`) co-occurring with a
+        // DISCRIMINATOR_KEYWORDS hit (`jitter`) on the SAME identifier, now reached via `+=`
+        // instead of `=` — must still suppress, mirroring
+        // `discriminator_suppresses_a_weak_keyword_collision` but for the loop-accumulate shape.
+        let f = files(vec![(
+            "src/ui/backoff.ts",
+            "function nextBackoffSchedule() {\n  let sessionJitterMs = 0;\n  for (let i = 0; i < 5; i++) {\n    sessionJitterMs += Math.random() * 50;\n  }\n  return sessionJitterMs;\n}\n",
+        )]);
+        assert!(rule_hits(&WeakTokenRandomnessChecker.check(&view(&f))).is_empty());
+    }
+
+    #[test]
+    fn arrow_function_const_declaration_enclosing_name_is_recognized() {
+        // `const generateShareToken = () => { ... }` is the other extremely common JS/TS
+        // declaration idiom alongside `function NAME()` / `export function NAME()` — confirms
+        // the existing const-arrow branch of `declaration_name` already covers the
+        // loop-accumulate shape too (no local security keyword; function name is the only
+        // signal).
+        let f = files(vec![(
+            "src/links/build.ts",
+            "const generateShareToken = () => {\n  let result = '';\n  for (let i = 0; i < 32; i++) {\n    result += CHARS[Math.floor(Math.random() * CHARS.length)];\n  }\n  return result;\n};\n",
         )]);
         let hits = WeakTokenRandomnessChecker.check(&view(&f));
         let vs = rule_hits(&hits);
