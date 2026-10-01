@@ -64,7 +64,8 @@ fn capture_token_for(rule_id: &str) -> Option<&'static str> {
     match rule_id {
         id if id == rls_checker::RULE_RLS_ENABLED
             || id == rls_checker::RULE_RLS_NO_POLICY
-            || id == rls_checker::RULE_RLS_POLICY_DISABLED =>
+            || id == rls_checker::RULE_RLS_POLICY_DISABLED
+            || id == rls_checker::RULE_RLS_DISABLED_NOT_RESTORED =>
         {
             Some("table")
         }
@@ -200,12 +201,13 @@ mod tests {
 
     /// Every Supabase corpus rule whose authored remediation text uses a domain placeholder
     /// (`<table>`, `<view>`, `<bucket>`, `<matview>`, `<schema>`, `<function-name>`) OTHER than
-    /// the four `capture_token_for` already maps is NOT answered by any deterministic
+    /// the five `capture_token_for` already maps is NOT answered by any deterministic
     /// `ArchChecker` today (verified against `crates/checks/src/supabase/`: only
     /// `SupabaseRlsChecker` and `SupabaseFnSearchPathChecker` exist, and between them they only
-    /// answer RLS-ENABLED / RLS-NO-POLICY / RLS-POLICY-DISABLED / FUNC-SEARCH-PATH). Wiring a
-    /// deterministic-checker token for one of these would be a lie about provenance — they are
-    /// AI-audit findings (see `ai_audit::parse_finding_captures` for that path instead) or, for
+    /// answer RLS-ENABLED / RLS-NO-POLICY / RLS-POLICY-DISABLED / RLS-DISABLED-NOT-RESTORED /
+    /// FUNC-SEARCH-PATH). Wiring a deterministic-checker token for one of these would be a lie
+    /// about provenance — they are AI-audit findings (see `ai_audit::parse_finding_captures`
+    /// for that path instead) or, for
     /// `SUPABASE-RLS-INITPLAN-1`/`SUPABASE-RLS-PERMISSIVE-TRUE-1`/`SUPABASE-RLS-VIEW-INVOKER-1`,
     /// facets `SupabaseRlsChecker` genuinely does not inspect (policy predicate content /
     /// `security_invoker`). This test pins `capture_token_for` to `None` for all of them so a
@@ -241,6 +243,7 @@ mod tests {
             ("SUPABASE-RLS-ENABLED-1", "table"),
             ("SUPABASE-RLS-NO-POLICY-1", "table"),
             ("SUPABASE-RLS-POLICY-DISABLED-1", "table"),
+            ("SUPABASE-RLS-DISABLED-NOT-RESTORED-1", "table"),
             ("SUPABASE-FUNC-SEARCH-PATH-1", "function-name"),
         ];
         for (id, token) in expected {
