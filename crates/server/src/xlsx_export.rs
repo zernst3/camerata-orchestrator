@@ -51,7 +51,8 @@ use crate::onboard::ScanReport;
 use crate::report_export::{
     bucket_title, category_for, classify, client_headline_and_detail, disposition_label,
     effective_bucket, effort_hours_bounds, finding_key, normalize_severity, provenance_tier_rank,
-    resolve_citation, resolve_fix, Disposition, DispositionWire, ReportOptions,
+    resolve_citation, resolve_fix, sanitize_report_findings, Disposition, DispositionWire,
+    ReportOptions,
 };
 
 // ── Row model (the intermediate shape shared by every findings-style sheet) ────────
@@ -232,6 +233,10 @@ fn partition_rows(
     corpus: Option<&camerata_rules::RuleSet>,
     chosen_options: &HashMap<String, String>,
 ) -> (Vec<FindingRow>, Vec<DepRow>) {
+    // C4-R3: same zero-width/BOM sanitization `build_report_json` applies to the PDF's JSON —
+    // see `sanitize_report_findings`'s doc comment for why this is the one shared ingestion
+    // point rather than a per-artifact patch.
+    let report = &sanitize_report_findings(report);
     let mut rows = Vec::new();
     let mut dep_rows = Vec::new();
 

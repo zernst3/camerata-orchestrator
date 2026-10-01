@@ -168,6 +168,68 @@ impl ReportOptions {
     }
 }
 
+/// C4-R3: zero-width and byte-order-mark code points. None of these carry any visual
+/// information in ANY of the three report artifacts (the Typst-rendered PDF, `findings.json`,
+/// the xlsx workbook) — their only observable effect is to silently corrupt an otherwise
+/// identical-looking string for exact-match search/grep/diff/copy-paste. A scanned repo CAN
+/// legitimately contain one of these in a file name or a pasted snippet (adversarial or just
+/// odd source encoding); this list is also what the PDF template's own `breakable()` helper
+/// must never introduce as a side effect of wrapping a long path (see that function's doc
+/// comment in `templates/audit_report.typ`).
+const ZERO_WIDTH_CODEPOINTS: [char; 5] = [
+    '\u{200B}', // zero width space
+    '\u{200C}', // zero width non-joiner
+    '\u{200D}', // zero width joiner
+    '\u{FEFF}', // BOM / zero width no-break space
+    '\u{2060}', // word joiner
+];
+
+/// Strip every [`ZERO_WIDTH_CODEPOINTS`] character out of `s`, borrowing unchanged when none
+/// are present (the overwhelming common case) so this is free to call defensively.
+pub(crate) fn strip_zero_width(s: &str) -> std::borrow::Cow<'_, str> {
+    if s.chars().any(|c| ZERO_WIDTH_CODEPOINTS.contains(&c)) {
+        std::borrow::Cow::Owned(
+            s.chars()
+                .filter(|c| !ZERO_WIDTH_CODEPOINTS.contains(c))
+                .collect(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(s)
+    }
+}
+
+/// Apply [`strip_zero_width`] to the handful of a [`Finding`]'s free-text fields that flow,
+/// verbatim or near-verbatim, into every report artifact: `path` (the PDF's `raw()` path
+/// rendering, the xlsx "Location" column, `findings.json`'s `path` field), `snippet` (the PDF's
+/// code block, and — for a dependency-advisory finding — the package name), `detail` (the
+/// curated-finding body), and every `captures` value (substituted into authored remediation
+/// text by [`instantiate_remediation`]). This is the ONE ingestion point both
+/// [`build_report_json`] and `xlsx_export::partition_rows` call before doing anything else with
+/// a scan's findings, so neither artifact can drift from the other on this invariant, and no
+/// future field added to either builder needs its own copy of this defense.
+pub(crate) fn sanitize_finding_text(finding: &Finding) -> Finding {
+    let mut f = finding.clone();
+    f.path = strip_zero_width(&f.path).into_owned();
+    f.snippet = strip_zero_width(&f.snippet).into_owned();
+    f.detail = strip_zero_width(&f.detail).into_owned();
+    for v in f.captures.values_mut() {
+        *v = strip_zero_width(v).into_owned();
+    }
+    f
+}
+
+/// Apply [`sanitize_finding_text`] to every finding in `report`, returning an owned clone — the
+/// shared ingestion step for [`build_report_json`] and `xlsx_export::partition_rows`. Clones
+/// the whole report (not just `findings`) so the caller can shadow its `report: &ScanReport`
+/// parameter with the sanitized value and leave every other line in the function unchanged.
+pub(crate) fn sanitize_report_findings(report: &ScanReport) -> ScanReport {
+    let mut report = report.clone();
+    for f in report.findings.iter_mut() {
+        *f = sanitize_finding_text(f);
+    }
+    report
+}
+
 /// Stable identity for a `Finding`, matching `camerata_ui_core::triage::finding_key`'s
 /// wire format BYTE-FOR-BYTE (same fields, same order, same NUL separator) so a
 /// disposition keyed off the client's `FindingView` looks up correctly here. The two
@@ -1547,6 +1609,24 @@ pub(crate) fn client_headline_and_detail(
 /// [`instantiate_remediation`] (filled from the finding's own `path`, which is always present),
 /// so they are not listed here; the catch-all arm below is still a safe fallback for them too if
 /// `path` is ever empty.
+/// True when `token` (already stripped of any leading `a:` prefix) has the SHAPE every real
+/// placeholder in this corpus uses: lowercase ASCII letters, digits, and hyphens only (`path`,
+/// `function-name`, `secret-kind`, …). C4-R3: authored `remediation`/`finding_*` prose
+/// occasionally needs to show a literal angle-bracketed EXAMPLE inline — e.g. an XSS rule's
+/// "verify a payload like <img src=x onerror=alert(1)> renders as inert text" — and
+/// [`instantiate_remediation`] used to treat every `<...>` span as a token to fill, so that
+/// literal example's own `<img ...>` markup got swallowed and replaced by the generic filler,
+/// rendering the nonsense sentence "a payload like the affected resource renders as inert
+/// text." A real token is never spelled with spaces, `=`, or uppercase letters; this check lets
+/// [`instantiate_remediation`] tell the two apart and leave a non-token span exactly as the
+/// rule author wrote it.
+fn is_placeholder_token_shape(token: &str) -> bool {
+    !token.is_empty()
+        && token
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
 fn generic_placeholder_filler(token: &str) -> &'static str {
     match token {
         "table" => "the affected table",
@@ -1656,6 +1736,15 @@ pub(crate) fn instantiate_remediation(
             Some(bare) => (bare.trim(), true),
             None => (raw_token, false),
         };
+        if !is_placeholder_token_shape(token) {
+            // C4-R3: not a real placeholder — emit the original bracketed span verbatim. Running
+            // a literal example (HTML markup, a generic-type snippet, …) through the generic
+            // filler would replace the author's own words with nonsense; a malformed span gets
+            // the identical verbatim treatment just below in the no-closing-bracket branch.
+            out.push_str(&rest[start..start + 1 + end + 1]);
+            rest = &after_open[end + 1..];
+            continue;
+        }
         let filled = if matches!(token, "path" | "file") && !path.trim().is_empty() {
             path.to_string()
         } else {
@@ -2186,6 +2275,11 @@ pub fn build_report_json(
     corpus: Option<&camerata_rules::RuleSet>,
     opts: &ReportOptions,
 ) -> AuditReportJson {
+    // C4-R3: sanitize zero-width/BOM code points out of every finding ONCE, here, before any
+    // downstream section touches `path`/`snippet`/`detail`/`captures` — see
+    // `sanitize_report_findings`'s doc comment. Shadows the parameter so every other line below
+    // (and every other use of `report` in this function) is unchanged.
+    let report = &sanitize_report_findings(report);
     let candidates_reviewed = report.findings.len();
 
     // Partition: false positives out (counted once), everything else keeps its finding +
@@ -2936,6 +3030,84 @@ mod tests {
         // Exact format: repo\0rule_id\0path\0line\0snippet
         let expected = format!("owner/repo\u{0}RULE-X\u{0}src/a.rs\u{0}7\u{0}{}", f.snippet);
         assert_eq!(key, expected);
+    }
+
+    // ── C4-R3 defect 3: zero-width/BOM code points never survive into JSON/xlsx fields ──
+
+    #[test]
+    fn strip_zero_width_removes_every_listed_codepoint_and_borrows_when_clean() {
+        let dirty = "apps/web/\u{200B}src/\u{FEFF}a.ts\u{200C}\u{200D}\u{2060}";
+        let cleaned = strip_zero_width(dirty);
+        assert_eq!(cleaned, "apps/web/src/a.ts");
+        for c in ZERO_WIDTH_CODEPOINTS {
+            assert!(!cleaned.contains(c));
+        }
+        // The common case (nothing to strip) must not allocate a new string.
+        assert!(matches!(
+            strip_zero_width("clean/path.rs"),
+            std::borrow::Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn sanitize_finding_text_strips_zero_width_from_path_snippet_detail_and_captures() {
+        let mut f = finding("SEC-1", "apps/\u{200B}web/a.ts", 1, "high");
+        f.snippet = "const x = 1\u{FEFF};".to_string();
+        f.detail = "secret\u{200D} found".to_string();
+        f.captures
+            .insert("table".to_string(), "pro\u{200C}files".to_string());
+
+        let cleaned = sanitize_finding_text(&f);
+        assert_eq!(cleaned.path, "apps/web/a.ts");
+        assert_eq!(cleaned.snippet, "const x = 1;");
+        assert_eq!(cleaned.detail, "secret found");
+        assert_eq!(cleaned.captures.get("table").unwrap(), "profiles");
+    }
+
+    /// `build_report_json` must sanitize BEFORE anything downstream reads `path` — the
+    /// JSON this builds is what both the Typst template and `findings.json` ultimately render,
+    /// so a zero-width space planted in a scanned repo's own file name (adversarial or just an
+    /// odd encoding) must never reach either artifact.
+    #[test]
+    fn build_report_json_strips_zero_width_characters_from_finding_paths() {
+        let f = finding("SEC-1", "apps/\u{200B}web/\u{FEFF}a.ts", 1, "critical");
+        let report = report_with(vec![f], vec!["SEC-1"]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let serialized = serde_json::to_string(&json).unwrap();
+        for c in ZERO_WIDTH_CODEPOINTS {
+            assert!(
+                !serialized.contains(c),
+                "build_report_json's output must never contain U+{:04X}",
+                c as u32
+            );
+        }
+        assert!(serialized.contains("apps/web/a.ts"));
+    }
+
+    /// Same invariant, the xlsx/`findings.json` path (`xlsx_export::partition_rows`, exercised
+    /// here via `build_findings_export`) — a separate implementation from `build_report_json`,
+    /// so it needs its own regression rather than relying on the PDF-JSON test above.
+    #[test]
+    fn build_findings_export_strips_zero_width_characters_from_finding_paths() {
+        let f = finding("SEC-1", "apps/\u{200B}web/\u{FEFF}a.ts", 1, "critical");
+        let report = report_with(vec![f], vec!["SEC-1"]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let export = crate::xlsx_export::build_findings_export(
+            &report,
+            &HashMap::new(),
+            None,
+            &json,
+            &HashMap::new(),
+        );
+        let serialized = serde_json::to_string(&export).unwrap();
+        for c in ZERO_WIDTH_CODEPOINTS {
+            assert!(
+                !serialized.contains(c),
+                "build_findings_export's output must never contain U+{:04X}",
+                c as u32
+            );
+        }
+        assert!(serialized.contains("apps/web/a.ts"));
     }
 
     // ── FP exclusion ───────────────────────────────────────────────────────────
@@ -4250,6 +4422,65 @@ mod tests {
         assert_eq!(text, "Check the affected resource before shipping.");
     }
 
+    // ── C4-R3 defect 4: a literal angle-bracketed EXAMPLE in authored prose is not a token ──
+
+    /// General regression for the "a payload like the affected resource renders as inert text"
+    /// bug: `instantiate_remediation` used to treat EVERY `<...>` span as a placeholder to
+    /// fill, so an authored sentence showing a literal HTML/markup example got its own example
+    /// swallowed by the generic filler. A real placeholder token is always a bare
+    /// lowercase-and-hyphens identifier (`<path>`, `<function-name>`, `<a:secret-kind>`, …); a
+    /// span containing spaces, `=`, or uppercase letters is prose, not a token, and must render
+    /// completely unchanged.
+    #[test]
+    fn instantiate_remediation_treats_a_literal_bracketed_example_as_prose_not_a_placeholder() {
+        let captures = std::collections::BTreeMap::new();
+        let text = instantiate_remediation(
+            "Verify by confirming a payload like <img src=x onerror=alert(1)> renders as \
+             inert text or is stripped, never executes.",
+            "a.tsx",
+            &captures,
+        );
+        assert_eq!(
+            text,
+            "Verify by confirming a payload like <img src=x onerror=alert(1)> renders as \
+             inert text or is stripped, never executes."
+        );
+        assert!(
+            !text.contains("the affected resource"),
+            "a literal example must never be replaced by the generic placeholder filler: {text:?}"
+        );
+    }
+
+    /// A real, known placeholder token sitting right next to a literal bracketed example in the
+    /// SAME sentence must still be filled normally — the token-shape check must not become
+    /// overly broad and start treating legitimate tokens as prose too.
+    #[test]
+    fn instantiate_remediation_still_fills_a_real_token_alongside_a_literal_example() {
+        let mut captures = std::collections::BTreeMap::new();
+        captures.insert("table".to_string(), "profiles".to_string());
+        let text = instantiate_remediation(
+            "Enable RLS on <table>; an example payload like <SELECT 1> must then fail.",
+            "a.sql",
+            &captures,
+        );
+        assert_eq!(
+            text,
+            "Enable RLS on profiles; an example payload like <SELECT 1> must then fail."
+        );
+    }
+
+    #[test]
+    fn is_placeholder_token_shape_accepts_only_lowercase_hyphenated_identifiers() {
+        assert!(is_placeholder_token_shape("path"));
+        assert!(is_placeholder_token_shape("function-name"));
+        assert!(is_placeholder_token_shape("secret-kind"));
+        assert!(!is_placeholder_token_shape(""));
+        assert!(!is_placeholder_token_shape("img src=x onerror=alert(1)"));
+        assert!(!is_placeholder_token_shape("SELECT 1"));
+        assert!(!is_placeholder_token_shape("Entity"));
+        assert!(!is_placeholder_token_shape("T, E"));
+    }
+
     #[test]
     fn instantiate_remediation_fills_p4_context_fact_tokens_from_captures_and_generic_fallback() {
         let mut captures = std::collections::BTreeMap::new();
@@ -4931,6 +5162,194 @@ mod tests {
             !json.executive_summary.narrative.contains("finding(s)"),
             "must not contain the CLI-ism '(s)': {:?}",
             json.executive_summary.narrative
+        );
+    }
+
+    // ── C4-R3: four renderer defects, verified against the REAL compiled PDF's extracted
+    // text (not just "it compiled") — a smoke check that only asserts `%PDF` magic bytes is
+    // blind to exactly these bugs (a doubled banner, a stray "None", an embedded U+200B, an
+    // unfilled placeholder are all still a valid, compiling PDF). `pdf_extract` gives these
+    // tests the same read on the artifact a human (or a grep/copy-paste workflow) would get.
+
+    /// The long path shared by every C4-R3 test below: long enough (well past `breakable()`'s
+    /// default 40-char chunk size) to force a wrap in both the curated-finding site line and
+    /// the narrower severity×effort grid cell.
+    const C4_R3_LONG_PATH: &str = "apps/web/src/components/very/deeply/nested/directory/\
+        structure/that/goes/on/ForeverLongComponentFileName.tsx";
+
+    /// Builds a two-finding, multi-page RAW report that exercises all four C4-R3 defects at
+    /// once: a long path (zero-width-space wrap bug), an empty severity×effort cell (the
+    /// "None" bug — this report deliberately has findings in only ONE of the two
+    /// severity/effort combinations it surfaces, so the other cell in the grid is empty), the
+    /// real corpus's `SEC-NO-UNSAFE-HTML-SINK-1` remediation (the unfilled-placeholder bug,
+    /// whose authored text contains a literal `<img ...>` HTML example), and a RAW
+    /// (unreviewed) review state spanning several pages (the draft-banner-doubling bug).
+    async fn c4_r3_report_and_pdf() -> (AuditReportJson, Vec<u8>) {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let mut long_path_finding =
+            finding("SEC-NO-UNSAFE-HTML-SINK-1", C4_R3_LONG_PATH, 42, "critical");
+        long_path_finding.effort = Some("low".to_string());
+        long_path_finding.confidence = Some("high".to_string());
+
+        let mut other_finding = finding("SEC-NO-HARDCODED-SECRETS-1", "b.rs", 1, "low");
+        other_finding.effort = Some("high".to_string());
+
+        let report = report_with(
+            vec![long_path_finding, other_finding],
+            vec!["SEC-NO-UNSAFE-HTML-SINK-1", "SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        assert_eq!(
+            json.review_state,
+            ReviewState::Raw,
+            "report must be RAW to exercise the draft banner"
+        );
+        assert!(
+            json.priority_grid
+                .rows
+                .iter()
+                .any(|r| r.cells.iter().any(|c| c.findings.is_empty())),
+            "the grid must contain at least one empty cell to exercise the 'None' bug"
+        );
+
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed for the C4-R3 regression report");
+        (json, pdf)
+    }
+
+    /// Defect 1: the per-page draft banner must render EXACTLY ONCE per page — never doubled
+    /// into "DRAFTDRAFT: ..." by a redundant short echo elsewhere on the same or an adjacent
+    /// page. Every occurrence of the bare word "DRAFT" anywhere in the document must be part
+    /// of the one full banner sentence; a standalone "DRAFT" (the old footer echo) is exactly
+    /// what let it collide with the next page's banner.
+    #[tokio::test]
+    async fn compile_pdf_renders_the_draft_banner_exactly_once_never_doubled() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_renders_the_draft_banner_exactly_once_never_doubled: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let (_, pdf) = c4_r3_report_and_pdf().await;
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        assert!(
+            !text.contains("DRAFTDRAFT"),
+            "the draft banner must never render doubled: {text:?}"
+        );
+        let bare_draft_count = text.matches("DRAFT").count();
+        let full_banner_count = text
+            .matches("DRAFT: not yet reviewed by a human reviewer")
+            .count();
+        assert!(
+            full_banner_count >= 1,
+            "the draft banner must render at least once: {text:?}"
+        );
+        assert_eq!(
+            bare_draft_count, full_banner_count,
+            "every occurrence of the word DRAFT must be part of the one full banner sentence, \
+             never a standalone echo elsewhere on the page: {text:?}"
+        );
+    }
+
+    /// Defect 2: an empty severity×effort matrix cell must render as blank — never the
+    /// literal string "None" (a Rust `Option`/Typst `none` stringified instead of omitted) or
+    /// "null". The whole document is checked, not just the matrix section, since neither
+    /// string is legitimate ANYWHERE in this report's authored prose.
+    #[tokio::test]
+    async fn compile_pdf_never_renders_the_literal_none_for_an_empty_matrix_cell() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_never_renders_the_literal_none_for_an_empty_matrix_cell: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let (_, pdf) = c4_r3_report_and_pdf().await;
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        assert!(
+            !text.contains("None"),
+            "no cell may render the literal word None: {text:?}"
+        );
+        assert!(
+            !text.contains("null"),
+            "no cell may render the literal word null: {text:?}"
+        );
+    }
+
+    /// Defect 3: wrapping a long path/snippet/package must never splice a zero-width space (or
+    /// any other zero-width/BOM code point) into the rendered text — that invisible character
+    /// used to survive into the PDF's copy/search/grep layer and corrupt an otherwise-exact
+    /// path. The long path in `c4_r3_report_and_pdf` is long enough to force a wrap.
+    #[tokio::test]
+    async fn compile_pdf_never_embeds_a_zero_width_character_when_wrapping_a_long_path() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_never_embeds_a_zero_width_character_when_wrapping_a_long_path: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let (_, pdf) = c4_r3_report_and_pdf().await;
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        for c in ZERO_WIDTH_CODEPOINTS {
+            assert!(
+                !text.contains(c),
+                "rendered text must never contain U+{:04X}: {text:?}",
+                c as u32
+            );
+        }
+        // A genuine visual line wrap is expected to introduce ORDINARY whitespace at the break
+        // point (a real PDF reader/extractor represents any two-line text that way — that's not
+        // the bug) — collapsing all whitespace must still reconstruct the exact original path
+        // with NOTHING else spliced in. This is the real discriminator from the old bug: the
+        // zero-width space survived even collapsing whitespace, because it is not whitespace.
+        let collapsed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            collapsed.contains(C4_R3_LONG_PATH),
+            "wrapping the long path must never introduce anything other than incidental \
+             whitespace at the break point: reconstructed={collapsed:?}"
+        );
+    }
+
+    /// Defect 4: an authored remediation's literal angle-bracketed EXAMPLE (the real corpus's
+    /// `SEC-NO-UNSAFE-HTML-SINK-1` remediation shows `<img src=x onerror=alert(1)>` as prose,
+    /// not a placeholder) must render verbatim — never swallowed by the generic-placeholder
+    /// filler into a nonsense sentence like "a payload like the affected resource renders as
+    /// inert text".
+    #[tokio::test]
+    async fn compile_pdf_never_swallows_a_literal_html_example_into_a_generic_placeholder() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping \
+                 compile_pdf_never_swallows_a_literal_html_example_into_a_generic_placeholder: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let (json, pdf) = c4_r3_report_and_pdf().await;
+        assert!(
+            json.curated_findings
+                .iter()
+                .any(|g| g.rule_id == "SEC-NO-UNSAFE-HTML-SINK-1"),
+            "the HTML-sink finding must survive triage into curated findings"
+        );
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        assert!(
+            !text.contains("a payload like the affected resource"),
+            "the literal <img ...> example must not be replaced by the generic filler: {text:?}"
+        );
+        assert!(
+            text.contains("payload like") && text.contains("renders as inert text"),
+            "the authored remediation sentence must still render: {text:?}"
         );
     }
 
@@ -6283,7 +6702,7 @@ mod tests {
         let template = include_str!("../templates/audit_report.typ");
         assert!(
             template.contains("d.review_state == \"raw\""),
-            "the draft banner (and its footer echo) must be gated on d.review_state"
+            "the draft banner must be gated on d.review_state"
         );
         assert!(
             template.contains("DRAFT: not yet reviewed by a human reviewer"),
@@ -6298,6 +6717,53 @@ mod tests {
         assert!(
             is_draft_def < page_start,
             "is_draft must be defined before the page setup that reads it in header:"
+        );
+    }
+
+    /// C4-R3 defect 1: the template used to ALSO echo a bare " · DRAFT" in the footer, on top
+    /// of the header's full banner — a standalone "DRAFT" immediately ahead of the next page's
+    /// full banner sentence in reading order, which collapsed into "DRAFTDRAFT: not yet
+    /// reviewed..." under a naive multi-page text read. The banner text must appear in exactly
+    /// ONE place in the template source (the header), never echoed a second time in the footer.
+    #[test]
+    fn shipped_template_does_not_echo_the_draft_banner_a_second_time_in_the_footer() {
+        let template = include_str!("../templates/audit_report.typ");
+        // The rendered banner CONTENT (not a comment mentioning it) is this exact bracketed
+        // Typst markup span — it must appear exactly once (in the header), never a second time
+        // anywhere else in the template.
+        assert_eq!(
+            template
+                .matches("[DRAFT: not yet reviewed by a human reviewer]")
+                .count(),
+            1,
+            "the rendered draft banner content must appear exactly once in the template"
+        );
+        let footer_start = template.find("footer: context [").expect("footer block");
+        let footer_end = footer_start + template[footer_start..].find("],").expect("footer close");
+        let footer_body = &template[footer_start..footer_end];
+        assert!(
+            !footer_body.contains("[ · DRAFT]") && !footer_body.contains("[DRAFT]"),
+            "the footer must not render its own standalone DRAFT echo — the header banner \
+             already marks every page, and a bare echo there used to sit immediately ahead of \
+             the next page's full banner, concatenating into \"DRAFTDRAFT: not yet \
+             reviewed...\" under a naive multi-page text read: {footer_body}"
+        );
+    }
+
+    /// C4-R3 defect 2: an empty severity×effort matrix cell used to render the literal word
+    /// "None" — a stringified absent value, not an intentional empty state. The template must
+    /// render empty content for a zero-finding cell, never the word "None" (or "null").
+    #[test]
+    fn shipped_template_renders_an_empty_matrix_cell_as_blank_not_the_word_none() {
+        let template = include_str!("../templates/audit_report.typ");
+        let fn_start = template
+            .find("#let grid_cell_content(cell) = {")
+            .expect("grid_cell_content definition");
+        let fn_end = fn_start + template[fn_start..].find("\n}\n").expect("function close");
+        let body = &template[fn_start..fn_end];
+        assert!(
+            !body.contains("[None]") && !body.contains("[null]"),
+            "an empty grid cell must never render the literal word None/null: {body}"
         );
     }
 

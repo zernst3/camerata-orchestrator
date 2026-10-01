@@ -31,24 +31,32 @@
 
 // M8: a long unbroken raw string (a deep node_modules path, a one-line minified snippet, a
 // scoped package name) has no natural break character, and Typst's raw/monospace rendering
-// does not wrap inside such a run — it overflows the page edge. Insert an invisible
-// zero-width-space break opportunity every `n` characters so it wraps instead, with zero
-// visual change to the text itself.
+// does not wrap inside such a run — it overflows the page edge.
+//
+// C4-R3: this used to insert an invisible zero-width space (U+200B) between chunks as the
+// break opportunity — but that is a REAL character that survives into the PDF's text/copy
+// layer, so selecting or grepping a path out of the report came back with invisible junk
+// spliced into it, silently breaking the exact copy-paste-into-a-terminal workflow a report
+// reader needs most. `h(0pt, weak: true)` is pure layout spacing: zero width, so it never
+// shows up in copied or extracted text, yet it still gives the line breaker an optional break
+// point between the surrounding raw() chunks. Returns CONTENT (one raw() per chunk), never a
+// plain string — call sites use the result directly; wrapping it in another raw() call would
+// flatten everything back into one unbreakable run and reintroduce the overflow this fixes.
 #let breakable(s, n: 40) = {
-  // Guard: a none/empty input must yield an empty string, never `none`. Typst's ().join(sep) is
-  // `none`, and calling raw() on a none value fails the whole compile ("expected string, found
-  // none") — so any finding with an empty path/snippet/package would crash the report without this.
-  if s == none { return "" }
+  // Guard: a none/empty input must yield empty content, never `none` or a crash. Typst's
+  // raw(none) fails the whole compile ("expected string, found none") — so any finding with an
+  // empty path/snippet/package would crash the report without this.
+  if s == none { return raw("") }
   let len = s.len()
-  if len == 0 { return "" }
+  if len == 0 { return raw("") }
   let i = 0
   let out = ()
   while i < len {
     let e = calc.min(i + n, len)
-    out.push(s.slice(i, e))
+    out.push(raw(s.slice(i, e)))
     i = e
   }
-  out.join("\u{200B}")
+  out.intersperse(h(0pt, weak: true)).join()
 }
 
 // Branding (2026-09-13 review, owner's hard constraint): Camerata is the licensable
@@ -94,11 +102,17 @@
       ]
     ]
   ],
+  // C4-R3: the footer used to echo a bare " · DRAFT" after the page-number line, ON TOP OF the
+  // header's full banner above it — on every page, that bare word sits immediately before the
+  // NEXT page's "DRAFT: not yet reviewed..." in reading/selection/extraction order, with
+  // nothing but a page boundary between them, so a copy-paste or a naive multi-page text
+  // extraction read back "...page 1 · DRAFTDRAFT: not yet reviewed...". The header banner
+  // above already marks EVERY page unambiguously; render the draft state once per page, not
+  // twice.
   footer: context [
     #set text(size: 8pt, fill: rgb("#808080"))
     #align(center)[
       #if d.cover.brand != none [#d.cover.brand ]inspection report (advisory, not a certification), page #counter(page).display()
-      #if is_draft [ · DRAFT]
     ]
   ],
 )
@@ -191,9 +205,9 @@
       #after_headline
     ]
     #v(2pt)
-    #text(size: 8.5pt, fill: rgb("#666666"))[*#site.repo* / #raw(breakable(site.path)):#str(site.line)] #severity_chip(site.severity)
+    #text(size: 8.5pt, fill: rgb("#666666"))[*#site.repo* / #breakable(site.path):#str(site.line)] #severity_chip(site.severity)
     #if site.snippet != "" [
-      #block(fill: rgb("#f5f5f5"), inset: 5pt, radius: 2pt, width: 100%)[#raw(breakable(site.snippet, n: 70))]
+      #block(fill: rgb("#f5f5f5"), inset: 5pt, radius: 2pt, width: 100%)[#breakable(site.snippet, n: 70)]
     ]
     #site.detail
     // FIX 1 contract (report_export.rs's `CuratedSiteJson.fix`): `Option<String>` serializes
@@ -353,7 +367,7 @@
       #block(above: 4pt, below: 8pt)[
         #severity_chip(item.severity) *#item.headline*
         #text(size: 8.5pt, fill: rgb("#666666"))[
-          #item.repo / #raw(breakable(item.path)):#str(item.line) (#item.rule_id)
+          #item.repo / #breakable(item.path):#str(item.line) (#item.rule_id)
         ]
         #v(1pt)
         #text(size: 9pt)[Rough estimate: #item.hours_label]
@@ -421,15 +435,19 @@
   else { "Not yet estimated" }
 }
 
+// C4-R3: a cell with no findings in it used to render the literal word "None" — read by a
+// non-engineer client as something having GONE WRONG (a stringified absent value), not as the
+// intended "nothing landed in this severity x effort bucket" empty state. An empty cell now
+// renders as blank — the row/column headers already say which bucket it is, so a blank cell at
+// their intersection reads as "zero" without needing a word for it (and this house style never
+// uses an em/en dash as a placeholder either, see `or_na` above).
 #let grid_cell_content(cell) = {
-  if cell.findings.len() == 0 [
-    #text(fill: rgb("#bbbbbb"), size: 8pt)[None]
-  ] else [
+  if cell.findings.len() == 0 [] else [
     #for f in cell.findings [
       #block(above: 2pt, below: 4pt)[
         #text(size: 8pt)[#f.headline]
         #linebreak()
-        #text(size: 7.5pt, fill: rgb("#888888"))[#f.repo / #raw(breakable(f.path, n: 24)):#str(f.line) (#f.rule_id)]
+        #text(size: 7.5pt, fill: rgb("#888888"))[#f.repo / #breakable(f.path, n: 24):#str(f.line) (#f.rule_id)]
       ]
     ]
   ]
@@ -541,7 +559,7 @@
     inset: 5pt,
     [*Package*], [*Repo*], [*Advisory*], [*Severity*],
     ..d.dependency_snapshot.rows.map(row => (
-      [#raw(breakable(row.package, n: 24))],
+      [#breakable(row.package, n: 24)],
       [#row.repo],
       [#row.advisory],
       [#severity_chip(row.severity)],
