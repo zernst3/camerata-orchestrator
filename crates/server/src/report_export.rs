@@ -874,6 +874,13 @@ pub struct CuratedSiteJson {
     /// future template revision) can compare this site's bucket against its `FindingRefJson`
     /// counterpart in `matrix` directly, instead of parsing it back out of the label prose.
     pub bucket: String,
+    /// C4-P2: this SITE's own resolved citation ([`citation_for_finding`]) — NOT necessarily
+    /// identical to the parent [`CuratedGroupJson::citation`] shown once at the group header
+    /// (which is that same call applied to the group's FIRST site only). Exists so a consumer
+    /// needing the per-finding citation never has to assume group membership implies a shared
+    /// citation; the cross-artifact equality gate compares this against `findings.json`'s
+    /// `FindingRow::citation_label`/`citation_urls` for the same finding.
+    pub citation: CitationJson,
     pub also_matches: Vec<String>,
     /// The defect at THIS object (see `defect_headline`) — the template renders this as the
     /// bold per-finding heading; the group's own rule id + invariant title (`CuratedGroupJson`)
@@ -1459,6 +1466,38 @@ pub(crate) fn citation_for_finding(
     }
 }
 
+/// Human-readable title for `finding`'s rule (C4-P2). Prefers, in order:
+/// 1. the finding's OWN rule id's corpus title — unchanged from every pre-existing call site
+///    (a deterministic/preview finding always has a corpus entry, so this is the only branch
+///    that ever fires for one);
+/// 2. for an AI-tier finding whose own invented rule id has no corpus entry, the GROUNDING
+///    rule's corpus title — the same rule [`citation_for_finding`] already borrows a citation
+///    from for this finding's class, so the header and the citation underneath it describe the
+///    SAME standard rather than a human-readable citation sitting under a header that is
+///    nothing but the model's own invented id repeated;
+/// 3. the bare rule id — truly unclassifiable, last resort, never fabricated (identical to the
+///    pre-existing behavior for this case).
+pub(crate) fn title_for_finding(
+    finding: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> String {
+    if let Some(rule) = corpus.and_then(|c| c.get_by_id(&finding.rule_id)) {
+        return rule.title.clone();
+    }
+    if is_ai_tier(finding) {
+        if let Some(class) = classify_ai_finding(
+            &finding.rule_id,
+            finding.category.as_deref(),
+            &finding.detail,
+        ) {
+            if let Some(rule) = corpus.and_then(|c| c.get_by_id(class.grounding_rule_id())) {
+                return rule.title.clone();
+            }
+        }
+    }
+    finding.rule_id.clone()
+}
+
 /// The P3 curation gate: true when `finding` is AI-tier AND its citation is still
 /// "advisory" after the class-fallback attempt above — i.e. it cannot be honestly
 /// presented as grounded. `build_report_json` excludes such a finding from
@@ -1825,6 +1864,36 @@ pub(crate) fn category_for(rule_id: &str, corpus: Option<&camerata_rules::RuleSe
     prettify_category_key(rule_id)
 }
 
+/// Category for a specific FINDING (C4-P2), preferred over [`category_for`] wherever a
+/// `Finding` (not just a bare rule id) is available. An AI-tier finding invents its own
+/// rule id per occurrence (`"AI-SQL-INJECTION-7"`), which has no corpus entry to join
+/// against — `category_for` alone then falls back to mangling the invented id's own tokens
+/// into a category key (`"AI-SQL-INJECTION-7"` -> `"Ai SQL"`), scattering AI findings across
+/// nonsense per-finding "categories" instead of grouping them with their real defect family,
+/// and leaving the scorecard's `audited_rules` count for that bogus category at 0 (nothing in
+/// `provenance.audited_rule_ids` was ever going to share a made-up key).
+///
+/// The fix: when the finding's own rule id has no corpus entry, prefer its structured
+/// `category` field — the closed taxonomy calibration already classified it into (see
+/// `ai_audit::apply_verdicts`'s `is_known_category` gate, which only ever writes a trusted
+/// value there) — over mangling the rule id. Falls through to the rule-id mangling only when
+/// `category` is also absent, so a pre-calibration/deterministic finding with a real corpus
+/// entry is completely unaffected (first branch, unchanged from `category_for`).
+pub(crate) fn category_for_finding(
+    finding: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> String {
+    if let Some(rule) = corpus.and_then(|c| c.get_by_id(&finding.rule_id)) {
+        return prettify_category_key(&rule.domain);
+    }
+    if let Some(cat) = finding.category.as_deref() {
+        if !cat.trim().is_empty() {
+            return prettify_category_key(cat);
+        }
+    }
+    prettify_category_key(&finding.rule_id)
+}
+
 /// Which matrix cell a finding lands in. The auditor's OWN disposition wins where one
 /// exists (`Ignored`/`BaselineAccepted` -> Accepted; `TechDebt{Now}` -> Do now;
 /// `TechDebt{Later}` -> Plan); only an `Unresolved` (still-open) finding falls back to the
@@ -1985,8 +2054,13 @@ pub(crate) fn is_informational(
     {
         return true;
     }
-    // §2c — a low/medium finding the calibrator itself flagged as debatable.
-    if finding.confidence.as_deref() == Some("needs-review") {
+    // §2c — a low/medium finding the calibrator itself flagged as debatable. Checks BOTH the
+    // structured `needs_review` flag and the `confidence` string (C4-P2: upstream calibration
+    // passes are each individually responsible for keeping the two paired — see
+    // `ai_audit::apply_verdicts` — but reading both here means a finding that somehow reaches
+    // this point with only one of the two set is still correctly routed, rather than silently
+    // escaping the informational gate on a technicality).
+    if finding.needs_review || finding.confidence.as_deref() == Some("needs-review") {
         return true;
     }
     // §2a — an absence-type structured stance-rule note (the generic-arch/style over-firing).
@@ -2017,11 +2091,53 @@ fn finding_precondition_count(f: &Finding) -> usize {
     usize::from(crate::ai_audit::mentions_exploit_precondition(&text))
 }
 
-/// See [`FindingRefJson::confidence_rank`]'s doc comment.
+/// See [`FindingRefJson::confidence_rank`]'s doc comment. Reads BOTH hedge fields (C4-P2 —
+/// see [`is_informational`]'s §2c check for why) rather than `confidence` alone.
 fn finding_confidence_rank(f: &Finding) -> u8 {
-    match f.confidence.as_deref() {
-        Some("needs-review") => 1,
-        _ => 0,
+    u8::from(f.needs_review || f.confidence.as_deref() == Some("needs-review"))
+}
+
+// ── C4-P2: one hedge source of truth, shared by findings.json / the xlsx workbook / the PDF ──
+//
+// Bug family (artifact-consistency hardening, see docs/plans for the originating report): the
+// executive summary's "held for review" count (`is_informational`'s 4-signal bucket gate),
+// the structured `needs_review` boolean, and the `confidence` string could each tell a
+// different story for the SAME finding — a row routed to the informational appendix for a
+// reason OTHER than calibration doubt (an `info`-severity note, a testing-style deviation with
+// no corpus, an absence-type stance rule) rendered with `needs_review: false` /
+// `confidence: "high"` in `findings.json`/the workbook, even though the narrative text calls
+// that same row "held for a human reviewer's judgment call" — an unhedged row sitting in the
+// bucket whose entire definition is "needs a human to decide". Separately, a raw desync
+// between `f.needs_review` and `f.confidence` (a verdict re-application, a merge) could make
+// the two structured fields themselves disagree.
+//
+// The fix: ONE function decides whether a finding is hedged for EXPORT purposes, folding in
+// BOTH raw calibration doubt (`f.needs_review` / `f.confidence == "needs-review"`) AND bucket
+// placement (`bucket == "informational"` — being held for review IS a hedge, by definition of
+// the bucket). `build_report_json` (the PDF's `CuratedSiteJson.confidence`) and
+// `xlsx_export::partition_rows` (`FindingRow.confidence`/`FindingRow.needs_review`, which
+// `findings.json` serializes verbatim) both call this ONE function with their own
+// already-computed `bucket` (itself a single shared computation — see `effective_bucket`) —
+// never re-deriving hedge state independently. This does NOT change bucket placement (a
+// finding explicitly dispositioned out of `Unresolved` still routes via `matrix_bucket`, so a
+// calibration-hedged row CAN legitimately sit in `"plan"` rather than `"informational"` — see
+// `is_informational`'s "only an `Unresolved` row" gate); it only guarantees that WHEREVER a
+// finding lands, its exported confidence/needs_review fields never contradict each other or
+// the bucket that put it there.
+pub(crate) fn is_hedged(f: &Finding, bucket: &str) -> bool {
+    f.needs_review || f.confidence.as_deref() == Some("needs-review") || bucket == "informational"
+}
+
+/// The canonical EXPORTED confidence string for `f`, reconciled against [`is_hedged`] — never
+/// `"needs-review"` unless `is_hedged` agrees, and never anything OTHER than `"needs-review"`
+/// when it does. This is the one producer of the `confidence == "needs-review" ⇔ needs_review`
+/// biconditional every artifact renders (`CuratedSiteJson::confidence`, `FindingRow::confidence`
+/// / `FindingRow::needs_review`) — see [`is_hedged`]'s doc comment for the full rationale.
+pub(crate) fn hedge_confidence(f: &Finding, bucket: &str) -> Option<String> {
+    if is_hedged(f, bucket) {
+        Some("needs-review".to_string())
+    } else {
+        f.confidence.clone()
     }
 }
 
@@ -2348,10 +2464,10 @@ pub fn build_report_json(
         // bool here only because the appendix headline below needs to say WHICH reason applied.
         let gate_uncited = is_uncited_ai_finding(f, corpus);
         let bucket = effective_bucket(f, *disposition, severity, corpus, report.test_file_count);
-        let fallback_title = corpus
-            .and_then(|c| c.get_by_id(&f.rule_id))
-            .map(|r| r.title.clone())
-            .unwrap_or_else(|| f.rule_id.clone());
+        // C4-P2: `title_for_finding` (not a bare corpus-or-rule_id join) so an AI-tier finding
+        // grounded via the P3 class fallback gets a human-readable title too, instead of a
+        // header that is nothing but the model's own invented rule id repeated.
+        let fallback_title = title_for_finding(f, corpus);
         // P4: a deterministic floor finding renders its AUTHORED, repo-specific headline
         // (never the gate's raw "Deny…" directive) when the corpus has one for this rule;
         // an AI-tier / not-yet-authored finding falls back to the pre-P4 derivation exactly
@@ -2424,23 +2540,26 @@ pub fn build_report_json(
         sites.sort_by(|a, b| {
             (&a.0.repo, &a.0.path, a.0.line).cmp(&(&b.0.repo, &b.0.path, b.0.line))
         });
-        let preview_tool = sites.iter().find_map(|(f, _, _, _)| f.preview_tool.as_deref());
-        // P3: every site surviving the gate above is EITHER not AI-tier (its citation is
-        // whatever `resolve_citation` alone gives, unchanged from before this pass) OR
-        // AI-tier and grounded via the class fallback (`citation_for_finding`). Reuse the
-        // first non-advisory result any site in the group offers; fall back to the plain
-        // rule-level join for a uniform non-AI-tier group (byte-for-byte the old behavior).
-        let citation = sites
-            .iter()
-            .find_map(|(f, _, _, _)| {
-                let c = citation_for_finding(f, corpus);
-                (c.kind != "advisory").then_some(c)
-            })
-            .unwrap_or_else(|| resolve_citation(&rule_id, preview_tool, corpus));
-        let title = corpus
-            .and_then(|c| c.get_by_id(&rule_id))
-            .map(|r| r.title.clone())
-            .unwrap_or_else(|| rule_id.clone());
+        // `sites` is only ever populated via `.or_default().push(...)` above — a `rule_id` key
+        // only exists in `by_rule` because at least one finding was pushed under it, so the
+        // group is non-empty by construction.
+        let first_site = sites
+            .first()
+            .expect("a curated-findings group is only built from a non-empty site list")
+            .0;
+        // C4-P2: the group header's citation/title render next to `sites[0]` specifically (see
+        // the template's `render_site(group.sites.at(0), after_headline: [...group.citation...])`)
+        // — so they must be THAT SITE's own resolved values, never independently re-derived
+        // from the bare `rule_id` or picked from whichever OTHER member of the group happens to
+        // classify into a grounded citation first. Every site in `sites` already passed the P3
+        // citation gate (not AI-tier, or AI-tier and grounded — see the `continue` above), so
+        // `first_site`'s own citation is always already non-advisory (or, for a non-AI-tier
+        // group, identical across every member since it depends only on the shared `rule_id`)
+        // — this is never a downgrade from the prior "first non-advisory across all members"
+        // derivation, just the same answer computed without a cross-member search that could
+        // silently diverge from `sites[0]` if a future change weakened the gate above.
+        let citation = citation_for_finding(first_site, corpus);
+        let title = title_for_finding(first_site, corpus);
         let site_jsons = sites
             .iter()
             .map(|(f, disposition, reason, severity)| {
@@ -2474,10 +2593,23 @@ pub fn build_report_json(
                     detail,
                     severity: severity.clone(),
                     effort: f.effort.clone(),
-                    confidence: f.confidence.clone(),
+                    // C4-P2: the canonical reconciled confidence (see `hedge_confidence`'s doc
+                    // comment) — never the raw `f.confidence` alone, so a row the matrix pass
+                    // above bucketed "informational" for a NON-confidence reason (an
+                    // `info`-severity note, a testing-style deviation, an absence-type stance
+                    // rule) still shows `"needs-review"` here, matching the narrative's own
+                    // "held for a human reviewer's judgment call" framing instead of printing
+                    // "high"/blank next to a row that is, by construction, not curated.
+                    confidence: hedge_confidence(f, bucket),
                     disposition: disposition_label(*disposition, reason, bucket, confirmed_by_client),
                     bucket: bucket.to_string(),
                     also_matches: f.also_matches.clone(),
+                    // C4-P2: this SITE's own resolved citation — never the group's (which
+                    // renders once, next to `sites[0]`, in the template) — so a consumer that
+                    // wants the per-finding citation (the cross-artifact equality gate, a future
+                    // template revision) never has to assume group membership implies an
+                    // identical citation for every site.
+                    citation: citation_for_finding(f, corpus),
                     headline,
                     fix: resolve_fix(&rule_id, corpus, f, chosen_option_for_rule),
                     // P2: `f.fix_specific` was generated at SCAN time by
@@ -2510,8 +2642,12 @@ pub fn build_report_json(
         Vec<&(&Finding, Disposition, String, String)>,
     > = std::collections::BTreeMap::new();
     for entry in &code_findings {
+        // C4-P2: `category_for_finding` (not the bare rule-id `category_for`) so an AI-tier
+        // finding with no corpus entry groups under its real semantic category (e.g.
+        // "Rls Policy") instead of a mangled rule-id-derived key — see that function's doc
+        // comment for the "0 rules checked" bug this closes.
         by_category
-            .entry(category_for(&entry.0.rule_id, corpus))
+            .entry(category_for_finding(entry.0, corpus))
             .or_default()
             .push(entry);
     }
@@ -2570,7 +2706,21 @@ pub fn build_report_json(
             .map(String::as_str)
             .filter(|rid| category_for(rid, corpus) == *category)
             .collect();
-        let audited_rules = audited_in_category.len();
+        // C4-P2: "rules checked" for this category is the UNION of the declared-audited set
+        // (`audited_in_category` — the deterministic/preview rules Camerata ran against this
+        // repo) and every DISTINCT rule id that actually fired a finding here. An AI-tier
+        // finding's invented rule id is never in `provenance.audited_rule_ids` (the AI tier
+        // doesn't pre-declare which ids it might invent), so without this a category whose
+        // only findings are AI-tier reads "0 rules checked" next to a nonzero finding count —
+        // a logical impossibility (you cannot find a violation of a rule you never checked).
+        // `clean_rules` is deliberately UNCHANGED: "clean" means a DECLARED rule that produced
+        // zero findings, which an ad hoc AI-tier id (by definition fired at least once to even
+        // exist here) can never be.
+        let audited_rules = audited_in_category.len()
+            + rule_ids_with_findings
+                .iter()
+                .filter(|rid| !audited_in_category.contains(rid))
+                .count();
         let clean_rules = audited_in_category
             .iter()
             .filter(|rid| !rule_ids_with_findings.contains(*rid))
