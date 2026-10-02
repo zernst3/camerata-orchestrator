@@ -4185,11 +4185,19 @@ fn description_overlap_score(a: &Finding, b: &Finding) -> f64 {
 /// policies) are still kept apart.
 const DESCRIPTION_OVERLAP_THRESHOLD: f64 = 0.5;
 
-/// The pairwise semantic-merge predicate (design §1b, extended by P1 design point 2 and the
-/// MERGE cycle-2/cycle-3 hardening passes). `a` and `b` cluster as the same defect when ANY of
-/// FOUR GENERAL signals fires (never a fifth, fixture-specific one):
+/// The pairwise semantic-merge predicate (design §1b, extended by P1 design point 2, the MERGE
+/// cycle-2/cycle-3 hardening passes, and C4-P1's defect-shaped merge redesign). `a` and `b`
+/// cluster as the same defect when ANY of SIX GENERAL signals fires (never a seventh,
+/// fixture-specific one):
 ///  (a) same file, same (present) category, and within-window-or-same-construct — the original
 ///      cross-family-at-one-site signal; or
+///  (a') same file, SAME CONSTRUCT (not merely the coarser line window), and AT LEAST ONE side is
+///      security-tier ([`finding_class`]) — C4-P1 design point 1's generalization of (a): a
+///      boundary-validation rule and a privileged-key-bypass rule flagged on the SAME handler
+///      body are one defect wearing two rule names, not two, even though their categories
+///      differ. Scoped to `same_construct` specifically (never the looser line window) because
+///      "literally the same function body" is itself strong enough same-site evidence to drop
+///      the category requirement, where "within N lines" alone is not; or
 ///  (b) they share a captured structural object ([`shared_captured_object`]) — the "same root
 ///      cause across files" signal (a config flag and the handler that reads it; an RLS policy
 ///      and the page that relies on it), which does NOT require the same file or category; or
@@ -4199,12 +4207,17 @@ const DESCRIPTION_OVERLAP_THRESHOLD: f64 = 0.5;
 ///      but whose headline text is substantively the same sentence. Deliberately same-PATH-only:
 ///      this must never fuse a sink finding in one file with an unrelated call-site finding in
 ///      another file just because the prose happens to overlap; or
-///  (d) the IDENTICAL rule id fired on both, same file, within-window-or-same-construct (MERGE
-///      cycle-3, observed-failure 3) — the literal strongest "same defect" identity signal there
-///      is, so it needs neither a matching `category` (an invented `AI-` id with no taxonomy
-///      mapping still qualifies) nor prose overlap. Scoped exactly like (a) — same path + window/
-///      construct, never cross-file or far-apart-in-one-file — so a rule that legitimately fires
-///      at many unrelated sites across one large file is never silently folded into one row.
+///  (d) the IDENTICAL rule id fired on both, same file, within-window-or-same-construct OR AT THE
+///      SAME SEVERITY (MERGE cycle-3, observed-failure 3; widened by C4-P1 design point 3) — the
+///      literal strongest "same defect" identity signal there is, so it needs neither a matching
+///      `category` (an invented `AI-` id with no taxonomy mapping still qualifies) nor prose
+///      overlap. The same-severity arm is NOT distance-scoped on purpose: it is the general form
+///      of the pre-existing "N location(s)" collapse ([`group_structural_needs_review`]'s
+///      pattern), generalized from informational/needs-review rows to every curated row — one
+///      rule firing three times across one file at one severity is one row listing three sites,
+///      not three near-duplicate rows, regardless of how far apart the sites are. Still subject
+///      to the `objects_conflict` veto just below, so the canonical counter-example (the same
+///      RLS-missing rule firing once for `orders` and once for `profiles`) stays two rows.
 /// Every wrong-fusion guard still applies on top of whichever signal fired.
 fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool {
     let in_window = a.path == b.path
@@ -4214,21 +4227,38 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
     let in_construct =
         a.path == b.path && content.is_some_and(|c| same_construct(c, a.line, b.line));
 
-    // Signal (d): the identical rule id, same file, within window/construct — see the doc
-    // comment above. Computed up front since it also exempts the det+det guard just below: two
-    // "distinct" deterministic rows that are actually the SAME rule firing twice nearby are one
-    // defect by construction, same as the shared-captured-object case.
-    let same_rule_adjacent = a.rule_id == b.rule_id && (in_window || in_construct);
+    // Signal (d): the identical rule id, same file, within window/construct, OR at the same
+    // severity regardless of distance — see the doc comment above (the N-site collapse arm).
+    // Computed up front since it also exempts the det+det guard just below: two "distinct"
+    // deterministic rows that are actually the SAME rule firing twice (nearby, or at the same
+    // severity anywhere in the file) are one defect by construction, same as the
+    // shared-captured-object case.
+    let same_rule_adjacent =
+        a.rule_id == b.rule_id && (in_window || in_construct || a.severity == b.severity);
+
+    // Signal (a'): same construct + at least one side security-tier — see the doc comment above.
+    // Computed up front for the same reason as (d): a pair of DETERMINISTIC rules that both fire
+    // inside one handler body, one of them security-tier, is one defect, not two "distinct"
+    // deterministic rows.
+    let same_construct_security_override = a.path == b.path
+        && in_construct
+        && (finding_class(a) == FindingClass::Security
+            || finding_class(b) == FindingClass::Security);
 
     // Guard: two deterministic rows are two distinct defects by construction UNLESS they share a
-    // captured structural object (design MERGE gap (ii)) or are the same rule id firing twice
-    // nearby (signal (d)) — e.g. two independent secret-detectors both naming the SAME committed
-    // secret/file are the same root cause, not two. With neither, they stay distinct regardless
-    // of which clustering signal below would otherwise fire — this preserves the
-    // distinct-defects invariant.
+    // captured structural object (design MERGE gap (ii)), are the same rule id firing twice
+    // nearby or at the same severity (signal (d)), or sit in the same construct with one side
+    // security-tier (signal (a')) — e.g. two independent secret-detectors both naming the SAME
+    // committed secret/file are the same root cause, not two. With none of these, they stay
+    // distinct regardless of which clustering signal below would otherwise fire — this preserves
+    // the distinct-defects invariant.
     let both_deterministic =
         finding_origin(a) == Origin::Deterministic && finding_origin(b) == Origin::Deterministic;
-    if both_deterministic && !shared_captured_object(a, b) && !same_rule_adjacent {
+    if both_deterministic
+        && !shared_captured_object(a, b)
+        && !same_rule_adjacent
+        && !same_construct_security_override
+    {
         return false;
     }
 
@@ -4244,19 +4274,29 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
     let description_overlap =
         a.path == b.path && description_overlap_score(a, b) >= DESCRIPTION_OVERLAP_THRESHOLD;
 
-    if !same_file_adjacent && !shared_object && !description_overlap && !same_rule_adjacent {
+    if !same_file_adjacent
+        && !shared_object
+        && !description_overlap
+        && !same_rule_adjacent
+        && !same_construct_security_override
+    {
         return false;
     }
 
     // Guard: disjoint structural objects named in free text (different tables/policies) only
-    // vetoes the LINE-PROXIMITY, PROSE-OVERLAP and SAME-RULE-ADJACENT signals — two findings
-    // that merely sit near each other, or use similar wording, or share a rule id, but visibly
-    // name different things (e.g. the same RLS-missing rule firing once for `orders` and once for
-    // `profiles`, nearby in one file, is two distinct violations, not one). A
+    // vetoes the LINE-PROXIMITY, PROSE-OVERLAP, SAME-RULE-ADJACENT and SAME-CONSTRUCT-SECURITY
+    // signals — two findings that merely sit near each other, or use similar wording, or share a
+    // rule id, or share a construct with one side security-tier, but visibly name different
+    // things (e.g. the same RLS-missing rule firing once for `orders` and once for `profiles`,
+    // nearby in one file, is two distinct violations, not one; a validation rule naming `orders`
+    // and a bypass rule naming `profiles` in the same handler is two distinct defects, not one). A
     // `shared_captured_object` match is a stronger, structured same-object proof and is never
     // vetoed by this looser text heuristic.
     if !shared_object
-        && (same_file_adjacent || description_overlap || same_rule_adjacent)
+        && (same_file_adjacent
+            || description_overlap
+            || same_rule_adjacent
+            || same_construct_security_override)
         && objects_conflict(a, b)
     {
         return false;
@@ -4279,7 +4319,8 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
             || (a.located && b.located && in_construct)
             || shared_object
             || description_overlap
-            || same_rule_adjacent;
+            || same_rule_adjacent
+            || same_construct_security_override;
         if !snippet_corroborated {
             return false;
         }
