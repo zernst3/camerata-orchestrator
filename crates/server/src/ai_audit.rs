@@ -883,10 +883,18 @@ pub fn apply_verdicts(raw: &str, findings: Vec<Finding>) -> Vec<Finding> {
             // here — previously calibration never touched it for AI findings (only
             // `classify_repo_findings`'s in_test path did), so the UI's structured
             // "needs review" filter silently missed every AI-flagged finding.
+            //
+            // C4-P2: `needs_review` is set UNCONDITIONALLY from `low_conf` (never only on the
+            // `true` branch) — a finding that enters this call already carrying a stale
+            // `needs_review = true` (e.g. a prior THOROUGH-mode consensus vote, or a verdict
+            // re-application) must have it CLEARED when this verdict says `high`, or the
+            // exported `confidence`/`needs_review` fields silently desync: confidence says
+            // "high" but the structured flag still reads hedged. The two fields are a
+            // biconditional (`confidence == "needs-review"` iff `needs_review`) by construction
+            // here — see `report_export::is_hedged`, which additionally self-heals any
+            // desync this guard misses (a belt-and-suspenders defense, not a substitute for it).
             f.confidence = Some(if low_conf { "needs-review" } else { "high" }.to_string());
-            if low_conf {
-                f.needs_review = true;
-            }
+            f.needs_review = low_conf;
             // Structured effort (Part 1 §3): the calibration verdict schema now emits it
             // alongside severity/confidence. Only accept the three known values — a
             // mis-shaped or missing field leaves `effort` at its prior value (None for a
