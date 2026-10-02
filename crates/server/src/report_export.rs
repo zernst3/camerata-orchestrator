@@ -2202,20 +2202,86 @@ pub(crate) fn defect_headline(detail: &str, fallback: &str) -> String {
     if trimmed.is_empty() {
         return fallback.to_string();
     }
-    // First sentence boundary: prefer ". " (mid-paragraph), else a bare trailing '.', else the
-    // first '.' found anywhere, else the whole (short, presumably headline-shaped) string.
-    let end = if let Some(idx) = trimmed.find(". ") {
-        idx + 1
-    } else if let Some(idx) = trimmed.find('.') {
-        idx + 1
-    } else {
-        trimmed.len()
-    };
-    let mut headline = trimmed[..end].trim().to_string();
-    if !headline.ends_with('.') {
-        headline.push('.');
+    // C4-P4 (residual defect 1, 2026-10-01): sentence-boundary detection used to be "first '.'
+    // anywhere" (falling back through ". ", then a bare trailing '.', then any bare '.'), which
+    // cut a headline off mid-abbreviation any time `detail` led with "(e.g. ...)" / "i.e. ..." /
+    // "etc." before its real first sentence ended — the period in the abbreviation looked
+    // identical to a sentence-ending period to the old scan. `sentence_boundary` below is a
+    // REAL sentence-boundary scan: a '.' only counts when it is outside an open `(...)`
+    // parenthetical, not immediately preceded by a known abbreviation, and followed by
+    // whitespace+an uppercase letter (or end of string). When no such boundary exists at all
+    // (a single long run-on sentence with no real ending in sight), the headline is capped by
+    // LENGTH with an ellipsis instead of truncating at an arbitrary/wrong character — never an
+    // unbounded wall of text standing in for a "headline".
+    match sentence_boundary(trimmed) {
+        Some(end) => {
+            let mut headline = trimmed[..end].trim().to_string();
+            if !headline.ends_with('.') {
+                headline.push('.');
+            }
+            headline
+        }
+        None => {
+            if trimmed.chars().count() > HEADLINE_LENGTH_CAP {
+                let capped: String = trimmed.chars().take(HEADLINE_LENGTH_CAP).collect();
+                format!("{}...", capped.trim_end())
+            } else {
+                // Short enough to use whole (no ellipsis needed) — same trailing-period
+                // normalization as the real-boundary branch above, for a consistent
+                // headline-reads-like-a-sentence shape either way.
+                let mut headline = trimmed.to_string();
+                if !headline.ends_with('.') {
+                    headline.push('.');
+                }
+                headline
+            }
+        }
     }
-    headline
+}
+
+/// Headline length cap (characters), only ever applied when `detail` has no real sentence
+/// boundary at all within that many characters — see `defect_headline`'s doc comment.
+const HEADLINE_LENGTH_CAP: usize = 200;
+
+/// Known sentence-internal abbreviations whose own period must never be mistaken for a
+/// sentence-ending period, GENERAL across any `detail` text (not keyed to one rule/fixture) —
+/// see `defect_headline`'s doc comment for the bug this closes. Matched case-insensitively
+/// against the text immediately BEFORE and INCLUDING the candidate period.
+const SENTENCE_ABBREVIATIONS: &[&str] = &["e.g.", "i.e.", "etc.", "vs."];
+
+/// Find the end index (exclusive, just past the period) of the first REAL sentence boundary in
+/// `s`, or `None` if there is no such boundary anywhere. A `.` is a real boundary only when:
+/// it sits outside any open `(...)` parenthetical (so "(e.g. allowing X)" never splits there,
+/// parenthetical or not); it is NOT immediately preceded by a known abbreviation
+/// (`SENTENCE_ABBREVIATIONS`, so a bare "i.e." / "etc." outside parens doesn't split either);
+/// and it is followed by whitespace then an uppercase letter, OR it is the very last character
+/// in the string (a clean trailing sentence with nothing after it).
+fn sentence_boundary(s: &str) -> Option<usize> {
+    let mut paren_depth: i32 = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => paren_depth += 1,
+            ')' => paren_depth = (paren_depth - 1).max(0),
+            '.' if paren_depth == 0 => {
+                let rest_trimmed = s[i + 1..].trim_start();
+                let boundary_shaped = rest_trimmed
+                    .chars()
+                    .next()
+                    .map(char::is_uppercase)
+                    .unwrap_or(true); // nothing after it at all: a clean trailing sentence.
+                if boundary_shaped && !ends_with_known_abbreviation(&s[..=i]) {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn ends_with_known_abbreviation(prefix: &str) -> bool {
+    let lower = prefix.to_ascii_lowercase();
+    SENTENCE_ABBREVIATIONS.iter().any(|a| lower.ends_with(a))
 }
 
 /// Deterministic exec-summary narrative (never an LLM call). Overridden verbatim by
@@ -3558,6 +3624,113 @@ mod tests {
         assert_eq!(
             defect_headline("", "Every table has Row Level Security enabled"),
             "Every table has Row Level Security enabled"
+        );
+    }
+
+    // ── C4-P4 residual defect 1: headline truncation at an abbreviation (golden tests) ────
+
+    #[test]
+    fn defect_headline_does_not_truncate_inside_an_eg_parenthetical() {
+        assert_eq!(
+            defect_headline(
+                "The handler accepts an insecure default (e.g. allowing GET requests) before \
+                 validating the session. This is exploitable without authentication.",
+                "fallback"
+            ),
+            "The handler accepts an insecure default (e.g. allowing GET requests) before \
+             validating the session."
+        );
+    }
+
+    #[test]
+    fn defect_headline_does_not_truncate_at_a_bare_eg_abbreviation() {
+        assert_eq!(
+            defect_headline(
+                "Error handling is inconsistent, e.g. some handlers return 500 and others \
+                 throw. Fix this before shipping.",
+                "fallback"
+            ),
+            "Error handling is inconsistent, e.g. some handlers return 500 and others throw."
+        );
+    }
+
+    #[test]
+    fn defect_headline_does_not_truncate_at_a_bare_ie_abbreviation() {
+        assert_eq!(
+            defect_headline(
+                "This bypasses auth, i.e. anyone can reach the admin panel without a token. \
+                 That is unacceptable.",
+                "fallback"
+            ),
+            "This bypasses auth, i.e. anyone can reach the admin panel without a token."
+        );
+    }
+
+    #[test]
+    fn defect_headline_does_not_truncate_at_an_etc_abbreviation() {
+        assert_eq!(
+            defect_headline(
+                "The config accepts unsafe values like eval, exec, etc. without sanitization. \
+                 This must be fixed.",
+                "fallback"
+            ),
+            "The config accepts unsafe values like eval, exec, etc. without sanitization."
+        );
+    }
+
+    #[test]
+    fn defect_headline_does_not_truncate_at_a_vs_abbreviation() {
+        assert_eq!(
+            defect_headline(
+                "Credentials compare via string equality vs. constant-time comparison, which \
+                 leaks timing info. Rotate the credential now.",
+                "fallback"
+            ),
+            "Credentials compare via string equality vs. constant-time comparison, which leaks \
+             timing info."
+        );
+    }
+
+    #[test]
+    fn defect_headline_caps_by_length_with_an_ellipsis_when_no_real_sentence_boundary_exists() {
+        let run_on = "a".repeat(250);
+        let headline = defect_headline(&run_on, "fallback");
+        assert!(
+            headline.ends_with("..."),
+            "a boundary-less run-on must be capped with an ellipsis: {headline}"
+        );
+        assert!(
+            headline.chars().count() <= HEADLINE_LENGTH_CAP + 3,
+            "the capped headline must not exceed the length cap plus the ellipsis: {headline}"
+        );
+    }
+
+    #[test]
+    fn defect_headline_still_splits_on_a_genuine_non_abbreviation_period() {
+        // Regression guard: the abbreviation/parenthetical carve-outs above must never swallow
+        // a REAL sentence boundary that merely happens to sit near a parenthetical elsewhere in
+        // the text.
+        assert_eq!(
+            defect_headline(
+                "The profiles table has no RLS (confirmed via migration replay). Anyone with \
+                 the anon key can read and write every row.",
+                "fallback"
+            ),
+            "The profiles table has no RLS (confirmed via migration replay)."
+        );
+    }
+
+    #[test]
+    fn sentence_boundary_skips_an_abbreviation_period_even_before_a_capitalized_continuation() {
+        // "e.g." followed by a capitalized word looks EXACTLY like a real sentence boundary
+        // (period + space + uppercase letter) to a naive scan — the abbreviation check must
+        // still skip it, proving this isn't just the capitalization check doing the work.
+        let s = "Error handling is inconsistent, e.g. Some handlers return 500 while others \
+                 throw. Fix this before shipping.";
+        let end = sentence_boundary(s).expect("a real boundary exists later in the string");
+        assert_eq!(
+            &s[..end],
+            "Error handling is inconsistent, e.g. Some handlers return 500 while others throw."
         );
     }
 
