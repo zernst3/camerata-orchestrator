@@ -4260,14 +4260,17 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
     let in_construct =
         a.path == b.path && content.is_some_and(|c| same_construct(c, a.line, b.line));
 
-    // Signal (d): the identical rule id, same file, within window/construct, OR at the same
+    // Signal (d): the identical rule id, SAME FILE, within window/construct, OR at the same
     // severity regardless of distance — see the doc comment above (the N-site collapse arm).
     // Computed up front since it also exempts the det+det guard just below: two "distinct"
     // deterministic rows that are actually the SAME rule firing twice (nearby, or at the same
-    // severity anywhere in the file) are one defect by construction, same as the
-    // shared-captured-object case.
-    let same_rule_adjacent =
-        a.rule_id == b.rule_id && (in_window || in_construct || a.severity == b.severity);
+    // severity anywhere in the SAME file) are one defect by construction, same as the
+    // shared-captured-object case. The N-site arm REQUIRES `a.path == b.path` — the same rule
+    // firing in TWO DIFFERENT files is two distinct defects (two places to fix), e.g. the same
+    // architectural rule tripping a Rust handler and a TS handler; those must stay two rows.
+    // (`in_window`/`in_construct` already imply same path; only the same-severity arm needs it.)
+    let same_rule_adjacent = a.rule_id == b.rule_id
+        && (in_window || in_construct || (a.path == b.path && a.severity == b.severity));
 
     // Signal (a'): same construct + at least one side security-tier — see the doc comment above.
     // Computed up front for the same reason as (d): a pair of DETERMINISTIC rules that both fire
@@ -10680,6 +10683,31 @@ mod tests {
         assert!(
             lines.contains(&100) && lines.contains(&102),
             "both evidence sites must be kept: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn merge_c4_same_rule_same_severity_in_different_files_stays_two_rows() {
+        // C4-P1 regression: the N-site collapse arm (same rule id + same severity at any distance)
+        // must be SAME-FILE only. The same architectural rule tripping a Rust handler and a TS
+        // handler are two DISTINCT defects (two separate places to fix) and must stay two rows.
+        // Collapsing them cross-file was an over-merge that broke the handler-no-db / strict-
+        // layering e2e tests. Different paths, so no same-file signal (window/construct/overlap)
+        // can fire — this isolates the same-rule-adjacent same-path guard specifically.
+        let mut rs =
+            site_finding("ARCH-HANDLER-NO-DB-REPEAT-1", "src/routes/orders.rs", 2, "high", "");
+        rs.detail = "The Rust route handler holds a database handle and queries it inline."
+            .to_string();
+        let mut ts =
+            site_finding("ARCH-HANDLER-NO-DB-REPEAT-1", "src/routes/orders.ts", 2, "high", "");
+        ts.detail = "Separately, the TypeScript route reaches the data layer without delegating."
+            .to_string();
+        let out = merge_semantic_groups(vec![rs, ts], &[]);
+        assert_eq!(
+            out.len(),
+            2,
+            "the same rule firing in two DIFFERENT files is two distinct defects, never an N-site \
+             collapse: {out:?}"
         );
     }
 
