@@ -4202,6 +4202,33 @@ mod tests {
         assert_eq!(json.scorecard.rows[1].status, "Clean");
     }
 
+    /// C4-P4 residual defect 6 (verification): a category with >= 1 finding must show "rules
+    /// checked" >= 1, even when the firing rule id was never in the pre-declared
+    /// `audited_rule_ids` list (an AI-tier finding invents its own id; a rule can also just not
+    /// be pre-declared) — `category_for_finding`'s "declared-audited UNION distinct-fired-rule-
+    /// ids" derivation closes that gap. This is a general, corpus-free regression pin for the
+    /// same contract `xlsx_export::ai_tier_finding_citation_title_and_category_are_consistent_
+    /// and_grounded` already exercises end-to-end against the real corpus; confirmed STILL
+    /// fixed as of this residual-defects pass — see that test's own
+    /// `cat_row.audited_rules >= 1` assertion.
+    #[test]
+    fn scorecard_rules_checked_is_at_least_one_for_a_category_whose_rule_was_never_pre_declared() {
+        let f = finding("SOME-UNDECLARED-RULE-1", "a.rs", 1, "critical");
+        let report = report_with(vec![f], vec![]); // audited_rule_ids deliberately empty.
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let row = json
+            .scorecard
+            .rows
+            .iter()
+            .find(|r| r.critical == 1)
+            .expect("the finding's category must appear in the scorecard");
+        assert!(
+            row.audited_rules >= 1,
+            "a category with >= 1 finding must show >= 1 rules checked, got {}",
+            row.audited_rules
+        );
+    }
+
     #[test]
     fn scorecard_includes_a_clean_row_for_an_audited_category_with_zero_findings() {
         // An audited category with NO real findings at all (every hit was a false
