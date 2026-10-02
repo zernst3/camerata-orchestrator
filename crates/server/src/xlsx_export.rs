@@ -981,7 +981,17 @@ fn write_index_sheet(
     }
 
     let mut r = 0u32;
-    ws.write_string_with_format(r, 0, "Camerata Audit — Product Export Index", &fmts.title)?;
+    // C4-P4 (residual defect 3): finish the P6 "Codebase Inspection" rename on the Index sheet —
+    // this title row, "Repos audited", and "Audit model" below were left over from before that
+    // pass. Wording now matches the PDF's own neutral "Codebase Inspection"/"Repos inspected"/
+    // "Inspection model" language exactly (see `audit_report.typ`'s cover + methodology
+    // sections and `NEUTRAL_COVER_TITLE`).
+    ws.write_string_with_format(
+        r,
+        0,
+        "Camerata Codebase Inspection — Product Export Index",
+        &fmts.title,
+    )?;
     r += 2;
     if !opts.project_title.is_empty() {
         ws.write_string(r, 0, &opts.project_title)?;
@@ -1000,7 +1010,7 @@ fn write_index_sheet(
     // ── Provenance ──────────────────────────────────────────────────────────
     ws.write_string_with_format(r, 0, "Provenance", &fmts.section_title)?;
     r += 1;
-    ws.write_string(r, 0, "Repos audited")?;
+    ws.write_string(r, 0, "Repos inspected")?;
     ws.write_string(r, 1, report.repos.join(", "))?;
     r += 1;
     for aref in &report.provenance.audited_refs {
@@ -1015,7 +1025,7 @@ fn write_index_sheet(
         ws.write_string(r, 1, format!("{sha} on {branch}{dirty}"))?;
         r += 1;
     }
-    ws.write_string(r, 0, "Audit model")?;
+    ws.write_string(r, 0, "Inspection model")?;
     ws.write_string(r, 1, report.provenance.audit_model.as_deref().unwrap_or("n/a"))?;
     r += 1;
     ws.write_string(r, 0, "Calibration model")?;
@@ -1573,6 +1583,58 @@ mod tests {
                 "workbook.xml missing {expected}: {workbook_xml}"
             );
         }
+    }
+
+    // ── C4-P4 residual defect 3: Index sheet "Audit" wording finishes the P6 rename ─────
+
+    /// The Index sheet was left behind when the rest of the report moved from "Audit"/"audit"
+    /// to the neutral "Codebase Inspection" product wording (P6, 2026-09-29) — its title row
+    /// said "Camerata Audit", and its provenance rows said "Repos audited" / "Audit model"
+    /// where the PDF cover/methodology already say "Repos inspected" / "Inspection model".
+    /// Asserts the renamed strings are present and the word "audit" (any casing) never appears
+    /// in the sheet's own label cells (column A) — "Camerata" itself contains no such
+    /// substring, so this is a clean word-boundary check, not a scrub-then-check dance like the
+    /// PDF template's equivalent test (which has to carve out internal field-accessor tokens).
+    #[test]
+    fn index_sheet_says_inspection_never_audit() {
+        let f = finding("SEC-1", "a.rs", 1, "critical");
+        let report = report_with(vec![f], vec!["SEC-1"]);
+        let bytes = build_workbook(&report, &HashMap::new(), None, &empty_opts()).unwrap();
+        // Cell text in this workbook is stored by reference into the shared-strings table, not
+        // inline in the worksheet XML (see `cell_text`'s own `t="s"` + `<v>index</v>` lookup) —
+        // the Index sheet's actual label text lives in `xl/sharedStrings.xml`. That table is
+        // workbook-wide (every sheet's strings share it), and a DIFFERENT, out-of-scope sheet
+        // legitimately carries "auditor" (the False Positives sheet's "auditor-dispositioned"
+        // reason text — about the human reviewer, not report branding) — so this checks the
+        // three EXACT renamed/removed Index-sheet strings rather than a blanket "no audit
+        // anywhere in the workbook" scan, which would false-positive on that unrelated string.
+        let strings_xml = read_zip_entry(&bytes, "xl/sharedStrings.xml");
+
+        assert!(
+            strings_xml.contains("Camerata Codebase Inspection"),
+            "Index sheet title must use the renamed 'Codebase Inspection' wording: {strings_xml}"
+        );
+        assert!(
+            strings_xml.contains("Repos inspected"),
+            "Index sheet must say 'Repos inspected', matching the PDF cover: {strings_xml}"
+        );
+        assert!(
+            strings_xml.contains("Inspection model"),
+            "Index sheet must say 'Inspection model', matching the PDF methodology section: \
+             {strings_xml}"
+        );
+        assert!(
+            !strings_xml.contains("Camerata Audit "),
+            "the old 'Camerata Audit' title wording must be gone: {strings_xml}"
+        );
+        assert!(
+            !strings_xml.contains("Repos audited"),
+            "the old 'Repos audited' wording must be gone: {strings_xml}"
+        );
+        assert!(
+            !strings_xml.contains("Audit model"),
+            "the old 'Audit model' wording must be gone: {strings_xml}"
+        );
     }
 
     // ── P7: Coverage sheet's "Rules applied" appendix ────────────────────────────
