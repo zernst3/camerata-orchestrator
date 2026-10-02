@@ -20,13 +20,23 @@
 //! applied first — a hedged or uncited-AI row could therefore sit in an action tier here while
 //! the PDF/JSON correctly held it out, and the three artifacts' bucket counts could disagree.
 //! `effective_bucket` (which now folds those two gates in) is the fix: this module calls that
-//! one function, never `matrix_bucket` directly. W3 (2026-09-30): the headline in particular
-//! goes through `client_headline_and_detail` — the SAME plain-language rewrite the PDF uses
-//! (preferring a floor rule's authored `finding_headline` template, falling back to
-//! `defect_headline` over the raw `detail` only when no template is authored) — so the
-//! product export (`findings.json` / xlsx) can never leak raw internal rule prose that the
-//! PDF has already rewritten. The raw `detail` string is still carried verbatim in
-//! `FindingRow::detail` (an internal-completeness field, not client-facing headline text).
+//! one function, never `matrix_bucket` directly. W3 (2026-09-30), extended C4-P2 (2026-10-01):
+//! the headline AND detail both go through `client_headline_and_detail` — the SAME
+//! plain-language rewrite the PDF uses (preferring a floor rule's authored
+//! `finding_headline`/`finding_detail` template, falling back to `defect_headline`/the raw
+//! `detail` only when no template is authored) — so the product export (`findings.json` /
+//! xlsx) can never leak raw internal gate prose ("Deny…"/"Require…") that the PDF has already
+//! rewritten. Before C4-P2, only the headline went through the rewrite; `FindingRow::detail`
+//! took the raw `finding.detail` unconditionally, so a floor rule with an authored
+//! `finding_detail` template rewrote cleanly in the PDF's `CuratedSiteJson::detail` while
+//! `findings.json`/the workbook still printed the gate's own enforcement prose for the exact
+//! same finding. `FindingRow::detail` is NOT an internal-completeness field — the raw
+//! `finding.detail` lives only on `Finding` itself (never re-exported verbatim here).
+//!
+//! C4-P2 also extends this module's citation/category/confidence computation to call
+//! `citation_for_finding`/`category_for_finding`/`hedge_confidence` (not the plain
+//! `resolve_citation`/`category_for`/a bare `finding.confidence` read) — see those functions'
+//! doc comments for the AI-tier citation/category/hedge-consistency bugs this closes.
 //!
 //! # Why this is fed from `ScanReport`, not `AuditReportJson`
 //! `AuditReportJson` already excludes false positives, caps snippets/what's-healthy, and
@@ -49,10 +59,11 @@ use serde::Serialize;
 use crate::dep_audit::DEP_AUDIT_RULE_ID;
 use crate::onboard::ScanReport;
 use crate::report_export::{
-    bucket_title, category_for, classify, client_headline_and_detail, disposition_label,
-    effective_bucket, effort_hours_bounds, finding_key, normalize_severity, provenance_tier_rank,
-    resolve_citation, resolve_fix, sanitize_report_findings, Disposition, DispositionWire,
-    ReportOptions,
+    bucket_title, category_for, category_for_finding, citation_for_finding, classify,
+    client_headline_and_detail, disposition_label, effective_bucket, effort_hours_bounds,
+    finding_key, hedge_confidence, is_hedged, normalize_severity, provenance_tier_rank,
+    resolve_citation, resolve_fix, sanitize_report_findings, title_for_finding, Disposition,
+    DispositionWire, ReportOptions,
 };
 
 // ── Row model (the intermediate shape shared by every findings-style sheet) ────────
@@ -91,7 +102,14 @@ pub struct FindingRow {
     disposition_label: String,
     effort: String,
     est_hours: String,
+    /// C4-P2: the CANONICAL confidence (`report_export::hedge_confidence`), not a raw read of
+    /// `Finding::confidence` — `"needs-review"` whenever `needs_review` below is `true`, and
+    /// never otherwise (a strict biconditional, enforced at the one point both fields are set).
     confidence: String,
+    /// C4-P2: the CANONICAL hedge flag (`report_export::is_hedged`) — `true` whenever this
+    /// row's own calibration confidence says `"needs-review"` OR `bucket` above is
+    /// `"informational"` (being held for review is itself a hedge, regardless of WHICH of the
+    /// four `is_informational` signals routed it there).
     needs_review: bool,
     in_test: bool,
     /// `"Deterministic"` | `"Preview: {tool}"` | `"AI-advisory"` — derived from
@@ -254,21 +272,28 @@ fn partition_rows(
         let wire = dispositions.get(&finding_key(f));
         let is_fp = wire.map(|d| d.state.as_str()) == Some("FalsePositive");
         let severity = normalize_severity(&f.severity);
-        let category = category_for(&f.rule_id, corpus);
-        let title = corpus
-            .and_then(|c| c.get_by_id(&f.rule_id))
-            .map(|r| r.title.clone())
-            .unwrap_or_else(|| f.rule_id.clone());
+        // C4-P2: `category_for_finding`/`title_for_finding` (not the bare rule-id-only
+        // `category_for` / a raw corpus-or-rule_id join) — an AI-tier finding with no corpus
+        // entry of its own gets its real semantic category and, when the P3 class fallback
+        // grounds its citation, a human-readable title too — see those functions' doc comments.
+        let category = category_for_finding(f, corpus);
+        let title = title_for_finding(f, corpus);
         let chosen_option_for_rule = chosen_options
             .get(&f.rule_id.to_ascii_uppercase())
             .map(String::as_str);
-        // W3 (2026-09-30): the SAME plain-language rewrite the PDF uses for its curated-site
-        // headline — never the raw gate/rule-detail derivation `defect_headline` alone would
-        // give. `f.detail` (raw internal rule prose for a floor finding) stays available
-        // verbatim in `FindingRow::detail` below, so nothing is lost — only the client-facing
-        // headline column changes.
-        let (headline, _) = client_headline_and_detail(f, corpus, &title, chosen_option_for_rule);
-        let citation = resolve_citation(&f.rule_id, f.preview_tool.as_deref(), corpus);
+        // W3 (2026-09-30), extended C4-P2: the SAME plain-language rewrite the PDF uses for its
+        // curated-site headline AND detail — never the raw gate/rule-detail derivation
+        // `defect_headline`/`f.detail` alone would give. Both the headline and the detail
+        // columns below come from this ONE call, so a floor rule's authored `finding_detail`
+        // template rewrites identically in the PDF and the product export — the raw
+        // `finding.detail` (gate enforcement prose) is never exported verbatim.
+        let (headline, detail) =
+            client_headline_and_detail(f, corpus, &title, chosen_option_for_rule);
+        // C4-P2: `citation_for_finding` (not the plain `resolve_citation`) — an AI-tier finding
+        // with no corpus entry of its own still gets the P3 class fallback's grounded citation
+        // here, the SAME citation `build_report_json`'s curated findings/PDF show for it, rather
+        // than falling through to "AI-advisory, model-inferred." in the product export only.
+        let citation = citation_for_finding(f, corpus);
         let citation_kind = citation.kind.clone();
         let provenance = match citation.kind.as_str() {
             "preview" => format!(
@@ -324,8 +349,15 @@ fn partition_rows(
             disposition_label: disposition_label_str,
             effort: f.effort.clone().unwrap_or_default(),
             est_hours,
-            confidence: f.confidence.clone().unwrap_or_default(),
-            needs_review: f.needs_review,
+            // C4-P2: the canonical reconciled hedge state (see `is_hedged`/`hedge_confidence`'s
+            // doc comment) — never `f.confidence`/`f.needs_review` read directly, so a row
+            // `bucket` placed "informational" for a non-confidence reason (an `info`-severity
+            // note, a testing-style deviation, an absence-type stance rule) still exports
+            // `confidence == "needs-review"` / `needs_review == true` here, matching the
+            // executive summary's "held for review" framing — and the two fields can never
+            // disagree with each other, since both derive from the same `bucket`+`f` call.
+            confidence: hedge_confidence(f, bucket).unwrap_or_default(),
+            needs_review: is_hedged(f, bucket),
             in_test: f.in_test,
             provenance,
             citation_kind,
@@ -334,7 +366,7 @@ fn partition_rows(
             also_matches: f.also_matches.join(", "),
             status: f.status.clone(),
             snippet: cap_snippet_for_workbook(&f.snippet),
-            detail: f.detail.clone(),
+            detail,
             fix_specific: f.fix_specific.clone(),
             fix,
             is_fp,
@@ -1995,14 +2027,25 @@ mod tests {
             !exported_headline.starts_with("Deny"),
             "findings.json headline must never be the raw gate directive verbatim"
         );
-        // Completeness: the raw internal text is still carried, just not as the headline.
-        assert_eq!(findings_export.findings[0].detail, RAW_GATE_TEXT);
+        // C4-P2: the DETAIL column goes through the SAME plain-language rewrite as the
+        // headline — before this fix, `findings.json`'s `detail` carried `RAW_GATE_TEXT`
+        // verbatim (the PDF's `CuratedSiteJson::detail` already rewrote it; only the headline
+        // was fixed in a prior cycle), so a floor rule's authored `finding_detail` template
+        // rewrote cleanly in the PDF while the product export still printed internal gate
+        // prose for the IDENTICAL finding. `FindingRow::detail` is no longer an
+        // "internal-completeness, raw on purpose" field — the raw `finding.detail` lives only
+        // on the underlying `Finding`, never re-exported verbatim here.
+        assert_eq!(findings_export.findings[0].detail, AUTHORED_DETAIL);
+        assert!(
+            !findings_export.findings[0].detail.starts_with("Deny"),
+            "findings.json detail must never be the raw gate directive verbatim"
+        );
 
         // "All Findings" is the second worksheet added (after Index) -> sheet2.xml; row 1 is
         // the header, so the finding lands on row 2. Column B is "Headline" (index 1), column
         // U is "Detail" (index 20) per the `HEADERS` array. Resolve through the shared-string
         // pool (`cell_text`) rather than a whole-workbook substring search, so this pins which
-        // COLUMN the rewrite landed in — the raw text legitimately still appears in "Detail".
+        // COLUMN the rewrite landed in.
         let headline_cell = cell_text(&xlsx_bytes, "xl/worksheets/sheet2.xml", "B2");
         assert_eq!(
             headline_cell, AUTHORED_HEADLINE,
@@ -2014,8 +2057,13 @@ mod tests {
         );
         let detail_cell = cell_text(&xlsx_bytes, "xl/worksheets/sheet2.xml", "U2");
         assert_eq!(
-            detail_cell, RAW_GATE_TEXT,
-            "completeness: the raw internal text must still be recoverable from the Detail column"
+            detail_cell, AUTHORED_DETAIL,
+            "xlsx Detail column must carry the same plain-language rewrite as the PDF, got: \
+             {detail_cell:?}"
+        );
+        assert!(
+            !detail_cell.starts_with("Deny"),
+            "xlsx Detail column must never be the raw gate directive verbatim"
         );
     }
 
@@ -2356,5 +2404,433 @@ mod tests {
             "the xlsx row order must match the JSON matrix's within-bucket order"
         );
         assert_eq!(plan_rows[1].rule_id, "ARCH-STANCE-DEMO-1");
+    }
+
+    // ── C4-P2: artifact consistency (hedge reconciliation, AI-tier citation/category/title,
+    // detail rewrite, cross-artifact equality gate) ──────────────────────────────────────
+
+    /// Whether `typst` is on PATH — mirrors `report_export`'s own `which_typst` gate (that
+    /// helper is private to its own test module, so this is a small local copy) so the
+    /// cross-artifact test below can exercise a REAL PDF compile where possible without
+    /// failing in an environment that never installed the binary.
+    fn typst_available() -> bool {
+        std::process::Command::new("typst")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// C4-P2: an AI-tier finding with no corpus entry of its own, classified via the P3
+    /// fallback (`classify_ai_finding`) into a known defect class, must carry the IDENTICAL
+    /// grounded citation, a human-readable title (never the bare invented rule id), and its
+    /// real semantic category (never a mangled rule-id-token key) across `findings.json`, the
+    /// xlsx workbook, and the PDF's curated-findings data — and the category scorecard must
+    /// count it as a checked rule. This is the general class behind the "AI-tier critical is
+    /// uncited in json/xlsx while the PDF prints a different rule's citation under a mangled
+    /// category with 0 rules checked" bug.
+    #[tokio::test]
+    async fn ai_tier_finding_citation_title_and_category_are_consistent_and_grounded() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let mut f = finding(
+            "AI-RLS-GAP-CUSTOM-7",
+            "supabase/functions/orders/index.ts",
+            42,
+            "critical",
+        );
+        f.category = Some("rls-policy".to_string());
+        f.detail = "Cross-tenant row level security gap: the orders table has no RLS policy, \
+                     so any authenticated user can read every tenant's rows."
+            .to_string();
+        let report = report_with(vec![f], vec![]);
+        let dispositions = HashMap::new();
+        let opts = empty_opts();
+
+        let json =
+            crate::report_export::build_report_json(&report, &dispositions, Some(&corpus), &opts);
+        let findings_export = build_findings_export(
+            &report,
+            &dispositions,
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+        let xlsx_bytes = build_workbook(&report, &dispositions, Some(&corpus), &opts).unwrap();
+
+        // The known grounding rule's own citation/title — the SAME real corpus entry every
+        // artifact must end up citing for this finding.
+        let grounding_citation =
+            crate::report_export::resolve_citation("SUPABASE-RLS-ENABLED-1", None, Some(&corpus));
+        assert_eq!(grounding_citation.kind, "grounded");
+        let grounding_title = corpus
+            .get_by_id("SUPABASE-RLS-ENABLED-1")
+            .expect("fixture assumes SUPABASE-RLS-ENABLED-1 exists in the real corpus")
+            .title
+            .clone();
+
+        assert_eq!(
+            json.curated_findings.len(),
+            1,
+            "the AI-tier finding must survive the P3 citation gate into the curated set"
+        );
+        let group = &json.curated_findings[0];
+        assert_eq!(
+            group.citation.label, grounding_citation.label,
+            "the group header's citation must be the P3 class's grounded citation, not advisory"
+        );
+        assert_ne!(
+            group.title, "AI-RLS-GAP-CUSTOM-7",
+            "an AI-tier group's title must never be the model's own invented rule id repeated"
+        );
+        assert_eq!(
+            group.title, grounding_title,
+            "an AI-tier group grounded via the P3 class fallback should borrow that class's own \
+             human-readable corpus title"
+        );
+        assert_eq!(group.sites.len(), 1);
+        assert_eq!(
+            group.sites[0].citation.label, group.citation.label,
+            "the site's OWN citation must match the group header rendered next to it — never a \
+             different (category-neighbor) citation"
+        );
+
+        assert_eq!(findings_export.findings.len(), 1);
+        let row = &findings_export.findings[0];
+        assert_eq!(
+            row.citation_label, group.citation.label,
+            "findings.json citation_label must be byte-identical to the PDF's curated-site citation"
+        );
+        assert_eq!(
+            row.category, "RLS Policy",
+            "an AI-tier finding's category must come from its semantic `category` field, not a \
+             mangled rule-id-derived key"
+        );
+
+        let cat_row = json
+            .scorecard
+            .rows
+            .iter()
+            .find(|r| r.category == "RLS Policy")
+            .expect("the RLS Policy category must appear in the scorecard");
+        assert_eq!(cat_row.critical, 1);
+        assert!(
+            cat_row.audited_rules >= 1,
+            "a category with >= 1 finding must show >= 1 rules checked, got {}",
+            cat_row.audited_rules
+        );
+
+        // The xlsx row must carry the SAME citation label and category, in the columns the
+        // design doc assigns them (Category = col G, index 6; Citation = col P, index 15).
+        let category_cell = cell_text(&xlsx_bytes, "xl/worksheets/sheet2.xml", "G2");
+        assert_eq!(category_cell, "RLS Policy");
+        let citation_cell = cell_text(&xlsx_bytes, "xl/worksheets/sheet2.xml", "P2");
+        assert_eq!(citation_cell, group.citation.label);
+    }
+
+    /// C4-P2: the three "how many of these findings are hedged" signals — the executive
+    /// summary's `held_for_review` count, the number of exported rows with `needs_review ==
+    /// true`, and the number with `confidence == "needs-review"` — must all agree on a built
+    /// report. Before this fix they could legitimately disagree: `held_for_review` (the
+    /// informational-bucket count) folds in THREE signals besides calibration doubt (an
+    /// `info`-severity note, a testing-style deviation with no corpus, an absence-type stance
+    /// rule) that never touched the raw `needs_review`/`confidence` fields, so a row held for
+    /// one of those OTHER reasons exported `needs_review: false` / `confidence: "high"` even
+    /// while sitting in the bucket the narrative calls "held for a human reviewer's judgment
+    /// call".
+    #[test]
+    fn hedge_counts_held_needs_review_and_confidence_agree_on_a_built_report() {
+        // f1: an ordinary curated critical — never hedged, never informational.
+        let f1 = finding("SEC-CRITICAL-1", "a.rs", 1, "critical");
+
+        // f2: calibration itself flagged doubt (§2c) — the one signal that already touched the
+        // raw fields before this fix.
+        let mut f2 = finding("AI-DOUBTFUL-1", "b.rs", 2, "medium");
+        f2.confidence = Some("needs-review".to_string());
+        f2.needs_review = true;
+
+        // f3: a testing-style deviation in a repo below the test-corpus threshold (§2d) — NOT
+        // a confidence signal; `report_with` defaults `test_file_count` to 0.
+        let mut f3 = finding("STYLE-TEST-NAMING-1", "c_test.rs", 3, "medium");
+        f3.category = Some("testing-style".to_string());
+
+        // f4: an `info`-severity note — also NOT a confidence signal.
+        let f4 = finding("INFO-NOTE-1", "d.rs", 4, "info");
+
+        let report = report_with(vec![f1, f2, f3, f4], vec![]);
+        let dispositions = HashMap::new();
+        let opts = empty_opts();
+        let json = crate::report_export::build_report_json(&report, &dispositions, None, &opts);
+        let findings_export =
+            build_findings_export(&report, &dispositions, None, &json, &HashMap::new());
+
+        assert_eq!(
+            json.executive_summary.held_for_review, 3,
+            "f2 (calibration doubt), f3 (testing-style, no corpus) and f4 (info) must all be held"
+        );
+        let needs_review_count = findings_export
+            .findings
+            .iter()
+            .filter(|r| r.needs_review)
+            .count();
+        let confidence_needs_review_count = findings_export
+            .findings
+            .iter()
+            .filter(|r| r.confidence == "needs-review")
+            .count();
+        assert_eq!(
+            needs_review_count, 3,
+            "exported needs_review==true count must match held_for_review"
+        );
+        assert_eq!(
+            confidence_needs_review_count, 3,
+            "exported confidence==\"needs-review\" count must match held_for_review"
+        );
+        assert_eq!(json.executive_summary.held_for_review, needs_review_count);
+        assert_eq!(needs_review_count, confidence_needs_review_count);
+
+        // The reconciled biconditional: a row with confidence == "needs-review" and
+        // needs_review == false (or vice versa) is impossible.
+        for row in &findings_export.findings {
+            assert_eq!(
+                row.confidence == "needs-review",
+                row.needs_review,
+                "confidence/needs_review must never disagree, got confidence={:?} \
+                 needs_review={} for {}",
+                row.confidence,
+                row.needs_review,
+                row.rule_id
+            );
+        }
+
+        // f3/f4 specifically: informational for a NON-confidence reason, yet must still export
+        // hedged — the exact "two informational rows are confidence=high/unhedged" bug.
+        let style_row = findings_export
+            .findings
+            .iter()
+            .find(|r| r.rule_id == "STYLE-TEST-NAMING-1")
+            .expect("f3 must be exported");
+        assert!(
+            style_row.needs_review && style_row.confidence == "needs-review",
+            "a testing-style-held row must export hedged even though calibration never set its \
+             raw confidence"
+        );
+        let info_row = findings_export
+            .findings
+            .iter()
+            .find(|r| r.rule_id == "INFO-NOTE-1")
+            .expect("f4 must be exported");
+        assert!(
+            info_row.needs_review && info_row.confidence == "needs-review",
+            "an info-severity-held row must export hedged even though calibration never set its \
+             raw confidence"
+        );
+    }
+
+    /// General guard (not fixture-specific), mirroring
+    /// `no_findings_export_headline_matches_the_imperative_rule_text_pattern` above for the
+    /// `detail` column: across a mix of findings, no exported `detail` in `findings.json` may
+    /// begin with an internal imperative gate verb. Before C4-P2, `detail` was NEVER rewritten
+    /// (only `headline` was, in a prior cycle) — this pins the fix at the same generality as
+    /// the existing headline test, using the task's own anchor pattern.
+    #[test]
+    fn no_findings_export_detail_matches_the_imperative_rule_text_pattern() {
+        let corpus = ruleset_with_authored_floor_headline(
+            "SEC-TEST-HEADLINE-3",
+            "A vendor API token is exposed in this file.",
+            "Rotate the token and move it to a secret manager.",
+        );
+        let mut authored = finding("SEC-TEST-HEADLINE-3", "a.py", 3, "high");
+        authored.detail =
+            "Require that secret values never be committed to source control.".to_string();
+        // No corpus entry at all — exercises the pre-P4 fallback path, whose own `detail` (via
+        // the shared `finding()` helper) is not itself imperative, same as any real AI-tier
+        // finding's house-convention prose.
+        let unauthored = finding("SEC-TEST-NOT-IN-CORPUS-2", "b.py", 4, "medium");
+
+        let report = report_with(vec![authored, unauthored], vec![]);
+        let json = crate::report_export::build_report_json(
+            &report,
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let findings_export = build_findings_export(
+            &report,
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+
+        let imperative = regex::Regex::new(r"^\s*(Deny|Require|Disallow|Forbid|Enforce)\b")
+            .expect("imperative-gate-verb pattern must compile");
+        for row in &findings_export.findings {
+            assert!(
+                !imperative.is_match(&row.headline),
+                "findings.json headline must never start with an internal imperative rule-text \
+                 pattern, got: {:?}",
+                row.headline
+            );
+            assert!(
+                !imperative.is_match(&row.detail),
+                "findings.json detail must never start with an internal imperative rule-text \
+                 pattern, got: {:?}",
+                row.detail
+            );
+        }
+    }
+
+    /// C4-P2's durable fix: the cross-artifact EQUALITY GATE. For the SAME finding, citation
+    /// label, detail, severity, bucket, and hedge state must be byte-identical across
+    /// `findings.json` and the xlsx workbook — and the PDF's curated-findings data (what the
+    /// template actually renders) must carry those same values too, never a value the
+    /// template or a renderer recomputed independently. This is the test that stops the whole
+    /// "three renderers, three answers" bug family from recurring: any future change that
+    /// makes one artifact drift from the other two fails HERE, not in a client's hands.
+    #[tokio::test]
+    async fn cross_artifact_equality_gate_citation_detail_severity_bucket_and_hedge_match() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        // f1: a plain grounded finding sharing SUPABASE-RLS-ENABLED-1, not hedged -> do_now.
+        let f1 = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        // f2: the SAME rule id (same curated-findings GROUP as f1) but calibration-hedged at
+        // medium severity -> routes to "informational" while f1 stays "do_now" — proving
+        // bucket is computed PER SITE, never inherited from the group's first member.
+        let mut f2 = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/2.sql",
+            5,
+            "medium",
+        );
+        f2.confidence = Some("needs-review".to_string());
+        f2.needs_review = true;
+
+        let report = report_with(vec![f1, f2], vec!["SUPABASE-RLS-ENABLED-1"]);
+        let dispositions = HashMap::new();
+        let opts = empty_opts();
+
+        let json =
+            crate::report_export::build_report_json(&report, &dispositions, Some(&corpus), &opts);
+        let findings_export = build_findings_export(
+            &report,
+            &dispositions,
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+        let xlsx_bytes = build_workbook(&report, &dispositions, Some(&corpus), &opts).unwrap();
+
+        assert_eq!(
+            json.curated_findings.len(),
+            1,
+            "both sites share one rule-id group"
+        );
+        let group = &json.curated_findings[0];
+        assert_eq!(group.sites.len(), 2);
+        assert_eq!(findings_export.findings.len(), 2);
+
+        for site in &group.sites {
+            let row = findings_export
+                .findings
+                .iter()
+                .find(|r| r.path == site.path && r.line == site.line)
+                .unwrap_or_else(|| panic!("findings.json must carry a row for {}", site.path));
+
+            assert_eq!(
+                row.citation_label, site.citation.label,
+                "citation must be byte-identical between findings.json and the PDF's curated \
+                 site, for {}",
+                site.path
+            );
+            assert_eq!(
+                row.detail, site.detail,
+                "detail must be byte-identical between findings.json and the PDF's curated \
+                 site, for {}",
+                site.path
+            );
+            assert_eq!(
+                row.severity, site.severity,
+                "severity must be byte-identical between findings.json and the PDF's curated \
+                 site, for {}",
+                site.path
+            );
+            assert_eq!(
+                row.bucket, site.bucket,
+                "bucket must be byte-identical between findings.json and the PDF's curated \
+                 site, for {}",
+                site.path
+            );
+            let row_hedged = row.needs_review;
+            let site_hedged = site.confidence.as_deref() == Some("needs-review");
+            assert_eq!(
+                row_hedged, site_hedged,
+                "hedge state must be byte-identical between findings.json and the PDF's curated \
+                 site, for {}",
+                site.path
+            );
+
+            // Now the ACTUAL xlsx bytes, not just the Rust FindingRow value — the "All
+            // Findings" sheet is sheet2.xml; rows sort severity-desc so f1 (critical) is row 2
+            // and f2 (medium) is row 3.
+            let xlsx_row = if site.severity == "critical" { 2 } else { 3 };
+            let citation_cell = cell_text(
+                &xlsx_bytes,
+                "xl/worksheets/sheet2.xml",
+                &format!("P{xlsx_row}"),
+            );
+            assert_eq!(
+                citation_cell, site.citation.label,
+                "xlsx Citation cell must be byte-identical to the PDF's curated-site citation"
+            );
+            let detail_cell = cell_text(
+                &xlsx_bytes,
+                "xl/worksheets/sheet2.xml",
+                &format!("U{xlsx_row}"),
+            );
+            assert_eq!(
+                detail_cell, site.detail,
+                "xlsx Detail cell must be byte-identical to the PDF's curated-site detail"
+            );
+            let needs_review_cell = cell_text(
+                &xlsx_bytes,
+                "xl/worksheets/sheet2.xml",
+                &format!("M{xlsx_row}"),
+            );
+            assert_eq!(
+                needs_review_cell == "Yes",
+                site_hedged,
+                "xlsx Needs review cell must be byte-identical to the PDF's curated-site hedge \
+                 state"
+            );
+        }
+
+        // The group header's citation (what the template actually renders next to the FIRST
+        // site) must be that site's own citation — never a different member's.
+        assert_eq!(group.citation.label, group.sites[0].citation.label);
+
+        // Real end-to-end check where the toolchain allows it: the template must compile
+        // against this exact two-site, mixed-bucket, mixed-hedge data shape — proving the PDF
+        // reads these same serialized fields rather than recomputing anything of its own.
+        if typst_available() {
+            let pdf = crate::report_export::compile_pdf(&json)
+                .await
+                .expect("compile_pdf must succeed for a mixed-bucket, mixed-hedge group");
+            assert!(pdf.starts_with(b"%PDF"));
+        } else {
+            eprintln!(
+                "skipping the compile_pdf leg of cross_artifact_equality_gate_...: typst not on \
+                 PATH"
+            );
+        }
     }
 }
