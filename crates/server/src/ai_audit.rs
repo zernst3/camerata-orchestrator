@@ -796,12 +796,13 @@ fn strip_dedup_pointers(reason: &str) -> String {
 /// (clear precondition phrasing, not any use of the word "if") — a finding that merely
 /// contains "if" somewhere in an unrelated sentence must not trip this.
 ///
-/// CRITICAL GUARDRAIL (calibration review, docs/plans/2026-09-30_cycle2-queue-hardening.md):
-/// this predicate is used ONLY to (a) block an upward calibration move in [`apply_verdicts`]
-/// and (b) break ties in the "do now" ranking in `report_export`. It must NEVER be used to
-/// LOWER a severity — a genuine critical whose justification merely mentions a mitigation
-/// must never be buried by this logic. See the call sites' own doc comments for the
-/// never-demote invariant.
+/// CRITICAL GUARDRAIL (calibration review, docs/plans/2026-09-30_cycle2-queue-hardening.md,
+/// extended cycle-5): this predicate is used ONLY to (a) block an upward calibration move in
+/// [`apply_verdicts`], (b) cap the deterministic D5 floor's critical escalation in
+/// [`severity_calibration_floor`], and (c) break ties in the "do now" ranking in
+/// `report_export`. It must NEVER be used to LOWER a severity — a genuine critical whose
+/// justification merely mentions a mitigation must never be buried by this logic. See the call
+/// sites' own doc comments for the never-demote invariant.
 const EXPLOIT_PRECONDITION_PHRASES: &[&str] = &[
     "requires ",
     "contingent on",
@@ -812,12 +813,47 @@ const EXPLOIT_PRECONDITION_PHRASES: &[&str] = &[
     "an attacker must",
 ];
 
+/// Negation guard for the "requires " phrase specifically: "requires no authentication" (or
+/// "requires no login" — already its own floor phrase, see
+/// [`UNAUTHENTICATED_OR_FULL_COMPROMISE_PHRASES`]) NEGATES the requirement. It describes an
+/// UNCONDITIONAL exposure — no credential needed at all — which is the semantic OPPOSITE of a
+/// precondition that gates exploitation behind forging/holding something. Without this guard, a
+/// genuinely unauthenticated finding phrased as "the endpoint requires no authentication" would
+/// be misread as recording a precondition and incorrectly capped away from Critical. Scoped to
+/// "requires " because none of the other phrases above share this negation ambiguity.
+const REQUIRES_NEGATION_SUFFIX: &str = "no ";
+
+/// Whether `lower` (already-lowercased) contains the "requires " precondition phrase in a
+/// NON-negated form — i.e. an occurrence of "requires " not immediately followed by "no "
+/// ([`REQUIRES_NEGATION_SUFFIX`]). Scans every occurrence (not just the first) so text with both
+/// a negated occurrence ("...requires no login...") and a genuine one elsewhere ("...requires
+/// forging a session cookie...") still registers the genuine one.
+fn contains_non_negated_requires(lower: &str) -> bool {
+    let mut rest = lower;
+    while let Some(pos) = rest.find("requires ") {
+        let after = &rest[pos + "requires ".len()..];
+        if !after.starts_with(REQUIRES_NEGATION_SUFFIX) {
+            return true;
+        }
+        rest = after;
+    }
+    false
+}
+
 /// Whether `text` records an exploit precondition per [`EXPLOIT_PRECONDITION_PHRASES`].
-/// Case-insensitive; lowercases internally so every caller (both the calibration pass here
-/// and `report_export`'s ranking tie-break) can pass raw, unprocessed text.
+/// Case-insensitive; lowercases internally so every caller (the calibration passes here and
+/// `report_export`'s ranking tie-break) can pass raw, unprocessed text. The "requires " phrase
+/// is negation-guarded (see [`contains_non_negated_requires`]) so "requires no authentication"
+/// reads as unconditional, not as a precondition.
 pub(crate) fn mentions_exploit_precondition(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    EXPLOIT_PRECONDITION_PHRASES.iter().any(|p| lower.contains(p))
+    if contains_non_negated_requires(&lower) {
+        return true;
+    }
+    EXPLOIT_PRECONDITION_PHRASES
+        .iter()
+        .filter(|p| **p != "requires ")
+        .any(|p| lower.contains(*p))
 }
 
 /// Apply the calibration verdicts: recalibrate severity and annotate confidence/reason.
@@ -1123,9 +1159,10 @@ fn is_access_control_or_injection_class(f: &Finding) -> bool {
 /// else the floor severity plus the rationale to record. Order matters — unauthenticated/full-
 /// compromise is checked first (it is the highest floor and the two conditions are mutually
 /// exclusive by construction: an unauthenticated finding is never ALSO the "authenticated
-/// cross-tenant" case), then the authenticated-cross-tenant-read floor, then the RLS-hedge guard
-/// (which can only RAISE whatever floor is already computed, never lower it — see the combine
-/// step in `apply_severity_calibration_rule`).
+/// cross-tenant" case), then the authenticated-cross-tenant-read floor, then the exploit-
+/// precondition cap (which can only LOWER a Critical floor to High, never raise or lower
+/// anything else), then the RLS-hedge guard (which can only RAISE whatever floor is already
+/// computed, never lower it — see the combine step in `apply_severity_calibration_rule`).
 fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, String)> {
     let text = calibration_floor_scan_text(f);
     let mut floor = if mentions_unauthenticated_or_full_compromise(&text) {
@@ -1155,6 +1192,35 @@ fn severity_calibration_floor(f: &Finding) -> Option<(&'static str, String)> {
     } else {
         None
     };
+
+    // Exploit-precondition cap (cycle-5 regression fix): the two branches above derive a
+    // Critical floor purely from the finding's own unauthenticated/data-class vocabulary —
+    // neither one looks at whether that SAME text also records an exploit precondition (forging
+    // a cookie or token, tampering with a cookie, knowing a secret path, riding a victim's
+    // session). `apply_verdicts`'s upward-raise guard already blocks exactly this on the
+    // MODEL-verdict path (see `mentions_exploit_precondition`'s doc comment), but this
+    // deterministic floor runs AFTER `apply_verdicts` in `verify_findings` and re-derives
+    // Critical independently from the finding's own text — so it was silently re-raising exactly
+    // what the verdict-path guard had just blocked (two High-severity planted defects whose own
+    // text named a forged-cookie/known-path precondition both still came out Critical via this
+    // floor, not via the model verdict). Mirror the same guard here: when THIS floor computed
+    // Critical, a recorded precondition caps it at High instead. This can only LOWER the floor's
+    // own proposed value, never a finding's already-assigned severity: a finding that doesn't
+    // trip the floor at all is simply `None` and untouched, and `apply_severity_calibration_rule`
+    // below only ever RAISES toward the floor it is given — so capping the floor at High can only
+    // stop a RAISE, never demote a finding already calibrated to Critical by some other path.
+    let floor_is_critical = matches!(floor, Some((sev, _)) if sev == "critical");
+    if floor_is_critical && mentions_exploit_precondition(&text) {
+        floor = Some((
+            "high",
+            "Severity floor capped at High: the finding's own text records an exploit \
+             precondition (token/cookie forgery or tampering, knowledge of a secret path, or \
+             riding a victim's session) — the same guard that blocks an upward model-verdict \
+             raise to Critical in `apply_verdicts` applies to this deterministic floor too, so \
+             it cannot re-raise what that guard already capped."
+                .to_string(),
+        ));
+    }
 
     // The RLS-hedge guard: an access-control/injection finding must never rank below High
     // because the calibration reasoning speculates a deeper layer (RLS) probably already
@@ -7973,6 +8039,56 @@ mod tests {
         );
     }
 
+    // ── cycle-5 regression: precondition cap must be authoritative on the verdict path too ────
+    //
+    // Calibration review: two High-severity planted defects (a mutation gated by an unverified
+    // session that requires forging a cookie; a public bucket of sensitive documents that
+    // requires knowing a path) still came out Critical. These pin the verdict-path guard against
+    // the exact wording of those two classes — path-knowledge preconditions, not just
+    // cookie/token forging — bidirectional with the "do-not-break" raise test above.
+
+    /// A path-knowledge precondition ("requires knowing the exact ... path") must block the
+    /// upward raise exactly like a cookie-forging precondition does — the guard is phrase-based
+    /// on "requires ", not scoped to session/cookie language specifically.
+    #[test]
+    fn apply_verdicts_blocks_upward_raise_for_public_bucket_path_knowledge_precondition() {
+        let findings = vec![finding_with_detail(
+            "AI-PUBLIC-BUCKET-SENSITIVE-DOCS",
+            "high",
+            "A storage bucket of sensitive documents is publicly readable; exploitation requires \
+             knowing the exact object path, which is not discoverable by brute force.",
+        )];
+        let raw = r#"{"verdicts":[
+            {"index":0,"severity":"critical","confidence":"high","reason":"sensitive data exposed"}
+        ]}"#;
+        let out = apply_verdicts(raw, findings);
+        assert_eq!(
+            out[0].severity, "high",
+            "a path-knowledge precondition must block the upward raise to critical, same as a \
+             cookie-forging precondition"
+        );
+    }
+
+    /// UNDER-RATING GUARD (do-not-break): a committed secret with NO precondition language must
+    /// still raise to Critical through the ordinary verdict path — the precondition guard must
+    /// never be mistaken for a general brake on critical verdicts.
+    #[test]
+    fn apply_verdicts_committed_secret_raises_to_critical_without_precondition() {
+        let findings = vec![finding_with_detail(
+            "AI-STRIPE-SECRET-COMMITTED",
+            "high",
+            "A live Stripe secret key is hardcoded in this file and committed to the repository.",
+        )];
+        let raw = r#"{"verdicts":[
+            {"index":0,"severity":"critical","confidence":"high","reason":"secret committed to version control"}
+        ]}"#;
+        let out = apply_verdicts(raw, findings);
+        assert_eq!(
+            out[0].severity, "critical",
+            "a committed secret with no precondition language must raise to critical"
+        );
+    }
+
     // ── D5: severity calibration rules of thumb ───────────────────────────────
 
     fn finding_with_category(rule: &str, sev: &str, detail: &str, category: &str) -> Finding {
@@ -8253,6 +8369,180 @@ mod tests {
             "an unrelated finding passes through the floor untouched"
         );
         assert_eq!(unrelated.calibration_rationale, None);
+    }
+
+    // ── cycle-5: the D5 floor's own critical escalation must also respect the precondition
+    // cap ─────────────────────────────────────────────────────────────────────────────────────
+    //
+    // Calibration review (second attempt): cycle-4's R2 blocked an upward raise in
+    // `apply_verdicts` when a precondition phrase was present, but TWO High-severity planted
+    // defects still came out Critical — a mutation gated by an unverified session that requires
+    // forging a cookie; a public bucket of sensitive documents that requires knowing a path.
+    // Root cause: `severity_calibration_floor` (D5) re-derives Critical independently from the
+    // finding's own unauthenticated/data-class vocabulary, runs AFTER `apply_verdicts`, and
+    // never consulted preconditions at all — so it silently re-raised exactly what the
+    // verdict-path guard had just blocked. These tests pin the fix on the floor path directly
+    // (OVER-RATING guard), and the paired "do-not-break" tests pin the floor's genuine Critical
+    // classes stay Critical when no precondition is recorded (UNDER-RATING guard).
+
+    /// OVER-RATING GUARD: a finding that trips the UNAUTHENTICATED/full-compromise floor branch
+    /// (normally Critical) must cap at High when its own text ALSO records an exploit
+    /// precondition (forging a session cookie). Base severity starts below High to prove the cap
+    /// is an upper bound, not merely "leave it where it was" — it still raises from Medium to
+    /// High, just never all the way to Critical.
+    #[test]
+    fn severity_floor_caps_unauthenticated_critical_escalation_at_high_with_precondition() {
+        let f = finding_with_detail(
+            "AI-MUTATION-FORGED-COOKIE",
+            "medium",
+            "The admin-settings mutation runs with no authentication required on the session \
+             check; exploitation requires forging a session cookie to pass the check.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "high",
+            "an exploit precondition caps the floor's unauthenticated-branch critical \
+             escalation at High, though it still raises Medium up to High"
+        );
+        let rationale = out.calibration_rationale.expect("rationale recorded");
+        assert!(
+            rationale.to_lowercase().contains("precondition"),
+            "the cap must be recorded on the finding so it's auditable: {rationale}"
+        );
+    }
+
+    /// OVER-RATING GUARD: the cross-tenant-read + escalating-data-class floor branch (normally
+    /// Critical) must ALSO cap at High when the finding's own text records a precondition — here,
+    /// an attacker needing to know a secret storage path, mirroring the "public bucket of
+    /// sensitive documents" planted defect from the calibration review.
+    #[test]
+    fn severity_floor_caps_cross_tenant_data_class_critical_escalation_at_high_with_precondition() {
+        let f = finding_with_detail(
+            "AI-PUBLIC-BUCKET-DOCS",
+            "medium",
+            "An authenticated user can view another organization's stored government id \
+             documents in the shared bucket, though exploitation requires knowing the exact \
+             storage path.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "high",
+            "a precondition caps the cross-tenant/sensitive-data-class critical escalation at \
+             High, not Critical"
+        );
+    }
+
+    /// END-TO-END regression pin: `apply_verdicts` blocks the model's upward raise for a
+    /// preconditioned finding (cycle-4 R2), and the D5 floor that runs immediately after it must
+    /// NOT re-raise the finding back to Critical from its own independent text scan — this is the
+    /// exact failure mode the calibration review caught on the second attempt.
+    #[test]
+    fn severity_floor_does_not_re_raise_what_apply_verdicts_blocked_for_precondition() {
+        let findings = vec![finding_with_detail(
+            "AI-MUTATION-FORGED-COOKIE-2",
+            "high",
+            "The admin-settings mutation runs with no authentication required on the session \
+             check; exploitation requires forging a session cookie to pass the check.",
+        )];
+        let raw = r#"{"verdicts":[
+            {"index":0,"severity":"critical","confidence":"high","reason":"escalate to critical"}
+        ]}"#;
+        let calibrated = apply_verdicts(raw, findings);
+        assert_eq!(
+            calibrated[0].severity, "high",
+            "apply_verdicts must block the model's upward raise (cycle-4 R2)"
+        );
+        let floored = apply_severity_calibration_rules(calibrated);
+        assert_eq!(
+            floored[0].severity, "high",
+            "the deterministic D5 floor must not re-raise to critical what apply_verdicts \
+             already capped — this was the cycle-4-to-cycle-5 regression"
+        );
+    }
+
+    /// UNDER-RATING GUARD (do-not-break): a genuine unauthenticated exposure of sensitive data
+    /// with NO precondition recorded must still floor all the way to Critical — the cap must
+    /// never become a general brake on real unconditional criticals.
+    #[test]
+    fn severity_floor_unauthenticated_sensitive_data_exposure_stays_critical_without_precondition()
+    {
+        let f = finding_with_detail(
+            "AI-UNAUTH-PII-EXPORT",
+            "medium",
+            "The /api/records endpoint is unauthenticated and returns every user's social \
+             security number with no access control.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "critical",
+            "a genuine unauthenticated sensitive-data exposure with no precondition must stay \
+             Critical"
+        );
+    }
+
+    /// UNDER-RATING GUARD (do-not-break, false-positive regression): "requires no
+    /// authentication" is NOT a precondition — it NEGATES the requirement, describing the exact
+    /// unconditional exposure the floor polices. Without the negation guard on the "requires "
+    /// phrase, this exact wording (already used by `severity_floor_applies_across_a_finding_set_
+    /// after_apply_verdicts` above) would be misread as a precondition and wrongly capped at
+    /// High instead of Critical.
+    #[test]
+    fn severity_floor_requires_no_authentication_is_not_mistaken_for_a_precondition() {
+        let f = finding_with_detail(
+            "AI-UNAUTH-REQUIRES-NO-AUTH",
+            "medium",
+            "The export endpoint requires no authentication and returns every user's records.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "critical",
+            "\"requires no authentication\" negates the requirement and must still floor to \
+             Critical, not be capped at High"
+        );
+    }
+
+    /// GUARDRAIL (do-not-break): the floor-high RLS-hedge class (injection family, which covers
+    /// stored XSS) must stay exactly High — unaffected by the precondition cap, since the cap
+    /// only ever touches a Critical floor value, never a High one.
+    #[test]
+    fn severity_floor_stored_xss_injection_class_rls_hedge_stays_high_guardrail() {
+        let f = finding_with_category(
+            "AI-STORED-XSS-RLS-HEDGE",
+            "medium",
+            "Stored XSS: user-supplied HTML is rendered without sanitization; this is likely \
+             covered by RLS on the underlying table.",
+            "injection",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "high",
+            "a stored-XSS/injection-class floor must stay High on an RLS hedge, unaffected by \
+             the precondition cap"
+        );
+    }
+
+    /// GUARDRAIL (do-not-break): a weak-token-class finding that trips none of the floor's
+    /// phrases stays exactly at its authored Medium — neither raised by the floor nor lowered by
+    /// the precondition cap (which only ever lowers a Critical FLOOR VALUE, never a finding's
+    /// already-assigned severity).
+    #[test]
+    fn severity_floor_weak_token_class_stays_medium_guardrail() {
+        let f = finding_with_detail(
+            "AI-WEAK-SESSION-TOKEN",
+            "medium",
+            "Session tokens are generated with a weak, predictable random source, making them \
+             guessable with effort.",
+        );
+        let out = apply_severity_calibration_rule(f);
+        assert_eq!(
+            out.severity, "medium",
+            "a weak-token finding that trips no floor rule stays at its authored Medium"
+        );
+        assert_eq!(
+            out.calibration_rationale, None,
+            "no floor rule applies here; the precondition cap must not fabricate a rationale \
+             for a finding the floor never touched"
+        );
     }
 
     // ── D6: severity ceiling — R1/R2 (2026-09-30 cycle-2 queue-hardening) ─────────
