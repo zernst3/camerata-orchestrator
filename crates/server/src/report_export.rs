@@ -10320,4 +10320,112 @@ mod export_invariants_gate {
             );
         }
     }
+
+    // ── Invariant 12 (STANDING — REG-3) ─────────────────────────────────────────────────
+
+    /// REG-3: `ai_audit::semantic_pair_merges`'s same-construct-security override used to
+    /// absorb ANY co-located rule into a security finding's `also_matches` as long as one side
+    /// was security-tier, with no requirement the two findings share a defect class — so an
+    /// unrelated indexing-strategy or pagination-convention finding could vanish from its own
+    /// category/Coverage count by riding along in a security row's "Also violates" list. Fixed
+    /// in `semantic_pair_merges` itself (now requires a category-class match or a shared
+    /// captured object); this is the EXPORT-LEVEL trip wire that makes a future re-loosening of
+    /// that predicate visible here too, without needing to know the merge internals: across
+    /// every curated/held-for-review group in the exported report, an `also_matches` member's
+    /// rule-id category must never differ from its group's primary rule-id category whenever
+    /// BOTH have a known `categorize_rule_id` class. (An unmapped/invented id has no category to
+    /// compare and is not flagged by this id-only check — the full category-OR-shared-object
+    /// predicate is exercised directly, with synthetic same-construct fixtures, by the
+    /// `p1_c4_same_construct_*` tests in `ai_audit::tests`; this gate is the belt-and-suspenders
+    /// check that the real export pipeline's `also_matches` never contradicts it.)
+    #[tokio::test]
+    async fn also_matches_members_never_cross_category_without_a_shared_captured_object() {
+        let fx = build_fixture().await;
+        let mut offenders = Vec::new();
+        for group in fx
+            .json
+            .curated_findings
+            .iter()
+            .chain(fx.json.held_for_review_findings.iter())
+        {
+            let primary_category = crate::ai_audit::categorize_rule_id(&group.rule_id);
+            for site in &group.sites {
+                for member_id in &site.also_matches {
+                    let member_category = crate::ai_audit::categorize_rule_id(member_id);
+                    if let (Some(pc), Some(mc)) = (&primary_category, &member_category) {
+                        if pc != mc {
+                            offenders.push(format!(
+                                "{} (category {pc:?}) absorbed {member_id} (category {mc:?}) \
+                                 into also_matches with no shared captured object",
+                                group.rule_id
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "REG-3: an also_matches member must never cross category away from its primary's \
+             without a shared captured object: {offenders:#?}"
+        );
+    }
+
+    /// REG-3 regression test at the full export layer (mirrors the `ai_audit::tests` unit
+    /// coverage, but exercised end to end through `merge_semantic_groups` →
+    /// [`build_report_json`]): an injection finding and an unrelated pagination-convention
+    /// finding, co-located in one construct, with different categories and no shared captured
+    /// object, must export as TWO distinct curated groups — never one row with the pagination
+    /// rule swallowed into `also_matches` and hidden from its own category's Coverage count.
+    #[tokio::test]
+    async fn same_construct_injection_and_pagination_pair_export_as_two_distinct_groups() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let content = "fn handler() {\n let q = raw_sql(id);\n let page = rows.skip(n).take(k);\n}\n";
+        let files = vec![("src/api/handler.rs".to_string(), content.to_string())];
+        let mut injection = finding(
+            "SEC-SQL-INJECTION-SINK-1",
+            "demo/portal",
+            "src/api/handler.rs",
+            2,
+            "critical",
+        );
+        injection.detail = "User-controlled input flows into a raw SQL query.".to_string();
+        let mut pagination = finding(
+            "PERF-PAGINATION-MISSING-1",
+            "demo/portal",
+            "src/api/handler.rs",
+            3,
+            "medium",
+        );
+        pagination.detail = "This handler returns every row with no pagination.".to_string();
+
+        let merged = crate::ai_audit::merge_semantic_groups(vec![injection, pagination], &files);
+        assert_eq!(
+            merged.len(),
+            2,
+            "REG-3: an injection finding and an unrelated pagination finding co-located in one \
+             construct must stay two rows: {merged:?}"
+        );
+
+        let report = report_with(merged, vec![]);
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let groups: Vec<&str> = json
+            .curated_findings
+            .iter()
+            .chain(json.held_for_review_findings.iter())
+            .map(|g| g.rule_id.as_str())
+            .collect();
+        assert!(
+            groups.contains(&"SEC-SQL-INJECTION-SINK-1"),
+            "the injection finding must export as its own group: {groups:?}"
+        );
+        assert!(
+            groups.contains(&"PERF-PAGINATION-MISSING-1"),
+            "the pagination finding must export as its own group, never absorbed into the \
+             injection row's also_matches: {groups:?}"
+        );
+    }
 }

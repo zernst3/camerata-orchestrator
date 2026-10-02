@@ -3966,6 +3966,9 @@ fn is_known_category(c: &str) -> bool {
 /// order matters: more specific families (RLS, TLS, secrets) are checked before the broad
 /// authorization/arch buckets so a `SUPABASE-RLS-*` id lands in `rls-policy`, not `authorization`.
 /// No token matches → `None` (which makes the finding un-mergeable — fail-open to over-telling).
+/// `pub(crate)` (REG-3) so `report_export::export_invariants_gate` can check the same
+/// also-matches-never-crosses-category invariant this module's merge predicate enforces, without
+/// duplicating the taxonomy.
 ///
 /// WORD-BOUNDARY matched (`security_token_matches`, the same helper/approach `finding_class`'s
 /// `SECURITY_RULE_TOKENS` uses — see that const's doc comment), not raw substring, for the exact
@@ -3992,7 +3995,7 @@ fn is_known_category(c: &str) -> bool {
 /// positive class of its own (`"DIRECT"`, `"DISABLED"`, `"DIGEST"` all start with `"DI"|`) — the
 /// one real corpus id that relied on it (`JAVASCRIPT-NEST-MODULES-PROVIDERS-DI-1`) simply falls
 /// through to `None` now, the fail-open direction this function already commits to.
-fn categorize_rule_id(rule_id: &str) -> Option<String> {
+pub(crate) fn categorize_rule_id(rule_id: &str) -> Option<String> {
     let id = rule_id.to_ascii_uppercase();
     let words: Vec<&str> = id.split('-').collect();
     let has = |token: &str| security_token_matches(&words, token);
@@ -4335,13 +4338,20 @@ const DESCRIPTION_OVERLAP_THRESHOLD: f64 = 0.5;
 /// fixture-specific one):
 ///  (a) same file, same (present) category, and within-window-or-same-construct — the original
 ///      cross-family-at-one-site signal; or
-///  (a') same file, SAME CONSTRUCT (not merely the coarser line window), and AT LEAST ONE side is
-///      security-tier ([`finding_class`]) — C4-P1 design point 1's generalization of (a): a
-///      boundary-validation rule and a privileged-key-bypass rule flagged on the SAME handler
-///      body are one defect wearing two rule names, not two, even though their categories
-///      differ. Scoped to `same_construct` specifically (never the looser line window) because
-///      "literally the same function body" is itself strong enough same-site evidence to drop
-///      the category requirement, where "within N lines" alone is not; or
+///  (a') same file, SAME CONSTRUCT (not merely the coarser line window), AT LEAST ONE side is
+///      security-tier ([`finding_class`]), AND the pair is about the SAME defect class — C4-P1
+///      design point 1's generalization of (a), tightened by REG-3: a boundary-validation rule
+///      and a privileged-key-bypass rule flagged on the SAME handler body are one defect wearing
+///      two rule names, not two, even when their `category` strings differ, PROVIDED they are
+///      still linked by either a `categorize_rule_id` class match or a shared captured object
+///      ([`shared_captured_object`]) — e.g. both name the same guard flag that is at once
+///      under-validated and what the bypass trusts. Scoped to `same_construct` specifically
+///      (never the looser line window) because "literally the same function body" is itself
+///      strong enough same-site evidence to drop the EXACT-category-string requirement, but it
+///      is NOT enough on its own to fuse two genuinely unrelated rules that merely happen to
+///      fire in the same block (REG-3: an indexing-strategy or pagination-convention finding
+///      co-located with an injection/authorization finding must stay two rows — see
+///      `p1_c4_same_construct_pair_with_unrelated_category_and_no_object_stays_two_rows`); or
 ///  (b) they share a captured structural object ([`shared_captured_object`]) — the "same root
 ///      cause across files" signal (a config flag and the handler that reads it; an RLS policy
 ///      and the page that relies on it), which does NOT require the same file or category; or
@@ -4383,14 +4393,35 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
     let same_rule_adjacent = a.rule_id == b.rule_id
         && (in_window || in_construct || (a.path == b.path && a.severity == b.severity));
 
-    // Signal (a'): same construct + at least one side security-tier — see the doc comment above.
-    // Computed up front for the same reason as (d): a pair of DETERMINISTIC rules that both fire
-    // inside one handler body, one of them security-tier, is one defect, not two "distinct"
-    // deterministic rows.
+    // REG-3: same-construct pairs used to override the category requirement unconditionally —
+    // this is the GENERAL "same defect class" check that now gates signal (a') below, computed
+    // two ways: the explicit `Finding::category` field (when calibration/the rule-id heuristic
+    // set it on both sides), OR — independently, so either method alone suffices — the
+    // `categorize_rule_id` class derived straight from each rule id. Deliberately NOT the same
+    // `same_category` binding signal (a) uses just below: that one only ever looks at the
+    // `.category` field, whereas this also-tries-the-rule-id fallback is specific to the
+    // same-construct-security override so it still recognizes two corpus rule ids that are
+    // self-evidently the same family (e.g. two different `AUTHZ-`/`BYPASS`-flavored ids) even
+    // when neither Finding happens to carry an explicit `.category`.
+    let same_construct_category_class = matches!((&a.category, &b.category), (Some(ca), Some(cb)) if ca == cb)
+        || categorize_rule_id(&a.rule_id)
+            .is_some_and(|ca| categorize_rule_id(&b.rule_id).as_deref() == Some(ca.as_str()));
+
+    // Signal (a'): same construct, at least one side security-tier, AND (same defect class OR a
+    // shared captured object) — see the doc comment above. Computed up front for the same reason
+    // as (d): a pair of DETERMINISTIC rules that both fire inside one handler body, one of them
+    // security-tier and genuinely the same defect, is one defect, not two "distinct" deterministic
+    // rows. REG-3: previously fired on same-construct + security-tier ALONE, with no requirement
+    // the two findings be related at all — that absorbed unrelated co-located rules (an
+    // indexing-strategy or pagination-convention finding) into a security finding's
+    // `also_matches`, hiding them from their own category/Coverage count. Now requires the
+    // category-class match above OR `shared_captured_object`, the same two "same root cause"
+    // proofs the rest of this function already relies on.
     let same_construct_security_override = a.path == b.path
         && in_construct
         && (finding_class(a) == FindingClass::Security
-            || finding_class(b) == FindingClass::Security);
+            || finding_class(b) == FindingClass::Security)
+        && (same_construct_category_class || shared_captured_object(a, b));
 
     // Guard: two deterministic rows are two distinct defects by construction UNLESS they share a
     // captured structural object (design MERGE gap (ii)), are the same rule id firing twice
@@ -11097,14 +11128,28 @@ mod tests {
     fn p1_c4_same_sink_security_overrides_category_requirement() {
         // Design point 1: a boundary-validation rule and a privileged-key-bypass rule flagged on
         // the SAME handler body, with DIFFERENT categories — signal (a) alone would never fire.
-        // Because they share a construct (same_construct) AND one side is security-tier, they
-        // must still merge into one row with the security rule as primary.
+        // REG-3 tightened the same-construct-security override to additionally require the pair
+        // be about the SAME defect (same category class, or a shared captured object) — so this
+        // fixture now also gives both findings what actually links them in reality: the SAME
+        // `debug_mode` flag is what the validation rule says is under-checked and what the
+        // bypass rule says is trusted to skip the privileged-key check. That shared captured
+        // object is the legitimate root-cause link the override now requires; without it (see
+        // `p1_c4_same_construct_pair_with_unrelated_category_and_no_object_stays_two_rows`,
+        // just below) the override must NOT fire. Because they share a construct
+        // (`same_construct`), one side is security-tier, AND they share that captured object,
+        // they must still merge into one row with the security rule as primary.
         let content = "fn handler() {\n let x = input();\n if debug_mode {\n return bypass_check(x);\n }\n ok(x)\n}\n";
         let files = vec![("h.rs".to_string(), content.to_string())];
         let mut validation = site_finding("ARCH-BOUNDARY-VALIDATION-1", "h.rs", 2, "high", "");
         validation.category = Some("error-handling".to_string());
+        validation
+            .captures
+            .insert("flag".to_string(), "debug_mode".to_string());
         let mut bypass = site_finding("AUTH-PRIVILEGED-KEY-BYPASS-1", "h.rs", 4, "critical", "");
         bypass.category = Some("authorization".to_string());
+        bypass
+            .captures
+            .insert("flag".to_string(), "debug_mode".to_string());
         assert_eq!(
             finding_class(&validation),
             FindingClass::Hygiene,
@@ -11136,6 +11181,147 @@ mod tests {
             lines.contains(&2) && lines.contains(&4),
             "both evidence sites must be kept: {lines:?}"
         );
+    }
+
+    // ── REG-3: same-construct-security override tightened to require a same-defect link ────
+
+    #[test]
+    fn p1_c4_same_construct_pair_with_unrelated_category_and_no_object_stays_two_rows() {
+        // REG-3 (the bug this test pins): before the fix, `same_construct_security_override`
+        // fired whenever one side of a same-construct pair was security-tier, with NO
+        // requirement the two findings be related at all. That absorbed a genuinely unrelated,
+        // merely co-located rule into the security finding's `also_matches`, where it vanished
+        // from its own category's Coverage count and read as "clean" — exactly the shape that
+        // would mis-score a planted defect as a miss on a blind hold-out. An injection finding
+        // and an unrelated pagination-convention finding, co-located in the SAME handler, with
+        // DIFFERENT categories and no shared captured object, must stay TWO rows.
+        let content = "fn handler() {\n let q = raw_sql(id);\n let page = rows.skip(n).take(k);\n}\n";
+        let files = vec![("h.rs".to_string(), content.to_string())];
+        let mut injection =
+            site_finding("SEC-SQL-INJECTION-SINK-1", "h.rs", 2, "critical", "");
+        injection.detail = "User-controlled input flows into a raw SQL query.".to_string();
+        let mut pagination =
+            site_finding("PERF-PAGINATION-MISSING-1", "h.rs", 3, "medium", "");
+        pagination.detail = "This handler returns every row with no pagination.".to_string();
+        assert_eq!(
+            finding_class(&injection),
+            FindingClass::Security,
+            "sanity: the injection rule is security-tier"
+        );
+        assert_eq!(
+            finding_class(&pagination),
+            FindingClass::Hygiene,
+            "sanity: the pagination rule is not itself security-tier"
+        );
+        assert_ne!(
+            categorize_rule_id(&injection.rule_id),
+            categorize_rule_id(&pagination.rule_id),
+            "sanity: the two rules are genuinely different defect classes"
+        );
+
+        let out = merge_semantic_groups(vec![injection, pagination], &files);
+        assert_eq!(
+            out.len(),
+            2,
+            "an injection finding and an unrelated pagination finding co-located in one \
+             construct, with different categories and no shared object, must stay two rows, \
+             each routed to its own category: {out:?}"
+        );
+        let ids: std::collections::HashSet<&str> =
+            out.iter().map(|f| f.rule_id.as_str()).collect();
+        assert!(
+            ids.contains("SEC-SQL-INJECTION-SINK-1") && ids.contains("PERF-PAGINATION-MISSING-1"),
+            "neither finding may be absorbed into the other's also_matches: {out:?}"
+        );
+        assert!(
+            out.iter().all(|f| f.also_matches.is_empty()),
+            "neither row may carry the other as an also_matches member: {out:?}"
+        );
+    }
+
+    #[test]
+    fn p1_c4_same_construct_security_override_still_merges_on_matching_category() {
+        // PRESERVE: the legitimate case the override exists for — two same-construct findings
+        // that genuinely share a defect class (here, both corpus rule ids fall into the
+        // `categorize_rule_id` "authorization" class via the `BYPASS`/`RBAC` tokens, even though
+        // neither Finding carries an explicit `.category`) — must still merge, with merge
+        // PRIMACY untouched by the REG-3 tightening: this only narrows WHICH pairs merge, never
+        // WHO wins once they do. A deterministic rule id and an invented AI- id, same construct,
+        // same inferred category, both security-tier (the class-match alone would be enough even
+        // without the pre-existing "at least one side security" condition): still one row,
+        // deterministic primary (class ties broken by origin specificity — C5-1 unchanged).
+        let content =
+            "fn handler() {\n check_rbac(user);\n if bypass_role_check(user) {\n grant_all(user);\n }\n}\n";
+        let files = vec![("h.rs".to_string(), content.to_string())];
+        let det = site_finding("AUTHZ-RBAC-CHECK-INCOMPLETE-1", "h.rs", 2, "high", "");
+        let ai = site_finding("AI-PRIVILEGE-BYPASS-GRANTS-ALL", "h.rs", 4, "critical", "");
+        assert_eq!(
+            categorize_rule_id(&det.rule_id).as_deref(),
+            Some("authorization"),
+            "sanity: the deterministic rule id's inferred class is authorization"
+        );
+        assert_eq!(
+            categorize_rule_id(&ai.rule_id).as_deref(),
+            Some("authorization"),
+            "sanity: the invented AI- id's inferred class is ALSO authorization, via the \
+             `BYPASS` token, even with no explicit `.category` of its own"
+        );
+
+        let out = merge_semantic_groups(vec![det, ai], &files);
+        assert_eq!(
+            out.len(),
+            1,
+            "same construct + same inferred category + one side security-tier must still \
+             merge: {out:?}"
+        );
+        assert_eq!(
+            out[0].rule_id, "AUTHZ-RBAC-CHECK-INCOMPLETE-1",
+            "merge primacy (deterministic beats invented AI within the same class) is \
+             unaffected by the REG-3 tightening"
+        );
+        assert!(out[0]
+            .also_matches
+            .contains(&"AI-PRIVILEGE-BYPASS-GRANTS-ALL".to_string()));
+    }
+
+    #[test]
+    fn p1_c4_same_construct_security_override_still_merges_on_shared_object() {
+        // PRESERVE: the other legitimate link the override accepts — a shared captured object —
+        // continues to work exactly as before, independent of category. A deterministic finding
+        // and an adopted-AI finding (confidence set, non-`AI-` id) name the SAME captured table,
+        // same construct, different categories, one security-tier: still one row, deterministic
+        // primary.
+        let content = "fn handler() {\n validate(payments);\n leak_to_log(payments);\n}\n";
+        let files = vec![("h.rs".to_string(), content.to_string())];
+        let mut det = site_finding("ARCH-VALIDATION-INCOMPLETE-1", "h.rs", 2, "medium", "");
+        det.category = Some("input-validation".to_string());
+        det.captures
+            .insert("table".to_string(), "payments".to_string());
+        let mut ai = site_finding("SEC-SENSITIVE-DATA-LOGGED-1", "h.rs", 3, "critical", "");
+        ai.category = Some("resource-exposure".to_string());
+        ai.confidence = Some("high".to_string());
+        ai.captures
+            .insert("table".to_string(), "payments".to_string());
+        assert_ne!(
+            det.category, ai.category,
+            "sanity: the two findings have different categories"
+        );
+
+        let out = merge_semantic_groups(vec![det, ai], &files);
+        assert_eq!(
+            out.len(),
+            1,
+            "same construct + shared captured object + one side security-tier must still \
+             merge despite different categories: {out:?}"
+        );
+        assert_eq!(
+            out[0].rule_id, "ARCH-VALIDATION-INCOMPLETE-1",
+            "merge primacy (deterministic beats adopted-AI within the same class) is \
+             unaffected by the REG-3 tightening"
+        );
+        assert!(out[0]
+            .also_matches
+            .contains(&"SEC-SENSITIVE-DATA-LOGGED-1".to_string()));
     }
 
     #[test]
