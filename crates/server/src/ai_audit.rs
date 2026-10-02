@@ -1209,8 +1209,8 @@ pub fn apply_severity_calibration_rules(findings: Vec<Finding>) -> Vec<Finding> 
 // opposite correction, and neither one ever drops a finding — both stay in the queue, re-routed
 // and re-badged:
 //   - R1: a finding whose OWN text self-hedges "this is probably intentional, just confirm" is
-//     capped to Low + flagged `needs-review`, which routes it to the informational appendix
-//     (`report_export::is_informational`) instead of an action bucket.
+//     capped to Low + flagged `needs-review`, which routes it to the `held` bucket (C5-4;
+//     `report_export::is_held_for_review`) instead of an action bucket.
 //   - R2: a browser-mediated CORS/cross-origin header misconfiguration (exploitable only through
 //     a victim's browser + session, never a direct unauthenticated fetch) is clamped to exactly
 //     Medium, bidirectionally — lowering an inflated Critical/High AND raising a re-buried
@@ -4543,15 +4543,16 @@ pub fn apply_stack_exceptions(
 /// dispositioned by a waiver) finding is grouped, so:
 /// - a genuine security/floor finding (never `arch-conformance`, or never `needs-review`) is
 ///   NEVER touched — no security finding is ever lost in this pass;
-/// - a critical/high finding is never grouped away, matching the same hard invariant
-///   `report_export::is_informational` already enforces;
+/// - a critical/high finding is never grouped away, matching this pass's own narrow criteria
+///   above (not that it would matter for bucketing either way — `report_export::is_held_for_review`
+///   (C5-4) holds a `needs-review` row out of every action tier at ANY severity);
 /// - a finding an auditor already suppressed/waived keeps its own explicit disposition rather
 ///   than disappearing into a group.
 ///
-/// The grouped finding's `severity = "low"` + `confidence = Some("needs-review")` together are
-/// exactly what routes it to the informational appendix, OUTSIDE the curated do_now/do_next/
-/// plan action tiers, via the PRE-EXISTING `report_export::is_informational` §2c rule — no new
-/// bucketing logic needed on that side.
+/// The grouped finding's `confidence = Some("needs-review")` (its `needs_review` flag is also
+/// set — see `build_structural_group_finding`) is exactly what routes it to the `held` bucket
+/// (C5-4), OUTSIDE the curated do_now/do_next/plan action tiers, via the PRE-EXISTING
+/// `report_export::is_held_for_review` gate — no new bucketing logic needed on that side.
 ///
 /// Runs across the WHOLE scan (every repo the caller passes in), so a rule flagged in more than
 /// one repo still collapses to one row with every repo's site listed.
@@ -6607,9 +6608,11 @@ mod tests {
         );
     }
 
-    /// A CRITICAL or HIGH severity finding is NEVER swept into the grouped/informational
-    /// bucket, even if it happens to carry `arch-conformance` + `needs-review` — a real
-    /// security finding must never disappear into this noise-reduction pass.
+    /// A CRITICAL or HIGH severity finding is NEVER swept into this grouping pass, even if it
+    /// happens to carry `arch-conformance` + `needs-review` — a real security finding must never
+    /// disappear into this noise-reduction pass (this is a separate, narrower exclusion than
+    /// bucketing: a high/critical `needs-review` row the pass DIDN'T group still routes to
+    /// `held`, not an action bucket — see `report_export::is_held_for_review`, C5-4).
     #[test]
     fn a_high_or_critical_finding_is_never_grouped_away() {
         for sev in ["critical", "high"] {
@@ -8326,7 +8329,7 @@ mod tests {
          treating it as a defect.";
 
     /// R1: a self-hedged "probably intentional / confirmation-only" finding is capped to Low
-    /// AND flagged needs-review — routing it to the informational appendix without dropping it.
+    /// AND flagged needs-review — routing it to the `held` bucket (C5-4) without dropping it.
     #[test]
     fn severity_ceiling_self_hedged_confirmation_only_caps_to_low_and_needs_review() {
         let f = finding_with_detail("AI-HEDGE-1", "high", SELF_HEDGE_TEXT);

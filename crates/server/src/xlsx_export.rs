@@ -88,11 +88,13 @@ pub struct FindingRow {
     line: usize,
     rule_id: String,
     category: String,
-    /// `"do_now"` | `"do_next"` | `"plan"` | `"accepted"` | `"informational"` (matches
-    /// [`effective_bucket`] — C3-6), or empty for a false-positive row (a FP has no matrix
-    /// cell — it is excluded from the matrix entirely, same as the PDF). `"informational"`
-    /// means the SAME held-for-review appendix the PDF/JSON route a hedged or uncited-AI
-    /// finding to, never an action tier — see the Index sheet's disposition summary line.
+    /// `"do_now"` | `"do_next"` | `"plan"` | `"accepted"` | `"informational"` | `"held"` (C5-4;
+    /// matches [`effective_bucket`] — C3-6), or empty for a false-positive row (a FP has no
+    /// matrix cell — it is excluded from the matrix entirely, same as the PDF).
+    /// `"informational"` is the severity-capped (≤ medium) conventions-to-consider appendix;
+    /// `"held"` is a calibration hedge at ANY severity (C5-4). Both are held-for-review
+    /// destinations the PDF/JSON route a hedged or uncited-AI finding to, never an action tier —
+    /// see the Index sheet's disposition summary line.
     bucket: &'static str,
     /// The classified [`Disposition`] this session, or `None` for a false-positive row
     /// (`classify` must never be called on an FP-dispositioned finding — see
@@ -106,10 +108,10 @@ pub struct FindingRow {
     /// `Finding::confidence` — `"needs-review"` whenever `needs_review` below is `true`, and
     /// never otherwise (a strict biconditional, enforced at the one point both fields are set).
     confidence: String,
-    /// C4-P2: the CANONICAL hedge flag (`report_export::is_hedged`) — `true` whenever this
-    /// row's own calibration confidence says `"needs-review"` OR `bucket` above is
-    /// `"informational"` (being held for review is itself a hedge, regardless of WHICH of the
-    /// four `is_informational` signals routed it there).
+    /// C4-P2 / C5-4: the CANONICAL hedge flag (`report_export::is_hedged`) — `true` whenever
+    /// this row's own calibration confidence says `"needs-review"` OR `bucket` above is
+    /// `"informational"` or `"held"` (being held for review is itself a hedge, regardless of
+    /// which signal routed it there).
     needs_review: bool,
     in_test: bool,
     /// `"Deterministic"` | `"Preview: {tool}"` | `"AI-advisory"` — derived from
@@ -1101,15 +1103,23 @@ fn write_index_sheet(
     // C3-6: `informational` is counted here too (it wasn't before — the old `_ => {}` arm
     // silently dropped a held-for-review row from every count) and `open` mirrors
     // `report_export::build_report_json`'s own formula exactly: every `Unresolved` row MINUS
-    // the informational ones (an informational row is always `Unresolved` by construction —
-    // see `is_informational` — so this keeps `open` an ACTION count, not an appendix one),
-    // never just "unresolved rows not routed informational" counted directly, so the two
-    // artifacts can't drift if a future gate ever routes a non-`Unresolved` row informational.
+    // the held-for-review ones (an informational/held row is always `Unresolved` by
+    // construction — see `is_informational`/`is_held_for_review` — so this keeps `open` an
+    // ACTION count, not an appendix one), never just "unresolved rows not routed
+    // informational/held" counted directly, so the two artifacts can't drift if a future gate
+    // ever routes a non-`Unresolved` row that way.
+    //
+    // C5-4: `held` is counted SEPARATELY from `informational` (same split as
+    // `report_export::effective_bucket`'s two buckets) but both feed the SAME
+    // `held_for_review_total` shown in this one disposition-summary line, matching the PDF's
+    // `ExecutiveSummaryJson::held_for_review` reconciliation exactly — a high/critical
+    // calibration hedge lives in `held`, not `informational`, but it still counts here.
     let mut do_now = 0usize;
     let mut do_next = 0usize;
     let mut plan = 0usize;
     let mut accepted = 0usize;
     let mut informational = 0usize;
+    let mut held = 0usize;
     let mut unresolved = 0usize;
     for row in live_rows {
         match row.bucket {
@@ -1118,19 +1128,21 @@ fn write_index_sheet(
             "plan" => plan += 1,
             "accepted" => accepted += 1,
             "informational" => informational += 1,
+            "held" => held += 1,
             _ => {}
         }
         if row.disposition_kind == Some(Disposition::Unresolved) {
             unresolved += 1;
         }
     }
-    let open = unresolved.saturating_sub(informational);
+    let held_for_review_total = informational + held;
+    let open = unresolved.saturating_sub(held_for_review_total);
     ws.write_string(
         r,
         0,
         format!(
             "Disposition summary: {open} open, {do_now} do now, {do_next} do next, {plan} \
-             planned, {accepted} accepted, {informational} held for review, {fp_count} \
+             planned, {accepted} accepted, {held_for_review_total} held for review, {fp_count} \
              excluded as false positives, {} dependency {}.",
             dep_rows.len(),
             if dep_rows.len() == 1 { "advisory" } else { "advisories" }
@@ -2291,7 +2303,7 @@ mod tests {
     /// label is identical across the JSON matrix and the xlsx `FindingRow`, the aggregate
     /// counts per bucket match exactly, and the hedged row never lands in an action bucket in
     /// EITHER artifact. No finding is dropped by the fix (over-tell, never under-tell) — the
-    /// hedged row still ships, just consistently routed to `informational` everywhere.
+    /// hedged row still ships, just consistently routed to `held` (C5-4) everywhere.
     #[test]
     fn bucket_labels_and_counts_are_identical_across_json_and_xlsx() {
         let critical = finding("SEC-CRIT-1", "src/a.rs", 1, "critical");
@@ -2340,6 +2352,7 @@ mod tests {
             .chain(json.matrix.plan.iter())
             .chain(json.matrix.accepted.iter())
             .chain(json.matrix.informational.iter())
+            .chain(json.matrix.held.iter())
         {
             json_bucket.insert(
                 (f.rule_id.clone(), f.repo.clone(), f.path.clone(), f.line),
@@ -2376,6 +2389,7 @@ mod tests {
             ("plan", json.matrix.plan.len()),
             ("accepted", json.matrix.accepted.len()),
             ("informational", json.matrix.informational.len()),
+            ("held", json.matrix.held.len()),
         ] {
             let actual = live_rows.iter().filter(|r| r.bucket == bucket).count();
             assert_eq!(
@@ -2385,12 +2399,14 @@ mod tests {
         }
 
         // Expected shape for THIS fixture: 2 do_now (critical + high/low-effort), 1 do_next
-        // (high/no-effort), 1 plan (medium), 1 informational (the hedged low), 0 accepted.
+        // (high/no-effort), 1 plan (medium), 1 held (C5-4: the hedged low), 0 accepted, 0
+        // informational (a calibration hedge never lands there any more).
         assert_eq!(json.matrix.do_now.len(), 2);
         assert_eq!(json.matrix.do_next.len(), 1);
         assert_eq!(json.matrix.plan.len(), 1);
         assert_eq!(json.matrix.accepted.len(), 0);
-        assert_eq!(json.matrix.informational.len(), 1);
+        assert_eq!(json.matrix.informational.len(), 0);
+        assert_eq!(json.matrix.held.len(), 1);
 
         // The hedged row is NEVER in an action bucket, in EITHER artifact.
         let hedged_key = (
@@ -2401,14 +2417,14 @@ mod tests {
         );
         assert_eq!(
             json_bucket.get(&hedged_key).map(String::as_str),
-            Some("informational"),
-            "the hedged finding must route to informational in the JSON matrix"
+            Some("held"),
+            "the hedged finding must route to held (C5-4) in the JSON matrix"
         );
         let hedged_row = live_rows
             .iter()
             .find(|r| r.rule_id == "SEC-HEDGED-1")
             .expect("the hedged row must still be present — never dropped, only re-bucketed");
-        assert_eq!(hedged_row.bucket, "informational");
+        assert_eq!(hedged_row.bucket, "held");
         assert_ne!(hedged_row.bucket, "do_now");
         assert_ne!(hedged_row.bucket, "do_next");
 
@@ -2777,7 +2793,7 @@ mod tests {
             "critical",
         );
         // f2: the SAME rule id (same curated-findings GROUP as f1) but calibration-hedged at
-        // medium severity -> routes to "informational" while f1 stays "do_now" — proving
+        // medium severity -> routes to "held" (C5-4) while f1 stays "do_now" — proving
         // bucket is computed PER SITE, never inherited from the group's first member.
         let mut f2 = finding(
             "SUPABASE-RLS-ENABLED-1",

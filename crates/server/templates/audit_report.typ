@@ -540,10 +540,15 @@
 #pagebreak()
 
 // ── Held for review ─────────────────────────────────────────────────────────
-// C4-P4 (residual defect 5): a group whose sites are ALL informational (the hedged/needs-review
-// appendix, matching the executive summary's own "held for a human reviewer's judgment call"
-// framing) never renders under "Curated findings" — that heading promises action items. Same
-// row-level content, own heading, own page, strictly AFTER every curated finding above.
+// C4-P4 (residual defect 5) / C5-4: a group whose sites are ALL informational (the severity-
+// capped, <= medium conventions-to-consider appendix) or ALL held (a calibration hedge at ANY
+// severity, including high/critical — see report_export::is_held_for_review) never renders under
+// "Curated findings" — that heading promises action items. Both route here, matching the
+// executive summary's own "held for a human reviewer's judgment call" framing. `render_site`
+// renders each site's own real severity via `severity_chip` and its own `disposition` label
+// (computed server-side, distinct wording for "informational" vs "held") — no bucket-specific
+// branching needed here. Same row-level content, own heading, own page, strictly AFTER every
+// curated finding above.
 = Held for review
 
 #if d.held_for_review_findings.len() == 0 [

@@ -381,6 +381,13 @@ pub(crate) fn disposition_label(
     confirmed_by_client: bool,
 ) -> String {
     match disposition {
+        // C5-4: a calibration hedge (any severity) reads as a distinct "held for review" call
+        // to action, never the low-stakes "Convention to consider" wording the `informational`
+        // appendix uses — a high/critical row the calibrator itself flagged debatable must never
+        // read like a style note.
+        Disposition::Unresolved if bucket == "held" => {
+            "Held for review (calibration flagged this for further human judgment)".to_string()
+        }
         Disposition::Unresolved if bucket == "informational" => {
             "Convention to consider (informational)".to_string()
         }
@@ -415,6 +422,7 @@ pub(crate) fn bucket_title(bucket: &str) -> &'static str {
         "do_next" => "Do next",
         "plan" => "Plan",
         "informational" => "Informational",
+        "held" => "Held for review",
         _ => "Accepted",
     }
 }
@@ -578,9 +586,17 @@ pub struct ExecutiveSummaryJson {
     pub candidates_reviewed: usize,
     pub excluded_false_positive: usize,
     pub curated_total: usize,
-    /// P5: findings held out of the curated action tiers for a human reviewer's judgment call
-    /// (`matrix.informational.len()`) — the previously-invisible "other 23" in the reconciling
-    /// count `candidates_reviewed == curated_total + held_for_review + excluded_false_positive
+    /// P5 / C5-4: findings held out of the curated action tiers for a human reviewer's judgment
+    /// call — `matrix.informational.len() + matrix.held.len()`, NOT `informational.len()`
+    /// alone. The two buckets are both "held for review" for this reconciling purpose but
+    /// deliberately distinct destinations: `informational` is the severity-capped (≤ medium)
+    /// conventions-to-consider appendix, while `held` (C5-4) is the calibration hedge
+    /// (`needs_review`/`confidence == "needs-review"`) at ANY severity, including high/critical
+    /// — see [`crate::report_export::is_held_for_review`]'s doc comment for why that split
+    /// exists and the prior regression (a high/critical hedge silently NOT counted here because
+    /// it stayed in `do_now`/`do_next`) this field's current formula fixes. This is the
+    /// previously-invisible "other 23" in the reconciling count
+    /// `candidates_reviewed == curated_total + held_for_review + excluded_false_positive
     /// + dependency_advisories`. Always shown in the narrative, in BOTH review states.
     pub held_for_review: usize,
     /// P5: `DEP_AUDIT_RULE_ID` findings that survived the false-positive filter — carved into
@@ -670,8 +686,8 @@ pub struct FindingRefJson {
     /// to a rough hour estimate without re-joining back to the original `Finding`.
     pub effort: Option<String>,
     /// C3-6: this finding's own [`effective_bucket`] result (`"do_now"` | `"do_next"` |
-    /// `"plan"` | `"accepted"` | `"informational"`) — which `MatrixJson` vec this ref lives
-    /// in is already implied by position, but the explicit field lets every consumer
+    /// `"plan"` | `"accepted"` | `"informational"` | `"held"` (C5-4)) — which `MatrixJson` vec
+    /// this ref lives in is already implied by position, but the explicit field lets every consumer
     /// (`xlsx_export`, a cross-artifact test) assert the label directly rather than
     /// re-deriving or inferring it from array membership.
     pub bucket: String,
@@ -702,13 +718,25 @@ pub struct MatrixJson {
     pub plan: Vec<FindingRefJson>,
     pub accepted: Vec<FindingRefJson>,
     /// Bug 4's "Conventions to consider" appendix: absence-type stance/architecture notes,
-    /// `needs-review` low/medium rows, testing-style deviations in a repo with no test corpus,
-    /// and any `info`-severity finding. VISIBLE (over-tell preserved) but deliberately OUTSIDE
-    /// the do_now/do_next/plan action tiers and excluded from `curated_total` — a report
-    /// appendix, not a work item. A critical or high finding is NEVER placed here (see
-    /// `is_informational`).
+    /// testing-style deviations in a repo with no test corpus, and any `info`-severity finding.
+    /// VISIBLE (over-tell preserved) but deliberately OUTSIDE the do_now/do_next/plan action
+    /// tiers and excluded from `curated_total` — a report appendix, not a work item. A critical
+    /// or high finding is NEVER placed here (see `is_informational`). C5-4: a calibration hedge
+    /// (`needs-review`) is NOT one of this bucket's signals any more, at ANY severity — see
+    /// `held` below, the bucket that now owns that signal.
     #[serde(default)]
     pub informational: Vec<FindingRefJson>,
+    /// C5-4: findings the calibrator itself flagged debatable (`needs_review` /
+    /// `confidence == "needs-review"`), held out of every action tier (do_now/do_next/plan) AT
+    /// ANY SEVERITY — unlike `informational`, there is NO severity ceiling here: a high/critical
+    /// row the calibrator doubts is precisely the row a client must see called out as unresolved
+    /// doubt, not silently kept in an action tier next to findings nobody doubts. See
+    /// `is_held_for_review` for the gate and its doc comment for the regression this bucket
+    /// closes (a prior cycle folded this signal into `informational`, whose hard "critical/high
+    /// is never informational" invariant then kept a high/critical hedge stuck in `do_now`/
+    /// `do_next`, contradicting its own exported `needs_review: true`).
+    #[serde(default)]
+    pub held: Vec<FindingRefJson>,
 }
 
 // ── FIX 6: the real severity x effort priority grid ─────────────────────────────
@@ -1016,19 +1044,22 @@ pub struct AuditReportJson {
     /// BTreeMap-alphabetical-by-rule-id iteration order, which could and did land a live
     /// critical pages deep behind a run of alphabetically-earlier lows. A group qualifies for
     /// THIS list when at least one of its sites is in an action/accepted bucket (i.e. not
-    /// EVERY site in the group is informational) — see [`held_for_review_findings`] for the
-    /// complementary, fully-informational groups.
+    /// EVERY site in the group is informational or held (C5-4)) — see
+    /// [`held_for_review_findings`] for the complementary, fully-appendix groups.
     pub curated_findings: Vec<CuratedGroupJson>,
-    /// C4-P4 (residual defect 5): a group whose sites are ALL `bucket == "informational"` never
-    /// belongs under "Curated findings" client-facing prose (that heading promises action
-    /// items) — it renders in its own "Held for review" section instead, titled to match the
-    /// executive summary's own "held for a human reviewer's judgment call" framing. A MIXED
-    /// group (some sites curated, some informational — proven possible by
+    /// C4-P4 (residual defect 5) / C5-4: a group whose sites are ALL `bucket == "informational"`
+    /// or `bucket == "held"` never belongs under "Curated findings" client-facing prose (that
+    /// heading promises action items) — it renders in its own "Held for review" section instead,
+    /// titled to match the executive summary's own "held for a human reviewer's judgment call"
+    /// framing. This is also where a high/critical calibration hedge (`held`) now lands — see
+    /// `is_held_for_review`'s doc comment — rendered with its OWN true severity, not capped like
+    /// an `informational` row. A MIXED group (some sites curated, some
+    /// informational/held — proven possible by
     /// `matrix_and_curated_site_bucket_fields_agree_and_a_hedged_finding_is_never_an_action_bucket`'s
     /// sibling cross-artifact test) stays entirely in `curated_findings` above: splitting a
     /// single rule's sites across two top-level sections would fragment one finding's
     /// citation/title header across two places in the document for no reader benefit, so the
-    /// bar for moving a GROUP here is "zero curated sites," not "any informational site."
+    /// bar for moving a GROUP here is "zero curated sites," not "any informational/held site."
     pub held_for_review_findings: Vec<CuratedGroupJson>,
     pub whats_healthy: WhatsHealthyJson,
     pub dependency_snapshot: DependencySnapshotJson,
@@ -1585,10 +1616,10 @@ pub(crate) fn also_matches_titles(
 /// presented as grounded. `build_report_json` excludes such a finding from
 /// `curated_findings` entirely and routes it to the informational/held-for-review bucket
 /// with an explicit "needs review (uncited)" headline, REGARDLESS of severity — unlike
-/// `is_informational`'s other four signals, this one is a report-integrity gate, not a
-/// triage-confidence signal, so the "a critical/high finding is never informational"
-/// invariant there does not apply here on purpose: a critical, uncited finding is
-/// PRECISELY the case this gate exists to catch.
+/// `is_informational`'s other signals (or `is_held_for_review`'s calibration hedge), this one is
+/// a report-integrity gate, not a triage-confidence signal, so the "a critical/high finding is
+/// never informational" invariant there does not apply here on purpose: a critical, uncited
+/// finding is PRECISELY the case this gate exists to catch.
 pub(crate) fn is_uncited_ai_finding(
     finding: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
@@ -2029,6 +2060,11 @@ pub(crate) fn matrix_bucket(
 /// AI-tier finding with no grounded citation, can route out of an action tier even though its
 /// raw severity×effort quadrant alone would have placed it there. See `is_informational` and
 /// `is_uncited_ai_finding` for the individual signals folded in here.
+///
+/// C5-4: [`is_held_for_review`] is checked FIRST, ahead of `is_informational` — a calibration
+/// hedge routes to `"held"` at ANY severity, including critical/high, which `is_informational`'s
+/// own hard invariant would otherwise keep in an action tier. See that function's doc comment
+/// for the regression this closes.
 pub(crate) fn effective_bucket(
     finding: &Finding,
     disposition: Disposition,
@@ -2036,7 +2072,9 @@ pub(crate) fn effective_bucket(
     corpus: Option<&camerata_rules::RuleSet>,
     test_file_count: usize,
 ) -> &'static str {
-    if is_informational(finding, disposition, severity, corpus, test_file_count)
+    if is_held_for_review(finding, disposition) {
+        "held"
+    } else if is_informational(finding, disposition, severity, corpus, test_file_count)
         || is_uncited_ai_finding(finding, corpus)
     {
         "informational"
@@ -2060,18 +2098,19 @@ pub(crate) fn severity_rank(sev: &str) -> u8 {
 /// C4-P4 (residual defect 5): bucket rank for ordering the "Curated findings" section — action
 /// tiers lead (in the same do_now -> do_next -> plan order the severity x effort matrix and the
 /// "three things" box already use), "accepted" (dispositioned risk, still curated) comes next,
-/// and "informational" sorts last of all. In practice a group that reaches this ranking always
-/// has at least one non-informational site (see [`AuditReportJson::curated_findings`]'s doc
-/// comment on the group-eligibility rule), so the `_ => 4` arm only ever matters for computing
-/// the MIN across a mixed group's sites, where a same-rule informational companion site must
-/// never win the group's own (best) rank away from its curated sibling.
+/// and "informational"/"held" (C5-4) both sort last. In practice a group that reaches this
+/// ranking always has at least one non-informational, non-held site (see
+/// [`AuditReportJson::curated_findings`]'s doc comment on the group-eligibility rule), so the
+/// `_ => 4` arm only ever matters for computing the MIN across a mixed group's sites, where a
+/// same-rule informational/held companion site must never win the group's own (best) rank away
+/// from its curated sibling.
 fn curated_bucket_rank(bucket: &str) -> u8 {
     match bucket {
         "do_now" => 0,
         "do_next" => 1,
         "plan" => 2,
         "accepted" => 3,
-        _ => 4, // "informational" or anything unrecognized.
+        _ => 4, // "informational" | "held" (C5-4) or anything unrecognized.
     }
 }
 
@@ -2159,15 +2198,43 @@ pub(crate) const MIN_STYLE_CORPUS_FILES: usize = 3;
 pub(crate) const STANCE_LAYER_DOMAINS: &[&str] =
     &["universal", "api-layer", "fullstack", "ui", "javascript", "integration"];
 
+/// C5-4: whether a finding is HELD for a human reviewer's judgment call, INDEPENDENT of its own
+/// severity — the calibrator's own hedge (`needs_review` / `confidence == "needs-review"`),
+/// applied only to an OPEN (`Unresolved`) row (an auditor's explicit disposition — accepted /
+/// tech-debt / FP — is a human call that already supersedes calibration's own doubt; see
+/// `is_informational`'s identical "only ever re-bucket an OPEN row" gate for the same
+/// reasoning). Routes to the `held` bucket (see [`MatrixJson::held`]), which — UNLIKE
+/// `informational` — has NO severity ceiling: a high/critical row the calibrator itself flagged
+/// debatable is precisely the row a client must see called out as unresolved doubt, not silently
+/// left in an action tier next to findings nobody doubts.
+///
+/// This is the SECOND attempt at this fix (C5-4; the first, cycle-4's P2, regressed): the root
+/// cause was that `is_informational`'s hard "a critical/high finding is never informational"
+/// invariant was the ONLY gate checked, and `needs-review` was folded into that SAME
+/// severity-capped predicate — so a high/critical hedge fell through the hard invariant and
+/// stayed in `do_now`/`do_next`, contradicting its own exported `needs_review: true`, and the
+/// executive summary's "held for review" count (which only ever counted the `informational`
+/// appendix) silently undercounted the true number of hedged rows. Splitting the hedge gate out
+/// into its OWN function, checked BEFORE `is_informational` in [`effective_bucket`], closes that
+/// gap structurally: a hedge is a hedge regardless of severity, and `informational` stays
+/// reserved for the three genuinely low-stakes signals `is_informational` still owns.
+pub(crate) fn is_held_for_review(finding: &Finding, disposition: Disposition) -> bool {
+    if disposition != Disposition::Unresolved {
+        return false;
+    }
+    finding.needs_review || finding.confidence.as_deref() == Some("needs-review")
+}
+
 /// Whether a finding is a "convention to consider" rather than an action item (Bug 4). Routes
 /// to the `informational` matrix appendix instead of do_now/do_next/plan. NEVER true for a
 /// critical/high finding or for a finding the auditor has explicitly dispositioned — the hard
 /// invariant that keeps true defects in the action tiers. `severity` must already be
-/// normalized. The four independent informational signals (design §2a/2c/2d + the `info` tier
-/// itself):
+/// normalized. The three independent informational signals (design §2a/2d + the `info` tier
+/// itself) — the calibrator's own `needs-review` hedge (former §2c) is now its OWN gate,
+/// [`is_held_for_review`], checked ahead of this one in [`effective_bucket`]: a hedge routes to
+/// the `held` bucket at ANY severity, never into this severity-capped appendix:
 ///   - `info`-severity (e.g. the unexposed-schema RLS note from I3),
 ///   - `testing-style` category in a repo below the test-corpus threshold (§2d),
-///   - `needs-review` confidence at ≤ medium severity (§2c),
 ///   - absence-type (`located == false`) `structured` stance-layer rule at ≤ medium (§2a).
 pub(crate) fn is_informational(
     finding: &Finding,
@@ -2192,15 +2259,6 @@ pub(crate) fn is_informational(
     // §2d — testing-style deviation with no test corpus to deviate FROM.
     if finding.category.as_deref() == Some("testing-style") && test_file_count < MIN_STYLE_CORPUS_FILES
     {
-        return true;
-    }
-    // §2c — a low/medium finding the calibrator itself flagged as debatable. Checks BOTH the
-    // structured `needs_review` flag and the `confidence` string (C4-P2: upstream calibration
-    // passes are each individually responsible for keeping the two paired — see
-    // `ai_audit::apply_verdicts` — but reading both here means a finding that somehow reaches
-    // this point with only one of the two set is still correctly routed, rather than silently
-    // escaping the informational gate on a technicality).
-    if finding.needs_review || finding.confidence.as_deref() == Some("needs-review") {
         return true;
     }
     // §2a — an absence-type structured stance-rule note (the generic-arch/style over-firing).
@@ -2232,40 +2290,43 @@ fn finding_precondition_count(f: &Finding) -> usize {
 }
 
 /// See [`FindingRefJson::confidence_rank`]'s doc comment. Reads BOTH hedge fields (C4-P2 —
-/// see [`is_informational`]'s §2c check for why) rather than `confidence` alone.
+/// see [`is_held_for_review`]'s check for why) rather than `confidence` alone.
 fn finding_confidence_rank(f: &Finding) -> u8 {
     u8::from(f.needs_review || f.confidence.as_deref() == Some("needs-review"))
 }
 
-// ── C4-P2: one hedge source of truth, shared by findings.json / the xlsx workbook / the PDF ──
+// ── C4-P2 / C5-4: one hedge source of truth, shared by findings.json / the xlsx workbook / the
+// PDF ──────────────────────────────────────────────────────────────────────────────────────
 //
 // Bug family (artifact-consistency hardening, see docs/plans for the originating report): the
-// executive summary's "held for review" count (`is_informational`'s 4-signal bucket gate),
-// the structured `needs_review` boolean, and the `confidence` string could each tell a
-// different story for the SAME finding — a row routed to the informational appendix for a
-// reason OTHER than calibration doubt (an `info`-severity note, a testing-style deviation with
-// no corpus, an absence-type stance rule) rendered with `needs_review: false` /
-// `confidence: "high"` in `findings.json`/the workbook, even though the narrative text calls
-// that same row "held for a human reviewer's judgment call" — an unhedged row sitting in the
-// bucket whose entire definition is "needs a human to decide". Separately, a raw desync
-// between `f.needs_review` and `f.confidence` (a verdict re-application, a merge) could make
-// the two structured fields themselves disagree.
+// executive summary's "held for review" count, the structured `needs_review` boolean, and the
+// `confidence` string could each tell a different story for the SAME finding — a row routed to
+// the informational/held appendix for a reason OTHER than calibration doubt (an `info`-severity
+// note, a testing-style deviation with no corpus, an absence-type stance rule) rendered with
+// `needs_review: false` / `confidence: "high"` in `findings.json`/the workbook, even though the
+// narrative text calls that same row "held for a human reviewer's judgment call" — an unhedged
+// row sitting in the bucket whose entire definition is "needs a human to decide". Separately, a
+// raw desync between `f.needs_review` and `f.confidence` (a verdict re-application, a merge)
+// could make the two structured fields themselves disagree.
 //
 // The fix: ONE function decides whether a finding is hedged for EXPORT purposes, folding in
 // BOTH raw calibration doubt (`f.needs_review` / `f.confidence == "needs-review"`) AND bucket
-// placement (`bucket == "informational"` — being held for review IS a hedge, by definition of
-// the bucket). `build_report_json` (the PDF's `CuratedSiteJson.confidence`) and
-// `xlsx_export::partition_rows` (`FindingRow.confidence`/`FindingRow.needs_review`, which
-// `findings.json` serializes verbatim) both call this ONE function with their own
-// already-computed `bucket` (itself a single shared computation — see `effective_bucket`) —
-// never re-deriving hedge state independently. This does NOT change bucket placement (a
-// finding explicitly dispositioned out of `Unresolved` still routes via `matrix_bucket`, so a
-// calibration-hedged row CAN legitimately sit in `"plan"` rather than `"informational"` — see
-// `is_informational`'s "only an `Unresolved` row" gate); it only guarantees that WHEREVER a
-// finding lands, its exported confidence/needs_review fields never contradict each other or
-// the bucket that put it there.
+// placement (`bucket == "informational"` or `bucket == "held"` (C5-4) — being held for review IS
+// a hedge, by definition of either bucket). `build_report_json` (the PDF's
+// `CuratedSiteJson.confidence`) and `xlsx_export::partition_rows`
+// (`FindingRow.confidence`/`FindingRow.needs_review`, which `findings.json` serializes verbatim)
+// both call this ONE function with their own already-computed `bucket` (itself a single shared
+// computation — see `effective_bucket`) — never re-deriving hedge state independently. This does
+// NOT change bucket placement (a finding explicitly dispositioned out of `Unresolved` still
+// routes via `matrix_bucket`, so a calibration-hedged row CAN legitimately sit in `"plan"`
+// rather than `"held"` — see `is_held_for_review`'s "only an `Unresolved` row" gate); it only
+// guarantees that WHEREVER a finding lands, its exported confidence/needs_review fields never
+// contradict each other or the bucket that put it there.
 pub(crate) fn is_hedged(f: &Finding, bucket: &str) -> bool {
-    f.needs_review || f.confidence.as_deref() == Some("needs-review") || bucket == "informational"
+    f.needs_review
+        || f.confidence.as_deref() == Some("needs-review")
+        || bucket == "informational"
+        || bucket == "held"
 }
 
 /// The canonical EXPORTED confidence string for `f`, reconciled against [`is_hedged`] — never
@@ -2828,6 +2889,7 @@ pub fn build_report_json(
         ("plan", &mut matrix.plan),
         ("accepted", &mut matrix.accepted),
         ("informational", &mut matrix.informational),
+        ("held", &mut matrix.held),
     ] {
         if let Some(mut entries) = bucketed.remove(key) {
             entries.sort_by(|a, b| a.0.cmp(&b.0));
@@ -2958,16 +3020,22 @@ pub fn build_report_json(
         });
     }
 
-    // C4-P4 (residual defect 5): split fully-informational groups into their own section, then
-    // order the remaining (genuinely curated) groups by severity desc / bucket / confidence —
-    // see `AuditReportJson::curated_findings`'s and `::held_for_review_findings`'s doc comments
-    // for the eligibility rule and `curated_group_sort_key` for the ordering itself.
+    // C4-P4 (residual defect 5) / C5-4: split fully-informational-or-held groups into their own
+    // section, then order the remaining (genuinely curated) groups by severity desc / bucket /
+    // confidence — see `AuditReportJson::curated_findings`'s and `::held_for_review_findings`'s
+    // doc comments for the eligibility rule and `curated_group_sort_key` for the ordering
+    // itself. `"held"` (C5-4) is treated identically to `"informational"` here: a group whose
+    // every site is either appendix-worthy or calibration-hedged (at ANY severity) is never
+    // curated, and a high/critical hedge must land in `held_for_review_findings`, not
+    // `curated_findings` — that is the whole point of the C5-4 fix.
     let (mut curated_findings, mut held_for_review_findings): (
         Vec<CuratedGroupJson>,
         Vec<CuratedGroupJson>,
-    ) = all_curated_groups
-        .into_iter()
-        .partition(|g| g.sites.iter().any(|s| s.bucket != "informational"));
+    ) = all_curated_groups.into_iter().partition(|g| {
+        g.sites
+            .iter()
+            .any(|s| !matches!(s.bucket.as_str(), "informational" | "held"))
+    });
     curated_findings.sort_by_key(curated_group_sort_key);
     held_for_review_findings.sort_by_key(curated_group_sort_key);
 
@@ -3183,22 +3251,34 @@ pub fn build_report_json(
     };
 
     // ── Executive summary ──────────────────────────────────────────────────────
-    // Bug 4: informational (appendix) rows are NOT curated action items — they sit outside the
-    // four-bucket partition, so `curated_total` excludes them and the self-checking narrative
-    // invariant `do_now + do_next + plan + accepted == curated_total` still holds exactly.
+    // Bug 4 / C5-4: informational (appendix) AND held (calibration-hedge, any severity) rows are
+    // NOT curated action items — they sit outside the four-bucket partition, so `curated_total`
+    // excludes BOTH and the self-checking narrative invariant
+    // `do_now + do_next + plan + accepted == curated_total` still holds exactly.
+    // `held_for_review_total` is the SINGLE reconciling count the executive summary and
+    // methodology both show — see `ExecutiveSummaryJson::held_for_review`'s doc comment for why
+    // this must be `informational.len() + held.len()`, not `informational.len()` alone (the
+    // C5-4 regression this closes): a high/critical calibration hedge never lands in
+    // `informational` (the hard "critical/high is never informational" invariant), but it is
+    // still held out of every action tier via the separate `held` bucket, and must still count
+    // toward "held for review" or the total silently undercounts every needs-review row above
+    // medium severity.
     let informational = matrix.informational.len();
-    let curated_total = code_findings.len() - informational;
+    let held = matrix.held.len();
+    let held_for_review_total = informational + held;
+    let curated_total = code_findings.len() - held_for_review_total;
     let do_now = matrix.do_now.len();
     let do_next = matrix.do_next.len();
     let plan = matrix.plan.len();
     let accepted = matrix.accepted.len();
-    // Still-open action items (every informational row is Unresolved by construction — see
-    // `is_informational` — so subtracting them keeps `open` an ACTION count, not an appendix one).
+    // Still-open action items (every informational/held row is Unresolved by construction — see
+    // `is_informational`/`is_held_for_review` — so subtracting them keeps `open` an ACTION
+    // count, not an appendix one).
     let open = code_findings
         .iter()
         .filter(|(_, d, _, _)| *d == Disposition::Unresolved)
         .count()
-        - informational;
+        - held_for_review_total;
     // Calibration-review fix: rank by (severity desc, precondition_count asc, confidence) —
     // an unconditional critical must always outrank a critical whose own justification
     // records an exploit precondition (see `FindingRefJson::precondition_count`'s doc
@@ -3232,7 +3312,7 @@ pub fn build_report_json(
                 candidates_reviewed,
                 excluded_fp,
                 curated_total,
-                informational,
+                held_for_review_total,
                 dependency_advisories,
                 do_now,
                 do_next,
@@ -3248,7 +3328,7 @@ pub fn build_report_json(
         candidates_reviewed,
         excluded_false_positive: excluded_fp,
         curated_total,
-        held_for_review: informational,
+        held_for_review: held_for_review_total,
         dependency_advisories,
         do_now,
         do_next,
@@ -3341,7 +3421,7 @@ pub fn build_report_json(
     let methodology = MethodologyJson {
         candidates_reviewed,
         excluded_false_positive: excluded_fp,
-        held_for_review: informational,
+        held_for_review: held_for_review_total,
         next_steps: next_steps_note(candidates_reviewed, excluded_fp),
         deterministic_note:
             "Camerata runs a two-tier engine. A deterministic security floor (proven-defect \
@@ -3737,7 +3817,14 @@ mod tests {
         let json_value = serde_json::to_value(&json).unwrap();
 
         let mut checked_any = false;
-        for bucket in ["do_now", "do_next", "plan", "accepted", "informational"] {
+        for bucket in [
+            "do_now",
+            "do_next",
+            "plan",
+            "accepted",
+            "informational",
+            "held",
+        ] {
             for item in json_value["matrix"][bucket]
                 .as_array()
                 .into_iter()
@@ -4687,6 +4774,7 @@ mod tests {
             .chain(json.matrix.plan.iter())
             .chain(json.matrix.accepted.iter())
             .chain(json.matrix.informational.iter())
+            .chain(json.matrix.held.iter())
             .map(|f| f.rule_id.as_str())
             .collect();
         assert!(rule_ids.contains("ARCH-NO-VERSIONING-1"));
@@ -4758,25 +4846,22 @@ mod tests {
         );
     }
 
-    /// Invariant: a row the `is_informational` gate routes to the appendix (needs-review/
-    /// testing-style/absence-type/info-tier — the four signals in that function's doc comment)
-    /// NEVER carries a critical/high severity badge, by the hard invariant at the top of
-    /// `is_informational` itself. Pinned here as an explicit regression test over
-    /// `build_report_json`'s actual output, scoped to those four signals specifically: the
+    /// Invariant: a row the `is_informational` gate routes to the appendix (testing-style/
+    /// absence-type/info-tier — the three signals in that function's doc comment, since C5-4
+    /// moved the former needs-review §2c signal to its own severity-unbounded `is_held_for_review`
+    /// gate/`held` bucket) NEVER carries a critical/high severity badge, by the hard invariant at
+    /// the top of `is_informational` itself. Pinned here as an explicit regression test over
+    /// `build_report_json`'s actual output, scoped to those three signals specifically: the
     /// SEPARATE, pre-existing, and deliberately severity-blind `is_uncited_ai_finding` gate
     /// (see that function's own doc comment — "a critical, uncited finding is PRECISELY the
     /// case this gate exists to catch") is an intentional report-integrity carve-out, not part
     /// of this invariant, and is untouched by C5-1.
     #[test]
     fn c5_1_is_informational_routed_rows_never_exceed_medium_severity() {
-        // Two findings that genuinely route to the informational appendix via two of
-        // `is_informational`'s four signals: needs-review confidence at a non-critical/high
-        // severity (§2c), and the `info` tier itself. (A hedged CRITICAL/HIGH finding is a
-        // DIFFERENT case — the hard invariant at the top of `is_informational` holds those in
-        // the action tiers regardless of the hedge, which is exactly why this invariant is true
-        // by construction for this gate; this test proves the inverse direction end to end, over
-        // real `build_report_json` output, that every row this gate DOES route to
-        // `informational` carries severity <= medium.)
+        // One finding that genuinely routes to the informational appendix via a remaining
+        // `is_informational` signal (the `info` tier itself), and one SEPARATE needs-review
+        // finding (medium severity) proving C5-4's split: it now routes to `held`, NOT
+        // `informational` — the inverse of the old (regressed) behavior this test used to pin.
         let mut hedged_medium = finding("ARCH-DEBATABLE-1", "a.rs", 1, "medium");
         hedged_medium.confidence = Some("needs-review".to_string());
         hedged_medium.needs_review = true;
@@ -4786,8 +4871,8 @@ mod tests {
         let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
         assert_eq!(
             json.matrix.informational.len(),
-            2,
-            "both synthetic findings must actually route to the informational appendix: {:?}",
+            1,
+            "only the info-tier finding routes to the informational appendix: {:?}",
             json.matrix.informational
         );
         for row in &json.matrix.informational {
@@ -4796,6 +4881,20 @@ mod tests {
                 "an is_informational-routed row must never exceed medium severity: {row:?}"
             );
         }
+        // C5-4: the needs-review medium finding routes to `held`, never `informational` —
+        // severity is preserved (not downgraded), unlike an `informational` row, and it is
+        // never dropped.
+        assert_eq!(
+            json.matrix.held.len(),
+            1,
+            "the needs-review finding must route to held, not informational: {:?}",
+            json.matrix.held
+        );
+        assert_eq!(json.matrix.held[0].rule_id, "ARCH-DEBATABLE-1");
+        assert_eq!(
+            json.matrix.held[0].severity, "medium",
+            "held rows keep their real severity, never capped"
+        );
     }
 
     #[test]
@@ -5183,12 +5282,13 @@ mod tests {
                 }
             }
         }
-        let matrix_buckets: [&Vec<FindingRefJson>; 5] = [
+        let matrix_buckets: [&Vec<FindingRefJson>; 6] = [
             &json.matrix.do_now,
             &json.matrix.do_next,
             &json.matrix.plan,
             &json.matrix.accepted,
             &json.matrix.informational,
+            &json.matrix.held,
         ];
         for bucket in matrix_buckets {
             for f in bucket {
@@ -5374,7 +5474,9 @@ mod tests {
     /// `"needs-review"` confidence (never overwritten to `"high"` — `is_ai_tier` excludes it from
     /// the deterministic-by-construction path), and its calibrated effort still renders even
     /// though the row is hedged — a needs-review verdict is a confidence judgement, not an
-    /// estimate failure.
+    /// estimate failure. C5-4: a `high`-severity hedge like this one routes to `held` (never an
+    /// action bucket, regardless of severity) — the site lives in `held_for_review_findings`,
+    /// not `curated_findings`.
     #[tokio::test]
     async fn ai_tier_needs_review_row_keeps_its_confidence_and_still_carries_an_estimate() {
         let corpus_path = camerata_rules::corpus_path();
@@ -5386,7 +5488,20 @@ mod tests {
         f.effort = Some("medium".to_string());
         let report = report_with(vec![f], vec!["SUPABASE-RLS-ENABLED-1"]);
         let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
-        let site = &json.curated_findings[0].sites[0];
+        assert!(
+            json.curated_findings.is_empty(),
+            "a hedged row — even high severity — must never render under Curated findings: {:?}",
+            json.curated_findings
+        );
+        let site = &json.held_for_review_findings[0].sites[0];
+        assert_eq!(
+            site.bucket, "held",
+            "a high hedge routes to held, not an action bucket"
+        );
+        assert_eq!(
+            site.severity, "high",
+            "held never downgrades severity, unlike the informational appendix"
+        );
         assert_eq!(
             site.confidence,
             Some("needs-review".to_string()),
@@ -5659,7 +5774,8 @@ mod tests {
     /// The other half of the C3-1b contract: a finding the CALIBRATOR itself explicitly
     /// flagged doubtful (`confidence: Some("needs-review")`) still exports hedged — proving
     /// confidence hedging is driven by calibration doubt, not by whether a separate AI pass
-    /// (fix-generation) happened to succeed.
+    /// (fix-generation) happened to succeed. C5-4: this `high`-severity hedge lives in
+    /// `held_for_review_findings` (the `held` bucket), not `curated_findings`.
     #[tokio::test]
     async fn calibrator_flagged_doubt_still_exports_hedged() {
         // Setting `confidence` marks a finding AI-tier (`is_ai_tier`), which routes an
@@ -5682,8 +5798,13 @@ mod tests {
         f.needs_review = true;
         let report = report_with(vec![f], vec!["SUPABASE-RLS-ENABLED-1"]);
         let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        assert!(
+            json.curated_findings.is_empty(),
+            "a hedged row, even high severity, must never render under Curated findings: {:?}",
+            json.curated_findings
+        );
         assert_eq!(
-            json.curated_findings[0].sites[0].confidence,
+            json.held_for_review_findings[0].sites[0].confidence,
             Some("needs-review".to_string()),
             "a genuine calibration doubt verdict must still render as hedged"
         );
@@ -6066,8 +6187,8 @@ mod tests {
 
     /// The gate applies REGARDLESS of severity — a critical, uncited AI finding (exactly
     /// the "MOST important findings" the plan's problem statement calls out) must still be
-    /// excluded from curated, unlike `is_informational`'s other four signals which
-    /// deliberately never touch critical/high.
+    /// excluded from curated, unlike `is_informational`'s other signals which deliberately
+    /// never touch critical/high.
     #[test]
     fn citation_gate_excludes_a_critical_uncited_ai_finding_despite_severity() {
         let f = finding("AI-SOME-NOVEL-DEFECT", "a.rs", 1, "critical");
@@ -6965,8 +7086,10 @@ mod tests {
     //
     // `is_informational` is the single gate that diverts a low-signal OPEN finding out of the
     // do_now/do_next/plan action tiers into the visible-but-advisory `informational` appendix.
-    // These pin the four independent signals AND the two hard invariants (never critical/high,
-    // never a dispositioned finding) that keep real defects in the action tiers.
+    // These pin the three independent signals (C5-4 moved the former needs-review signal to its
+    // own severity-unbounded `is_held_for_review` gate — see `needs_review_confidence_is_held_not_informational`
+    // below) AND the two hard invariants (never critical/high, never a dispositioned finding)
+    // that keep real defects in the action tiers.
 
     /// The `info` severity tier is informational by definition — nothing below `low` is an
     /// action item (e.g. the unexposed-schema RLS note from I3).
@@ -7027,21 +7150,25 @@ mod tests {
         ));
     }
 
-    /// §2c — a low/medium finding the calibrator itself flagged `needs-review` (debatable /
-    /// theoretical / under-evidenced) is advisory, not an action item.
+    /// C5-4: a finding the calibrator itself flagged `needs-review` is held out of action tiers
+    /// via `is_held_for_review` — a SEPARATE gate from `is_informational` now (the former §2c
+    /// signal), with NO severity ceiling, so `is_informational` itself must say `false` for it
+    /// at every severity (it is no longer one of `is_informational`'s own signals at all).
     #[test]
-    fn needs_review_confidence_is_informational_at_low_severity() {
+    fn needs_review_confidence_is_held_not_informational() {
         let mut f = finding("SOME-RULE-1", "a.rs", 1, "medium");
         f.confidence = Some("needs-review".to_string());
-        assert!(is_informational(
-            &f,
-            Disposition::Unresolved,
-            "medium",
-            None,
-            0
-        ));
-        // But a high-confidence low finding is a normal (if minor) action item.
+        assert!(
+            is_held_for_review(&f, Disposition::Unresolved),
+            "a needs-review finding must be held for review"
+        );
+        assert!(
+            !is_informational(&f, Disposition::Unresolved, "medium", None, 0),
+            "needs-review is no longer one of is_informational's own signals (C5-4)"
+        );
+        // A high-confidence finding is neither held nor informational — a normal action item.
         f.confidence = Some("high".to_string());
+        assert!(!is_held_for_review(&f, Disposition::Unresolved));
         assert!(!is_informational(
             &f,
             Disposition::Unresolved,
@@ -7118,18 +7245,24 @@ mod tests {
     // R1 (`ai_audit::apply_severity_ceiling_rule`) re-routes a self-hedged finding to
     // needs-review + Low severity; R2 clamps a browser-mediated CORS misconfiguration to
     // exactly Medium. These pin the OUTPUT side here: that the R1 shape is what
-    // `is_informational` keys on, and that R2's medium landing spot buckets into "plan" —
-    // never "do_now" — so it can never displace a genuine critical from the top action tier.
+    // `is_held_for_review` keys on (C5-4: the hedge signal now lives there, not
+    // `is_informational`), and that R2's medium landing spot buckets into "plan" — never
+    // "do_now" — so it can never displace a genuine critical from the top action tier.
 
     /// An R1-shaped finding (severity capped to Low, confidence flagged needs-review by the D6
-    /// ceiling) routes to the informational appendix, out of every action bucket.
+    /// ceiling) routes to the `held` bucket (C5-4), out of every action bucket.
     #[test]
-    fn r1_shaped_low_needs_review_finding_is_informational() {
+    fn r1_shaped_low_needs_review_finding_is_held_for_review() {
         let mut f = finding("AI-HEDGE-1", "a.rs", 1, "low");
         f.confidence = Some("needs-review".to_string());
         assert!(
-            is_informational(&f, Disposition::Unresolved, "low", None, 0),
-            "an R1-shaped (low + needs-review) finding must route to the informational appendix"
+            is_held_for_review(&f, Disposition::Unresolved),
+            "an R1-shaped (low + needs-review) finding must be held for review"
+        );
+        assert_eq!(
+            effective_bucket(&f, Disposition::Unresolved, "low", None, 0),
+            "held",
+            "it must route to the held bucket, not an action tier"
         );
     }
 
@@ -7242,10 +7375,11 @@ mod tests {
 
     /// P7 end-to-end: N occurrences of one needs-review STRUCTURAL rule, grouped by
     /// `crate::ai_audit::group_structural_needs_review` into ONE finding, land as a SINGLE row
-    /// in the informational appendix — never one row per occurrence, and never in a curated
-    /// action tier — while a genuine critical finding in the same report is untouched.
+    /// in the `held` bucket (C5-4: a needs-review row, which is what the grouped finding carries)
+    /// — never one row per occurrence, and never in a curated action tier — while a genuine
+    /// critical finding in the same report is untouched.
     #[test]
-    fn grouped_structural_needs_review_finding_is_a_single_informational_row() {
+    fn grouped_structural_needs_review_finding_is_a_single_held_row() {
         let mut occ1 = finding("ARCH-SOME-PREFERENCE-1", "a.rs", 10, "medium");
         occ1.category = Some("arch-conformance".to_string());
         occ1.confidence = Some("needs-review".to_string());
@@ -7274,14 +7408,16 @@ mod tests {
         let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
 
         assert_eq!(
-            json.matrix.informational.len(),
+            json.matrix.held.len(),
             1,
-            "the grouped structural finding is ONE informational row, not N: {:?}",
-            json.matrix.informational
+            "the grouped structural finding is ONE held row, not N: {:?}",
+            json.matrix.held
         );
-        assert_eq!(
-            json.matrix.informational[0].rule_id,
-            "ARCH-SOME-PREFERENCE-1"
+        assert_eq!(json.matrix.held[0].rule_id, "ARCH-SOME-PREFERENCE-1");
+        assert!(
+            json.matrix.informational.is_empty(),
+            "a needs-review row never routes to informational (C5-4): {:?}",
+            json.matrix.informational
         );
         // None of the three original locations leak into an action tier as separate rows.
         for tier in [&json.matrix.do_now, &json.matrix.do_next, &json.matrix.plan] {
@@ -7302,14 +7438,15 @@ mod tests {
     /// `effective_bucket` call per finding now (previously two independent `is_informational`
     /// + `matrix_bucket` call sites in this file, which happened to agree today but had no
     /// structural guarantee against drifting apart). A hedged (`needs-review`) finding is the
-    /// sharpest case: it must read `"informational"` in BOTH places, never an action bucket —
-    /// and it still ships (over-tell, never dropped), just consistently re-bucketed.
+    /// sharpest case: it must read `"held"` (C5-4) in BOTH places, never an action bucket — and
+    /// it still ships (over-tell, never dropped), just consistently re-bucketed.
     ///
-    /// C4-P4 (residual defect 5, 2026-10-01): this finding's whole group is now ENTIRELY
-    /// informational (its only site), so it moved out of `curated_findings` into
+    /// C4-P4 (residual defect 5, 2026-10-01) / C5-4: this finding's whole group is now ENTIRELY
+    /// held (its only site), so it moved out of `curated_findings` into
     /// `held_for_review_findings` — see `AuditReportJson::curated_findings`'s doc comment. The
     /// bucket-agreement assertions below are unchanged; only which top-level list the group
-    /// lives in changed.
+    /// lives in changed (and the bucket label is `"held"`, not `"informational"` — C5-4 split
+    /// the two).
     #[test]
     fn matrix_and_curated_site_bucket_fields_agree_and_a_hedged_finding_is_never_an_action_bucket()
     {
@@ -7319,15 +7456,20 @@ mod tests {
         // as AI-tier — see that function's doc comment); without a preview tool or grounded
         // citation, the SEPARATE P3 "uncited AI finding" gate would exclude this row from
         // `curated_findings`/`held_for_review_findings` entirely rather than routing it to the
-        // informational appendix. Giving it a preview tool keeps its citation `"preview"` (not
+        // held bucket. Giving it a preview tool keeps its citation `"preview"` (not
         // `"advisory"`), isolating THIS test to the hedge/confidence signal this test is
         // actually about.
         hedged.preview_tool = Some("clippy".to_string());
         let report = report_with(vec![hedged], vec!["SOME-HEDGED-RULE-1"]);
         let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
 
-        assert_eq!(json.matrix.informational.len(), 1);
-        assert_eq!(json.matrix.informational[0].bucket, "informational");
+        assert_eq!(json.matrix.held.len(), 1);
+        assert_eq!(json.matrix.held[0].bucket, "held");
+        assert!(
+            json.matrix.informational.is_empty(),
+            "a needs-review row never routes to informational (C5-4): {:?}",
+            json.matrix.informational
+        );
         for tier in [&json.matrix.do_now, &json.matrix.do_next] {
             assert!(
                 tier.is_empty(),
@@ -7338,7 +7480,7 @@ mod tests {
             json.curated_findings
                 .iter()
                 .all(|g| g.rule_id != "SOME-HEDGED-RULE-1"),
-            "an entirely-informational finding must never render under Curated findings: {:?}",
+            "an entirely-held finding must never render under Curated findings: {:?}",
             json.curated_findings
         );
 
@@ -7346,17 +7488,14 @@ mod tests {
             .held_for_review_findings
             .iter()
             .find(|g| g.rule_id == "SOME-HEDGED-RULE-1")
-            .expect(
-                "the hedged finding still ships, as an informational row in \
-                 held_for_review_findings",
-            );
+            .expect("the hedged finding still ships, as a held row in held_for_review_findings");
         assert_eq!(group.sites.len(), 1, "the finding must not be dropped");
         assert_eq!(
-            group.sites[0].bucket, "informational",
-            "the curated site's own bucket field must read informational too"
+            group.sites[0].bucket, "held",
+            "the curated site's own bucket field must read held too"
         );
         assert_eq!(
-            group.sites[0].bucket, json.matrix.informational[0].bucket,
+            group.sites[0].bucket, json.matrix.held[0].bucket,
             "matrix and curated-site bucket fields must never disagree for the same finding"
         );
     }
@@ -8688,11 +8827,15 @@ mod tests {
 //  5. Hedge single source of truth: `needs_review ⇔ confidence == "needs-review"` for every
 //     row (biconditional — PASSES, by construction of `is_hedged`/`hedge_confidence`, C4-P2);
 //     the executive summary's "held for review" count equals the total number of
-//     `needs_review` rows (OPEN — see test doc comment: `is_informational`'s hard "critical/
-//     high is never informational" rule means a high/critical row the calibrator flagged
-//     `needs-review` is hedged but never lands in `matrix.informational`, so the two counts can
-//     diverge). STANDING: `hedge_confidence_is_a_strict_biconditional_on_every_row`.
-//     OPEN (`#[ignore]`, C5-4): `held_for_review_count_equals_total_needs_review_count`.
+//     `needs_review` rows. C5-4 (this cycle, second attempt — cycle-4's P2 regressed): the
+//     root cause was that `is_informational`'s hard "critical/high is never informational" rule
+//     was the ONLY gate a `needs-review` hedge went through, so a high/critical hedge stayed in
+//     `do_now`/`do_next` and was never counted. Fixed by splitting the hedge signal into its
+//     own gate (`is_held_for_review`) and its own bucket (`matrix.held`, severity-unbounded),
+//     checked BEFORE `is_informational` in `effective_bucket`; the executive summary's
+//     `held_for_review` is now `matrix.informational.len() + matrix.held.len()`. STANDING (both
+//     halves now pass): `hedge_confidence_is_a_strict_biconditional_on_every_row` and
+//     `held_for_review_count_equals_total_needs_review_count`.
 //  6. Bucket invariant: a row with `bucket ∈ {informational}` has `severity <= medium`. OPEN —
 //     `is_uncited_ai_finding` (P3) deliberately overrides this for an uncited AI-tier finding
 //     of ANY severity, by design (see that function's own doc comment: "a critical, uncited
@@ -8826,9 +8969,10 @@ mod export_invariants_gate {
     ///   given NO `captures`, so its authored `remediation`'s `<table>` token falls through to
     ///   the generic filler ("the affected table") — the vehicle for invariant 10's two halves.
     /// - `ARCH-CUSTOM-FLAGGED-1` ("f_hedge"): a high-severity, non-AI-tier finding the
-    ///   calibrator flagged `needs_review` — stays in `do_now` (high/critical is never
-    ///   auto-informational) while still exporting `needs_review: true` — the vehicle for
-    ///   invariant 5's open half.
+    ///   calibrator flagged `needs_review` — C5-4: routes to the `held` bucket (NOT `do_now`;
+    ///   high/critical is never auto-informational, but a hedge is held at ANY severity) while
+    ///   still exporting `needs_review: true` and keeping its real `high` severity — the vehicle
+    ///   for invariant 5's reconciliation count.
     /// - `ARCH-STYLE-NOTE-1` ("f_informational"): a plain `info`-severity note — the "ordinary"
     ///   held-for-review row (no confidence hedge at all; routed on severity alone).
     /// - `ARCH-CUSTOM-IDENTIFIER-1` ("f_identifier"): run through the REAL
@@ -9000,7 +9144,14 @@ mod export_invariants_gate {
             }
         };
 
-        for bucket in ["do_now", "do_next", "plan", "accepted", "informational"] {
+        for bucket in [
+            "do_now",
+            "do_next",
+            "plan",
+            "accepted",
+            "informational",
+            "held",
+        ] {
             for item in fx.json_value["matrix"][bucket]
                 .as_array()
                 .into_iter()
@@ -9332,15 +9483,16 @@ mod export_invariants_gate {
         );
     }
 
+    /// C5-4 (closed, second attempt — cycle-4's P2 regressed): `is_informational`'s hard
+    /// "critical/high is never informational" rule used to be the ONLY gate a calibration hedge
+    /// went through, so a high/critical row the calibrator flagged needs-review (`f_hedge` in
+    /// this fixture) was hedged (`needs_review=true`) but never landed in `matrix.informational`,
+    /// and `held_for_review` silently undercounted the total `needs_review` rows. Fixed by
+    /// splitting the hedge signal into its own severity-unbounded gate/bucket
+    /// (`is_held_for_review` / `matrix.held`, checked ahead of `is_informational` in
+    /// `effective_bucket`) and reconciling `held_for_review` as
+    /// `matrix.informational.len() + matrix.held.len()`.
     #[tokio::test]
-    #[ignore = "C5-4 open: `is_informational`'s hard \"critical/high is never informational\" \
-                rule means a high/critical row the calibrator flagged needs-review (f_hedge in \
-                this fixture) is hedged (needs_review=true) but never lands in \
-                matrix.informational, so held_for_review can legitimately undercount the total \
-                needs_review rows. Route to the C5 backlog: either the exec-summary line needs \
-                a second count (\"N held for review, M more flagged for review but actioned \
-                anyway\") or this is accepted as intentional and the invariant should be \
-                narrowed to low/medium-severity rows only."]
     async fn held_for_review_count_equals_total_needs_review_count() {
         let fx = build_fixture().await;
         let held_for_review = fx.json.executive_summary.held_for_review;
