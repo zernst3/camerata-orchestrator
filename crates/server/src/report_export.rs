@@ -881,7 +881,15 @@ pub struct CuratedSiteJson {
     /// citation; the cross-artifact equality gate compares this against `findings.json`'s
     /// `FindingRow::citation_label`/`citation_urls` for the same finding.
     pub citation: CitationJson,
+    /// Raw rule ids absorbed into this finding during P1 clustering — an INTERNAL/traceability
+    /// field (registry cross-reference, test assertions) never rendered as-is in any
+    /// client-facing artifact. See [`also_matches_titles`] for the human-readable form the
+    /// template actually renders.
     pub also_matches: Vec<String>,
+    /// C4-P4 (residual defect 2): the human-readable TITLES of `also_matches`, resolved via
+    /// [`also_matches_titles`] — this is what the PDF's "Also violates:" line renders. Never the
+    /// raw ids above; an id with no resolvable corpus title is simply absent here.
+    pub also_matches_titles: Vec<String>,
     /// The defect at THIS object (see `defect_headline`) — the template renders this as the
     /// bold per-finding heading; the group's own rule id + invariant title (`CuratedGroupJson`)
     /// is demoted to a smaller subtitle line for registry traceability.
@@ -1496,6 +1504,29 @@ pub(crate) fn title_for_finding(
         }
     }
     finding.rule_id.clone()
+}
+
+/// C4-P4 (residual defect 2): human-readable TITLES for a finding's `also_matches` list (other
+/// rule ids absorbed into this one during P1 clustering) — NEVER the raw rule ids themselves.
+/// Client-facing prose (the PDF curated-site "Also violates" line, the xlsx/`findings.json`
+/// "Also matches" column) must never surface an internal rule-id token, which a reader has no
+/// way to decode. An id with no resolvable corpus title is DROPPED from the list entirely
+/// rather than falling back to the bare id — unlike [`title_for_finding`]'s last-resort bare-id
+/// fallback (fine for a finding's OWN primary title, since that's the only identifier left to
+/// show at all) applying that same fallback here would just reintroduce the raw-id leak this
+/// function exists to close. Shared by both call sites so the PDF and the xlsx/JSON sibling can
+/// never render two different label sets for the same underlying ids.
+pub(crate) fn also_matches_titles(
+    ids: &[String],
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<String> {
+    ids.iter()
+        .filter_map(|id| {
+            corpus
+                .and_then(|c| c.get_by_id(id))
+                .map(|rule| rule.title.clone())
+        })
+        .collect()
 }
 
 /// The P3 curation gate: true when `finding` is AI-tier AND its citation is still
@@ -2747,6 +2778,7 @@ pub fn build_report_json(
                     disposition: disposition_label(*disposition, reason, bucket, confirmed_by_client),
                     bucket: bucket.to_string(),
                     also_matches: f.also_matches.clone(),
+                    also_matches_titles: also_matches_titles(&f.also_matches, corpus),
                     // C4-P2: this SITE's own resolved citation — never the group's (which
                     // renders once, next to `sites[0]`, in the template) — so a consumer that
                     // wants the per-finding citation (the cross-artifact equality gate, a future

@@ -237,8 +237,10 @@
     #text(size: 8.5pt)[
       #mini_chip("Effort: " + or_not_estimated(site.effort)) #mini_chip("Confidence: " + or_not_evaluated(site.confidence)) #text(weight: "bold")[#site.disposition]
     ]
-    #if site.also_matches.len() > 0 [
-      #text(size: 8pt, fill: rgb("#888888"))[Also violates: #site.also_matches.join(", ")]
+    // C4-P4 (residual defect 2): human-readable TITLES, never raw rule ids — see
+    // `report_export::also_matches_titles`'s doc comment.
+    #if site.also_matches_titles.len() > 0 [
+      #text(size: 8pt, fill: rgb("#888888"))[Also violates: #site.also_matches_titles.join(", ")]
     ]
   ]
 }

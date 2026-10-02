@@ -126,6 +126,10 @@ pub struct FindingRow {
     /// Newline-separated citation source URLs (plain text, not hyperlink objects — a cell
     /// can carry several URLs).
     citation_urls: String,
+    /// C4-P4 (residual defect 2): human-readable rule TITLES (never raw rule ids) — see
+    /// `report_export::also_matches_titles`'s doc comment. This is ALSO the `findings.json`
+    /// "also_matches" field (this struct serializes verbatim), so the raw-id leak closed in the
+    /// PDF's "Also violates" line had a second, independent instance right here.
     also_matches: String,
     status: String,
     snippet: String,
@@ -368,7 +372,8 @@ fn partition_rows(
             citation_kind,
             citation_label: citation.label,
             citation_urls,
-            also_matches: f.also_matches.join(", "),
+            also_matches: crate::report_export::also_matches_titles(&f.also_matches, corpus)
+                .join(", "),
             status: f.status.clone(),
             snippet: cap_snippet_for_workbook(&f.snippet),
             detail,
@@ -2838,5 +2843,86 @@ mod tests {
                  PATH"
             );
         }
+    }
+
+    // ── C4-P4 residual defect 2: no raw rule id in client-facing "also matches" prose ──────
+
+    /// `findings.json`'s `also_matches` field (and the xlsx "Also matches" column it mirrors
+    /// verbatim) used to be `f.also_matches.join(", ")` — the raw internal rule ids, exactly
+    /// the kind of token a client has no way to decode. Both must now render the OTHER rule's
+    /// human-readable TITLE instead, never the bare id.
+    #[tokio::test]
+    async fn also_matches_column_and_findings_json_render_titles_never_raw_rule_ids() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let other_rule_id = "SEC-NO-HARDCODED-SECRETS-1";
+        let other_title = corpus
+            .get_by_id(other_rule_id)
+            .expect("fixture assumes this rule exists in the real corpus")
+            .title
+            .clone();
+
+        let mut f = finding("SUPABASE-RLS-ENABLED-1", "a.sql", 1, "critical");
+        f.also_matches = vec![other_rule_id.to_string()];
+
+        let report = report_with(vec![f], vec![]);
+        let dispositions = HashMap::new();
+        let opts = empty_opts();
+        let json =
+            crate::report_export::build_report_json(&report, &dispositions, Some(&corpus), &opts);
+        let findings_export = build_findings_export(
+            &report,
+            &dispositions,
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+
+        assert_eq!(findings_export.findings.len(), 1);
+        let row = &findings_export.findings[0];
+        assert!(
+            row.also_matches.contains(&other_title),
+            "findings.json also_matches must render the rule TITLE, got: {:?}",
+            row.also_matches
+        );
+        assert!(
+            !row.also_matches.contains(other_rule_id),
+            "findings.json also_matches must never contain the raw rule id, got: {:?}",
+            row.also_matches
+        );
+
+        let xlsx_bytes = build_workbook(&report, &dispositions, Some(&corpus), &opts).unwrap();
+        let also_matches_cell = cell_text(&xlsx_bytes, "xl/worksheets/sheet2.xml", "R2");
+        assert_eq!(
+            also_matches_cell, row.also_matches,
+            "the xlsx Also matches column must be byte-identical to findings.json"
+        );
+        assert!(
+            !also_matches_cell.contains(other_rule_id),
+            "the xlsx Also matches column must never contain the raw rule id, got: {also_matches_cell:?}"
+        );
+
+        // Also exercise the PDF's own curated-site field directly: the group header is on the
+        // FIRST (and only) site here.
+        assert_eq!(json.curated_findings.len(), 1);
+        let site = &json.curated_findings[0].sites[0];
+        assert!(site.also_matches_titles.contains(&other_title));
+        assert!(!site.also_matches_titles.iter().any(|t| t == other_rule_id));
+    }
+
+    /// An `also_matches` id with no resolvable corpus title must be DROPPED, never fall back to
+    /// the bare id (that fallback is fine for a finding's own PRIMARY title — see
+    /// `title_for_finding` — but would reintroduce the raw-id leak here).
+    #[test]
+    fn also_matches_with_no_corpus_entry_is_dropped_not_shown_as_a_raw_id() {
+        let mut f = finding("SUPABASE-RLS-ENABLED-1", "a.sql", 1, "critical");
+        f.also_matches = vec!["SOME-UNKNOWN-RULE-ID-1".to_string()];
+        let titles = crate::report_export::also_matches_titles(&f.also_matches, None);
+        assert!(
+            titles.is_empty(),
+            "an unresolvable also_matches id must be dropped, not shown raw: {titles:?}"
+        );
     }
 }
