@@ -1738,6 +1738,29 @@ pub(crate) fn resolve_fix(
     ))
 }
 
+/// C5-8 (R7 amended): whether `finding` has ANY fix text available to show a client, if it
+/// lands in an action bucket — either a this-codebase specific fix
+/// (`ai_audit::generate_fix_specifics`'s `Finding::fix_specific`) or the rule's own authored
+/// remediation ([`resolve_fix`], the exact join `CuratedSiteJson::fix` itself performs). A
+/// pipeline failure on the FIRST (fix-generation gave up or never ran) is routine and never
+/// gates anything by itself — see the C3-1b module comment above — because the SECOND normally
+/// still ships a usable fix.
+///
+/// Deliberately does NOT, by itself, treat "the rule id has no corpus entry at all" as missing
+/// a fix — see [`is_action_row_missing_a_fix`], the actual bucket-routing gate, for why that
+/// case is scoped out separately rather than folded in here.
+fn has_any_fix(
+    finding: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_option: Option<&str>,
+) -> bool {
+    finding
+        .fix_specific
+        .as_deref()
+        .is_some_and(|s| !s.trim().is_empty())
+        || resolve_fix(&finding.rule_id, corpus, finding, chosen_option).is_some()
+}
+
 // ── P4 (2026-09-29): floor findings get finding-level treatment ────────────────────
 //
 // A deterministic/floor finding's `detail` is set at scan time
@@ -2134,12 +2157,30 @@ pub(crate) fn matrix_bucket(
 /// real-severity badge are identical). At medium/low/info it still routes to `"informational"`,
 /// exactly as before — nothing changes for the severity band `is_informational`'s cap was
 /// already written for.
+///
+/// C5-8 (R7 amended — re-route, never block): a FINAL check, after every other gate has had its
+/// say, for the one case none of them cover — a row that earns an action bucket
+/// (do_now/do_next/plan) on severity/effort/disposition alone, survives every other gate, but
+/// has no fix to put in front of the client. Delegates entirely to
+/// [`is_action_row_missing_a_fix`] — see that function's doc comment for the exact scope (in
+/// particular, why an UNRECOGNIZED rule id is deliberately exempt). Shipping a recognized-but-
+/// unauthored rule's row as an action item with a blank Fix block is worse than silence — it
+/// reads as "we checked, here is what to do" when there is nothing to do yet. It is NOT dropped
+/// (over-tell, never under-tell) and NOT a new refuse-to-export gate (this function always
+/// returns a destination, never an error) — it is re-routed to `"held"`, the same
+/// severity-unbounded bucket `is_held_for_review` and the C5-7 uncited-AI case both use, with
+/// its own disclosed reason ("fix not generated" — a caller building this row's headline calls
+/// `is_action_row_missing_a_fix` separately to know WHICH held-for-review reason applied,
+/// mirroring `gate_uncited`'s identical pattern a few lines up in `build_report_json`).
+/// `"accepted"` is deliberately EXEMPT: an auditor who already accepted the risk is not
+/// expecting a fix at all, so a missing one there is not a gap this check needs to catch.
 pub(crate) fn effective_bucket(
     finding: &Finding,
     disposition: Disposition,
     severity: &str,
     corpus: Option<&camerata_rules::RuleSet>,
     test_file_count: usize,
+    chosen_option: Option<&str>,
 ) -> &'static str {
     if is_held_for_review(finding, disposition) {
         return "held";
@@ -2154,7 +2195,69 @@ pub(crate) fn effective_bucket(
     if is_informational(finding, disposition, severity, corpus, test_file_count) {
         return "informational";
     }
-    matrix_bucket(disposition, severity, finding.effort.as_deref())
+    let bucket = matrix_bucket(disposition, severity, finding.effort.as_deref());
+    if is_action_row_missing_a_fix(
+        finding,
+        disposition,
+        severity,
+        corpus,
+        test_file_count,
+        chosen_option,
+    ) {
+        "held"
+    } else {
+        bucket
+    }
+}
+
+/// C5-8 (R7 amended): true when `finding` would land in an ACTION bucket
+/// (do_now/do_next/plan) by severity/effort/disposition alone, survives every other
+/// `effective_bucket` gate, and has no fix to show — neither a codebase-specific fix
+/// (`Finding::fix_specific`) nor the rule's own authored remediation ([`resolve_fix`]).
+/// [`effective_bucket`] delegates its own final check here (so the two can never drift) and a
+/// caller building this row's headline calls this a SECOND time to know WHICH held-for-review
+/// reason applied — the same duplication `gate_uncited`/`is_uncited_ai_finding` already accept
+/// in `build_report_json`'s matrix-building loop, for the identical reason.
+///
+/// # Scoped to RECOGNIZED corpus rules only
+/// This is the runtime safety net for the residual case P3's corpus-load gate is meant to make
+/// rare: a rule the corpus KNOWS ABOUT, which should therefore already carry authored
+/// remediation, somehow does not. It is deliberately NOT triggered merely because
+/// `finding.rule_id` has no corpus entry at all — an unrecognized id (an AI-tier finding's own
+/// invented rule id, or any rule the loaded corpus simply does not define) was never going to
+/// have a rule-level fix to begin with; that is a separate, pre-existing, already-documented gap
+/// (see `is_ai_tier`'s doc comment and `citation_join_still_labels_a_non_ai_tier_unknown_rule_id_as_ai_advisory`'s
+/// test — e.g. `SEC-NO-RAW-SQL-CONCAT-1` has no TOML entry at all and is untouched by the P3
+/// citation gate for the same reason), not a NEW one this check exists to catch. Concretely: an
+/// AI-tier finding that classifies into a grounded citation class (C5-7's `AiFindingClass`) but
+/// whose own invented rule id still has no corpus entry, and whose `fix_specific` generation
+/// hasn't run in a given synchronous test, is UNCHANGED by this gate — exactly as it was before
+/// C5-8 — because `resolve_fix` was never going to find a rule-level remediation for an invented
+/// id regardless of this feature.
+pub(crate) fn is_action_row_missing_a_fix(
+    finding: &Finding,
+    disposition: Disposition,
+    severity: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    test_file_count: usize,
+    chosen_option: Option<&str>,
+) -> bool {
+    if is_held_for_review(finding, disposition) || is_uncited_ai_finding(finding, corpus) {
+        return false;
+    }
+    if is_informational(finding, disposition, severity, corpus, test_file_count) {
+        return false;
+    }
+    let bucket = matrix_bucket(disposition, severity, finding.effort.as_deref());
+    if !matches!(bucket, "do_now" | "do_next" | "plan") {
+        return false;
+    }
+    if has_any_fix(finding, corpus, chosen_option) {
+        return false;
+    }
+    // Neither fix half exists. Only count that as the C5-8 gap when the rule is one the
+    // loaded corpus actually recognizes — see this function's doc comment.
+    corpus.and_then(|c| c.get_by_id(&finding.rule_id)).is_some()
 }
 
 /// Severity rank for ordering (0 = most severe, ascending). The canonical mapping for any
@@ -2906,11 +3009,33 @@ pub fn build_report_json(
         // P3: an AI-tier finding with no grounded citation (`is_uncited_ai_finding`) is ALSO
         // routed here — deliberately independent of severity (see that function's doc
         // comment), since the whole point is to catch the critical/high findings that would
-        // otherwise sit in the curated set carrying "AI-advisory, model-inferred." Both gates
-        // now live INSIDE `effective_bucket` itself (C3-6) — kept as a separate `gate_uncited`
-        // bool here only because the appendix headline below needs to say WHICH reason applied.
+        // otherwise sit in the curated set carrying "AI-advisory, model-inferred." C5-8 adds a
+        // THIRD such signal (an action-tier row with no fix to show at all). All three gates
+        // now live INSIDE `effective_bucket` itself (C3-6) — kept as separate bools here only
+        // because the appendix headline below needs to say WHICH reason applied.
+        // `chosen_option_for_rule` is needed by `effective_bucket`'s C5-8 "has a fix" check
+        // below, so it is computed here, ahead of that call, rather than after it as before.
+        let chosen_option_for_rule = opts
+            .chosen_options
+            .get(&f.rule_id.to_ascii_uppercase())
+            .map(String::as_str);
         let gate_uncited = is_uncited_ai_finding(f, corpus);
-        let bucket = effective_bucket(f, *disposition, severity, corpus, report.test_file_count);
+        let gate_no_fix = is_action_row_missing_a_fix(
+            f,
+            *disposition,
+            severity,
+            corpus,
+            report.test_file_count,
+            chosen_option_for_rule,
+        );
+        let bucket = effective_bucket(
+            f,
+            *disposition,
+            severity,
+            corpus,
+            report.test_file_count,
+            chosen_option_for_rule,
+        );
         // C4-P2: `title_for_finding` (not a bare corpus-or-rule_id join) so an AI-tier finding
         // grounded via the P3 class fallback gets a human-readable title too, instead of a
         // header that is nothing but the model's own invented rule id repeated.
@@ -2919,17 +3044,21 @@ pub fn build_report_json(
         // (never the gate's raw "Deny…" directive) when the corpus has one for this rule;
         // an AI-tier / not-yet-authored finding falls back to the pre-P4 derivation exactly
         // as before. See `client_headline_and_detail`'s doc comment.
-        let chosen_option_for_rule = opts
-            .chosen_options
-            .get(&f.rule_id.to_ascii_uppercase())
-            .map(String::as_str);
         let (base_headline, _) =
             client_headline_and_detail(f, corpus, &fallback_title, chosen_option_for_rule);
-        // P3: an honest "why is this not curated" marker for the appendix row, distinct
-        // from the other informational reasons (which the appendix count doesn't otherwise
-        // distinguish either — see `matrix.informational`'s doc comment).
+        // P3 / C5-8: an honest "why is this not curated" marker for the appendix row, distinct
+        // from the other informational/held reasons (which the appendix count doesn't otherwise
+        // distinguish either — see `matrix.informational`'s doc comment). `gate_uncited` and
+        // `gate_no_fix` are mutually exclusive by construction (`effective_bucket` checks
+        // `is_uncited_ai_finding` before ever reaching the C5-8 fix-availability check), so
+        // there is no ordering ambiguity between these two arms.
         let headline = if gate_uncited {
             format!("Needs review (uncited — no grounded citation found): {base_headline}")
+        } else if gate_no_fix {
+            format!(
+                "Needs review (fix not generated — no codebase-specific or rule-level \
+                 remediation available): {base_headline}"
+            )
         } else {
             base_headline
         };
@@ -3018,28 +3147,60 @@ pub fn build_report_json(
         let site_jsons = sites
             .iter()
             .map(|(f, disposition, reason, severity)| {
+                // `chosen_option_for_rule` feeds `effective_bucket`'s C5-8 "has a fix" check
+                // below, so (same reordering as the matrix-building loop above) it is computed
+                // ahead of that call now, not after it.
+                let chosen_option_for_rule = opts
+                    .chosen_options
+                    .get(&rule_id.to_ascii_uppercase())
+                    .map(String::as_str);
                 // Bug 4 / C3-6: keep the curated-site LABEL in lockstep with the matrix cell
                 // this finding actually lands in — an informational row reads "Convention to
                 // consider", never "Open (recommended: Plan)". `effective_bucket` is the SAME
                 // call the matrix-building pass above makes for this finding, so the two can
                 // never compute a different answer for the same row.
-                let bucket =
-                    effective_bucket(f, *disposition, severity, corpus, report.test_file_count);
+                let bucket = effective_bucket(
+                    f,
+                    *disposition,
+                    severity,
+                    corpus,
+                    report.test_file_count,
+                    chosen_option_for_rule,
+                );
+                // C5-8: unlike the uncited-AI gate (which `continue`s a finding out of every
+                // group above, so this loop never sees one), a no-fix-held row DOES still
+                // appear here — same rule, same group, just this one site's `bucket` is
+                // `"held"` instead of an action tier. Disclose WHY in its own headline too,
+                // not only via `disposition_label`'s generic held-for-review wording, so a
+                // reader scanning this site within its rule's curated group sees the concrete
+                // reason right next to it.
+                let gate_no_fix = is_action_row_missing_a_fix(
+                    f,
+                    *disposition,
+                    severity,
+                    corpus,
+                    report.test_file_count,
+                    chosen_option_for_rule,
+                );
                 let confirmed_by_client = dispositions
                     .get(&finding_key(f))
                     .map(|d| d.confirmed_by_client)
                     .unwrap_or(false);
-                let chosen_option_for_rule = opts
-                    .chosen_options
-                    .get(&rule_id.to_ascii_uppercase())
-                    .map(String::as_str);
                 // P4: prefer the authored, repo-specific (headline, detail) pair over the raw
                 // gate text — see `client_headline_and_detail`'s doc comment. `detail` here is
                 // NOT `f.detail.clone()` unconditionally anymore: for a floor finding with an
                 // authored template, it's the authored client-facing detail instead of the
                 // gate's own "Deny…" enforcement prose.
-                let (headline, detail) =
+                let (base_headline, detail) =
                     client_headline_and_detail(f, corpus, &title, chosen_option_for_rule);
+                let headline = if gate_no_fix {
+                    format!(
+                        "Needs review (fix not generated — no codebase-specific or rule-level \
+                         remediation available): {base_headline}"
+                    )
+                } else {
+                    base_headline
+                };
                 CuratedSiteJson {
                     repo: f.repo.clone(),
                     path: f.path.clone(),
@@ -5292,14 +5453,113 @@ mod tests {
         // above: every real corpus rule is now authored, so a synthetic single-rule corpus (via
         // `ruleset_with_unauthored_rule`) is the only way to permanently pin the "unauthored
         // remediation omits the Fix line" fail-safe, independent of corpus authoring state.
+        //
+        // C5-8: a row with NEITHER a rule-level fix NOR a codebase-specific one is now re-routed
+        // to `held` entirely (see `curated_row_with_neither_fix_half_and_a_known_unauthored_rule_
+        // is_held_not_curated` below) — that is a DIFFERENT, newer invariant than the one this
+        // test exists to pin (that `resolve_fix`/`CuratedSiteJson::fix` itself never fabricates a
+        // directive-sourced fallback). Giving the finding a `fix_specific` here keeps it curated
+        // so this test still exercises exactly what it always did, undisturbed by C5-8.
         let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
-        let f = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
+        let mut f = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
+        f.fix_specific = Some(
+            "A codebase-specific fix, independent of the rule's own (absent) \
+                                authored remediation."
+                .to_string(),
+        );
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
         assert_eq!(
             json.curated_findings[0].sites[0].fix, None,
             "an unauthored rule's Fix block must be omitted (None), never backfilled from directive"
         );
+    }
+
+    /// C5-8 (R7 amended): the actual target scenario `curated_finding_site_fix_is_none_when_
+    /// remediation_is_unauthored` above used to (incorrectly, pre-C5-8) leave curated — a KNOWN
+    /// corpus rule with no authored remediation, paired with a finding that also has no
+    /// codebase-specific fix. Both fix halves are empty, so this row must never ship as a
+    /// do_now item with a blank Fix block: it is re-routed to `held`, fully visible, with the
+    /// reason disclosed in its own headline.
+    #[test]
+    fn curated_row_with_neither_fix_half_and_a_known_unauthored_rule_is_held_not_curated() {
+        let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
+        let f = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
+        assert_eq!(
+            f.fix_specific, None,
+            "sanity check: the shared `finding()` helper must not default to a fix_specific"
+        );
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+
+        assert!(
+            json.curated_findings.is_empty(),
+            "a row with no fix at all must never ship as a curated action item: {:?}",
+            json.curated_findings
+        );
+        assert_eq!(
+            json.matrix.held.len(),
+            1,
+            "it must be re-routed to held, not dropped: {:?}",
+            json.matrix.held
+        );
+        assert_eq!(
+            json.matrix.held[0].severity, "critical",
+            "held never downgrades severity"
+        );
+        assert!(
+            json.matrix.held[0]
+                .headline
+                .to_lowercase()
+                .contains("fix not generated"),
+            "the held row's own headline must disclose WHY: {}",
+            json.matrix.held[0].headline
+        );
+        // It is still fully present in the held-for-review appendix group too, never dropped.
+        let group = json
+            .held_for_review_findings
+            .iter()
+            .find(|g| g.rule_id == "SEC-TEST-UNAUTHORED-1")
+            .expect("the row must still be present in held_for_review_findings");
+        assert_eq!(group.sites[0].bucket, "held");
+        assert_eq!(group.sites[0].fix, None);
+        assert_eq!(group.sites[0].fix_for_this_finding, None);
+    }
+
+    /// C5-8: a curated row WITH a fix (either half) is entirely unaffected — this is the
+    /// companion "never over-applies" half of the gate's test matrix.
+    #[tokio::test]
+    async fn curated_row_with_a_fix_stays_in_its_action_bucket() {
+        let corpus = camerata_rules::ruleset_with_unauthored_rule("SEC-TEST-UNAUTHORED-1");
+
+        // Half A: no rule-level remediation, but a codebase-specific fix WAS generated.
+        let mut with_specific = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
+        with_specific.fix_specific =
+            Some("Rotate the credential and remove it from source.".to_string());
+        let report = report_with(vec![with_specific], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        assert_eq!(json.matrix.held.len(), 0);
+        assert_eq!(json.matrix.do_now.len(), 1);
+        assert_eq!(json.curated_findings.len(), 1);
+
+        // Half B: no codebase-specific fix, but the rule itself DOES carry authored remediation.
+        let corpus_path = camerata_rules::corpus_path();
+        let (real_corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let mut rls = finding(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        rls.captures
+            .insert("table".to_string(), "profiles".to_string());
+        let report2 = report_with(vec![rls], vec!["SUPABASE-RLS-ENABLED-1"]);
+        let json2 = build_report_json(&report2, &HashMap::new(), Some(&real_corpus), &empty_opts());
+        assert_eq!(json2.matrix.held.len(), 0);
+        assert_eq!(json2.matrix.do_now.len(), 1);
+        assert_eq!(json2.curated_findings.len(), 1);
+        assert!(json2.curated_findings[0].sites[0].fix.is_some());
     }
 
     // ── P4: floor findings get finding-level treatment ──────────────────────────────────
@@ -7466,7 +7726,7 @@ mod tests {
             "an R1-shaped (low + needs-review) finding must be held for review"
         );
         assert_eq!(
-            effective_bucket(&f, Disposition::Unresolved, "low", None, 0),
+            effective_bucket(&f, Disposition::Unresolved, "low", None, 0, None),
             "held",
             "it must route to the held bucket, not an action tier"
         );

@@ -339,9 +339,17 @@ fn partition_rows(
             // matrix pass and curated-findings label — never this module's own
             // severity-only `matrix_bucket` call (that was the root cause of the xlsx's
             // bucket counts disagreeing with the PDF/JSON: a hedged or uncited-AI row had no
-            // gate here to hold it out of an action tier).
-            let bucket =
-                effective_bucket(f, disposition, &severity, corpus, report.test_file_count);
+            // gate here to hold it out of an action tier). C5-8 extends this same shared call
+            // with a "has a fix" check, so `chosen_option_for_rule` (already computed above for
+            // `fix`/`headline`/`detail`) is threaded through here too.
+            let bucket = effective_bucket(
+                f,
+                disposition,
+                &severity,
+                corpus,
+                report.test_file_count,
+                chosen_option_for_rule,
+            );
             let confirmed = wire.map(|d| d.confirmed_by_client).unwrap_or(false);
             let label = disposition_label(disposition, &reason, bucket, confirmed);
             (bucket, Some(disposition), label, String::new())
