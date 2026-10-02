@@ -384,9 +384,15 @@ pub(crate) fn disposition_label(
         // C5-4: a calibration hedge (any severity) reads as a distinct "held for review" call
         // to action, never the low-stakes "Convention to consider" wording the `informational`
         // appendix uses — a high/critical row the calibrator itself flagged debatable must never
-        // read like a style note.
+        // read like a style note. C5-7: the `held` bucket now also carries a SECOND, unrelated
+        // reason (a high/critical uncited AI-tier finding — see `is_uncited_ai_finding`), so
+        // this label is deliberately reason-agnostic rather than naming "calibration"
+        // specifically; the row's own headline already states the concrete reason ("calibration
+        // flagged..." / "Needs review (uncited...)") right next to it.
         Disposition::Unresolved if bucket == "held" => {
-            "Held for review (calibration flagged this for further human judgment)".to_string()
+            "Held for review (a human reviewer's judgment call is needed before this can be \
+             actioned)"
+                .to_string()
         }
         Disposition::Unresolved if bucket == "informational" => {
             "Convention to consider (informational)".to_string()
@@ -1659,10 +1665,14 @@ pub(crate) fn also_matches_titles(
 /// presented as grounded. `build_report_json` excludes such a finding from
 /// `curated_findings` entirely and routes it to the informational/held-for-review bucket
 /// with an explicit "needs review (uncited)" headline, REGARDLESS of severity — unlike
-/// `is_informational`'s other signals (or `is_held_for_review`'s calibration hedge), this one is
-/// a report-integrity gate, not a triage-confidence signal, so the "a critical/high finding is
-/// never informational" invariant there does not apply here on purpose: a critical, uncited
-/// finding is PRECISELY the case this gate exists to catch.
+/// `is_informational`'s other signals, this one is a report-integrity gate, not a
+/// triage-confidence signal: a critical, uncited finding is PRECISELY the case this gate
+/// exists to catch, so it is never dropped, never silently demoted into an ordinary
+/// severity-capped appendix row, and (C5-7) never squashed into `informational` at a
+/// severity that invariant was never meant to carry — see [`effective_bucket`]'s doc comment
+/// for the held-vs-informational split this feeds into (held at high/critical, informational
+/// at medium/low/info, both still fully visible and both still excluded from
+/// `curated_findings`).
 pub(crate) fn is_uncited_ai_finding(
     finding: &Finding,
     corpus: Option<&camerata_rules::RuleSet>,
@@ -2108,6 +2118,22 @@ pub(crate) fn matrix_bucket(
 /// hedge routes to `"held"` at ANY severity, including critical/high, which `is_informational`'s
 /// own hard invariant would otherwise keep in an action tier. See that function's doc comment
 /// for the regression this closes.
+///
+/// C5-7 (closes the gate's `C5-5`-flagged open invariant): [`is_uncited_ai_finding`] is now
+/// checked as its OWN branch, ahead of `is_informational`, rather than folded into the same
+/// `|| is_uncited_ai_finding(...)` arm that fed `"informational"`. That shared arm is how a
+/// high/critical uncited AI finding used to end up in `matrix.informational` carrying its real
+/// (high/critical) severity — `is_uncited_ai_finding` is deliberately severity-blind (see its
+/// own doc comment: "a critical, uncited finding is PRECISELY the case this gate exists to
+/// catch"), but `informational` is everywhere else in this module a severity-CAPPED appendix
+/// (`is_informational`'s hard "critical/high is never informational" rule), and the shared arm
+/// silently exempted this one signal from that invariant. At high/critical severity an uncited
+/// AI finding now routes to `"held"` instead — the same severity-unbounded "a human must decide"
+/// destination `is_held_for_review` uses (here, the human decision needed is "supply or confirm
+/// a citation" rather than "resolve a calibration hedge", but the destination, visibility, and
+/// real-severity badge are identical). At medium/low/info it still routes to `"informational"`,
+/// exactly as before — nothing changes for the severity band `is_informational`'s cap was
+/// already written for.
 pub(crate) fn effective_bucket(
     finding: &Finding,
     disposition: Disposition,
@@ -2116,14 +2142,19 @@ pub(crate) fn effective_bucket(
     test_file_count: usize,
 ) -> &'static str {
     if is_held_for_review(finding, disposition) {
-        "held"
-    } else if is_informational(finding, disposition, severity, corpus, test_file_count)
-        || is_uncited_ai_finding(finding, corpus)
-    {
-        "informational"
-    } else {
-        matrix_bucket(disposition, severity, finding.effort.as_deref())
+        return "held";
     }
+    if is_uncited_ai_finding(finding, corpus) {
+        return if severity_rank(severity) <= severity_rank("high") {
+            "held"
+        } else {
+            "informational"
+        };
+    }
+    if is_informational(finding, disposition, severity, corpus, test_file_count) {
+        return "informational";
+    }
+    matrix_bucket(disposition, severity, finding.effort.as_deref())
 }
 
 /// Severity rank for ordering (0 = most severe, ascending). The canonical mapping for any
@@ -6238,17 +6269,143 @@ mod tests {
     /// the "MOST important findings" the plan's problem statement calls out) must still be
     /// excluded from curated, unlike `is_informational`'s other signals which deliberately
     /// never touch critical/high.
+    ///
+    /// C5-7: a critical/high uncited finding used to land in `matrix.informational` — the SAME
+    /// bucket `is_informational`'s own hard invariant caps at `<= medium` everywhere else,
+    /// which this row silently violated (the gate's own `C5-5`-flagged open test). It now
+    /// routes to `matrix.held` instead, at its real (uncited) severity — never informational,
+    /// never an action bucket, never dropped.
     #[test]
-    fn citation_gate_excludes_a_critical_uncited_ai_finding_despite_severity() {
+    fn citation_gate_routes_a_critical_uncited_ai_finding_to_held_not_informational() {
         let f = finding("AI-SOME-NOVEL-DEFECT", "a.rs", 1, "critical");
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
         assert!(json.curated_findings.is_empty());
         assert_eq!(json.matrix.do_now.len(), 0);
-        assert_eq!(json.matrix.informational.len(), 1);
+        assert_eq!(
+            json.matrix.informational.len(),
+            0,
+            "a critical uncited finding must never sit in the severity-capped informational \
+             appendix: {:?}",
+            json.matrix.informational
+        );
+        assert_eq!(
+            json.matrix.held.len(),
+            1,
+            "a critical uncited finding must route to held, the severity-unbounded needs-\
+             review bucket: {:?}",
+            json.matrix.held
+        );
+        assert_eq!(
+            json.matrix.held[0].severity, "critical",
+            "held never downgrades severity, same as the calibration-hedge case"
+        );
+        assert_eq!(json.matrix.held[0].rule_id, "AI-SOME-NOVEL-DEFECT");
         // The severity histogram (cover stats) still honestly reflects it — over-tell, not
         // hidden from the reader entirely, just excluded from the curated action tiers.
         assert_eq!(json.cover.stats.critical, 1);
+    }
+
+    /// C5-7: provenance/citation are ALWAYS the tier/citation of the row's OWN rule id, never
+    /// a sibling finding's — a held, uncited AI-tier row must never display "Deterministic"
+    /// provenance or another rule's citation, even when a genuinely grounded deterministic
+    /// finding is exported right alongside it in the same report. Exercised through
+    /// `findings.json` (`FindingRow`), the one exported shape that carries both `provenance`
+    /// and `citation_urls` per row regardless of bucket (a held/informational row never gets a
+    /// `CuratedGroupJson` at all — see the `by_rule` loop's uncited-AI `continue` above).
+    #[tokio::test]
+    async fn uncited_ai_row_provenance_and_citation_are_never_borrowed_from_a_sibling() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let grounded = finding("SEC-NO-HARDCODED-SECRETS-1", "a.rs", 1, "critical");
+        let uncited_ai = finding("AI-SOME-NOVEL-DEFECT", "b.rs", 2, "critical");
+        let report = report_with(vec![grounded, uncited_ai], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let findings_export = crate::xlsx_export::build_findings_export(
+            &report,
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+        // `FindingRow`'s fields are private to `xlsx_export` (only `findings.json`'s serialized
+        // shape is the stable public contract) — go through `serde_json::Value`, same as the
+        // `export_invariants_gate` module's own fixture crawlers do.
+        let export_value =
+            serde_json::to_value(&findings_export).expect("FindingsExport must serialize");
+        let rows = export_value["findings"]
+            .as_array()
+            .expect("findings must be an array");
+
+        let ai_row = rows
+            .iter()
+            .find(|r| r["rule_id"].as_str() == Some("AI-SOME-NOVEL-DEFECT"))
+            .expect("the uncited AI row must still be exported in findings.json");
+        assert_eq!(
+            ai_row["provenance"].as_str(),
+            Some("AI-advisory"),
+            "an uncited AI-tier row must never display borrowed \"Deterministic\" provenance: \
+             {ai_row:?}"
+        );
+        assert!(
+            ai_row["citation_urls"].as_str().unwrap_or("").is_empty(),
+            "an uncited AI-tier row's citation must be its own model-inferred label, not a \
+             sibling's URLs: {:?}",
+            ai_row["citation_urls"]
+        );
+
+        let secret_row = rows
+            .iter()
+            .find(|r| r["rule_id"].as_str() == Some("SEC-NO-HARDCODED-SECRETS-1"))
+            .expect("the grounded deterministic row must still be exported");
+        assert_eq!(secret_row["provenance"].as_str(), Some("Deterministic"));
+
+        // And the bucket split itself: the uncited critical AI row is held, out of every
+        // action bucket and out of informational; the grounded deterministic row stays curated.
+        assert_eq!(json.matrix.held.len(), 1);
+        assert_eq!(json.matrix.held[0].rule_id, "AI-SOME-NOVEL-DEFECT");
+        assert_eq!(json.matrix.do_now.len(), 1);
+        assert_eq!(json.matrix.do_now[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
+    }
+
+    /// C5-7: a grounded AI-tier row (its class fallback resolves to a real published standard
+    /// — here, RLS) is UNAFFECTED by the held-routing fix: it is not uncited, so
+    /// `is_uncited_ai_finding` never fires for it, and a critical grounded AI finding stays
+    /// exactly where its severity×effort quadrant puts it (`do_now`), never diverted to `held`.
+    #[tokio::test]
+    async fn a_grounded_ai_row_with_a_real_citation_is_unaffected_by_the_held_route() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let mut rls = finding(
+            "AI-CROSS-TENANT-RLS-1",
+            "supabase/migrations/1.sql",
+            1,
+            "critical",
+        );
+        rls.detail = "Row Level Security is disabled on the payments table.".to_string();
+        let report = report_with(vec![rls], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+
+        assert!(is_ai_tier(&finding(
+            "AI-CROSS-TENANT-RLS-1",
+            "x",
+            1,
+            "critical"
+        )));
+        assert_eq!(
+            json.matrix.held.len(),
+            0,
+            "a grounded AI finding must never be routed to held: {:?}",
+            json.matrix.held
+        );
+        assert_eq!(json.matrix.do_now.len(), 1);
+        assert_eq!(json.matrix.do_now[0].rule_id, "AI-CROSS-TENANT-RLS-1");
+        assert_eq!(json.curated_findings.len(), 1);
+        assert_ne!(json.curated_findings[0].citation.kind, "advisory");
     }
 
     /// A non-AI-tier finding's own advisory citation is untouched by the gate (see
@@ -8944,13 +9101,18 @@ mod tests {
 //     `held_for_review` is now `matrix.informational.len() + matrix.held.len()`. STANDING (both
 //     halves now pass): `hedge_confidence_is_a_strict_biconditional_on_every_row` and
 //     `held_for_review_count_equals_total_needs_review_count`.
-//  6. Bucket invariant: a row with `bucket ∈ {informational}` has `severity <= medium`. OPEN —
-//     `is_uncited_ai_finding` (P3) deliberately overrides this for an uncited AI-tier finding
-//     of ANY severity, by design (see that function's own doc comment: "a critical, uncited
-//     finding is PRECISELY the case this gate exists to catch"), so a high/critical uncited
-//     finding legitimately sits in the informational appendix with its real (high) severity
-//     still shown. OPEN (`#[ignore]`, C5-5 — flagged for a product decision, not a bug fix):
-//     `informational_bucket_severity_is_bounded_except_for_the_uncited_ai_override`.
+//  6. Bucket invariant: a row with `bucket ∈ {informational}` has `severity <= medium`. CLOSED
+//     (C5-7, was OPEN/`#[ignore]`d as C5-5): `is_uncited_ai_finding` (P3) is deliberately
+//     severity-blind (see that function's own doc comment: "a critical, uncited finding is
+//     PRECISELY the case this gate exists to catch"), so a high/critical uncited finding used
+//     to be shoved into `informational` anyway, with its real (high/critical) severity shown —
+//     the one documented exception to this invariant, and the ignored test pinned it as a
+//     known gap rather than silently passing. Fixed by giving that signal its OWN destination
+//     in `effective_bucket`: a high/critical uncited finding now routes to `matrix.held` (the
+//     same severity-unbounded "a human must decide" bucket [`is_held_for_review`] uses) instead
+//     of `informational`; only a medium/low/info uncited finding still lands in `informational`,
+//     where the severity cap was always meant to apply. STANDING (no exception remains):
+//     `informational_bucket_severity_is_bounded_with_no_exceptions`.
 //  7. Provenance equals the tier of the row's OWN rule; a merged row's citation is its PRIMARY
 //     site's own resolved citation, never an absorbed member's. Traces to C4-P2
 //     (`citation_for_finding` called per-site, not per-group-first-site-only in error) / C3-6.
@@ -9091,8 +9253,9 @@ mod export_invariants_gate {
     /// - `AI-STALE-SESSION-INVALIDATION-1` ("f_ai_advisory"): a standalone, high-severity,
     ///   genuinely uncited AI-tier finding (no RLS/XSS/open-redirect/weak-token/query-
     ///   injection/CORS vocabulary anywhere in its id or detail, so `classify_ai_finding` can't
-    ///   ground it) — the vehicle for invariant 6's open half and invariant 7's "AI-advisory"
-    ///   provenance check.
+    ///   ground it) — the vehicle for invariant 6 (C5-7: routes to `matrix.held`, at its real
+    ///   `high` severity, never `informational`) and invariant 7's "AI-advisory" provenance
+    ///   check.
     async fn build_fixture() -> Fixture {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
@@ -9617,18 +9780,21 @@ mod export_invariants_gate {
         );
     }
 
-    // ── Invariant 6 ──────────────────────────────────────────────────────────────────────
+    // ── Invariant 6 (STANDING — C5-7 closed the former C5-5 open exception) ───────────────
 
+    /// C5-5 (closed by C5-7): this gate test used to be `#[ignore]`d, pinning a KNOWN
+    /// exception — `is_uncited_ai_finding` (P3) is deliberately severity-blind (see that
+    /// function's own doc comment: "a critical, uncited finding is PRECISELY the case this
+    /// gate exists to catch"), and `f_ai_advisory` (`high` severity, uncited) used to still
+    /// route to `matrix.informational`, silently breaking the "informational implies
+    /// low-stakes" invariant this test checks. `effective_bucket` now gives a high/critical
+    /// uncited finding its OWN destination (`matrix.held`, the same severity-unbounded bucket
+    /// [`is_held_for_review`] uses) instead of `informational`, so the invariant holds with NO
+    /// exception left — this test is un-ignored, and a second assertion locks in WHERE the
+    /// former exception actually went: `f_ai_advisory` must now be in `held`, at its real
+    /// `high` severity, out of both `informational` and every action bucket.
     #[tokio::test]
-    #[ignore = "C5-5 open: `is_uncited_ai_finding` (P3) deliberately overrides the \"informational \
-                implies low-stakes\" assumption for an uncited AI-tier finding of ANY severity \
-                (f_ai_advisory in this fixture is `high` and still routes to \
-                matrix.informational) — see that function's own doc comment, which frames this \
-                as intentional: \"a critical, uncited finding is PRECISELY the case this gate \
-                exists to catch.\" Flagging for a product decision (should the appendix visibly \
-                distinguish a high/critical uncited row from a genuinely low-stakes one?), not \
-                filing it as a bug to silently fix."]
-    async fn informational_bucket_severity_is_bounded_except_for_the_uncited_ai_override() {
+    async fn informational_bucket_severity_is_bounded_with_no_exceptions() {
         let fx = build_fixture().await;
         let mut offenders = Vec::new();
         for item in fx.json.matrix.informational.iter() {
@@ -9641,8 +9807,44 @@ mod export_invariants_gate {
         }
         assert!(
             offenders.is_empty(),
-            "a bucket==informational row must have severity <= medium: {offenders:#?}"
+            "a bucket==informational row must have severity <= medium, with no exceptions \
+             left: {offenders:#?}"
         );
+
+        // The former exception's destination: the uncited, high-severity AI finding must now
+        // be in `held`, not informational and not any action bucket, with its real severity.
+        let held_ai = fx
+            .json
+            .matrix
+            .held
+            .iter()
+            .find(|f| f.rule_id == "AI-STALE-SESSION-INVALIDATION-1")
+            .expect("the uncited high-severity AI finding must be in matrix.held");
+        assert_eq!(
+            held_ai.severity, "high",
+            "held never downgrades severity: {held_ai:?}"
+        );
+        assert!(
+            !fx.json
+                .matrix
+                .informational
+                .iter()
+                .any(|f| f.rule_id == "AI-STALE-SESSION-INVALIDATION-1"),
+            "the uncited AI finding must not ALSO appear in informational"
+        );
+        for (bucket_name, bucket) in [
+            ("do_now", &fx.json.matrix.do_now),
+            ("do_next", &fx.json.matrix.do_next),
+            ("plan", &fx.json.matrix.plan),
+            ("accepted", &fx.json.matrix.accepted),
+        ] {
+            assert!(
+                !bucket
+                    .iter()
+                    .any(|f| f.rule_id == "AI-STALE-SESSION-INVALIDATION-1"),
+                "the uncited AI finding must never land in the action bucket {bucket_name}"
+            );
+        }
     }
 
     // ── Invariant 7 (STANDING) ───────────────────────────────────────────────────────────
