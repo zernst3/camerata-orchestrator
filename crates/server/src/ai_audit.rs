@@ -4712,26 +4712,33 @@ const RELATIVE_POSITION_PHRASES: &[&str] = &[
     "same as the",
 ];
 
-/// Split `text` into sentences on `.`/`!`/`?` (delimiter kept with the sentence it ends),
-/// trimming and dropping empty pieces. A simple, general tokenizer — good enough to isolate the
-/// ONE sentence carrying a cross-reference from the surrounding narrative without disturbing the
-/// rest of a multi-sentence `detail`.
+/// Split `text` into sentences (delimiter kept with the sentence it ends), trimming and
+/// dropping empty pieces. Splits ONLY at a real [`crate::report_export::sentence_boundaries`]
+/// hit — NOT at every bare `.`/`!`/`?` — so a dotted call, filename, version string, URL, or
+/// known abbreviation embedded in `text` is never torn apart into its own spurious "sentence".
+///
+/// REG-5: this used to split on every literal `.`/`!`/`?` regardless of context, which exploded
+/// `client.auth.method()` into three fragments ("client.", "auth.", "method()"). Callers that
+/// rejoin the returned pieces with `" "` (see `strip_cross_reference_sentences`) then stitched
+/// those fragments back together as `"client. auth. method()"` — inserting a space after every
+/// such period, even when nothing was actually filtered out. Splitting only at a genuine
+/// boundary makes the rejoin a no-op everywhere except the one case this tokenizer exists to
+/// handle in the first place: a GENUINELY run-together sentence with no space at all
+/// ("...done.Next step..."), where `sentence_boundaries` still finds the boundary (an uppercase
+/// letter immediately after the punctuation) and the rejoin supplies the missing space.
 fn split_into_sentences(text: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut cur = String::new();
-    for ch in text.chars() {
-        cur.push(ch);
-        if matches!(ch, '.' | '!' | '?') {
-            let trimmed = cur.trim();
-            if !trimmed.is_empty() {
-                out.push(trimmed.to_string());
-            }
-            cur.clear();
+    let mut start = 0usize;
+    for end in crate::report_export::sentence_boundaries(text) {
+        let piece = text[start..end].trim();
+        if !piece.is_empty() {
+            out.push(piece.to_string());
         }
+        start = end;
     }
-    let trimmed = cur.trim();
-    if !trimmed.is_empty() {
-        out.push(trimmed.to_string());
+    let tail = text[start..].trim();
+    if !tail.is_empty() {
+        out.push(tail.to_string());
     }
     out
 }
@@ -10957,6 +10964,59 @@ mod tests {
             2,
             "different severity + disjoint named objects must stay two rows: {out:?}"
         );
+    }
+
+    // ── REG-5: split_into_sentences / strip_cross_reference_sentences must never insert a
+    // space after a period embedded in an identifier, filename, version string, URL, or known
+    // abbreviation — only at a GENUINE sentence boundary. See `report_export::sentence_boundaries`'s
+    // doc comment for the full rule set this closes.
+
+    #[test]
+    fn split_into_sentences_only_splits_at_a_genuine_sentence_boundary() {
+        let text = "call foo.bar() in module.spec.ts, e.g. now.Next sentence v1.2.3 \
+                     https://x.y/z";
+        let sentences = split_into_sentences(text);
+        assert_eq!(
+            sentences,
+            vec![
+                "call foo.bar() in module.spec.ts, e.g. now.".to_string(),
+                "Next sentence v1.2.3 https://x.y/z".to_string(),
+            ],
+            "the ONLY real sentence boundary is \"now.\" -> \"Next\" (a run-together sentence \
+             with no space at all); every other period here sits inside an identifier/filename/\
+             version/URL/abbreviation and must not split: {sentences:?}"
+        );
+    }
+
+    #[test]
+    fn strip_cross_reference_sentences_only_adds_a_space_at_the_genuine_boundary() {
+        // The fixed step, exercised with no other_ids (so nothing is actually filtered) — this
+        // isolates the split+rejoin spacing behavior from the cross-reference-stripping logic.
+        // REG-5: before the fix, this rejoin forced a space after EVERY period in the input
+        // (~111 instances in one real PDF), corrupting dotted calls, filenames, version
+        // strings, and abbreviations alike.
+        let input = "call foo.bar() in module.spec.ts, e.g. now.Next sentence v1.2.3 \
+                      https://x.y/z";
+        let expected = "call foo.bar() in module.spec.ts, e.g. now. Next sentence v1.2.3 \
+                         https://x.y/z";
+        let (output, referenced) = strip_cross_reference_sentences(input, &[]);
+        assert_eq!(
+            output, expected,
+            "only the genuine \"now.Next\" run-together boundary gets a space inserted; every \
+             dotted call, filename, version string, and abbreviation must be byte-identical to \
+             the input"
+        );
+        assert!(referenced.is_empty());
+    }
+
+    #[test]
+    fn strip_cross_reference_sentences_skips_backtick_delimited_spans_entirely() {
+        // A code span quoted in prose must never be scanned for sentence punctuation, no matter
+        // what it contains — `foo.Bar()` inside backticks must not be mistaken for a
+        // run-together sentence just because `Bar` happens to be capitalized.
+        let input = "See `foo.Bar()` for the implementation. It is documented separately.";
+        let (output, _) = strip_cross_reference_sentences(input, &[]);
+        assert_eq!(output, input);
     }
 
     #[test]

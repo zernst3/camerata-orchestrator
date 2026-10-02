@@ -2390,33 +2390,74 @@ const HEADLINE_LENGTH_CAP: usize = 200;
 const SENTENCE_ABBREVIATIONS: &[&str] = &["e.g.", "i.e.", "etc.", "vs."];
 
 /// Find the end index (exclusive, just past the period) of the first REAL sentence boundary in
-/// `s`, or `None` if there is no such boundary anywhere. A `.` is a real boundary only when:
-/// it sits outside any open `(...)` parenthetical (so "(e.g. allowing X)" never splits there,
-/// parenthetical or not); it is NOT immediately preceded by a known abbreviation
-/// (`SENTENCE_ABBREVIATIONS`, so a bare "i.e." / "etc." outside parens doesn't split either);
-/// and it is followed by whitespace then an uppercase letter, OR it is the very last character
-/// in the string (a clean trailing sentence with nothing after it).
+/// `s`, or `None` if there is no such boundary anywhere. See [`sentence_boundaries`] for the
+/// full rule set (this is just its first hit) — kept as its own function because
+/// [`defect_headline`] only ever wants the first boundary, not every one.
 fn sentence_boundary(s: &str) -> Option<usize> {
+    sentence_boundaries(s).first().copied()
+}
+
+/// REG-5: find every REAL sentence-boundary index (exclusive, just past the punctuation) in
+/// `s` — the general scan [`sentence_boundary`] (first hit only) and
+/// [`crate::ai_audit::split_into_sentences`] (every hit, to tokenize a `detail` into sentences
+/// without fragmenting identifiers) both build on. A `.`/`!`/`?` is a real boundary only when
+/// ALL of the following hold:
+///
+/// - it sits outside any backtick-delimited span (`` `...` `` is treated as fully opaque —
+///   code/identifiers quoted in prose, e.g. `` `foo.bar()` ``, must never be scanned for
+///   sentence punctuation at all, regardless of what they contain);
+/// - it sits outside any open `(...)` parenthetical (so "(e.g. allowing X)" never splits there);
+/// - for `.` specifically, it is NOT immediately preceded by a known abbreviation
+///   (`SENTENCE_ABBREVIATIONS`, so a bare "i.e." / "etc." outside parens doesn't split either);
+/// - it is followed, with NO whitespace required, by an uppercase letter (this is what still
+///   catches a genuinely run-together sentence like "end.Start" and inserts the missing space
+///   when the caller rejoins kept sentences with `" "` — the ONLY legitimate reason this
+///   machinery was built), OR by whitespace then an uppercase letter, OR it is the very last
+///   character in the string (a clean trailing sentence with nothing after it).
+///
+/// This is deliberately NOT "any `.` is a boundary" — that naive scan is REG-5: it used to treat
+/// every period in `detail` (including the ones inside dotted calls, filenames, version
+/// strings, and abbreviations — `client.auth.method()`, `settings.toml`,
+/// `0001_migration.sql:12`, `e.g.`, `v1.2.3`) as a sentence end, fragment on it, then rejoin the
+/// fragments with a forced single space — silently inserting a space after every such period
+/// across headline/detail prose in the PDF, xlsx, and JSON alike (all three artifacts derive
+/// from the same stored `Finding::detail`). A period is only a genuine boundary here when the
+/// text immediately after it is SHAPED like the start of a new sentence (uppercase letter, or
+/// end of string) — a lowercase letter or digit right after the period (the identifier/
+/// filename/version/dotted-call case) never qualifies, boundary-shaped-ness alone included.
+pub(crate) fn sentence_boundaries(s: &str) -> Vec<usize> {
+    let mut out = Vec::new();
     let mut paren_depth: i32 = 0;
+    let mut in_backtick = false;
     for (i, c) in s.char_indices() {
+        if c == '`' {
+            in_backtick = !in_backtick;
+            continue;
+        }
+        if in_backtick {
+            continue;
+        }
         match c {
             '(' => paren_depth += 1,
             ')' => paren_depth = (paren_depth - 1).max(0),
-            '.' if paren_depth == 0 => {
-                let rest_trimmed = s[i + 1..].trim_start();
+            '.' | '!' | '?' if paren_depth == 0 => {
+                if c == '.' && ends_with_known_abbreviation(&s[..=i]) {
+                    continue;
+                }
+                let rest_trimmed = s[i + c.len_utf8()..].trim_start();
                 let boundary_shaped = rest_trimmed
                     .chars()
                     .next()
                     .map(char::is_uppercase)
                     .unwrap_or(true); // nothing after it at all: a clean trailing sentence.
-                if boundary_shaped && !ends_with_known_abbreviation(&s[..=i]) {
-                    return Some(i + 1);
+                if boundary_shaped {
+                    out.push(i + c.len_utf8());
                 }
             }
             _ => {}
         }
     }
-    None
+    out
 }
 
 fn ends_with_known_abbreviation(prefix: &str) -> bool {
@@ -3598,6 +3639,185 @@ mod tests {
             );
         }
         assert!(serialized.contains("apps/web/a.ts"));
+    }
+
+    /// REG-5 golden-export gate: scan `field` for `<alnum>. <lowercase-or-digit>` — the
+    /// signature of a space wrongly inserted after a period embedded in an identifier, dotted
+    /// call, filename, version string, or abbreviation (`client. auth. method()`,
+    /// `settings. toml`, `0001_migration. sql:12`, `e. g.`, `v1. 2. 3`) — EXCLUDING a match
+    /// immediately preceded by a known abbreviation (`e.g.`/`i.e.`/`etc.`/`vs.`), which is
+    /// correct, un-corrupted English (e.g. "...accepts unsafe values, e.g. eval.") and must not
+    /// be flagged as a false positive. Returns the first offending match, if any.
+    fn find_period_space_corruption(field: &str) -> Option<&str> {
+        let corruption =
+            regex::Regex::new(r"[A-Za-z0-9]\. [a-z0-9]").expect("static regex must compile");
+        for m in corruption.find_iter(field) {
+            // The matched alnum is a single ASCII byte, so the period sits at `m.start() + 1`.
+            let period_idx = m.start() + 1;
+            if !ends_with_known_abbreviation(&field[..=period_idx]) {
+                return Some(m.as_str());
+            }
+        }
+        None
+    }
+
+    /// Pull a named string field off a `serde_json::Value` object, if present and non-null.
+    fn json_str_field<'a>(obj: &'a serde_json::Value, key: &str) -> Option<&'a str> {
+        obj.get(key).and_then(|v| v.as_str())
+    }
+
+    /// Every headline/detail/snippet/fix-shaped field on one `CuratedSiteJson`/`FindingRefJson`/
+    /// `GridTagJson`/`ThreeThingsItemJson`/`FindingRow`-shaped JSON object — the full set of
+    /// client-facing per-finding text fields across the PDF/JSON and xlsx/findings.json shapes.
+    const FINDING_TEXT_FIELD_KEYS: [&str; 5] = [
+        "headline",
+        "detail",
+        "snippet",
+        "fix",
+        "fix_for_this_finding",
+    ];
+
+    fn assert_no_corruption_in_finding_fields(obj: &serde_json::Value, artifact: &str) {
+        for key in FINDING_TEXT_FIELD_KEYS {
+            if let Some(s) = json_str_field(obj, key) {
+                assert!(
+                    find_period_space_corruption(s).is_none(),
+                    "{artifact}'s `{key}` field contains a period-space corruption artifact \
+                     ({:?}): {s:?}",
+                    find_period_space_corruption(s)
+                );
+            }
+        }
+        // `findings.json`'s `FindingRow` names the primary-fix column `fix_specific`, not
+        // `fix_for_this_finding` — same field shape, different wire name.
+        if let Some(s) = json_str_field(obj, "fix_specific") {
+            assert!(
+                find_period_space_corruption(s).is_none(),
+                "{artifact}'s `fix_specific` field contains a period-space corruption artifact \
+                 ({:?}): {s:?}",
+                find_period_space_corruption(s)
+            );
+        }
+    }
+
+    /// REG-5 golden-export gate: no client-facing per-finding text field (headline, detail,
+    /// snippet, fix/fix_specific) in ANY of the three artifacts (the PDF/JSON's
+    /// `AuditReportJson`, and `findings.json`/the xlsx's `FindingsExport`) may ever contain the
+    /// period-space corruption pattern — scoped to the FINDING fields specifically (never the
+    /// static narrative/methodology/disclaimer prose, which legitimately contains sentences
+    /// that start with a digit — "...produced 1 candidate finding. 1 is curated for action..."
+    /// — a shape this regex cannot distinguish from corruption and was never meant to police).
+    /// This is a DURABLE regression gate, not a one-off fixture check: the synthetic finding
+    /// below exercises the full real pipeline — `ai_audit::merge_semantic_groups` (where the
+    /// corruption was actually introduced, in `split_into_sentences`/
+    /// `strip_cross_reference_sentences`'s split-then-rejoin) feeding into `build_report_json`
+    /// and `xlsx_export::build_findings_export` — so any FUTURE change anywhere in that chain
+    /// that reintroduces a naive "split on every period" step will fail this test loudly,
+    /// regardless of which function it lands in.
+    #[test]
+    fn no_export_artifact_ever_contains_a_space_inserted_inside_an_identifier_or_abbreviation() {
+        let mut f = finding(
+            "SEC-REG5-IDENTIFIER-HEAVY-1",
+            "src/api/invoices.ts",
+            42,
+            "critical",
+        );
+        f.detail = "The call to client.auth.method() in config/settings.toml bypasses the \
+                     session check. See 0001_migration.sql:12 for the original schema, e.g. the \
+                     v1.2.3 release notes at https://x.y/z document the same gap. Anyone with \
+                     the anon key can read and write every row."
+            .to_string();
+
+        // Run the finding through the SAME merge pass the real pipeline applies before a
+        // report is ever built — this is where REG-5 actually lived.
+        let merged = crate::ai_audit::merge_semantic_groups(vec![f], &[]);
+
+        let report = report_with(merged, vec!["SEC-REG5-IDENTIFIER-HEAVY-1"]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json_value = serde_json::to_value(&json).unwrap();
+
+        let mut checked_any = false;
+        for bucket in ["do_now", "do_next", "plan", "accepted", "informational"] {
+            for item in json_value["matrix"][bucket]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                assert_no_corruption_in_finding_fields(item, "AuditReportJson.matrix");
+                checked_any = true;
+            }
+        }
+        for item in json_value["three_things"]["items"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            assert_no_corruption_in_finding_fields(item, "AuditReportJson.three_things");
+            checked_any = true;
+        }
+        for row in json_value["priority_grid"]["rows"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            for cell in row["cells"].as_array().into_iter().flatten() {
+                for item in cell["findings"].as_array().into_iter().flatten() {
+                    assert_no_corruption_in_finding_fields(item, "AuditReportJson.priority_grid");
+                    checked_any = true;
+                }
+            }
+        }
+        for group_key in ["curated_findings", "held_for_review_findings"] {
+            for group in json_value[group_key].as_array().into_iter().flatten() {
+                for site in group["sites"].as_array().into_iter().flatten() {
+                    assert_no_corruption_in_finding_fields(site, "AuditReportJson sites");
+                    checked_any = true;
+                }
+            }
+        }
+        assert!(
+            checked_any,
+            "the fixture finding must reach at least one checked section for this gate to mean \
+             anything"
+        );
+        // Sanity check the fixture's identifiers actually survived verbatim into the artifact.
+        let json_serialized = serde_json::to_string(&json).unwrap();
+        assert!(
+            json_serialized.contains("client.auth.method()")
+                && json_serialized.contains("settings.toml")
+                && json_serialized.contains("0001_migration.sql:12")
+                && json_serialized.contains("v1.2.3"),
+            "fixture identifiers must survive into the report untouched for this gate to mean \
+             anything: {json_serialized}"
+        );
+
+        let findings_export = crate::xlsx_export::build_findings_export(
+            &report,
+            &HashMap::new(),
+            None,
+            &json,
+            &HashMap::new(),
+        );
+        let findings_value = serde_json::to_value(&findings_export).unwrap();
+        let mut checked_any_rows = false;
+        for row in findings_value["findings"].as_array().into_iter().flatten() {
+            assert_no_corruption_in_finding_fields(row, "FindingsExport.findings");
+            checked_any_rows = true;
+        }
+        assert!(
+            checked_any_rows,
+            "the fixture finding must reach findings.json/the xlsx export for this gate to mean \
+             anything"
+        );
+        let findings_serialized = serde_json::to_string(&findings_export).unwrap();
+        assert!(
+            findings_serialized.contains("client.auth.method()")
+                && findings_serialized.contains("settings.toml")
+                && findings_serialized.contains("0001_migration.sql:12")
+                && findings_serialized.contains("v1.2.3"),
+            "fixture identifiers must survive into the findings export untouched for this gate \
+             to mean anything: {findings_serialized}"
+        );
     }
 
     // ── FP exclusion ───────────────────────────────────────────────────────────
