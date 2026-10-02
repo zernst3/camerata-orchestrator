@@ -4082,6 +4082,31 @@ fn shared_captured_object(a: &Finding, b: &Finding) -> bool {
     })
 }
 
+/// C4-P1 design point 2: backfill a `captures` entry from the finding's own structural-object
+/// extraction ([`structural_objects`]) for a finding whose detector never populated `captures`
+/// itself. Most deterministic/floor checks and many AI findings leave `captures` empty even when
+/// the object they are about IS named in their own `snippet`/`detail` text (a policy name, a
+/// table) — without an entry there, such a finding can never participate in the cross-file
+/// [`shared_captured_object`] merge signal (design point 2b), even when a call-site finding in
+/// another file plainly relies on that SAME object. This closes exactly that gap, GENERALLY
+/// (every finding gets a chance, not one keyed to a specific rule or category): when `captures`
+/// is empty, take the structural objects [`structural_objects`] already extracts for the
+/// `objects_conflict` veto and, when there is EXACTLY ONE, record it under a generic `"object"`
+/// key. Deliberately a no-op when there are zero (nothing concrete named) or MORE THAN ONE
+/// (ambiguous — which one is the actual sink? guessing risks inventing a false cross-file link)
+/// candidates, which keeps this strictly additive and safe: it can only ever CREATE a new merge
+/// opportunity for a finding that previously had none, never silently pick the wrong object out
+/// of several. Never overwrites a `captures` entry a detector already set.
+fn backfill_captured_object(f: &mut Finding) {
+    if !f.captures.is_empty() {
+        return;
+    }
+    let mut objs = structural_objects(f).into_iter();
+    if let (Some(obj), None) = (objs.next(), objs.next()) {
+        f.captures.insert("object".to_string(), obj);
+    }
+}
+
 /// The smallest brace-delimited block containing 1-based `line`, as `(start_line, end_line)`.
 /// Cheap single-pass brace matcher; returns `None` for brace-free content (SQL, YAML) so callers
 /// fall back to the line-window rule. Used to unify two findings on the same handler body even
@@ -4542,26 +4567,33 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
 }
 
 /// The SECOND merge pass (design §1, extended by P1 — see
-/// `docs/plans/2026-09-29_codebase-inspection-hardening.md`): after `resolve_finding_lines` +
-/// `merge_by_location` have collapsed exact-location duplicates, fuse cross-TIER duplicates —
-/// the same defect flagged by two rule families a few lines apart (an AI RLS finding + the
-/// native RLS checker; a service-role-bypass + a fetch-then-authorize on one handler body), OR
-/// the same root cause flagged in DIFFERENT files via a shared captured object (a config flag +
-/// the handler that reads it). Greedy single pass: each finding joins the first existing group
-/// whose seed it merges with (via [`semantic_pair_merges`]), else seeds a new group. Category is
-/// filled from the rule-id heuristic for any finding a source didn't classify — this also
-/// determines [`finding_class`] for members that have no security-sounding rule id of their own.
+/// `docs/plans/2026-09-29_codebase-inspection-hardening.md` — and by C4-P1's defect-shaped merge
+/// redesign): after `resolve_finding_lines` + `merge_by_location` have collapsed exact-location
+/// duplicates, fuse cross-TIER duplicates — the same defect flagged by two rule families a few
+/// lines apart (an AI RLS finding + the native RLS checker; a service-role-bypass + a
+/// fetch-then-authorize on one handler body), OR the same root cause flagged in DIFFERENT files
+/// via a shared captured object (a config flag + the handler that reads it). Greedy single pass:
+/// each finding joins the first existing group whose seed it merges with (via
+/// [`semantic_pair_merges`]), else seeds a new group. Category is filled from the rule-id
+/// heuristic for any finding a source didn't classify — this also determines [`finding_class`]
+/// for members that have no security-sounding rule id of their own. `captures` is backfilled the
+/// same way ([`backfill_captured_object`]) so a finding whose own detector never populated
+/// `captures` still gets a shot at the cross-file [`shared_captured_object`] signal when its own
+/// text unambiguously names one object. The final pass, [`strip_headline_cross_references`],
+/// runs over the MERGED output to clean up any row whose own narrative text still points at
+/// another (now possibly reordered) row by name.
 pub fn merge_semantic_groups(findings: Vec<Finding>, files: &[(String, String)]) -> Vec<Finding> {
     let by_path: std::collections::HashMap<&str, &str> = files
         .iter()
         .map(|(p, c)| (p.as_str(), c.as_str()))
         .collect();
-    // Backfill category from the heuristic where no source assigned one.
+    // Backfill category + captures from the heuristics where no source assigned them.
     let mut findings = findings;
     for f in findings.iter_mut() {
         if f.category.is_none() {
             f.category = categorize_rule_id(&f.rule_id);
         }
+        backfill_captured_object(f);
     }
     let mut groups: Vec<Vec<Finding>> = Vec::new();
     for f in findings {
@@ -4579,7 +4611,173 @@ pub fn merge_semantic_groups(findings: Vec<Finding>, files: &[(String, String)])
             groups.push(vec![f]);
         }
     }
-    groups.into_iter().map(merge_semantic_group).collect()
+    let merged: Vec<Finding> = groups.into_iter().map(merge_semantic_group).collect();
+    strip_headline_cross_references(merged)
+}
+
+/// C4-P1 design point 4: relative-POSITION marker phrases that signal a sentence is pointing at
+/// another finding's place in the report, independent of whether it also names a specific rule
+/// id — "see the finding below", "as noted above", "duplicate of the above finding". Deliberately
+/// a SMALL, general marker list (not keyed to any one rule's wording): the word "finding"
+/// combined with a positional word is a stronger, less false-positive-prone anchor than the
+/// positional word alone would be (plain "above"/"below" shows up constantly in ordinary
+/// code/prose — "the line above sets the header" — and must not be treated as a cross-reference).
+const RELATIVE_POSITION_PHRASES: &[&str] = &[
+    "finding below",
+    "finding above",
+    "findings below",
+    "findings above",
+    "see below",
+    "see above",
+    "noted below",
+    "noted above",
+    "mentioned below",
+    "mentioned above",
+    "duplicate of",
+    "same as the",
+];
+
+/// Split `text` into sentences on `.`/`!`/`?` (delimiter kept with the sentence it ends),
+/// trimming and dropping empty pieces. A simple, general tokenizer — good enough to isolate the
+/// ONE sentence carrying a cross-reference from the surrounding narrative without disturbing the
+/// rest of a multi-sentence `detail`.
+fn split_into_sentences(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for ch in text.chars() {
+        cur.push(ch);
+        if matches!(ch, '.' | '!' | '?') {
+            let trimmed = cur.trim();
+            if !trimmed.is_empty() {
+                out.push(trimmed.to_string());
+            }
+            cur.clear();
+        }
+    }
+    let trimmed = cur.trim();
+    if !trimmed.is_empty() {
+        out.push(trimmed.to_string());
+    }
+    out
+}
+
+/// True when `token` appears in `sentence` as a whole token — not immediately preceded or
+/// followed by another identifier character (alphanumeric or `_`) — so a short rule id can never
+/// spuriously match as a substring of a longer, unrelated one (`"SEC-A-1"` must not match inside
+/// `"SEC-A-10"`). `-` is deliberately NOT treated as an identifier character here since rule ids
+/// already use it as their OWN internal separator; ordinary sentence punctuation around the id
+/// (spaces, commas, a trailing period) is what actually bounds it in prose.
+fn sentence_contains_token(sentence: &str, token: &str) -> bool {
+    if token.is_empty() {
+        return false;
+    }
+    let bytes = sentence.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut start = 0usize;
+    while let Some(rel) = sentence[start..].find(token) {
+        let abs = start + rel;
+        let before_ok = abs == 0 || !is_ident(bytes[abs - 1]);
+        let after = abs + token.len();
+        let after_ok = after >= bytes.len() || !is_ident(bytes[after]);
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
+/// Drop every sentence of `text` that either (a) names one of `other_ids` (another finding's
+/// exact rule id — [`sentence_contains_token`], case-sensitive since rule ids are) or (b) matches
+/// a [`RELATIVE_POSITION_PHRASES`] marker (case-insensitive), and return `(rejoined remaining
+/// text, the other_ids that were named)`. Fails OPEN: if dropping cross-reference sentences would
+/// empty `text` out entirely, the ORIGINAL text is returned untouched and nothing is reported as
+/// referenced — a stale pointer in an otherwise-informative paragraph beats an empty finding
+/// body.
+fn strip_cross_reference_sentences(text: &str, other_ids: &[&str]) -> (String, Vec<String>) {
+    let mut kept: Vec<String> = Vec::new();
+    let mut referenced: Vec<String> = Vec::new();
+    for sentence in split_into_sentences(text) {
+        let mut named: Vec<String> = Vec::new();
+        for id in other_ids {
+            if sentence_contains_token(&sentence, id) {
+                named.push((*id).to_string());
+            }
+        }
+        let lower = sentence.to_ascii_lowercase();
+        let has_position_marker = RELATIVE_POSITION_PHRASES.iter().any(|m| lower.contains(m));
+        if !named.is_empty() || has_position_marker {
+            referenced.extend(named);
+            continue;
+        }
+        kept.push(sentence);
+    }
+    if kept.is_empty() {
+        return (text.to_string(), Vec::new());
+    }
+    (kept.join(" "), referenced)
+}
+
+/// C4-P1 design point 4: a finding's own `detail` text literally pointing at ANOTHER finding by
+/// name or relative report position ("see the SEC-RLS-MISSING finding below", "as noted above")
+/// reads as broken prose — or points at the wrong row entirely — once merge/sort/filtering
+/// reorders the final report. This is the SAME staleness [`strip_dedup_pointers`] already fixes
+/// for calibration's `reason` field (index-based "same as [N]" pointers), extended here to a
+/// finding's own narrative `detail` (the text `report_export::defect_headline` derives the
+/// client-facing headline from). Runs as the LAST step of
+/// [`merge_semantic_groups`], over the MERGED output: for each row, every OTHER row's rule id
+/// (its own primary id, or any id already absorbed into THAT row's `also_matches`) that this
+/// row's `detail` happens to name is a genuine cross-reference to a DIFFERENT defect — the
+/// sentence containing it is stripped from `detail`, and the relationship is recorded
+/// STRUCTURALLY instead of in prose: the referenced row's primary id is added to THIS row's
+/// `also_matches`, and — since the relationship is mutual even when only one side wrote the
+/// pointer — THIS row's primary id is reciprocally added to the referenced row's `also_matches`.
+/// Nothing is ever dropped, only moved from stale narrative text into structured data. A sentence
+/// using relative-position language without naming a specific rule id is stripped the same way,
+/// with nothing to add (no id was named to record).
+fn strip_headline_cross_references(mut findings: Vec<Finding>) -> Vec<Finding> {
+    // Every id each row already "owns" (its own primary id + its own also_matches) — a mention of
+    // one of these within the SAME row is the row's own content, not a cross-finding pointer.
+    let owned_ids: Vec<std::collections::HashSet<String>> = findings
+        .iter()
+        .map(|f| {
+            let mut s: std::collections::HashSet<String> = f.also_matches.iter().cloned().collect();
+            s.insert(f.rule_id.clone());
+            s
+        })
+        .collect();
+    // Reciprocal also_matches ids to add after the scan, keyed by row index — collected
+    // separately so the scan itself only ever reads `findings`, never mutates it mid-loop.
+    let mut extra_also_matches: Vec<Vec<String>> = vec![Vec::new(); findings.len()];
+    for i in 0..findings.len() {
+        // (owner row index, id) pairs for every id NOT owned by row i.
+        let other_ids: Vec<(usize, &str)> = owned_ids
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != i)
+            .flat_map(|(j, s)| s.iter().map(move |id| (j, id.as_str())))
+            .collect();
+        let id_list: Vec<&str> = other_ids.iter().map(|(_, id)| *id).collect();
+        let (new_detail, referenced) =
+            strip_cross_reference_sentences(&findings[i].detail, &id_list);
+        if new_detail != findings[i].detail {
+            findings[i].detail = new_detail;
+        }
+        for id in &referenced {
+            if let Some((owner, _)) = other_ids.iter().find(|(_, x)| x == id) {
+                extra_also_matches[i].push(findings[*owner].rule_id.clone());
+                extra_also_matches[*owner].push(findings[i].rule_id.clone());
+            }
+        }
+    }
+    for (i, extra) in extra_also_matches.into_iter().enumerate() {
+        for id in extra {
+            if id != findings[i].rule_id && !findings[i].also_matches.contains(&id) {
+                findings[i].also_matches.push(id);
+            }
+        }
+    }
+    findings
 }
 
 /// Run the real-time audit passes with rule-routing applied.
@@ -10474,6 +10672,287 @@ mod tests {
         assert!(
             lines.contains(&100) && lines.contains(&102),
             "both evidence sites must be kept: {lines:?}"
+        );
+    }
+
+    // ── C4-P1: defect-shaped merge redesign ─────────────────────────────────────────────────
+    // Synthetic findings only — one defect shipping as 2-3 rows (same handler/different rules,
+    // cross-file root cause, N same-rule sites, stale headline cross-references).
+
+    #[test]
+    fn p1_c4_same_sink_security_overrides_category_requirement() {
+        // Design point 1: a boundary-validation rule and a privileged-key-bypass rule flagged on
+        // the SAME handler body, with DIFFERENT categories — signal (a) alone would never fire.
+        // Because they share a construct (same_construct) AND one side is security-tier, they
+        // must still merge into one row with the security rule as primary.
+        let content = "fn handler() {\n let x = input();\n if debug_mode {\n return bypass_check(x);\n }\n ok(x)\n}\n";
+        let files = vec![("h.rs".to_string(), content.to_string())];
+        let mut validation = site_finding("ARCH-BOUNDARY-VALIDATION-1", "h.rs", 2, "high", "");
+        validation.category = Some("error-handling".to_string());
+        let mut bypass = site_finding("AUTH-PRIVILEGED-KEY-BYPASS-1", "h.rs", 4, "critical", "");
+        bypass.category = Some("authorization".to_string());
+        assert_eq!(
+            finding_class(&validation),
+            FindingClass::Hygiene,
+            "sanity: the plain validation rule is not itself security-tier"
+        );
+        assert_eq!(
+            finding_class(&bypass),
+            FindingClass::Security,
+            "sanity: the bypass rule is security-tier"
+        );
+
+        let out = merge_semantic_groups(vec![validation, bypass], &files);
+        assert_eq!(
+            out.len(),
+            1,
+            "same-handler validation + bypass rules must merge despite different categories: {out:?}"
+        );
+        assert_eq!(
+            out[0].rule_id, "AUTH-PRIVILEGED-KEY-BYPASS-1",
+            "the security-tier rule must win primary"
+        );
+        assert!(out[0]
+            .also_matches
+            .contains(&"ARCH-BOUNDARY-VALIDATION-1".to_string()));
+        let lines: std::collections::HashSet<usize> = std::iter::once(out[0].line)
+            .chain(out[0].also_locations.iter().map(|l| l.line))
+            .collect();
+        assert!(
+            lines.contains(&2) && lines.contains(&4),
+            "both evidence sites must be kept: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn p1_c4_same_construct_distinct_objects_stays_two_rows() {
+        // Over-merge guard: the same-construct/security-override signal must NOT fuse two
+        // findings in one handler that visibly name DIFFERENT structural objects — that is two
+        // distinct defects, not one, even with one side security-tier.
+        let content = "fn handler() {\n let a = orders.find();\n let b = profiles.find();\n}\n";
+        let files = vec![("h.rs".to_string(), content.to_string())];
+        let mut security = site_finding("AUTH-ORDERS-LEAK-1", "h.rs", 2, "high", "orders.find()");
+        security.category = Some("authorization".to_string());
+        let mut hygiene = site_finding(
+            "ARCH-PROFILES-SMELL-1",
+            "h.rs",
+            3,
+            "medium",
+            "profiles.find()",
+        );
+        hygiene.category = Some("arch-conformance".to_string());
+
+        let out = merge_semantic_groups(vec![security, hygiene], &files);
+        assert_eq!(
+            out.len(),
+            2,
+            "two defects naming different objects in one handler must stay two rows: {out:?}"
+        );
+    }
+
+    #[test]
+    fn p1_c4_cross_file_policy_and_query_merge_via_backfilled_object() {
+        // Design point 2: a permissive-policy finding and the query finding that relies on that
+        // SAME policy, in a DIFFERENT file, must merge into one row at the policy, with the
+        // query's site preserved in also_locations — even though NEITHER finding's own detector
+        // populated `captures` (the general case). `merge_semantic_groups`'s backfill must
+        // extract the shared object from each finding's own prose for the cross-file
+        // shared-captured-object signal to fire.
+        let mut policy = site_finding(
+            "SUPABASE-RLS-PERMISSIVE-POLICY-1",
+            "supabase/policies.sql",
+            12,
+            "high",
+            "\"invoices_read_all\"",
+        );
+        policy.detail =
+            "The \"invoices_read_all\" policy grants unrestricted read access.".to_string();
+        let mut query = site_finding(
+            "AI-QUERY-RELIES-ON-PERMISSIVE-POLICY",
+            "src/api/invoices.ts",
+            30,
+            "medium",
+            "\"invoices_read_all\"",
+        );
+        query.detail =
+            "This query relies on the \"invoices_read_all\" policy to scope access.".to_string();
+        assert!(
+            policy.captures.is_empty() && query.captures.is_empty(),
+            "sanity: neither detector populated captures itself"
+        );
+
+        let out = merge_semantic_groups(vec![policy, query], &[]);
+        assert_eq!(
+            out.len(),
+            1,
+            "policy + relying query must merge via the backfilled captured object: {out:?}"
+        );
+        assert_eq!(
+            out[0].rule_id, "SUPABASE-RLS-PERMISSIVE-POLICY-1",
+            "the policy finding is primary"
+        );
+        assert!(out[0]
+            .also_matches
+            .contains(&"AI-QUERY-RELIES-ON-PERMISSIVE-POLICY".to_string()));
+        assert_eq!(out[0].also_locations.len(), 1);
+        assert_eq!(out[0].also_locations[0].path, "src/api/invoices.ts");
+    }
+
+    #[test]
+    fn p1_c4_n_site_collapse_same_rule_same_file_same_severity() {
+        // Design point 3: the GENERAL "N location(s)" pattern (already used for the
+        // arch-conformance/needs-review structural group) must also apply to a genuinely curated
+        // row: one rule firing at the SAME severity three times across one file, far enough apart
+        // that no window/construct signal would otherwise catch it, collapses to ONE row listing
+        // every site — not three near-duplicate rows.
+        let a = site_finding("ARCH-NO-DIRECT-DB-1", "svc.rs", 10, "medium", "");
+        let b = site_finding("ARCH-NO-DIRECT-DB-1", "svc.rs", 200, "medium", "");
+        let c = site_finding("ARCH-NO-DIRECT-DB-1", "svc.rs", 400, "medium", "");
+        let out = merge_semantic_groups(vec![a, b, c], &[]);
+        assert_eq!(
+            out.len(),
+            1,
+            "three same-rule/same-file/same-severity occurrences must collapse to one row: {out:?}"
+        );
+        assert_eq!(
+            out[0].also_locations.len(),
+            2,
+            "the other two occurrences are preserved as sites"
+        );
+        let lines: std::collections::HashSet<usize> = std::iter::once(out[0].line)
+            .chain(out[0].also_locations.iter().map(|l| l.line))
+            .collect();
+        assert!(
+            lines.contains(&10) && lines.contains(&200) && lines.contains(&400),
+            "all three evidence sites must be kept: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn p1_c4_n_site_collapse_does_not_fuse_different_severities_or_objects() {
+        // The N-site collapse signal is scoped to SAME severity, and still subject to the
+        // objects_conflict veto — it must not swallow a genuinely distinct occurrence (different
+        // severity AND a different named object) of the same rule into the group.
+        let mut a = site_finding("RLS-MISSING-1", "s.sql", 10, "medium", "public.orders");
+        a.detail = "orders has no RLS policy".to_string();
+        let mut b = site_finding("RLS-MISSING-1", "s.sql", 500, "critical", "public.payments");
+        b.detail = "payments has no RLS policy".to_string();
+        let out = merge_semantic_groups(vec![a, b], &[]);
+        assert_eq!(
+            out.len(),
+            2,
+            "different severity + disjoint named objects must stay two rows: {out:?}"
+        );
+    }
+
+    #[test]
+    fn p1_c4_headline_cross_reference_stripped_and_moved_to_also_matches() {
+        // Design point 4: a finding whose `detail` literally names ANOTHER finding's rule id
+        // reads as stale prose once the report is sorted/filtered. The reference must be
+        // stripped out of `detail` and the relationship recorded structurally in `also_matches`
+        // — on BOTH sides, since the relationship is mutual even though only one side wrote the
+        // pointer.
+        let sink = site_finding(
+            "SEC-SQL-INJECTION-SINK-1",
+            "src/db/sink.ts",
+            50,
+            "critical",
+            "",
+        );
+        let mut call_site = site_finding(
+            "AI-SQL-INJECTION-CALL-SITE",
+            "src/api/handler.ts",
+            20,
+            "high",
+            "",
+        );
+        call_site.detail = "This call site passes unsanitized user input toward the known sink. \
+             See the SEC-SQL-INJECTION-SINK-1 finding below for the full trace. The input \
+             originates from an unauthenticated endpoint, which is a distinct fact not covered \
+             by the sink finding alone."
+            .to_string();
+
+        let out = merge_semantic_groups(vec![sink, call_site], &[]);
+        assert_eq!(
+            out.len(),
+            2,
+            "the sink and call site add distinct facts and stay two rows: {out:?}"
+        );
+        let sink_out = out
+            .iter()
+            .find(|f| f.rule_id == "SEC-SQL-INJECTION-SINK-1")
+            .expect("sink row survives");
+        let call_site_out = out
+            .iter()
+            .find(|f| f.rule_id == "AI-SQL-INJECTION-CALL-SITE")
+            .expect("call site row survives");
+        assert!(
+            !call_site_out.detail.contains("SEC-SQL-INJECTION-SINK-1"),
+            "the stale cross-reference must be stripped from the headline/detail text: {:?}",
+            call_site_out.detail
+        );
+        assert!(
+            !call_site_out
+                .detail
+                .to_ascii_lowercase()
+                .contains("finding below"),
+            "the relative-position phrase must be stripped too: {:?}",
+            call_site_out.detail
+        );
+        assert!(
+            call_site_out.detail.contains("distinct fact"),
+            "the REST of the sentence/paragraph must survive — only the cross-reference sentence \
+             is dropped: {:?}",
+            call_site_out.detail
+        );
+        assert!(
+            call_site_out
+                .also_matches
+                .contains(&"SEC-SQL-INJECTION-SINK-1".to_string()),
+            "the named rule id must be recorded structurally on the referencing row: {:?}",
+            call_site_out.also_matches
+        );
+        assert!(
+            sink_out
+                .also_matches
+                .contains(&"AI-SQL-INJECTION-CALL-SITE".to_string()),
+            "the relationship must be recorded RECIPROCALLY on the referenced row too: {:?}",
+            sink_out.also_matches
+        );
+    }
+
+    #[test]
+    fn p1_c4_headline_without_named_rule_still_strips_relative_position_language() {
+        // The relative-position marker alone (no specific rule id named) must still be stripped
+        // from the headline text, with nothing spurious added to also_matches.
+        let mut a = site_finding("AI-SOLO-FINDING-1", "a.rs", 10, "medium", "");
+        a.detail = "This is a real, standalone defect. See the finding below for more context."
+            .to_string();
+        let b = site_finding("AI-UNRELATED-2", "b.rs", 5, "low", "");
+
+        let out = merge_semantic_groups(vec![a, b], &[]);
+        assert_eq!(out.len(), 2);
+        let a_out = out
+            .iter()
+            .find(|f| f.rule_id == "AI-SOLO-FINDING-1")
+            .unwrap();
+        assert!(
+            !a_out
+                .detail
+                .to_ascii_lowercase()
+                .contains("see the finding below"),
+            "the relative-position sentence must be stripped: {:?}",
+            a_out.detail
+        );
+        assert!(
+            a_out.detail.contains("real, standalone defect"),
+            "the rest of the detail must survive: {:?}",
+            a_out.detail
+        );
+        assert!(
+            a_out.also_matches.is_empty(),
+            "no rule id was named, so nothing is added to also_matches: {:?}",
+            a_out.also_matches
         );
     }
 
