@@ -2133,15 +2133,42 @@ pub(crate) fn is_hedged(f: &Finding, bucket: &str) -> bool {
 /// when it does. This is the one producer of the `confidence == "needs-review" ⇔ needs_review`
 /// biconditional every artifact renders (`CuratedSiteJson::confidence`, `FindingRow::confidence`
 /// / `FindingRow::needs_review`) — see [`is_hedged`]'s doc comment for the full rationale.
+///
+/// C4-P3: a deterministic-floor / RLS-replay finding never goes through the AI calibration pass
+/// (`ai_audit::verify_findings`), so `f.confidence` is `None` for it FOREVER — not "not yet
+/// evaluated", genuinely never evaluated, because there is no judgment call left for calibration
+/// to make: the mini schema-state replay / content-rule match either holds or it does not. Left
+/// as `None`, this prints "Confidence: not evaluated this run" beside a PROVEN critical (a live
+/// secret, an unprotected table, a definer function with no pinned search_path) — which reads as
+/// "we are not sure" next to exactly the findings a client is paying to act on first. Once a row
+/// has survived [`is_hedged`] above (so R1's null-location downgrade, `is_informational`'s
+/// absence/needs-review/testing-style checks, and a raw `needs_review` flag have ALL already had
+/// their say — see the module-level doc comment on [`is_hedged`]), a `None`-confidence,
+/// non-AI-tier row (`!is_ai_tier(f)`, i.e. origin `Deterministic` per `ai_audit::finding_origin`'s
+/// own definition of that origin — `AdoptedAi`/`InventedAi` findings carry a real `confidence` or
+/// are gated separately) is reported `"high"` BY CONSTRUCTION. This never fires for an AI-tier
+/// finding whose confidence is `None` because ITS OWN calibration pass genuinely failed — that
+/// stays `None` (the honest "not evaluated this run" gap is real there, since a model verdict was
+/// actually expected and never arrived).
 pub(crate) fn hedge_confidence(f: &Finding, bucket: &str) -> Option<String> {
     if is_hedged(f, bucket) {
         Some("needs-review".to_string())
+    } else if f.confidence.is_none() && !is_ai_tier(f) {
+        Some("high".to_string())
     } else {
         f.confidence.clone()
     }
 }
 
-fn finding_ref(f: &Finding, severity: &str, headline: String, bucket: &str) -> FindingRefJson {
+#[allow(clippy::too_many_arguments)]
+fn finding_ref(
+    f: &Finding,
+    severity: &str,
+    headline: String,
+    bucket: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_option: Option<&str>,
+) -> FindingRefJson {
     FindingRefJson {
         rule_id: f.rule_id.clone(),
         repo: f.repo.clone(),
@@ -2149,7 +2176,12 @@ fn finding_ref(f: &Finding, severity: &str, headline: String, bucket: &str) -> F
         line: f.line,
         severity: severity.to_string(),
         headline,
-        effort: f.effort.clone(),
+        // C4-P3: calibration's effort, else the rule's authored band — see `resolve_effort`'s
+        // doc comment. Keeps the matrix table AND the "three things this week" box (which reads
+        // `FindingRefJson::effort` for its hour estimate / total) in lockstep with
+        // `CuratedSiteJson::effort`, so a proven do-now critical never shows an estimate in the
+        // curated findings section but "not yet estimated" in the summary box above it.
+        effort: resolve_effort(f, &f.rule_id, corpus, chosen_option),
         bucket: bucket.to_string(),
         precondition_count: finding_precondition_count(f),
         confidence_rank: finding_confidence_rank(f),
@@ -2308,6 +2340,39 @@ fn ai_tier_note_for(review_state: ReviewState) -> String {
                 .to_string()
         }
     }
+}
+
+/// C4-P3: the EXPORTED remediation-effort tier for `f`, reconciled against the rule it violates.
+/// Order of preference:
+/// 1. `f.effort` — the finding's OWN estimate, whether set by the AI calibration pass
+///    (`ai_audit::verify_findings`) or by a deterministic detector's own sensible default at
+///    finding-creation time (e.g. `onboard::audit::default_effort_for`). Never second-guessed
+///    here.
+/// 2. Failing that, the rule's AUTHORED effort band on the option this finding resolves against
+///    (`RuleOption::effort`, set in the corpus TOML) — the rule author's floor/default estimate
+///    for a finding that never went through calibration and whose detector built a bare
+///    `Finding` with no per-finding default (the architectural/RLS-replay checkers —
+///    `onboard::architectural::arch_violation_to_finding` sets `effort: None` unconditionally).
+///    This is the fix for a PROVEN critical (an unprotected table, a definer function with no
+///    pinned search_path) rendering "not estimated this run" forever just because its detector
+///    never set one: the rule itself already carries a defensible default.
+/// 3. `None` — genuinely no estimate available from either source. The caller's existing
+///    "not yet estimated" render (`effort_hours_bounds`) and the run-wide `FailedPass{pass:
+///    "hour estimation", ..}` disclosure (`ai_audit::verify_findings`) are the honest way to
+///    say so; this function never fabricates a number, and — per the C4-P3 guardrail — nothing
+///    downstream may ever refuse or drop a row because this returns `None`.
+pub(crate) fn resolve_effort(
+    f: &Finding,
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    chosen_option: Option<&str>,
+) -> Option<String> {
+    f.effort.clone().or_else(|| {
+        corpus
+            .and_then(|c| c.get_by_id(rule_id))
+            .and_then(|rule| rule.resolved_option(chosen_option))
+            .and_then(|opt| opt.effort.clone())
+    })
 }
 
 /// Item 7's effort -> rough-hour mapping (a judgment call, documented here rather than buried
@@ -2497,10 +2562,17 @@ pub fn build_report_json(
             f.path.clone(),
             f.line,
         );
-        bucketed
-            .entry(bucket)
-            .or_default()
-            .push((sort_key, finding_ref(f, severity, headline, bucket)));
+        bucketed.entry(bucket).or_default().push((
+            sort_key,
+            finding_ref(
+                f,
+                severity,
+                headline,
+                bucket,
+                corpus,
+                chosen_option_for_rule,
+            ),
+        ));
     }
     let mut matrix = MatrixJson::default();
     for (key, target) in [
@@ -2592,7 +2664,12 @@ pub fn build_report_json(
                     snippet: cap_snippet(&f.snippet),
                     detail,
                     severity: severity.clone(),
-                    effort: f.effort.clone(),
+                    // C4-P3: calibration's own effort, else the rule's authored effort band —
+                    // see `resolve_effort`'s doc comment. Never `f.effort.clone()` alone: that
+                    // left every architectural/RLS-replay floor finding (no calibration, no
+                    // per-finding default) rendering "not estimated this run" even when the
+                    // rule itself carries a defensible authored band.
+                    effort: resolve_effort(f, &rule_id, corpus, chosen_option_for_rule),
                     // C4-P2: the canonical reconciled confidence (see `hedge_confidence`'s doc
                     // comment) — never the raw `f.confidence` alone, so a row the matrix pass
                     // above bucketed "informational" for a NON-confidence reason (an
@@ -4273,6 +4350,215 @@ mod tests {
         }
     }
 
+    // ── C4-P3: deterministic confidence-by-construction + estimate fallback ────────────────
+    //
+    // Deterministic-floor and RLS-replay rows never go through AI calibration, so `confidence`
+    // and `effort` are `None` on them forever unless something else fills them in. Before this
+    // pass, a PROVEN critical (a live secret, an unprotected table, a definer function with no
+    // pinned search_path) rendered "Confidence: not evaluated this run" / "Effort: not
+    // estimated this run" beside it — which reads as doubt next to exactly the findings a
+    // client is paying to act on first.
+
+    /// A deterministic finding (a realistic architectural-checker shape: `arch_violation_to_
+    /// finding` never sets `confidence` or `effort`) with a REAL location, against a rule whose
+    /// corpus TOML carries an authored effort band (`SUPABASE-FUNC-SEARCH-PATH-1`, authored
+    /// `effort = "low"` on its default option), must export `confidence == "high"` AND a
+    /// non-empty estimate — in `findings.json` (`CuratedSiteJson`), the xlsx `FindingRow`, AND
+    /// the compiled PDF's rendered text. Never "not evaluated this run" / "not estimated this
+    /// run" next to a proven defect.
+    #[tokio::test]
+    async fn deterministic_finding_with_real_location_exports_high_confidence_and_an_estimate() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+
+        // Exactly the shape `onboard::architectural::arch_violation_to_finding` produces: no
+        // calibration ever touches this finding, so `confidence`/`effort` start (and, absent
+        // this fix, would stay) `None`.
+        let f = finding(
+            "SUPABASE-FUNC-SEARCH-PATH-1",
+            "supabase/migrations/1.sql",
+            8,
+            "high",
+        );
+        assert_eq!(f.confidence, None, "fixture must simulate never-calibrated");
+        assert_eq!(f.effort, None, "fixture must simulate never-calibrated");
+
+        let report = report_with(vec![f.clone()], vec!["SUPABASE-FUNC-SEARCH-PATH-1"]);
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+
+        // ── findings.json (CuratedSiteJson) ──
+        let site = &json
+            .curated_findings
+            .iter()
+            .find(|g| g.rule_id == "SUPABASE-FUNC-SEARCH-PATH-1")
+            .expect("must be curated, not held out")
+            .sites[0];
+        assert_eq!(
+            site.confidence,
+            Some("high".to_string()),
+            "a deterministic finding with a real location exports confidence 'high' by \
+             construction: {:?}",
+            site.confidence
+        );
+        assert_eq!(
+            site.effort,
+            Some("low".to_string()),
+            "must fall back to the rule's authored effort band: {:?}",
+            site.effort
+        );
+
+        // ── xlsx FindingRow (via the same findings.json export the product route ships) ──
+        // `FindingRow`'s fields are private to `xlsx_export` (only the struct is `pub`), so a
+        // sibling module inspects it the same way an external consumer of `findings.json`
+        // would: through its serialized shape.
+        let findings_export = crate::xlsx_export::build_findings_export(
+            &report,
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+        let export_value =
+            serde_json::to_value(&findings_export).expect("FindingsExport must serialize");
+        let row = export_value["findings"]
+            .as_array()
+            .expect("findings must be an array")
+            .iter()
+            .find(|r| r["rule_id"] == "SUPABASE-FUNC-SEARCH-PATH-1")
+            .expect("row must be present in the xlsx/findings.json export");
+        assert_eq!(row["confidence"], "high", "xlsx confidence must match the PDF/json");
+        assert_eq!(row["effort"], "low", "xlsx effort must fall back to the authored band");
+
+        // ── PDF source ──
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping the PDF leg of \
+                 deterministic_finding_with_real_location_exports_high_confidence_and_an_estimate: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed");
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        assert!(
+            text.contains("Confidence: high"),
+            "the PDF must render the deterministic-by-construction confidence: {text:?}"
+        );
+        assert!(
+            !text.contains("Confidence: not evaluated this run"),
+            "a proven deterministic finding must never render as unevaluated: {text:?}"
+        );
+        assert!(
+            !text.contains("Effort: not estimated this run"),
+            "a deterministic finding with an authored effort band must never render \
+             unestimated: {text:?}"
+        );
+    }
+
+    /// Sequencing proof with R1 (`downgrade_unlocated_above_informational`): a deterministic
+    /// finding downgraded to informational because it carries NO real location (empty path,
+    /// `line == 0` — the absence-only / platform-owned shape) must NOT get the "high by
+    /// construction" treatment. It stays hedged (`"needs-review"`), exactly like any other
+    /// informational row — proving the deterministic-confidence rule runs AFTER R1's downgrade
+    /// has already had its say, never before it.
+    #[test]
+    fn deterministic_finding_downgraded_to_informational_is_not_high() {
+        let unlocated = finding("SUPABASE-RLS-POLICY-DISABLED-1", "", 0, "critical");
+        assert_eq!(unlocated.confidence, None, "never calibrated");
+        let report = report_with(vec![unlocated], vec!["SUPABASE-RLS-POLICY-DISABLED-1"]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(
+            json.matrix.informational.len(),
+            1,
+            "R1 must still downgrade the unlocated finding to informational: {:?}",
+            json.matrix
+        );
+        let site = &json.curated_findings[0].sites[0];
+        assert_eq!(
+            site.confidence,
+            Some("needs-review".to_string()),
+            "an informational deterministic row must stay hedged, never 'high': {:?}",
+            site.confidence
+        );
+    }
+
+    /// An AI-tier finding the calibrator genuinely marked doubtful keeps its calibrated
+    /// `"needs-review"` confidence (never overwritten to `"high"` — `is_ai_tier` excludes it from
+    /// the deterministic-by-construction path), and its calibrated effort still renders even
+    /// though the row is hedged — a needs-review verdict is a confidence judgement, not an
+    /// estimate failure.
+    #[tokio::test]
+    async fn ai_tier_needs_review_row_keeps_its_confidence_and_still_carries_an_estimate() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        let mut f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "high");
+        f.confidence = Some("needs-review".to_string());
+        f.needs_review = true;
+        f.effort = Some("medium".to_string());
+        let report = report_with(vec![f], vec!["SUPABASE-RLS-ENABLED-1"]);
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let site = &json.curated_findings[0].sites[0];
+        assert_eq!(
+            site.confidence,
+            Some("needs-review".to_string()),
+            "a genuine calibration doubt verdict must be preserved, never promoted to high"
+        );
+        assert_eq!(
+            site.effort,
+            Some("medium".to_string()),
+            "a hedged row still carries its own calibrated estimate — doubt about the \
+             finding is not the same thing as an unestimated fix"
+        );
+    }
+
+    /// The C4-P3 guardrail: nothing downstream may ever refuse or drop a row because it has no
+    /// calibration and no corpus to fall back on — the honest degrade is "not yet estimated",
+    /// never an omitted row. A bare deterministic finding with NO corpus at all (so neither a
+    /// calibrated effort NOR an authored band is available) still exports, still lands in its
+    /// severity-driven bucket, and still carries the deterministic-by-construction confidence.
+    #[test]
+    fn a_row_with_no_calibration_and_no_corpus_still_exports_unrefused() {
+        let f = finding("ARCH-NEVER-CALIBRATED-1", "a.rs", 1, "high");
+        assert_eq!(f.confidence, None);
+        assert_eq!(f.effort, None);
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(
+            json.curated_findings.len(),
+            1,
+            "a finding with no calibration and no corpus must still be curated, never dropped"
+        );
+        let site = &json.curated_findings[0].sites[0];
+        assert_eq!(
+            site.confidence,
+            Some("high".to_string()),
+            "still gets the deterministic-by-construction confidence even with no corpus"
+        );
+        assert_eq!(
+            site.effort, None,
+            "with neither a calibrated effort nor a corpus to fall back on, the row \
+             honestly reports no estimate rather than fabricating one"
+        );
+        // Bucket placement is untouched by any of this — a high-severity finding still lands
+        // somewhere actionable, never silently excluded.
+        let in_some_action_bucket = json.matrix.do_now.len()
+            + json.matrix.do_next.len()
+            + json.matrix.plan.len()
+            == 1;
+        assert!(
+            in_some_action_bucket,
+            "the row must land in exactly one action bucket, never vanish: {:?}",
+            json.matrix
+        );
+    }
+
     /// A committed-secret floor finding (`SEC-NO-SECRET-FILE-1` on a real `.env`) renders a
     /// headline naming the actual file, PLUS a `.gitignore`-coverage context fact in its
     /// detail — never the gate's own "Deny writing a file whose path marks it as
@@ -4407,10 +4693,19 @@ mod tests {
     /// The deterministic finding from the C3-1b spec: its specific fix failed to generate
     /// (`fix_specific: None`, exactly `generate_fix_specifics`' new no-hedge failure state —
     /// `needs_review: false`, `confidence: None`, `detail` carrying no pipeline-state tag).
-    /// It must export UNHEDGED (confidence stays `None`, disposition is never demoted), it
-    /// must NOT be informational/out-of-bucket, it must still land in `do_now` on its own
-    /// severity/effort merits, and it must carry the RULE-level fix (`resolve_fix`'s authored
-    /// remediation) so the row still ships a usable fix even with no codebase-specific one.
+    /// It must export UNHEDGED (disposition is never demoted), it must NOT be
+    /// informational/out-of-bucket, it must still land in `do_now` on its own severity/effort
+    /// merits, and it must carry the RULE-level fix (`resolve_fix`'s authored remediation) so
+    /// the row still ships a usable fix even with no codebase-specific one.
+    ///
+    /// C4-P3: `confidence` is NOT `None` here — this finding never went through AI calibration
+    /// (`f.confidence` starts `None` and stays that way), so by `hedge_confidence`'s
+    /// deterministic-by-construction rule it exports `"high"`. This is the exact fix C4-P3
+    /// targets: before it, this SUPABASE-RLS-ENABLED-1 do_now critical rendered "Confidence: not
+    /// evaluated this run" next to a proven defect. The "ONLY hedge source is calibration"
+    /// invariant this test originally asserted is still true in spirit — a fix-generation
+    /// failure still never HEDGES this row (never flips it to `"needs-review"` or
+    /// informational) — it just no longer leaves a non-hedged, never-calibrated row blank.
     #[tokio::test]
     async fn fix_generation_failure_exports_unhedged_with_the_rule_level_fix_in_do_now() {
         let corpus_path = camerata_rules::corpus_path();
@@ -4451,9 +4746,11 @@ mod tests {
         );
         let site = &json.curated_findings[0].sites[0];
         assert_eq!(
-            site.confidence, None,
-            "confidence must be untouched by a fix-generation failure — the ONLY hedge \
-             source is calibration"
+            site.confidence,
+            Some("high".to_string()),
+            "C4-P3: a never-calibrated, non-hedged deterministic finding exports confidence \
+             'high' by construction, instead of blank — a fix-generation failure must not \
+             change that"
         );
         assert_eq!(
             site.fix_for_this_finding, None,

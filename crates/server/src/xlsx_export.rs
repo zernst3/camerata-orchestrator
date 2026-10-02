@@ -62,8 +62,8 @@ use crate::report_export::{
     bucket_title, category_for, category_for_finding, citation_for_finding, classify,
     client_headline_and_detail, disposition_label, effective_bucket, effort_hours_bounds,
     finding_key, hedge_confidence, is_hedged, normalize_severity, provenance_tier_rank,
-    resolve_citation, resolve_fix, sanitize_report_findings, title_for_finding, Disposition,
-    DispositionWire, ReportOptions,
+    resolve_citation, resolve_effort, resolve_fix, sanitize_report_findings, title_for_finding,
+    Disposition, DispositionWire, ReportOptions,
 };
 
 // ── Row model (the intermediate shape shared by every findings-style sheet) ────────
@@ -310,7 +310,12 @@ fn partition_rows(
             .collect::<Vec<_>>()
             .join("\n");
         let fix = resolve_fix(&f.rule_id, corpus, f, chosen_option_for_rule);
-        let (_, est_hours) = effort_hours_bounds(f.effort.as_deref());
+        // C4-P3: calibration's effort, else the rule's authored band (see
+        // `report_export::resolve_effort`'s doc comment) — never `f.effort` alone, so a
+        // deterministic/RLS-replay floor finding with an authored band doesn't render "not
+        // estimated this run" here while the PDF's curated findings show a real number.
+        let resolved_effort = resolve_effort(f, &f.rule_id, corpus, chosen_option_for_rule);
+        let (_, est_hours) = effort_hours_bounds(resolved_effort.as_deref());
 
         let (bucket, disposition_kind, disposition_label_str, fp_reason) = if is_fp {
             (
@@ -347,7 +352,7 @@ fn partition_rows(
             bucket,
             disposition_kind,
             disposition_label: disposition_label_str,
-            effort: f.effort.clone().unwrap_or_default(),
+            effort: resolved_effort.unwrap_or_default(),
             est_hours,
             // C4-P2: the canonical reconciled hedge state (see `is_hedged`/`hedge_confidence`'s
             // doc comment) — never `f.confidence`/`f.needs_review` read directly, so a row
@@ -1968,6 +1973,7 @@ mod tests {
             finding_headline: Some(headline.to_string()),
             finding_detail: Some(detail.to_string()),
             escalation: None,
+            effort: None,
         }];
         rule.default_option = Some("default".to_string());
         let mut set = camerata_rules::RuleSet::default();
