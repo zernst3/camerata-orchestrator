@@ -3657,36 +3657,68 @@ fn confidence_rank(c: Option<&str>) -> u8 {
     }
 }
 
-/// The shared primary-selection ranking for BOTH merge passes (design point 3): higher tuples
-/// win via `max_by_key`. Order is exactly the design's: (1) `FindingClass` — Security beats
-/// Hygiene unconditionally; (2) calibrated severity; (3) confidence (a "needs-review" flag ranks
-/// last); (4) rule specificity via `origin_rank` (deterministic beats an adopted-AI mapping
-/// beats an invented `AI-` name — "more specific/narrow over broad"); (5) earliest appearance,
-/// the final deterministic tiebreak so output never depends on hash/iteration order.
+/// The shared primary-selection ranking for BOTH merge passes (design point 3, reordered by
+/// C5-1 — see `docs/plans/2026-09-29_codebase-inspection-hardening.md` P1 for the original and
+/// the REG-1/REG-2 work item for this reordering). Higher tuples win via `max_by_key`. Order:
+/// (1) `FindingClass` — Security beats Hygiene unconditionally, independent of everything else,
+/// so a structural/style row can never absorb and hide a security defect (the P1 regression);
+/// (2) rule specificity via `origin_rank` — Deterministic beats AdoptedAi beats InventedAi.
+/// C5-1 moved this key AHEAD of severity: before, an AI-tier finding's uncalibrated, routinely
+/// inflated severity could outrank its own deterministic sibling describing the SAME defect at
+/// the SAME site (the REG-1 symptom — a correctly-graded, high-confidence, authored-fix
+/// deterministic finding gets demoted to `also_matches` behind a hedged, fix-less, inflated AI
+/// guess). Origin now decides BEFORE severity within a class, so a deterministic finding always
+/// wins primacy over an AI one of the same class, whatever either side's own severity says —
+/// but class is still checked FIRST, so a genuine security finding (even AI-tier) still beats an
+/// irrelevant deterministic structural row, preserving the P1 invariant; (3) calibrated severity
+/// (now only a tiebreak within one class+origin tier — e.g. two deterministic members, or two AI
+/// members); (4) confidence (a "needs-review" flag ranks last); (5) earliest appearance, the
+/// final deterministic tiebreak so output never depends on hash/iteration order.
 fn primary_rank(f: &Finding, group_len: usize, index: usize) -> (u8, u8, u8, u8, usize) {
     (
         class_rank(finding_class(f)),
+        origin_rank(finding_origin(f)),
         severity_rank(&f.severity),
         confidence_rank(f.confidence.as_deref()),
-        origin_rank(finding_origin(f)),
         // Larger for earlier findings (lower `index`), so `max_by_key` resolves ties toward the
         // EARLIEST appearance — see BUG-7's original comment on this idiom.
         group_len - index,
     )
 }
 
+/// C5-1: the merged row's severity. The default — and the ONLY behavior when every member of
+/// the group shares the SAME origin tier (all deterministic, or all AI) — is the pre-existing
+/// `max()` across the group: a higher severity among peers of equal standing is a real
+/// escalation and must never be thrown away (e.g. two deterministic rules on the same defect, one
+/// graded higher than the other). The one carve-out: the chosen PRIMARY is Deterministic but the
+/// group is MIXED-tier (it also absorbed an AI-tier member). An AI-tier severity is uncalibrated
+/// and routinely inflated relative to its own deterministic sibling describing the identical
+/// defect — letting `max()` win there means an AI "critical" guess silently overrides a
+/// correctly-graded deterministic "medium", which is exactly the REG-1 symptom this work item
+/// fixes. In that one case the primary's OWN (grounded) severity is authoritative instead.
+fn merged_severity(primary: &Finding, max_sev: String, all_same_tier: bool) -> String {
+    if !all_same_tier && finding_origin(primary) == Origin::Deterministic {
+        primary.severity.clone()
+    } else {
+        max_sev
+    }
+}
+
 /// Collapse one `(path, line)` group of findings into a SINGLE finding. The model routinely
 /// reports one smell under several rule names — an invented `AI-` name PLUS the adopted
 /// corpus rule it maps to PLUS sibling invented names — each with a different title, so a
 /// `.expect()` panic at handlers.rs:41 arrives as five rows. This keeps ONE primary, chosen by
-/// `primary_rank` (security-class, then severity, then confidence, then specificity, then
-/// earliest), demotes every OTHER distinct rule id to `also_matches`, and keeps the max
-/// severity — so the row honestly reads "violates layering + DI + entities-chain" rather than
-/// emitting five near-duplicates. Before P1, this picked "adopted (non-AI-) beats invented" as
-/// its FIRST key, which is exactly the canonical failure: an adopted-but-irrelevant structural
-/// rule id at the same exact line as an AI-invented SECURITY finding used to win primacy
-/// regardless of severity, hiding the security defect. `primary_rank`'s class-first ordering
-/// fixes that while leaving same-class ties resolved exactly as before.
+/// `primary_rank` (security-class, then specificity/origin, then severity, then confidence, then
+/// earliest — see that function's doc comment for the C5-1 reordering), demotes every OTHER
+/// distinct rule id to `also_matches`, and sets the severity via `merged_severity` (max across
+/// the group, EXCEPT when the primary is deterministic in a mixed-tier group — see that
+/// function's doc comment) — so the row honestly reads "violates layering + DI + entities-chain"
+/// rather than emitting five near-duplicates. Before P1, this picked "adopted (non-AI-) beats
+/// invented" as its FIRST key, which is exactly the canonical failure: an adopted-but-irrelevant
+/// structural rule id at the same exact line as an AI-invented SECURITY finding used to win
+/// primacy regardless of severity, hiding the security defect. `primary_rank`'s class-first
+/// ordering fixes that while leaving same-class ties resolved exactly as before (now
+/// origin-before-severity within a class — C5-1).
 fn merge_location_group(group: Vec<Finding>) -> Finding {
     let primary_idx = group
         .iter()
@@ -3699,6 +3731,11 @@ fn merge_location_group(group: Vec<Finding>) -> Finding {
         .max_by_key(|f| severity_rank(&f.severity))
         .map(|f| f.severity.clone())
         .unwrap_or_else(|| "low".to_string());
+    // C5-1: whether every member shares the SAME origin tier — see `merged_severity`'s doc
+    // comment. Computed over the FULL group (primary included) before it is removed below.
+    let all_same_tier = group
+        .iter()
+        .all(|f| finding_origin(f) == finding_origin(&group[0]));
 
     let mut group = group;
     let mut primary = group.remove(primary_idx);
@@ -3711,7 +3748,15 @@ fn merge_location_group(group: Vec<Finding>) -> Finding {
             also.push(f.rule_id.clone());
         }
     }
-    primary.severity = max_sev;
+    primary.severity = merged_severity(&primary, max_sev, all_same_tier);
+    // C5-1: a deterministic primary with no codebase-specific fix of its own yet (normally
+    // `fix_specific` is only populated in a LATER pipeline pass — see `Finding::fix_specific`'s
+    // doc comment — but a finding carried forward from a prior incremental run can already carry
+    // one) inherits the first member's rather than shipping fix-less when a perfectly good one
+    // was sitting right there in the group it just absorbed.
+    if primary.fix_specific.is_none() {
+        primary.fix_specific = group.iter().find_map(|f| f.fix_specific.clone());
+    }
     primary.also_matches = also;
     primary
 }
@@ -4365,16 +4410,19 @@ fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool
 }
 
 /// Collapse one semantic group into a single finding, PRIMARY chosen by `primary_rank`
-/// (security-class, then severity, then confidence, then specificity, then earliest — design
-/// point 3); max severity kept; every OTHER distinct rule id (including the members' own
-/// pre-existing `also_matches`) demoted into `also_matches`, scoped to ONLY this cluster's
-/// members (design point 4's `also_matches`-correctness fix: an id can only appear here if it
-/// was actually a member of, or already demoted within, THIS group — never a rule from an
-/// unrelated cluster). Every member's OWN evidence site is preserved in `also_locations`
-/// (design point 4's "list them all" union) rather than silently dropped when it loses the
-/// primary slot; a member whose `located == false` (no independently-fixable code of its own —
-/// see `Finding::located`) is marked `consequence: true` there, so it folds in as an "also
-/// affects" location rather than reading as a peer, independently-actionable site.
+/// (security-class, then specificity/origin, then severity, then confidence, then earliest —
+/// design point 3, reordered by C5-1 — see that function's doc comment); severity set via
+/// `merged_severity` (max across the group, except when the primary is deterministic in a
+/// mixed-tier group); every OTHER distinct rule id (including the members' own pre-existing
+/// `also_matches`) demoted into `also_matches`, scoped to ONLY this cluster's members (design
+/// point 4's `also_matches`-correctness fix: an id can only appear here if it was actually a
+/// member of, or already demoted within, THIS group — never a rule from an unrelated cluster).
+/// Every member's OWN evidence site is preserved in `also_locations` (design point 4's "list them
+/// all" union) rather than silently dropped when it loses the primary slot; a member whose
+/// `located == false` (no independently-fixable code of its own — see `Finding::located`) is
+/// marked `consequence: true` there, so it folds in as an "also affects" location rather than
+/// reading as a peer, independently-actionable site. C5-1: a primary with no `fix_specific` of
+/// its own inherits the first member's (see `merge_location_group`'s matching comment).
 fn merge_semantic_group(group: Vec<Finding>) -> Finding {
     let primary_idx = group
         .iter()
@@ -4387,6 +4435,11 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
         .max_by_key(|f| severity_rank(&f.severity))
         .map(|f| f.severity.clone())
         .unwrap_or_else(|| "low".to_string());
+    // C5-1: see `merged_severity`'s doc comment. Computed over the FULL group (primary included)
+    // before it is removed below.
+    let all_same_tier = group
+        .iter()
+        .all(|f| finding_origin(f) == finding_origin(&group[0]));
     let mut group = group;
     let mut primary = group.remove(primary_idx);
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -4399,6 +4452,14 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
         }
     }
     let mut also_locations: Vec<MergedLocation> = primary.also_locations.drain(..).collect();
+    // C5-1: computed before the loop below (which only reads `f.fix_specific` incidentally via
+    // `&group`, never consumes it) — a deterministic primary inherits the first member's
+    // codebase-specific fix when it has none of its own yet.
+    let inherited_fix_specific = primary
+        .fix_specific
+        .is_none()
+        .then(|| group.iter().find_map(|f| f.fix_specific.clone()))
+        .flatten();
     for f in &group {
         if seen.insert(f.rule_id.clone()) {
             also.push(f.rule_id.clone());
@@ -4426,9 +4487,12 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
     also_locations.retain(|l| {
         location_seen.insert((l.repo.clone(), l.path.clone(), l.line, l.rule_id.clone()))
     });
-    primary.severity = max_sev;
+    primary.severity = merged_severity(&primary, max_sev, all_same_tier);
     primary.also_matches = also;
     primary.also_locations = also_locations;
+    if primary.fix_specific.is_none() {
+        primary.fix_specific = inherited_fix_specific;
+    }
     primary
 }
 
@@ -10264,6 +10328,13 @@ mod tests {
         // in another file are one root-cause defect, not two — the general "same object across
         // files" signal (design point 2b), independent of category or line proximity. The
         // absorbed member's own evidence site is preserved, not silently dropped.
+        //
+        // C5-1: the deterministic config-flag finding now ALWAYS wins primacy over its AI-tier
+        // sibling within the same class (REG-1) — origin outranks severity — even though the AI
+        // side's own (uncalibrated, inflated) severity is higher. The merged severity is the
+        // deterministic primary's OWN grounded "medium", never the AI member's "high" (REG-2):
+        // see `merged_severity`'s doc comment for why `max()` must not apply across a mixed-tier
+        // group. (Before C5-1 this test pinned the OPPOSITE, buggy behavior — see git history.)
         let mut flag = site_finding("CONFIG-FLAG-DEBUG-MODE", "config.rs", 5, "medium", "");
         flag.captures
             .insert("flag".to_string(), "debug_mode".to_string());
@@ -10279,19 +10350,26 @@ mod tests {
             "cross-file findings sharing a captured object collapse into one defect"
         );
         assert_eq!(
-            out[0].rule_id, "AI-HANDLER-TRUSTS-DEBUG-FLAG",
-            "higher severity wins primary (same class, no confidence signal)"
+            out[0].rule_id, "CONFIG-FLAG-DEBUG-MODE",
+            "the deterministic finding must win primacy over its AI-tier sibling, regardless of \
+             which side's own severity is higher (C5-1 / REG-1)"
+        );
+        assert_eq!(
+            out[0].severity, "medium",
+            "the merged severity must be the deterministic primary's OWN grounded severity, \
+             never inflated by the absorbed AI member's higher (uncalibrated) severity (C5-1 / \
+             REG-2)"
         );
         assert!(out[0]
             .also_matches
-            .contains(&"CONFIG-FLAG-DEBUG-MODE".to_string()));
+            .contains(&"AI-HANDLER-TRUSTS-DEBUG-FLAG".to_string()));
         assert_eq!(
             out[0].also_locations.len(),
             1,
             "the absorbed member's own evidence site is preserved, not dropped"
         );
-        assert_eq!(out[0].also_locations[0].path, "config.rs");
-        assert_eq!(out[0].also_locations[0].line, 5);
+        assert_eq!(out[0].also_locations[0].path, "handler.rs");
+        assert_eq!(out[0].also_locations[0].line, 80);
         assert!(
             !out[0].also_locations[0].consequence,
             "both sides cite real, independently-actionable code"

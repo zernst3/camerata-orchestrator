@@ -2956,6 +2956,34 @@ pub fn build_report_json(
     for rid in &report.provenance.audited_rule_ids {
         by_category.entry(category_for(rid, corpus)).or_default();
     }
+    // C5-1 (coverage accounting): a rule counts as "matched this run" if it fired as a PRIMARY
+    // (`f.rule_id`) OR survived only as a merged `also_matches` member — a rule demoted into
+    // `also_matches` by `ai_audit::merge_location_group`/`merge_semantic_group` genuinely fired;
+    // it just lost the primary slot to another finding describing the same defect. Before this,
+    // `rule_ids_with_findings`/`rule_ids_with_any_finding` below only ever looked at the
+    // PRIMARY's own `rule_id`, so an absorbed rule — most commonly the deterministic rule a
+    // pre-fix merge used to demote behind an inflated AI primary (see `merge_semantic_group`'s
+    // `primary_rank` doc comment) — showed 0 findings in the Coverage sheet and was listed as
+    // "verified clean" even though it fired and was merged into a visible row. Keyed by each
+    // absorbed id's OWN category (via `category_for`, the same join `audited_rule_ids` uses just
+    // above) since an absorbed AI/adopted id can belong to a different category than the
+    // primary's — a member matched under ITS category, not necessarily the row's displayed one.
+    let mut matched_rule_ids_by_category: std::collections::BTreeMap<
+        String,
+        std::collections::HashSet<String>,
+    > = std::collections::BTreeMap::new();
+    for (f, _, _, _) in &code_findings {
+        matched_rule_ids_by_category
+            .entry(category_for_finding(f, corpus))
+            .or_default()
+            .insert(f.rule_id.clone());
+        for also_id in &f.also_matches {
+            matched_rule_ids_by_category
+                .entry(category_for(also_id, corpus))
+                .or_default()
+                .insert(also_id.clone());
+        }
+    }
     let mut scorecard_rows: Vec<CategoryRowJson> = Vec::new();
     for (category, entries) in &by_category {
         let mut critical = 0usize;
@@ -2964,7 +2992,7 @@ pub fn build_report_json(
         let mut low = 0usize;
         let mut open_high_or_critical = false;
         let mut open_medium = false;
-        let mut rule_ids_with_findings: std::collections::HashSet<&str> =
+        let mut rule_ids_with_findings: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         for entry in entries.iter() {
             let f = entry.0;
@@ -2976,7 +3004,7 @@ pub fn build_report_json(
                 "medium" => medium += 1,
                 _ => low += 1,
             }
-            rule_ids_with_findings.insert(f.rule_id.as_str());
+            rule_ids_with_findings.insert(f.rule_id.clone());
             let still_open = matches!(
                 disposition,
                 Disposition::Unresolved | Disposition::TechDebtNow | Disposition::TechDebtLater
@@ -2996,6 +3024,13 @@ pub fn build_report_json(
         } else {
             "Clean"
         };
+        // C5-1: fold in every rule id absorbed into THIS category via `also_matches` (see the
+        // doc comment on `matched_rule_ids_by_category` above) — a rule that only survived as a
+        // merged member still genuinely matched and must count toward `audited_rules`/never
+        // toward `clean_rules`.
+        if let Some(absorbed) = matched_rule_ids_by_category.get(category) {
+            rule_ids_with_findings.extend(absorbed.iter().cloned());
+        }
         let audited_in_category: Vec<&str> = report
             .provenance
             .audited_rule_ids
@@ -3016,11 +3051,11 @@ pub fn build_report_json(
         let audited_rules = audited_in_category.len()
             + rule_ids_with_findings
                 .iter()
-                .filter(|rid| !audited_in_category.contains(rid))
+                .filter(|rid| !audited_in_category.contains(&rid.as_str()))
                 .count();
         let clean_rules = audited_in_category
             .iter()
-            .filter(|rid| !rule_ids_with_findings.contains(*rid))
+            .filter(|rid| !rule_ids_with_findings.contains(**rid))
             .count();
         scorecard_rows.push(CategoryRowJson {
             category: category.clone(),
@@ -3051,9 +3086,16 @@ pub fn build_report_json(
     // corpus doesn't turn this section into dozens of bullets that read as padding; the
     // remainder is summarized in one honest count line instead of silently dropped.
     const WHATS_HEALTHY_CAP: usize = 10;
-    let rule_ids_with_any_finding: std::collections::HashSet<&str> = code_findings
+    // C5-1: a rule that only survived a merge as an absorbed `also_matches` member (never its
+    // own primary row) still genuinely fired this run — see `matched_rule_ids_by_category`'s doc
+    // comment above for the full "0 in Coverage, listed as verified clean" bug this closes.
+    // "Healthy" is global (not per-category, unlike the scorecard above), so this folds every
+    // `also_matches` id in directly rather than going through the per-category map.
+    let rule_ids_with_any_finding: std::collections::HashSet<String> = code_findings
         .iter()
-        .map(|(f, _, _, _)| f.rule_id.as_str())
+        .flat_map(|(f, _, _, _)| {
+            std::iter::once(f.rule_id.clone()).chain(f.also_matches.iter().cloned())
+        })
         .collect();
     let mut healthy_rules: Vec<HealthyRuleJson> = report
         .provenance
@@ -4272,6 +4314,268 @@ mod tests {
                 .any(|g| g.rule_id == "ARCH-MIDDLEWARE-FIRST-1"),
             "the structural row must not survive as its own peer row once absorbed"
         );
+    }
+
+    // ── C5-1: REG-1/REG-2 (merge primacy + severity) + coverage accounting ──────────────────
+    // docs: the deterministic/AI merge-primacy regression + the coverage-accounting bug it
+    // caused. Synthetic findings only.
+
+    /// The canonical REG-1/REG-2 scenario end to end: a deterministic floor rule (medium,
+    /// grounded, authored fix) and an AI-tier rule (critical, hedged, no fix of its own)
+    /// describe the SAME defect at the SAME site. Before C5-1, the AI row's inflated severity
+    /// won primacy (`primary_rank` ranked severity ahead of origin), demoting the clean
+    /// deterministic finding to `also_matches` and reporting it as "verified clean" in Coverage
+    /// (REG-1); the merged severity then inherited the AI member's inflated critical (REG-2).
+    /// After the fix: the deterministic rule is primary, the merged severity is its own grounded
+    /// "medium" (never the AI member's "critical"), its authored fix survives, and BOTH rule ids
+    /// count as matched in Coverage — neither is listed healthy/"verified clean".
+    #[tokio::test]
+    async fn c5_1_deterministic_primary_wins_merge_and_coverage_counts_both_rule_ids() {
+        let code = "db.query(`DELETE FROM t WHERE id=${id}`)";
+        let mut det = finding("SEC-DETERMINISTIC-SITE-1", "a.ts", 10, "medium");
+        det.snippet = code.to_string();
+        det.fix_specific =
+            Some("Use a parameterized query via the shared `db` client.".to_string());
+        let mut ai = finding("AI-SITE-DEFECT-1", "a.ts", 10, "critical");
+        ai.snippet = code.to_string();
+        ai.confidence = Some("needs-review".to_string());
+        ai.needs_review = true;
+
+        let files = vec![("a.ts".to_string(), code.to_string())];
+        let merged = crate::ai_audit::merge_by_location(vec![det, ai], &files);
+        assert_eq!(
+            merged.len(),
+            1,
+            "same-site findings must collapse to one row"
+        );
+        assert_eq!(
+            merged[0].rule_id, "SEC-DETERMINISTIC-SITE-1",
+            "the deterministic rule must win primacy, regardless of the AI member's higher \
+             (uncalibrated) severity"
+        );
+        assert_eq!(
+            merged[0].severity, "medium",
+            "the merged severity must be the deterministic primary's own, never the AI member's \
+             inflated critical"
+        );
+        assert!(merged[0]
+            .also_matches
+            .contains(&"AI-SITE-DEFECT-1".to_string()));
+
+        let report = report_with(merged, vec!["SEC-DETERMINISTIC-SITE-1", "AI-SITE-DEFECT-1"]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        let group = json
+            .curated_findings
+            .iter()
+            .find(|g| g.rule_id == "SEC-DETERMINISTIC-SITE-1")
+            .expect("the deterministic rule must survive as the curated primary");
+        assert_eq!(group.sites.len(), 1);
+        let site = &group.sites[0];
+        assert_eq!(site.severity, "medium");
+        assert_eq!(
+            site.confidence.as_deref(),
+            Some("high"),
+            "an un-hedged deterministic finding resolves to high confidence"
+        );
+        assert_eq!(
+            site.fix_for_this_finding.as_deref(),
+            Some("Use a parameterized query via the shared `db` client."),
+            "the deterministic primary's own authored fix must survive"
+        );
+        assert!(site.also_matches.contains(&"AI-SITE-DEFECT-1".to_string()));
+
+        // Coverage: BOTH rule ids count as matched this run — neither is "verified clean".
+        let healthy_ids: Vec<&str> = json
+            .whats_healthy
+            .rules
+            .iter()
+            .map(|r| r.rule_id.as_str())
+            .collect();
+        assert!(
+            !healthy_ids.contains(&"SEC-DETERMINISTIC-SITE-1"),
+            "the primary rule must never be listed as healthy/clean: {healthy_ids:?}"
+        );
+        assert!(
+            !healthy_ids.contains(&"AI-SITE-DEFECT-1"),
+            "the absorbed AI member must never be listed as healthy/clean either: {healthy_ids:?}"
+        );
+
+        let det_category = category_for("SEC-DETERMINISTIC-SITE-1", None);
+        let ai_category = category_for("AI-SITE-DEFECT-1", None);
+        let det_row = json
+            .scorecard
+            .rows
+            .iter()
+            .find(|r| r.category == det_category)
+            .expect("the deterministic rule's category must have a scorecard row");
+        assert!(
+            det_row.audited_rules >= 1 && det_row.clean_rules == 0,
+            "the primary must count as matched (>= 1), never clean: {det_row:?}"
+        );
+        let ai_row = json
+            .scorecard
+            .rows
+            .iter()
+            .find(|r| r.category == ai_category)
+            .expect("the AI rule's own category must have a scorecard row");
+        assert!(
+            ai_row.audited_rules >= 1 && ai_row.clean_rules == 0,
+            "the absorbed AI member must count as matched (>= 1) in Coverage, never \
+             'verified clean': {ai_row:?}"
+        );
+    }
+
+    /// Safe twin: two findings of DIFFERENT defect classes/categories at one site (line 0 —
+    /// uncited/file-level, so `merge_by_location`'s "unrelated file-level issues legitimately
+    /// share line 0" carve-out applies, and the categories are deliberately disjoint so
+    /// `merge_semantic_groups` has no shared signal either) must NEVER merge — they stay two
+    /// independent rows, and both are counted. Proves C5-1's primacy/severity changes only
+    /// affect findings that WERE already matched into one group; they never cause two distinct
+    /// defects to collapse into one.
+    #[test]
+    fn c5_1_safe_twin_different_defect_classes_at_one_site_stay_two_rows() {
+        let mut a = finding("ARCH-NO-VERSIONING-1", "app.ts", 0, "medium");
+        a.category = Some("api-layer".to_string());
+        a.snippet = "no API versioning scheme is in use".to_string();
+        let mut b = finding("AI-MISSING-RATE-LIMIT-1", "app.ts", 0, "low");
+        b.category = Some("transport-security".to_string());
+        b.snippet = "no rate limiting is configured".to_string();
+
+        let merged = crate::ai_audit::merge_semantic_groups(
+            crate::ai_audit::merge_by_location(vec![a, b], &[]),
+            &[],
+        );
+        assert_eq!(
+            merged.len(),
+            2,
+            "two findings of different defect classes at one site must stay two rows: {merged:?}"
+        );
+
+        let report = report_with(merged, vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        // Every code finding gets a `FindingRefJson` in exactly one matrix bucket regardless of
+        // citation (the uncited-AI gate only changes WHICH bucket, never whether it's counted at
+        // all) — so scanning every bucket is the general "both survive, nothing silently
+        // dropped" check, unlike `curated_findings` alone (which the P3 citation gate can hold
+        // an uncited AI-tier id out of entirely).
+        let rule_ids: std::collections::HashSet<&str> = json
+            .matrix
+            .do_now
+            .iter()
+            .chain(json.matrix.do_next.iter())
+            .chain(json.matrix.plan.iter())
+            .chain(json.matrix.accepted.iter())
+            .chain(json.matrix.informational.iter())
+            .map(|f| f.rule_id.as_str())
+            .collect();
+        assert!(rule_ids.contains("ARCH-NO-VERSIONING-1"));
+        assert!(rule_ids.contains("AI-MISSING-RATE-LIMIT-1"));
+    }
+
+    /// Cover-count invariant: however many raw findings merge into however many real defects,
+    /// the cover's critical count must equal the number of critical rows ACTUALLY RENDERED in
+    /// the report body — never the raw pre-merge count. Two real critical defects, each
+    /// independently double-reported (a deterministic floor rule + a duplicate AI rule at the
+    /// same site) — 4 raw findings, 2 real defects — must land on a critical count of 2.
+    #[tokio::test]
+    async fn c5_1_cover_critical_count_equals_rendered_critical_rows_after_merge() {
+        // Deliberately disjoint structural objects (`accountsRepo` vs `sessionsRepo`) and
+        // distinct detail prose, so the two sites are genuinely two SEPARATE defects — no
+        // cross-file semantic signal (shared captured object / description overlap / same-rule
+        // same-file) should fuse them together; only each site's OWN deterministic+AI pair
+        // merges via the exact-location pass.
+        let code_a = "accountsRepo.query(`DELETE FROM accounts WHERE id=${id}`)";
+        let mut det_a = finding("SEC-NO-RAW-SQL-CONCAT-1", "a.ts", 10, "critical");
+        det_a.snippet = code_a.to_string();
+        det_a.detail =
+            "Unsanitized input flows into a raw SQL delete against accounts.".to_string();
+        let mut ai_a = finding("AI-SQL-INJECTION-A", "a.ts", 10, "critical");
+        ai_a.snippet = code_a.to_string();
+        ai_a.detail = det_a.detail.clone();
+
+        let code_b = "sessionsRepo.execute(`DELETE FROM sessions WHERE token=${t}`)";
+        let mut det_b = finding("SEC-NO-RAW-SQL-CONCAT-1", "b.ts", 20, "critical");
+        det_b.snippet = code_b.to_string();
+        det_b.detail =
+            "Unsanitized input flows into a raw SQL delete against sessions.".to_string();
+        let mut ai_b = finding("AI-SQL-INJECTION-B", "b.ts", 20, "critical");
+        ai_b.snippet = code_b.to_string();
+        ai_b.detail = det_b.detail.clone();
+
+        let files = vec![
+            ("a.ts".to_string(), code_a.to_string()),
+            ("b.ts".to_string(), code_b.to_string()),
+        ];
+        let raw = vec![det_a, ai_a, det_b, ai_b];
+        let merged = crate::ai_audit::merge_semantic_groups(
+            crate::ai_audit::merge_by_location(raw, &files),
+            &files,
+        );
+        assert_eq!(
+            merged.len(),
+            2,
+            "4 raw findings describing 2 real defects must land on exactly 2 rows: {merged:?}"
+        );
+
+        let report = report_with(merged, vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        let rendered_critical_rows = json
+            .curated_findings
+            .iter()
+            .flat_map(|g| &g.sites)
+            .filter(|s| s.severity == "critical")
+            .count();
+        assert_eq!(
+            json.cover.stats.critical, rendered_critical_rows,
+            "the cover's critical count must equal the number of critical rows actually \
+             rendered in the body"
+        );
+        assert_eq!(
+            json.cover.stats.critical, 2,
+            "merging must land on exactly 2 criticals, never the raw pre-merge count of 4"
+        );
+    }
+
+    /// Invariant: a row the `is_informational` gate routes to the appendix (needs-review/
+    /// testing-style/absence-type/info-tier — the four signals in that function's doc comment)
+    /// NEVER carries a critical/high severity badge, by the hard invariant at the top of
+    /// `is_informational` itself. Pinned here as an explicit regression test over
+    /// `build_report_json`'s actual output, scoped to those four signals specifically: the
+    /// SEPARATE, pre-existing, and deliberately severity-blind `is_uncited_ai_finding` gate
+    /// (see that function's own doc comment — "a critical, uncited finding is PRECISELY the
+    /// case this gate exists to catch") is an intentional report-integrity carve-out, not part
+    /// of this invariant, and is untouched by C5-1.
+    #[test]
+    fn c5_1_is_informational_routed_rows_never_exceed_medium_severity() {
+        // Two findings that genuinely route to the informational appendix via two of
+        // `is_informational`'s four signals: needs-review confidence at a non-critical/high
+        // severity (§2c), and the `info` tier itself. (A hedged CRITICAL/HIGH finding is a
+        // DIFFERENT case — the hard invariant at the top of `is_informational` holds those in
+        // the action tiers regardless of the hedge, which is exactly why this invariant is true
+        // by construction for this gate; this test proves the inverse direction end to end, over
+        // real `build_report_json` output, that every row this gate DOES route to
+        // `informational` carries severity <= medium.)
+        let mut hedged_medium = finding("ARCH-DEBATABLE-1", "a.rs", 1, "medium");
+        hedged_medium.confidence = Some("needs-review".to_string());
+        hedged_medium.needs_review = true;
+        let info_tier = finding("ARCH-INFO-NOTE-1", "b.rs", 2, "info");
+
+        let report = report_with(vec![hedged_medium, info_tier], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(
+            json.matrix.informational.len(),
+            2,
+            "both synthetic findings must actually route to the informational appendix: {:?}",
+            json.matrix.informational
+        );
+        for row in &json.matrix.informational {
+            assert!(
+                severity_rank(&row.severity) >= severity_rank("medium"),
+                "an is_informational-routed row must never exceed medium severity: {row:?}"
+            );
+        }
     }
 
     #[test]
