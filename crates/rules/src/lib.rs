@@ -422,6 +422,17 @@ struct OptionToml {
     /// choosing this option calls for escalation. Absent → this option does not escalate.
     #[serde(default)]
     escalation: Option<EscalationSpec>,
+    /// Authored remediation-EFFORT tier for a finding evaluated against this option: `"low"` |
+    /// `"medium"` | `"high"`, the SAME three-tier vocabulary as `Finding::effort` (C4-P3). This
+    /// is the rule author's own floor/default estimate for how long the fix takes — consulted
+    /// ONLY when a finding's own calibrated `effort` is absent (a deterministic-floor or
+    /// RLS-replay finding never goes through the AI calibration pass that sets `Finding::effort`
+    /// per-finding, so without this a client-visible row would show "not estimated this run"
+    /// forever, no matter how proven the defect). `None`/absent when not yet authored; the
+    /// report then falls back to its pre-existing "not yet estimated" honest gap (see
+    /// `report_export::resolve_effort`) rather than fabricating a number.
+    #[serde(default)]
+    effort: Option<String>,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -474,6 +485,15 @@ pub struct RuleOption {
     /// the gate denies + bounces as normal). Option-scoped so a rule can offer an escalating option
     /// alongside non-escalating ones, and only the selected option's spec is active.
     pub escalation: Option<EscalationSpec>,
+    /// Authored remediation-EFFORT tier (C4-P3): `"low"` | `"medium"` | `"high"`, the same
+    /// vocabulary `Finding::effort` uses. This is the rule author's floor/default estimate,
+    /// consulted by `report_export::resolve_effort` ONLY when a finding's own calibrated
+    /// `effort` is absent — the deterministic floor and RLS-replay checkers never go through
+    /// the AI calibration pass that sets `Finding::effort` per-finding, so without this a
+    /// proven, client-visible defect would show "not estimated this run" forever. `None` when
+    /// not yet authored for this option; the report then renders its pre-existing honest gap
+    /// rather than fabricating a number.
+    pub effort: Option<String>,
 }
 
 /// How a rule's escalation condition is handled when an agent's work meets it.
@@ -866,6 +886,7 @@ pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
         finding_headline: None,
         finding_detail: None,
         escalation: None,
+        effort: None,
     };
     let rule = Rule {
         id: RuleId(rule_id.to_owned()),
@@ -1110,6 +1131,7 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
             finding_headline: o.finding_headline.filter(|s| !s.trim().is_empty()),
             finding_detail: o.finding_detail.filter(|s| !s.trim().is_empty()),
             escalation: o.escalation,
+            effort: o.effort.filter(|s| !s.trim().is_empty()),
         })
         .collect();
 
@@ -1444,6 +1466,7 @@ mod tests {
                     finding_headline: o.finding_headline.filter(|s| !s.trim().is_empty()),
                     finding_detail: o.finding_detail.filter(|s| !s.trim().is_empty()),
                     escalation: o.escalation,
+                    effort: o.effort.filter(|s| !s.trim().is_empty()),
                 })
                 .collect(),
             verification: raw.verification,
@@ -1699,6 +1722,47 @@ mod tests {
                 "expected universal rules to load as 'universal' domain"
             );
         }
+    }
+
+    /// C4-P3 corpus-LOAD gate (dev/CI only — this is a test, not a runtime refusal): every rule
+    /// that resolves a DEFAULT option (the option a finding against it binds to when the
+    /// project hasn't configured its own `chosen_option`) must carry authored, non-empty
+    /// `remediation` text on that option. Without this, a curated finding's "Fix:" line is
+    /// silently omitted (`report_export::resolve_fix`'s honest-gap degrade) for a rule nobody
+    /// ever finished authoring — exactly the gap that let proven criticals ship with no fix text
+    /// to fall back to when per-finding fix generation failed (item 4). Failing this test names
+    /// the offending rule id(s) so the fix is "author the TOML", never a runtime workaround.
+    ///
+    /// Scope note: a rule with NO default option (a pure architect-must-choose stance decision —
+    /// branch-naming convention, API versioning scheme, …) is intentionally OUT of scope here.
+    /// No finding ever resolves a Fix line for such a rule until a project explicitly configures
+    /// a `chosen_option`, and several of these rules legitimately offer a "no policy adopted"
+    /// alternative with no remediation (there is nothing to fix if the project opts out of the
+    /// rule entirely) — gating on every option would force authoring remediation for alternatives
+    /// that, by design, flag nothing.
+    #[tokio::test]
+    async fn every_rule_with_a_default_option_has_authored_remediation() {
+        let path = corpus_path();
+        let set = load_corpus(&path).await.expect("corpus must load cleanly");
+        let offenders: Vec<String> = set
+            .iter()
+            .filter_map(|rule| {
+                let default_id = rule.default_option.as_deref()?;
+                let option = rule.options.iter().find(|o| o.id == default_id)?;
+                let has_remediation = option
+                    .remediation
+                    .as_deref()
+                    .map(|s| !s.trim().is_empty())
+                    .unwrap_or(false);
+                (!has_remediation)
+                    .then(|| format!("{} (default option {default_id:?})", rule.id_str()))
+            })
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "every rule's default option must carry authored remediation text, so a curated \
+             finding against it always ships a Fix line — missing on: {offenders:#?}"
+        );
     }
 
     fn populated_set() -> RuleSet {

@@ -78,6 +78,7 @@ schemas, with `pg_temp` listed last) to the function definition in a new migrati
 re-running `\\df+ <function-name>` in `psql` (or the equivalent Supabase SQL editor query) and
 confirming the function's config now shows a pinned `search_path`.
 """
+effort = "low"
 why = "search_path hijacking against a SECURITY DEFINER function is a well-documented, well-understood Postgres attack with a known, low-cost fix (SET search_path); folding the SECURITY INVOKER preference into this rule's remediation gives the report one clear finding instead of two overlapping, lower-value ones."
 
 [[option]]

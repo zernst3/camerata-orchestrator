@@ -56,6 +56,7 @@ entire fix; no new policy needs writing. Verify by confirming the Supabase dashb
 Authentication > Policies page shows `<table>` as RLS-enabled, and that an anon-key request
 outside the existing policies' scope is now rejected.
 """
+effort = "low"
 why = "Policies-with-RLS-off is a distinct failure mode from bare missing-RLS: it indicates a developer BELIEVES the table is protected, which changes both the remediation message (enable RLS; the policies are likely already correct) and the report's credibility (naming the exact gap between intent and reality is the paid-audit value)."
 
 [[option]]
