@@ -1117,30 +1117,73 @@ fn failed_pass_disclosures(failed_passes: &[crate::ai_audit::FailedPass]) -> Vec
 /// such field anywhere in `ReportOptions`, and fabricating one would be worse than the
 /// placeholder it replaces). The number this report CAN state honestly, because every input to
 /// it is already computed for the executive-summary/methodology reconciliation a few lines
-/// above this one, is the TRIAGE fix rate: the share of this run's candidate findings that were
-/// kept (curated, held for review, or accepted risk — anything NOT excluded as a false
-/// positive) rather than thrown out as noise. A zero-candidate (clean) run has no fix rate to
-/// report; the paragraph says so plainly instead of dividing by zero or rendering a percentage
-/// that implies findings existed.
+/// above this one, is the TRIAGE fix rate.
+///
+/// C5-6 (REG-6, 2026-10-02): the triage fix rate above used to be `(candidates_reviewed -
+/// excluded_false_positive) / candidates_reviewed` — "kept" counted EVERY non-excluded
+/// candidate, including rows still sitting in [`MatrixJson::held`] / `informational` with no
+/// human disposition at all. On a fresh, unreviewed DRAFT export that produced a flatly false
+/// "100% fix rate" sentence calling undecided held rows "real, actionable items" before a
+/// reviewer had looked at a single one of them. Two independent bugs, both fixed here:
+///
+/// - **No percentage before a human has triaged anything.** [`ReviewState::Raw`] (see its doc
+///   comment — nobody this session has dispositioned a single finding) can never print a
+///   fix-rate percentage, full stop; there is no "rate" yet, only an unreviewed backlog. It
+///   prints the held count instead: "Fix rate not yet established: N of M candidates are held
+///   for a reviewer's decision; 0 excluded so far" — `0 excluded` is not a placeholder, it is
+///   always true here, because [`ReviewState::Raw`] is derived from "no finding carries an
+///   explicit this-session auditor disposition," and an excluded-as-false-positive row IS such
+///   a disposition (see `build_report_json`'s partition loop).
+/// - **Held rows never belong in the rate's numerator OR denominator**, even once a reviewer
+///   has acted on OTHER findings. A row still sitting in `held`/`informational` was not kept as
+///   "real, actionable," nor was it excluded as noise — it is neither, by construction. The
+///   fix rate is now `curated_total / (curated_total + excluded_false_positive)` only: the
+///   share of DECIDED candidates (curated for action vs. excluded as a false positive) that
+///   were kept. The "excluding the rest as likely false positives" clause is appended only when
+///   `excluded_false_positive > 0` — with nothing excluded, "excluding the rest" describes
+///   nothing and is simply dropped, not forced to read "excluding 0."
+///
+/// A zero-candidate (clean) run has no fix rate to report; the paragraph says so plainly
+/// instead of dividing by zero or rendering a percentage that implies findings existed. The
+/// same "nothing to compute a rate from" sentence is reused, defensively, if a `Reviewed`
+/// export somehow has zero curated AND zero excluded candidates (every candidate is held or a
+/// dependency advisory) — dividing zero by zero is not a 0% or 100% fix rate, it is "not yet
+/// established," identically to the draft case.
 pub(crate) fn next_steps_note(
+    review_state: ReviewState,
     candidates_reviewed: usize,
+    curated_total: usize,
+    held_for_review: usize,
     excluded_false_positive: usize,
 ) -> String {
-    let kept = candidates_reviewed.saturating_sub(excluded_false_positive);
+    let not_yet_established = || {
+        format!(
+            "Fix rate not yet established: {held_for_review} of {} are held for a reviewer's \
+             decision; 0 excluded so far.",
+            noun(candidates_reviewed, "candidate", "candidates"),
+        )
+    };
     let fix_rate_sentence = if candidates_reviewed == 0 {
         "This run produced no candidate findings, so there is no fix rate to report.".to_string()
+    } else if matches!(review_state, ReviewState::Raw) {
+        not_yet_established()
     } else {
-        let pct = (kept as f64 / candidates_reviewed as f64) * 100.0;
-        let noun = if candidates_reviewed == 1 {
-            "finding"
+        let denominator = curated_total + excluded_false_positive;
+        if denominator == 0 {
+            not_yet_established()
         } else {
-            "findings"
-        };
-        format!(
-            "This run kept {kept} of {candidates_reviewed} candidate {noun} as real, \
-             actionable items (a {pct:.0}% fix rate), excluding the rest as likely false \
-             positives."
-        )
+            let pct = (curated_total as f64 / denominator as f64) * 100.0;
+            let excluding_clause = if excluded_false_positive > 0 {
+                ", excluding the rest as likely false positives"
+            } else {
+                ""
+            };
+            format!(
+                "This run kept {curated_total} of {} as real, actionable items (a {pct:.0}% \
+                 fix rate){excluding_clause}.",
+                noun(denominator, "candidate finding", "candidate findings"),
+            )
+        }
     };
     format!(
         "There are three steps from here. First, the do-now items above get fixed, by your own \
@@ -3422,7 +3465,13 @@ pub fn build_report_json(
         candidates_reviewed,
         excluded_false_positive: excluded_fp,
         held_for_review: held_for_review_total,
-        next_steps: next_steps_note(candidates_reviewed, excluded_fp),
+        next_steps: next_steps_note(
+            review_state,
+            candidates_reviewed,
+            curated_total,
+            held_for_review_total,
+            excluded_fp,
+        ),
         deterministic_note:
             "Camerata runs a two-tier engine. A deterministic security floor (proven-defect \
              SAST rules plus a migration-timeline replay for Supabase Row Level Security) \
@@ -7790,10 +7839,69 @@ mod tests {
 
     #[test]
     fn next_steps_note_singular_finding_noun_at_exactly_one_candidate() {
-        let note = next_steps_note(1, 0);
+        let note = next_steps_note(ReviewState::Reviewed, 1, 1, 0, 0);
         assert!(
             note.contains("kept 1 of 1 candidate finding as"),
             "a single candidate must use the singular noun, not 'findings': {note}"
+        );
+    }
+
+    // ── C5-6 (REG-6): fix-rate sentence must be true or absent ─────────────────────────
+
+    /// Draft export, nothing excluded yet, some rows held for review: no percentage must ever
+    /// appear, and the held count must be named so the backlog isn't invisible.
+    #[test]
+    fn next_steps_note_draft_with_held_rows_names_the_held_count_with_no_percentage() {
+        let note = next_steps_note(ReviewState::Raw, 23, 0, 23, 0);
+        assert!(
+            !note.contains('%'),
+            "a draft export must never print a fix-rate percentage: {note}"
+        );
+        assert!(
+            !note.contains("real, actionable"),
+            "held rows on a draft export must never be called real, actionable items: {note}"
+        );
+        assert!(
+            note.contains("Fix rate not yet established"),
+            "a draft export must say the fix rate is not yet established: {note}"
+        );
+        assert!(
+            note.contains("23 of 23 candidates are held for a reviewer's decision"),
+            "the held count must be named plainly: {note}"
+        );
+        assert!(
+            note.contains("0 excluded so far"),
+            "a draft export has excluded nothing yet, and must say so: {note}"
+        );
+    }
+
+    /// Reviewed export, 17 curated and 3 excluded (0 held): the fix rate is curated / (curated
+    /// + excluded) = 85%, and the exclusion clause appears because something was excluded.
+    #[test]
+    fn next_steps_note_reviewed_with_exclusions_shows_percentage_and_exclusion_clause() {
+        let note = next_steps_note(ReviewState::Reviewed, 20, 17, 0, 3);
+        assert!(
+            note.contains("17 of 20") && note.contains("85%"),
+            "the fix rate must be curated/(curated+excluded) = 17/20 = 85%: {note}"
+        );
+        assert!(
+            note.contains("excluding the rest as likely false positives"),
+            "excluded > 0 must surface the exclusion clause: {note}"
+        );
+    }
+
+    /// Reviewed export, 20 curated and 0 excluded: still a percentage (100%), but the
+    /// "excluding the rest" clause must not appear since nothing was excluded.
+    #[test]
+    fn next_steps_note_reviewed_with_no_exclusions_omits_the_exclusion_clause() {
+        let note = next_steps_note(ReviewState::Reviewed, 20, 20, 0, 0);
+        assert!(
+            note.contains("20 of 20") && note.contains("100%"),
+            "zero excluded still yields a (100%) fix rate over curated candidates: {note}"
+        );
+        assert!(
+            !note.contains("excluding the rest"),
+            "excluded == 0 must never print the exclusion clause: {note}"
         );
     }
 
@@ -8635,8 +8743,8 @@ mod tests {
     fn no_client_facing_authored_string_contains_the_word_audit() {
         let candidates: Vec<String> = vec![
             AUDIT_REPORT_DISCLAIMER.to_string(),
-            next_steps_note(10, 3),
-            next_steps_note(0, 0),
+            next_steps_note(ReviewState::Reviewed, 10, 7, 0, 3),
+            next_steps_note(ReviewState::Raw, 0, 0, 0, 0),
             ai_tier_note_for(ReviewState::Raw),
             ai_tier_note_for(ReviewState::Reviewed),
             default_narrative(ReviewState::Raw, 10, 3, 1, 1, 1, 0, 1, 0, 0, 0),
