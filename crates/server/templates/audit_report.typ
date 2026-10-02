@@ -485,45 +485,77 @@
 
 #pagebreak()
 
+// One curated-findings GROUP (one rule, its citation/title header, and every site it covers) —
+// factored out so "Curated findings" and the separate "Held for review" section (C4-P4 residual
+// defect 5) render identically instead of maintaining two copies of this block.
+//
+// S4: keep the group heading + citation + FIRST site together (orphan control) — later sites in
+// the same group are free to break across pages normally.
+//
+// FIX 8 (2026-09-13 review): the BOLD, primary heading for each finding is the per-site defect
+// headline (`render_site`'s own `site.headline`, Item 1) and now LEADS the block outright — the
+// rule id + its own invariant title, plus the citation, render as a small gray SUBTITLE directly
+// BENEATH that headline (via `render_site`'s `after_headline`), kept for registry traceability,
+// never as the thing a reader sees first.
+#let render_curated_group(group) = {
+  block(breakable: false)[
+    #block(above: 12pt, below: 2pt)[
+      #if group.sites.len() > 0 [
+        #render_site(group.sites.at(0), after_headline: [
+          #text(size: 8.5pt, fill: rgb("#888888"))[#group.rule_id: #group.title] #text(size: 8.5pt, fill: rgb("#888888"))[(#str(group.sites.len()) #plural(group.sites.len(), "site", "sites"))]
+          // Item 5: show the citation ONCE. When real external sources exist, the bulleted
+          // title+URL list IS the citation — the run-on `citation.label` (a redundant join of
+          // those same titles) is dropped. `label` is shown only when there are no external
+          // sources to bullet (the advisory/preview case), where it is the sole honesty note.
+          #if group.citation.sources.len() > 0 [
+            #for s in group.citation.sources [
+              #text(size: 8.5pt, fill: rgb("#555555"))[- #s.title #if s.url != "" [(#s.url)]]
+            ]
+          ] else [
+            #text(size: 8.5pt, fill: rgb("#555555"))[#group.citation.label]
+          ]
+        ])
+      ]
+    ]
+  ]
+  for site in group.sites.slice(1) [
+    #render_site(site)
+  ]
+}
+
 // ── 5. Curated findings ───────────────────────────────────────────────────
+// C4-P4 (residual defect 5): `d.curated_findings` is already ordered by the server (severity
+// desc, then bucket do_now -> do_next -> plan -> accepted, then confidence) — see
+// `report_export::curated_group_sort_key` — never re-sorted (alphabetically or otherwise) here.
 = Curated findings
 
 #if d.curated_findings.len() == 0 [
   No open code findings survived triage.
 ] else [
   #for group in d.curated_findings [
-    // S4: keep the group heading + citation + FIRST site together (orphan control) — later
-    // sites in the same group are free to break across pages normally.
-    //
-    // FIX 8 (2026-09-13 review): the BOLD, primary heading for each finding is the per-site
-    // defect headline (`render_site`'s own `site.headline`, Item 1) and now LEADS the block
-    // outright — the rule id + its own invariant title, plus the citation, render as a small
-    // gray SUBTITLE directly BENEATH that headline (via `render_site`'s `after_headline`),
-    // kept for registry traceability, never as the thing a reader sees first.
-    #block(breakable: false)[
-      #block(above: 12pt, below: 2pt)[
-        #if group.sites.len() > 0 [
-          #render_site(group.sites.at(0), after_headline: [
-            #text(size: 8.5pt, fill: rgb("#888888"))[#group.rule_id: #group.title] #text(size: 8.5pt, fill: rgb("#888888"))[(#str(group.sites.len()) #plural(group.sites.len(), "site", "sites"))]
-            // Item 5: show the citation ONCE. When real external sources exist, the bulleted
-            // title+URL list IS the citation — the run-on `citation.label` (a redundant join
-            // of those same titles) is dropped. `label` is shown only when there are no
-            // external sources to bullet (the advisory/preview case), where it is the sole
-            // honesty note.
-            #if group.citation.sources.len() > 0 [
-              #for s in group.citation.sources [
-                #text(size: 8.5pt, fill: rgb("#555555"))[- #s.title #if s.url != "" [(#s.url)]]
-              ]
-            ] else [
-              #text(size: 8.5pt, fill: rgb("#555555"))[#group.citation.label]
-            ]
-          ])
-        ]
-      ]
-    ]
-    #for site in group.sites.slice(1) [
-      #render_site(site)
-    ]
+    #render_curated_group(group)
+  ]
+]
+
+#pagebreak()
+
+// ── Held for review ─────────────────────────────────────────────────────────
+// C4-P4 (residual defect 5): a group whose sites are ALL informational (the hedged/needs-review
+// appendix, matching the executive summary's own "held for a human reviewer's judgment call"
+// framing) never renders under "Curated findings" — that heading promises action items. Same
+// row-level content, own heading, own page, strictly AFTER every curated finding above.
+= Held for review
+
+#if d.held_for_review_findings.len() == 0 [
+  No findings held for a reviewer's judgment call this run.
+] else [
+  #text(size: 9pt, style: "italic", fill: rgb("#666666"))[
+    Held for a human reviewer's judgment call — not an open action item, but worth a second \
+    look.
+  ]
+  #v(4pt)
+  #for group in d.held_for_review_findings [
+    #render_curated_group(group)
   ]
 ]
 

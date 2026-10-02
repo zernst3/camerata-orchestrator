@@ -1011,7 +1011,25 @@ pub struct AuditReportJson {
     /// counts and the "Three things this week" box's `do_now` selection); the template no
     /// longer reads `matrix` directly for its own section.
     pub priority_grid: PriorityGridJson,
+    /// C4-P4 (residual defect 5): ordered by severity desc, then bucket (do_now -> do_next ->
+    /// plan -> accepted), then confidence — see [`curated_group_sort_key`] — NEVER the old
+    /// BTreeMap-alphabetical-by-rule-id iteration order, which could and did land a live
+    /// critical pages deep behind a run of alphabetically-earlier lows. A group qualifies for
+    /// THIS list when at least one of its sites is in an action/accepted bucket (i.e. not
+    /// EVERY site in the group is informational) — see [`held_for_review_findings`] for the
+    /// complementary, fully-informational groups.
     pub curated_findings: Vec<CuratedGroupJson>,
+    /// C4-P4 (residual defect 5): a group whose sites are ALL `bucket == "informational"` never
+    /// belongs under "Curated findings" client-facing prose (that heading promises action
+    /// items) — it renders in its own "Held for review" section instead, titled to match the
+    /// executive summary's own "held for a human reviewer's judgment call" framing. A MIXED
+    /// group (some sites curated, some informational — proven possible by
+    /// `matrix_and_curated_site_bucket_fields_agree_and_a_hedged_finding_is_never_an_action_bucket`'s
+    /// sibling cross-artifact test) stays entirely in `curated_findings` above: splitting a
+    /// single rule's sites across two top-level sections would fragment one finding's
+    /// citation/title header across two places in the document for no reader benefit, so the
+    /// bar for moving a GROUP here is "zero curated sites," not "any informational site."
+    pub held_for_review_findings: Vec<CuratedGroupJson>,
     pub whats_healthy: WhatsHealthyJson,
     pub dependency_snapshot: DependencySnapshotJson,
     pub methodology: MethodologyJson,
@@ -2039,6 +2057,64 @@ pub(crate) fn severity_rank(sev: &str) -> u8 {
     }
 }
 
+/// C4-P4 (residual defect 5): bucket rank for ordering the "Curated findings" section — action
+/// tiers lead (in the same do_now -> do_next -> plan order the severity x effort matrix and the
+/// "three things" box already use), "accepted" (dispositioned risk, still curated) comes next,
+/// and "informational" sorts last of all. In practice a group that reaches this ranking always
+/// has at least one non-informational site (see [`AuditReportJson::curated_findings`]'s doc
+/// comment on the group-eligibility rule), so the `_ => 4` arm only ever matters for computing
+/// the MIN across a mixed group's sites, where a same-rule informational companion site must
+/// never win the group's own (best) rank away from its curated sibling.
+fn curated_bucket_rank(bucket: &str) -> u8 {
+    match bucket {
+        "do_now" => 0,
+        "do_next" => 1,
+        "plan" => 2,
+        "accepted" => 3,
+        _ => 4, // "informational" or anything unrecognized.
+    }
+}
+
+/// C4-P4 (residual defect 5): confidence rank for the FINAL tie-break in curated-group
+/// ordering (after severity, then bucket) — a confidently-asserted finding sorts ahead of an
+/// equally-severe, equally-bucketed one the calibrator flagged as debatable. Takes
+/// [`CuratedSiteJson::confidence`] verbatim (already the canonical [`hedge_confidence`] value,
+/// never a raw unreconciled read); an absent confidence (no calibration pass ran at all) is
+/// treated as ordinary/medium rather than either extreme, since "no opinion recorded" is not
+/// the same claim as "needs review."
+fn curated_confidence_rank(confidence: Option<&str>) -> u8 {
+    match confidence {
+        Some("high") => 0,
+        Some("medium") => 1,
+        Some("low") => 2,
+        Some("needs-review") => 3,
+        _ => 1,
+    }
+}
+
+/// C4-P4 (residual defect 5): the full sort key for one curated GROUP — the MIN (best/most
+/// urgent) of `(severity_rank, curated_bucket_rank, curated_confidence_rank)` across every site
+/// in the group, with the group's own `rule_id` as a final deterministic tie-break so two
+/// equally-ranked groups never depend on map/vec iteration order. Using the MIN across sites
+/// (rather than, say, the first site after the existing repo/path/line sort) means a mixed
+/// group's own curated site always determines its position, never an informational companion
+/// that happens to sort first within the group.
+fn curated_group_sort_key(group: &CuratedGroupJson) -> (u8, u8, u8, String) {
+    let best = group
+        .sites
+        .iter()
+        .map(|s| {
+            (
+                severity_rank(&s.severity),
+                curated_bucket_rank(&s.bucket),
+                curated_confidence_rank(s.confidence.as_deref()),
+            )
+        })
+        .min()
+        .unwrap_or((u8::MAX, u8::MAX, u8::MAX));
+    (best.0, best.1, best.2, group.rule_id.clone())
+}
+
 /// Provenance-tier rank for the WITHIN-bucket sort (C3-6, item 3): a deterministic/grounded
 /// citation (a published standard, a real linter rule) outranks a scan-time preview tool,
 /// which outranks an ungrounded AI-advisory citation — so a security-floor finding (typically
@@ -2737,7 +2813,7 @@ pub fn build_report_json(
             .or_default()
             .push((f, *disposition, reason.clone(), severity.clone()));
     }
-    let mut curated_findings: Vec<CuratedGroupJson> = Vec::new();
+    let mut all_curated_groups: Vec<CuratedGroupJson> = Vec::new();
     for (rule_id, mut sites) in by_rule {
         sites.sort_by(|a, b| {
             (&a.0.repo, &a.0.path, a.0.line).cmp(&(&b.0.repo, &b.0.path, b.0.line))
@@ -2833,13 +2909,26 @@ pub fn build_report_json(
                 }
             })
             .collect();
-        curated_findings.push(CuratedGroupJson {
+        all_curated_groups.push(CuratedGroupJson {
             rule_id,
             title,
             citation,
             sites: site_jsons,
         });
     }
+
+    // C4-P4 (residual defect 5): split fully-informational groups into their own section, then
+    // order the remaining (genuinely curated) groups by severity desc / bucket / confidence —
+    // see `AuditReportJson::curated_findings`'s and `::held_for_review_findings`'s doc comments
+    // for the eligibility rule and `curated_group_sort_key` for the ordering itself.
+    let (mut curated_findings, mut held_for_review_findings): (
+        Vec<CuratedGroupJson>,
+        Vec<CuratedGroupJson>,
+    ) = all_curated_groups
+        .into_iter()
+        .partition(|g| g.sites.iter().any(|s| s.bucket != "informational"));
+    curated_findings.sort_by_key(curated_group_sort_key);
+    held_for_review_findings.sort_by_key(curated_group_sort_key);
 
     // Scorecard: group by category, over code_findings (all of them, so an accepted
     // high-severity item still shows up in the severity counts — only the STATUS chip
@@ -3214,6 +3303,7 @@ pub fn build_report_json(
         matrix,
         priority_grid,
         curated_findings,
+        held_for_review_findings,
         whats_healthy: WhatsHealthyJson {
             rules: healthy_rules,
             further_clean_count,
@@ -4743,7 +4833,11 @@ mod tests {
             "R1 must still downgrade the unlocated finding to informational: {:?}",
             json.matrix
         );
-        let site = &json.curated_findings[0].sites[0];
+        // C4-P4 (residual defect 5): this finding's whole group is entirely informational (its
+        // only site), so it lives in `held_for_review_findings`, not `curated_findings` — see
+        // `AuditReportJson::curated_findings`'s doc comment.
+        assert!(json.curated_findings.is_empty());
+        let site = &json.held_for_review_findings[0].sites[0];
         assert_eq!(
             site.confidence,
             Some("needs-review".to_string()),
@@ -6182,6 +6276,111 @@ mod tests {
         assert!(pdf.starts_with(b"%PDF"));
     }
 
+    // ── C4-P4 residual defect 5: curated ordering + held-for-review separation ─────────
+
+    /// Render test (compiles the real Typst template): "Curated findings" must be ordered by
+    /// severity desc (never alphabetically by rule id — the fixture deliberately gives the LOW
+    /// finding a rule id that sorts alphabetically FIRST, so a passing test can only mean the
+    /// severity sort actually fired), and an entirely-informational finding must render under
+    /// its own "Held for review" heading, strictly AFTER every curated finding, never under
+    /// "Curated findings" itself.
+    #[tokio::test]
+    async fn curated_findings_are_severity_ordered_and_informational_rows_are_held_for_review_separately(
+    ) {
+        if which_typst().is_none() {
+            eprintln!("skipping curated_findings_are_severity_ordered_...: typst not on PATH");
+            return;
+        }
+        let mut low = finding("AAA-LOW-COSMETIC-1", "a.rs", 1, "low");
+        low.detail = "A low severity cosmetic logging format issue was observed here. This is \
+                      not urgent."
+            .to_string();
+        let mut critical = finding("ZZZ-CRITICAL-AUTH-1", "z.rs", 2, "critical");
+        critical.detail = "A critical authentication bypass allows any unauthenticated user \
+                            full admin access. Immediate action is required."
+            .to_string();
+        let mut info = finding("MMM-STYLE-NOTE-1", "m.rs", 3, "info");
+        info.detail = "A minor style preference about variable naming conventions was observed \
+                       in this file."
+            .to_string();
+
+        let report = report_with(vec![low, critical, info], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        // JSON-level contract: 2 genuinely curated groups (ordered critical-first despite the
+        // alphabetical trap), 1 fully-informational group moved out to its own list.
+        assert_eq!(
+            json.curated_findings.len(),
+            2,
+            "{:?}",
+            json.curated_findings
+        );
+        assert_eq!(json.held_for_review_findings.len(), 1);
+        assert_eq!(
+            json.curated_findings[0].sites[0].severity, "critical",
+            "the first curated finding must be the max severity present, not the \
+             alphabetically-first rule id: {:?}",
+            json.curated_findings
+        );
+        assert_eq!(json.curated_findings[1].sites[0].severity, "low");
+        assert_eq!(
+            json.held_for_review_findings[0].sites[0].bucket,
+            "informational"
+        );
+        assert!(json
+            .curated_findings
+            .iter()
+            .all(|g| g.sites.iter().all(|s| s.bucket != "informational")));
+
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed for the severity-ordering fixture");
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+
+        // Both headings also appear once each in the clickable table of contents, and some of
+        // the headline text also appears in the "three things this week" box and the severity
+        // matrix earlier in the document — `rfind` anchors on the real SECTION headings (the
+        // last occurrence of each), and the comparisons below are scoped to the text BETWEEN
+        // (and after) those two anchors, so none of those earlier incidental occurrences can
+        // produce a false pass.
+        let curated_anchor = text
+            .rfind("Curated findings")
+            .expect("the Curated findings section heading must render");
+        let held_anchor = text
+            .rfind("Held for review")
+            .expect("the Held for review section heading must render");
+        assert!(
+            curated_anchor < held_anchor,
+            "the Curated findings section must render before Held for review: {text:?}"
+        );
+
+        let curated_section = &text[curated_anchor..held_anchor];
+        let held_section = &text[held_anchor..];
+
+        let critical_idx = curated_section
+            .find("authentication bypass")
+            .expect("the critical finding's headline must render in Curated findings");
+        let low_idx = curated_section
+            .find("cosmetic logging format")
+            .expect("the low finding's headline must render in Curated findings");
+        assert!(
+            critical_idx < low_idx,
+            "the critical (max-severity) finding must render BEFORE the low finding within \
+             Curated findings, never alphabetically: {curated_section:?}"
+        );
+
+        assert!(
+            held_section.contains("variable naming conventions"),
+            "the informational finding must render in Held for review: {held_section:?}"
+        );
+        assert!(
+            !curated_section.contains("variable naming conventions"),
+            "no informational row may appear inside Curated findings (i.e. before a curated \
+             one): {curated_section:?}"
+        );
+    }
+
     /// Best-effort `typst` presence check for the compile test's skip gate (mirrors the
     /// same PATH lookup `compile_pdf` itself relies on via `Command::new("typst")`, just
     /// synchronous and side-effect-free here).
@@ -6575,12 +6774,18 @@ mod tests {
     // ── C3-6: one bucket computation, read consistently everywhere in the JSON ─────────
 
     /// `FindingRefJson::bucket` (the matrix entry) and `CuratedSiteJson::bucket` (the SAME
-    /// finding's curated-findings row) must read the SAME value — both come from exactly one
+    /// finding's held-for-review row) must read the SAME value — both come from exactly one
     /// `effective_bucket` call per finding now (previously two independent `is_informational`
     /// + `matrix_bucket` call sites in this file, which happened to agree today but had no
     /// structural guarantee against drifting apart). A hedged (`needs-review`) finding is the
     /// sharpest case: it must read `"informational"` in BOTH places, never an action bucket —
     /// and it still ships (over-tell, never dropped), just consistently re-bucketed.
+    ///
+    /// C4-P4 (residual defect 5, 2026-10-01): this finding's whole group is now ENTIRELY
+    /// informational (its only site), so it moved out of `curated_findings` into
+    /// `held_for_review_findings` — see `AuditReportJson::curated_findings`'s doc comment. The
+    /// bucket-agreement assertions below are unchanged; only which top-level list the group
+    /// lives in changed.
     #[test]
     fn matrix_and_curated_site_bucket_fields_agree_and_a_hedged_finding_is_never_an_action_bucket()
     {
@@ -6589,9 +6794,10 @@ mod tests {
         // A non-`None` `confidence` makes `is_ai_tier` true (it treats any calibrated finding
         // as AI-tier — see that function's doc comment); without a preview tool or grounded
         // citation, the SEPARATE P3 "uncited AI finding" gate would exclude this row from
-        // `curated_findings` entirely rather than routing it to the informational appendix.
-        // Giving it a preview tool keeps its citation `"preview"` (not `"advisory"`), isolating
-        // THIS test to the hedge/confidence signal this test is actually about.
+        // `curated_findings`/`held_for_review_findings` entirely rather than routing it to the
+        // informational appendix. Giving it a preview tool keeps its citation `"preview"` (not
+        // `"advisory"`), isolating THIS test to the hedge/confidence signal this test is
+        // actually about.
         hedged.preview_tool = Some("clippy".to_string());
         let report = report_with(vec![hedged], vec!["SOME-HEDGED-RULE-1"]);
         let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
@@ -6604,12 +6810,22 @@ mod tests {
                 "a hedged finding must never land in an action bucket: {tier:?}"
             );
         }
+        assert!(
+            json.curated_findings
+                .iter()
+                .all(|g| g.rule_id != "SOME-HEDGED-RULE-1"),
+            "an entirely-informational finding must never render under Curated findings: {:?}",
+            json.curated_findings
+        );
 
         let group = json
-            .curated_findings
+            .held_for_review_findings
             .iter()
             .find(|g| g.rule_id == "SOME-HEDGED-RULE-1")
-            .expect("the hedged finding still ships in curated_findings, as an informational row");
+            .expect(
+                "the hedged finding still ships, as an informational row in \
+                 held_for_review_findings",
+            );
         assert_eq!(group.sites.len(), 1, "the finding must not be dropped");
         assert_eq!(
             group.sites[0].bucket, "informational",
