@@ -580,8 +580,9 @@
 // ── Next steps (FIX 3, 2026-09-13 review) ───────────────────────────────────────────
 // A short, FACTUAL "what happens after this report" paragraph, opening the ladder before the
 // reader gets to Methodology's more technical detail. `d.methodology.next_steps` is authored
-// prose (`report_export::NEXT_STEPS_NOTE`), never an LLM call, same pattern as the
-// deterministic/ai-tier notes below.
+// prose (`report_export::next_steps_note`, which also computes and states the run's real
+// numeric fix rate per promise 2), never an LLM call, same pattern as the deterministic/ai-tier
+// notes below.
 = Next steps
 
 #d.methodology.next_steps
