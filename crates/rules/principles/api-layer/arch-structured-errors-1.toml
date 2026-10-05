@@ -24,6 +24,7 @@ directive = "Every 4xx and 5xx response uses the same shape: a top-level error o
 remediation = """
 Change the error response shape for this endpoint to a structured envelope with a stable code (like INVALID_EMAIL), a human-readable message, and an optional details object for field-level context. Keep the code stable across releases even if the message wording changes. Verify by triggering a 4xx/5xx from the endpoint and confirming the response body contains the code/message/details envelope instead of a plain string or empty body.
 """
+effort = "medium"
 why = "Stringly-typed error messages are a leading source of brittle client code because logic ends up doing substring matches on text that was meant for humans."
 
 [[option]]

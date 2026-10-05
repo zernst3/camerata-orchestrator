@@ -34,6 +34,7 @@ directive = "Structure every test method as three distinct phases separated by b
 remediation = """
 Restructure the test method into three separated phases: Arrange (set up the system under test and its mocks), Act (exactly one call that invokes the behavior under test), and Assert (explicit assertions on the outcome). Split a test that currently exercises multiple behaviors in sequence into separate test methods, one per behavior. Verify by confirming each test method has exactly one Act step and fails for exactly one reason when it fails.
 """
+effort = "low"
 why = "AAA makes the intent of each test legible at a glance, eliminates hidden assumptions, and ensures each failure maps to exactly one broken behavior."
 
 [[option]]

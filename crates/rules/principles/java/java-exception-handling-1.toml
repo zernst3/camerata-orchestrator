@@ -34,6 +34,7 @@ directive = "Every catch block contains exactly one of: (1) a log statement (err
 remediation = """
 Change the catch block so it either logs the exception with its stack trace and relevant context variables, re-throws it, or wraps it in a new exception with the original set as the cause, instead of continuing silently or returning a default value. Verify by triggering the failure path in a test and confirming the exception is visible in the logs or propagates rather than disappearing.
 """
+effort = "medium"
 why = "Logging or re-throwing preserves diagnostic information and ensures failures are visible to operators and developers."
 
 [[option]]

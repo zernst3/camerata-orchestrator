@@ -28,6 +28,7 @@ directive = "Each architectural layer/feature declares which other modules it ma
 remediation = """
 Remove the forbidden import that crosses a declared module boundary (for example a controller importing a repository directly, or domain importing infrastructure), and route the dependency through the allowed layer instead. Add or confirm the AST import-graph check runs in CI and fails the build on this class of import. Verify by confirming the offending import is gone and the CI import-boundary check passes.
 """
+effort = "medium"
 why = "Dependency direction is the architecture; enforcing it by AST keeps the diagram and the code in lockstep, where review alone reliably misses a single forbidden `use` line in a large diff."
 
 [[option]]

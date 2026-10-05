@@ -37,6 +37,7 @@ The clippy lint unwrap_used is set to deny under [workspace.lints.clippy], so an
 remediation = """
 Set clippy's unwrap_used lint to deny under [workspace.lints.clippy], and replace the .unwrap() call in non-test code with proper error propagation (the ? operator or an explicit match/if-let). Add allow-unwrap-in-tests = true in clippy.toml so test code is exempt. Verify by running cargo clippy and confirming the build fails if a new .unwrap() appears in non-test code.
 """
+effort = "medium"
 why = "Converts a convention into a per-build mechanical guarantee, so a reintroduced unwrap fails the merge before a human reads the diff."
 
 [[option]]

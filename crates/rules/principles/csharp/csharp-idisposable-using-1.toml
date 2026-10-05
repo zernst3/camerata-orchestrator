@@ -28,6 +28,7 @@ directive = "IDisposable resources are declared with the `using` keyword at the 
 remediation = """
 Wrap the IDisposable resource in a using declaration (using var resource = ...;) so it is disposed automatically when the enclosing block exits, and remove any manual Dispose() call or naked instantiation without a using scope. Verify by confirming the resource's Dispose() runs even when an exception is thrown partway through the method, for example by checking a connection pool doesn't leak connections under a fault-injection test.
 """
+effort = "medium"
 why = "Using declarations are the most concise and guarantee cleanup on any code path (exception or return)."
 
 [[option]]

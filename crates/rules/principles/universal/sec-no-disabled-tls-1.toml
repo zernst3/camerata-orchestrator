@@ -31,6 +31,7 @@ directive = "TLS certificate verification flags are never set to disabled/false/
 remediation = """
 Remove the disabled TLS verification flag from the production code path, and for a test or local-dev setup that needs to reach a self-signed certificate, add that certificate authority to the test environment's trust store instead of disabling verification. Verify by confirming no code path reachable in production sets a TLS-verification-disabled flag, and the test environment connects successfully with verification still enabled.
 """
+effort = "medium"
 finding_headline = "Your `<path>` file disables TLS certificate verification."
 finding_detail = """
 With certificate verification turned off, anyone on the network path can silently intercept — and even modify — this connection's traffic, without your application or its users ever noticing (a man-in-the-middle attack). Re-enable verification in `<path>`; if a self-signed certificate is needed for local development, add that certificate to the trust store instead of disabling verification.

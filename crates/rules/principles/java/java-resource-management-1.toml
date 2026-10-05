@@ -35,6 +35,7 @@ directive = "Every resource that implements AutoCloseable (java.sql.Connection, 
 remediation = """
 Move the resource's instantiation into a try-with-resources statement (or an explicit finally block that closes it) so it is guaranteed to close even if an exception is thrown, rather than relying on an explicit close() call at the end of the method or on garbage collection. Verify by forcing an exception partway through the method and confirming the resource's close() still runs, for example by checking a connection pool does not leak connections under a fault-injection test.
 """
+effort = "medium"
 why = "Try-with-resources is concise, reliable, and guarantees cleanup even if an exception is thrown."
 
 [[option]]

@@ -25,6 +25,7 @@ directive = "Declarations default to const. let is used only for a binding that 
 remediation = """
 Change the declaration from let to const, since the binding is never reassigned after initialization. Reserve let only for bindings that are genuinely reassigned. Verify by confirming the linter's prefer-const rule passes on this file.
 """
+effort = "medium"
 why = "A const binding tells the reader at the declaration site that the name will never be reassigned, so they can reason about the scope without scanning for a later mutation."
 
 [[option]]

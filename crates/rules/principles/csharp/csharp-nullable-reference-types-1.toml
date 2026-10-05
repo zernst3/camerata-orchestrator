@@ -20,6 +20,7 @@ directive = "<Nullable>enable</Nullable> is set in the project file (.csproj). A
 remediation = """
 Enable the Nullable setting in the project file and fix the resulting nullable-reference warnings (dereferencing a possibly-null value, assigning null to a non-nullable variable, uninitialized non-nullable fields) rather than suppressing them. Set warnings as errors so a new null-safety issue fails the build going forward. Verify by confirming the project builds clean with Nullable enabled and no nullable warnings are suppressed with pragma directives.
 """
+effort = "medium"
 why = "Nullable reference types catch null-reference bugs at compile time, eliminating an entire class of runtime crashes."
 
 [[option]]

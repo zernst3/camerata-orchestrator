@@ -34,6 +34,7 @@ directive = "describe() blocks are named after the unit under test (a module, cl
 remediation = """
 Rename the describe() block to the unit under test's name and the test()/it() block to a present-tense description of the expected behavior (for example 'returns an empty array when the input list is empty'), instead of a terse or duplicated title. Verify by confirming no two tests in the suite share the same title and each title alone communicates the scenario and expectation.
 """
+effort = "low"
 why = "Unique, behaviour-descriptive names make failing CI output self-explanatory and eliminate the need to open the file to understand what broke."
 
 [[option]]

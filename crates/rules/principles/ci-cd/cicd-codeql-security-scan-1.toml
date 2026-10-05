@@ -44,6 +44,7 @@ directive = "Enable CodeQL code scanning in CI for a PUBLIC / open-source reposi
 remediation = """
 Enable CodeQL code scanning in CI for this repository using the free entitlement, which applies because the repository is public. Confirm the workflow builds the language(s) CodeQL needs and runs on a schedule or on pull requests. Verify by checking the repository's Security tab for completed CodeQL scan results after the workflow runs.
 """
+effort = "medium"
 why = "CodeQL is free on public/open-source repos, but only there: private code needs paid GHAS. Its whole-program database build is too heavy for scan-time or in-loop use, so it is a CI / layer-3 capability only. Pinning the query suite in the repo keeps the gate from drifting."
 
 [[option]]
@@ -53,4 +54,5 @@ directive = "For a PRIVATE / closed-source repository, run CodeQL through GitHub
 remediation = """
 Enable GitHub Advanced Security on this private repository and turn on CodeQL code scanning through it, understanding this is a paid per-active-committer license. Wire the CodeQL workflow into CI the same way as the public case, now that GHAS is active. Verify by checking the repository's Security tab for completed CodeQL scan results and confirming GHAS is listed as enabled in repository settings.
 """
+effort = "medium"
 why = "Private/closed-source repos cannot use CodeQL for free; GitHub Advanced Security is required and is billed per active committer. The whole-program database build keeps CodeQL at CI / layer-3 only, never at scan or in-loop. Pinning the query suite in the repo keeps the gate authoritative."

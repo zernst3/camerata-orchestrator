@@ -30,6 +30,7 @@ directive = "Unit test files are placed in the same directory as the module unde
 remediation = """
 Move the test file out of the parallel tests/ or __tests__/ tree and place it next to the source file it tests, named after that module with a .test.ts suffix (or .test.tsx for components). Verify by confirming the test file's directory matches its source file's directory exactly.
 """
+effort = "medium"
 why = "Co-location makes navigation trivial, keeps renames synchronised, and makes coverage gaps visible without tooling."
 
 [[option]]

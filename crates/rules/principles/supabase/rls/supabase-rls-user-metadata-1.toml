@@ -57,6 +57,7 @@ you need richer role logic, move it to a dedicated roles table with its own RLS 
 Verify by confirming that editing your own profile's metadata through the normal client SDK no
 longer changes what the policy grants you.
 """
+effort = "medium"
 why = "user_metadata / raw_user_meta_data are user-writable by design; using either as an authorization input is a structural privilege-escalation vector with no legitimate counter-example, so an unconditional flag is correct rather than a needs_review carve-out."
 
 [[option]]

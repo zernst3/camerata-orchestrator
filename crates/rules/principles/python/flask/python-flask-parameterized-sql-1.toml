@@ -20,6 +20,7 @@ directive = "All database queries use the SQLAlchemy ORM query API (`.filter()`,
 remediation = """
 Replace the f-string or %-formatted SQL with the SQLAlchemy ORM query API where possible, or with sqlalchemy.text() using named bind parameters passed as a dict when raw SQL is required. Verify by passing a value containing a SQL metacharacter as a bound parameter and confirming it is treated as data, not executable SQL.
 """
+effort = "medium"
 why = "The ORM parameterizes automatically; `text()` with bind parameters sends SQL and values separately so a value can never be parsed as SQL."
 
 [[option]]

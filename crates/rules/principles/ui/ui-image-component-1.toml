@@ -29,6 +29,7 @@ directive = "All images in feature code render through a single project-level im
 remediation = """
 Replace the direct framework image primitive or raw HTML img element with the project-level image component, which wires the CDN's variants, lazy-loading defaults, fallback handling, and accessibility defaults in one place. Verify by confirming this call site imports the project-level image component rather than the framework primitive or a raw img tag.
 """
+effort = "medium"
 why = "Image delivery carries several policy decisions baked in: which CDN URL pattern, which transform parameters, which formats to negotiate, default sizes and breakpoints, lazy-loading thresholds, fallback behavior, accessibility defaults."
 
 [[option]]

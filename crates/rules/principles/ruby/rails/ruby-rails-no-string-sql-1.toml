@@ -20,6 +20,7 @@ directive = "Every ActiveRecord query method that accepts a SQL fragment (`.wher
 remediation = """
 Replace the string-interpolated SQL fragment in the query method (.where, .order, .joins, .having, .group) with a hash condition or ?/:named placeholders, passing the dynamic value as a separate argument instead of embedding it in the string. Verify by passing a value containing a SQL metacharacter as the bound value and confirming it is treated as data, not executable SQL.
 """
+effort = "medium"
 why = "Hash conditions and placeholder syntax bind values separately from the SQL grammar so they can never be parsed as SQL, eliminating injection."
 
 [[option]]

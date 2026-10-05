@@ -42,6 +42,7 @@ directive = "Tests never call time.Sleep or time.Now directly. Code under test a
 remediation = """
 Replace the time.Sleep call in the test with either an injected clock the test controls, or a synchronization primitive (a channel, a wait group, or a polling helper with a timeout) that waits for the actual condition rather than a fixed duration. Use t.TempDir() for filesystem isolation and t.Setenv() for environment variable changes. Verify by running the test repeatedly and confirming it passes reliably regardless of machine speed.
 """
+effort = "medium"
 why = "Eliminates the most common sources of test flakiness. Tests run in any order, on any machine, with identical results."
 
 [[option]]

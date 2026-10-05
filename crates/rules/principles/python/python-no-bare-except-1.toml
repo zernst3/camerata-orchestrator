@@ -28,6 +28,7 @@ directive = "Exception handlers name the specific exception type(s) they can rec
 remediation = """
 Replace the bare except: (or unconditional except Exception:) with the specific exception type(s) the code can actually recover from. If a broad except Exception is genuinely needed, restrict it to a top-level process or request boundary that logs the full traceback and re-raises or converts it. Verify by triggering an unrelated exception type in the same block and confirming it now propagates instead of being silently caught.
 """
+effort = "medium"
 why = "Specific handlers recover from what they planned for and let every unanticipated failure surface where it can be diagnosed."
 
 [[option]]

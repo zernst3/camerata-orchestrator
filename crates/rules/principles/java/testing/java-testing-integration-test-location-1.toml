@@ -30,6 +30,7 @@ directive = "Name integration test classes with the IT suffix (e.g., UserReposit
 remediation = """
 Rename the integration test class to end with the IT suffix (for example UserRepositoryIT) and annotate it with @Tag("integration"), and configure Surefire/Failsafe so unit tests exclude *IT.java files while Failsafe runs them in the verify phase. Verify by confirming a plain unit-test run skips the renamed class and a separate integration-test run picks it up.
 """
+effort = "low"
 why = "Failsafe picks them up by convention; @Tag enables fine-grained CI filtering independent of file naming."
 
 [[option]]

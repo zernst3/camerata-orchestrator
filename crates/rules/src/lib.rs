@@ -2807,4 +2807,70 @@ mod tests {
             "universal rule is selected with empty domain list"
         );
     }
+
+    // ── C6-B4: every deterministic (CI-enforced) rule option with authored client-facing
+    // remediation carries an authored effort band ──────────────────────────────────────
+
+    /// A deterministic/floor finding never goes through the AI calibration pass that sets
+    /// `Finding::effort` per-finding (see `report_export::resolve_effort`'s doc comment in
+    /// camerata-server) — its ONLY source of a remediation-effort estimate is this rule's own
+    /// authored [`RuleOption::effort`] band. `Mechanical`/`Architectural` enforcement
+    /// ([`EnforcementKind::is_ci_enforced`]) IS that deterministic tier by this corpus's own
+    /// taxonomy: a hard, repeatable lint pattern or an AST/static-analysis pass, as opposed to
+    /// `Prose`/`Structured` rules a human or the AI semantic-audit pass judges (which DO get a
+    /// per-finding calibrated effort, so an authored band is a nice-to-have there, never the
+    /// only source). This is a BUILD/CI-TIME corpus test, not a runtime gate — a new
+    /// deterministic rule (or a new option on an existing one) that ships authored
+    /// client-facing `remediation` but no `effort` band fails THIS test in `cargo test`,
+    /// never a paying client's report (the fifth-consecutive-run alarm C6-B4 exists to close).
+    ///
+    /// Scoped to options that actually carry `remediation`: an option with none never renders
+    /// a Fix line at all (see `resolve_fix`'s doc comment in camerata-server), so there is
+    /// nothing for `effort` to pair with — a rejected/non-default alternative with no
+    /// remediation is a pre-existing, accepted shape in this corpus (e.g.
+    /// `SUPABASE-RLS-ENABLED-1`'s rejected `regex-grep-each-migration-independently` option)
+    /// and stays intentionally exempt here too.
+    #[tokio::test]
+    async fn every_deterministic_rule_option_with_remediation_has_an_authored_effort_band() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            // Skip when the corpus checkout is not present (mirrors every other real-corpus
+            // test in this module).
+            return;
+        }
+        let (set, errors) = load_corpus_lenient(path).await;
+        assert!(
+            errors.is_empty(),
+            "the real corpus must load without parse errors: {errors:?}"
+        );
+
+        let mut missing: Vec<String> = Vec::new();
+        for rule in set.iter() {
+            if !rule.enforcement.is_ci_enforced() {
+                // Prose/Structured: AI-judged: calibration sets Finding::effort per-finding.
+                continue;
+            }
+            for option in &rule.options {
+                let has_remediation = option
+                    .remediation
+                    .as_deref()
+                    .is_some_and(|s| !s.trim().is_empty());
+                if !has_remediation {
+                    continue;
+                }
+                if option.effort.is_none() {
+                    missing.push(format!("{} / option `{}`", rule.id_str(), option.id));
+                }
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "every deterministic (mechanical/architectural) rule option with authored \
+             client-facing remediation must also carry an authored `effort` band — a \
+             deterministic finding never goes through AI calibration, so this is its ONLY \
+             path to a remediation-effort estimate (see `report_export::resolve_effort` in \
+             camerata-server). Missing on: {missing:#?}"
+        );
+    }
 }

@@ -52,6 +52,7 @@ does not need per-row access rules, leave RLS enabled with no policy and instead
 authorization check in the server code that uses that client. Verify by confirming a normal
 (anon or authenticated-role) request can perform the operations the feature actually needs.
 """
+effort = "medium"
 why = "The finding is a genuine repo-detectable signal (deny-by-default RLS) but its root cause is ambiguous from static analysis alone; medium severity plus a two-branch remediation is the honest framing rather than guessing which branch applies."
 
 [[option]]

@@ -20,6 +20,7 @@ directive = "Every controller action or Minimal API endpoint handler that perfor
 remediation = """
 Change the action or endpoint handler to an async action returning IActionResult (or an async Task-returning handler for Minimal API) and await every I/O call inside it instead of blocking on .Result or .Wait(). Move any fire-and-forget work off async void and onto a tracked background mechanism such as a hosted service queue. Verify by confirming the handler's signature is async and a load test no longer shows thread-pool starvation under concurrent requests.
 """
+effort = "medium"
 why = "Async actions release the thread-pool thread during I/O wait, allowing the server to handle many concurrent requests with a bounded thread count, and avoid the deadlock risk of sync-over-async in ASP.NET's synchronization context."
 
 [[option]]

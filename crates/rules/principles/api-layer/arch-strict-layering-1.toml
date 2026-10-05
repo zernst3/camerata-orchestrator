@@ -32,6 +32,7 @@ directive = "Controllers handle HTTP only; services hold framework-agnostic busi
 remediation = """
 Move the database access found in the controller or service into a repository, keep business logic in the service layer, and keep the controller limited to HTTP handling. Add or confirm the lint/AST checks (arch-handler-no-db-1 and arch-no-cross-boundary-imports-1) run in CI to keep the boundary enforced going forward. Verify by confirming the controller and service in question contain no direct DB query calls and the lint check passes.
 """
+effort = "medium"
 why = "Prevents business logic hiding inside the query layer; keeps each layer testable and swappable."
 
 [[option]]

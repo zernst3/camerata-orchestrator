@@ -19,6 +19,7 @@ directive = "Timestamps are stored and transmitted in UTC everywhere (database c
 remediation = """
 Change the timestamp's storage and API representation to UTC, and route its display through the single project-level date-formatting helper instead of formatting it inline at the call site with locale-aware APIs or a post-mount client effect. Verify by confirming the stored/transmitted value is UTC and every rendering of it goes through the one helper, which converts to the viewer's local timezone.
 """
+effort = "medium"
 why = "Storing in UTC keeps the source of truth unambiguous across services and regions, while rendering in the user's local timezone matches what a consumer-facing user actually expects to see. Centralizing the conversion in one helper means the storage format and the display policy can each evolve independently without touching call sites, and gives SSR/CSR a single place to agree on timezone resolution instead of drifting per call site."
 
 [[option]]

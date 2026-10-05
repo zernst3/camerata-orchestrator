@@ -95,6 +95,7 @@ separately. Verify by confirming the Supabase dashboard (or `\\d+ <table>` / `pg
 in `psql`) shows `<table>` as RLS-enabled, and that an anon-key or otherwise-untrusted request
 against it is now rejected.
 """
+effort = "low"
 why = "An explicit disable that is never restored is a distinct, higher-signal authoring defect from a table that simply never had RLS considered — it names a concrete missing or mistargeted statement, which changes both the remediation (restore forward, don't rewrite history) and the report's credibility. Firing independent of exposure scoping and of co-located rules' severity keeps this rule's signal from being silently absorbed into a lower-severity or non-exposed-schema demotion that would misrepresent a deliberate-but-unrestored disable as a routine oversight."
 
 [[option]]

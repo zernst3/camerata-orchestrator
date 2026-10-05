@@ -28,6 +28,7 @@ directive = "Any value that represents money, a counted quantity, a percentage w
 remediation = """
 Change the type backing the monetary or quantity value from a binary floating-point type to the language's exact-decimal type (BigDecimal, Decimal, rust_decimal, decimal.Decimal, or equivalent), and store it as a matching exact-numeric column in the database rather than REAL/DOUBLE. Update arithmetic on that value to use the decimal type's operations instead of float math. Verify by confirming a calculation that previously produced a rounding artifact (like 0.1 + 0.2) now returns an exact result.
 """
+effort = "medium"
 why = "Binary floating-point cannot represent most decimal fractions exactly."
 
 [[option]]

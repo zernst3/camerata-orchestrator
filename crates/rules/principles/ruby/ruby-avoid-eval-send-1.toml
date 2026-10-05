@@ -20,6 +20,7 @@ directive = "Dynamic dispatch is implemented as a case statement or hash that ma
 remediation = """
 Replace the eval()/send() call driven by user input with a fixed dispatch table (a hash or case statement) that maps a known set of input values to hardcoded method names or lambdas. Verify by passing an input value not in the dispatch table and confirming it is rejected rather than dynamically evaluated or dispatched.
 """
+effort = "medium"
 why = "A fixed whitelist eliminates the ability to invoke unintended methods."
 
 [[option]]

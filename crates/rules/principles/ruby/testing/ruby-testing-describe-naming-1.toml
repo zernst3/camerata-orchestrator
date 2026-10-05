@@ -20,6 +20,7 @@ directive = "Top-level describe takes the class constant (never a string like 'U
 remediation = """
 Rename the top-level describe to the class constant (describe User, not describe 'User'), nested describes for methods to '#method_name' (instance) or '.method_name' (class), and context blocks to start with when/with/without. Verify by confirming the spec file's describe/context blocks follow this naming and the RSpec/Rubocop naming cop passes.
 """
+effort = "low"
 why = "Produces readable failure messages, mirrors Ruby docs conventions, and is enforced by rubocop-rspec."
 
 [[option]]

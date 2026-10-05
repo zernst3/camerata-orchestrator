@@ -25,6 +25,7 @@ directive = "Explicit any annotations are forbidden. At boundaries where a value
 remediation = """
 Replace the explicit any annotation with unknown, and add a type guard or schema-based parser (zod or similar) that narrows the value to a concrete type before it's used. Verify by confirming the linter's no-explicit-any rule passes and the value cannot be used without first being narrowed.
 """
+effort = "medium"
 why = "any disables type checking transitively along every assignment, call, and property access it touches, so one any near a boundary can silently void the guarantees of a large region of typed code; unknown serves the same purpose without the contagion."
 
 [[option]]

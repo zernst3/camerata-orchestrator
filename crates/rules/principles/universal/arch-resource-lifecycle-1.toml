@@ -32,6 +32,7 @@ directive = "Every spawned subprocess carries a kill-on-drop / kill-on-cancel di
 remediation = """
 Add a kill-on-drop (or kill-on-cancel) disposition to the spawned subprocess so a dropped, timed-out, or cancelled operation terminates the child instead of orphaning it, and wrap any temp file or directory creation in an RAII cleanup guard instead of leaving it to the OS or manual cleanup. Verify by cancelling or timing out the operation and confirming the child process and any temp artifacts it created are gone afterward, checkable via the process list and the temp directory.
 """
+effort = "medium"
 why = "The app, not the OS, owns what it spawns and writes; reaping on drop/cancel/shutdown and RAII-cleaning temp artifacts is the only way orphaned processes and leaked scratch do not accumulate across runs."
 
 [[option]]

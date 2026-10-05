@@ -28,6 +28,7 @@ directive = "On the assembled tree, run the integration gate's event reconciliat
 remediation = """
 Add the missing consumer for an event that is emitted but never subscribed to, or add the missing producer/emit call for a subscription that is waiting on an event nothing ever publishes. Remove the dead emit or dead subscription instead if it turns out to be leftover from removed functionality. Verify by re-running the integration gate's event reconciliation on the assembled tree and confirming every emitted event now has at least one matching consumer and every subscription has a matching emitter.
 """
+effort = "low"
 why = "The wiring-completeness check runs on the integrated whole — the only place both the emit and the subscribe are visible at once — as a deterministic comparison of neutral event records, not an LLM guessing whether the ends connect."
 
 [[option]]

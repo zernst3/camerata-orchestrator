@@ -36,6 +36,7 @@ directive = "Every Go source file foo.go has its tests in foo_test.go in the sam
 remediation = """
 Move the test file for this source file into the same directory, renamed to match the source file with a _test.go suffix, out of a separate tests/ directory. Verify by confirming go test ./... discovers and runs the relocated test automatically.
 """
+effort = "low"
 why = "Required by the go tool for automatic test discovery. Keeps tests adjacent to the code they test."
 
 [[option]]

@@ -29,6 +29,7 @@ directive = "Circular imports are not allowed (enforced by the compiler). Public
 remediation = """
 Move the implementation detail currently importable from outside the module into an internal/ package so external packages can no longer import it, and break the circular import by moving the shared type or function into a package both sides can depend on without depending on each other. Verify by confirming the compiler rejects an external package's attempt to import the internal path, and go build no longer reports an import cycle.
 """
+effort = "medium"
 why = "Clear boundaries prevent circular dependencies and keep the dependency graph a DAG."
 
 [[option]]

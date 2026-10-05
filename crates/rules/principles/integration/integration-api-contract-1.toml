@@ -39,6 +39,7 @@ directive = "On the assembled tree (all role agents' worktrees combined), run th
 remediation = """
 Fix the mismatched endpoint call: either add the missing route (or field) on the producer side, or correct the consumer to call the route and shape the producer actually exposes. If the mismatch is intentional (a known, deliberate design fork), add an inline waiver comment with a reason rather than leaving it unreconciled. Verify by re-running the integration gate's reconciliation on the assembled tree and confirming the specific consumer call now matches a produced route by method, path, and shape.
 """
+effort = "low"
 why = "The contract becomes a deterministic comparison of neutral records on the integrated whole — the one place positioned to see both sides of the seam — instead of a per-agent gate that structurally cannot, or an LLM eyeballing whether prose contracts line up (probabilistic convention wearing the gate's uniform)."
 
 [[option]]

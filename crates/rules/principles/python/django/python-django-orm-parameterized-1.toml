@@ -20,6 +20,7 @@ directive = "All database queries use the Django ORM query API (`.filter()`, `.e
 remediation = """
 Replace the string-formatted or .extra()-based raw SQL with the Django ORM query API (.filter(), .exclude(), Q(), F()) where possible, or with QuerySet.raw()/cursor.execute() passing bound parameters when raw SQL is unavoidable. Verify by passing a value containing a SQL metacharacter as a bound parameter and confirming it is treated as data, not executable SQL.
 """
+effort = "low"
 why = "The ORM parameterizes automatically; raw queries with explicit `params=` bind values separately from the SQL grammar, eliminating injection."
 
 [[option]]

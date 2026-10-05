@@ -25,6 +25,7 @@ directive = "The postfix non-null assertion operator (!) is forbidden. A value t
 remediation = """
 Replace the postfix non-null assertion (!) with an explicit narrowing: a control-flow guard, optional chaining with a fallback, or an early return that proves the value is non-null to the compiler. Verify by confirming the linter's no-non-null-assertion rule passes and the compiler, not an assertion, is what proves the value is present at this point.
 """
+effort = "medium"
 why = "The non-null assertion erases the check strictNullChecks exists to enforce and is a runtime no-op, so a wrong assertion lets a null flow through to a TypeError detached from the bad assumption."
 
 [[option]]

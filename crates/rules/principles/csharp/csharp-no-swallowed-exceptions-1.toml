@@ -28,6 +28,7 @@ directive = "Exception handlers catch the most specific exception type they can 
 remediation = """
 Change the catch block to catch the most specific exception type it can actually recover from, and have it either log the full exception with stack trace through the application's structured logger, or rethrow it (bare throw or a wrapped exception). Remove any empty catch body. Verify by triggering the failure path in a test and confirming the exception appears in the logs or propagates, rather than disappearing silently.
 """
+effort = "medium"
 why = "Every exception surfaces either as a log entry or is propagated to the caller; bugs never silently vanish."
 
 [[option]]

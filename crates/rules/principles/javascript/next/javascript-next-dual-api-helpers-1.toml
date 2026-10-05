@@ -29,6 +29,7 @@ directive = "Client-side code (client components, hooks, event handlers) makes A
 remediation = """
 Replace the raw fetch call in this client component, hook, or event handler with a call through the shared client-side API helper, which attaches credentials and handles auth redirects consistently. Leave Server Components free to fetch directly, since they run in a different context. Verify by confirming no client component issues a raw fetch call and each instead goes through the shared helper.
 """
+effort = "medium"
 why = "Client-side code doesn't get Next's automatic fetch memoization/caching, so centralizing credentials, base URLs, and error handling in one client helper avoids re-deriving those rules at every call site. Server Components get equivalent caching and dedup for free from Next's extended fetch, so forcing every server-side fetch through a shared helper adds indirection without the benefit that justifies it on the client."
 
 [[option]]

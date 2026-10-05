@@ -25,6 +25,7 @@ directive = "Every dynamic value in a SQL statement is passed as a bound paramet
 remediation = """
 Replace the string-concatenated or manually-escaped SQL with bound parameters, using PreparedStatement's ? placeholders or the ORM's parameterized query syntax. Remove the manual escaping logic once parameter binding replaces it. Verify by passing a value containing a SQL metacharacter as a bound parameter and confirming it is treated as data, not executable SQL.
 """
+effort = "low"
 why = "Parameterization prevents SQL injection entirely by sending SQL and values to the database separately."
 
 [[option]]

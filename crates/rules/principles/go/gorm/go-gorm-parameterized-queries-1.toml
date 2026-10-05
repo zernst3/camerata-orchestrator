@@ -28,6 +28,7 @@ directive = "The codebase uses GORM's query builder (db.Where(\"age > ?\", 30).F
 remediation = """
 Replace the string-concatenated or fmt.Sprintf-built query with GORM's query builder where possible, or with db.Raw using ? placeholders and bound arguments when raw SQL is necessary. Verify by passing a value containing a single quote or SQL metacharacter and confirming it is bound as a parameter rather than concatenated into the query string.
 """
+effort = "low"
 why = "Parameterized queries prevent SQL injection; the query builder is the idiomatic first choice, raw SQL with parameters is acceptable as a fallback."
 
 [[option]]

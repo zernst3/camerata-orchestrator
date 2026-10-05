@@ -20,6 +20,7 @@ directive = "Every .rb file begins with the line # frozen_string_literal: true (
 remediation = """
 Add the comment # frozen_string_literal: true as the first (or second, after a shebang) line of the file, and replace any in-place string mutation with .dup or .clone where a mutable copy is genuinely needed. Verify by confirming the file runs without a FrozenError and the linter's frozen-string-literal rule passes.
 """
+effort = "medium"
 why = "Immutable strings by default eliminate accidental mutation bugs."
 
 [[option]]

@@ -36,6 +36,7 @@ directive = "Every commit subject — and, when PR coverage is enabled, every PR
 remediation = """
 Add the project's configured ticket prefix (for example AB#123 for Azure Boards) to the end of the commit subject, and to the PR title when PR coverage is enabled. Verify by attempting to commit or open a PR without the reference and confirming the CI check rejects it.
 """
+effort = "medium"
 why = "A work-item reference auto-links the change to its tracked item, giving requirement-to-code traceability; enforcing it at the metadata gate (CI + the VCS-action gate) is the only place the subject/title is visible, since no code gate sees the commit or PR metadata."
 
 [[option]]

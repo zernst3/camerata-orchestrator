@@ -20,6 +20,7 @@ directive = "Every dynamic value in a SQL statement is passed as a bound paramet
 remediation = """
 Replace the string-concatenated or interpolated SQL with a bound parameter using the driver's or ORM's parameterized placeholder syntax. Remove any manual escaping logic once parameter binding replaces it. Verify by passing a value containing a SQL metacharacter as a bound parameter and confirming it is treated as data, not executable SQL.
 """
+effort = "low"
 why = "Parameterization sends SQL and values separately so a value can never be parsed as SQL, eliminating injection entirely."
 
 [[option]]

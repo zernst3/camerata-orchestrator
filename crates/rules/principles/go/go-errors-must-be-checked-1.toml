@@ -29,6 +29,7 @@ directive = "Every function call that returns an error is followed by an explici
 remediation = """
 Add an explicit if err != nil check after the call currently discarding its error with a blank identifier, and handle or propagate the error instead of ignoring it. Reserve blank-identifier discards for the rare, explicitly commented low-consequence case. Verify by forcing the call to fail in a test and confirming the error is surfaced rather than silently swallowed.
 """
+effort = "medium"
 why = "Checking every error keeps the contract visible and prevents silent cascading failures."
 
 [[option]]

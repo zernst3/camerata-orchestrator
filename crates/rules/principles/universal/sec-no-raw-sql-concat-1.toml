@@ -41,6 +41,7 @@ directive = "A SQL statement string containing a DML keyword (SELECT/INSERT/UPDA
 remediation = """
 Rewrite the query in the affected file to use a parameterized placeholder ($1/?/a named parameter) or a query-builder method instead of concatenating or interpolating the value directly into the SQL string. Pass the external value as a bound argument to the query call rather than as part of the string. Verify by feeding the affected input a value containing SQL syntax (e.g. a quote character or a SQL keyword) and confirming it is treated as literal data, not executed as part of the query.
 """
+effort = "low"
 finding_headline = "Your `<path>` file builds a SQL query by pasting a value directly into the query text."
 finding_detail = """
 When part of a query's text comes from outside input pasted straight into the SQL string, an attacker can rewrite the query itself — reading other users' data, bypassing a login check, or changing and deleting records (a SQL injection). Rewrite the query in `<path>` to use a parameterized placeholder or a query-builder method, so untrusted values are always passed as data, never as part of the query text.

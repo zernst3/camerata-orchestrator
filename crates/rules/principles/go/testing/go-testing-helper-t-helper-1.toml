@@ -37,6 +37,7 @@ directive = "Any function that accepts *testing.T (or *testing.TB) and may call 
 remediation = """
 Add a t.Helper() call as the first line of the helper function that accepts *testing.T and may call t.Fatal/t.Error/t.Fatalf/t.Errorf. Verify by forcing the helper to fail and confirming the reported failure line points to the caller's call site, not to the line inside the helper.
 """
+effort = "medium"
 why = "Failures are attributed to the call site in the test body, not the helper internals. Required for debuggable test output."
 
 [[option]]

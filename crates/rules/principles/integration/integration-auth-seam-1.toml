@@ -36,6 +36,7 @@ directive = "On the assembled tree, run the integration gate's auth-seam reconci
 remediation = """
 Add server-side authorization enforcement to the producer endpoint that the UI currently gates only client-side behind a permission check, so the guard exists on both sides of the seam. If the endpoint is genuinely meant to be open, remove the UI's permission gate instead so the affordance's visibility matches what the server actually allows. Verify by calling the endpoint directly, bypassing the UI, and confirming it is rejected for a caller who lacks the permission.
 """
+effort = "medium"
 why = "Server-side authorization is a whole-system property, not a per-file one; the integration tier is the only gate that sees both the UI's gating and the endpoint's enforcement at once, so it can deterministically require that a hidden button maps to a guarded endpoint — while per-seam firing plus waivers keep a legitimately-public endpoint from becoming a false positive."
 
 [[option]]

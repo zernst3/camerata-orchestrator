@@ -29,6 +29,7 @@ directive = "Every hook (useState, useEffect, useMemo, useContext, custom hooks,
 remediation = """
 Move the conditionally-called hook to the top level of the component or custom hook, calling it unconditionally on every render, and move the condition inside the hook's body instead. Verify by confirming the eslint-plugin-react-hooks rules-of-hooks lint rule passes and the hook is called in the same order on every render.
 """
+effort = "medium"
 why = "React identifies hook state by call order, so a hook inside a condition, loop, or early return changes that order between renders and silently associates state with the wrong slot, corrupting component state in ways that are hard to trace."
 
 [[option]]

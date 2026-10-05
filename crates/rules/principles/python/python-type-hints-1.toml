@@ -20,6 +20,7 @@ directive = "Every public function and method declares parameter and return type
 remediation = """
 Add parameter and return type hints to the public function or method that's missing them, and confirm a static type checker (mypy or pyright) runs in CI at error severity so a future regression is caught automatically. Verify by running the type checker locally and confirming it reports no errors on this function's signature and call sites.
 """
+effort = "low"
 why = "A checked, annotated codebase turns type mismatches into build failures at their origin and keeps the annotations honest."
 
 [[option]]

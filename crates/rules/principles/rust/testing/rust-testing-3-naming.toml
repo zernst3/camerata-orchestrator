@@ -35,6 +35,7 @@ directive = "Test function names use snake_case (enforced by rustc non_snake_cas
 remediation = """
 Rename the test function to a snake_case name that describes the scenario and expected outcome (for example returns_none_when_key_absent), instead of a bare test_/it_/should_ prefix with no scenario description. Verify by confirming the test's name alone communicates what's being tested and what the expected outcome is.
 """
+effort = "low"
 why = "snake_case is mechanically enforced by the compiler; scenario-description names make cargo test failure output self-documenting."
 
 [[option]]

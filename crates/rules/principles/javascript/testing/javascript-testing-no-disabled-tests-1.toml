@@ -30,6 +30,7 @@ directive = "The jest/no-disabled-tests and jest/no-focused-tests rules are conf
 remediation = """
 Remove the .skip, .only, xtest, or xit modifier from this test, and either fix the test so it passes or delete it if it's no longer relevant, rather than leaving it disabled in committed code. Enable jest/no-disabled-tests and jest/no-focused-tests at error severity in the ESLint config. Verify by confirming the lint gate fails if a disabled or focused test is reintroduced.
 """
+effort = "medium"
 why = "Disabled tests accumulate as hidden technical debt; the lint gate forces resolution at the point of authorship rather than deferring it indefinitely."
 
 [[option]]

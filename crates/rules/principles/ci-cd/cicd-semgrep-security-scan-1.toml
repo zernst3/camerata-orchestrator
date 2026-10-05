@@ -44,6 +44,7 @@ directive = "Wire the free Semgrep Community Edition CLI into CI and make it ava
 remediation = """
 Install the free Semgrep Community Edition CLI and wire it into CI (and the local scan preview, if applicable) to run its security rule set against the codebase on every relevant run. Verify by confirming a CI run produces Semgrep findings and that the tool completes within the pipeline's time budget.
 """
+effort = "medium"
 why = "Community Edition is free, OSS, and lightweight enough to run at the scan preview and in CI on any repo (public or private) without a license. Single-file analysis trades cross-file taint tracking for speed, which is the right trade for the in-loop and preview paths."
 
 [[option]]
@@ -53,4 +54,5 @@ directive = "Adopt the paid Semgrep AppSec Platform (Team/Enterprise) and wire i
 remediation = """
 Adopt the paid Semgrep AppSec Platform, wire its CI integration into the pipeline, and connect the managed platform for findings triage. Verify by confirming CI runs report to the Semgrep platform and that cross-file/cross-function findings appear there that Community Edition alone would have missed.
 """
+effort = "medium"
 why = "The paid Pro tier buys cross-file taint analysis and the much larger Pro rule set plus centralized findings governance, at a per-seat cost. It is a CI/platform-tier capability, heavier and licensed, so it belongs in CI rather than the scan preview or the in-loop path."
