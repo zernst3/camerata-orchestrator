@@ -4434,6 +4434,122 @@ fn backfill_captured_object(f: &mut Finding) {
     }
 }
 
+/// C6-B2 design point 1: keyword substrings that mark a CONSTANT_CASE identifier as naming a
+/// secret/credential rather than an ordinary configuration constant — the "evidence-chain /
+/// root-cause" merge signal calls for linking findings that each reference the SAME concrete
+/// secret/credential, "even across files and with no line proximity". Deliberately a named list
+/// rather than a bare "KEY" substring (which would also catch an ordinary identifier like
+/// `PRIMARY_KEY_COLUMN`) — the token still also has to pass the CONSTANT_CASE shape test in
+/// [`is_credential_identifier`] below, so this is the conservative half of a two-part test, not
+/// the whole of it.
+const CREDENTIAL_IDENTIFIER_KEYWORDS: &[&str] = &[
+    "SECRET",
+    "API_KEY",
+    "APIKEY",
+    "ACCESS_KEY",
+    "ACCESSKEY",
+    "PRIVATE_KEY",
+    "PRIVATEKEY",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "AUTH_TOKEN",
+    "ACCESS_TOKEN",
+];
+
+/// Minimum length (characters) for a candidate CONSTANT_CASE token to be considered a credential
+/// identifier — mirrors [`MIN_SHARED_CAPTURE_LEN`]'s "too generic to prove anything" floor, set
+/// higher here because a genuine secret identifier (`STRIPE_SECRET_KEY`, `DB_PASSWORD`) is always
+/// a multi-word compound; anything shorter is more likely an accidental short acronym.
+const MIN_CREDENTIAL_TOKEN_LEN: usize = 8;
+
+/// True when `tok` is shaped like a CONSTANT_CASE identifier (uppercase ASCII letters, digits,
+/// and underscores only, with at least one underscore — ruling out a bare acronym) of at least
+/// [`MIN_CREDENTIAL_TOKEN_LEN`] characters, AND its text contains one of
+/// [`CREDENTIAL_IDENTIFIER_KEYWORDS`] — e.g. `STRIPE_SECRET_KEY`, `DB_PASSWORD`,
+/// `AWS_SECRET_ACCESS_KEY`. The shape check is intentionally strict (an ordinary sentence never
+/// emits a fully-uppercase, underscore-bearing multi-word token by accident), which is what lets
+/// this fire with NO file/category/distance restriction at all, unlike the looser
+/// [`description_overlap_score`] prose heuristic: this is a structural identity match, not prose
+/// similarity.
+fn is_credential_identifier(tok: &str) -> bool {
+    if tok.len() < MIN_CREDENTIAL_TOKEN_LEN || !tok.contains('_') {
+        return false;
+    }
+    if !tok
+        .chars()
+        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    {
+        return false;
+    }
+    CREDENTIAL_IDENTIFIER_KEYWORDS
+        .iter()
+        .any(|kw| tok.contains(kw))
+}
+
+/// Extract every CONSTANT_CASE credential/secret identifier (see [`is_credential_identifier`])
+/// named in free text. Repo-agnostic, pure lexical scan, no rule-specific parsing — mirrors
+/// [`structural_objects`]'s shape, but targets the bare-underscore-identifier shape
+/// (`STRIPE_SECRET_KEY`) that [`structural_objects`]'s dotted/quoted extraction does not cover.
+fn credential_identifier_tokens(text: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let mut cur = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' {
+            cur.push(ch);
+        } else if !cur.is_empty() {
+            if is_credential_identifier(&cur) {
+                out.insert(std::mem::take(&mut cur));
+            } else {
+                cur.clear();
+            }
+        }
+    }
+    if is_credential_identifier(&cur) {
+        out.insert(cur);
+    }
+    out
+}
+
+/// C6-B2 design point 1: the GENERAL root-cause identity a finding carries — every credential
+/// token (see [`credential_identifier_tokens`]) findable in its own `captures` VALUES plus its
+/// own `snippet`/`detail` text. This is the "evidence chain" extraction: the config file that
+/// holds `STRIPE_SECRET_KEY`, the module that builds a client by reading `STRIPE_SECRET_KEY`,
+/// and a call site whose own explanation names that SAME `STRIPE_SECRET_KEY` as the credential
+/// the client it calls was built from, all extract the identical token here — regardless of
+/// which file they are in, which rule flagged them, or how far apart their lines sit.
+///
+/// Pure and side-effect-free (never mutates `f`); used by BOTH [`backfill_credential_identity`]
+/// (to seed `captures` so the pre-existing [`shared_captured_object`] cross-file merge signal
+/// picks the link up with NO further change to [`semantic_pair_merges`] itself — the det+det
+/// guard, the `objects_conflict` veto exemption, and the AI+AI corroboration guard already treat
+/// a `shared_captured_object` match as strong enough to fire regardless of file/category/
+/// distance) and, independently, by `report_export`'s top-3 "three distinct root causes"
+/// selector (C6-B2 design point 3), as a defense-in-depth check for the case this merge pass
+/// conservatively left two same-root-cause rows distinct.
+pub(crate) fn root_cause_credential_identities(f: &Finding) -> std::collections::BTreeSet<String> {
+    let mut out = credential_identifier_tokens(&format!("{} {}", f.snippet, f.detail));
+    for v in f.captures.values() {
+        out.extend(credential_identifier_tokens(v));
+    }
+    out
+}
+
+/// C6-B2 design point 1: backfill `captures` with any credential identifier
+/// ([`root_cause_credential_identities`]) a finding's own text names. Deliberately additive and
+/// NEVER gated on `captures` already being non-empty (unlike [`backfill_captured_object`]'s
+/// single-structural-object case): a credential token is matched by an explicit, narrow
+/// keyword+shape test (see [`is_credential_identifier`]), so there is no "which one of several is
+/// the real object" ambiguity to guard against — recording every token found is always safe.
+/// Each token is inserted under its OWN key (the token itself) so it can never collide with or
+/// overwrite an unrelated capture a detector already set (e.g. a `"table"` key from
+/// [`backfill_captured_object`]).
+fn backfill_credential_identity(f: &mut Finding) {
+    for tok in root_cause_credential_identities(f) {
+        f.captures.entry(tok.clone()).or_insert(tok);
+    }
+}
+
 /// The smallest brace-delimited block containing 1-based `line`, as `(start_line, end_line)`.
 /// Cheap single-pass brace matcher; returns `None` for brace-free content (SQL, YAML) so callers
 /// fall back to the line-window rule. Used to unify two findings on the same handler body even
@@ -4957,7 +5073,14 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
 /// for members that have no security-sounding rule id of their own. `captures` is backfilled the
 /// same way ([`backfill_captured_object`]) so a finding whose own detector never populated
 /// `captures` still gets a shot at the cross-file [`shared_captured_object`] signal when its own
-/// text unambiguously names one object. The final pass, [`strip_headline_cross_references`],
+/// text unambiguously names one object — and, independently (C6-B2 design point 1), via
+/// [`backfill_credential_identity`], so a finding naming a secret/credential identifier
+/// (`STRIPE_SECRET_KEY`) in its own text gets a shot at that SAME signal even when several such
+/// tokens are named (no single-candidate ambiguity restriction, unlike the general object case):
+/// this is how the holder of a leaked credential, the module that constructs a client from it,
+/// and every call site that uses it collapse into ONE row instead of shipping as N separate
+/// criticals, each with its own redundant remediation estimate. The final pass,
+/// [`strip_headline_cross_references`],
 /// runs over the MERGED output to clean up any row whose own narrative text still points at
 /// another (now possibly reordered) row by name.
 pub fn merge_semantic_groups(findings: Vec<Finding>, files: &[(String, String)]) -> Vec<Finding> {
@@ -4972,6 +5095,7 @@ pub fn merge_semantic_groups(findings: Vec<Finding>, files: &[(String, String)])
             f.category = categorize_rule_id(&f.rule_id);
         }
         backfill_captured_object(f);
+        backfill_credential_identity(f);
     }
     let mut groups: Vec<Vec<Finding>> = Vec::new();
     for f in findings {
@@ -11339,6 +11463,176 @@ mod tests {
             out.len(),
             2,
             "distinct det+det defects with no shared object must stay two rows: {out:?}"
+        );
+    }
+
+    // ── C6-B2: evidence-chain / root-cause merge signal ─────────────────────────────────────
+    // ONE leaked credential, named/used across 3+ files (the holder, the module constructing a
+    // client from it, and its call sites), must collapse into ONE row — see
+    // `root_cause_credential_identities`/`backfill_credential_identity`'s doc comments.
+
+    #[test]
+    fn c6b2_leaked_credential_chain_across_four_findings_three_files_merges_into_one() {
+        // The holder (deterministic secret-detector), the module that constructs a client from
+        // the SAME secret, and two downstream call sites that use that client — each one's own
+        // text names the identical credential identifier, in a different file, under different
+        // rule families, far apart in line number. All four are ONE defect (delete the secret +
+        // rotate it once), not four.
+        let mut holder = site_finding(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "src/config.ts",
+            5,
+            "critical",
+            "",
+        );
+        holder.detail =
+            "STRIPE_SECRET_KEY is committed in plaintext in this config file.".to_string();
+        holder.effort = Some("high".to_string());
+
+        let mut constructor = site_finding(
+            "AI-STRIPE-CLIENT-FROM-LEAKED-KEY",
+            "src/payments/stripeClient.ts",
+            212,
+            "critical",
+            "",
+        );
+        constructor.detail =
+            "Constructs a Stripe client directly from the committed STRIPE_SECRET_KEY constant."
+                .to_string();
+        constructor.effort = Some("high".to_string());
+
+        let mut call_site_a = site_finding(
+            "AI-PAYMENT-CALL-USES-LEAKED-KEY-1",
+            "src/payments/charge.ts",
+            40,
+            "critical",
+            "",
+        );
+        call_site_a.detail =
+            "Calls stripe.charges.create using the client built from STRIPE_SECRET_KEY."
+                .to_string();
+        call_site_a.effort = Some("high".to_string());
+
+        let mut call_site_b = site_finding(
+            "AI-PAYMENT-CALL-USES-LEAKED-KEY-2",
+            "src/payments/refund.ts",
+            900,
+            "critical",
+            "",
+        );
+        call_site_b.detail =
+            "Issues a refund via the same client built from STRIPE_SECRET_KEY.".to_string();
+        call_site_b.effort = Some("high".to_string());
+
+        let out = merge_semantic_groups(
+            vec![holder, constructor, call_site_a, call_site_b],
+            &[],
+        );
+        assert_eq!(
+            out.len(),
+            1,
+            "one leaked credential referenced by 4 findings across 3+ files must collapse into \
+             ONE row: {out:?}"
+        );
+        let row = &out[0];
+        assert_eq!(
+            row.rule_id, "SEC-NO-HARDCODED-SECRETS-1",
+            "the deterministic holder finding wins primacy"
+        );
+        let ids: std::collections::HashSet<&str> = std::iter::once(row.rule_id.as_str())
+            .chain(row.also_matches.iter().map(String::as_str))
+            .collect();
+        for expected in [
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "AI-STRIPE-CLIENT-FROM-LEAKED-KEY",
+            "AI-PAYMENT-CALL-USES-LEAKED-KEY-1",
+            "AI-PAYMENT-CALL-USES-LEAKED-KEY-2",
+        ] {
+            assert!(ids.contains(expected), "missing rule id {expected} in {ids:?}");
+        }
+        assert_eq!(
+            row.also_locations.len(),
+            3,
+            "every other site's own evidence location is preserved: {:?}",
+            row.also_locations
+        );
+        let also_paths: std::collections::HashSet<&str> =
+            row.also_locations.iter().map(|l| l.path.as_str()).collect();
+        for expected_path in [
+            "src/payments/stripeClient.ts",
+            "src/payments/charge.ts",
+            "src/payments/refund.ts",
+        ] {
+            assert!(
+                also_paths.contains(expected_path),
+                "missing location {expected_path} in {also_paths:?}"
+            );
+        }
+        // Single estimate, not a sum of the 4 members' own estimates — `effort` is a
+        // categorical tier (never a number to sum), and the merge never touches the primary's
+        // own `effort` at all; this pins that invariant explicitly.
+        assert_eq!(
+            row.effort,
+            Some("high".to_string()),
+            "the merged row carries ONE estimate (the primary's own), never a sum of the \
+             consequence sites' estimates"
+        );
+    }
+
+    #[test]
+    fn c6b2_two_different_leaked_credentials_stay_two_rows() {
+        // Safe twin: TWO DIFFERENT leaked credentials, each independently committed/used, must
+        // NOT cross-merge just because both are "a leaked secret" — the root-cause signal
+        // requires the SAME concrete identifier, never merely "both are critical".
+        let mut stripe_holder = site_finding(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "src/config.ts",
+            5,
+            "critical",
+            "",
+        );
+        stripe_holder.detail =
+            "STRIPE_SECRET_KEY is committed in plaintext in this config file.".to_string();
+
+        let mut sendgrid_holder = site_finding(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "src/email/config.ts",
+            9,
+            "critical",
+            "",
+        );
+        sendgrid_holder.detail =
+            "SENDGRID_API_KEY is committed in plaintext in this config file.".to_string();
+
+        let out = merge_semantic_groups(vec![stripe_holder, sendgrid_holder], &[]);
+        assert_eq!(
+            out.len(),
+            2,
+            "two DIFFERENT leaked credentials must stay two rows, never cross-merged on \
+             \"both are a leaked secret\" alone: {out:?}"
+        );
+    }
+
+    #[test]
+    fn c6b2_backfill_never_overwrites_an_existing_capture() {
+        // The credential backfill must be purely additive: a finding that already carries a
+        // `captures` entry for an unrelated purpose (e.g. a table name from
+        // `backfill_captured_object`) must keep that entry intact AND still gain the credential
+        // token under its own key.
+        let mut f = site_finding("SEC-MIXED-1", "src/handler.ts", 10, "high", "");
+        f.captures
+            .insert("table".to_string(), "profiles".to_string());
+        f.detail = "Reads DB_PASSWORD to connect before querying profiles.".to_string();
+        backfill_credential_identity(&mut f);
+        assert_eq!(
+            f.captures.get("table").map(String::as_str),
+            Some("profiles"),
+            "the pre-existing capture must survive untouched"
+        );
+        assert_eq!(
+            f.captures.get("DB_PASSWORD").map(String::as_str),
+            Some("DB_PASSWORD"),
+            "the credential token is additionally recorded under its own key"
         );
     }
 
