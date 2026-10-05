@@ -2219,10 +2219,21 @@ pub(crate) fn effective_bucket(
         test_file_count,
         chosen_option,
     ) {
-        "held"
-    } else {
-        bucket
+        return "held";
     }
+    // C6-B4 (amended): a missing ESTIMATE must NOT demote a row out of its action bucket.
+    //
+    // The fix gate above is a different case and stays: an action item with no fix of any kind is
+    // unusable, so held-with-a-disclosed-reason is the honest destination. A missing effort band
+    // is only a PACKAGING gap — the finding itself is confident, cited and actionable. Demoting it
+    // would hide the engine's strongest rows (a deterministic security HIGH with no authored band
+    // yet) out of the queue the reviewer reads first, which is the completeness failure this
+    // product exists to avoid: noise is handled by merge/re-rank/re-badge/route, never by pushing a
+    // real action item out of sight over a field the ESTIMATOR failed to supply. The row therefore
+    // keeps its action bucket and renders an honest "not estimated this run" instead; the
+    // corpus-load test (`every_deterministic_rule_option_with_remediation_has_an_authored_effort_band`)
+    // is where missing bands get driven to zero, at BUILD time, where nothing is hidden from anyone.
+    bucket
 }
 
 /// C5-8 (R7 amended): true when `finding` would land in an ACTION bucket
@@ -2271,6 +2282,61 @@ pub(crate) fn is_action_row_missing_a_fix(
         return false;
     }
     // Neither fix half exists. Only count that as the C5-8 gap when the rule is one the
+    // loaded corpus actually recognizes — see this function's doc comment.
+    corpus.and_then(|c| c.get_by_id(&finding.rule_id)).is_some()
+}
+
+/// C6-B4: the fix-availability gate's exact mirror for the OTHER half of a usable action row
+/// — true when `finding` would land in an ACTION bucket (do_now/do_next/plan) by
+/// severity/effort/disposition alone, survives every other `effective_bucket` gate, and has
+/// NO remediation-effort estimate from ANY source ([`resolve_effort`]: neither the finding's
+/// own calibrated `effort` nor the rule's authored band).
+///
+/// # Why this should rarely fire post-C6-B4.1
+/// The corpus-wide test `every_deterministic_rule_option_with_remediation_has_an_authored_
+/// effort_band` (in `camerata-rules`) now guarantees every deterministic (mechanical/
+/// architectural) rule option that carries client-facing `remediation` ALSO carries an
+/// authored `effort` band — which means a recognized rule's row almost never reaches this
+/// gate in practice going forward: if it has a fix to show, [`resolve_effort`] can virtually
+/// always find a number to go with it. This function exists as the SAME kind of belt-and-
+/// suspenders runtime safety net [`is_action_row_missing_a_fix`] is for its own invariant
+/// (a corpus-authoring gap slipping past the build-time test some other way, a non-default
+/// resolved option, a corpus that failed to load at render time) — not an expected steady
+/// state. The fifth-consecutive-run alarm C6-B4 exists to close is exactly this: an
+/// unestimated deterministic row shipping silently in an action bucket. Now it either gets an
+/// estimate or is visibly, honestly held — never silently shipped unestimated.
+///
+/// # Scoped to RECOGNIZED corpus rules only (mirrors the fix gate exactly)
+/// Deliberately NOT triggered merely because `finding.rule_id` has no corpus entry, or no
+/// corpus was loaded at all — that is the PRE-EXISTING, honestly-disclosed "not yet
+/// estimated" gap the C4-P3 guardrail protects
+/// (`a_row_with_no_calibration_and_no_corpus_still_exports_unrefused`: a bare finding with
+/// no calibration and no corpus must still export, in its severity-driven action bucket,
+/// reporting "not yet estimated" rather than vanishing). This gate only catches the NEWER,
+/// narrower case: a rule the loaded corpus DOES recognize, which per C6-B4.1 should already
+/// carry an authored band whenever it has a fix, somehow still has neither.
+pub(crate) fn is_action_row_missing_an_estimate(
+    finding: &Finding,
+    disposition: Disposition,
+    severity: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+    test_file_count: usize,
+    chosen_option: Option<&str>,
+) -> bool {
+    if is_held_for_review(finding, disposition) || is_uncited_ai_finding(finding, corpus) {
+        return false;
+    }
+    if is_informational(finding, disposition, severity, corpus, test_file_count) {
+        return false;
+    }
+    let bucket = matrix_bucket(disposition, severity, finding.effort.as_deref());
+    if !matches!(bucket, "do_now" | "do_next" | "plan") {
+        return false;
+    }
+    if resolve_effort(finding, &finding.rule_id, corpus, chosen_option).is_some() {
+        return false;
+    }
+    // No estimate from any source. Only count that as the C6-B4 gap when the rule is one the
     // loaded corpus actually recognizes — see this function's doc comment.
     corpus.and_then(|c| c.get_by_id(&finding.rule_id)).is_some()
 }
@@ -3046,6 +3112,19 @@ pub fn build_report_json(
             report.test_file_count,
             chosen_option_for_rule,
         );
+        // C6-B4: computed independently (same pattern as `gate_no_fix` just above) purely so
+        // the headline below can say WHICH held-for-review reason applied — `effective_bucket`
+        // checks `is_action_row_missing_a_fix` FIRST, so when both this and `gate_no_fix` are
+        // true the fix-missing reason wins in the headline below, matching the bucket the two
+        // gates agree on either way (both route to "held").
+        let gate_no_estimate = is_action_row_missing_an_estimate(
+            f,
+            *disposition,
+            severity,
+            corpus,
+            report.test_file_count,
+            chosen_option_for_rule,
+        );
         let bucket = effective_bucket(
             f,
             *disposition,
@@ -3064,18 +3143,32 @@ pub fn build_report_json(
         // as before. See `client_headline_and_detail`'s doc comment.
         let (base_headline, _) =
             client_headline_and_detail(f, corpus, &fallback_title, chosen_option_for_rule);
-        // P3 / C5-8: an honest "why is this not curated" marker for the appendix row, distinct
-        // from the other informational/held reasons (which the appendix count doesn't otherwise
-        // distinguish either — see `matrix.informational`'s doc comment). `gate_uncited` and
-        // `gate_no_fix` are mutually exclusive by construction (`effective_bucket` checks
-        // `is_uncited_ai_finding` before ever reaching the C5-8 fix-availability check), so
-        // there is no ordering ambiguity between these two arms.
+        // P3 / C5-8 / C6-B4: an honest "why is this not curated" marker for the appendix row,
+        // distinct from the other informational/held reasons (which the appendix count
+        // doesn't otherwise distinguish either — see `matrix.informational`'s doc comment).
+        // `gate_uncited` is mutually exclusive with the other two by construction
+        // (`effective_bucket` checks `is_uncited_ai_finding` before ever reaching either
+        // fix/estimate-availability check); `gate_no_fix` and `gate_no_estimate` can both be
+        // true for the same row (no fix usually means no estimate either), so `gate_no_fix`'s
+        // arm is checked first and wins the headline in that case — not an ordering ambiguity,
+        // just a priority pick between two reasons that both land the SAME row in "held".
         let headline = if gate_uncited {
             format!("Needs review (uncited — no grounded citation found): {base_headline}")
         } else if gate_no_fix {
             format!(
                 "Needs review (fix not generated — no codebase-specific or rule-level \
                  remediation available): {base_headline}"
+            )
+        } else if gate_no_estimate && (bucket == "held" || bucket == "informational") {
+            // C6-B4 (amended): a missing estimate NO LONGER routes a row to held, so this
+            // "why is this not curated" marker must only render when the row genuinely IS
+            // out of the action tier for some other reason. A curated action row that merely
+            // lacks an effort band keeps its own headline and renders an honest "not estimated
+            // this run" in its effort field instead — labelling it "Needs review" would be a
+            // false hedge on a confident finding.
+            format!(
+                "Needs review (effort not estimated — no calibrated or rule-level estimate \
+                 available): {base_headline}"
             )
         } else {
             base_headline
@@ -3209,6 +3302,17 @@ pub fn build_report_json(
                     report.test_file_count,
                     chosen_option_for_rule,
                 );
+                // C6-B4: same disclosure pattern as `gate_no_fix` just above — see that gate's
+                // sibling-ordering note in the matrix-bucketing loop for why `gate_no_fix` wins
+                // the headline when both are true for the same row.
+                let gate_no_estimate = is_action_row_missing_an_estimate(
+                    f,
+                    *disposition,
+                    severity,
+                    corpus,
+                    report.test_file_count,
+                    chosen_option_for_rule,
+                );
                 // C6-B1: same disclosure for the uncited-AI gate, now that this loop no longer
                 // `continue`s past such a finding (see the `by_rule`-population loop above) —
                 // mirrors the identical `gate_uncited` headline prefix the matrix-bucketing loop
@@ -3231,6 +3335,15 @@ pub fn build_report_json(
                     format!(
                         "Needs review (fix not generated — no codebase-specific or rule-level \
                          remediation available): {base_headline}"
+                    )
+                } else if gate_no_estimate && (bucket == "held" || bucket == "informational") {
+                    // C6-B4 (amended) — see the identical guard in the matrix-bucketing loop:
+                    // a missing estimate no longer routes a row out of the action tier, so this
+                    // marker renders only when the row is genuinely held/informational for
+                    // another reason. A curated row simply shows "not estimated this run".
+                    format!(
+                        "Needs review (effort not estimated — no calibrated or rule-level \
+                         estimate available): {base_headline}"
                     )
                 } else {
                     base_headline
@@ -3267,7 +3380,6 @@ pub fn build_report_json(
                     // identical citation for every site.
                     citation: citation_for_finding(f, corpus),
                     headline,
-                    fix: resolve_fix(&rule_id, corpus, f, chosen_option_for_rule),
                     // P2: `f.fix_specific` was generated at SCAN time by
                     // `ai_audit::generate_fix_specifics` (this layer stays pure/synchronous —
                     // no model access here, just a read) — a codebase-specific fix that the
@@ -3277,6 +3389,25 @@ pub fn build_report_json(
                     // `fix` (resolved just above from the rule's own authored remediation)
                     // still renders as the primary "Fix:" line (C3-1b: a pipeline failure here
                     // never removes the finding's fix, only its codebase-specific flavor).
+                    //
+                    // C6-B3: a give-up no longer always leaves `fix_specific` (and therefore
+                    // `fix_for_this_finding`) at `None` — `generate_fix_specifics` now
+                    // instantiates the rule's OWN authored remediation against this finding's
+                    // own identifiers and writes THAT into `fix_specific`, via the exact same
+                    // `resolve_fix` machinery this `fix` field below calls. When it does, the
+                    // two fields would otherwise render the IDENTICAL sentence twice (a bold
+                    // "Fix:" line immediately followed by a "General guidance:" line repeating
+                    // it verbatim) — `fix` is suppressed here whenever it's byte-identical to
+                    // `fix_for_this_finding`, so the template's secondary line only ever adds
+                    // information, never echoes the primary line back.
+                    fix: {
+                        let generic = resolve_fix(&rule_id, corpus, f, chosen_option_for_rule);
+                        if generic.as_deref() == f.fix_specific.as_deref() {
+                            None
+                        } else {
+                            generic
+                        }
+                    },
                     fix_for_this_finding: f.fix_specific.clone(),
                 }
             })
@@ -5609,6 +5740,10 @@ mod tests {
                                 authored remediation."
                 .to_string(),
         );
+        // C6-B4: this test is about the FIX half only — give it its own calibrated effort so
+        // `is_action_row_missing_an_estimate` (a separate, newer gate for the OTHER half)
+        // doesn't also re-route it to held and mask the assertion below.
+        f.effort = Some("medium".to_string());
         let report = report_with(vec![f], vec![]);
         let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
         assert_eq!(
@@ -5678,6 +5813,10 @@ mod tests {
         let mut with_specific = finding("SEC-TEST-UNAUTHORED-1", "a.py", 1, "critical");
         with_specific.fix_specific =
             Some("Rotate the credential and remove it from source.".to_string());
+        // C6-B4: give it its own calibrated effort so the separate estimate-availability gate
+        // (`is_action_row_missing_an_estimate`) doesn't also re-route it to held — this test
+        // is isolating the FIX half only, exactly like the test above.
+        with_specific.effort = Some("low".to_string());
         let report = report_with(vec![with_specific], vec![]);
         let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
         assert_eq!(json.matrix.held.len(), 0);

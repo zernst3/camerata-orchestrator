@@ -2776,32 +2776,154 @@ pub(crate) fn fix_leaks_methodology(fix: &str) -> Option<String> {
         .map(|p| p.to_string())
 }
 
+/// One ROUND of the fix-specific generation loop (C6-B3.4 extracted this out of
+/// [`generate_fix_specifics`] so a normal `FIX_BATCH_SIZE`-batched round and the final
+/// single-finding retry share IDENTICAL request-building, streaming, and self-check logic —
+/// the only axis that varies between callers is `batch_size`). Mutates `findings[idx]
+/// .fix_specific` in place for anything that validates; returns the subset of `pending` that
+/// still needs another round. A transport/timeout failure on one chunk re-queues only THAT
+/// chunk's findings, never the whole still-pending set.
+#[allow(clippy::too_many_arguments)]
+async fn run_fix_specifics_round(
+    llm: &dyn LlmPort,
+    repo: &str,
+    system: &str,
+    fix_model: Option<&str>,
+    meter: Option<&UsageMeter>,
+    corpus: Option<&camerata_rules::RuleSet>,
+    files: &[(String, String)],
+    findings: &mut [Finding],
+    feedback: &mut std::collections::HashMap<usize, String>,
+    pending: &[usize],
+    batch_size: usize,
+) -> Vec<usize> {
+    let mut still_pending = Vec::new();
+    // Bounded chunks (see `FIX_BATCH_SIZE`'s doc comment) — each is an independent streamed
+    // call, so a failure/timeout in ONE chunk only re-queues ITS findings for the next
+    // attempt, never the whole still-pending set. `pending.chunks(..)` yields exactly one
+    // chunk (the whole set) when `batch_size >= pending.len()`, so the request/self-check
+    // shape below is unchanged from before this fix in that case.
+    for batch in pending.chunks(batch_size.max(1)) {
+        let prompt = {
+            let refs: Vec<&Finding> = batch.iter().map(|&i| &findings[i]).collect();
+            let local_feedback: std::collections::HashMap<usize, String> = batch
+                .iter()
+                .enumerate()
+                .filter_map(|(pos, orig)| feedback.get(orig).cloned().map(|r| (pos, r)))
+                .collect();
+            format!(
+                "Repository: {repo}\n\nWrite a concrete fix for each finding below:\n\n{}",
+                build_fix_specific_block(&refs, files, corpus, &local_feedback)
+            )
+        };
+        let mut req = LlmRequest::new(prompt)
+            .with_system(system.to_string())
+            .with_max_tokens(scaled_max_tokens(batch.len(), FIX_TOKENS_PER_FINDING));
+        if let Some(m) = fix_model {
+            req = req.with_model(m.to_string());
+        }
+        // Routed through the STREAMING transport (not the flat `complete`) so a large
+        // batch gets the CLI heartbeat + partial-output salvage instead of a flat,
+        // non-reset 300s deadline. `on_delta` is a no-op: this pass has no live
+        // transcript sink to feed.
+        let mut on_delta = |_: &str| {};
+        let resp = match llm.complete_streaming(req, &mut on_delta).await {
+            Ok(r) => r,
+            // Transport/timeout failure: nothing to validate for this chunk this round.
+            // Re-queue exactly this chunk's findings so the next round retries them (or,
+            // on the last round, the instantiated-fallback below picks them up) — a
+            // failure never re-queues findings OUTSIDE this chunk.
+            Err(_) => {
+                still_pending.extend(batch.iter().copied());
+                continue;
+            }
+        };
+        if let Some(m) = meter {
+            m.record(&resp);
+        }
+        let parsed = parse_fix_specifics(&resp.text);
+
+        for (pos, &orig_idx) in batch.iter().enumerate() {
+            let Some(text) = parsed.get(&pos) else {
+                feedback
+                    .entry(orig_idx)
+                    .or_insert_with(|| "you did not return a fix for this finding".to_string());
+                still_pending.push(orig_idx);
+                continue;
+            };
+            let evidence = fix_evidence_blob(&findings[orig_idx], files);
+            if let Some(bad) = find_ungrounded_identifier(text, &evidence) {
+                feedback.insert(
+                    orig_idx,
+                    format!(
+                        "you named `{bad}`, which doesn't appear anywhere in this finding's \
+                         evidence"
+                    ),
+                );
+                still_pending.push(orig_idx);
+                continue;
+            }
+            if let Some(reason) = fix_contradicts_detail(text, &findings[orig_idx].detail) {
+                feedback.insert(orig_idx, reason);
+                still_pending.push(orig_idx);
+                continue;
+            }
+            if let Some(leak) = fix_leaks_methodology(text) {
+                feedback.insert(
+                    orig_idx,
+                    format!(
+                        "you described detection methodology (\"{leak}\") — describe only \
+                         the fix, never how it was found"
+                    ),
+                );
+                still_pending.push(orig_idx);
+                continue;
+            }
+            findings[orig_idx].fix_specific = Some(text.clone());
+        }
+    }
+    still_pending
+}
+
 /// Run the P2 fix-specific generation pass: for every non-dependency finding in `findings`,
 /// generate a codebase-specific `fix_specific` (see [`fix_specific_system_prompt`]), then
 /// validate it (identifier grounding + non-contradiction + no-methodology-leak) and
 /// regenerate up to [`MAX_FIX_REGENERATIONS`] times for anything that fails. A finding whose
-/// fix STILL doesn't pass after every retry keeps `fix_specific` at `None` — NEVER an empty or
-/// fabricated string — and the failure is only LOGGED (stderr), never written into any
-/// client-facing field. This is a PIPELINE failure (the model never produced a validated,
-/// codebase-specific fix), not a confidence judgement about the finding itself, so it must
-/// NEVER set `needs_review`, NEVER hedge, and NEVER tag `detail` with pipeline-state text
-/// (C3-1b, `docs/plans/2026-09-30_cycle2-queue-hardening.md`) — the ONLY thing that sets
+/// fix STILL doesn't pass after every batched retry gets ONE more solo attempt (C6-B3.4,
+/// `run_fix_specifics_round` with `batch_size = 1`) — a smaller, single-finding prompt is a
+/// cheap reliability win on top of the batched retries, since it strips away any
+/// cross-finding context (a batch-mate's evidence, a batch-mate's rejected fix) that may have
+/// been confusing the model or tripping the self-check on THIS finding specifically.
+///
+/// A finding that STILL doesn't pass after that keeps `fix_specific` at `None` from the
+/// MODEL's own attempt — but C6-B3 means that is no longer the end of the story: this
+/// function now instantiates the RULE's own authored remediation against the finding's own
+/// `path`/`captures` (via [`crate::report_export::resolve_fix`], the exact machinery the
+/// generic `fix` field already uses) and writes THAT into `fix_specific` instead, so the
+/// finding's PRIMARY fix line is still concrete and finding-specific — never a silent `None`,
+/// never the model's fabricated/rejected text. Only a finding whose rule has no authored
+/// remediation at all (no corpus, no corpus entry, or a blank `remediation` field) keeps
+/// `fix_specific` as `None` — genuinely nothing to instantiate. Every give-up (whether or not
+/// the instantiated fallback covered it) is recorded into the returned `Vec<FailedPass>` so
+/// the report export can disclose the degradation (count included) rather than shipping
+/// silently — see [`FailedPass`] and W6.
+///
+/// This is a PIPELINE failure (the model never produced a validated, codebase-specific fix),
+/// not a confidence judgement about the finding itself, so it must NEVER set `needs_review`,
+/// NEVER hedge, and NEVER tag `detail` with pipeline-state text (C3-1b,
+/// `docs/plans/2026-09-30_cycle2-queue-hardening.md`) — the ONLY thing that sets
 /// `needs_review`/`confidence = "needs-review"` is a calibration doubt verdict
-/// (`apply_verdicts`). The row still ships a usable fix: `report_export::resolve_fix` renders
-/// the RULE's own authored remediation (`RuleOption::remediation`) as the finding's generic
-/// `fix` whether or not `fix_specific` generated, and the Typst template renders that generic
-/// `fix` as the primary "Fix:" line whenever `fix_for_this_finding` is `None` — see both
-/// functions' doc comments.
+/// (`apply_verdicts`). A row that STILL has no fix from ANY source (no model-generated
+/// specific, no instantiated authored remediation) is never dropped and never refused here —
+/// [`crate::report_export::is_action_row_missing_a_fix`] re-routes exactly that case to
+/// `"held"` at report-export time, with its own disclosed reason.
 ///
 /// Modeled on [`verify_findings`] above: same `&dyn LlmPort` seam, same [`UsageMeter`]
 /// folding, same streamed-call + bounded-chunk shape (`FIX_BATCH_SIZE`, in the
 /// "AGGREGATE-PASS TUNING" section). Dependency-audit findings (`DEP_AUDIT_RULE_ID`) are
 /// skipped — they're carved into their own §7 lane and never flow through
 /// `resolve_fix`/`CuratedSiteJson` either (see that carve-out's doc comment in
-/// `report_export.rs`). Graceful: a finding the model never responds about at all (its
-/// chunk's call fails, or every attempt is rejected) still gets the needs-review fallback
-/// rather than being silently dropped — recall-first discovery, matching every other pass in
-/// this module.
+/// `report_export.rs`).
 pub async fn generate_fix_specifics(
     llm: &dyn LlmPort,
     repo: &str,
@@ -2810,7 +2932,7 @@ pub async fn generate_fix_specifics(
     fix_model: Option<&str>,
     meter: Option<&UsageMeter>,
     corpus: Option<&camerata_rules::RuleSet>,
-) -> Vec<Finding> {
+) -> (Vec<Finding>, Vec<FailedPass>) {
     let indices: Vec<usize> = findings
         .iter()
         .enumerate()
@@ -2818,7 +2940,7 @@ pub async fn generate_fix_specifics(
         .map(|(i, _)| i)
         .collect();
     if indices.is_empty() {
-        return findings;
+        return (findings, Vec::new());
     }
 
     let system = fix_specific_system_prompt();
@@ -2832,108 +2954,88 @@ pub async fn generate_fix_specifics(
         if pending.is_empty() {
             break;
         }
-        let mut still_pending = Vec::new();
-        // Bounded chunks (see `FIX_BATCH_SIZE`'s doc comment) — each is an independent
-        // streamed call, so a failure/timeout in ONE chunk only re-queues ITS findings for
-        // the next attempt, never the whole still-pending set. `pending.chunks(..)` yields
-        // exactly one chunk (the whole set) in the common case, so the request/self-check
-        // shape below is unchanged from before this fix in that case.
-        for batch in pending.chunks(FIX_BATCH_SIZE) {
-            let prompt = {
-                let refs: Vec<&Finding> = batch.iter().map(|&i| &findings[i]).collect();
-                let local_feedback: std::collections::HashMap<usize, String> = batch
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(pos, orig)| feedback.get(orig).cloned().map(|r| (pos, r)))
-                    .collect();
-                format!(
-                    "Repository: {repo}\n\nWrite a concrete fix for each finding below:\n\n{}",
-                    build_fix_specific_block(&refs, files, corpus, &local_feedback)
-                )
-            };
-            let mut req = LlmRequest::new(prompt)
-                .with_system(system.clone())
-                .with_max_tokens(scaled_max_tokens(batch.len(), FIX_TOKENS_PER_FINDING));
-            if let Some(m) = fix_model {
-                req = req.with_model(m.to_string());
-            }
-            // Routed through the STREAMING transport (not the flat `complete`) so a large
-            // batch gets the CLI heartbeat + partial-output salvage instead of a flat,
-            // non-reset 300s deadline. `on_delta` is a no-op: this pass has no live
-            // transcript sink to feed.
-            let mut on_delta = |_: &str| {};
-            let resp = match llm.complete_streaming(req, &mut on_delta).await {
-                Ok(r) => r,
-                // Transport/timeout failure: nothing to validate for this chunk this round.
-                // Re-queue exactly this chunk's findings so the next round retries them (or,
-                // on the last round, the needs-review fallback below picks them up) — a
-                // failure never re-queues findings OUTSIDE this chunk.
-                Err(_) => {
-                    still_pending.extend(batch.iter().copied());
-                    continue;
-                }
-            };
-            if let Some(m) = meter {
-                m.record(&resp);
-            }
-            let parsed = parse_fix_specifics(&resp.text);
+        pending = run_fix_specifics_round(
+            llm,
+            repo,
+            &system,
+            fix_model,
+            meter,
+            corpus,
+            files,
+            &mut findings,
+            &mut feedback,
+            &pending,
+            FIX_BATCH_SIZE,
+        )
+        .await;
+    }
 
-            for (pos, &orig_idx) in batch.iter().enumerate() {
-                let Some(text) = parsed.get(&pos) else {
-                    feedback
-                        .entry(orig_idx)
-                        .or_insert_with(|| "you did not return a fix for this finding".to_string());
-                    still_pending.push(orig_idx);
-                    continue;
-                };
-                let evidence = fix_evidence_blob(&findings[orig_idx], files);
-                if let Some(bad) = find_ungrounded_identifier(text, &evidence) {
-                    feedback.insert(
-                        orig_idx,
-                        format!(
-                            "you named `{bad}`, which doesn't appear anywhere in this finding's \
-                             evidence"
-                        ),
-                    );
-                    still_pending.push(orig_idx);
-                    continue;
-                }
-                if let Some(reason) = fix_contradicts_detail(text, &findings[orig_idx].detail) {
-                    feedback.insert(orig_idx, reason);
-                    still_pending.push(orig_idx);
-                    continue;
-                }
-                if let Some(leak) = fix_leaks_methodology(text) {
-                    feedback.insert(
-                        orig_idx,
-                        format!(
-                            "you described detection methodology (\"{leak}\") — describe only \
-                             the fix, never how it was found"
-                        ),
-                    );
-                    still_pending.push(orig_idx);
-                    continue;
-                }
-                findings[orig_idx].fix_specific = Some(text.clone());
+    // C6-B3.4: one FINAL, cheap-reliability pass over whatever's still pending — SOLO
+    // (batch_size = 1) rather than batched. See this function's doc comment for why a
+    // smaller prompt is worth one extra call per still-pending finding.
+    if !pending.is_empty() {
+        pending = run_fix_specifics_round(
+            llm,
+            repo,
+            &system,
+            fix_model,
+            meter,
+            corpus,
+            files,
+            &mut findings,
+            &mut feedback,
+            &pending,
+            1,
+        )
+        .await;
+    }
+
+    // C6-B3: a give-up is never silent and never leaves the finding with no fix line when a
+    // fix is available from ANY source. Instantiate the rule's own authored remediation
+    // against THIS finding's own path/captures — the identical machinery that already backs
+    // the generic `fix` field — and write it into `fix_specific`, so the finding's PRIMARY
+    // fix line is concrete and finding-specific even though the model itself never produced
+    // one. A finding whose rule carries no authored remediation at all keeps `fix_specific`
+    // as `None`; `report_export::is_action_row_missing_a_fix` is what re-routes THAT case to
+    // `"held"` rather than shipping an action-bucket row with no fix text anywhere.
+    let mut failed_passes = Vec::new();
+    if !pending.is_empty() {
+        let gave_up = pending.len();
+        let mut instantiated = 0usize;
+        for &idx in &pending {
+            eprintln!(
+                "[camerata-server] fix-specific generation gave up for {repo} {}:{} ({}) after \
+                 {MAX_FIX_REGENERATIONS} batched retries plus one single-finding retry — \
+                 falling back to the rule's authored remediation, instantiated against this \
+                 finding's own identifiers, not a client-facing hedge.",
+                findings[idx].path, findings[idx].line, findings[idx].rule_id
+            );
+            if let Some(fallback) = crate::report_export::resolve_fix(
+                &findings[idx].rule_id,
+                corpus,
+                &findings[idx],
+                None,
+            ) {
+                findings[idx].fix_specific = Some(fallback);
+                instantiated += 1;
             }
         }
-        pending = still_pending;
+        let uncovered = gave_up - instantiated;
+        failed_passes.push(FailedPass {
+            repo: repo.to_string(),
+            pass: "fix-specific generation".to_string(),
+            reason: format!(
+                "per-finding fix generation gave up on {gave_up} finding(s) this run after \
+                 {MAX_FIX_REGENERATIONS} batched retries plus one single-finding retry; \
+                 {instantiated} shipped the rule's own authored remediation, instantiated \
+                 against the finding's own identifiers, in place of a model-generated fix, \
+                 and {uncovered} had no authored remediation to fall back to either (routed \
+                 to held for manual review rather than shipped with no fix at all)"
+            ),
+        });
     }
 
-    // C3-1b: never emit an empty/fabricated fix, but also never let this PIPELINE failure
-    // masquerade as a CONFIDENCE judgement — no `needs_review`, no `detail` tag. Operators see
-    // the gap in the logs; the client sees the rule's own authored remediation instead (see
-    // this function's doc comment).
-    for idx in pending {
-        eprintln!(
-            "[camerata-server] fix-specific generation gave up for {repo} {}:{} ({}) after \
-             {MAX_FIX_REGENERATIONS} retries — the finding still ships with the rule's \
-             authored remediation as its Fix line, not a client-facing hedge.",
-            findings[idx].path, findings[idx].line, findings[idx].rule_id
-        );
-    }
-
-    findings
+    (findings, failed_passes)
 }
 
 /// Partition `files` into contiguous chunks each whose RAW size is at most `budget` bytes,
@@ -8013,7 +8115,7 @@ mod tests {
         };
         let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
 
-        let out = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        let (out, _) = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
 
         assert_eq!(
             completer
@@ -8161,7 +8263,7 @@ mod tests {
         ];
         let completer = SalvagingFixCompleter { calls: 0.into() };
 
-        let out = generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
+        let (out, _) = generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
 
         assert_eq!(
             out[0].fix_specific.as_deref(),
@@ -12863,7 +12965,7 @@ mod tests {
             r#"{"fixes":[{"index":0,"fix":"Use `safeInternalPath` instead of `rawRedirect` in app/auth/signout/route.ts."}]}"#,
         ]);
         let meter = UsageMeter::default();
-        let out =
+        let (out, _) =
             generate_fix_specifics(&completer, "o/r", vec![f], &files, None, Some(&meter), None)
                 .await;
         assert_eq!(out.len(), 1);
@@ -12885,7 +12987,7 @@ mod tests {
             "some-pkg@1.0.0",
         );
         let completer = FailingCompleter;
-        let out = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        let (out, _) = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].fix_specific, None);
         // No model call was ever attempted — FailingCompleter would have surfaced it as a
@@ -12912,7 +13014,7 @@ mod tests {
         let completer = SequencedCompleter::new(&[
             r#"{"fixes":[{"index":0,"fix":"Remove .env from the repository and its git history, and rotate the exposed credential."}]}"#,
         ]);
-        let out =
+        let (out, _) =
             generate_fix_specifics(&completer, "o/r", vec![f], &files, None, None, None).await;
         assert_eq!(out.len(), 1);
         assert!(
@@ -12934,7 +13036,7 @@ mod tests {
         let completer = StubCompleter {
             text: "complete garbage, not json".to_string(),
         };
-        let out = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        let (out, _) = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].fix_specific, None, "must never fabricate a fix");
         assert!(
@@ -12956,7 +13058,7 @@ mod tests {
     async fn generate_fix_specifics_transport_failure_never_hedges_or_tags_detail() {
         // The OTHER failure mode: the LLM is unreachable entirely (not just returning junk).
         let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
-        let out =
+        let (out, _) =
             generate_fix_specifics(&FailingCompleter, "o/r", vec![f], &[], None, None, None).await;
         assert_eq!(out[0].fix_specific, None);
         assert!(!out[0].needs_review);
@@ -12982,7 +13084,7 @@ mod tests {
             // Round 1 (after feedback): a grounded correction.
             r#"{"fixes":[{"index":0,"fix":"Check the caller owns `id` before calling delete_order(id)."}]}"#,
         ]);
-        let out = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        let (out, _) = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
         assert_eq!(
             out[0].fix_specific.as_deref(),
             Some("Check the caller owns `id` before calling delete_order(id).")
@@ -13006,7 +13108,7 @@ mod tests {
             // Round 1: addresses the real gap instead.
             r#"{"fixes":[{"index":0,"fix":"Replace the `any` casts in foo.ts with explicit types."}]}"#,
         ]);
-        let out = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        let (out, _) = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
         assert_eq!(
             out[0].fix_specific.as_deref(),
             Some("Replace the `any` casts in foo.ts with explicit types.")
@@ -13021,7 +13123,7 @@ mod tests {
             r#"{"fixes":[{"index":0,"fix":"Camerata detected this via a regex scan; fix the concatenation."}]}"#,
             r#"{"fixes":[{"index":0,"fix":"Use a parameterized query in a.rs instead of concatenation."}]}"#,
         ]);
-        let out = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        let (out, _) = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
         let saved = out[0].fix_specific.as_deref().unwrap_or_default();
         assert!(!saved.to_ascii_lowercase().contains("camerata"));
         assert!(!saved.to_ascii_lowercase().contains("regex"));
@@ -13035,19 +13137,144 @@ mod tests {
     async fn generate_fix_specifics_gives_up_after_max_regenerations_and_folds_usage_every_round() {
         let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
         // Always returns an ungrounded fix — every round is rejected, so after
-        // MAX_FIX_REGENERATIONS retries the finding falls through with `fix_specific` still
-        // `None` (never hedged — see the total/transport-failure tests above), and every
+        // MAX_FIX_REGENERATIONS batched retries PLUS the one C6-B3.4 single-finding retry,
+        // the finding falls through with `fix_specific` still `None` — no corpus is passed
+        // in, so the C6-B3 instantiated fallback has no authored remediation to fall back to
+        // either (never hedged — see the total/transport-failure tests above), and every
         // round's call must still have folded into the meter (spend isn't lost just because
         // the content was rejected).
         let completer = StubCompleter {
             text: r#"{"fixes":[{"index":0,"fix":"Use `neverInEvidence` here."}]}"#.to_string(),
         };
         let meter = UsageMeter::default();
-        let out =
+        let (out, failed_passes) =
             generate_fix_specifics(&completer, "o/r", vec![f], &[], None, Some(&meter), None).await;
         assert_eq!(out[0].fix_specific, None);
         assert!(!out[0].needs_review);
-        assert_eq!(meter.snapshot().calls as usize, MAX_FIX_REGENERATIONS + 1);
+        // MAX_FIX_REGENERATIONS + 1 batched rounds, plus 1 more solo retry (C6-B3.4).
+        assert_eq!(meter.snapshot().calls as usize, MAX_FIX_REGENERATIONS + 2);
+        assert_eq!(
+            failed_passes.len(),
+            1,
+            "a give-up must be disclosed exactly once: {failed_passes:?}"
+        );
+        assert_eq!(failed_passes[0].pass, "fix-specific generation");
+    }
+
+    // ── C6-B3: instantiated authored-remediation fallback on give-up ───────────────────
+
+    /// When fix-GENERATION itself gives up (transport unreachable — every batched retry AND
+    /// the C6-B3.4 solo retry fail) but the rule DOES carry an authored remediation with a
+    /// `<table>` placeholder, `fix_specific` must still end up populated — with the
+    /// remediation INSTANTIATED against this finding's own `captures`, not a generic/bare
+    /// rendering and not left `None`. `SUPABASE-RLS-ENABLED-1`'s authored remediation names
+    /// `<table>` twice (`crates/rules/principles/supabase/rls/supabase-rls-enabled-1.toml`).
+    #[tokio::test]
+    async fn generate_fix_specifics_instantiates_the_authored_remediation_on_give_up() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        let mut f = fx(
+            "SUPABASE-RLS-ENABLED-1",
+            "supabase/migrations/1.sql",
+            1,
+            "no RLS evidence for `profiles`",
+            "CREATE TABLE profiles (...)",
+        );
+        f.captures.insert("table".to_string(), "profiles".to_string());
+
+        let (out, failed_passes) = generate_fix_specifics(
+            &FailingCompleter,
+            "o/r",
+            vec![f],
+            &[],
+            None,
+            None,
+            Some(&corpus),
+        )
+        .await;
+
+        let fix = out[0]
+            .fix_specific
+            .as_deref()
+            .expect("a give-up with an authored remediation available must still populate \
+                     fix_specific — never leave the row with no codebase-specific fix line");
+        assert!(
+            fix.contains("profiles"),
+            "the instantiated fallback must name THIS finding's own identifier (the table \
+             `profiles`, from its `captures`), not the bare `<table>` token or a generic \
+             filler: {fix}"
+        );
+        assert!(
+            !fix.contains('<'),
+            "every placeholder token must be substituted — no raw `<token>` left in the \
+             client-facing fix: {fix}"
+        );
+        assert!(!out[0].needs_review, "a fix-generation failure never hedges the finding");
+
+        assert_eq!(
+            failed_passes.len(),
+            1,
+            "the give-up must still be disclosed even though a usable fallback shipped: \
+             {failed_passes:?}"
+        );
+        assert_eq!(failed_passes[0].pass, "fix-specific generation");
+        assert!(
+            failed_passes[0].reason.contains("gave up on 1 finding"),
+            "the disclosure must carry the give-up COUNT: {}",
+            failed_passes[0].reason
+        );
+        assert!(
+            failed_passes[0].reason.contains("1 shipped"),
+            "the disclosure must say how many give-ups the instantiated fallback covered: {}",
+            failed_passes[0].reason
+        );
+    }
+
+    /// The mirror case: the rule the finding cites has NO corpus entry at all (an invented
+    /// AI-tier rule id, or simply a rule this loaded corpus doesn't define), so there is
+    /// nothing to instantiate. `fix_specific` legitimately stays `None` — the give-up is
+    /// still disclosed, and the finding is never dropped; it is
+    /// `report_export::is_action_row_missing_a_fix`'s job (exercised in report_export.rs's
+    /// own tests) to re-route a row like this to "held" at export time rather than ship an
+    /// action-bucket row with no fix text anywhere.
+    #[tokio::test]
+    async fn generate_fix_specifics_leaves_fix_specific_none_when_the_rule_has_no_authored_remediation()
+     {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly, got errors: {errors:?}");
+        let f = fx(
+            "AI-CUSTOM-ARCH-RULE-1",
+            "a.rs",
+            10,
+            "some real defect",
+            "let x = 1;",
+        );
+
+        let (out, failed_passes) = generate_fix_specifics(
+            &FailingCompleter,
+            "o/r",
+            vec![f],
+            &[],
+            None,
+            None,
+            Some(&corpus),
+        )
+        .await;
+
+        assert_eq!(
+            out[0].fix_specific, None,
+            "nothing to instantiate — must never fabricate a fix"
+        );
+        assert!(!out[0].needs_review);
+        assert_eq!(failed_passes.len(), 1);
+        assert!(
+            failed_passes[0].reason.contains("0 shipped"),
+            "the disclosure must say explicitly that zero of this run's give-ups got an \
+             instantiated fallback: {}",
+            failed_passes[0].reason
+        );
     }
 
     #[tokio::test]
@@ -13071,7 +13298,7 @@ mod tests {
         let completer = SequencedCompleter::new(&[
             r#"{"fixes":[{"index":0,"fix":"Route the redirect through `safeInternalPath`, defined right here in lib/redirect.ts."}]}"#,
         ]);
-        let out =
+        let (out, _) =
             generate_fix_specifics(&completer, "o/r", vec![f], &files, None, None, None).await;
         assert!(
             out[0].fix_specific.is_some(),
@@ -13083,6 +13310,14 @@ mod tests {
     /// max_tokens must SCALE with the finding count instead of the old hardcoded flat 4096 —
     /// a full `FIX_BATCH_SIZE` chunk is deliberately sized (see that constant's doc comment)
     /// to already exceed the old flat floor, since each fix is a full prose sentence.
+    ///
+    /// `CapturingCompleter` always answers `"{}"` (no usable fix), so EVERY batched round
+    /// here is rejected and the C6-B3.4 solo retry round also runs afterward — that round
+    /// legitimately uses a SMALLER max_tokens (one finding, not `FIX_BATCH_SIZE`), so this
+    /// test only asserts over the BATCHED rounds' own requests (the first
+    /// `MAX_FIX_REGENERATIONS + 1` calls); the sibling
+    /// `generate_fix_specifics_solo_retry_round_uses_a_smaller_max_tokens_than_the_batched_rounds`
+    /// test below pins the solo round's own, smaller value.
     #[tokio::test]
     async fn generate_fix_specifics_scales_max_tokens_with_finding_count() {
         let completer = CapturingCompleter::default();
@@ -13090,17 +13325,60 @@ mod tests {
             .map(|i| fx("ARCH-1", "a.rs", i, "some real defect", "let x = 1;"))
             .collect();
 
-        let _ = generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
+        let (_, _) = generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
 
         let seen = completer.seen.lock().unwrap();
-        assert!(!seen.is_empty());
         let expected = scaled_max_tokens(FIX_BATCH_SIZE, FIX_TOKENS_PER_FINDING);
         assert!(
             expected > 4096,
             "test setup must exercise the scaled-above-floor branch, got {expected}"
         );
-        for req in seen.iter() {
+        let batched_rounds = MAX_FIX_REGENERATIONS + 1;
+        assert!(
+            seen.len() >= batched_rounds,
+            "expected at least {batched_rounds} batched-round calls, got {}",
+            seen.len()
+        );
+        for req in seen.iter().take(batched_rounds) {
             assert_eq!(req.max_tokens, expected);
+        }
+    }
+
+    /// C6-B3.4: the cheap-reliability solo retry round (batch_size = 1) deliberately uses a
+    /// SMALLER max_tokens than the batched rounds that preceded it — it covers exactly one
+    /// finding, not `FIX_BATCH_SIZE` of them. `CapturingCompleter` never returns a usable fix,
+    /// so every batched round AND the solo round all run; the LAST call this completer sees
+    /// is therefore from the solo round.
+    #[tokio::test]
+    async fn generate_fix_specifics_solo_retry_round_uses_a_smaller_max_tokens_than_the_batched_rounds()
+     {
+        let completer = CapturingCompleter::default();
+        let findings: Vec<Finding> = (0..FIX_BATCH_SIZE)
+            .map(|i| fx("ARCH-1", "a.rs", i, "some real defect", "let x = 1;"))
+            .collect();
+
+        let (_, _) = generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
+
+        let seen = completer.seen.lock().unwrap();
+        let batched_rounds = MAX_FIX_REGENERATIONS + 1;
+        let batched_max_tokens = scaled_max_tokens(FIX_BATCH_SIZE, FIX_TOKENS_PER_FINDING);
+        let solo_max_tokens = scaled_max_tokens(1, FIX_TOKENS_PER_FINDING);
+        assert!(
+            seen.len() > batched_rounds,
+            "expected solo-round calls after the batched rounds, got {} total calls",
+            seen.len()
+        );
+        for req in seen.iter().skip(batched_rounds) {
+            assert_eq!(
+                req.max_tokens, solo_max_tokens,
+                "every solo-round call must use the SMALLER single-finding max_tokens"
+            );
+            assert!(
+                req.max_tokens < batched_max_tokens,
+                "the solo round's max_tokens must be smaller than the batched rounds': {} vs {}",
+                req.max_tokens,
+                batched_max_tokens
+            );
         }
     }
 
@@ -13111,7 +13389,7 @@ mod tests {
         let completer = CapturingCompleter::default();
         let f = fx("ARCH-1", "a.rs", 10, "some real defect", "let x = 1;");
 
-        let _ = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
+        let (_, _) = generate_fix_specifics(&completer, "o/r", vec![f], &[], None, None, None).await;
 
         let seen = completer.seen.lock().unwrap();
         assert_eq!(seen[0].max_tokens, 4096);
@@ -13139,7 +13417,7 @@ mod tests {
             canned,
         };
 
-        let out = generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
+        let (out, _) = generate_fix_specifics(&completer, "o/r", findings, &[], None, None, None).await;
 
         assert_eq!(out.len(), n, "no finding dropped across chunk boundaries");
         assert!(

@@ -1321,7 +1321,7 @@ pub async fn audit_repos(
                 // usage into the SAME `meter` as calibration/audit, so its spend is never
                 // invisible to the actual-vs-estimated readout.
                 if run_ai_review && !repo_findings.is_empty() {
-                    repo_findings = crate::ai_audit::generate_fix_specifics(
+                    let (fixed_findings, fix_failed_passes) = crate::ai_audit::generate_fix_specifics(
                         &llm,
                         spec,
                         repo_findings,
@@ -1331,6 +1331,11 @@ pub async fn audit_repos(
                         corpus,
                     )
                     .await;
+                    repo_findings = fixed_findings;
+                    // C6-B3: same disclosure mechanism as the alternative-recommendation and
+                    // hour-estimation sub-passes above — a per-finding fix-generation give-up
+                    // is never silent.
+                    all_failed_passes.extend(fix_failed_passes);
                 }
                 all_findings.extend(repo_findings);
                 repos_ok.push(spec.to_string());
