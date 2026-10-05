@@ -710,6 +710,21 @@ pub struct FindingRefJson {
     /// or a finding calibration never scored at all — the deterministic floor/preview tier,
     /// which was never in doubt to begin with) and `1` for `needs-review`. Lower ranks first.
     pub confidence_rank: u8,
+    /// C6-B2 design point 3: every credential/secret root-cause identity token
+    /// (`ai_audit::root_cause_credential_identities`) this finding's own text names — empty when
+    /// none were found. Used ONLY by the "three things this week" top-3 selector
+    /// (`build_report_json`'s `top3_do_now`) as an independent, defense-in-depth distinctness
+    /// check: a row that shares a non-empty token with an ALREADY-SELECTED row is skipped in
+    /// favor of the next-ranked row, so three "do this week" slots are never spent on three sites
+    /// of ONE leaked credential. This is a safety net, not the primary fix — the primary fix is
+    /// the merge pass itself (`ai_audit::backfill_credential_identity` feeding the pre-existing
+    /// `shared_captured_object` cross-file merge signal) collapsing those sites into ONE row
+    /// before the report is ever built; this field only catches the case where the merge pass
+    /// conservatively left two rows distinct. Never used for bucket placement, severity, or any
+    /// other decision — an empty set (the common case: no detected credential) never blocks
+    /// selection, and every skipped row still ships normally wherever `do_now`/the matrix already
+    /// placed it; nothing is dropped.
+    pub root_cause_keys: Vec<String>,
 }
 
 /// The severity×effort action matrix — the money page. Cell membership is driven by the
@@ -2563,6 +2578,9 @@ fn finding_ref(
         bucket: bucket.to_string(),
         precondition_count: finding_precondition_count(f),
         confidence_rank: finding_confidence_rank(f),
+        root_cause_keys: crate::ai_audit::root_cause_credential_identities(f)
+            .into_iter()
+            .collect(),
     }
 }
 
@@ -3549,7 +3567,31 @@ pub fn build_report_json(
     // below (the ONE place these findings are now named) — the exec-summary's own
     // `top_do_now` bullet list and blast-radius lead sentence are gone (see
     // `default_narrative`'s doc comment).
-    let top3_do_now: Vec<&FindingRefJson> = do_now_sorted.iter().take(3).collect();
+    //
+    // C6-B2 design point 3: walk `do_now_sorted` in rank order, but SKIP a row that shares a
+    // non-empty root-cause credential token (`FindingRefJson::root_cause_keys`) with a row
+    // already selected — the defense-in-depth distinctness check for the case the merge pass
+    // (`ai_audit::merge_semantic_groups` / `backfill_credential_identity`) conservatively left
+    // several sites of ONE leaked credential as separate rows. A skipped row is simply not
+    // chosen for THIS box; `do_now_sorted`/`matrix.do_now` are never mutated, so it still ships
+    // normally everywhere else the report lists do-now findings.
+    let mut top3_do_now: Vec<&FindingRefJson> = Vec::new();
+    let mut selected_root_causes: std::collections::HashSet<&str> =
+        std::collections::HashSet::new();
+    for f in &do_now_sorted {
+        if top3_do_now.len() >= 3 {
+            break;
+        }
+        let shares_selected_root_cause = !f.root_cause_keys.is_empty()
+            && f.root_cause_keys
+                .iter()
+                .any(|k| selected_root_causes.contains(k.as_str()));
+        if shares_selected_root_cause {
+            continue;
+        }
+        top3_do_now.push(f);
+        selected_root_causes.extend(f.root_cause_keys.iter().map(String::as_str));
+    }
     let dependency_advisories = dependency_snapshot.rows.len();
     // W6: never a silent omission — one explicit sentence per pass that failed/timed out
     // this scan, shared verbatim between the summary and the methodology below.
@@ -4650,6 +4692,90 @@ mod tests {
         let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
         assert!(json.three_things.items.is_empty());
         assert_eq!(json.three_things.total_hours_label, "No do-now items this run.");
+    }
+
+    // ── C6-B2: top-3 "three distinct root causes" selector ─────────────────────────────────
+    // Defense in depth for the case the merge pass (`ai_audit::merge_semantic_groups` /
+    // `backfill_credential_identity`) conservatively leaves several sites of ONE leaked
+    // credential as separate rows: the top-3 box must still never spend more than one slot on
+    // them. These findings are deliberately fed to `build_report_json` WITHOUT running the merge
+    // pipeline first (report_export never merges on its own), so this specifically exercises the
+    // selector's OWN distinctness check, independent of whether the merge pass also caught it.
+
+    #[test]
+    fn three_things_box_shows_three_distinct_root_causes_not_three_sites_of_one_credential() {
+        // Deliberately NOT "AI-"-prefixed: that tier goes through the separate P3 citation
+        // gate (`is_ai_tier` / `is_uncited_ai_finding`), which is an orthogonal concern this
+        // test is not about. Deterministic-shaped rule ids keep the fixture focused on the
+        // root-cause distinctness check alone.
+        let mut holder = finding("SEC-NO-HARDCODED-SECRETS-1", "config.ts", 5, "critical");
+        holder.detail =
+            "STRIPE_SECRET_KEY is committed in plaintext in this config file.".to_string();
+        let mut constructor = finding(
+            "SEC-STRIPE-CLIENT-FROM-LEAKED-KEY-1",
+            "stripeClient.ts",
+            12,
+            "critical",
+        );
+        constructor.detail =
+            "Builds a Stripe client directly from the committed STRIPE_SECRET_KEY.".to_string();
+        let mut call_site = finding(
+            "SEC-PAYMENT-CALL-USES-LEAKED-KEY-1",
+            "charge.ts",
+            40,
+            "critical",
+        );
+        call_site.detail =
+            "Issues a charge using the client built from STRIPE_SECRET_KEY.".to_string();
+        let mut distinct_a = finding("SEC-UNRELATED-CRITICAL-1", "other1.ts", 1, "critical");
+        distinct_a.detail = "Totally separate unauthenticated admin export.".to_string();
+        let mut distinct_b = finding("SEC-UNRELATED-CRITICAL-2", "other2.ts", 1, "critical");
+        distinct_b.detail = "A second, unrelated, totally distinct critical.".to_string();
+
+        let report = report_with(
+            vec![holder, constructor, call_site, distinct_a, distinct_b],
+            vec![],
+        );
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(
+            json.matrix.do_now.len(),
+            5,
+            "nothing is dropped from the queue — all 5 still ship as do-now rows: {:?}",
+            json.matrix.do_now
+        );
+        assert_eq!(
+            json.three_things.items.len(),
+            3,
+            "three slots still fill when enough DISTINCT candidates exist: {:?}",
+            json.three_things.items
+        );
+        let top3_ids: std::collections::HashSet<&str> = json
+            .three_things
+            .items
+            .iter()
+            .map(|i| i.rule_id.as_str())
+            .collect();
+        assert!(
+            top3_ids.contains("SEC-UNRELATED-CRITICAL-1")
+                && top3_ids.contains("SEC-UNRELATED-CRITICAL-2"),
+            "both genuinely distinct criticals must be in the top-3, never crowded out by one \
+             root cause: {top3_ids:?}"
+        );
+        let credential_chain_ids = [
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "SEC-STRIPE-CLIENT-FROM-LEAKED-KEY-1",
+            "SEC-PAYMENT-CALL-USES-LEAKED-KEY-1",
+        ];
+        let credential_rows_selected = credential_chain_ids
+            .iter()
+            .filter(|id| top3_ids.contains(**id))
+            .count();
+        assert_eq!(
+            credential_rows_selected, 1,
+            "only ONE of the three same-credential rows may fill a top-3 slot, never three: \
+             {top3_ids:?}"
+        );
     }
 
     // ── Calibration-review fix: precondition tie-break in the do-now ranking ──────────
