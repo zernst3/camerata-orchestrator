@@ -669,6 +669,20 @@ For EACH finding, do two things:
       names is real regardless of what a deeper layer might also do. If you invoke RLS (or any
       other layer) as a mitigating factor, it must be a CONFIRMED fact from the evidence you were
       given, not a guess, and it does not excuse a boundary that has already failed.
+    - An open or unvalidated redirect (the destination is attacker-controlled or otherwise
+      unchecked) is "medium" by default, NOT "high" — on its own it only harms the user who
+      follows it and hands the attacker nothing. It becomes "high" exactly when the finding says
+      the redirect is CHAINED to credential capture (the destination can read or exfiltrate a
+      token, cookie, or credential) — then the attacker walks away with something usable. It is
+      never "critical" from the redirect mechanism alone, chained or not — that would require an
+      UNAUTHENTICATED path to a privileged operation, which is a different finding.
+    - A privileged/role/admin check enforced ONLY in client-visible (UI/browser) code, with no
+      independent check on the server, is "high" AT MOST, never "critical" — the client-side
+      control is not the security boundary; a client can always be made to skip what only the
+      client enforces. Judge it by what the SERVER allows an authenticated caller to do once that
+      gate is bypassed. An authenticated privilege escalation confined to a single resource or
+      operation is "high"; "critical" is reserved for an unauthenticated reach or a system- or
+      account-wide compromise, neither of which a client-side-only gate states by itself.
   * A concrete, demonstrable SECURITY or CORRECTNESS break that does NOT clear the critical bar
     above (injection needing extra steps to reach, missing auth on a write path with contained
     blast radius, data loss/corruption, a real but non-catastrophic exploit) is "high".
@@ -1349,13 +1363,166 @@ fn mentions_self_hedged_confirmation_only(text: &str) -> bool {
         .any(|p| text.contains(p))
 }
 
-/// Apply the R1/R2 severity ceiling to ONE finding. R2 (CORS) is checked first and, when it
+// ── D7 (C6-A3): two more severity-ceiling classes, same shape as D6's R1/R2 — derived entirely
+// from the finding's own text, never dropping a finding, safe over ANY finding set. Added to
+// close a rubric-instability gap observed across two independent benchmark repos: the SAME two
+// classes kept drifting to an inflated severity run-to-run.
+//
+// R3 — open/unvalidated redirect. The exploit boundary this polices: a redirect to an
+// attacker-chosen destination only harms the user who follows it — on its own the attacker gains
+// nothing more than a referral, so it is Medium. It becomes High exactly when the finding's own
+// text says the redirect is CHAINED to credential capture (the destination can read or
+// exfiltrate a token, cookie, or credential) — only then does the attacker walk away with
+// something usable. It is NEVER Critical from the redirect mechanism alone, chained or not —
+// that would require the SAME finding to also describe an unauthenticated path to a privileged
+// operation, which is D5's job, not this ceiling's.
+//
+// R4 — a privileged/role/admin check enforced ONLY in client-visible (UI/browser) code, with no
+// independent server-side re-check. The exploit boundary: a client-side control is not itself the
+// security boundary — anything a client enforces, a client can be made to skip — so the real
+// exposure is bounded by what the SERVER allows an authenticated caller to do once that gate is
+// bypassed. An authenticated privilege escalation confined to a single resource/operation is a
+// HIGH finding, not Critical; Critical is reserved for an unauthenticated reach or a system- or
+// account-wide compromise, neither of which this class states by itself. Cap-only (like R1, it
+// never raises a lower severity) — the absent server-side check is itself a real defect worth
+// keeping wherever the model or the floor already put it, just never above High.
+//
+// Both R3 and R4 are gated against the D5 UNAUTHENTICATED/full-compromise floor phrases — unlike
+// R2 (CORS), which is authoritative because that vocabulary and the floor's are mutually
+// exclusive by construction, a redirect or a client-side check CAN legitimately co-occur in the
+// same finding's prose as an unauthenticated-access/full-compromise statement, and when it does
+// that Critical was earned through the floor's mechanism, not this ceiling's — so neither R3 nor
+// R4 may demote it. This is the BLOCKS-UP-ONLY requirement: these two ceilings only ever cap a
+// severity that their OWN class would otherwise have produced, never a severity legitimately
+// assigned by a different rule.
+
+/// Phrases naming an open or unvalidated redirect — the destination is attacker-controlled or
+/// otherwise unchecked, as opposed to a redirect to a fixed, trusted, hardcoded location.
+const OPEN_REDIRECT_PHRASES: &[&str] = &[
+    "open redirect",
+    "open-redirect",
+    "unvalidated redirect",
+    "redirect target is not validated",
+    "redirect url is not validated",
+    "redirect destination is not validated",
+    "does not validate the redirect",
+    "redirect parameter is not restricted",
+    "redirects to an attacker-controlled",
+    "redirects to an arbitrary",
+    "redirects to any external",
+    "redirects to any url",
+    "arbitrary redirect",
+    "unvalidated return url",
+    "unchecked redirect",
+];
+
+/// Verbs marking the redirect destination as actively capturing something a victim carries —
+/// paired with a credential-object phrase (reusing [`CREDENTIAL_DATA_PHRASES`], the same
+/// vocabulary D5's cross-tenant escalation branch already uses) so an unrelated mention of
+/// "token"/"session" elsewhere in the same finding's prose doesn't spuriously chain it.
+const CREDENTIAL_CAPTURE_VERBS: &[&str] = &[
+    "captures",
+    "capture",
+    "steals",
+    "exfiltrates",
+    "exfiltrate",
+    "harvests",
+    "intercepts",
+    "leaks",
+    "carries",
+    "forwards",
+    "appends",
+    "includes",
+    "sends",
+    "transmits",
+];
+
+fn mentions_open_redirect(text: &str) -> bool {
+    OPEN_REDIRECT_PHRASES.iter().any(|p| text.contains(p))
+}
+
+/// Whether `text` chains an open redirect to credential capture — BOTH a credential-object
+/// phrase AND a capture-shaped verb must be present (the same AND-pair shape as
+/// [`mentions_authenticated_cross_tenant_read`]'s phrase+verb pairing above).
+fn mentions_redirect_chained_to_credential_capture(text: &str) -> bool {
+    CREDENTIAL_DATA_PHRASES.iter().any(|c| text.contains(c))
+        && CREDENTIAL_CAPTURE_VERBS.iter().any(|v| text.contains(v))
+}
+
+/// Phrases marking the control's ENFORCEMENT LOCATION as client-visible/UI-only with no
+/// independent server-side check — Group A of the R4 AND-pair, mirroring the
+/// [`CROSS_TENANT_PHRASES`] + [`READ_VERBS`] AND-pair shape above (a location signal plus a
+/// privilege-type signal, not either alone).
+const CLIENT_ONLY_ENFORCEMENT_PHRASES: &[&str] = &[
+    "client-side only",
+    "client side only",
+    "only on the client",
+    "only in the client",
+    "only in the ui",
+    "ui-only",
+    "ui only",
+    "only enforced in the browser",
+    "only enforced client-side",
+    "browser-only check",
+    "no server-side check",
+    "no server-side enforcement",
+    "not enforced on the server",
+    "not re-verified on the server",
+    "not re-checked on the server",
+    "server never verifies",
+    "server does not verify",
+    "server does not re-check",
+    "server-side check is missing",
+    "only hides the button",
+    "only hides the ui",
+    "disabled client-side",
+];
+
+/// Phrases marking the control as a privilege/role/admin gate — Group B of the R4 AND-pair.
+/// Deliberately bigram/trigram phrases, not the bare word "admin" (which appears in countless
+/// unrelated findings — an admin dashboard, an admin route — with no bearing on this class), so
+/// the pair only fires on an actual privilege-gate mention.
+const PRIVILEGE_ROLE_GATE_PHRASES: &[&str] = &[
+    "admin check",
+    "admin flag",
+    "admin role",
+    "is an admin",
+    "as an admin",
+    "admin access",
+    "admin privileges",
+    "role check",
+    "role field",
+    "user role",
+    "user's role",
+    "permission check",
+    "elevated privileges",
+    "privilege escalation",
+    "isadmin",
+    "is_admin",
+];
+
+/// Whether `text` describes a privilege/role/admin gate whose enforcement location is
+/// client-visible/UI-only — BOTH an enforcement-location phrase AND a privilege-type phrase.
+fn mentions_client_only_privilege_gate(text: &str) -> bool {
+    CLIENT_ONLY_ENFORCEMENT_PHRASES
+        .iter()
+        .any(|p| text.contains(p))
+        && PRIVILEGE_ROLE_GATE_PHRASES.iter().any(|p| text.contains(p))
+}
+
+/// Apply the R1-R4 severity ceiling to ONE finding. R2 (CORS) is checked first and, when it
 /// matches, is AUTHORITATIVE for that finding — it overrides whatever the D5 floor already did
 /// (including a floor-critical), because a browser-mediated CORS misconfiguration is never the
 /// "direct unauthenticated exposure" class the floor polices, even if the finding's prose happens
 /// to also brush against floor vocabulary. A finding that does NOT mention CORS is completely
 /// untouched by this branch, so a genuinely unauthenticated-exposure finding keeps the floor's
-/// Critical rating unchanged. R1 is checked only when R2 didn't match.
+/// Critical rating unchanged.
+///
+/// R3 (redirect) and R4 (client-only privilege gate) are checked next, each gated against the D5
+/// unauthenticated/full-compromise floor phrases first (see the D7 section doc comment for why —
+/// unlike CORS, these two CAN legitimately co-occur with a floor-earned Critical in the same
+/// finding's prose, and must never demote it). R3 is a full bidirectional clamp like R2; R4 is
+/// cap-only like R1. R1 is checked last.
 fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
     let text = calibration_floor_scan_text(&f);
 
@@ -1369,6 +1536,44 @@ fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
                 .to_string(),
         );
         return f;
+    }
+
+    let floor_earned_critical = mentions_unauthenticated_or_full_compromise(&text);
+
+    if mentions_open_redirect(&text) && !floor_earned_critical {
+        if mentions_redirect_chained_to_credential_capture(&text) {
+            f.severity = "high".to_string();
+            f.calibration_rationale = Some(
+                "Severity ceiling: an open/unvalidated redirect chained to credential capture — \
+                 the destination can read or exfiltrate a token, cookie, or credential — lets an \
+                 attacker walk away with something usable. Calibrated to exactly High."
+                    .to_string(),
+            );
+        } else {
+            f.severity = "medium".to_string();
+            f.calibration_rationale = Some(
+                "Severity ceiling: an open/unvalidated redirect, on its own, only harms the user \
+                 who follows it and hands the attacker nothing — not High or Critical unless \
+                 chained to credential capture. Calibrated to exactly Medium."
+                    .to_string(),
+            );
+        }
+        return f;
+    }
+
+    if mentions_client_only_privilege_gate(&text) && !floor_earned_critical {
+        if severity_rank(&f.severity) > severity_rank("high") {
+            f.severity = "high".to_string();
+        }
+        f.calibration_rationale = Some(
+            "Severity ceiling: a privileged/role check enforced only in client-visible (UI/\
+             browser) code, with no independent server-side re-check, is never by itself the \
+             basis for Critical — the client-side control is not the security boundary. An \
+             authenticated privilege escalation confined to a single resource/operation is High \
+             at most; Critical is reserved for an unauthenticated reach or a system- or \
+             account-wide compromise. Calibrated to High at most."
+                .to_string(),
+        );
     }
 
     if mentions_self_hedged_confirmation_only(&text) {
@@ -1388,10 +1593,10 @@ fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
     f
 }
 
-/// Apply the R1/R2 severity ceiling to a whole finding set — run immediately after
+/// Apply the R1-R4 severity ceiling to a whole finding set — run immediately after
 /// `apply_severity_calibration_rules` (the D5 floor) everywhere that runs. Safe over ANY finding
-/// set (deterministic-floor findings included), since both ceiling rules derive entirely from
-/// the finding's own text rather than the model's verdict.
+/// set (deterministic-floor findings included), since all four ceiling rules derive entirely
+/// from the finding's own text rather than the model's verdict.
 pub fn apply_severity_ceiling_rules(findings: Vec<Finding>) -> Vec<Finding> {
     findings
         .into_iter()
@@ -8691,6 +8896,285 @@ mod tests {
             "negated hedge language must not downgrade severity"
         );
         assert_eq!(out.confidence, None);
+    }
+
+    // ── D7 (C6-A3): severity ceiling R3 (open/unvalidated redirect) and R4 (a privileged/role
+    // check enforced only in client-visible code) ────────────────────────────────────────────
+    //
+    // Observed across two independent benchmark repos: a client-side/open redirect was
+    // inflating to High, and a UI-only admin/role check was inflating to Critical, run over run
+    // on the SAME code. Each anchor below is pinned bidirectionally — an over-rating guard (the
+    // class caps at its anchor) and an under-rating guard (the regression list of classes that
+    // must NOT be buried by the new rules: a chained redirect, a genuine unauthenticated
+    // exposure, a committed secret, the weak-token class, and the floor-high
+    // injection/stored-XSS class).
+
+    const OPEN_REDIRECT_TEXT: &str =
+        "The /login?next= handler performs an open redirect: `next` is taken straight from the \
+         query string and used as the post-login redirect target with no allow-list or same-\
+         origin check.";
+
+    const CHAINED_REDIRECT_TEXT: &str =
+        "The OAuth callback performs an open redirect to a `return_to` URL taken from the query \
+         string with no allow-list check; the redirect destination captures the session token \
+         appended to the fragment, so a crafted link exfiltrates the victim's session.";
+
+    const CLIENT_ONLY_ADMIN_CHECK_TEXT: &str =
+        "The `isAdmin` role check that gates the delete-organization button is enforced \
+         client-side only in the React component; there is no server-side check on the DELETE \
+         /orgs/:id route, so any authenticated user can send the request directly.";
+
+    /// OVER-RATING GUARD: an open-redirect finding that started Critical (the observed inflation
+    /// failure) must land at exactly Medium, not stay at High or Critical.
+    #[test]
+    fn severity_ceiling_open_redirect_caps_critical_at_medium() {
+        let f = finding_with_detail("AI-OPEN-REDIRECT-1", "critical", OPEN_REDIRECT_TEXT);
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(out.severity, "medium");
+        assert!(out.calibration_rationale.is_some());
+    }
+
+    /// OVER-RATING GUARD, upward direction: the SAME unchained redirect class starting at Low
+    /// must ALSO land at exactly Medium — not left buried at Low. Bidirectional, like R2's CORS
+    /// clamp.
+    #[test]
+    fn severity_ceiling_open_redirect_raises_low_to_medium() {
+        let f = finding_with_detail("AI-OPEN-REDIRECT-2", "low", OPEN_REDIRECT_TEXT);
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(out.severity, "medium");
+    }
+
+    /// Bidirectional guard, spelled out explicitly: an UNCHAINED open redirect must never be
+    /// observed at either extreme after both passes run, whichever extreme it started at.
+    #[test]
+    fn severity_ceiling_open_redirect_is_never_low_high_or_critical() {
+        for start in ["critical", "high", "medium", "low", "info"] {
+            let f = finding_with_detail("AI-OPEN-REDIRECT-3", start, OPEN_REDIRECT_TEXT);
+            let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+            assert_eq!(
+                out.severity, "medium",
+                "starting severity {start:?} must land at exactly Medium"
+            );
+        }
+    }
+
+    /// UNDER-RATING GUARD (do-not-break): an open redirect CHAINED to credential capture must
+    /// land at High, not buried at Medium — even when it started at Low or Medium.
+    #[test]
+    fn severity_ceiling_chained_redirect_raises_low_to_high() {
+        let f = finding_with_detail("AI-CHAINED-REDIRECT-1", "low", CHAINED_REDIRECT_TEXT);
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(
+            out.severity, "high",
+            "a redirect chained to credential capture must reach High, not be buried at Medium"
+        );
+    }
+
+    /// UNDER-RATING GUARD (do-not-break), over-rating half of the same chained class: a chained
+    /// redirect that started Critical must come DOWN to exactly High, not stay at Critical —
+    /// chaining earns High, not Critical, from the redirect mechanism alone.
+    #[test]
+    fn severity_ceiling_chained_redirect_caps_critical_at_high() {
+        let f = finding_with_detail("AI-CHAINED-REDIRECT-2", "critical", CHAINED_REDIRECT_TEXT);
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(out.severity, "high");
+    }
+
+    /// NEVER-DEMOTE / BLOCKS-UP-ONLY guard: a finding whose text is BOTH an open redirect AND,
+    /// independently, an unauthenticated path to a privileged operation earned its Critical
+    /// through the D5 floor's mechanism, not the redirect's — R3 must not demote it.
+    #[test]
+    fn severity_ceiling_open_redirect_does_not_demote_unauthenticated_exposure() {
+        let f = finding_with_detail(
+            "AI-REDIRECT-PLUS-UNAUTH",
+            "high",
+            "The admin panel's /impersonate endpoint performs an open redirect to an \
+             attacker-controlled URL AND requires no authentication at all, letting anyone \
+             assume any user's identity.",
+        );
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(
+            out.severity, "critical",
+            "an independently-earned unauthenticated/full-compromise critical must survive the \
+             redirect ceiling, not be demoted to Medium"
+        );
+    }
+
+    /// OVER-RATING GUARD: a privileged/role check enforced only client-side (the observed
+    /// inflation failure) must cap at High, not stay Critical.
+    #[test]
+    fn severity_ceiling_client_only_admin_check_caps_critical_at_high() {
+        let f = finding_with_detail(
+            "AI-CLIENT-ADMIN-1",
+            "critical",
+            CLIENT_ONLY_ADMIN_CHECK_TEXT,
+        );
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(out.severity, "high");
+        assert!(out.calibration_rationale.is_some());
+    }
+
+    /// Cap-only semantics (like R1): a client-only admin-check finding that started at Medium
+    /// must NOT be raised by R4 — the rule only ever lowers a severity above its anchor, never
+    /// raises one below it. The rationale is still recorded (transparency, same convention as
+    /// D5's floor when it "touches but doesn't change" a finding).
+    #[test]
+    fn severity_ceiling_client_only_admin_check_does_not_raise_below_high() {
+        let f = finding_with_detail("AI-CLIENT-ADMIN-2", "medium", CLIENT_ONLY_ADMIN_CHECK_TEXT);
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(
+            out.severity, "medium",
+            "R4 caps Critical down to High; it must never raise a lower severity up to High"
+        );
+        assert!(
+            out.calibration_rationale.is_some(),
+            "the rule touched this finding (it matched the class) so a rationale is recorded \
+             even though the severity itself didn't change"
+        );
+    }
+
+    /// NEVER-DEMOTE / BLOCKS-UP-ONLY guard: a finding whose text is BOTH a client-only admin
+    /// check AND, independently, an unauthenticated path to full account compromise earned its
+    /// Critical through the D5 floor's mechanism — R4 must not demote it.
+    #[test]
+    fn severity_ceiling_client_only_admin_check_does_not_demote_unauthenticated_exposure() {
+        let f = finding_with_detail(
+            "AI-CLIENT-ADMIN-PLUS-UNAUTH",
+            "high",
+            "The admin role check is enforced client-side only with no server-side check, and \
+             separately the account-recovery flow allows full account takeover with no \
+             authentication required at all.",
+        );
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(
+            out.severity, "critical",
+            "an independently-earned unauthenticated/full-compromise critical must survive the \
+             client-only-admin-check ceiling, not be capped to High"
+        );
+    }
+
+    /// UNDER-RATING GUARD (do-not-break, shared regression list): a genuinely unauthenticated
+    /// sensitive-data exposure with no redirect/client-check vocabulary at all must still reach
+    /// Critical through the full floor+ceiling pipeline — R3/R4 must not become a general brake
+    /// on real unconditional criticals they don't target.
+    #[test]
+    fn severity_ceiling_unauthenticated_exposure_unaffected_by_new_rules() {
+        let f = finding_with_detail(
+            "AI-UNAUTH-EXPORT-3",
+            "medium",
+            "The /api/records endpoint is unauthenticated and returns every user's social \
+             security number with no access control.",
+        );
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(out.severity, "critical");
+    }
+
+    /// UNDER-RATING GUARD (do-not-break, shared regression list): a committed secret, run
+    /// through the model-verdict path AND the full deterministic floor+ceiling pipeline, must
+    /// still land at Critical — R3/R4 have no redirect/client-check vocabulary to match here, so
+    /// this pins that the new rules don't accidentally interfere with an unrelated class.
+    #[test]
+    fn severity_ceiling_committed_secret_unaffected_by_new_rules() {
+        let findings = vec![finding_with_detail(
+            "AI-STRIPE-SECRET-COMMITTED-2",
+            "high",
+            "A live Stripe secret key is hardcoded in this file and committed to the repository.",
+        )];
+        let raw = r#"{"verdicts":[
+            {"index":0,"severity":"critical","confidence":"high","reason":"secret committed to version control"}
+        ]}"#;
+        let calibrated = apply_verdicts(raw, findings);
+        let floored = apply_severity_calibration_rules(calibrated);
+        let ceiled = apply_severity_ceiling_rules(floored);
+        assert_eq!(ceiled[0].severity, "critical");
+    }
+
+    /// UNDER-RATING GUARD (do-not-break, shared regression list): the weak-token class, which
+    /// trips no floor or ceiling rule at all, must stay exactly at its authored Medium through
+    /// the full pipeline — never demoted to Low by the new rules.
+    #[test]
+    fn severity_ceiling_weak_token_class_unaffected_by_new_rules() {
+        let f = finding_with_detail(
+            "AI-WEAK-SESSION-TOKEN-2",
+            "medium",
+            "Session tokens are generated with a weak, predictable random source, making them \
+             guessable with effort.",
+        );
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(
+            out.severity, "medium",
+            "the weak-token class must stay at Medium, never buried at Low by the new rules"
+        );
+    }
+
+    /// UNDER-RATING GUARD (do-not-break, shared regression list): a floor-high injection/stored-
+    /// XSS finding must stay exactly High through the full pipeline — unaffected by R3/R4, which
+    /// have no redirect/client-check vocabulary to match on this finding's text.
+    #[test]
+    fn severity_ceiling_stored_xss_floor_high_unaffected_by_new_rules() {
+        let f = finding_with_category(
+            "AI-STORED-XSS-RLS-HEDGE-2",
+            "medium",
+            "Stored XSS: user-supplied HTML is rendered without sanitization; this is likely \
+             covered by RLS on the underlying table.",
+            "injection",
+        );
+        let out = apply_severity_ceiling_rule(apply_severity_calibration_rule(f));
+        assert_eq!(out.severity, "high");
+    }
+
+    // ── Determinism: the deterministic calibration layer must be stable run-to-run ───────────
+    //
+    // The engine has oscillated on severity for the SAME code across runs. The floor (D5) and
+    // ceiling (D6/D7) passes are pure functions of each finding's own text, so — unlike the
+    // calibration MODEL, which this test makes no claim about and cannot make deterministic —
+    // running them twice over an identical finding set must produce identical output: same
+    // severities, same calibration rationale text, same order. This is the guard for "same
+    // input -> same severity" for everything that does NOT depend on the model's judgment call.
+
+    /// Running the deterministic floor+ceiling pipeline twice over the SAME finding set (one
+    /// finding per anchor covered above, plus a couple of untouched/unrelated findings) must
+    /// yield identical severities, identical rationale text, and identical ordering both times.
+    #[test]
+    fn deterministic_calibration_pipeline_is_stable_across_two_runs() {
+        fn build_set() -> Vec<Finding> {
+            vec![
+                finding_with_detail(
+                    "AI-UNAUTH",
+                    "medium",
+                    "The export endpoint is unauthenticated and returns every user's records.",
+                ),
+                finding_with_detail("AI-REDIRECT", "high", OPEN_REDIRECT_TEXT),
+                finding_with_detail("AI-CHAINED-REDIRECT", "low", CHAINED_REDIRECT_TEXT),
+                finding_with_detail("AI-CLIENT-ADMIN", "critical", CLIENT_ONLY_ADMIN_CHECK_TEXT),
+                finding_with_detail("AI-CORS", "low", CORS_CREDENTIALS_TEXT),
+                finding_with_detail("AI-HEDGE", "high", SELF_HEDGE_TEXT),
+                finding_with_detail(
+                    "AI-WEAK-TOKEN",
+                    "medium",
+                    "Session tokens are generated with a weak, predictable random source.",
+                ),
+                finding_with_detail("AI-UNRELATED", "medium", "A minor style inconsistency."),
+            ]
+        }
+
+        fn run(findings: Vec<Finding>) -> Vec<(String, String, Option<String>)> {
+            let floored = apply_severity_calibration_rules(findings);
+            let ceiled = apply_severity_ceiling_rules(floored);
+            ceiled
+                .into_iter()
+                .map(|f| (f.rule_id, f.severity, f.calibration_rationale))
+                .collect()
+        }
+
+        let run1 = run(build_set());
+        let run2 = run(build_set());
+        assert_eq!(
+            run1, run2,
+            "the deterministic floor+ceiling pipeline must produce identical severities, \
+             rationale text, and ordering across two runs over the same input — this does NOT \
+             (and cannot) pin the calibration MODEL itself, only this deterministic layer"
+        );
     }
 
     // ── Structured confidence + effort (Part 1 §3) ────────────────────────────
