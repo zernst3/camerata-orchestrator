@@ -3105,15 +3105,26 @@ pub fn build_report_json(
     #[allow(clippy::type_complexity)]
     let mut by_rule: std::collections::BTreeMap<String, Vec<(&Finding, Disposition, String, String)>> =
         std::collections::BTreeMap::new();
+    // C6-B1 (closes a client-facing "counted but never rendered" bug): this loop used to
+    // `continue` past an `is_uncited_ai_finding` row entirely — the stale reasoning (see the
+    // removed comment, and `uncited_ai_row_provenance_and_citation_are_never_borrowed_from_a_
+    // sibling`'s now-outdated doc comment) was "it was already routed to `matrix.informational`
+    // above, so no `CuratedGroupJson` is needed for it." That was true ONLY of the gate's
+    // original, pre-C5-7 shape, where an uncited AI finding always landed in `informational`.
+    // C5-7 (see `effective_bucket`'s doc comment) now routes a high/critical uncited finding to
+    // `"held"` instead — a severity-unbounded bucket the "Held for review" PDF section (and the
+    // cover/scorecard/xlsx counts, all of which tally `code_findings` directly) already expect
+    // to see rendered. Skipping the row here left it counted in `matrix.held`, the cover severity
+    // strip, the category scorecard and `findings.json`/the workbook, while the PDF renderer
+    // never emitted it anywhere — not the matrix (expected: held is out of scope for the
+    // severity x effort grid), not curated (expected: this gate's whole point), and NOT Held for
+    // review either, because no site ever existed for it to render. Every `code_findings` row
+    // now unconditionally gets a `CuratedSiteJson` here; the uncited-AI gate still keeps it OUT
+    // of `curated_findings` — the actual client-facing guarantee — via the bucket-based
+    // `curated_findings` / `held_for_review_findings` partition below (its `bucket` field is
+    // already `"informational"` or `"held"`, never an action tier, for exactly this finding; see
+    // `effective_bucket`), not by erasing the row from existence.
     for (f, disposition, reason, severity) in &code_findings {
-        // P3 citation gate: an AI-tier finding with no grounded citation (own rule id, nor
-        // its mapped class) never enters the curated set — see `is_uncited_ai_finding`'s doc
-        // comment. It was already routed to `matrix.informational` above; skipping it here
-        // means no `CuratedGroupJson` is ever built for it, so it is IMPOSSIBLE for
-        // `curated_findings` to carry an "AI-advisory, model-inferred." citation.
-        if is_uncited_ai_finding(f, corpus) {
-            continue;
-        }
         by_rule
             .entry(f.rule_id.clone())
             .or_default()
@@ -3167,13 +3178,11 @@ pub fn build_report_json(
                     report.test_file_count,
                     chosen_option_for_rule,
                 );
-                // C5-8: unlike the uncited-AI gate (which `continue`s a finding out of every
-                // group above, so this loop never sees one), a no-fix-held row DOES still
-                // appear here — same rule, same group, just this one site's `bucket` is
-                // `"held"` instead of an action tier. Disclose WHY in its own headline too,
-                // not only via `disposition_label`'s generic held-for-review wording, so a
-                // reader scanning this site within its rule's curated group sees the concrete
-                // reason right next to it.
+                // C5-8: a no-fix-held row still appears here — same rule, same group, just this
+                // one site's `bucket` is `"held"` instead of an action tier. Disclose WHY in its
+                // own headline too, not only via `disposition_label`'s generic held-for-review
+                // wording, so a reader scanning this site within its rule's curated group sees
+                // the concrete reason right next to it.
                 let gate_no_fix = is_action_row_missing_a_fix(
                     f,
                     *disposition,
@@ -3182,6 +3191,11 @@ pub fn build_report_json(
                     report.test_file_count,
                     chosen_option_for_rule,
                 );
+                // C6-B1: same disclosure for the uncited-AI gate, now that this loop no longer
+                // `continue`s past such a finding (see the `by_rule`-population loop above) —
+                // mirrors the identical `gate_uncited` headline prefix the matrix-bucketing loop
+                // computes for the same row, so the wording is identical wherever the row renders.
+                let gate_uncited = is_uncited_ai_finding(f, corpus);
                 let confirmed_by_client = dispositions
                     .get(&finding_key(f))
                     .map(|d| d.confirmed_by_client)
@@ -3193,7 +3207,9 @@ pub fn build_report_json(
                 // gate's own "Deny…" enforcement prose.
                 let (base_headline, detail) =
                     client_headline_and_detail(f, corpus, &title, chosen_option_for_rule);
-                let headline = if gate_no_fix {
+                let headline = if gate_uncited {
+                    format!("Needs review (uncited — no grounded citation found): {base_headline}")
+                } else if gate_no_fix {
                     format!(
                         "Needs review (fix not generated — no codebase-specific or rule-level \
                          remediation available): {base_headline}"
@@ -6570,9 +6586,10 @@ mod tests {
     /// a sibling finding's — a held, uncited AI-tier row must never display "Deterministic"
     /// provenance or another rule's citation, even when a genuinely grounded deterministic
     /// finding is exported right alongside it in the same report. Exercised through
-    /// `findings.json` (`FindingRow`), the one exported shape that carries both `provenance`
-    /// and `citation_urls` per row regardless of bucket (a held/informational row never gets a
-    /// `CuratedGroupJson` at all — see the `by_rule` loop's uncited-AI `continue` above).
+    /// `findings.json` (`FindingRow`), the one exported shape that resolves `provenance` and
+    /// `citation_urls` independently of the PDF's curated/held-for-review grouping, so this
+    /// stays a meaningful cross-check of `FindingRow`'s own resolution regardless of which
+    /// `CuratedGroupJson` bucket (C6-B1) the same row also lands in.
     #[tokio::test]
     async fn uncited_ai_row_provenance_and_citation_are_never_borrowed_from_a_sibling() {
         let corpus_path = camerata_rules::corpus_path();
@@ -7490,6 +7507,358 @@ mod tests {
             "no informational row may appear inside Curated findings (i.e. before a curated \
              one): {curated_section:?}"
         );
+    }
+
+    // ── C6-B1: a held-bucket row counted but never rendered (fixed above in the
+    // `by_rule`-population loop) ──────────────────────────────────────────────────────────
+
+    /// Reproduces the exact client-facing shape of the bug: six criticals, one of them a
+    /// hedged (`needs_review: true`), uncited AI-tier finding that — before this fix — was
+    /// tallied into `matrix.held`/the cover strip/the category scorecard via the independent
+    /// `code_findings` pass but never got a `CuratedSiteJson` at all, because the `by_rule`
+    /// loop `continue`d past any `is_uncited_ai_finding` row before building one (stale
+    /// reasoning left over from before C5-7 — see that loop's updated doc comment). The
+    /// client counts six criticals on the cover and finds five in the PDF; the missing one is
+    /// a critical. This test pins both halves: the row is counted, AND it has a real,
+    /// independently discoverable site block, AND that block actually renders in the "Held
+    /// for review" section of the compiled PDF.
+    #[tokio::test]
+    async fn hedged_uncited_critical_in_held_bucket_is_counted_and_renders_in_held_for_review() {
+        if which_typst().is_none() {
+            eprintln!("skipping hedged_uncited_critical_in_held_bucket_...: typst not on PATH");
+            return;
+        }
+        let mut hedge = finding(
+            "AI-CUSTOM-NOVEL-DEFECT-1",
+            "apps/api/src/risky.ts",
+            7,
+            "critical",
+        );
+        hedge.detail = "zzqy-hedged-uncited-critical: a genuinely novel defect class the model \
+                         flagged with low confidence, naming none of the known grounded \
+                         vocabulary."
+            .to_string();
+        hedge.needs_review = true;
+
+        // Five ordinary criticals that render normally, so the fixture matches the client's
+        // own report exactly: six criticals counted, one of six missing from the PDF body.
+        let mut findings: Vec<Finding> = (1..=5)
+            .map(|n| {
+                let mut f = finding(
+                    &format!("SEC-TEST-ORDINARY-CRIT-{n}"),
+                    &format!("apps/api/src/ordinary_{n}.ts"),
+                    n,
+                    "critical",
+                );
+                f.detail = format!("zzqy-ordinary-critical-{n}: an uncontested critical finding.");
+                f
+            })
+            .collect();
+        findings.push(hedge);
+
+        let report = report_with(findings, vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        // ── Counted ──
+        assert_eq!(
+            json.cover.stats.critical, 6,
+            "the cover must count all six criticals, hedged row included: {:?}",
+            json.cover.stats
+        );
+        assert_eq!(
+            json.matrix.held.len(),
+            1,
+            "the hedged, uncited row must sit in the severity-unbounded held bucket: {:?}",
+            json.matrix.held
+        );
+        assert_eq!(json.matrix.held[0].severity, "critical");
+        assert_eq!(json.matrix.held[0].rule_id, "AI-CUSTOM-NOVEL-DEFECT-1");
+
+        // ── Has a rendered-eligible site ──
+        let held_group = json
+            .held_for_review_findings
+            .iter()
+            .find(|g| g.rule_id == "AI-CUSTOM-NOVEL-DEFECT-1")
+            .expect(
+                "the hedged, uncited critical finding must have its own CuratedGroupJson in \
+                 held_for_review_findings, not merely a matrix.held tally",
+            );
+        assert_eq!(held_group.sites.len(), 1);
+        assert_eq!(held_group.sites[0].severity, "critical");
+        assert_eq!(held_group.sites[0].bucket, "held");
+        assert!(
+            json.curated_findings
+                .iter()
+                .all(|g| g.rule_id != "AI-CUSTOM-NOVEL-DEFECT-1"),
+            "the uncited gate must still keep this row OUT of curated_findings: {:?}",
+            json.curated_findings
+        );
+
+        // ── Actually renders ──
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed for the hedged-uncited-critical fixture");
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+
+        // C6-B1: anchor on the HEADING specifically, not any substring occurrence — a `held`
+        // row's own disposition label literally reads "Held for review (a human reviewer's
+        // judgment call is needed before this can be actioned)" (see `disposition_label`), so a
+        // naive `rfind("Held for review")` matches that IN-BODY label (which sorts after the
+        // row's own content) rather than the section heading, truncating the slice to AFTER the
+        // very content being tested for. The heading alone is followed by a bare newline in the
+        // extracted text (the ToC entry is followed by dot-leader spaces; the in-body label is
+        // followed by " ("), so anchoring on the heading-plus-newline disambiguates all three.
+        let curated_anchor = text
+            .find("Curated findings\n")
+            .expect("heading must render");
+        let held_anchor = text.find("Held for review\n").expect("heading must render");
+        let held_section = &text[held_anchor..];
+        let curated_section = &text[curated_anchor..held_anchor];
+
+        for n in 1..=5 {
+            assert!(
+                text.contains(&format!("zzqy-ordinary-critical-{n}")),
+                "ordinary critical #{n} must render somewhere: {text:?}"
+            );
+        }
+        assert!(
+            held_section.contains("zzqy-hedged-uncited-critical"),
+            "the hedged, uncited critical row must render in the Held for review section — \
+             this is the exact bug: counted on the cover/scorecard, absent from every \
+             rendered section: {held_section:?}"
+        );
+        assert!(
+            !curated_section.contains("zzqy-hedged-uncited-critical"),
+            "the hedged, uncited row must never render inside Curated findings: \
+             {curated_section:?}"
+        );
+    }
+
+    /// The cover's critical tally must equal the number of critical-severity site BLOCKS
+    /// actually built across `curated_findings` + `held_for_review_findings` combined — never
+    /// a count computed independently of what gets a rendered block. Six criticals, split
+    /// across every destination a critical row can reach (two ordinary curated do_now rows,
+    /// two calibration-hedged held rows, two uncited-AI held rows), all six render.
+    #[tokio::test]
+    async fn cover_critical_count_equals_the_number_of_critical_blocks_actually_rendered() {
+        let mut findings = Vec::new();
+        for n in 1..=2 {
+            let mut f = finding(
+                &format!("SEC-CURATED-CRIT-{n}"),
+                &format!("a{n}.rs"),
+                n,
+                "critical",
+            );
+            f.detail = format!("zzqy-curated-critical-{n}");
+            findings.push(f);
+        }
+        for n in 1..=2 {
+            let mut f = finding(
+                &format!("ARCH-HEDGE-CRIT-{n}"),
+                &format!("b{n}.rs"),
+                n,
+                "critical",
+            );
+            f.detail = format!("zzqy-hedged-critical-{n}");
+            f.needs_review = true;
+            findings.push(f);
+        }
+        for n in 1..=2 {
+            let mut f = finding(
+                &format!("AI-UNCITED-CRIT-{n}"),
+                &format!("c{n}.rs"),
+                n,
+                "critical",
+            );
+            f.detail = format!(
+                "zzqy-uncited-critical-{n}: no grounded citation vocabulary anywhere in this \
+                 sentence."
+            );
+            findings.push(f);
+        }
+
+        let report = report_with(findings, vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        let rendered_critical_blocks = json
+            .curated_findings
+            .iter()
+            .chain(json.held_for_review_findings.iter())
+            .flat_map(|g| &g.sites)
+            .filter(|s| s.severity == "critical")
+            .count();
+
+        assert_eq!(json.cover.stats.critical, 6, "{:?}", json.cover.stats);
+        assert_eq!(
+            rendered_critical_blocks, 6,
+            "every one of the six critical rows must have an actual rendered site block"
+        );
+        assert_eq!(
+            json.cover.stats.critical, rendered_critical_blocks,
+            "the cover's critical tally must equal the number of critical blocks actually \
+             rendered, never a count computed independently of rendering"
+        );
+
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping PDF leg of cover_critical_count_equals_the_number_of_critical_blocks_actually_rendered: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed for the six-critical fixture");
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        for n in 1..=2 {
+            assert!(
+                text.contains(&format!("zzqy-curated-critical-{n}")),
+                "{text:?}"
+            );
+            assert!(
+                text.contains(&format!("zzqy-hedged-critical-{n}")),
+                "{text:?}"
+            );
+            assert!(
+                text.contains(&format!("zzqy-uncited-critical-{n}")),
+                "{text:?}"
+            );
+        }
+    }
+
+    /// Every (bucket x severity) combination the report pipeline can actually produce must
+    /// emit a real, independently findable site block — curated at critical/high/medium/low
+    /// (never info, which is always informational by `is_informational`'s hard rule), held at
+    /// EVERY severity including critical/high (C5-4: severity-unbounded by design), and
+    /// informational only at medium/low/info (never critical/high: `is_informational`'s other
+    /// hard invariant). `informational x critical` and `informational x high` are not
+    /// included below because they are IMPOSSIBLE combinations by design, not untested ones —
+    /// seprately pinned by `critical_and_high_are_never_informational`. One shared report, one
+    /// shared `build_report_json` call, one shared PDF compile — twelve independent
+    /// assertions, so a renderer change that silently drops any ONE combination fails exactly
+    /// that assertion rather than a vague aggregate count.
+    #[tokio::test]
+    async fn every_bucket_severity_combination_emits_a_rendered_block() {
+        let severities = ["critical", "high", "medium", "low"];
+        let mut findings = Vec::new();
+        let mut expectations: Vec<(&'static str, &'static str, String)> = Vec::new();
+
+        // curated x {critical, high, medium, low}
+        for sev in severities {
+            let tag = format!("zzqy-curated-{sev}");
+            let mut f = finding(
+                &format!("SEC-COMBO-CURATED-{}", sev.to_ascii_uppercase()),
+                &format!("curated-{sev}.rs"),
+                1,
+                sev,
+            );
+            f.detail = tag.clone();
+            findings.push(f);
+            expectations.push(("curated", sev, tag));
+        }
+
+        // held x {critical, high, medium, low, info} — a calibration hedge, severity-unbounded.
+        for sev in ["critical", "high", "medium", "low", "info"] {
+            let tag = format!("zzqy-held-{sev}");
+            let mut f = finding(
+                &format!("ARCH-COMBO-HELD-{}", sev.to_ascii_uppercase()),
+                &format!("held-{sev}.rs"),
+                1,
+                sev,
+            );
+            f.detail = tag.clone();
+            f.needs_review = true;
+            findings.push(f);
+            expectations.push(("held", sev, tag));
+        }
+
+        // informational x {medium, low} — the §2d testing-style gate (this fixture's
+        // `test_file_count` is 0, below `MIN_STYLE_CORPUS_FILES`).
+        for sev in ["medium", "low"] {
+            let tag = format!("zzqy-informational-{sev}");
+            let mut f = finding(
+                &format!("ARCH-COMBO-INFO-{}", sev.to_ascii_uppercase()),
+                &format!("info-{sev}.rs"),
+                1,
+                sev,
+            );
+            f.detail = tag.clone();
+            f.category = Some("testing-style".to_string());
+            findings.push(f);
+            expectations.push(("informational", sev, tag));
+        }
+
+        // informational x info — the plain `info`-severity rule, no hedge needed.
+        {
+            let tag = "zzqy-informational-info".to_string();
+            let mut f = finding("ARCH-COMBO-INFO-INFO", "info-info.rs", 1, "info");
+            f.detail = tag.clone();
+            findings.push(f);
+            expectations.push(("informational", "info", tag));
+        }
+
+        let report = report_with(findings, vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        for (bucket, sev, tag) in &expectations {
+            let (group_list, group_list_name) = match *bucket {
+                "curated" => (&json.curated_findings, "curated_findings"),
+                _ => (&json.held_for_review_findings, "held_for_review_findings"),
+            };
+            let site = group_list
+                .iter()
+                .flat_map(|g| &g.sites)
+                .find(|s| s.detail == *tag)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "no rendered site found for ({bucket}, {sev}) in {group_list_name}: \
+                         tag {tag:?} — curated_findings={:?}, held_for_review_findings={:?}",
+                        json.curated_findings, json.held_for_review_findings
+                    )
+                });
+            assert_eq!(
+                site.severity, *sev,
+                "the site found for tag {tag:?} must keep its real severity"
+            );
+            let expected_site_bucket = if *bucket == "curated" {
+                // Any action tier counts — do_now/do_next/plan all mean "genuinely curated".
+                assert!(
+                    !matches!(site.bucket.as_str(), "informational" | "held"),
+                    "tag {tag:?} expected to be curated (an action tier), got bucket {:?}",
+                    site.bucket
+                );
+                continue;
+            } else {
+                *bucket
+            };
+            assert_eq!(
+                site.bucket, expected_site_bucket,
+                "tag {tag:?} expected site bucket {expected_site_bucket:?}, got {:?}",
+                site.bucket
+            );
+        }
+
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping PDF leg of every_bucket_severity_combination_emits_a_rendered_block: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        let pdf = compile_pdf(&json)
+            .await
+            .expect("compile_pdf must succeed for the full bucket x severity combo fixture");
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        for (bucket, sev, tag) in &expectations {
+            assert!(
+                text.contains(tag.as_str()),
+                "({bucket}, {sev}) tagged {tag:?} must render somewhere in the compiled PDF: \
+                 {text:?}"
+            );
+        }
     }
 
     /// Best-effort `typst` presence check for the compile test's skip gate (mirrors the
@@ -10426,6 +10795,73 @@ mod export_invariants_gate {
             groups.contains(&"PERF-PAGINATION-MISSING-1"),
             "the pagination finding must export as its own group, never absorbed into the \
              injection row's also_matches: {groups:?}"
+        );
+    }
+
+    // ── Invariant 13 (STANDING — C6-B1) ──────────────────────────────────────────────────
+
+    /// C6-B1: a row counted but never rendered — the exact client-facing failure this
+    /// invariant exists to catch. Root cause: the `by_rule`-population loop in
+    /// `build_report_json` used to `continue` past any `is_uncited_ai_finding` row BEFORE a
+    /// `CuratedSiteJson` was ever built for it, on the stale assumption that the row "was
+    /// already routed to `matrix.informational`" — true before C5-7, false after it (C5-7
+    /// routes a high/critical uncited finding to the severity-unbounded `held` bucket
+    /// instead). The row stayed counted everywhere that tallies `code_findings` directly
+    /// (`matrix.held`, the cover severity strip, the category scorecard, `findings.json`/the
+    /// workbook) while the PDF renderer never emitted it in ANY section. Fixed by always
+    /// building a site (see that loop's updated doc comment); this test is the STANDING gate
+    /// against a regression of the same SHAPE from a different cause — any future change that
+    /// drops, skips, or double-renders a row fails this assertion, a build-breaking TEST-gate
+    /// failure, never a silent count/render divergence a client discovers first.
+    ///
+    /// Asserted two ways over the one shared fixture (6 live code findings: `f_secret`,
+    /// `f_rls`, `f_hedge`, `f_informational`, `f_identifier`, `f_ai_advisory` — see
+    /// `build_fixture`'s doc comment):
+    /// 1. rows in the JSON (`candidates_reviewed` minus excluded false positives minus
+    ///    dependency-audit rows — the same `code_findings` total the cover/scorecard/xlsx all
+    ///    tally against) equals rendered blocks (`curated_findings` + `held_for_review_findings`
+    ///    site counts combined, which between them account for every informational AND held
+    ///    row, not just curated ones);
+    /// 2. restated directly against the cover severity strip, the one artifact closest to
+    ///    what a client reads first.
+    #[tokio::test]
+    async fn rows_in_json_equal_rendered_blocks_across_curated_and_held_for_review() {
+        let fx = build_fixture().await;
+
+        let rendered_blocks: usize = fx
+            .json
+            .curated_findings
+            .iter()
+            .chain(fx.json.held_for_review_findings.iter())
+            .map(|g| g.sites.len())
+            .sum();
+
+        // `code_findings.len()` itself is private to `build_report_json`, but it is exactly
+        // `candidates_reviewed - excluded_false_positive - dependency_advisories` by
+        // construction (see that function's own executive-summary reconciliation) — the same
+        // total `cover.stats`/`scorecard` already tally against directly.
+        let rows_in_json = fx.json.executive_summary.candidates_reviewed
+            - fx.json.executive_summary.excluded_false_positive
+            - fx.json.executive_summary.dependency_advisories;
+
+        assert_eq!(
+            rendered_blocks, rows_in_json,
+            "every row counted in the JSON must have exactly one rendered block across \
+             curated_findings + held_for_review_findings combined — a mismatch means some row \
+             is counted (cover/scorecard/xlsx) without ever being rendered, or rendered more \
+             than once. rendered_blocks={rendered_blocks}, rows_in_json={rows_in_json}, \
+             curated_findings={:?}, held_for_review_findings={:?}",
+            fx.json.curated_findings, fx.json.held_for_review_findings
+        );
+
+        let cover_total = fx.json.cover.stats.critical
+            + fx.json.cover.stats.high
+            + fx.json.cover.stats.medium
+            + fx.json.cover.stats.low;
+        assert_eq!(
+            rendered_blocks, cover_total,
+            "the cover severity strip must tally exactly as many rows as actually got a \
+             rendered block — never a count computed independently of what rendered"
         );
     }
 }
