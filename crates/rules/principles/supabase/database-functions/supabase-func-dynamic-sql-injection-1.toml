@@ -1,0 +1,94 @@
+id = "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1"
+title = "A database function must not EXECUTE a dynamically-assembled query string built via non-quoting interpolation (|| concatenation or format()'s %s)"
+tag = "stack"
+domain = "supabase:database-functions"
+# General Postgres, not just Supabase: a plpgsql function that EXECUTEs a dynamically-built
+# query string assembled via `||` concatenation or `format()`'s non-escaping `%s` placeholder
+# is exploitable in ANY Postgres database, whether or not the repo also uses Supabase. Without
+# this, a plain-Postgres repo (hand-written .sql, no supabase/ layout, no @supabase/* dependency)
+# gets only the generic `sql` domain from domains_for_stack, which never matches this rule's
+# folder-derived `supabase:database-functions` domain — so the rule would never be
+# proposed/armed for it. `extra_domains` (crates/rules/src/lib.rs) is the general mechanism
+# (identical to this folder's sibling SUPABASE-FUNC-SEARCH-PATH-1): this rule stays filed under
+# supabase/database-functions/ (keeping its existing supabase:* grouping/behavior), but ALSO
+# matches any repo whose stack carries the `sql` domain.
+extra_domains = ["sql"]
+layer = "platform"
+enforcement = "architectural"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a statement-splitter-aware scan over CREATE FUNCTION/PROCEDURE bodies: a dollar-quoted plpgsql body containing an EXECUTE statement whose assembled string uses `||` concatenation with a non-literal operand, or a format() call whose template uses the non-escaping %s placeholder alongside a non-literal argument, is flagged. This is deterministic once a function body is isolated as a whole (the EXECUTE statement and its string-building shape are both facts about the same statement), and the match-set has no known benign counter-example (format()'s own %L/%I escaping placeholders and EXECUTE ... USING's bound-argument form are both excluded by construction) — making this a floor-tier candidate on the same statement-splitter infrastructure SUPABASE-FUNC-SEARCH-PATH-1 already depends on. Severity is additionally keyed on a co-present GRANT EXECUTE ... TO anon/public/authenticated in the same scanned SQL corpus, which elevates the finding from High to Critical (an anonymous/public-facing caller can reach the injection directly). Conformance holds when every EXECUTE'd dynamic query is built with format()'s %L/%I or a bound USING argument instead of %s or ||."
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/89.html"
+title = "CWE-89: Improper Neutralization of Special Elements used in an SQL Command ('SQL Injection')"
+
+[[sources]]
+url = "https://www.postgresql.org/docs/current/plpgsql-statements.html#PLPGSQL-STATEMENTS-EXECUTING-DYN"
+title = "PostgreSQL docs — PL/pgSQL: Executing Dynamic Commands (EXECUTE, and the warning against building query strings by direct concatenation of untrusted data)"
+
+[[sources]]
+url = "https://www.postgresql.org/docs/current/functions-string.html#FUNCTIONS-STRING-FORMAT"
+title = "PostgreSQL docs — format(): %L quotes a literal, %I quotes an identifier, %s inserts a string value AS-IS with no escaping"
+
+[decision]
+question = "Must a database function's dynamically-assembled EXECUTE'd query string always use an escaping/bound channel (format()'s %L/%I, or EXECUTE ... USING) rather than || concatenation or format()'s %s placeholder?"
+default = "require-escaping-or-bound-dynamic-sql"
+why = """
+PostgreSQL's own PL/pgSQL documentation is explicit about this exact attack: when a dynamic
+command is assembled by directly concatenating an untrusted value into the query string, "there
+is a potential security risk" of SQL injection, the same class of defect CWE-89 names for any
+language. `EXECUTE`'s dynamically-built string has no SQL-parser-level distinction between code
+and data once it's been assembled — exactly like string-built SQL in application code (the
+existing SEC-NO-QUERY-GRAMMAR-INJECTION-1 rule's own target), except this shape lives INSIDE the
+database, in a function body, invisible to any checker that only scans application-language
+source files.
+
+`format()`'s own documentation draws the exact safe/unsafe line this rule enforces: `%L` quotes
+its argument as an SQL literal (escaping embedded quotes), `%I` quotes it as a double-quoted
+identifier — both are SAFE because they neutralize the value's ability to terminate the intended
+token. `%s` inserts the argument's string value with NO escaping at all — if the argument is
+attacker-controlled, `%s` provides zero protection, functionally identical to naive `||`
+concatenation. `EXECUTE '...' USING value` is Postgres's bound-parameter form for dynamic SQL,
+exactly analogous to a prepared statement's placeholder, and is unconditionally safe regardless
+of what flows into it.
+
+Severity is driven by reachability: a function with this defect that is additionally GRANTed
+EXECUTE to `anon`/`public`/`authenticated` (Supabase/PostgREST's own anonymous-caller and
+Postgres's own everyone-pseudo-role) is directly reachable by an unauthenticated API request, so
+it is Critical rather than High — the technical defect is identical either way, but who can
+trigger it changes the urgency.
+"""
+
+[[option]]
+id = "require-escaping-or-bound-dynamic-sql"
+label = "Flag every EXECUTE'd dynamic-SQL string assembled via || or format()'s %s with a non-literal operand; require %L/%I or USING instead"
+directive = """
+Parse each CREATE FUNCTION/PROCEDURE body as a whole. When it contains an EXECUTE statement whose
+assembled query string is built via `||` concatenation with at least one non-literal segment, or
+via a `format()` call whose template contains `%s` alongside at least one non-literal argument,
+emit a finding: "This function runs a dynamically-assembled query via EXECUTE built with
+[mechanism] rather than an escaping/bound channel — an attacker-controlled value flowing into
+this expression can inject arbitrary SQL." Severity is High by default; Critical when the same
+scanned SQL corpus also contains a `GRANT EXECUTE ON FUNCTION <this function> TO
+anon|public|authenticated`. Remediation, in priority order: (1) use format()'s `%I` to quote an
+identifier (table/column name) or `%L` to quote a literal value, replacing any `%s` whose argument
+is not a hardcoded constant; (2) pass the value as a bound `USING` argument to EXECUTE instead of
+concatenating it into the string at all.
+"""
+remediation = """
+For `<function-name>`, replace the unsafe interpolation with an escaping or bound channel: use
+`format('...%I...', column_name)` to quote an identifier, `format('...%L...', literal_value)` to
+quote a literal value, or rewrite the EXECUTE as `EXECUTE '... $1 ...' USING value` to bind the
+value instead of concatenating it into the string. Verify by confirming a payload containing the
+target quoting character (a single quote for %L/USING, a double quote or dot for %I) no longer
+changes which statement actually executes.
+"""
+effort = "low"
+why = "Postgres's own format() function already ships the correct safe primitives (%L/%I) and EXECUTE already ships a bound-argument form (USING) — the fix is substituting the escaping/bound form for the non-escaping one, not introducing new infrastructure."
+
+[[option]]
+id = "flag-every-execute-regardless-of-interpolation-shape"
+label = "Flag every EXECUTE statement in a function body, regardless of how its string was assembled"
+directive = "Treat the mere presence of a dynamic EXECUTE as report-worthy, without checking whether the string was built via an escaping/bound channel."
+why = "Rejected: EXECUTE with a fully static string, EXECUTE ... USING a bound argument, and format() using only %L/%I are all the Postgres-documented SAFE patterns for dynamic SQL, not residual risk — flagging them anyway would produce a finding with no actionable remediation (the function is already doing the right thing) and would train the reader to distrust the report's other dynamic-SQL findings. The non-escaping channel (|| concatenation, format()'s %s) is the actual vulnerability condition, not EXECUTE by itself."
