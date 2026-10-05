@@ -15,8 +15,12 @@
 //! - [`rls_checker`]: [`rls_checker::SupabaseRlsChecker`] — the three RLS rule ids.
 //! - [`search_path_checker`]: [`search_path_checker::SupabaseFnSearchPathChecker`] —
 //!   `SUPABASE-FUNC-SEARCH-PATH-1`.
+//! - [`dynamic_sql_exec_checker`]: [`dynamic_sql_exec_checker::DynamicSqlExecInjectionChecker`]
+//!   — `SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1` (a function body `EXECUTE`-ing a
+//!   dynamically-assembled, non-quoted query string).
 
 pub mod config;
+pub mod dynamic_sql_exec_checker;
 pub mod rls_checker;
 pub mod search_path_checker;
 pub mod splitter;

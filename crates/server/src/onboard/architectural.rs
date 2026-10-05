@@ -60,7 +60,7 @@ pub fn audit_architectural(repo: &str, files: &[(String, String)], armed_rule_id
 /// deliberately a small, explicit allowlist rather than a guess, so a capture is only ever wired
 /// when we're sure it names the same kind of object the rule's authored text expects.
 fn capture_token_for(rule_id: &str) -> Option<&'static str> {
-    use camerata_checks::supabase::{rls_checker, search_path_checker};
+    use camerata_checks::supabase::{dynamic_sql_exec_checker, rls_checker, search_path_checker};
     match rule_id {
         id if id == rls_checker::RULE_RLS_ENABLED
             || id == rls_checker::RULE_RLS_NO_POLICY
@@ -70,6 +70,9 @@ fn capture_token_for(rule_id: &str) -> Option<&'static str> {
             Some("table")
         }
         id if id == search_path_checker::RULE_FUNC_SEARCH_PATH => Some("function-name"),
+        id if id == dynamic_sql_exec_checker::RULE_DYNAMIC_SQL_EXEC_INJECTION => {
+            Some("function-name")
+        }
         _ => None,
     }
 }

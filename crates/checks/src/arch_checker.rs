@@ -230,6 +230,7 @@ pub fn all_checkers() -> Vec<Box<dyn ArchChecker>> {
     vec![
         Box::new(crate::supabase::rls_checker::SupabaseRlsChecker),
         Box::new(crate::supabase::search_path_checker::SupabaseFnSearchPathChecker),
+        Box::new(crate::supabase::dynamic_sql_exec_checker::DynamicSqlExecInjectionChecker),
         Box::new(crate::python_testing::PythonTestFileNamingChecker),
         Box::new(crate::ui_dates::UtcDatesChecker),
         Box::new(crate::handler_no_db_checker::HandlerNoDbChecker),
@@ -355,6 +356,7 @@ mod tests {
             "SUPABASE-RLS-NO-POLICY-1",
             "SUPABASE-RLS-POLICY-DISABLED-1",
             "SUPABASE-FUNC-SEARCH-PATH-1",
+            "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1",
             "PYTHON-TESTING-FILE-NAMING-1",
             "UI-UTC-DATES-1",
             "SEC-NO-WEAK-TOKEN-RANDOMNESS-1",
