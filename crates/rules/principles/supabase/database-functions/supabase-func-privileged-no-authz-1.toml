@@ -1,0 +1,101 @@
+id = "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1"
+title = "A SECURITY DEFINER function that writes data and is granted EXECUTE to anon/public/authenticated must check caller identity/role/ownership before writing"
+tag = "stack"
+domain = "supabase:database-functions"
+# General Postgres/PostgREST, not just Supabase: a SECURITY DEFINER function that performs a
+# write and is reachable by a broad role with no caller-identity check is exploitable in any
+# Postgres database exposed through PostgREST (or any RPC layer that calls functions on the
+# caller's behalf), whether or not the repo also uses Supabase's folder layout. `extra_domains`
+# (crates/rules/src/lib.rs) is the general mechanism (identical to this folder's siblings
+# SUPABASE-FUNC-SEARCH-PATH-1 and SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1): this rule stays filed
+# under supabase/database-functions/ (keeping its existing supabase:* grouping/behavior), but
+# ALSO matches any repo whose stack carries the `sql` domain.
+extra_domains = ["sql"]
+layer = "platform"
+enforcement = "architectural"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a statement-splitter-aware scan over CREATE FUNCTION/PROCEDURE bodies correlated against GRANT EXECUTE statements anywhere in the same scanned SQL corpus (the same cross-file correlation SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1 already depends on): a function declared SECURITY DEFINER, whose body contains a standalone INSERT/UPDATE/DELETE/TRUNCATE/MERGE statement, that is GRANTed EXECUTE to anon/public/authenticated, and whose body contains none of the recognized authorization-predicate idioms (auth.uid()/auth.jwt()/current_user/session_user/a JWT-claims read, a role-or-ownership-check function CALL, or a shared-secret/signature comparison) is flagged. This is deterministic once a function body is isolated as a whole and its signature/grants are known facts about the same scanned corpus, and the match-set has a documented, bounded false-negative surface (a predicate's mere presence is accepted as evidence of gating, without verifying it actually guards the write) rather than an unbounded false-positive one — making this a floor-tier candidate on the same statement-splitter infrastructure its siblings already depend on. Conformance holds when every mutating SECURITY DEFINER function reachable by a broad grant checks the caller's identity, role, or ownership (or a shared-secret/signature) before writing."
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/862.html"
+title = "CWE-862: Missing Authorization"
+
+[[sources]]
+url = "https://owasp.org/www-project-application-security-verification-standard/"
+title = "OWASP Application Security Verification Standard (ASVS) — V4 Access Control"
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/functions#security-definer-vs-invoker"
+title = "Supabase docs — Database Functions: SECURITY DEFINER runs with the privileges of the user that created it, bypassing the caller's own row-level security"
+
+[decision]
+question = "Must a SECURITY DEFINER function that writes data and is granted EXECUTE to anon/public/authenticated check the caller's identity, role, or ownership (or a shared secret) before writing?"
+default = "require-authz-predicate-in-privileged-mutating-functions"
+why = """
+Supabase's own documentation is explicit about the mechanism this rule targets: a SECURITY
+DEFINER function "runs with the privileges of the user that created it," which means it executes
+with elevated privileges regardless of who calls it and regardless of row-level security policies
+that would otherwise constrain the caller directly. That is precisely the shape CWE-862 (Missing
+Authorization) describes: a privileged operation performed without a server-side check that the
+requester is entitled to perform it. When such a function is additionally GRANTed EXECUTE to
+`anon`, `public`, or `authenticated` — Supabase/PostgREST's own broad, unauthenticated-or-any-
+authenticated-caller roles — it is reachable directly over the PostgREST RPC endpoint by any
+caller matching that grant. A mutating SECURITY DEFINER function with no identity/role/ownership
+check inside its own body is therefore a privilege-escalation primitive: the row-level security
+policies that would normally gate a write never run (the DEFINER's privileges bypass them), and
+nothing inside the function substitutes for that missing gate.
+
+A UI/client-side check is never a substitute for this: OWASP ASVS's access-control chapter (V4)
+requires that access-control decisions be enforced on a trusted service layer, not trusted to the
+client — and PostgREST's RPC endpoint reaches the function directly regardless of what any UI
+does or does not render.
+
+Three shapes are deliberately treated as satisfying this requirement because they are genuine
+server-side authorization controls, even though only the first is a classic "role or ownership"
+check: a session/JWT identity read (`auth.uid()`, `auth.jwt()`, `current_user`, `session_user`, a
+`request.jwt` claims read) compared against an owner/role column; a call to a role/ownership/
+permission-check function (`has_role(...)`, `is_owner(...)`, `check_permission(...)`); or a
+caller-supplied shared secret/signature compared against a stored or configured value (a webhook-
+style compensating control, where the secret itself — never visible to the UI — is what
+authorizes the call). A function gated by any of these is not the defect this rule targets.
+"""
+
+[[option]]
+id = "require-authz-predicate-in-privileged-mutating-functions"
+label = "Flag a mutating SECURITY DEFINER function granted to anon/public/authenticated with no identity/role/ownership/secret check in its body"
+directive = """
+Parse each CREATE FUNCTION/PROCEDURE body as a whole and correlate it against every GRANT EXECUTE
+statement in the same scanned SQL corpus. When a function is declared SECURITY DEFINER, its body
+contains a standalone INSERT/UPDATE/DELETE/TRUNCATE/MERGE statement, it is GRANTed EXECUTE to
+anon, public, or authenticated, and its body contains none of the recognized authorization-
+predicate idioms, emit a finding: "This SECURITY DEFINER function performs a privileged write and
+is reachable by a broad role, but never checks who the caller is before writing — any caller
+matching the grant can trigger the write regardless of ownership or entitlement." Severity is
+High. Remediation, in priority order: (1) add a server-side identity/ownership check at the top of
+the function body before the write (e.g. `if auth.uid() <> owner_id then raise exception ...;`),
+or a role-check function call (e.g. `has_role(auth.uid(), 'admin')`); (2) if no caller should be
+able to invoke this function directly at all, revoke the broad grant and invoke it only from a
+trusted server-side path instead.
+"""
+remediation = """
+For `<function-name>`, add a server-side authorization check as the FIRST statement in the
+function body, before any write: compare `auth.uid()` (or `current_user`/`session_user`, or a
+custom JWT claim read via `current_setting('request.jwt.claims', true)`) against the row's
+owner/tenant column and `raise exception` on mismatch, or call a role-check helper (e.g.
+`has_role(auth.uid(), 'admin')`) and `raise exception` when it returns false. If the function is
+not meant to be callable by any end-user role at all, instead run `revoke execute on function
+<function-name> from anon, authenticated, public;` and invoke it only from a trusted server-side
+context. A UI-only disable/hide of the triggering button is never sufficient — the function is
+still reachable directly via the PostgREST RPC endpoint regardless of what the UI renders. Verify
+by confirming a direct RPC call from a caller who does not own/is not entitled to the target row
+is rejected before any row is written.
+"""
+effort = "medium"
+why = "Postgres already has the primitives this fix needs (auth.uid()/current_user/session_user, a role-check function, or REVOKE) — the fix is adding one guard clause (or narrowing the grant), not introducing new infrastructure."
+
+[[option]]
+id = "flag-every-security-definer-function-regardless-of-grant-or-body"
+label = "Flag every SECURITY DEFINER function, regardless of grants or body contents"
+directive = "Treat the mere presence of SECURITY DEFINER as report-worthy, without checking whether the function writes, is broadly granted, or already contains an authorization check."
+why = "Rejected: SECURITY DEFINER is Postgres's documented mechanism for intentionally elevating privileges for a specific, audited reason (the search-path-pinning rule SUPABASE-FUNC-SEARCH-PATH-1 already covers its OWN distinct defect) — most SECURITY DEFINER functions are read-only, not granted to a broad role, or already properly guarded, and flagging all of them indiscriminately would bury the small number of genuinely unauthorized, broadly-reachable, mutating functions in noise, training the reader to ignore this rule's findings entirely."
