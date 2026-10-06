@@ -5398,9 +5398,12 @@ fn strip_headline_cross_references(mut findings: Vec<Finding>) -> Vec<Finding> {
 ///
 /// - Filters `files` to only the files that group's scope covers.
 /// - Chunks those filtered files for context-window sizing.
-/// - Runs [`run_passes`] over the group's rules, with `advisory_disabled = true` for
-///   language-specific groups so the "flag novel issues" pass fires exactly once per file
-///   chunk (in the cross-cutting `All` group) rather than once per group × chunk.
+/// - Runs [`run_passes`] over the group's rules, with `advisory_disabled = true` for a
+///   language-specific group ONLY when a cross-cutting `All` group ALSO runs this scan (so the
+///   "flag novel issues" pass fires exactly once per file chunk there, instead of once per
+///   group × chunk). When no `All` group exists at all (a purely language-scoped rule
+///   selection), every language group keeps advisory enabled instead — see the `has_all_group`
+///   doc comment in this function's body for why that never duplicates a finding (W2).
 ///
 /// When routing produces no savings (all rules are cross-cutting, or only one group), this
 /// degenerates to the previous single-group behavior with no overhead.
@@ -5496,14 +5499,38 @@ async fn run_routed_passes(
     let mut total_ok: usize = 0;
     let mut last_err: Option<anyhow::Error> = None;
 
+    // W2 (closes a real zero-row semantic-tier defect, previously documented as an accepted
+    // "known limitation" in `routing_single_language_repo_with_language_rules`): a project whose
+    // SELECTED rule set is entirely language-scoped (e.g. only `RUST-*` rules — no `ARCH-*`/
+    // `SEC-*`/other cross-cutting rule) produces a `route_plan` with NO `Scope::All` group at
+    // all. The old unconditional `!matches!(group.scope, Scope::All)` then disabled advisory in
+    // EVERY group, which means the "ALSO flag any other genuine issues NOT covered by an adopted
+    // rule" instruction (the model's one and only backstop for issues no selected rule names —
+    // see `audit_system_prompt`'s doc comment) was never sent to the model AT ALL for that scan.
+    // That is the silent-collapse mechanism: a repo scanned with a language-only rule selection
+    // gets zero chance at any novel/security finding outside those rules, indistinguishable from
+    // "the model looked and found nothing."
+    //
+    // Fix: advisory is disabled for a language group ONLY when a SEPARATE cross-cutting All
+    // group also exists to run it (the original duplicate-novel-finding concern this flag
+    // exists for). When there is no All group, every language group keeps advisory enabled
+    // instead — safe to do because `Scope::Language` groups are mutually exclusive by
+    // construction (`scan_routing::file_language` maps each file to AT MOST one language), so no
+    // file can receive the advisory instruction from more than one group.
+    let has_all_group = route_plan
+        .groups
+        .iter()
+        .any(|g| matches!(g.scope, Scope::All));
+
     for (gi, group) in route_plan.groups.iter().enumerate() {
-        // The advisory pass runs only in the Scope::All (cross-cutting) group. Language-specific
-        // groups run their adopted rules but never trigger the novel-issue discovery pass —
-        // doing so would produce duplicate novel findings for every file that belongs to both a
-        // language group AND the All group (which is every language file). The correct place for
-        // "is there anything wrong with this code beyond the listed rules?" is the cross-cutting
-        // pass that already sees every file.
-        let advisory_disabled = !matches!(group.scope, Scope::All);
+        // The advisory pass is suppressed in a language-specific group only when a cross-cutting
+        // All group ALSO runs this scan — that All group already sees every file, so re-running
+        // advisory per language group would produce duplicate novel findings for every file
+        // (every language file is also an All-group file). When there is no All group, nothing
+        // else will ever ask "is there anything wrong beyond the listed rules?", so each
+        // (mutually exclusive) language group runs it itself — see the `has_all_group` doc
+        // comment above.
+        let advisory_disabled = has_all_group && !matches!(group.scope, Scope::All);
 
         // Materialize the owned file list for this group's scope.
         let group_files: Vec<(String, String)> = files
@@ -5584,16 +5611,26 @@ async fn run_routed_passes(
 /// The advisory "flag novel issues beyond the adopted rules" task is gated to `bi==0` in
 /// `run_passes` so novel issues are not re-flagged under N invented names across N rule-batches
 /// of the same chunk. Routing adds a second dimension: if we ran advisory in every language
-/// group, a `.rs` file would get advisory in the rust group AND the All group — bringing back
-/// the duplicate-novel-finding problem. The safe wiring:
+/// group WHILE an All group also exists, a `.rs` file would get advisory in the rust group AND
+/// the All group — bringing back the duplicate-novel-finding problem. The safe wiring
+/// (W2-amended — see `run_routed_passes`'s `has_all_group`):
 ///
-/// - The **All group** (cross-cutting rules) runs with advisory **enabled** (the default):
-///   novel issues are discovered once, against every file, on the first batch of each chunk.
-/// - Every **language group** runs with `advisory_disabled = true`: those passes check only
-///   their adopted rules, never re-triggering the advisory pass.
+/// - When a cross-cutting **All group** exists, it alone runs with advisory **enabled**:
+///   novel issues are discovered once, against every file, on the first batch of each chunk;
+///   every **language group** runs with `advisory_disabled = true` so it never re-triggers the
+///   advisory pass over files the All group already covers.
+/// - When NO All group exists at all (a purely language-scoped rule selection — e.g. a project
+///   that selected only `RUST-*` rules), advisory stays **enabled** in every language group
+///   instead of going dark for the whole scan: `Scope::Language` groups are mutually exclusive
+///   by file (`scan_routing::file_language` maps each file to at most one language), so this
+///   cannot duplicate a finding, and it is the ONLY way such a scan ever gets the model's
+///   backstop "is there anything wrong here beyond the listed rules?" pass at all. Before this
+///   fix, a language-only rule selection silently suppressed novel-issue discovery for the
+///   entire scan — the semantic-tier's security backstop role never fired, indistinguishable
+///   from "nothing to report."
 ///
-/// Net: novel findings appear exactly once per file chunk (in the All group), language-scoped
-/// rules skip unmatched files, and no finding is missed.
+/// Net: novel findings appear exactly once per file chunk that belongs to any group, language-
+/// scoped rules skip unmatched files, and no finding is missed.
 ///
 /// ### Batch mode
 ///
@@ -9892,24 +9929,62 @@ mod tests {
         assert_eq!(plan.groups[0].scope, Scope::Language("rust"));
         assert_eq!(plan.groups[0].rules.len(), 2, "both RUST rules land in the same group");
 
-        // No cross-cutting rules → advisory_disabled = true for the only group.
-        // NOTE: in run_routed_passes this means no advisory pass at all for this repo scan
-        // (since there's no All group). This is acceptable: novel-issue discovery via advisory
-        // is only suppressed when there IS an All group running advisory; a purely language-scoped
-        // scan with no All group still runs advisory because the language group IS the only group
-        // and is the most-specific coverage. In practice: if someone adds ONLY RUST-* rules,
-        // they should still get novel findings. We verify the advisory_disabled logic handles this:
-        // since there's no Scope::All group, the `run_routed_passes` loop would set
-        // advisory_disabled=true for the language group, effectively silencing advisory.
-        // The correct behavior is: advisory runs in the first/only group regardless.
-        // This edge case is documented as a known limitation; in practice, users typically
-        // have at least some ARCH-/SEC- rules, which always produce an All group.
-        // Document the invariant: advisory_disabled is true for language scopes.
-        let advisory_disabled = !matches!(plan.groups[0].scope, Scope::All);
+        // W2 (previously a documented-but-unfixed defect): no cross-cutting rule was selected,
+        // so this plan has NO `Scope::All` group at all. Mirror `run_routed_passes`'s
+        // `has_all_group`-gated formula — advisory must stay ENABLED for the only group here,
+        // because nothing else will ever run the "flag novel issues beyond the adopted rules"
+        // backstop pass for this scan. The old unconditional `!matches!(scope, Scope::All)`
+        // formula silenced advisory for the WHOLE scan in exactly this shape (a project that
+        // selected only `RUST-*` rules got zero chance at any novel/security finding outside
+        // them) — this is the regression test for that collapse.
+        let has_all_group = plan.groups.iter().any(|g| matches!(g.scope, Scope::All));
         assert!(
-            advisory_disabled,
-            "language group sets advisory_disabled=true (advisory runs only in All group)"
+            !has_all_group,
+            "a purely language-scoped selection has no All group"
         );
+        let advisory_disabled = has_all_group && !matches!(plan.groups[0].scope, Scope::All);
+        assert!(
+            !advisory_disabled,
+            "with no All group anywhere in the plan, the only (language) group must keep \
+             advisory ENABLED — otherwise novel-issue discovery never runs for this scan at all"
+        );
+    }
+
+    /// W2: a POLYGLOT repo with only language-scoped rules across MULTIPLE languages (still no
+    /// `Scope::All` group) must keep advisory enabled in EVERY group — language groups are
+    /// mutually exclusive by file (a `.rs` file is never in the `web` group's file set), so this
+    /// can never duplicate a novel finding for any one file.
+    #[test]
+    fn routing_polyglot_no_all_group_keeps_advisory_enabled_in_every_language_group() {
+        use crate::scan_routing::{plan_routes, Scope};
+
+        let files = vec![
+            ("src/a.rs".to_string(), "pub fn a() {}".to_string()),
+            ("web/app.ts".to_string(), "export const x = 1;".to_string()),
+        ];
+        let rules = vec![
+            ("RUST-1".to_string(), "d".to_string()),
+            ("TS-1".to_string(), "d".to_string()),
+        ];
+        let plan = plan_routes(&rules, &files);
+
+        assert_eq!(
+            plan.groups.len(),
+            2,
+            "rust + web, no cross-cutting rule → two groups"
+        );
+        let has_all_group = plan.groups.iter().any(|g| matches!(g.scope, Scope::All));
+        assert!(!has_all_group, "no cross-cutting rule was selected");
+        for group in &plan.groups {
+            let advisory_disabled = has_all_group && !matches!(group.scope, Scope::All);
+            assert!(
+                !advisory_disabled,
+                "{:?} must keep advisory enabled when no All group exists: every language \
+                 group's files are disjoint from every other's, so this never duplicates a \
+                 finding",
+                group.scope
+            );
+        }
     }
 
     // ── BUG-5: consensus_verdicts tie-breaking direction ─────────────────────────────
