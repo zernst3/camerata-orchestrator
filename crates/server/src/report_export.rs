@@ -4033,6 +4033,7 @@ mod tests {
             },
             recommendations: std::collections::HashMap::new(),
             failed_passes: Vec::new(),
+            ledger: crate::scan_ledger::ScanLedger::new(),
         }
     }
 
@@ -10100,6 +10101,7 @@ mod export_invariants_gate {
             },
             recommendations: std::collections::HashMap::new(),
             failed_passes: Vec::new(),
+            ledger: crate::scan_ledger::ScanLedger::new(),
         }
     }
 
