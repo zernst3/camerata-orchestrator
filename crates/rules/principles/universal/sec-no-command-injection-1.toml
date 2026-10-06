@@ -1,0 +1,68 @@
+id = "SEC-NO-COMMAND-INJECTION-1"
+title = "OS commands and dynamic code/method dispatch are never invoked with data the function did not construct itself"
+tag = "universal"
+domain = "universal"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/78.html"
+title = "CWE-78: Improper Neutralization of Special Elements used in an OS Command ('OS Command Injection')"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/94.html"
+title = "CWE-94: Improper Control of Generation of Code ('Code Injection')"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/OS_Command_Injection_Defense_Cheat_Sheet.html"
+title = "OWASP OS Command Injection Defense Cheat Sheet"
+
+[decision]
+question = "Does a value the current function did not construct itself ever reach a shell-interpreted command, a raw process-exec call, or a dynamic code/method-dispatch call (eval, send, instance_eval)?"
+default = "fixed-argv-no-shell"
+why = """
+A shell-interpreted invocation (shell=True, a `sh -c`/`bash -c` wrapper, Runtime.exec's
+whitespace-naive tokenizer) hands the ENTIRE command string to something that re-parses it for
+metacharacters (`;`, `|`, `&&`, backticks, `$()`). If any part of that string is a value the
+function did not construct itself, an attacker can terminate the intended command and append
+their own (CWE-78). The same risk shows up one level removed in dynamic code/method dispatch
+(`eval()`, `instance_eval`, `send`/`public_send` with a string the function did not construct
+itself) — the "command" being injected is Ruby/Python/JS source rather than a shell line, but the
+defect shape and the fix are identical: never let an externally-influenced value choose what
+gets executed (CWE-94). The fix in both cases is structural, not escaping: invoke the target
+directly with a fixed, separately-passed argument list (no shell in the middle), or dispatch
+through a fixed allowlist/dispatch table instead of a dynamically-evaluated string.
+"""
+
+[[option]]
+id = "fixed-argv-no-shell"
+label = "Invoke the target directly with a fixed argument list; never shell=True / a shell wrapper / eval / dynamic send"
+directive = "Every subprocess invocation passes the target binary and a separately-passed argument list directly to the OS (never shell=True, never a `sh -c`/`bash -c` wrapper, never a single interpolated command string). Dynamic code or method dispatch never evaluates a string the function did not construct itself via eval()/instance_eval()/class_eval(), and send()/public_send() is only ever called with a hardcoded symbol or a value validated against a fixed allowlist."
+remediation = """
+Replace the shell-interpreted call (shell=True, a `sh -c`/`bash -c` wrapper, or a single
+interpolated command string) with a direct invocation of the target binary passing a fixed,
+separately-passed argument list — no shell sits between your code and the argument boundary.
+For dynamic code/method dispatch, replace eval()/send() driven by a value the function did not
+construct itself with a fixed dispatch table (a hash or case/switch statement) mapping a known
+set of values to hardcoded methods, or validate the value against a fixed allowlist before using
+it as a symbol. Verify by feeding an input containing shell metacharacters (`; rm -rf /` or
+similar) or an unexpected method name and confirming it is rejected rather than executed.
+"""
+effort = "medium"
+finding_headline = "Your `<path>` file lets a value it did not construct itself choose what command or method gets executed."
+finding_detail = """
+When a value the function did not construct itself is handed to a shell-interpreted command or
+a dynamic eval/send call, an attacker who can influence that value can run their own commands or
+invoke methods they were never meant to reach — full remote code execution in the worst case.
+Rewrite the call in `<path>` to invoke the target directly with a fixed argument list (no shell),
+or route dynamic dispatch through a fixed allowlist instead of evaluating the value directly.
+"""
+why = "A fixed argument list removes the shell's re-parsing step entirely, so no character the value contains can ever be interpreted as a command separator; a fixed dispatch table removes the attacker's ability to name an unintended method at all, regardless of input validation quality."
+
+[[option]]
+id = "shell-with-escaping"
+label = "Escape shell metacharacters, then pass the command through a shell as before"
+directive = "a value the function did not construct itself is escaped (shell metacharacters neutralized) before being embedded in a shell-interpreted command string, rather than invoking the target directly with a separate argument list"
+why = "Rejected: shell-escaping is a per-shell, per-platform correctness problem (POSIX sh vs bash vs PowerShell quote differently), and a single missed metacharacter or an unusual encoding reopens the hole. Invoking the target directly with a separate argument list makes the shell's re-parsing step structurally absent instead of relying on escaping every call site correctly."

@@ -1276,13 +1276,16 @@ pub async fn audit_repos(
                                 *rid,
                                 crate::scan_ledger::RuleTier::Deterministic,
                                 false,
-                                Some(
-                                    "declares mechanical/architectural enforcement but has no \
-                                     wired detector (not in the arch_checker registry, gateway \
-                                     rule registry, Semgrep mapping, or scan-preview linter \
-                                     source)"
-                                        .to_string(),
-                                ),
+                                // Embeds `scan_ledger::NO_WIRED_DETECTOR_REASON` verbatim (not
+                                // retyped) so `rule_disclosure`'s substring check can never
+                                // silently decouple from this producer — see that constant's
+                                // doc comment.
+                                Some(format!(
+                                    "declares mechanical/architectural enforcement but has {} \
+                                     (not in the arch_checker registry, gateway rule registry, \
+                                     Semgrep mapping, or scan-preview linter source)",
+                                    crate::scan_ledger::NO_WIRED_DETECTOR_REASON,
+                                )),
                                 0,
                                 0,
                             ),

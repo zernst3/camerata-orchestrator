@@ -5386,29 +5386,45 @@ async fn onboard_audit(
     Json(report)
 }
 
-/// Map a semgrep rule id to the FLOOR rule id whose security category it overlaps,
-/// or `None` when the semgrep rule has no floor twin (net-new coverage that must pass
-/// through untouched).
+/// Map an external-tool (semgrep) rule id to the CORPUS rule id it is evidence for, or
+/// `None` when the tool rule has no corpus-grounded twin (net-new coverage that must
+/// pass through untouched, or a rule we haven't grounded yet).
 ///
-/// The floor (`crate::onboard::AUDIT_RULES`) runs at the Layer-1 gate AND at scan
-/// preview. Semgrep runs at scan preview AND CI (Layer-2 / Layer-3). Semgrep rules
-/// that overlap the floor on the same (repo, path, line) axis:
+/// Originally scoped to just the FLOOR (`crate::onboard::AUDIT_RULES`) overlap case
+/// (hence the name): the floor runs at the Layer-1 gate AND at scan preview, semgrep
+/// runs at scan preview AND CI (Layer-2 / Layer-3), and several semgrep rules duplicate
+/// a floor rule on the same (repo, path, line) axis. W3 (the commodity-class taint
+/// layer) generalizes this table's ACTUAL use beyond that original scope: it is also
+/// the GROUNDING map `crate::report_export::corpus_rule_for` joins against so a preview
+/// finding's citation, severity calibration, authored remediation, and effort estimate
+/// come from OUR corpus rule rather than a generic "found by this tool" label — and it
+/// is the signal `mechanical_gate::semgrep_covered_rule_ids` uses to recognize a
+/// `mechanical` corpus rule as genuinely detector-backed (channel 3). Every mapped
+/// corpus rule id below therefore means "a semgrep rule answers for this corpus rule,"
+/// which is a superset of "...and ALSO has a floor twin" — the table comment marks
+/// which rows are floor overlaps (dedup-relevant) vs. grounding-only (no floor twin, no
+/// dedup collapse, just citation/remediation attachment).
 ///
-/// | Semgrep rule id                                  | Floor rule id                    |
-/// |--------------------------------------------------|----------------------------------|
-/// | `camerata.security.hardcoded-secret`             | `SEC-NO-HARDCODED-SECRETS-1`     |
-/// | `camerata.security.hardcoded-secret-dquote`      | `SEC-NO-HARDCODED-SECRETS-1`     |
-/// | `camerata.security.sql-string-concat-python`     | `SEC-NO-RAW-SQL-CONCAT-1`        |
-/// | `camerata.security.sql-string-concat-js`         | `SEC-NO-RAW-SQL-CONCAT-1`        |
-/// | `camerata.security.sql-string-concat-rust`       | `SEC-NO-RAW-SQL-CONCAT-1`        |
-/// | `camerata.security.sql-string-concat-csharp`     | `SEC-NO-RAW-SQL-CONCAT-1`        |
-/// | `camerata.security.disabled-tls-rust`            | `SEC-NO-DISABLED-TLS-1`          |
-/// | `camerata.security.disabled-tls-csharp`          | `SEC-NO-DISABLED-TLS-1`          |
-/// | `camerata.security.yaml-unsafe-load`             | `SEC-NO-UNSAFE-DESERIALIZATION-1` |
+/// | Semgrep rule id                                       | Corpus rule id                  | Floor twin? |
+/// |--------------------------------------------------------|----------------------------------|-------------|
+/// | `camerata.security.hardcoded-secret`                   | `SEC-NO-HARDCODED-SECRETS-1`     | yes |
+/// | `camerata.security.hardcoded-secret-dquote`            | `SEC-NO-HARDCODED-SECRETS-1`     | yes |
+/// | `camerata.security.sql-string-concat-python`           | `SEC-NO-RAW-SQL-CONCAT-1`        | yes |
+/// | `camerata.security.sql-string-concat-js`               | `SEC-NO-RAW-SQL-CONCAT-1`        | yes |
+/// | `camerata.security.sql-string-concat-rust`             | `SEC-NO-RAW-SQL-CONCAT-1`        | yes |
+/// | `camerata.security.sql-string-concat-csharp`           | `SEC-NO-RAW-SQL-CONCAT-1`        | yes |
+/// | `camerata.security.taint-sql-injection-{python,js,rust,csharp,go,ruby,java}` | `SEC-NO-RAW-SQL-CONCAT-1` | yes |
+/// | `camerata.security.disabled-tls-rust`                  | `SEC-NO-DISABLED-TLS-1`          | yes |
+/// | `camerata.security.disabled-tls-csharp`                | `SEC-NO-DISABLED-TLS-1`          | yes |
+/// | `camerata.security.yaml-unsafe-load`                   | `SEC-NO-UNSAFE-DESERIALIZATION-1`| yes |
+/// | `camerata.security.taint-xss-{python,js,csharp,go,ruby,java}` | `SEC-NO-UNSAFE-HTML-SINK-1` | no (grounding-only) |
+/// | `camerata.security.taint-open-redirect-{python,js,csharp,go,ruby,java}` | `SEC-NO-OPEN-REDIRECT-1` | no (grounding-only) |
+/// | `camerata.security.exec-injection` / `-js`             | `SEC-NO-COMMAND-INJECTION-1`     | no (grounding-only) |
+/// | `camerata.security.taint-command-injection-{python,js,rust,csharp,go,ruby,java}` | `SEC-NO-COMMAND-INJECTION-1` | no (grounding-only) |
+/// | `camerata.security.taint-ruby-eval-send`               | `RUBY-AVOID-EVAL-SEND-1`         | no (grounding-only; closes a pre-existing phantom detector) |
 ///
-/// The remaining semgrep rules (`exec-injection`, `exec-injection-js`,
-/// `weak-hash-*`, `path-traversal-python`, `subprocess-shell-true`) have no
-/// floor twin and map to `None`.
+/// The remaining semgrep rules (`weak-hash-*`, `path-traversal-python`,
+/// `subprocess-shell-true`) have no corpus-grounded twin yet and map to `None`.
 ///
 /// NOTE: rule ids here must be the NORMALIZED (clean) form — `normalize_semgrep_rule_id`
 /// in `scan_tools` strips any absolute-path prefix before findings reach this function.
@@ -5417,17 +5433,53 @@ async fn onboard_audit(
 /// at Layer 1 (gate); semgrep enforces at Layers 2-3 (CI). Trimming semgrep would punch
 /// a hole in CI coverage. The fix is presentation-time dedup at scan preview only (see
 /// `dedup_scan_previews`). Decision: docs/decisions/2026-06-22_scan_floor_semgrep_dedup.md
+/// and docs/decisions/2026-10-06_w3_commodity_taint_layer.md
 pub(crate) fn semgrep_floor_category(semgrep_rule_id: &str) -> Option<&'static str> {
     match semgrep_rule_id {
-        "camerata.security.hardcoded-secret"
-        | "camerata.security.hardcoded-secret-dquote" => Some("SEC-NO-HARDCODED-SECRETS-1"),
+        "camerata.security.hardcoded-secret" | "camerata.security.hardcoded-secret-dquote" => {
+            Some("SEC-NO-HARDCODED-SECRETS-1")
+        }
         "camerata.security.sql-string-concat-python"
         | "camerata.security.sql-string-concat-js"
         | "camerata.security.sql-string-concat-rust"
-        | "camerata.security.sql-string-concat-csharp" => Some("SEC-NO-RAW-SQL-CONCAT-1"),
-        "camerata.security.disabled-tls-rust"
-        | "camerata.security.disabled-tls-csharp" => Some("SEC-NO-DISABLED-TLS-1"),
+        | "camerata.security.sql-string-concat-csharp"
+        | "camerata.security.taint-sql-injection-python"
+        | "camerata.security.taint-sql-injection-js"
+        | "camerata.security.taint-sql-injection-rust"
+        | "camerata.security.taint-sql-injection-csharp"
+        | "camerata.security.taint-sql-injection-go"
+        | "camerata.security.taint-sql-injection-ruby"
+        | "camerata.security.taint-sql-injection-java" => Some("SEC-NO-RAW-SQL-CONCAT-1"),
+        "camerata.security.disabled-tls-rust" | "camerata.security.disabled-tls-csharp" => {
+            Some("SEC-NO-DISABLED-TLS-1")
+        }
         "camerata.security.yaml-unsafe-load" => Some("SEC-NO-UNSAFE-DESERIALIZATION-1"),
+        "camerata.security.taint-xss-python"
+        | "camerata.security.taint-xss-js"
+        | "camerata.security.taint-xss-csharp"
+        | "camerata.security.taint-xss-go"
+        | "camerata.security.taint-xss-ruby"
+        | "camerata.security.taint-xss-java" => Some("SEC-NO-UNSAFE-HTML-SINK-1"),
+        "camerata.security.taint-open-redirect-python"
+        | "camerata.security.taint-open-redirect-js"
+        | "camerata.security.taint-open-redirect-csharp"
+        | "camerata.security.taint-open-redirect-go"
+        | "camerata.security.taint-open-redirect-ruby"
+        | "camerata.security.taint-open-redirect-java" => Some("SEC-NO-OPEN-REDIRECT-1"),
+        "camerata.security.exec-injection"
+        | "camerata.security.exec-injection-js"
+        | "camerata.security.taint-command-injection-python"
+        | "camerata.security.taint-command-injection-js"
+        | "camerata.security.taint-command-injection-rust"
+        | "camerata.security.taint-command-injection-csharp"
+        | "camerata.security.taint-command-injection-go"
+        | "camerata.security.taint-command-injection-ruby"
+        | "camerata.security.taint-command-injection-java" => Some("SEC-NO-COMMAND-INJECTION-1"),
+        // Grounded to the Ruby-specific corpus rule (not SEC-NO-COMMAND-INJECTION-1): this
+        // closes RUBY-AVOID-EVAL-SEND-1's pre-existing phantom-detector gap (it declared a
+        // Brakeman integration Camerata never ran) with a real taint-mode detector for the
+        // exact defect the corpus TOML already describes.
+        "camerata.security.taint-ruby-eval-send" => Some("RUBY-AVOID-EVAL-SEND-1"),
         _ => None,
     }
 }
@@ -5451,12 +5503,17 @@ pub(crate) fn semgrep_floor_category(semgrep_rule_id: &str) -> Option<&'static s
 ///                camerata.security.yaml-unsafe-load share one category and collapse
 ///                correctly when they fire on the same (repo, path, line).
 /// - `"tls"`    — disabled TLS / cert verification
+/// - `"xss"`    — cross-site scripting via a raw-HTML sink (W3)
+/// - `"redirect"` — open redirect via an unvalidated redirect target (W3)
 ///
-/// Decision: docs/decisions/2026-06-23_stack_gating_and_crosstool_dedup.md
+/// Decision: docs/decisions/2026-06-23_stack_gating_and_crosstool_dedup.md and
+/// docs/decisions/2026-10-06_w3_commodity_taint_layer.md
 pub(crate) fn finding_security_category(rule_id: &str) -> Option<&'static str> {
     match rule_id {
         // Floor rules (SEC-* ids from AUDIT_RULES)
-        "SEC-NO-HARDCODED-SECRETS-1" | "SEC-NO-PRIVATE-KEY-1" | "SEC-NO-VENDOR-TOKEN-1" => Some("secret"),
+        "SEC-NO-HARDCODED-SECRETS-1" | "SEC-NO-PRIVATE-KEY-1" | "SEC-NO-VENDOR-TOKEN-1" => {
+            Some("secret")
+        }
         "SEC-NO-RAW-SQL-CONCAT-1" => Some("sql"),
         "SEC-NO-DISABLED-TLS-1" => Some("tls"),
         // SEC-NO-UNSAFE-DESERIALIZATION-1: the floor rule for the deser category.
@@ -5465,31 +5522,67 @@ pub(crate) fn finding_security_category(rule_id: &str) -> Option<&'static str> {
         // one row, floor canonical. The old "yaml" category string is retired; both sides
         // now use "deser" (broader: covers pickle, unserialize, Marshal.load, BinaryFormatter).
         "SEC-NO-UNSAFE-DESERIALIZATION-1" => Some("deser"),
+        // W3: corpus rules with no floor twin — categorized so two EXTERNAL-TOOL findings
+        // (e.g. a taint rule and a future second tool) can still collapse on the same line;
+        // never collapses against a floor row since no floor row carries these ids.
+        "SEC-NO-UNSAFE-HTML-SINK-1" => Some("xss"),
+        "SEC-NO-OPEN-REDIRECT-1" => Some("redirect"),
+        "SEC-NO-COMMAND-INJECTION-1" => Some("exec"),
+        "RUBY-AVOID-EVAL-SEND-1" => Some("exec"),
         // Semgrep rules (camerata.security.*)
         // NOTE: keep these in sync with the rule ids in
-        // crates/server/assets/semgrep-rules/security.yml. A semgrep rule whose id is
-        // missing here returns None, so the deduper cannot categorize it and it will
-        // NEVER collapse against an overlapping floor finding (the 2026-06-23 dedup gap:
-        // the -rust/-csharp/-dquote ids were added to the corpus but not registered here).
-        "camerata.security.hardcoded-secret"
-        | "camerata.security.hardcoded-secret-dquote" => Some("secret"),
+        // crates/server/assets/semgrep-rules/security.yml and taint-security.yml. A semgrep
+        // rule whose id is missing here returns None, so the deduper cannot categorize it and
+        // it will NEVER collapse against an overlapping floor finding (the 2026-06-23 dedup
+        // gap: the -rust/-csharp/-dquote ids were added to the corpus but not registered here).
+        "camerata.security.hardcoded-secret" | "camerata.security.hardcoded-secret-dquote" => {
+            Some("secret")
+        }
         "camerata.security.sql-string-concat-python"
         | "camerata.security.sql-string-concat-js"
         | "camerata.security.sql-string-concat-rust"
-        | "camerata.security.sql-string-concat-csharp" => Some("sql"),
+        | "camerata.security.sql-string-concat-csharp"
+        | "camerata.security.taint-sql-injection-python"
+        | "camerata.security.taint-sql-injection-js"
+        | "camerata.security.taint-sql-injection-rust"
+        | "camerata.security.taint-sql-injection-csharp"
+        | "camerata.security.taint-sql-injection-go"
+        | "camerata.security.taint-sql-injection-ruby"
+        | "camerata.security.taint-sql-injection-java" => Some("sql"),
         "camerata.security.exec-injection"
-        | "camerata.security.exec-injection-js" => Some("exec"),
+        | "camerata.security.exec-injection-js"
+        | "camerata.security.taint-command-injection-python"
+        | "camerata.security.taint-command-injection-js"
+        | "camerata.security.taint-command-injection-rust"
+        | "camerata.security.taint-command-injection-csharp"
+        | "camerata.security.taint-command-injection-go"
+        | "camerata.security.taint-command-injection-ruby"
+        | "camerata.security.taint-command-injection-java"
+        | "camerata.security.taint-ruby-eval-send" => Some("exec"),
         "camerata.security.weak-hash-python"
         | "camerata.security.weak-hash-js"
         | "camerata.security.weak-hash-rust"
         | "camerata.security.weak-hash-csharp" => Some("hash"),
-        "camerata.security.disabled-tls-rust"
-        | "camerata.security.disabled-tls-csharp" => Some("tls"),
+        "camerata.security.disabled-tls-rust" | "camerata.security.disabled-tls-csharp" => {
+            Some("tls")
+        }
         "camerata.security.path-traversal-python" => Some("path"),
         "camerata.security.subprocess-shell-true" => Some("shell"),
         // yaml-unsafe-load maps to "deser" (not "yaml") so it collapses with the
         // floor rule SEC-NO-UNSAFE-DESERIALIZATION-1 when both fire on the same line.
         "camerata.security.yaml-unsafe-load" => Some("deser"),
+        "camerata.security.taint-xss-python"
+        | "camerata.security.taint-xss-js"
+        | "camerata.security.taint-xss-csharp"
+        | "camerata.security.taint-xss-go"
+        | "camerata.security.taint-xss-ruby"
+        | "camerata.security.taint-xss-java" => Some("xss"),
+        "camerata.security.taint-open-redirect-python"
+        | "camerata.security.taint-open-redirect-js"
+        | "camerata.security.taint-open-redirect-csharp"
+        | "camerata.security.taint-open-redirect-go"
+        | "camerata.security.taint-open-redirect-ruby"
+        | "camerata.security.taint-open-redirect-java" => Some("redirect"),
         // Ruff / ESLint lints that overlap with floor or semgrep in the same category.
         // S608 = possible SQL injection (Ruff/flake8-bandit) — same category as the floor SQL rule.
         "S608" => Some("sql"),
@@ -5626,42 +5719,153 @@ pub async fn merge_scan_preview(
     // with its findings count, mirroring the floor's progress.
     job: Option<(&crate::jobs::JobStore, &str)>,
 ) {
-    if preview_rules.is_empty() {
-        return;
-    }
-    let Some(set) = corpus else { return };
-    let lookup = |id: &str| set.get_by_id(id);
-    for (spec, dir) in sources {
-        // Only the rules bound to this repo (or project-level) preview against it.
-        let for_repo: Vec<crate::onboard::SelectedRule> = preview_rules
-            .iter()
-            .filter(|r| r.applies_to(spec))
-            .cloned()
-            .collect();
-        if for_repo.is_empty() {
-            continue;
+    if !preview_rules.is_empty() {
+        if let Some(set) = corpus {
+            let lookup = |id: &str| set.get_by_id(id);
+            for (spec, dir) in sources {
+                // Only the rules bound to this repo (or project-level) preview against it.
+                let for_repo: Vec<crate::onboard::SelectedRule> = preview_rules
+                    .iter()
+                    .filter(|r| r.applies_to(spec))
+                    .cloned()
+                    .collect();
+                if for_repo.is_empty() {
+                    continue;
+                }
+                // Derive the language set present in this repo so stack-gating can omit
+                // tools whose language is absent (e.g. no eslint on a Rust-only repo).
+                let dir_clone = dir.clone();
+                let present_languages = tokio::task::spawn_blocking(move || {
+                    crate::onboard::files::read_local_repo_files(&dir_clone)
+                        .map(|ex| crate::scan_tools::languages_from_files(&ex.files))
+                        .unwrap_or_default()
+                })
+                .await
+                .unwrap_or_default();
+                let (previews, mut notes) = crate::scan_tools::run_scan_tools(
+                    spec,
+                    dir,
+                    &for_repo,
+                    &lookup,
+                    Some(&present_languages),
+                    job,
+                )
+                .await;
+                // Dedup preview findings that overlap the deterministic floor or other preview
+                // tools BEFORE appending. When two tools flag the same (repo, path, line) for a
+                // compatible security category, the higher-precedence finding is kept canonical
+                // and the other tool's id is folded into `also_matches`. See `dedup_scan_previews`.
+                let deduped = dedup_scan_previews(&mut report.findings, previews);
+                report.findings.extend(deduped);
+                report.coverage_notes.append(&mut notes);
+            }
         }
-        // Derive the language set present in this repo so stack-gating can omit
-        // tools whose language is absent (e.g. no eslint on a Rust-only repo).
-        let dir_clone = dir.clone();
-        let present_languages =
-            tokio::task::spawn_blocking(move || {
-                crate::onboard::files::read_local_repo_files(&dir_clone)
-                    .map(|ex| crate::scan_tools::languages_from_files(&ex.files))
-                    .unwrap_or_default()
-            })
-            .await
-            .unwrap_or_default();
-        let (previews, mut notes) =
-            crate::scan_tools::run_scan_tools(spec, dir, &for_repo, &lookup, Some(&present_languages), job).await;
-        // Dedup preview findings that overlap the deterministic floor or other preview
-        // tools BEFORE appending. When two tools flag the same (repo, path, line) for a
-        // compatible security category, the higher-precedence finding is kept canonical and
-        // the other tool's id is folded into `also_matches`. See `dedup_scan_previews`.
-        let deduped = dedup_scan_previews(&mut report.findings, previews);
-        report.findings.extend(deduped);
-        report.coverage_notes.append(&mut notes);
     }
+    // W3: reconcile the ledger's ExternalTool-tier entries against what ACTUALLY happened in
+    // the pass above — unconditionally, even when the pass above never ran at all (empty
+    // `preview_rules` / no corpus), because `onboard::audit_repos`'s CI-tier rule loop may have
+    // already speculatively recorded such an entry as `ran = true, findings_emitted = 0` purely
+    // on the strength of "a semgrep rule maps to this corpus rule" — BEFORE this pass (the one
+    // that actually runs the tool) executed at all. See `reconcile_external_tool_ledger`'s doc
+    // comment for why this correction can't happen earlier.
+    reconcile_external_tool_ledger(report);
+}
+
+/// Corrects the ledger's `RuleTier::ExternalTool` entries to reflect what the scan-time
+/// external-tool pass (the loop in [`merge_scan_preview`] above) ACTUALLY produced, instead of
+/// the speculative `ran = true, findings_emitted = 0` placeholder `onboard::audit_repos`'s
+/// CI-tier rule loop records before this pass runs (that loop only knows "a semgrep rule maps
+/// to this corpus rule id" — it cannot know whether semgrep is installed, provisions
+/// successfully, or actually executes for THIS scan, because the two loops run in different,
+/// decoupled pipeline stages).
+///
+/// Two outcomes, decided per rule id:
+///
+/// 1. **The tool ran (or wasn't needed) for every repo this scan touched** — no hard-failure
+///    `CoverageNote` names it. The entry is corrected to `ran = true` with the REAL emitted
+///    count (from `report.findings`, post-dedup, via [`finding_grounds_to`]) — never the
+///    hardcoded `0` the pre-pass loop guessed. A genuinely clean pass (tool ran, zero findings)
+///    is still honestly `verified_clean()` here.
+/// 2. **The tool is absent or failed for every repo this scan touched** (a `CoverageNote` whose
+///    `tool` matches names a hard failure, not merely "unrouted"). The entry is corrected to
+///    `ran = false` with a disclosed reason ("commodity taint pass did not run: <reason>"), and
+///    a matching [`crate::ai_audit::FailedPass`] is pushed onto `report.failed_passes` — the
+///    SAME disclosure mechanism every other degraded pass in this codebase uses. Never a
+///    silent "verified clean", never a refused export (`report.findings`/`report.ledger`'s
+///    OTHER entries are completely untouched).
+///
+/// A tool that failed for SOME repos but produced real findings for others is treated as
+/// outcome 1 (a nonzero `emitted` count wins) — the honest statement in that case is "ran, N
+/// findings", not "did not run", and the per-repo failure is still visible in
+/// `report.coverage_notes` either way (this function never removes a `CoverageNote`).
+pub(crate) fn reconcile_external_tool_ledger(report: &mut crate::onboard::ScanReport) {
+    // "unrouted" is a ROUTING gap (a selected rule with no tool to drive it at all), not a
+    // tool-execution failure — never treated as evidence the tool itself didn't run.
+    let failed_tools: std::collections::HashSet<&str> = report
+        .coverage_notes
+        .iter()
+        .filter(|n| n.tool != "unrouted")
+        .map(|n| n.tool.as_str())
+        .collect();
+
+    let external_tool_rule_ids: Vec<String> = report
+        .ledger
+        .rules()
+        .filter(|r| r.tier == crate::scan_ledger::RuleTier::ExternalTool)
+        .map(|r| r.rule_id.clone())
+        .collect();
+
+    for rule_id in external_tool_rule_ids {
+        let emitted = report
+            .findings
+            .iter()
+            .filter(|f| finding_grounds_to(f, &rule_id))
+            .count();
+
+        if emitted == 0 && failed_tools.contains("semgrep") {
+            let reason = report
+                .coverage_notes
+                .iter()
+                .find(|n| n.tool == "semgrep")
+                .map(|n| n.message.clone())
+                .unwrap_or_else(|| "semgrep did not run this scan".to_string());
+            report.ledger.correct_rule_after_external_pass(
+                rule_id.clone(),
+                false,
+                Some(format!("commodity taint pass did not run: {reason}")),
+                0,
+            );
+            report.failed_passes.push(crate::ai_audit::FailedPass {
+                repo: report.repos.join(", "),
+                pass: "commodity taint pass".to_string(),
+                reason: format!("{rule_id}: commodity taint pass did not run: {reason}"),
+            });
+        } else {
+            report
+                .ledger
+                .correct_rule_after_external_pass(rule_id, true, None, emitted);
+        }
+    }
+}
+
+/// Whether finding `f` is evidence that the corpus rule `rule_id` was evaluated — either `f`
+/// IS that rule (a floor row, or a preview row whose own id already equals the corpus id), OR
+/// `f`'s own rule id GROUNDS to `rule_id` via [`semgrep_floor_category`] (a standalone preview
+/// row for a tool rule that hasn't been deduped into anything else), OR one of `f.also_matches`
+/// does (the tool's rule id was folded into a floor/higher-precedence row by
+/// [`dedup_scan_previews`] — the defect is still real and still counted, just not as its own
+/// top-level row). Mirrors `ScanLedger::fired_rule_ids`'s own "a merged-away rule still counts"
+/// principle at the cross-tool-grounding layer.
+pub(crate) fn finding_grounds_to(f: &crate::onboard::Finding, rule_id: &str) -> bool {
+    if f.rule_id == rule_id {
+        return true;
+    }
+    if semgrep_floor_category(&f.rule_id) == Some(rule_id) {
+        return true;
+    }
+    f.also_matches
+        .iter()
+        .any(|m| m == rule_id || semgrep_floor_category(m) == Some(rule_id))
 }
 
 /// Mode 3 — START an async audit JOB. Spawns the same audit in the background and returns a
@@ -21130,10 +21334,8 @@ mod tests {
                 "overlapping rule '{rule}' must map to floor '{expected_floor}'"
             );
         }
-        // Non-overlapping rules: no floor twin, return None.
+        // Non-overlapping rules: no corpus-grounded twin at all, return None.
         for rule in &[
-            "camerata.security.exec-injection",
-            "camerata.security.exec-injection-js",
             "camerata.security.weak-hash-python",
             "camerata.security.weak-hash-js",
             "camerata.security.weak-hash-rust",
@@ -21144,9 +21346,93 @@ mod tests {
             assert_eq!(
                 semgrep_floor_category(rule),
                 None,
-                "rule '{rule}' must map to None (no floor twin)"
+                "rule '{rule}' must map to None (no corpus-grounded twin)"
             );
         }
+    }
+
+    /// W3: the commodity-class taint rules each ground to the right corpus rule id —
+    /// SQLi taint rules (all 7 languages) ground to the SAME corpus rule as the
+    /// pre-existing pattern-based sql-string-concat-* ids (a floor twin); XSS/open-redirect
+    /// taint rules ground to their corpus rule with NO floor twin (grounding-only, never
+    /// collapsed against a floor row); command-injection taint rules (plus the pre-existing
+    /// exec-injection pattern ids) ground to the new SEC-NO-COMMAND-INJECTION-1 rule.
+    #[test]
+    fn w3_taint_rules_ground_to_the_right_corpus_rule() {
+        let sqli_taint = [
+            "camerata.security.taint-sql-injection-python",
+            "camerata.security.taint-sql-injection-js",
+            "camerata.security.taint-sql-injection-rust",
+            "camerata.security.taint-sql-injection-csharp",
+            "camerata.security.taint-sql-injection-go",
+            "camerata.security.taint-sql-injection-ruby",
+            "camerata.security.taint-sql-injection-java",
+        ];
+        for id in sqli_taint {
+            assert_eq!(
+                semgrep_floor_category(id),
+                Some("SEC-NO-RAW-SQL-CONCAT-1"),
+                "{id} must ground to SEC-NO-RAW-SQL-CONCAT-1"
+            );
+        }
+
+        let xss_taint = [
+            "camerata.security.taint-xss-python",
+            "camerata.security.taint-xss-js",
+            "camerata.security.taint-xss-csharp",
+            "camerata.security.taint-xss-go",
+            "camerata.security.taint-xss-ruby",
+            "camerata.security.taint-xss-java",
+        ];
+        for id in xss_taint {
+            assert_eq!(
+                semgrep_floor_category(id),
+                Some("SEC-NO-UNSAFE-HTML-SINK-1"),
+                "{id} must ground to SEC-NO-UNSAFE-HTML-SINK-1"
+            );
+        }
+
+        let redirect_taint = [
+            "camerata.security.taint-open-redirect-python",
+            "camerata.security.taint-open-redirect-js",
+            "camerata.security.taint-open-redirect-csharp",
+            "camerata.security.taint-open-redirect-go",
+            "camerata.security.taint-open-redirect-ruby",
+            "camerata.security.taint-open-redirect-java",
+        ];
+        for id in redirect_taint {
+            assert_eq!(
+                semgrep_floor_category(id),
+                Some("SEC-NO-OPEN-REDIRECT-1"),
+                "{id} must ground to SEC-NO-OPEN-REDIRECT-1"
+            );
+        }
+
+        let cmdi_taint = [
+            "camerata.security.exec-injection",
+            "camerata.security.exec-injection-js",
+            "camerata.security.taint-command-injection-python",
+            "camerata.security.taint-command-injection-js",
+            "camerata.security.taint-command-injection-rust",
+            "camerata.security.taint-command-injection-csharp",
+            "camerata.security.taint-command-injection-go",
+            "camerata.security.taint-command-injection-ruby",
+            "camerata.security.taint-command-injection-java",
+        ];
+        for id in cmdi_taint {
+            assert_eq!(
+                semgrep_floor_category(id),
+                Some("SEC-NO-COMMAND-INJECTION-1"),
+                "{id} must ground to SEC-NO-COMMAND-INJECTION-1"
+            );
+        }
+
+        // Ruby eval/send grounds to its OWN pre-existing corpus rule, not the generic
+        // command-injection one — closing RUBY-AVOID-EVAL-SEND-1's phantom-detector gap.
+        assert_eq!(
+            semgrep_floor_category("camerata.security.taint-ruby-eval-send"),
+            Some("RUBY-AVOID-EVAL-SEND-1")
+        );
     }
 
     // ── FIX 2: cross-preview-tool dedup tests ────────────────────────────────
@@ -21257,6 +21543,66 @@ mod tests {
         assert_eq!(finding_security_category("some-unknown-linter-rule"), None);
     }
 
+    /// W3: the new taint rule ids and their grounding-only corpus rules categorize
+    /// correctly, including the two brand-new categories ("xss", "redirect").
+    #[test]
+    fn finding_security_category_covers_w3_taint_rules() {
+        assert_eq!(
+            finding_security_category("SEC-NO-UNSAFE-HTML-SINK-1"),
+            Some("xss")
+        );
+        assert_eq!(
+            finding_security_category("SEC-NO-OPEN-REDIRECT-1"),
+            Some("redirect")
+        );
+        assert_eq!(
+            finding_security_category("SEC-NO-COMMAND-INJECTION-1"),
+            Some("exec")
+        );
+        for id in [
+            "camerata.security.taint-sql-injection-python",
+            "camerata.security.taint-sql-injection-js",
+            "camerata.security.taint-sql-injection-rust",
+            "camerata.security.taint-sql-injection-csharp",
+            "camerata.security.taint-sql-injection-go",
+            "camerata.security.taint-sql-injection-ruby",
+            "camerata.security.taint-sql-injection-java",
+        ] {
+            assert_eq!(finding_security_category(id), Some("sql"), "{id}");
+        }
+        for id in [
+            "camerata.security.taint-xss-python",
+            "camerata.security.taint-xss-js",
+            "camerata.security.taint-xss-csharp",
+            "camerata.security.taint-xss-go",
+            "camerata.security.taint-xss-ruby",
+            "camerata.security.taint-xss-java",
+        ] {
+            assert_eq!(finding_security_category(id), Some("xss"), "{id}");
+        }
+        for id in [
+            "camerata.security.taint-open-redirect-python",
+            "camerata.security.taint-open-redirect-js",
+            "camerata.security.taint-open-redirect-csharp",
+            "camerata.security.taint-open-redirect-go",
+            "camerata.security.taint-open-redirect-ruby",
+            "camerata.security.taint-open-redirect-java",
+        ] {
+            assert_eq!(finding_security_category(id), Some("redirect"), "{id}");
+        }
+        for id in [
+            "camerata.security.taint-command-injection-python",
+            "camerata.security.taint-command-injection-js",
+            "camerata.security.taint-command-injection-rust",
+            "camerata.security.taint-command-injection-csharp",
+            "camerata.security.taint-command-injection-go",
+            "camerata.security.taint-command-injection-ruby",
+            "camerata.security.taint-command-injection-java",
+        ] {
+            assert_eq!(finding_security_category(id), Some("exec"), "{id}");
+        }
+    }
+
     /// Regression for the 2026-06-23 dedup gap: a floor SQL finding and a semgrep
     /// `sql-string-concat-rust` finding on the SAME file:line MUST collapse (floor canonical),
     /// not double-report. Before the fix, the -rust id had no category so it skipped dedup.
@@ -21278,6 +21624,78 @@ mod tests {
             .also_matches
             .iter()
             .any(|m| m == "camerata.security.sql-string-concat-rust"));
+    }
+
+    /// W3 (commodity-class taint layer): a floor SEC-NO-RAW-SQL-CONCAT-1 finding and a semgrep
+    /// TAINT-mode SQLi finding (a shape the old pattern-based rule could never have caught —
+    /// here a Go `fmt.Sprintf`-built query) on the SAME (repo, path, line) must still collapse
+    /// to ONE row, OUR deterministic row primary, the tool's rule id preserved in
+    /// `also_matches`, and the cover count not inflated — exactly the pre-existing C5-1 merge
+    /// contract, now exercised with a taint rule id instead of a pattern rule id.
+    #[test]
+    fn crosstool_dedup_floor_and_taint_sqli_go_same_location_collapses() {
+        let mut existing = vec![floor_finding(
+            "me/svc",
+            "internal/db.go",
+            88,
+            "SEC-NO-RAW-SQL-CONCAT-1",
+        )];
+        let previews = vec![semgrep_finding(
+            "me/svc",
+            "internal/db.go",
+            88,
+            "camerata.security.taint-sql-injection-go",
+        )];
+        let leftover = dedup_scan_previews(&mut existing, previews);
+        assert!(
+            leftover.is_empty(),
+            "taint SQLi (go) should collapse into the floor row"
+        );
+        assert_eq!(
+            existing.len(),
+            1,
+            "cover count must not be inflated by the extra tool finding"
+        );
+        assert_eq!(
+            existing[0].rule_id, "SEC-NO-RAW-SQL-CONCAT-1",
+            "OUR deterministic row stays primary"
+        );
+        assert!(
+            existing[0]
+                .also_matches
+                .iter()
+                .any(|m| m == "camerata.security.taint-sql-injection-go"),
+            "the external tool's rule id must be preserved in also_matches: {:?}",
+            existing[0].also_matches
+        );
+    }
+
+    /// W3: when the floor does NOT fire on a line (the regex's double-quote-only heuristic
+    /// misses a single-quoted/backtick/go-sprintf shape) but the taint rule DOES, the taint
+    /// finding must stand on its own as a NEW top-level preview row — never silently dropped
+    /// just because an unrelated category already has a row nearby. This is the actual
+    /// coverage-expansion case W3 exists for.
+    #[test]
+    fn taint_sqli_finding_with_no_floor_twin_on_that_line_stands_alone() {
+        let mut existing: Vec<crate::onboard::Finding> = Vec::new();
+        let previews = vec![semgrep_finding(
+            "me/svc",
+            "internal/db.go",
+            99,
+            "camerata.security.taint-sql-injection-go",
+        )];
+        let leftover = dedup_scan_previews(&mut existing, previews);
+        assert_eq!(
+            leftover.len(),
+            1,
+            "no floor twin on this line -> the finding must survive"
+        );
+        assert_eq!(
+            leftover[0].rule_id,
+            "camerata.security.taint-sql-injection-go"
+        );
+        assert!(leftover[0].preview);
+        assert_eq!(leftover[0].preview_tool.as_deref(), Some("semgrep"));
     }
 
     /// Regression for the unsafe-deser floor port: a floor SEC-NO-UNSAFE-DESERIALIZATION-1
@@ -22340,6 +22758,199 @@ mod tests {
     }
 
     // ── last_scan store tests ─────────────────────────────────────────────────────────
+
+    // ── W3: finding_grounds_to / reconcile_external_tool_ledger ─────────────────────────
+
+    /// Helper: build a minimal preview `Finding` for the W3 ledger-reconciliation tests.
+    fn preview_finding_for_test(
+        rule_id: &str,
+        tool: &str,
+        also_matches: &[&str],
+    ) -> crate::onboard::Finding {
+        crate::onboard::Finding {
+            repo: "owner/repo".to_string(),
+            path: "src/db.py".to_string(),
+            line: 10,
+            rule_id: rule_id.to_string(),
+            severity: "high".to_string(),
+            preview: true,
+            preview_tool: Some(tool.to_string()),
+            also_matches: also_matches.iter().map(|s| s.to_string()).collect(),
+            ..crate::onboard::Finding::default()
+        }
+    }
+
+    #[test]
+    fn finding_grounds_to_matches_own_rule_id() {
+        let f = preview_finding_for_test("SEC-NO-RAW-SQL-CONCAT-1", "semgrep", &[]);
+        assert!(finding_grounds_to(&f, "SEC-NO-RAW-SQL-CONCAT-1"));
+    }
+
+    #[test]
+    fn finding_grounds_to_matches_via_semgrep_floor_category() {
+        // A standalone preview row (never deduped against anything) whose OWN rule id is the
+        // tool's id grounds to the corpus rule via `semgrep_floor_category`.
+        let f =
+            preview_finding_for_test("camerata.security.taint-sql-injection-go", "semgrep", &[]);
+        assert!(finding_grounds_to(&f, "SEC-NO-RAW-SQL-CONCAT-1"));
+        assert!(!finding_grounds_to(&f, "SEC-NO-OPEN-REDIRECT-1"));
+    }
+
+    #[test]
+    fn finding_grounds_to_matches_via_also_matches() {
+        // A floor-canonical row that absorbed the semgrep rule id into `also_matches` during
+        // dedup — the defect is still real and still counts as evidence the corpus rule fired.
+        let f = preview_finding_for_test(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "semgrep",
+            &["camerata.security.taint-sql-injection-python"],
+        );
+        // Build a SEPARATE finding whose OWN id is NOT the corpus id, but is folded into another.
+        let folded = crate::onboard::Finding {
+            rule_id: "unrelated-id".to_string(),
+            also_matches: vec!["camerata.security.taint-sql-injection-python".to_string()],
+            ..preview_finding_for_test("unrelated-id", "semgrep", &[])
+        };
+        assert!(finding_grounds_to(&f, "SEC-NO-RAW-SQL-CONCAT-1"));
+        assert!(finding_grounds_to(&folded, "SEC-NO-RAW-SQL-CONCAT-1"));
+    }
+
+    #[test]
+    fn finding_grounds_to_false_for_unrelated_rule() {
+        let f = preview_finding_for_test("camerata.security.weak-hash-python", "semgrep", &[]);
+        assert!(!finding_grounds_to(&f, "SEC-NO-RAW-SQL-CONCAT-1"));
+    }
+
+    /// Helper: a minimal ScanReport (via the existing `gated` constructor, whose fields are
+    /// all `pub`) with its `findings`/`ledger`/`coverage_notes` overwritten for the test.
+    fn report_for_ledger_test() -> crate::onboard::ScanReport {
+        crate::onboard::ScanReport::gated(&["owner/repo".to_string()])
+    }
+
+    /// The tool genuinely ran and found something: the pre-pass speculative
+    /// `ran=true, findings_emitted=0` entry is corrected to the REAL count, stays `ran=true`,
+    /// and no disclosure is raised.
+    #[test]
+    fn reconcile_marks_rule_ran_with_real_count_when_tool_succeeded() {
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0, // the pre-pass speculative (hardcoded) count
+        );
+        report.findings = vec![preview_finding_for_test(
+            "camerata.security.taint-sql-injection-python",
+            "semgrep",
+            &[],
+        )];
+        reconcile_external_tool_ledger(&mut report);
+        let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
+        assert!(entry.ran);
+        assert_eq!(
+            entry.findings_emitted, 1,
+            "must reflect the REAL count, not the pre-pass 0"
+        );
+        assert!(
+            report.failed_passes.is_empty(),
+            "a successful pass must not disclose a failure"
+        );
+    }
+
+    /// The tool is absent/failed for every repo this scan touched (a hard-failure
+    /// `CoverageNote` names it): the entry is corrected to NOT RUN with a disclosed reason, and
+    /// a `FailedPass` is pushed — never a silent "verified clean".
+    #[test]
+    fn reconcile_marks_rule_not_run_and_discloses_when_tool_absent() {
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0,
+        );
+        report.coverage_notes = vec![crate::onboard::CoverageNote {
+            tool: "semgrep".to_string(),
+            message:
+                "could not preview 1 rule(s) with semgrep: base interpreter not available: python3"
+                    .to_string(),
+        }];
+        // No findings at all — the tool never ran.
+        reconcile_external_tool_ledger(&mut report);
+        let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
+        assert!(
+            !entry.ran,
+            "a tool that never ran must never be recorded as ran=true"
+        );
+        assert!(!entry.verified_clean(), "must never read as verified clean");
+        let reason = entry.skip_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.starts_with("commodity taint pass did not run:"),
+            "got: {reason}"
+        );
+        assert_eq!(report.failed_passes.len(), 1);
+        assert_eq!(report.failed_passes[0].pass, "commodity taint pass");
+        assert!(report.failed_passes[0]
+            .reason
+            .contains("SEC-NO-RAW-SQL-CONCAT-1"));
+    }
+
+    /// An "unrouted" coverage note (a routing gap — a selected rule with no tool to drive it)
+    /// must NOT be mistaken for a tool-execution failure.
+    #[test]
+    fn reconcile_does_not_treat_unrouted_note_as_tool_failure() {
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0,
+        );
+        report.coverage_notes = vec![crate::onboard::CoverageNote {
+            tool: "unrouted".to_string(),
+            message: "could not preview SOME-OTHER-RULE-1 — no scan-runnable tool wired"
+                .to_string(),
+        }];
+        reconcile_external_tool_ledger(&mut report);
+        let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
+        assert!(
+            entry.ran,
+            "an unrelated routing gap must not flip an unrelated rule to not-run"
+        );
+        assert_eq!(
+            entry.findings_emitted, 0,
+            "genuinely zero findings is a real clean result here"
+        );
+        assert!(report.failed_passes.is_empty());
+    }
+
+    /// Non-ExternalTool ledger entries (the floor, arch_checker, …) are untouched by
+    /// reconciliation — it only ever corrects the tier it exists for.
+    #[test]
+    fn reconcile_leaves_non_external_tool_entries_untouched() {
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            true,
+            None,
+            5,
+            2,
+        );
+        reconcile_external_tool_ledger(&mut report);
+        let entry = report.ledger.rule("SEC-NO-HARDCODED-SECRETS-1").unwrap();
+        assert!(entry.ran);
+        assert_eq!(
+            entry.findings_emitted, 2,
+            "must be untouched by the external-tool correction"
+        );
+    }
 
     /// Helper: build a minimal ScanReport with one active finding.
     fn make_scan_report(rule_id: &str) -> crate::onboard::ScanReport {

@@ -245,6 +245,56 @@ impl ScanLedger {
         self.rules.values()
     }
 
+    /// Forcibly OVERWRITE a rule's `ran`/`skip_reason`/`findings_emitted` facts — unlike
+    /// [`record_rule`](Self::record_rule) (which OR-accumulates `ran` across repos within a
+    /// scan, appropriate for a multi-repo run), this REPLACES whatever was recorded.
+    ///
+    /// # Why this exists (W3)
+    ///
+    /// The scan-time external-tool pass (`crate::merge_scan_preview` / `scan_tools::run_scan_tools`)
+    /// runs in a SEPARATE, later stage than the one that first populates the ledger
+    /// (`onboard::audit_repos`'s CI-tier rule loop, which optimistically records a
+    /// semgrep-mapped rule as `ran = true, findings_emitted = 0` on the strength of "a semgrep
+    /// rule EXISTS for this corpus rule," before the tool has actually run for this scan).
+    /// That optimism is sometimes wrong — the tool can be absent, fail to provision, or error
+    /// out entirely — and by the time the real pass's result is known, `record_rule`'s
+    /// OR-accumulate semantics can no longer walk `ran` back to `false` (by design: it must
+    /// never let a later "it didn't run here" silently erase an earlier real "it ran there").
+    /// This method is the narrow, explicit escape hatch for that one correction: the caller
+    /// (`crate::reconcile_external_tool_ledger`) uses it ONLY after the external-tool pass has
+    /// actually completed, to replace a speculative pre-pass entry with the real outcome —
+    /// never to downgrade a rule that genuinely ran somewhere.
+    ///
+    /// Preserves the existing entry's `tier`/`files_evaluated` when one is already present
+    /// (there usually is, from the pre-pass optimistic record); defaults to
+    /// [`RuleTier::ExternalTool`] / `0` for a rule_id the ledger hasn't seen at all yet.
+    pub fn correct_rule_after_external_pass(
+        &mut self,
+        rule_id: impl Into<String>,
+        ran: bool,
+        skip_reason: Option<String>,
+        findings_emitted: usize,
+    ) -> &RuleLedgerEntry {
+        let rule_id = rule_id.into();
+        let (tier, files_evaluated) = self
+            .rules
+            .get(&rule_id)
+            .map(|e| (e.tier, e.files_evaluated))
+            .unwrap_or((RuleTier::ExternalTool, 0));
+        self.rules.insert(
+            rule_id.clone(),
+            RuleLedgerEntry {
+                rule_id: rule_id.clone(),
+                tier,
+                ran,
+                skip_reason,
+                files_evaluated,
+                findings_emitted,
+            },
+        );
+        self.rules.get(&rule_id).expect("just inserted")
+    }
+
     pub fn rule(&self, rule_id: &str) -> Option<&RuleLedgerEntry> {
         self.rules.get(rule_id)
     }
@@ -330,6 +380,17 @@ pub fn stage_disclosure(
     })
 }
 
+/// The exact substring [`rule_disclosure`] keys on to recognize the W1-item-4 "declared
+/// mechanical/architectural enforcement but nothing ever evaluates it" defect shape.
+///
+/// W3 hardening: this used to be a bare string literal duplicated at the call site
+/// (`onboard::audit_repos`'s skip-reason constructor) and the check site (`rule_disclosure`
+/// below) — a future wording edit to either copy would silently decouple the two and the
+/// disclosure would stop firing with no test failure pointing at why. Every producer of a
+/// "no detector" skip reason MUST embed this constant verbatim (not retype the phrase), and
+/// `rule_disclosure` checks against the SAME constant, so the two can never drift apart.
+pub const NO_WIRED_DETECTOR_REASON: &str = "no wired detector";
+
 /// A runtime disclosure for a rule that declared mechanical/architectural enforcement but has
 /// no wired detector (the W1-item-4 defect, closed at build time by `crate::mechanical_gate`
 /// for the known corpus — this is the scan-time symptom-level backstop for any rule that
@@ -346,7 +407,7 @@ pub fn rule_disclosure(
         return None;
     }
     let reason = rule.skip_reason.as_deref().unwrap_or("");
-    if !reason.contains("no wired detector") {
+    if !reason.contains(NO_WIRED_DETECTOR_REASON) {
         return None;
     }
     Some(crate::ai_audit::FailedPass {

@@ -1017,6 +1017,23 @@ fn arm_sec_no_hardcoded_secrets_1(path: &str, content: &str) -> Result<(), Strin
 
 /// Compiled pattern for `SEC-NO-RAW-SQL-CONCAT-1`.
 ///
+/// # W3: demoted from "detector of record" (fast in-loop backstop only)
+///
+/// This regex is now a SECONDARY, fast, synchronous backstop for the Layer-2/3 content-scan
+/// gate — not the rule's primary detector. The PRIMARY detector for this defect class is the
+/// `camerata.security.taint-sql-injection-*` taint-mode semgrep rule family
+/// (`crates/server/assets/semgrep-rules/taint-security.yml`), which covers single-quoted
+/// strings, backtick/template literals, Python `%` formatting, and multi-segment
+/// concatenation across 8 languages — every shape this double-quote-only regex structurally
+/// cannot match (see "Known limits" below). `crate::mechanical_gate::REGEX_DEMOTED_FOR_SEMGREP`
+/// reflects this in the detector-channel classification the ledger/coverage reporting use.
+///
+/// This function is KEPT (not removed): Layer 2/3's content-scan gate runs synchronously on
+/// every file edit in the governed dev loop, and cannot shell out to an external process on
+/// that hot path — a fast, zero-dependency regex backstop is still valuable there even though
+/// it no longer carries the coverage story. See
+/// docs/decisions/2026-10-06_w3_commodity_taint_layer.md.
+///
 /// # Heuristic and its limits
 ///
 /// Fires only when a **double-quoted string literal** satisfies all three conditions:

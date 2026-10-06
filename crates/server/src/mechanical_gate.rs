@@ -33,9 +33,16 @@ use std::collections::HashSet;
 /// own `id:` lines rather than hand-maintained — adding a new Semgrep rule (and its
 /// `semgrep_floor_category` mapping) automatically grows this set, so it can never silently
 /// drift stale the way a copy-pasted id list would.
+///
+/// Reads BOTH bundled rule files: `security.yml` (the pattern-based rules) and, as of W3,
+/// `taint-security.yml` (the commodity-class taint rules — SQL injection, XSS, open redirect,
+/// command injection). A rule added to either file is picked up automatically.
 pub fn semgrep_covered_rule_ids() -> HashSet<&'static str> {
-    const YAML: &str = include_str!("../assets/semgrep-rules/security.yml");
-    YAML.lines()
+    const PATTERN_YAML: &str = include_str!("../assets/semgrep-rules/security.yml");
+    const TAINT_YAML: &str = include_str!("../assets/semgrep-rules/taint-security.yml");
+    [PATTERN_YAML, TAINT_YAML]
+        .iter()
+        .flat_map(|yaml| yaml.lines())
         .filter_map(|line| line.trim().strip_prefix("- id:"))
         .map(str::trim)
         .filter_map(crate::semgrep_floor_category)
@@ -65,6 +72,11 @@ pub fn has_preview_tool_source(rule: &camerata_rules::Rule) -> bool {
 /// MUST NOT happen in a caller that also wants channel-4 parity with
 /// [`mechanical_rules_missing_detector`] (the build gate always passes `Some`) — a caller
 /// with no corpus loaded at all has no way to look up a rule's `[[sources]]` regardless.
+///
+/// W3 (commodity-class taint layer): a rule id in [`REGEX_DEMOTED_FOR_SEMGREP`] prefers
+/// channel 3 (semgrep) over channel 2 (gateway rule registry) when BOTH exist, inverting
+/// the normal precedence. See that const's doc comment for why this is scoped to a named
+/// allowlist rather than a global reorder.
 pub fn detector_channel(
     rule_id: &str,
     checker_ids: &HashSet<&str>,
@@ -72,8 +84,12 @@ pub fn detector_channel(
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Option<&'static str> {
     if checker_ids.contains(rule_id) {
-        Some("arch_checker")
-    } else if camerata_gateway::lookup_arm(rule_id).is_some() {
+        return Some("arch_checker");
+    }
+    if REGEX_DEMOTED_FOR_SEMGREP.contains(&rule_id) && semgrep_ids.contains(rule_id) {
+        return Some("semgrep");
+    }
+    if camerata_gateway::lookup_arm(rule_id).is_some() {
         Some("gateway_rule_registry")
     } else if semgrep_ids.contains(rule_id) {
         Some("semgrep")
@@ -86,6 +102,32 @@ pub fn detector_channel(
         None
     }
 }
+
+/// Corpus rule ids whose gateway-arm detector is a known SHAPE-FITTED heuristic (authored
+/// to catch one narrow syntax, not the general defect class) that a broader, taint-mode
+/// external-tool rule now covers more completely. For these ids ONLY, [`detector_channel`]
+/// prefers the semgrep channel over the gateway-registry channel — i.e. the regex is
+/// DEMOTED from "the detector of record" to a fast in-loop backstop that still runs (Layer
+/// 2/3 cannot shell out to an external tool synchronously on every file edit) but is no
+/// longer what coverage reporting credits.
+///
+/// `SEC-NO-RAW-SQL-CONCAT-1`'s gateway arm (`camerata_gateway::sec_sql_concat_regex`) only
+/// matches a DOUBLE-QUOTED string literal containing a DML keyword + confirming clause +
+/// `{}`/`+` — it cannot match single-quoted strings, backtick/template literals, Python `%`
+/// formatting, or a query built across multiple string segments. The semgrep taint rule
+/// family `camerata.security.taint-sql-injection-*` (`assets/semgrep-rules/taint-security.yml`)
+/// covers every one of those shapes across 8 languages by tracking dataflow instead of
+/// matching one spelling. Demoting the regex's channel here does NOT remove it from the
+/// gateway (the Layer-2/3 content-scan gate keeps running it as a synchronous, zero-cost
+/// backstop) and does NOT reduce coverage — the opposite: it corrects the ledger/coverage
+/// story to credit the tool that actually covers the class broadly, per the W3 plan's
+/// "retire or demote the shape-fitted regex" directive.
+///
+/// Scoped to a named allowlist (not a global channel reorder) because several OTHER
+/// gateway-registry rules (e.g. `SEC-NO-HARDCODED-SECRETS-1`'s entropy-aware secret scan)
+/// are NOT shape-fitted and are the better detector of the two — reordering globally would
+/// wrongly demote a stronger native check in favor of a weaker generic pattern rule.
+pub const REGEX_DEMOTED_FOR_SEMGREP: &[&str] = &["SEC-NO-RAW-SQL-CONCAT-1"];
 
 /// Every rule id in `corpus` that declares `enforcement = "mechanical"` but resolves to NONE
 /// of the four wired-detector channels (see module doc). Sorted for stable, readable test
@@ -125,6 +167,11 @@ pub fn mechanical_rules_missing_detector(corpus: &camerata_rules::RuleSet) -> Ve
 /// needs (the list itself must not go stale once an id is actually fixed). Only read from
 /// this module's own tests (see the `has_preview_tool_source` doc comment for why that's
 /// marked the same way).
+///
+/// W3 (commodity-class taint layer) removed `RUBY-AVOID-EVAL-SEND-1`: it now resolves via
+/// channel 3 (`camerata.security.taint-ruby-eval-send`, a real taint-mode detector — see
+/// `assets/semgrep-rules/taint-security.yml`), closing the gap where it declared a Brakeman
+/// integration Camerata never actually ran.
 #[cfg_attr(not(test), allow(dead_code))]
 const KNOWN_PRE_W1_MECHANICAL_GAPS: &[&str] = &[
     "CICD-CODEQL-SECURITY-SCAN-1",
@@ -153,7 +200,6 @@ const KNOWN_PRE_W1_MECHANICAL_GAPS: &[&str] = &[
     "JAVASCRIPT-TESTING-NAMING-1",
     "JAVASCRIPT-TESTING-NO-DISABLED-TESTS-1",
     "JAVASCRIPT-TESTING-UNIT-COLOCATION-1",
-    "RUBY-AVOID-EVAL-SEND-1",
     "RUBY-FROZEN-STRING-LITERAL-1",
     "RUBY-RAILS-NO-SECRETS-IN-CODE-1",
     "RUBY-RAILS-STRONG-PARAMS-1",
@@ -167,6 +213,66 @@ const KNOWN_PRE_W1_MECHANICAL_GAPS: &[&str] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// W3: `semgrep_covered_rule_ids` reads BOTH bundled rule files — a regression guard for
+    /// the exact bug this gate caught during W3 development (the function only read
+    /// `security.yml`, silently missing every id declared in the new `taint-security.yml`,
+    /// which made `RUBY-AVOID-EVAL-SEND-1` look like a NEW phantom even though a real taint
+    /// detector for it existed).
+    #[test]
+    fn semgrep_covered_rule_ids_includes_taint_file_ids() {
+        let ids = semgrep_covered_rule_ids();
+        assert!(
+            ids.contains("SEC-NO-RAW-SQL-CONCAT-1"),
+            "must include ids from taint-security.yml, not just security.yml"
+        );
+        assert!(ids.contains("RUBY-AVOID-EVAL-SEND-1"));
+        assert!(ids.contains("SEC-NO-COMMAND-INJECTION-1"));
+        assert!(ids.contains("SEC-NO-UNSAFE-HTML-SINK-1"));
+        assert!(ids.contains("SEC-NO-OPEN-REDIRECT-1"));
+    }
+
+    /// W3: `SEC-NO-RAW-SQL-CONCAT-1` is in [`REGEX_DEMOTED_FOR_SEMGREP`], and
+    /// `detector_channel` resolves it to `"semgrep"` (not `"gateway_rule_registry"`) once
+    /// semgrep covers it — the regex is demoted from "detector of record" even though
+    /// `camerata_gateway::lookup_arm` still answers this id (the gate keeps running it as a
+    /// fast in-loop backstop; see [`REGEX_DEMOTED_FOR_SEMGREP`]'s doc comment).
+    #[test]
+    fn sql_concat_regex_is_demoted_in_favor_of_semgrep_channel() {
+        assert!(REGEX_DEMOTED_FOR_SEMGREP.contains(&"SEC-NO-RAW-SQL-CONCAT-1"));
+        // Sanity: the gateway arm still exists (we did not remove the backstop).
+        assert!(
+            camerata_gateway::lookup_arm("SEC-NO-RAW-SQL-CONCAT-1").is_some(),
+            "the in-loop regex backstop must still be wired, just no longer primary"
+        );
+        let checker_ids: HashSet<&str> = HashSet::new();
+        let semgrep_ids: HashSet<&str> = ["SEC-NO-RAW-SQL-CONCAT-1"].into_iter().collect();
+        assert_eq!(
+            detector_channel("SEC-NO-RAW-SQL-CONCAT-1", &checker_ids, &semgrep_ids, None),
+            Some("semgrep"),
+            "must prefer the semgrep channel over the gateway rule registry for this id"
+        );
+    }
+
+    /// A rule NOT in [`REGEX_DEMOTED_FOR_SEMGREP`] that ALSO has both a gateway arm and a
+    /// semgrep mapping keeps the ORIGINAL precedence (gateway registry first) — the demotion
+    /// is scoped to the named allowlist, never a global channel reorder.
+    #[test]
+    fn non_demoted_rule_keeps_gateway_registry_precedence() {
+        let checker_ids: HashSet<&str> = HashSet::new();
+        let semgrep_ids: HashSet<&str> = ["SEC-NO-HARDCODED-SECRETS-1"].into_iter().collect();
+        assert!(camerata_gateway::lookup_arm("SEC-NO-HARDCODED-SECRETS-1").is_some());
+        assert_eq!(
+            detector_channel(
+                "SEC-NO-HARDCODED-SECRETS-1",
+                &checker_ids,
+                &semgrep_ids,
+                None
+            ),
+            Some("gateway_rule_registry"),
+            "a non-demoted rule must keep its original channel precedence"
+        );
+    }
 
     /// The CI-time gate: every `mechanical` corpus rule must have a real detector, OR be an
     /// already-tracked, pre-existing gap (see [`KNOWN_PRE_W1_MECHANICAL_GAPS`]). This is a

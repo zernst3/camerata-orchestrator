@@ -1244,6 +1244,46 @@ mod tests {
         assert_eq!(f[0].preview_tool.as_deref(), Some("semgrep"));
     }
 
+    /// W3 (commodity-class taint layer): a SYNTHETIC semgrep SARIF payload for one of the new
+    /// taint rule ids — exactly the shape semgrep emits with an absolute `--config` path —
+    /// parses into a preview `Finding` with the clean, portable rule id and external-tool
+    /// provenance. No semgrep binary required; this is the ingestion/mapping unit test the W3
+    /// plan calls for.
+    #[test]
+    fn parse_sarif_ingests_a_synthetic_taint_sqli_finding() {
+        let sarif = r#"{
+          "version": "2.1.0",
+          "runs": [{
+            "results": [{
+              "ruleId": "Users.alice.camerata.tooling.semgrep-rules.camerata.security.taint-sql-injection-go",
+              "level": "error",
+              "message": { "text": "Possible SQL injection (taint)." },
+              "locations": [{
+                "physicalLocation": {
+                  "artifactLocation": { "uri": "internal/db.go" },
+                  "region": { "startLine": 88 }
+                }
+              }]
+            }]
+          }]
+        }"#;
+        let f = parse_sarif("me/svc", ScanTool::Semgrep, sarif).unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(
+            f[0].rule_id, "camerata.security.taint-sql-injection-go",
+            "path prefix must be stripped"
+        );
+        assert_eq!(f[0].path, "internal/db.go");
+        assert_eq!(f[0].line, 88);
+        assert_eq!(f[0].severity, "high");
+        // External-tool provenance — never our own deterministic tier.
+        assert!(
+            f[0].preview,
+            "must carry preview=true (external-tool), never our own tier"
+        );
+        assert_eq!(f[0].preview_tool.as_deref(), Some("semgrep"));
+    }
+
     #[test]
     fn parse_sarif_normalizes_path_prefixed_semgrep_rule_id() {
         // When semgrep is invoked with an absolute --config path, it prefixes
@@ -1796,5 +1836,192 @@ mod tests {
         assert!(ok);
         assert!(stdout.contains("hello"));
         assert!(stdout.contains("world"));
+    }
+
+    // ── W3: commodity-class taint layer — shape-variant SQLi corpus ──────────────────────
+    //
+    // The bundled taint-mode rule family (`assets/semgrep-rules/taint-security.yml`) is
+    // validated two ways:
+    //
+    // 1. SYNTHETIC tool-output fixtures (immediately below) — no semgrep binary required,
+    //    always runs, exercises the SAME ingestion path (`parse_sarif`) the live pass uses.
+    // 2. A LIVE end-to-end run against the real `semgrep` binary and the bundled YAML,
+    //    gated on binary presence (mirrors `report_export.rs`'s `which_typst()` gate for the
+    //    PDF tests) — skips with a message rather than failing when semgrep isn't on PATH.
+
+    /// Best-effort `semgrep` presence check for the live-run test's skip gate. Mirrors
+    /// `report_export.rs`'s `which_typst()`: a synchronous, side-effect-free PATH probe.
+    fn which_semgrep() -> Option<()> {
+        std::process::Command::new("semgrep")
+            .arg("--version")
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|_| ())
+    }
+
+    /// Synthetic SARIF fixtures standing in for what a real semgrep run over the bundled
+    /// taint-security.yml would emit for the shape-variant SQLi corpus — one entry per
+    /// syntax shape, plus three safe twins that must NEVER appear in real semgrep output
+    /// (asserted by the live test below, when it runs). Exercises `parse_sarif` +
+    /// `normalize_semgrep_rule_id` exactly as the live pass's ingestion path does, with NO
+    /// semgrep binary required — this always runs.
+    #[test]
+    fn synthetic_shape_variant_sqli_fixtures_ingest_correctly() {
+        fn sarif_result(rule_id: &str, path: &str, line: usize) -> serde_json::Value {
+            serde_json::json!({
+                "ruleId": rule_id,
+                "level": "error",
+                "message": { "text": "Possible SQL injection (taint)." },
+                "locations": [{
+                    "physicalLocation": {
+                        "artifactLocation": { "uri": path },
+                        "region": { "startLine": line }
+                    }
+                }]
+            })
+        }
+        // 7 distinct unsafe shapes (single-quoted, double-quoted, f-string/template literal,
+        // %-format, multi-segment concat, intermediate-variable-then-execute, driver raw
+        // method) — the exact shapes the old double-quote-only regex could never cover.
+        let unsafe_shapes = [
+            ("src/a.py", 2, "double-quoted concatenation"),
+            ("src/b.py", 2, "single-quoted concatenation"),
+            ("src/c.py", 2, "f-string interpolation"),
+            ("src/d.py", 2, "%-format interpolation"),
+            ("src/e.py", 3, "intermediate variable then execute"),
+            ("src/f.py", 4, "multi-segment concatenation"),
+            ("src/g.py", 2, "driver .raw() unsafe method"),
+        ];
+        let results: Vec<serde_json::Value> = unsafe_shapes
+            .iter()
+            .map(|(path, line, _desc)| {
+                sarif_result(
+                    "Users.ci.camerata.tooling.semgrep-rules.camerata.security.taint-sql-injection-python",
+                    path,
+                    *line,
+                )
+            })
+            .collect();
+        let sarif = serde_json::json!({
+            "version": "2.1.0",
+            "runs": [{ "results": results }]
+        })
+        .to_string();
+
+        let findings = parse_sarif("me/svc", ScanTool::Semgrep, &sarif).expect("must parse");
+        assert_eq!(
+            findings.len(),
+            unsafe_shapes.len(),
+            "every unsafe shape must ingest as its own finding"
+        );
+        for (f, (path, line, desc)) in findings.iter().zip(unsafe_shapes.iter()) {
+            assert_eq!(
+                f.rule_id, "camerata.security.taint-sql-injection-python",
+                "{desc}: id must normalize"
+            );
+            assert_eq!(&f.path, path, "{desc}");
+            assert_eq!(f.line, *line, "{desc}");
+            assert!(
+                f.preview && f.preview_tool.as_deref() == Some("semgrep"),
+                "{desc}: external-tool provenance"
+            );
+        }
+        // Safe twins (parameterized query, tagged template / constant string) are simply
+        // ABSENT from a real tool's output — nothing to parse, nothing to assert beyond "the
+        // ingestion path doesn't invent findings that aren't in the input", which the exact
+        // `findings.len()` assertion above already proves.
+    }
+
+    /// LIVE end-to-end run: the REAL `semgrep` binary against the bundled
+    /// `taint-security.yml`, over a small shape-variant SQLi corpus written to a temp dir
+    /// (synthetic fixtures — never reads from the repo's own test corpus). Skips gracefully
+    /// when semgrep is not on PATH, per [`which_semgrep`].
+    #[tokio::test]
+    async fn live_semgrep_detects_shape_variant_sqli_and_spares_safe_twins() {
+        if which_semgrep().is_none() {
+            eprintln!(
+                "skipping live_semgrep_detects_shape_variant_sqli_and_spares_safe_twins: \
+                 semgrep not on PATH"
+            );
+            return;
+        }
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let src = r#"
+def get_user_dquote(user_id):
+    cursor.execute("SELECT * FROM users WHERE id = " + user_id)
+
+def get_user_squote(user_id):
+    cursor.execute('SELECT * FROM users WHERE id = ' + user_id)
+
+def get_user_fstring(user_id):
+    cursor.execute(f"SELECT * FROM users WHERE id = {user_id}")
+
+def get_user_percent(user_id):
+    cursor.execute("SELECT * FROM users WHERE id = %s" % user_id)
+
+def get_user_intermediate(user_id):
+    query = f"SELECT * FROM users WHERE id = {user_id}"
+    cursor.execute(query)
+
+def get_user_multisegment(user_id):
+    q1 = "SELECT * FROM users WHERE id = " + user_id
+    q2 = q1 + " AND active = 1"
+    cursor.execute(q2)
+
+def get_user_safe_param(user_id):
+    cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+
+def get_user_safe_constant():
+    cursor.execute("SELECT * FROM users")
+"#;
+        std::fs::write(dir.path().join("t1.py"), src).expect("write fixture");
+
+        let rules_dir = crate::tool_provisioning::bundled_semgrep_rules_dir();
+        let config = rules_dir.join("taint-security.yml");
+        assert!(
+            config.exists(),
+            "bundled taint-security.yml must exist at {}",
+            config.display()
+        );
+
+        let (stdout, _ok) = run_capture_stdout(
+            dir.path(),
+            "semgrep",
+            &[
+                "--sarif",
+                "--config",
+                config.to_str().expect("utf8 path"),
+                "--quiet",
+                ".",
+            ],
+            None,
+        )
+        .await
+        .expect("semgrep must run");
+
+        let findings = parse_sarif("me/svc", ScanTool::Semgrep, &stdout).expect("must parse SARIF");
+        let lines: std::collections::HashSet<usize> = findings
+            .iter()
+            .filter(|f| f.rule_id == "camerata.security.taint-sql-injection-python")
+            .map(|f| f.line)
+            .collect();
+
+        // The 6 unsafe shapes (dquote, squote, fstring, percent, intermediate-var,
+        // multi-segment) each produce a finding on their `cursor.execute(...)` line.
+        for line in [2, 5, 8, 11, 15, 20] {
+            assert!(
+                lines.contains(&line),
+                "unsafe shape at line {line} must be flagged, got lines: {lines:?}"
+            );
+        }
+        // The 2 safe twins (parameterized query, constant string) must NEVER be flagged.
+        for line in [23, 26] {
+            assert!(
+                !lines.contains(&line),
+                "safe twin at line {line} must NOT be flagged, got lines: {lines:?}"
+            );
+        }
     }
 }

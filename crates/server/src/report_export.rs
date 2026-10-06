@@ -1380,12 +1380,35 @@ fn is_external_source_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
+/// Join `rule_id` against `corpus`, falling back to the W3 grounding map
+/// (`crate::semgrep_floor_category`) when `rule_id` is an external tool's OWN rule id
+/// (e.g. `camerata.security.taint-sql-injection-python`) rather than one of our corpus
+/// ids. This is the single place "which corpus TOML entry supplies this finding's
+/// citation/remediation/effort" is decided, so `resolve_citation`, `resolve_fix`, and
+/// `resolve_effort` can't drift from each other on what "grounded" means for a preview
+/// finding. The finding's OWN `rule_id` (and `preview_tool`) are never touched by this —
+/// only which corpus rule's authored facts get joined in.
+///
+/// A direct hit (`rule_id` IS a corpus id) always wins over the grounding map, so this
+/// is fully backward compatible with every existing call site that already passes a
+/// corpus id directly (e.g. `resolve_citation("SEC-NO-RAW-SQL-CONCAT-1", ...)`).
+pub(crate) fn corpus_rule_for<'c>(
+    rule_id: &str,
+    corpus: Option<&'c camerata_rules::RuleSet>,
+) -> Option<&'c camerata_rules::Rule> {
+    corpus.and_then(|c| {
+        c.get_by_id(rule_id).or_else(|| {
+            crate::semgrep_floor_category(rule_id).and_then(|grounded_id| c.get_by_id(grounded_id))
+        })
+    })
+}
+
 pub(crate) fn resolve_citation(
     rule_id: &str,
     preview_tool: Option<&str>,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> CitationJson {
-    if let Some(rule) = corpus.and_then(|c| c.get_by_id(rule_id)) {
+    if let Some(rule) = corpus_rule_for(rule_id, corpus) {
         let sources: Vec<CitationSourceJson> = rule
             .sources
             .iter()
@@ -1758,7 +1781,7 @@ pub(crate) fn resolve_fix(
     finding: &Finding,
     chosen_option: Option<&str>,
 ) -> Option<String> {
-    let rule = corpus.and_then(|c| c.get_by_id(rule_id))?;
+    let rule = corpus_rule_for(rule_id, corpus)?;
     let evaluated = finding.evaluated_option_id.as_deref().or(chosen_option);
     let option = rule.resolved_option(evaluated)?;
     let remediation = option.remediation.as_deref()?.trim();
@@ -2956,8 +2979,7 @@ pub(crate) fn resolve_effort(
     chosen_option: Option<&str>,
 ) -> Option<String> {
     f.effort.clone().or_else(|| {
-        corpus
-            .and_then(|c| c.get_by_id(rule_id))
+        corpus_rule_for(rule_id, corpus)
             .and_then(|rule| rule.resolved_option(chosen_option))
             .and_then(|opt| opt.effort.clone())
     })
@@ -6363,6 +6385,84 @@ mod tests {
             .find(|g| g.rule_id == "SEC-NO-RAW-SQL-CONCAT-1")
             .expect("SEC-NO-RAW-SQL-CONCAT-1 must be curated, not held out as uncited");
         assert_eq!(group.citation.kind, "grounded");
+    }
+
+    /// W3 (commodity-class taint layer) grounded-mapping test: a SYNTHETIC external-tool
+    /// finding whose OWN rule id is the semgrep taint rule's id (not a corpus id) still
+    /// resolves to OUR grounded citation (CWE-89/OWASP), OUR authored remediation, and never
+    /// loses its external-tool provenance (`preview = true`, `preview_tool = Some("semgrep")`)
+    /// — it must never render as our own deterministic tier, and never borrow a citation from
+    /// an unrelated rule.
+    #[tokio::test]
+    async fn taint_sqli_tool_rule_id_resolves_through_the_grounding_map() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+
+        let mut f = finding(
+            "camerata.security.taint-sql-injection-go",
+            "internal/db.go",
+            88,
+            "high",
+        );
+        f.preview = true;
+        f.preview_tool = Some("semgrep".to_string());
+
+        let citation = resolve_citation(&f.rule_id, f.preview_tool.as_deref(), Some(&corpus));
+        assert_eq!(
+            citation.kind, "grounded",
+            "a taint rule's OWN (non-corpus) rule id must still resolve to a grounded citation \
+             via the grounding map, got: {citation:?}"
+        );
+        assert!(
+            citation
+                .sources
+                .iter()
+                .any(|s| s.url.contains("cwe.mitre.org/data/definitions/89")),
+            "must cite CWE-89 (the SAME citation SEC-NO-RAW-SQL-CONCAT-1 cites), got: {:?}",
+            citation.sources
+        );
+
+        let fix = resolve_fix(&f.rule_id, Some(&corpus), &f, None);
+        assert!(
+            fix.is_some_and(|s| !s.trim().is_empty()),
+            "must resolve OUR authored remediation via the grounding map"
+        );
+
+        // Provenance stays honest: never promoted to our own deterministic tier.
+        assert!(
+            f.preview,
+            "grounding a citation must never flip preview to false"
+        );
+        assert_eq!(
+            f.preview_tool.as_deref(),
+            Some("semgrep"),
+            "grounding a citation must never clear preview_tool (never 'our own tier')"
+        );
+
+        // End-to-end: the curated-set builder renders it grounded too, not advisory.
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let group = json
+            .curated_findings
+            .iter()
+            .find(|g| g.rule_id == "camerata.security.taint-sql-injection-go")
+            .expect("must be curated, not held out as uncited");
+        assert_eq!(group.citation.kind, "grounded");
+    }
+
+    /// A tool rule id with NO grounding mapping at all (an unrecognized id) must still fall
+    /// back to the honest generic "preview" label — the grounding map is additive, it never
+    /// makes an ungrounded id LOOK grounded.
+    #[test]
+    fn ungrounded_tool_rule_id_still_falls_back_to_preview_label() {
+        let citation =
+            resolve_citation("camerata.security.some-future-rule", Some("semgrep"), None);
+        assert_eq!(citation.kind, "preview");
+        assert!(citation.label.contains("semgrep"));
     }
 
     /// A clean repo (no floor findings at all) must still render without panicking, with an
