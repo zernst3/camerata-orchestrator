@@ -1,0 +1,101 @@
+id = "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1"
+title = "A SECURITY DEFINER function that returns rows filtered only by its own caller-supplied parameter, and is granted EXECUTE to anon/public/authenticated, must check that id against the caller's identity"
+tag = "stack"
+domain = "supabase:database-functions"
+# General Postgres/PostgREST, not just Supabase: a SECURITY DEFINER function that reads data
+# filtered by a caller-controlled key, with no check tying that key to the caller's own
+# identity, is exploitable in any Postgres database exposed through PostgREST (or any RPC layer
+# that calls functions on the caller's behalf). `extra_domains` (crates/rules/src/lib.rs) is the
+# general mechanism (identical to this folder's siblings SUPABASE-FUNC-SEARCH-PATH-1,
+# SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1, and SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1): this rule
+# stays filed under supabase/database-functions/ (keeping its existing supabase:* grouping/
+# behavior), but ALSO matches any repo whose stack carries the `sql` domain.
+extra_domains = ["sql"]
+layer = "platform"
+enforcement = "architectural"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a statement-splitter-aware scan over CREATE FUNCTION/PROCEDURE bodies correlated against GRANT EXECUTE statements anywhere in the same scanned SQL corpus (the same cross-file correlation SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1 and SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1 already depend on): a function declared SECURITY DEFINER, with at least one declared parameter, whose body contains no standalone INSERT/UPDATE/DELETE/TRUNCATE/MERGE statement (the sibling SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1 owns that WRITE shape), that is GRANTed EXECUTE to anon/public/authenticated, whose body contains an equality comparison between a column and one of the function's OWN declared parameters, and whose body contains none of the recognized authorization-predicate idioms (auth.uid()/auth.jwt()/current_user/session_user/a JWT-claims read, a role-or-ownership-check function CALL, or a shared-secret/signature CALL-or-comparison) is flagged. This is deterministic once a function body is isolated as a whole and its signature/parameters/grants are known facts about the same scanned corpus, and the match-set has a documented, bounded false-negative surface (a predicate's mere presence anywhere in the body is accepted as evidence of gating, without verifying it actually guards the specific read; no attempt to infer whether the matched parameter is specifically a tenant/parent/owner id as opposed to some other caller-supplied filter) rather than an unbounded false-positive one — making this a floor-tier candidate on the same statement-splitter infrastructure its siblings already depend on. Conformance holds when every SECURITY DEFINER function that returns rows filtered by a caller-supplied parameter, reachable by a broad grant, also checks that parameter against the caller's own identity, role, or a shared secret before returning rows."
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/639.html"
+title = "CWE-639: Authorization Bypass Through User-Controlled Key"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/863.html"
+title = "CWE-863: Incorrect Authorization"
+
+[[sources]]
+url = "https://supabase.com/docs/guides/database/functions#security-definer-vs-invoker"
+title = "Supabase docs — Database Functions: SECURITY DEFINER runs with the privileges of the user that created it, bypassing the caller's own row-level security"
+
+[decision]
+question = "Must a SECURITY DEFINER function that returns rows filtered only by a caller-supplied parameter, and is granted EXECUTE to anon/public/authenticated, check that parameter against the caller's own identity before returning rows?"
+default = "require-caller-identity-check-in-privileged-cross-tenant-reads"
+why = """
+A SECURITY DEFINER function bypasses Row Level Security exactly the same way whether it reads or
+writes — Supabase's own documentation is explicit that it "runs with the privileges of the user
+that created it," regardless of who calls it. SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1 already covers
+the WRITE half of that: a mutating, broadly-granted SECURITY DEFINER function with no identity
+check. The READ half is the same defect in a different shape and CWE's own taxonomy names it
+separately: CWE-639 (Authorization Bypass Through User-Controlled Key) describes exactly a
+function that uses a caller-supplied key (here, a tenant/parent/owner id passed as a plain
+parameter) to select a resource, without verifying the caller is entitled to that specific key.
+Because the function runs as SECURITY DEFINER, the RLS policies that would otherwise constrain
+which rows a direct table query could return never run — the function's own body is the only
+place such a check can happen, and if it's absent, any caller who can invoke the function at all
+(granted via `anon`, `public`, or `authenticated` — Supabase/PostgREST's own broad roles) can
+substitute ANY id and read another tenant's, owner's, or user's rows.
+
+This is functionally identical to the IDOR (Insecure Direct Object Reference) class of defect in
+application code, except the bypass happens INSIDE the database rather than in a web handler —
+and, as with the WRITE-shape sibling rule, a UI/client-side check that merely avoids RENDERING a
+button for another tenant's data is never a substitute: the PostgREST RPC endpoint reaches the
+function directly regardless of what any UI does or does not show.
+
+The same three authorization-predicate shapes the WRITE-shape sibling rule accepts are accepted
+here for the identical reason — they are genuine server-side checks that make the caller-supplied
+id's relationship to the caller provable before data is returned: a session/JWT identity read
+compared against an owner/tenant column, a role/ownership/permission-check function CALL, or a
+caller-supplied shared secret/signature compared against a stored value.
+"""
+
+[[option]]
+id = "require-caller-identity-check-in-privileged-cross-tenant-reads"
+label = "Flag a SECURITY DEFINER read filtered by its own parameter, granted to anon/public/authenticated, with no identity/role/ownership/secret check in its body"
+directive = """
+Parse each CREATE FUNCTION/PROCEDURE body as a whole and correlate it against every GRANT EXECUTE
+statement in the same scanned SQL corpus. When a function is declared SECURITY DEFINER, has at
+least one declared parameter, its body contains no standalone INSERT/UPDATE/DELETE/TRUNCATE/MERGE
+statement, it is GRANTed EXECUTE to anon, public, or authenticated, its body equates a column
+against one of its own declared parameters, and its body contains none of the recognized
+authorization-predicate idioms, emit a finding: "This SECURITY DEFINER function returns rows
+filtered only by a caller-supplied parameter and is reachable by a broad role, but never checks
+that parameter against who the caller is — any caller matching the grant can substitute any id and
+read another tenant's or user's rows." Severity is High. Remediation, in priority order: (1) add a
+server-side identity check at the top of the function body before returning rows (e.g. `if
+auth.uid() <> (select owner_id from <table> where id = p_id) then raise exception ...;`); (2)
+derive the filtering id from `auth.uid()` directly instead of accepting it as a caller-supplied
+parameter at all, when the function is only ever meant to return the CALLER's own rows.
+"""
+remediation = """
+For `<function-name>`, add a server-side identity check as the FIRST statement in the function
+body, before returning any rows: compare `auth.uid()` (or `current_user`/`session_user`, or a
+custom JWT claim read via `current_setting('request.jwt.claims', true)`) against the row's
+owner/tenant column for the id supplied, and `raise exception` on mismatch — or call a role-check
+helper (e.g. `has_role(auth.uid(), 'admin')`) and `raise exception` when it returns false. If the
+function is only ever meant to return the CALLER's own data, consider deriving the id from
+`auth.uid()` directly instead of accepting it as a parameter, removing the substitution risk
+entirely. A UI-only disable/hide of the triggering control is never sufficient — the function is
+still reachable directly via the PostgREST RPC endpoint regardless of what the UI renders. Verify
+by confirming a direct RPC call supplying an id the caller does not own is rejected before any row
+is returned.
+"""
+effort = "medium"
+why = "Postgres already has the primitives this fix needs (auth.uid()/current_user/session_user, a role-check function, or deriving the id from the caller's own claims) — the fix is adding one guard clause (or removing the parameter entirely), not introducing new infrastructure."
+
+[[option]]
+id = "flag-every-security-definer-read-regardless-of-grant-or-body"
+label = "Flag every SECURITY DEFINER read-only function, regardless of grants, parameters, or body contents"
+directive = "Treat the mere presence of a SECURITY DEFINER read as report-worthy, without checking whether it filters by a caller-supplied parameter, is broadly granted, or already contains an authorization check."
+why = "Rejected: most SECURITY DEFINER read-only functions take no caller-supplied filtering parameter at all, are not granted to a broad role, or already check the caller's identity — flagging all of them indiscriminately would bury the small number of genuinely cross-tenant-reachable functions in noise, training the reader to ignore this rule's findings entirely. The caller-controlled-key shape (a parameter equated against a result column, with no identity check) is the actual CWE-639 vulnerability condition, not SECURITY DEFINER or even a WHERE-filtered read by itself."
