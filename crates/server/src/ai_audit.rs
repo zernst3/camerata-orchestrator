@@ -331,6 +331,16 @@ CRITICAL — do NOT invent rule names that duplicate adopted rules. Before you s
 
 Flagging novel issues (issues no adopted rule covers) is GATED by this pass's instruction line. ONLY when that line says to "ALSO flag any other genuine issues" may you report something outside the adopted rules — and then set `rule` to a short kebab name (e.g. "auth-on-write-paths"), reserved strictly for genuinely-novel issues (if any adopted rule fits, use the adopted id instead). When the instruction line says to check ONLY the listed rules, report nothing outside them.
 
+CROSS-FILE REASONING IS YOUR MANDATE. Every other automated check in this pipeline (the deterministic floor, every external static-analysis tool) reads ONE FILE AT A TIME — you are the only layer with the REPO MAP and multiple file bodies at once, so tracing an invariant ACROSS files is work no other layer can do. Three mechanisms to actively look for, by name, regardless of which specific rule (if any) they end up filed under:
+- CONFIG-TO-HANDLER: a platform/feature flag or config value set in one file (verification disabled, a check short-circuited, a debug/bypass mode left on) that a handler or privileged code path in ANOTHER file reads and trusts, with no independent check of its own.
+- POLICY-TO-CALL-SITE: a permissive access/data policy (a wide-open rule, a default-allow, an overly broad grant) declared in one place, and code elsewhere that relies on that policy as its only protection.
+- CREDENTIAL-TO-USAGE: a secret or credential defined or loaded in one file and consumed by code in one or more OTHER files — trace where it is actually used, not just where it is declared.
+If deciding one of these needs the body of a file you don't have, use `needs_files` (see below) rather than guessing or staying silent about it.
+
+COMPENSATING CONTROLS — before flagging a missing check on any path, ask: is there ANY compensating check elsewhere on this same path — a signature or HMAC verification, a shared-secret comparison, a session-derived identity check, an ownership predicate, a role/permission gate? If you can find one (in the file at hand, the repo map, or another file body you have), do NOT flag it — a report that ignores a real compensating control is itself a false positive. Only flag the path when you looked and found none.
+
+BACKSTOP ROLE — a missing rule is never a reason to withhold a real finding. When your own reasoning (especially the cross-file mechanisms above) turns up a genuine security-relevant observation that doesn't fit any adopted rule, report it exactly like any other novel issue — subject to the SAME instruction-line gate described above, never silenced just because nothing named it in advance.
+
 DO NOT report: hardcoded secrets, secrets embedded in URLs, raw SQL string concatenation, or path-escape writes — a separate deterministic scanner already covers those precisely. Do not report pure style/formatting nits.
 
 Each line in the digest is prefixed with its line number as `NNNN| `. Cite that exact number in `line` — do not estimate.
@@ -712,6 +722,12 @@ Do NOT deduplicate, and do NOT cross-reference other findings — no "same as [N
 of [N]", "as index N", "index N", "row N", or ANY pointer to another finding by index/row.
 Deduplication already happened upstream; your `reason` is one line about THIS finding's
 severity/confidence only, with no reference to any other finding.
+
+A finding whose rule id you don't recognize as a named convention is NOT automatically less
+credible — it is the audit's BACKSTOP catching a genuine issue that no named rule happened to
+cover. Judge it purely on the evidence in its own `detail`/`snippet`, exactly like any other
+finding: do not discount its severity or confidence for being unnamed, and do not inflate it
+either. The absence of a rule id is not evidence of anything.
 
 Return ONLY JSON, no prose:
 {"verdicts":[{"index":0,"severity":"critical|high|medium|low","confidence":"high|low","effort":"low|medium|high","category":"authorization|authentication|secret-exposure|injection|transport-security|rls-policy|resource-exposure|input-validation|error-handling|arch-conformance|testing-style|performance","reason":"one line"}]}
@@ -9698,6 +9714,87 @@ mod tests {
                  high) so the model doesn't inflate ordinary findings"
             );
         }
+    }
+
+    /// W2: the standard audit prompt (the pass that runs on EVERY scan, not just the opt-in
+    /// deep tier) must explicitly own its cross-file mandate by name, the compensating-control
+    /// check, and the "report it even if no rule exists" backstop instruction — the three
+    /// pieces of guidance added to close the zero-row semantic-tier collapse. A string-
+    /// structure test (mirrors `shipped_template_footer_says_inspection_report_and_keeps_the_
+    /// advisory_caveat` in `report_export.rs`): it pins the WORDING contract so a future edit
+    /// can't quietly drop one of these clauses without a visible test failure.
+    #[test]
+    fn audit_system_prompt_owns_the_cross_file_mandate_and_compensating_control_check() {
+        let p = audit_system_prompt();
+
+        // The three cross-file mechanisms, named explicitly (never a repo-specific name).
+        assert!(
+            p.contains("CONFIG-TO-HANDLER"),
+            "must name the config-flag-to-privileged-handler mechanism"
+        );
+        assert!(
+            p.contains("POLICY-TO-CALL-SITE"),
+            "must name the permissive-policy-to-call-site mechanism"
+        );
+        assert!(
+            p.contains("CREDENTIAL-TO-USAGE"),
+            "must name the credential-defined-in-one-file-consumed-in-another mechanism"
+        );
+        assert!(
+            p.to_uppercase().contains("CROSS-FILE"),
+            "must call out cross-file reasoning as this pass's own mandate"
+        );
+
+        // The compensating-control question, with its concrete examples, and the never-flag-
+        // when-present instruction (the do-not-break invariant this work item must preserve).
+        assert!(
+            p.contains("COMPENSATING CONTROL") || p.contains("compensating check"),
+            "must instruct the model to check for a compensating control before flagging"
+        );
+        for example in [
+            "signature",
+            "shared-secret",
+            "session-derived identity",
+            "ownership predicate",
+        ] {
+            assert!(
+                p.to_lowercase().contains(example),
+                "compensating-control guidance must name \"{example}\" as a qualifying check: \
+                 {p}"
+            );
+        }
+        assert!(
+            p.contains("do NOT flag it") || p.contains("do NOT flag"),
+            "must explicitly instruct: do not flag when a compensating control is found"
+        );
+
+        // The explicit backstop clause: a missing rule is never a reason to withhold a finding.
+        assert!(
+            p.to_uppercase().contains("BACKSTOP"),
+            "must name the backstop role explicitly"
+        );
+        assert!(
+            p.contains("missing rule is never a reason") || p.contains("even if no rule"),
+            "must explicitly state that an unnamed/un-ruled issue must still be reported: {p}"
+        );
+    }
+
+    /// W2: the calibration prompt must not let an un-ruled (backstop) finding be quietly
+    /// discounted purely for lacking a named rule id — that would re-create the same silent
+    /// collapse one stage later (a real finding surviving parsing only to be devalued/dropped
+    /// at calibration for having no corpus id).
+    #[test]
+    fn verify_system_prompt_does_not_discount_an_unnamed_backstop_finding() {
+        let p = verify_system_prompt();
+        assert!(
+            p.contains("BACKSTOP"),
+            "calibration prompt must name the backstop role: {p}"
+        );
+        assert!(
+            p.to_lowercase().contains("not automatically less credible")
+                || p.to_lowercase().contains("do not discount"),
+            "calibration prompt must explicitly forbid discounting an un-ruled finding: {p}"
+        );
     }
 
     #[test]
