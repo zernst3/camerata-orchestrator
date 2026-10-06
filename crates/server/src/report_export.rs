@@ -984,6 +984,19 @@ pub struct HealthyRuleJson {
     pub citation: CitationJson,
 }
 
+/// W1: one rule the ledger confirms did NOT run this scan, with the real reason — the
+/// "excluded from this audit" section. Never a rule that merely wasn't SELECTED (this is
+/// populated only from `ScanLedger::excluded_rules`, which only ever carries rules the
+/// pipeline actually considered and then could not run).
+#[derive(Debug, Clone, Serialize)]
+pub struct ExcludedRuleJson {
+    pub rule_id: String,
+    pub title: String,
+    /// Why this rule did not run this scan (e.g. "declares mechanical/architectural
+    /// enforcement but has no wired detector", "AI/semantic review not requested this run").
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WhatsHealthyJson {
     /// Audited rules with zero real (non-FP) findings this run, capped (S6) at
@@ -1083,6 +1096,12 @@ pub struct AuditReportJson {
     /// bar for moving a GROUP here is "zero curated sites," not "any informational/held site."
     pub held_for_review_findings: Vec<CuratedGroupJson>,
     pub whats_healthy: WhatsHealthyJson,
+    /// W1: rules the ledger confirms did NOT run this scan, each with its real reason — the
+    /// "excluded from this audit" section. Empty whenever `report.ledger` carries no rule
+    /// data (pre-W1 reports / fixtures that never populate it) — see `has_rule_ledger_data`
+    /// in `build_report_json`. Sorted by rule id for stable output.
+    #[serde(default)]
+    pub rules_not_run: Vec<ExcludedRuleJson>,
     pub dependency_snapshot: DependencySnapshotJson,
     pub methodology: MethodologyJson,
     pub disclaimer: String,
@@ -3211,6 +3230,36 @@ pub fn build_report_json(
         }
     }
 
+    // ── W1: report-build-time ledger stage ────────────────────────────────────────
+    // `has_rule_ledger_data` gates every ledger-derived section below on whether `report`
+    // actually carries real per-rule facts (the live pipeline always populates these via
+    // `onboard::audit_repos`) — a report built before W1, or a test fixture that never
+    // touches `report.ledger`, falls back to the pre-W1 derivation so existing behavior is
+    // unchanged. `report_ledger` is a CLONE (this function stays pure/no-mutation of
+    // `report`) that additionally records THIS function's own row-accounting: every
+    // `code_finding` is either curated (do_now/do_next/plan/accepted), held, informational,
+    // excluded as a false positive, or carved into the dependency snapshot — see
+    // `StageAccounting::other` for the last two, which don't fit the four named buckets.
+    let has_rule_ledger_data = report.ledger.rules().next().is_some();
+    let mut report_ledger = report.ledger.clone();
+    {
+        let rows_in = candidates_reviewed;
+        let rows_out =
+            matrix.do_now.len() + matrix.do_next.len() + matrix.plan.len() + matrix.accepted.len();
+        let mut acc = crate::scan_ledger::StageAccounting {
+            routed_held: matrix.held.len(),
+            routed_informational: matrix.informational.len(),
+            ..Default::default()
+        };
+        acc.other
+            .push(("excluded_false_positive".to_string(), excluded_fp));
+        acc.other.push((
+            "dependency_snapshot_carve_out".to_string(),
+            dep_findings.len(),
+        ));
+        report_ledger.record_stage("report-build-partition", rows_in, rows_out, acc);
+    }
+
     // Curated findings: grouped by rule (sorted for deterministic output), each rule's
     // sites sorted by repo/path/line.
     #[allow(clippy::type_complexity)]
@@ -3606,9 +3655,19 @@ pub fn build_report_json(
             std::iter::once(f.rule_id.clone()).chain(f.also_matches.iter().cloned())
         })
         .collect();
-    let mut healthy_rules: Vec<HealthyRuleJson> = report
-        .provenance
-        .audited_rule_ids
+    // W1: "verified clean" is sourced from the LEDGER (`ran && findings_emitted == 0`) when
+    // the scan populated one — a rule the ledger knows did NOT run (e.g. the item-4 defect:
+    // declares mechanical enforcement with no wired detector) can never appear here just
+    // because it was merely SELECTED. `report.provenance.audited_rule_ids` (every selected
+    // rule, regardless of execution) remains the fallback for a report with no ledger data
+    // (pre-W1 persisted reports, or a test fixture that never populates `report.ledger`), so
+    // existing behavior is unchanged there.
+    let healthy_candidate_ids: Vec<String> = if has_rule_ledger_data {
+        report_ledger.healthy_rule_ids()
+    } else {
+        report.provenance.audited_rule_ids.clone()
+    };
+    let mut healthy_rules: Vec<HealthyRuleJson> = healthy_candidate_ids
         .iter()
         .filter(|rid| !rule_ids_with_any_finding.contains(rid.as_str()))
         .map(|rid| HealthyRuleJson {
@@ -3626,6 +3685,28 @@ pub fn build_report_json(
     });
     let further_clean_count = healthy_rules.len().saturating_sub(WHATS_HEALTHY_CAP);
     healthy_rules.truncate(WHATS_HEALTHY_CAP);
+
+    // ── W1: "excluded from this audit" — rules the ledger confirms did NOT run ───
+    // Only ever populated from the ledger (no pre-W1 fallback source exists for this new
+    // section — `excluded_mechanical_rules` is a different, pre-existing field with its own
+    // consumer (the Excel export) and is left untouched here).
+    let mut rules_not_run: Vec<ExcludedRuleJson> = if has_rule_ledger_data {
+        report_ledger
+            .excluded_rules()
+            .into_iter()
+            .map(|(rid, reason)| ExcludedRuleJson {
+                rule_id: rid.to_string(),
+                title: corpus
+                    .and_then(|c| c.get_by_id(rid))
+                    .map(|r| r.title.clone())
+                    .unwrap_or_else(|| rid.to_string()),
+                reason: reason.to_string(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    rules_not_run.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
 
     // ── §7 Dependency snapshot ─────────────────────────────────────────────────
     let dep_rows: Vec<DependencyFindingJson> = dep_findings
@@ -3726,7 +3807,30 @@ pub fn build_report_json(
     let dependency_advisories = dependency_snapshot.rows.len();
     // W6: never a silent omission — one explicit sentence per pass that failed/timed out
     // this scan, shared verbatim between the summary and the methodology below.
-    let failed_pass_notes = failed_pass_disclosures(&report.failed_passes);
+    // W1: fold in a disclosure for EVERY ledger integrity gap — every scan-time stage/rule
+    // `report.ledger` already carried PLUS this function's own just-recorded report-build-
+    // partition stage — deduped against whatever `report.failed_passes` already carries (the
+    // real pipeline, `onboard::audit_repos`, pushes scan-time disclosures there itself; a
+    // report built directly from a populated ledger, e.g. in tests, has none yet). Rides the
+    // SAME existing `FailedPass` mechanism as every other disclosure, rather than a parallel
+    // string list.
+    let mut failed_passes_for_report = report.failed_passes.clone();
+    let repo_label_for_ledger = report.repos.join(", ");
+    for stage in report_ledger.stages() {
+        if let Some(fp) = crate::scan_ledger::stage_disclosure(&repo_label_for_ledger, stage) {
+            if !failed_passes_for_report.contains(&fp) {
+                failed_passes_for_report.push(fp);
+            }
+        }
+    }
+    for rule in report_ledger.rules() {
+        if let Some(fp) = crate::scan_ledger::rule_disclosure(&repo_label_for_ledger, rule) {
+            if !failed_passes_for_report.contains(&fp) {
+                failed_passes_for_report.push(fp);
+            }
+        }
+    }
+    let failed_pass_notes = failed_pass_disclosures(&failed_passes_for_report);
     let (narrative, is_override) = match &opts.executive_summary_override {
         Some(text) if !text.trim().is_empty() => (text.clone(), true),
         _ => (
@@ -3902,6 +4006,7 @@ pub fn build_report_json(
             further_clean_count,
             dependency_clean,
         },
+        rules_not_run,
         dependency_snapshot,
         methodology,
         disclaimer: AUDIT_REPORT_DISCLAIMER.to_string(),
@@ -11129,6 +11234,176 @@ mod export_invariants_gate {
             rendered_blocks, cover_total,
             "the cover severity strip must tally exactly as many rows as actually got a \
              rendered block — never a count computed independently of what rendered"
+        );
+    }
+
+    // ── W1: pipeline-integrity ledger invariants ───────────────────────────────────────────
+    // 12. Ledger-sourced coverage: a rule the ledger confirms did NOT run can never appear in
+    //     "What's healthy"; a rule that genuinely fired can never appear in either "healthy"
+    //     or "excluded from this audit"; and a fully-reconciled scan (every stage's rows_in ==
+    //     rows_out + accounted) never emits a "pipeline integrity" disclosure. Traces to W1
+    //     (docs/plans — the pipeline-integrity ledger): rules that never ran being reported as
+    //     "verified clean" while the selector's own evidence described the violation.
+    #[tokio::test]
+    async fn ledger_sourced_healthy_and_excluded_never_overlap_and_a_reconciled_scan_discloses_nothing(
+    ) {
+        let f_fired = finding(
+            "ARCH-STRICT-LAYERING-1",
+            "demo/portal",
+            "apps/api/src/handlers/users.rs",
+            12,
+            "high",
+        );
+        let mut report = report_with(vec![f_fired], vec![]);
+
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        // Genuinely ran, zero findings -> healthy.
+        ledger.record_rule(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            true,
+            None,
+            40,
+            0,
+        );
+        // Genuinely ran AND fired (matches the one real Finding above) -> neither healthy nor
+        // excluded.
+        ledger.record_rule(
+            "ARCH-STRICT-LAYERING-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            true,
+            None,
+            40,
+            1,
+        );
+        // The W1-item-4 defect shape: declared mechanical, no wired detector -> excluded with
+        // a reason, never healthy.
+        ledger.record_rule(
+            "PYTHON-PARAMETERIZED-SQL-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            false,
+            Some(
+                "declares mechanical/architectural enforcement but has no wired detector"
+                    .to_string(),
+            ),
+            0,
+            0,
+        );
+        // A fully-accounted stage (e.g. a merge that absorbed one row into the fired primary)
+        // — rows_in == rows_out + merged, so unaccounted == 0.
+        let mut acc = crate::scan_ledger::StageAccounting::default();
+        acc.push_merge("AI-SOME-INVENTED-ID-1", "ARCH-STRICT-LAYERING-1");
+        ledger.record_stage("cross-family-merge", 2, 1, acc);
+        report.ledger = ledger;
+
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+
+        let healthy_ids: std::collections::HashSet<&str> = json
+            .whats_healthy
+            .rules
+            .iter()
+            .map(|r| r.rule_id.as_str())
+            .collect();
+        let excluded_ids: std::collections::HashSet<&str> = json
+            .rules_not_run
+            .iter()
+            .map(|r| r.rule_id.as_str())
+            .collect();
+
+        assert!(
+            healthy_ids.contains("SEC-NO-HARDCODED-SECRETS-1"),
+            "a rule that ran with zero findings must be healthy: {healthy_ids:?}"
+        );
+        assert!(
+            !healthy_ids.contains("PYTHON-PARAMETERIZED-SQL-1"),
+            "a rule the ledger says did NOT run must never be healthy: {healthy_ids:?}"
+        );
+        assert!(
+            excluded_ids.contains("PYTHON-PARAMETERIZED-SQL-1"),
+            "a not-run rule must appear in excluded-from-this-audit with its reason: {:?}",
+            json.rules_not_run
+        );
+        let python_entry = json
+            .rules_not_run
+            .iter()
+            .find(|r| r.rule_id == "PYTHON-PARAMETERIZED-SQL-1")
+            .expect("present per the assertion above");
+        assert!(
+            python_entry.reason.contains("no wired detector"),
+            "the excluded entry must carry the REAL reason, not a placeholder: {:?}",
+            python_entry.reason
+        );
+        assert!(
+            !healthy_ids.contains("ARCH-STRICT-LAYERING-1")
+                && !excluded_ids.contains("ARCH-STRICT-LAYERING-1"),
+            "a rule that genuinely fired must appear in neither healthy nor excluded: \
+             healthy={healthy_ids:?} excluded={excluded_ids:?}"
+        );
+        assert!(
+            healthy_ids.is_disjoint(&excluded_ids),
+            "no rule id may EVER appear in both healthy and excluded: healthy={healthy_ids:?} \
+             excluded={excluded_ids:?}"
+        );
+
+        // A fully-reconciled scan (every stage's rows_in == rows_out + accounted, which this
+        // fixture's single merge stage satisfies by construction, and the report-build
+        // partition stage satisfies because the one real finding lands squarely in an action
+        // bucket with none excluded/held/informational) must emit NO "pipeline integrity"
+        // disclosure anywhere a reader would see it.
+        let all_disclosures = json
+            .methodology
+            .failed_passes
+            .iter()
+            .chain(json.executive_summary.failed_passes.iter());
+        for note in all_disclosures {
+            assert!(
+                !note.to_ascii_lowercase().contains("pipeline integrity"),
+                "a fully-reconciled scan must never disclose a pipeline-integrity gap: {note}"
+            );
+        }
+    }
+
+    /// The flip side: a stage the ledger could NOT fully reconcile (a row vanished with no
+    /// recorded disposition) DOES surface as an explicit "pipeline integrity" disclosure —
+    /// proving the invariant above is actually load-bearing, not vacuously true because
+    /// nothing ever checks the unreconciled case.
+    #[tokio::test]
+    async fn an_unreconciled_stage_discloses_a_pipeline_integrity_gap() {
+        let report = report_with(Vec::new(), vec![]);
+        let mut report = report;
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        // 5 rows in, 3 out, NOTHING explained -> 2 unaccounted.
+        ledger.record_stage(
+            "cross-family-merge",
+            5,
+            3,
+            crate::scan_ledger::StageAccounting::default(),
+        );
+        report.ledger = ledger;
+
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+
+        let found = json
+            .methodology
+            .failed_passes
+            .iter()
+            .chain(json.executive_summary.failed_passes.iter())
+            .any(|note| {
+                note.to_ascii_lowercase().contains("pipeline integrity")
+                    && note.contains("cross-family-merge")
+            });
+        assert!(
+            found,
+            "an unreconciled stage must disclose a pipeline-integrity gap naming the stage: \
+             methodology={:?} executive_summary={:?}",
+            json.methodology.failed_passes, json.executive_summary.failed_passes
         );
     }
 }
