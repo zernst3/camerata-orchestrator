@@ -10617,6 +10617,74 @@ mod tests {
         }
     }
 
+    /// W2 UNIT regression for the zero-row semantic-tier collapse: a fake LLM reports ONE
+    /// security finding under a bare kebab name (no adopted corpus rule matches it — `selected`
+    /// is empty) and `audit_repo` must still return it, tagged `AI-`, rather than the model's
+    /// response being silently dropped anywhere in the chunk/merge/calibration chain. Narrower
+    /// and faster than the full `semantic_tier_cross_file_backstop_e2e.rs` integration test
+    /// (which also drives the finding through `report_export::build_report_json`) — this one
+    /// pins the contract at the `audit_repo` boundary alone.
+    #[tokio::test]
+    async fn audit_repo_with_no_adopted_rule_still_returns_the_models_own_security_finding() {
+        let findings_json = r#"{
+            "findings": [
+                {
+                    "path": "src/handlers/account.rs",
+                    "line": 4,
+                    "severity": "critical",
+                    "rule": "missing-ownership-check-on-account-delete",
+                    "title": "Any authenticated user can delete any account by id",
+                    "code": "delete_account(req.account_id);",
+                    "detail": "The handler never confirms req.account_id belongs to the caller before deleting it — no ownership predicate anywhere on this path.",
+                    "captures": {}
+                }
+            ],
+            "proposed_rules": [],
+            "needs_files": []
+        }"#;
+        let stub = StubCompleter { text: findings_json.to_string() };
+        let files = vec![(
+            "src/handlers/account.rs".to_string(),
+            "fn delete(req: Req) {\n    delete_account(req.account_id);\n}\n".to_string(),
+        )];
+        // Empty `selected` — the whole point: no adopted rule exists for this defect, so it can
+        // ONLY ever reach the architect via the semantic tier's own backstop reasoning.
+        let selected: Vec<(String, String)> = Vec::new();
+
+        let (findings, _proposed, _recs, failed_passes, _stage_samples) = audit_repo(
+            &stub,
+            "acme/app",
+            &files,
+            &selected,
+            &[],
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Sequential,
+            false,
+            None,
+            None,
+            None,
+            Some(&files),
+        )
+        .await
+        .expect("audit_repo must succeed against a well-formed stub response");
+
+        assert_eq!(
+            findings.len(),
+            1,
+            "the model's orphan security finding must survive to audit_repo's return value: \
+             failed_passes={failed_passes:?}"
+        );
+        assert!(
+            findings[0].rule_id.starts_with("AI-"),
+            "an id with no adopted-rule match must be tagged AI-tier: {}",
+            findings[0].rule_id
+        );
+        assert_eq!(findings[0].severity, "critical");
+        assert_eq!(findings[0].path, "src/handlers/account.rs");
+    }
+
     /// Records every `LlmRequest` it receives — used to inspect the ACTUAL prompt +
     /// cache-breakpoint structure `run_passes` builds for a real multi-chunk,
     /// multi-rule-batch scan (GAP-3 regression coverage), rather than only testing the pure
@@ -11427,6 +11495,86 @@ mod tests {
                 "{rule_id}'s finding must be tagged under its recommended option"
             );
         }
+    }
+
+    // ---- W2: no-vanishing merge guarantee ------------------------------------------------
+    //
+    // Both merge passes pick a PRIMARY and literally `.remove()` it from the group's Vec to
+    // build the output row's `also_matches` from the rest. That `.remove()` is exactly the
+    // operation a future refactor could get wrong (e.g. special-casing "group now empty" into
+    // an early `None`/empty-Vec return instead of "the primary IS the row"). These tests pin
+    // the invariant directly: a group whose primary is removed during merge must ALWAYS still
+    // emit that one row, for every group size including the singleton case (where removing the
+    // primary leaves literally nothing else).
+
+    #[test]
+    fn merge_location_group_singleton_whose_primary_is_removed_still_emits_a_row() {
+        let f = site_finding("AI-LONE-FINDING", "a.rs", 7, "high", "only member");
+        let merged = merge_location_group(vec![f]);
+        assert_eq!(
+            merged.rule_id, "AI-LONE-FINDING",
+            "the only member IS the primary — removing it from the group must still yield it \
+             as the output row, not an empty/default finding"
+        );
+        assert!(
+            merged.also_matches.is_empty(),
+            "a singleton group has no siblings to demote"
+        );
+    }
+
+    #[test]
+    fn merge_location_group_multi_member_whose_primary_is_removed_still_emits_a_row() {
+        // Three findings at the same site; `SEC-` beats the `AI-` ones on class+origin, so it
+        // is the primary REMOVED from the group vec mid-merge — the row must still come out,
+        // carrying both siblings in `also_matches`, never a vanished/empty result.
+        let sec = site_finding("SEC-NO-RAW-SQL-CONCAT-1", "db.rs", 20, "high", "sec");
+        let ai_a = site_finding("AI-RAW-QUERY-BUILDING", "db.rs", 20, "medium", "sec");
+        let ai_b = site_finding("AI-UNSAFE-QUERY", "db.rs", 20, "medium", "sec");
+        let merged = merge_location_group(vec![sec, ai_a, ai_b]);
+        assert_eq!(
+            merged.rule_id, "SEC-NO-RAW-SQL-CONCAT-1",
+            "the deterministic member is primary and must survive as the row's own id"
+        );
+        assert_eq!(
+            merged.also_matches.len(),
+            2,
+            "both removed siblings must be demoted into also_matches, never dropped: {:?}",
+            merged.also_matches
+        );
+    }
+
+    #[test]
+    fn merge_semantic_group_singleton_whose_primary_is_removed_still_emits_a_row() {
+        let f = site_finding("AI-LONE-SEMANTIC-FINDING", "a.rs", 7, "high", "only member");
+        let merged = merge_semantic_group(vec![f]);
+        assert_eq!(
+            merged.rule_id, "AI-LONE-SEMANTIC-FINDING",
+            "a singleton semantic group must still emit its one row, never vanish"
+        );
+    }
+
+    #[test]
+    fn merge_semantic_group_multi_member_whose_primary_is_removed_still_emits_a_row() {
+        let mut det = site_finding("RLS-MISSING", "a.rs", 10, "high", "");
+        det.category = Some("rls-policy".to_string());
+        let mut ai_a = site_finding("AI-rls-thing-one", "a.rs", 12, "medium", "");
+        ai_a.category = Some("rls-policy".to_string());
+        let mut ai_b = site_finding("AI-rls-thing-two", "a.rs", 13, "medium", "");
+        ai_b.category = Some("rls-policy".to_string());
+        // `merge_semantic_group` takes an already-clustered group directly (unlike
+        // `merge_semantic_groups`, which does the clustering) — exercises the exact
+        // `group.remove(primary_idx)` call site this invariant is about.
+        let merged = merge_semantic_group(vec![det, ai_a, ai_b]);
+        assert_eq!(
+            merged.rule_id, "RLS-MISSING",
+            "the deterministic member, removed as primary mid-merge, must still be the row"
+        );
+        assert_eq!(
+            merged.also_matches.len(),
+            2,
+            "both removed AI siblings must survive in also_matches: {:?}",
+            merged.also_matches
+        );
     }
 
     // ---- Semantic dedup (design §1d) ----------------------------------------------------

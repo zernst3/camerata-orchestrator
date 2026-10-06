@@ -141,6 +141,20 @@ impl StageLedgerEntry {
     pub fn is_integral(&self) -> bool {
         self.unaccounted == 0
     }
+
+    /// W2: the total of every NAMED disposition this entry recorded (merged + held +
+    /// informational + deduped + the `other` escape-hatch buckets) — i.e. `rows_in - rows_out`
+    /// minus whatever `unaccounted` already had to absorb. Mirrors [`StageAccounting::accounted`]
+    /// but over the already-reconciled, persisted entry, so a caller (or test) can state the
+    /// `rows_in == rows_out + accounted_total() + unaccounted` identity explicitly instead of
+    /// only checking `unaccounted == 0`.
+    pub fn accounted_total(&self) -> usize {
+        self.merged_into.len()
+            + self.routed_held
+            + self.routed_informational
+            + self.deduped
+            + self.other.iter().map(|(_, n)| n).sum::<usize>()
+    }
 }
 
 /// The scan-wide evaluation ledger: per-rule execution facts + per-stage row accounting,
@@ -502,6 +516,63 @@ mod tests {
         assert_eq!(entry.unaccounted, 2);
         assert!(!entry.is_integral());
         assert_eq!(ledger.total_unaccounted(), 2);
+    }
+
+    /// W2: the semantic/AI tier's own accounting identity, stated as an explicit arithmetic
+    /// check (not just `unaccounted == 0`) over BOTH real ai-tier stages
+    /// (`ai_audit::audit_repo` records `"ai-location-merge"` and `"ai-calibration"` by these
+    /// exact names): `rows_in == rows_out + accounted` for every stage a Semantic-tier rule's
+    /// findings pass through. This is the regression contract for the zero-row collapse at the
+    /// ledger level — a scan with `rows_in > 0` for the semantic tier can never reconcile to
+    /// `rows_out == 0` with nothing accounting for the rest.
+    #[test]
+    fn semantic_tier_advisory_rows_reconcile_rows_out_plus_accounted_equals_rows_in() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_rule(
+            "AI-CONFIG-HANDLER-DEFECT-1",
+            RuleTier::Semantic,
+            true,
+            None,
+            2,
+            3,
+        );
+
+        // ai-location-merge: 3 raw findings in, 1 deduped away, 2 location-merged into 1 row.
+        let mut location_acc = StageAccounting::default();
+        location_acc.deduped = 1;
+        location_acc.push_merge("AI-DUP-NAME-1", "AI-CONFIG-HANDLER-DEFECT-1");
+        let location_entry = ledger.record_stage("ai-location-merge", 3, 1, location_acc);
+        assert_eq!(
+            location_entry.rows_in,
+            location_entry.rows_out + location_entry.accounted_total(),
+            "ai-location-merge must reconcile exactly"
+        );
+        assert_eq!(location_entry.unaccounted, 0);
+
+        // ai-calibration: never drops a row on its own (see `audit_repo`'s doc comment) — the
+        // ONE row from above passes straight through.
+        let calibration_entry =
+            ledger.record_stage("ai-calibration", 1, 1, StageAccounting::default());
+        assert_eq!(
+            calibration_entry.rows_in,
+            calibration_entry.rows_out + calibration_entry.accounted_total(),
+            "ai-calibration must reconcile exactly"
+        );
+        assert_eq!(calibration_entry.unaccounted, 0);
+
+        // The scan-wide identity holds across every stage the semantic tier's rows touched.
+        assert_eq!(
+            ledger.total_unaccounted(),
+            0,
+            "a semantic-tier scan with rows_in > 0 must never leave any row unaccounted: {:#?}",
+            ledger.stages()
+        );
+        assert!(
+            ledger
+                .fired_rule_ids()
+                .contains("AI-CONFIG-HANDLER-DEFECT-1"),
+            "the rule that produced these rows must be recorded as fired, never silently clean"
+        );
     }
 
     #[test]
