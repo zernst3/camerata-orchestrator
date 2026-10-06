@@ -1,0 +1,810 @@
+rules:
+  # ═══════════════════════════════════════════════════════════════════════════
+  # W3 — commodity-class TAINT rules (sources / sinks / sanitizers).
+  # ═══════════════════════════════════════════════════════════════════════════
+  #
+  # `security.yml` (the sibling file) is PATTERN-based: one rule = one syntax
+  # shape (a specific quote style, a specific concatenation operator). That
+  # breaks down for the commodity vulnerability classes below, where real-world
+  # code expresses the SAME defect through many unrelated syntaxes: a
+  # single-quoted literal, a double-quoted literal, a backtick/template
+  # literal, `%`-style formatting, an intermediate variable assigned before the
+  # call that uses it, or a "driver" method whose raw/unsafe overload differs
+  # from its parameterized one only by argument shape. A pattern rule written
+  # for one shape silently misses every other shape on the same repo.
+  #
+  # Taint mode fixes this structurally instead of by enumerating shapes:
+  #
+  #   - `pattern-sources`  — where does data ENTER that we must treat as
+  #     attacker-influenced? Every rule below sources on the ENCLOSING
+  #     FUNCTION'S OWN FORMAL PARAMETERS (`pattern-inside: def $FUNC(...,
+  #     $PARAM, ...): ...` + `pattern: $PARAM`). This is deliberately a LOCAL,
+  #     framework-agnostic signal rather than naming each framework's request
+  #     object (`request.args`, `req.query`, `params[...]`, ActionController
+  #     params, Spring `@RequestParam`, …) — a scan that only recognizes one
+  #     framework's request shape misses every other framework entirely, and a
+  #     client's code is never guaranteed to funnel external input through a
+  #     name Camerata can special-case. Treating "a value this function did not
+  #     construct itself" as the trust boundary generalizes to every framework,
+  #     every call graph depth, and (crucially) to the "intermediate variable,
+  #     then execute" and "built across N segments" shapes the task's own
+  #     shape-variant corpus exercises, because taint propagates through
+  #     ordinary assignment, concatenation, string formatting, and (per
+  #     semgrep's default taint-propagation behavior) through an unknown
+  #     function's return value when any argument to that call is tainted —
+  #     with NO custom `pattern-propagators` required for any rule below
+  #     (verified empirically; see the W3 implementation report).
+  #
+  #   - `pattern-sinks`    — the dangerous operation. Each sink pattern uses
+  #     `focus-metavariable` to point at EXACTLY the argument that must be
+  #     tainted for the call to be dangerous. This is what makes the
+  #     parameterized-query / tagged-template / argv-list "safe twins" clean
+  #     by construction rather than via a bolted-on exception: e.g.
+  #     `$CURSOR.execute($QUERY, ...)` with `focus-metavariable: $QUERY`
+  #     means a second, separate "bound params" argument never taints the
+  #     match — only the query-text argument itself does. A constant string
+  #     literal is never tainted, so `cursor.execute("SELECT * FROM users")`
+  #     never fires regardless of what arguments follow it.
+  #
+  #   - `pattern-sanitizers` — a handful of well-known escaping/tagging
+  #     constructs that neutralize taint before it reaches a sink (a `sql`
+  #     tagged template literal; `escapeHtml`/`HttpUtility.HtmlEncode`/
+  #     `StringEscapeUtils.escapeHtml4`/etc. for the XSS rules). Verified
+  #     empirically to suppress the false positive an un-sanitized taint rule
+  #     produces on already-escaped output (see the Java fixture in the W3
+  #     implementation report) without suppressing the real defect.
+  #
+  # Every rule id below is GROUNDED to one of our own corpus rules via
+  # `semgrep_floor_category` (`crates/server/src/lib.rs`) so OUR citation,
+  # severity calibration, authored remediation, and effort estimate attach to
+  # the finding — never semgrep's own generic "found by this tool" framing,
+  # and never a borrowed citation from an unrelated rule. Findings from these
+  # rules always carry `preview_tool = Some("semgrep")`: they render as
+  # external-tool findings, never as Camerata's own deterministic tier.
+  #
+  # Coverage matrix (8 languages x 4 classes). A language/class cell is
+  # OMITTED, not approximated, when no common idiom generalizes safely — see
+  # the per-section notes below for the two intentional gaps (Rust XSS, Rust
+  # open redirect).
+  #
+  # | class              | python | js/ts | rust | csharp | go  | ruby | java |
+  # |---------------------|--------|-------|------|--------|-----|------|------|
+  # | SQL injection        | yes    | yes   | yes  | yes    | yes | yes  | yes  |
+  # | XSS                  | yes    | yes   | --   | yes    | yes | yes  | yes  |
+  # | Open redirect         | yes    | yes   | --   | yes    | yes | yes  | yes  |
+  # | Command injection     | yes    | yes   | yes  | yes    | yes | yes  | yes  |
+  #
+  # Decision: docs/decisions/2026-10-06_w3_commodity_taint_layer.md
+
+  # ── SQL injection (taint) ────────────────────────────────────────────────
+  #
+  # Grounded to SEC-NO-RAW-SQL-CONCAT-1 (same corpus rule the pre-existing
+  # pattern-based sql-string-concat-{python,js,rust,csharp} rules grounded to;
+  # those rules are RETIRED below in favor of these taint equivalents, which
+  # additionally cover Go, Ruby, and Java). CWE-89.
+
+  - id: camerata.security.taint-sql-injection-python
+    mode: taint
+    message: >
+      Possible SQL injection: a value this function did not construct itself flows,
+      through concatenation, f-string/`%` interpolation, or an intermediate variable,
+      into a query-execution call. Use a parameterized query (cursor.execute(sql, params))
+      instead. [Grounded to SEC-NO-RAW-SQL-CONCAT-1.]
+    severity: ERROR
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              def $FUNC(..., $PARAM, ...):
+                  ...
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CURSOR.execute($QUERY)
+              - pattern: $CURSOR.execute($QUERY, ...)
+              - pattern: $CURSOR.executemany($QUERY, ...)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-sql-injection-js
+    mode: taint
+    message: >
+      Possible SQL injection: a value this function did not construct itself flows,
+      through concatenation, template-literal interpolation, or an intermediate
+      variable, into a query-execution call. Use a parameterized query / prepared
+      statement, or a `sql` tagged-template query builder, instead.
+      [Grounded to SEC-NO-RAW-SQL-CONCAT-1.]
+    severity: ERROR
+    languages: [javascript, typescript]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: function $FUNC(..., $PARAM, ...) { ... }
+              - pattern-inside: async function $FUNC(..., $PARAM, ...) { ... }
+              - pattern-inside: function(..., $PARAM, ...) { ... }
+              - pattern-inside: ($PARAM) => { ... }
+              - pattern-inside: async ($PARAM) => { ... }
+          - pattern: $PARAM
+    pattern-sanitizers:
+      # A tagged template literal (e.g. `` sql`SELECT ... ${id}` ``) hands the
+      # literal pieces and the interpolated values to the tag function
+      # SEPARATELY — the tag function (not naive string building) decides how
+      # to bind them, which is exactly the parameterized-query query-builder
+      # pattern this rule's own corpus rule recommends. Any tag name is
+      # accepted; the shape (a tag immediately before a template literal) is
+      # the signal, not a specific library name.
+      - pattern: $TAG`...`
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $DB.query($QUERY)
+              - pattern: $DB.query($QUERY, ...)
+              - pattern: $DB.execute($QUERY)
+              - pattern: $DB.execute($QUERY, ...)
+              - pattern: $DB.raw($QUERY)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-sql-injection-rust
+    mode: taint
+    message: >
+      Possible SQL injection: a value this function did not construct itself flows,
+      through `format!()` or concatenation, into a raw query-execution call. Use
+      sqlx::query!/diesel's query builder, or bind the value as a parameter, instead.
+      [Grounded to SEC-NO-RAW-SQL-CONCAT-1.]
+    severity: ERROR
+    languages: [rust]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  fn $FUNC(..., $PARAM: $TYPE, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  fn $FUNC(..., $PARAM: $TYPE, ...) -> $RET {
+                    ...
+                  }
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $CONN.execute($QUERY)
+              - pattern: $CONN.execute($QUERY, ...)
+              - pattern: $CONN.query($QUERY)
+              - pattern: $CONN.query($QUERY, ...)
+              - pattern: $CONN.query_raw($QUERY)
+              - pattern: $CONN.query_raw($QUERY, ...)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-sql-injection-csharp
+    mode: taint
+    message: >
+      Possible SQL injection: a value this function did not construct itself flows,
+      through string interpolation or concatenation, or an intermediate variable,
+      into a SQL command's text. Use a parameterized SqlCommand (SqlParameter),
+      Entity Framework LINQ, or Dapper with named parameters instead.
+      [Grounded to SEC-NO-RAW-SQL-CONCAT-1.]
+    severity: ERROR
+    languages: [csharp]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              $RET $FUNC(..., $TYPE $PARAM, ...) {
+                ...
+              }
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: new SqlCommand($QUERY, ...)
+              - pattern: new SqliteCommand($QUERY, ...)
+              - pattern: $CMD.CommandText = $QUERY
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-sql-injection-go
+    mode: taint
+    message: >
+      Possible SQL injection: a value this function did not construct itself flows,
+      through fmt.Sprintf or concatenation, into a database/sql query-execution call.
+      Use a parameterized placeholder (`?`/`$1`) passed as a separate argument instead.
+      [Grounded to SEC-NO-RAW-SQL-CONCAT-1.]
+    severity: ERROR
+    languages: [go]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $FUNC(..., $PARAM $TYPE, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func $FUNC(..., $PARAM $TYPE, ...) $RET {
+                    ...
+                  }
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $DB.Query($QUERY)
+              - pattern: $DB.Query($QUERY, ...)
+              - pattern: $DB.QueryRow($QUERY)
+              - pattern: $DB.QueryRow($QUERY, ...)
+              - pattern: $DB.Exec($QUERY)
+              - pattern: $DB.Exec($QUERY, ...)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-sql-injection-ruby
+    mode: taint
+    message: >
+      Possible SQL injection: a value this function did not construct itself flows,
+      through string interpolation/concatenation or an intermediate variable, into a
+      raw query-execution call. Use ActiveRecord's `?`/named-parameter binding
+      (`Model.where("id = ?", id)`) instead. [Grounded to SEC-NO-RAW-SQL-CONCAT-1.]
+    severity: ERROR
+    languages: [ruby]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              def $FUNC(..., $PARAM, ...)
+                ...
+              end
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $MODEL.where($QUERY)
+              - pattern: $MODEL.find_by_sql($QUERY)
+              - pattern: $CONN.execute($QUERY)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-sql-injection-java
+    mode: taint
+    message: >
+      Possible SQL injection: a value this function did not construct itself flows,
+      through concatenation or an intermediate variable, into a Statement's
+      query-execution call. Use a PreparedStatement with bound parameters instead.
+      [Grounded to SEC-NO-RAW-SQL-CONCAT-1.]
+    severity: ERROR
+    languages: [java]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              $RET $FUNC(..., $TYPE $PARAM, ...) {
+                ...
+              }
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $STMT.executeQuery($QUERY)
+              - pattern: $STMT.execute($QUERY)
+              - pattern: $STMT.executeUpdate($QUERY)
+          - focus-metavariable: $QUERY
+
+  # ── Cross-site scripting (taint) ─────────────────────────────────────────
+  #
+  # Grounded to SEC-NO-UNSAFE-HTML-SINK-1. CWE-79. Rust is intentionally
+  # OMITTED: the Rust web ecosystem (actix-web/axum/rocket/warp) has no single
+  # dominant "raw, unescaped HTML sink" idiom comparable to innerHTML/
+  # dangerouslySetInnerHTML/Html.Raw — a generic `HttpResponse::body(...)`
+  # pattern would fire on every HTTP response body regardless of content type
+  # (JSON APIs, binary downloads, …), which is exactly the kind of
+  # shape-fitted-to-false-positive rule this work is replacing elsewhere. Left
+  # as a documented gap rather than a low-quality rule.
+
+  - id: camerata.security.taint-xss-python
+    mode: taint
+    message: >
+      Possible XSS: a value this function did not construct itself is passed to a
+      raw-HTML sink without sanitization. Sanitize with an allowlist HTML sanitizer
+      before the sink, or avoid the raw-HTML sink entirely.
+      [Grounded to SEC-NO-UNSAFE-HTML-SINK-1.]
+    severity: ERROR
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              def $FUNC(..., $PARAM, ...):
+                  ...
+          - pattern: $PARAM
+    pattern-sanitizers:
+      - pattern: escape($X)
+      - pattern: html.escape($X)
+      - pattern: markupsafe.escape($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: mark_safe($QUERY)
+              - pattern: Markup($QUERY)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-xss-js
+    mode: taint
+    message: >
+      Possible XSS: a value this function did not construct itself is written through
+      a raw-HTML sink (innerHTML / document.write) without sanitization. Sanitize with
+      DOMPurify (or equivalent) before the sink, or use textContent instead.
+      [Grounded to SEC-NO-UNSAFE-HTML-SINK-1.]
+    severity: ERROR
+    languages: [javascript, typescript]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: function $FUNC(..., $PARAM, ...) { ... }
+              - pattern-inside: async function $FUNC(..., $PARAM, ...) { ... }
+              - pattern-inside: function(..., $PARAM, ...) { ... }
+              - pattern-inside: ($PARAM) => { ... }
+              - pattern-inside: async ($PARAM) => { ... }
+          - pattern: $PARAM
+    pattern-sanitizers:
+      - pattern: DOMPurify.sanitize($X)
+      - pattern: escapeHtml($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $EL.innerHTML = $QUERY
+              - pattern: document.write($QUERY)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-xss-csharp
+    mode: taint
+    message: >
+      Possible XSS: a value this function did not construct itself is rendered
+      through a raw-HTML sink (Html.Raw / Response.Write) without sanitization.
+      Encode with HttpUtility.HtmlEncode, or use the framework's default escaped
+      rendering, instead. [Grounded to SEC-NO-UNSAFE-HTML-SINK-1.]
+    severity: ERROR
+    languages: [csharp]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              $RET $FUNC(..., $TYPE $PARAM, ...) {
+                ...
+              }
+          - pattern: $PARAM
+    pattern-sanitizers:
+      - pattern: HttpUtility.HtmlEncode($X)
+      - pattern: Encoder.HtmlEncode($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: Html.Raw($QUERY)
+              - pattern: Response.Write($QUERY)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-xss-go
+    mode: taint
+    message: >
+      Possible XSS: a value this function did not construct itself is cast to
+      template.HTML, bypassing html/template's default auto-escaping. Use
+      template.HTMLEscapeString, or render the value as plain text instead.
+      [Grounded to SEC-NO-UNSAFE-HTML-SINK-1.]
+    severity: ERROR
+    languages: [go]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $FUNC(..., $PARAM $TYPE, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func $FUNC(..., $PARAM $TYPE, ...) $RET {
+                    ...
+                  }
+          - pattern: $PARAM
+    pattern-sanitizers:
+      - pattern: template.HTMLEscapeString($X)
+    pattern-sinks:
+      - patterns:
+          - pattern: template.HTML($QUERY)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-xss-ruby
+    mode: taint
+    message: >
+      Possible XSS: a value this function did not construct itself is marked
+      html_safe or passed to raw() without sanitization. Use sanitize() (Rails) to
+      allowlist markup, or let the default ERB escaping apply.
+      [Grounded to SEC-NO-UNSAFE-HTML-SINK-1.]
+    severity: ERROR
+    languages: [ruby]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              def $FUNC(..., $PARAM, ...)
+                ...
+              end
+          - pattern: $PARAM
+    pattern-sanitizers:
+      - pattern: sanitize($X)
+      - pattern: ERB::Util.html_escape($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: raw($QUERY)
+              - pattern: $QUERY.html_safe
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-xss-java
+    mode: taint
+    message: >
+      Possible XSS: a value this function did not construct itself is written to a
+      response writer without encoding. Encode with StringEscapeUtils.escapeHtml4
+      (Apache Commons Text) or HtmlUtils.htmlEscape (Spring) before writing it.
+      [Grounded to SEC-NO-UNSAFE-HTML-SINK-1.]
+    severity: ERROR
+    languages: [java]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              $RET $FUNC(..., $TYPE $PARAM, ...) {
+                ...
+              }
+          - pattern: $PARAM
+    pattern-sanitizers:
+      - pattern: escapeHtml($X)
+      - pattern: StringEscapeUtils.escapeHtml4($X)
+      - pattern: HtmlUtils.htmlEscape($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $WRITER.println($QUERY)
+              - pattern: $WRITER.write($QUERY)
+          - focus-metavariable: $QUERY
+
+  # ── Open redirect (taint) ────────────────────────────────────────────────
+  #
+  # Grounded to SEC-NO-OPEN-REDIRECT-1. CWE-601. Rust is intentionally OMITTED
+  # for the same reason as Rust XSS above: no single dominant redirect-response
+  # idiom generalizes across actix-web/axum/rocket/warp without either missing
+  # most real call sites or over-matching unrelated response construction.
+
+  - id: camerata.security.taint-open-redirect-python
+    mode: taint
+    message: >
+      Possible open redirect: a redirect target this function did not construct
+      itself is handed to a redirect response with no allowlist check. Validate the
+      target against an allowlist of internal paths/registered hosts first.
+      [Grounded to SEC-NO-OPEN-REDIRECT-1.]
+    severity: ERROR
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              def $FUNC(..., $PARAM, ...):
+                  ...
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: redirect($QUERY)
+              - pattern: HttpResponseRedirect($QUERY)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-open-redirect-js
+    mode: taint
+    message: >
+      Possible open redirect: a redirect target this function did not construct
+      itself is handed to a redirect response or location assignment with no
+      allowlist check. Validate the target against an allowlist first.
+      [Grounded to SEC-NO-OPEN-REDIRECT-1.]
+    severity: ERROR
+    languages: [javascript, typescript]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: function $FUNC(..., $PARAM, ...) { ... }
+              - pattern-inside: async function $FUNC(..., $PARAM, ...) { ... }
+              - pattern-inside: function(..., $PARAM, ...) { ... }
+              - pattern-inside: ($PARAM) => { ... }
+              - pattern-inside: async ($PARAM) => { ... }
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $RES.redirect($QUERY)
+              - pattern: window.location = $QUERY
+              - pattern: window.location.href = $QUERY
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-open-redirect-csharp
+    mode: taint
+    message: >
+      Possible open redirect: a redirect target this function did not construct
+      itself is handed to Response.Redirect with no allowlist check. Validate the
+      target against an allowlist first. [Grounded to SEC-NO-OPEN-REDIRECT-1.]
+    severity: ERROR
+    languages: [csharp]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              $RET $FUNC(..., $TYPE $PARAM, ...) {
+                ...
+              }
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern: Response.Redirect($QUERY)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-open-redirect-go
+    mode: taint
+    message: >
+      Possible open redirect: a redirect target this function did not construct
+      itself is handed to http.Redirect with no allowlist check. Validate the
+      target against an allowlist first. [Grounded to SEC-NO-OPEN-REDIRECT-1.]
+    severity: ERROR
+    languages: [go]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $FUNC(..., $PARAM $TYPE, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func $FUNC(..., $PARAM $TYPE, ...) $RET {
+                    ...
+                  }
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern: http.Redirect($W, $R, $QUERY, ...)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-open-redirect-ruby
+    mode: taint
+    message: >
+      Possible open redirect: a redirect target this function did not construct
+      itself is handed to redirect_to with no allowlist check. Validate the target
+      against an allowlist first. [Grounded to SEC-NO-OPEN-REDIRECT-1.]
+    severity: ERROR
+    languages: [ruby]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              def $FUNC(..., $PARAM, ...)
+                ...
+              end
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern: redirect_to($QUERY)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-open-redirect-java
+    mode: taint
+    message: >
+      Possible open redirect: a redirect target this function did not construct
+      itself is handed to sendRedirect with no allowlist check. Validate the target
+      against an allowlist first. [Grounded to SEC-NO-OPEN-REDIRECT-1.]
+    severity: ERROR
+    languages: [java]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              $RET $FUNC(..., $TYPE $PARAM, ...) {
+                ...
+              }
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern: $RESPONSE.sendRedirect($QUERY)
+          - focus-metavariable: $QUERY
+
+  # ── Command injection (taint) ────────────────────────────────────────────
+  #
+  # Grounded to SEC-NO-COMMAND-INJECTION-1 (new universal corpus rule — see
+  # `crates/rules/principles/universal/sec-no-command-injection-1.toml`). CWE-78
+  # (OS command injection) and CWE-94 (dynamic code evaluation, for
+  # eval/send/instance_eval-style sinks). The Ruby rule below also closes the
+  # pre-existing RUBY-AVOID-EVAL-SEND-1 phantom (it previously declared
+  # `enforcement = "mechanical"` on the strength of a Brakeman integration
+  # Camerata never actually runs).
+
+  - id: camerata.security.taint-command-injection-python
+    mode: taint
+    message: >
+      Possible command injection: a value this function did not construct itself
+      flows into a shell-interpreted subprocess call. Pass an argument list (never
+      shell=True / os.system) so the OS, not a shell, splits the arguments.
+      [Grounded to SEC-NO-COMMAND-INJECTION-1.]
+    severity: ERROR
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              def $FUNC(..., $PARAM, ...):
+                  ...
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: os.system($QUERY)
+              - pattern: subprocess.Popen($QUERY, shell=True)
+              - pattern: subprocess.Popen($QUERY, ..., shell=True)
+              - pattern: subprocess.run($QUERY, shell=True)
+              - pattern: subprocess.run($QUERY, ..., shell=True)
+              - pattern: subprocess.call($QUERY, shell=True)
+              - pattern: subprocess.call($QUERY, ..., shell=True)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-command-injection-js
+    mode: taint
+    message: >
+      Possible command injection: a value this function did not construct itself
+      flows into child_process.exec (shell-interpreted). Use execFile/spawn with an
+      argument array instead. [Grounded to SEC-NO-COMMAND-INJECTION-1.]
+    severity: ERROR
+    languages: [javascript, typescript]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: function $FUNC(..., $PARAM, ...) { ... }
+              - pattern-inside: async function $FUNC(..., $PARAM, ...) { ... }
+              - pattern-inside: function(..., $PARAM, ...) { ... }
+              - pattern-inside: ($PARAM) => { ... }
+              - pattern-inside: async ($PARAM) => { ... }
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: exec($QUERY)
+              - pattern: $CP.exec($QUERY)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-command-injection-rust
+    mode: taint
+    message: >
+      Possible command injection: a value this function did not construct itself
+      flows into a `sh -c`/`bash -c` subprocess invocation. Invoke the target binary
+      directly with a fixed argument list instead of a shell.
+      [Grounded to SEC-NO-COMMAND-INJECTION-1.]
+    severity: ERROR
+    languages: [rust]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  fn $FUNC(..., $PARAM: $TYPE, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  fn $FUNC(..., $PARAM: $TYPE, ...) -> $RET {
+                    ...
+                  }
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: Command::new("sh").arg("-c").arg($QUERY)
+              - pattern: Command::new("bash").arg("-c").arg($QUERY)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-command-injection-csharp
+    mode: taint
+    message: >
+      Possible command injection: a value this function did not construct itself
+      flows into Process.Start. Pass fixed arguments via ProcessStartInfo.ArgumentList
+      instead of a single interpolated command string.
+      [Grounded to SEC-NO-COMMAND-INJECTION-1.]
+    severity: ERROR
+    languages: [csharp]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              $RET $FUNC(..., $TYPE $PARAM, ...) {
+                ...
+              }
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern: Process.Start($QUERY)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-command-injection-go
+    mode: taint
+    message: >
+      Possible command injection: a value this function did not construct itself
+      flows into a `sh -c`/`bash -c` exec.Command invocation. Invoke the target
+      binary directly with a fixed argument list instead of a shell.
+      [Grounded to SEC-NO-COMMAND-INJECTION-1.]
+    severity: ERROR
+    languages: [go]
+    pattern-sources:
+      - patterns:
+          - pattern-either:
+              - pattern-inside: |
+                  func $FUNC(..., $PARAM $TYPE, ...) {
+                    ...
+                  }
+              - pattern-inside: |
+                  func $FUNC(..., $PARAM $TYPE, ...) $RET {
+                    ...
+                  }
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: exec.Command("sh", "-c", $QUERY)
+              - pattern: exec.Command("bash", "-c", $QUERY)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-command-injection-ruby
+    mode: taint
+    message: >
+      Possible command injection: a value this function did not construct itself
+      flows into system()/Kernel.exec (shell command). Use a fixed argument list
+      instead of a shell-interpreted command string.
+      [Grounded to SEC-NO-COMMAND-INJECTION-1.]
+    severity: ERROR
+    languages: [ruby]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              def $FUNC(..., $PARAM, ...)
+                ...
+              end
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: system($QUERY)
+              - pattern: Kernel.exec($QUERY)
+          - focus-metavariable: $QUERY
+
+  # Grounded separately to RUBY-AVOID-EVAL-SEND-1 (not SEC-NO-COMMAND-INJECTION-1): this
+  # corpus rule already exists, already declares `enforcement = "mechanical"`, and already
+  # cites Brakeman's "Dangerous Evaluation"/"Dangerous Send" warning types — but Camerata
+  # never actually runs Brakeman, so it was a PHANTOM detector (a real corpus TOML
+  # declaring a check that nothing in the pipeline ever evaluates; see
+  # `crate::mechanical_gate`'s `KNOWN_PRE_W1_MECHANICAL_GAPS`). This taint rule closes it
+  # with a real, taint-mode detector for the exact same defect the TOML already describes.
+  - id: camerata.security.taint-ruby-eval-send
+    mode: taint
+    message: >
+      Possible dynamic code/method-dispatch injection: a value this function did not
+      construct itself flows into eval()/instance_eval()/class_eval() or send()/
+      public_send(). Use a fixed dispatch table (hash or case statement) mapping a
+      known set of values to hardcoded method names, or a hardcoded symbol, instead.
+      [Grounded to RUBY-AVOID-EVAL-SEND-1.]
+    severity: ERROR
+    languages: [ruby]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              def $FUNC(..., $PARAM, ...)
+                ...
+              end
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: eval($QUERY)
+              - pattern: instance_eval($QUERY)
+              - pattern: class_eval($QUERY)
+              - pattern: send($QUERY)
+              - pattern: public_send($QUERY)
+          - focus-metavariable: $QUERY
+
+  - id: camerata.security.taint-command-injection-java
+    mode: taint
+    message: >
+      Possible command injection: a value this function did not construct itself
+      flows into Runtime.exec, which naively tokenizes on whitespace. Use
+      ProcessBuilder with a fixed argument list instead.
+      [Grounded to SEC-NO-COMMAND-INJECTION-1.]
+    severity: ERROR
+    languages: [java]
+    pattern-sources:
+      - patterns:
+          - pattern-inside: |
+              $RET $FUNC(..., $TYPE $PARAM, ...) {
+                ...
+              }
+          - pattern: $PARAM
+    pattern-sinks:
+      - patterns:
+          - pattern: Runtime.getRuntime().exec($QUERY)
+          - focus-metavariable: $QUERY
