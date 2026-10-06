@@ -58,16 +58,25 @@
 //!    merely assigns a `role` COLUMN (`update users set role = p_new_role ...`) must NOT be
 //!    exempted by the bare word "role" sitting in an UPDATE's target-list; only an actual
 //!    function CALL whose name encodes a role/ownership check counts.
-//! 3. **A shared-secret/signature compensating control** — any identifier token anywhere in the
-//!    body containing `secret`, `token`, or `signature` (e.g. a parameter `p_webhook_secret`
-//!    compared against a stored value, or a call to a signature-verification helper). Per the
-//!    hold-out's do-not-break list, a function gated by a caller-supplied shared secret/HMAC
-//!    signature IS a legitimate server-side authorization control (the UI never sees the
-//!    secret), even though it isn't a role/ownership check in the RLS sense — so it must not be
-//!    flagged. This signal is intentionally broader than (2)'s call-form restriction: these
-//!    words are specific enough (unlike `role`/`owner`, which collide with ordinary business
-//!    columns) that a plain-comparison form (`if p_token <> stored_token then raise ...`), not
-//!    just a function call, is accepted as evidence of the check.
+//! 3. **A shared-secret/signature compensating control** — an identifier containing `secret`,
+//!    `token`, or `signature` appearing EITHER as a function CALL (`verify_signature(...)`,
+//!    `check_webhook_secret(...)` — the same call-form test as (2)) OR as an operand of a
+//!    COMPARISON operator (`<>`, `!=`, or a bare `=` sitting in a guard-like clause — see
+//!    [`is_guard_context`]): `if p_secret <> stored_secret then raise ...`, or `where token =
+//!    p_token` used as a guard. Per the hold-out's do-not-break list, a function gated by a
+//!    caller-supplied shared secret/HMAC signature IS a legitimate server-side authorization
+//!    control (the UI never sees the secret), even though it isn't a role/ownership check in
+//!    the RLS sense — so it must not be flagged. This signal is intentionally broader than (2)
+//!    in STYLE (a bare comparison counts, not just a call) but, like (2), is scoped to evidence
+//!    of an actual CHECK — an identifier merely being the ASSIGNMENT TARGET of an UPDATE's
+//!    `SET` clause, a SELECT list entry, an INSERT column, or a `RAISE` argument is incidental
+//!    USE, not a check, and must not exempt a body that is otherwise completely unguarded (see
+//!    [`has_check_function_call`] and [`has_secret_guard_comparison`], and the regression test
+//!    `bare_secret_column_assignment_without_a_real_check_still_fires` — the exact failure mode
+//!    the original, unscoped "any identifier anywhere" version of this signal had: a mutating,
+//!    broadly-granted function that merely touches a column named `api_token` (revoking a
+//!    token, logging a signature, storing a webhook payload) was silently exempted and never
+//!    flagged, even with zero actual authorization check anywhere in its body).
 //!
 //! This mirrors `dynamic_sql_exec_checker`'s own "false negative over false positive" floor-
 //! detector discipline: being generous about what counts as a predicate trades a handful of
@@ -116,8 +125,12 @@ const MUTATING_KEYWORDS: &[&str] = &["insert", "update", "delete", "truncate", "
 const ROLE_CHECK_CALL_SUBSTRINGS: &[&str] =
     &["role", "owner", "permission", "authoriz", "admin", "verify"];
 
-/// Plain-text identifier substrings (see module doc, signal 3) that count as a shared-secret/
-/// signature compensating control wherever they appear in the body, not just in call form.
+/// Identifier substrings (see module doc, signal 3) that count as a shared-secret/signature
+/// compensating control — ONLY in CALL form (`verify_signature(...)`, via
+/// [`has_check_function_call`]) or as an operand of a genuine COMPARISON/conditional guard (via
+/// [`has_secret_guard_comparison`]). An incidental mention (an UPDATE's assignment target, a
+/// SELECT list entry, an INSERT column, a RAISE argument) does NOT count — see the
+/// `bare_secret_column_assignment_without_a_real_check_still_fires` regression test.
 const SECRET_CHECK_SUBSTRINGS: &[&str] = &["secret", "token", "signature"];
 
 pub struct PrivilegedFunctionNoAuthzChecker;
@@ -649,23 +662,146 @@ fn has_check_function_call(lower: &[char], call_substrings: &[&str]) -> bool {
     false
 }
 
-/// Scan `lower` (a comment-stripped, already-lowercased body) for ANY identifier token
-/// (anywhere — call form or plain reference) containing one of `substrings`. See module doc
-/// signal 3: deliberately broader than [`has_check_function_call`] because these particular
-/// words are specific enough not to collide with ordinary business-data column names.
-fn has_identifier_containing_any(lower: &[char], substrings: &[&str]) -> bool {
-    let mut i = 0usize;
-    while i < lower.len() {
-        let c = lower[i];
-        if c.is_alphabetic() || c == '_' {
-            let start = i;
-            while i < lower.len() && (lower[i].is_alphanumeric() || lower[i] == '_') {
-                i += 1;
+/// Keywords whose presence, scanning BACKWARD from a comparison operator within the same
+/// statement, mean the operator sits in a GUARD/conditional clause (`WHERE`, `IF`, `WHEN`, an
+/// `ELSIF`, or a boolean `AND`/`OR` continuing one of those) rather than an assignment target.
+/// See [`is_guard_context`].
+const GUARD_CLAUSE_KEYWORDS: &[&str] = &["where", "if", "when", "elsif", "and", "or"];
+
+/// Keywords whose presence, scanning backward from a bare `=` within the same statement, mean
+/// that `=` is an ASSIGNMENT (an UPDATE's `SET col = val`, or a keyed `INSERT ... VALUES`
+/// shape some dialects allow) rather than a comparison. See [`is_guard_context`].
+const ASSIGNMENT_CLAUSE_KEYWORDS: &[&str] = &["set", "values", "insert"];
+
+/// Whether the comparison operator whose first character sits at `lower[op_pos]` is inside a
+/// GUARD/conditional clause rather than an assignment target. `<>` and `!=` never need this —
+/// Postgres has no assignment spelled with either — but a bare `=` is genuinely ambiguous:
+/// `UPDATE users SET api_token = NULL WHERE id = p_id` contains one `=` that is an assignment
+/// target (`api_token = NULL`) and one that is a real comparison (`id = p_id`) in the SAME
+/// statement. This resolves the ambiguity by scanning backward from `op_pos`, stopping at the
+/// nearest preceding keyword from [`GUARD_CLAUSE_KEYWORDS`] (→ comparison) or
+/// [`ASSIGNMENT_CLAUSE_KEYWORDS`] (→ assignment) or a top-level `;` (→ no clause keyword found
+/// in this statement at all, conservatively treated as NOT a guard). This is the same
+/// discipline [`has_check_function_call`]'s CALL-FORM restriction already applies to signal
+/// 2 — scoped to evidence of an actual CHECK, not an incidental word match — carried over to
+/// signal 3's comparison form (see the module doc and the
+/// `bare_secret_column_assignment_without_a_real_check_still_fires` regression test).
+fn is_guard_context(lower: &[char], op_pos: usize) -> bool {
+    let mut i = op_pos;
+    while i > 0 {
+        i -= 1;
+        if lower[i] == ';' {
+            return false;
+        }
+        if lower[i].is_alphanumeric() || lower[i] == '_' {
+            let mut start = i;
+            while start > 0 && (lower[start - 1].is_alphanumeric() || lower[start - 1] == '_') {
+                start -= 1;
             }
-            let ident: String = lower[start..i].iter().collect();
-            if ident_contains_any(&ident, substrings) {
+            let word: String = lower[start..=i].iter().collect();
+            if GUARD_CLAUSE_KEYWORDS.contains(&word.as_str()) {
                 return true;
             }
+            if ASSIGNMENT_CLAUSE_KEYWORDS.contains(&word.as_str()) {
+                return false;
+            }
+            if start == 0 {
+                return false;
+            }
+            i = start;
+        }
+    }
+    false
+}
+
+/// The identifier immediately preceding `pos` (skipping whitespace), if any.
+fn ident_before(lower: &[char], pos: usize) -> Option<String> {
+    let mut end = pos;
+    while end > 0 && lower[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+    let mut start = end;
+    while start > 0 && (lower[start - 1].is_alphanumeric() || lower[start - 1] == '_') {
+        start -= 1;
+    }
+    if start == end {
+        return None;
+    }
+    Some(lower[start..end].iter().collect())
+}
+
+/// The identifier immediately following `pos` (skipping whitespace), if any.
+fn ident_after(lower: &[char], pos: usize) -> Option<String> {
+    let mut start = pos;
+    while start < lower.len() && lower[start].is_whitespace() {
+        start += 1;
+    }
+    let begin = start;
+    while start < lower.len() && (lower[start].is_alphanumeric() || lower[start] == '_') {
+        start += 1;
+    }
+    if start == begin {
+        return None;
+    }
+    Some(lower[begin..start].iter().collect())
+}
+
+/// Whether the LEFT or RIGHT operand of the comparison operator starting at `op_pos` (length
+/// `op_len`) is an identifier containing one of `substrings`.
+fn operand_identifier_matches(
+    lower: &[char],
+    op_pos: usize,
+    op_len: usize,
+    substrings: &[&str],
+) -> bool {
+    if let Some(id) = ident_before(lower, op_pos) {
+        if ident_contains_any(&id, substrings) {
+            return true;
+        }
+    }
+    if let Some(id) = ident_after(lower, op_pos + op_len) {
+        if ident_contains_any(&id, substrings) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Scan `lower` (a comment-stripped, already-lowercased body) for a COMPARISON (`<>`, `!=`, or
+/// a bare `=` sitting in a guard-like clause — see [`is_guard_context`]) whose operand on
+/// either side is an identifier containing one of `substrings`. See module doc signal 3: this
+/// is the "or in a COMPARISON/conditional guard" half of the CALL-OR-COMPARISON discipline —
+/// [`has_check_function_call`] (reused with the same `substrings`) is the other half.
+fn has_secret_guard_comparison(lower: &[char], substrings: &[&str]) -> bool {
+    let mut i = 0usize;
+    while i < lower.len() {
+        if lower[i] == '<' && lower.get(i + 1) == Some(&'>') {
+            if operand_identifier_matches(lower, i, 2, substrings) {
+                return true;
+            }
+            i += 2;
+            continue;
+        }
+        if lower[i] == '!' && lower.get(i + 1) == Some(&'=') {
+            if operand_identifier_matches(lower, i, 2, substrings) {
+                return true;
+            }
+            i += 2;
+            continue;
+        }
+        if lower[i] == '=' {
+            // Exclude `:=` (assignment) and `<=`/`>=` (ordering, never an identity check).
+            let prev_excludes = i > 0 && matches!(lower[i - 1], ':' | '<' | '>');
+            if !prev_excludes
+                && is_guard_context(lower, i)
+                && operand_identifier_matches(lower, i, 1, substrings)
+            {
+                return true;
+            }
+            i += 1;
             continue;
         }
         i += 1;
@@ -701,8 +837,13 @@ fn has_authorization_predicate(stripped_body: &str) -> bool {
         return true;
     }
 
-    // Signal 3: a shared-secret/signature compensating control (any identifier form).
-    if has_identifier_containing_any(&lower, SECRET_CHECK_SUBSTRINGS) {
+    // Signal 3: a shared-secret/signature compensating control — a CALL form (same mechanism
+    // as signal 2, reused with the secret/token/signature vocabulary) OR a genuine COMPARISON/
+    // conditional guard (NOT an incidental mention — see `is_guard_context`).
+    if has_check_function_call(&lower, SECRET_CHECK_SUBSTRINGS) {
+        return true;
+    }
+    if has_secret_guard_comparison(&lower, SECRET_CHECK_SUBSTRINGS) {
         return true;
     }
 
@@ -968,6 +1109,151 @@ mod tests {
             1,
             "a bare 'role' column reference must not exempt an otherwise-unguarded write: {vs:#?}"
         );
+    }
+
+    // ── signal-3 regression: the secret-substring false exemption (item 2) ────────────
+
+    #[test]
+    fn bare_secret_column_assignment_without_a_real_check_still_fires() {
+        // The EXACT false-exemption this fix closes: a mutating, broadly-granted function that
+        // merely WRITES a column named like a secret (revoking a token) has zero actual
+        // authorization check anywhere in its body — the old "any identifier anywhere
+        // containing 'secret'/'token'/'signature'" signal silently exempted this.
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.revoke_token(p_user_id uuid) \
+             returns void as $$ \
+             begin \
+             update users set api_token = null where id = p_user_id; \
+             end; \
+             $$ language plpgsql security definer;\n\
+             grant execute on function public.revoke_token(uuid) to authenticated;\n",
+        )]);
+        let violations = PrivilegedFunctionNoAuthzChecker.check(&view(&f));
+        let vs = rule_hits(&violations);
+        assert_eq!(
+            vs.len(),
+            1,
+            "a bare secret-named column assignment must not exempt an otherwise-unguarded write: {vs:#?}"
+        );
+    }
+
+    #[test]
+    fn secret_named_column_in_insert_list_without_a_real_check_still_fires() {
+        // Shape variant: the secret-named identifier is an INSERT column (logging a webhook
+        // signature), not an UPDATE assignment target — still incidental use, not a check.
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.log_webhook(p_signature text, p_payload text) \
+             returns void as $$ \
+             begin \
+             insert into webhook_log (signature, payload) values (p_signature, p_payload); \
+             end; \
+             $$ language plpgsql security definer;\n\
+             grant execute on function public.log_webhook(text, text) to anon;\n",
+        )]);
+        let violations = PrivilegedFunctionNoAuthzChecker.check(&view(&f));
+        let vs = rule_hits(&violations);
+        assert_eq!(
+            vs.len(),
+            1,
+            "an INSERT column named like a secret must not exempt an otherwise-unguarded write: {vs:#?}"
+        );
+    }
+
+    #[test]
+    fn secret_named_identifier_in_raise_argument_without_a_real_check_still_fires() {
+        // Shape variant: the secret-named identifier is only a RAISE NOTICE argument.
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.delete_session(p_token text, p_id uuid) \
+             returns void as $$ \
+             begin \
+             raise notice 'deleting session for token %', p_token; \
+             delete from sessions where id = p_id; \
+             end; \
+             $$ language plpgsql security definer;\n\
+             grant execute on function public.delete_session(text, uuid) to anon;\n",
+        )]);
+        let violations = PrivilegedFunctionNoAuthzChecker.check(&view(&f));
+        let vs = rule_hits(&violations);
+        assert_eq!(
+            vs.len(),
+            1,
+            "a RAISE-only mention of a secret-named identifier must not exempt the write: {vs:#?}"
+        );
+    }
+
+    #[test]
+    fn where_clause_bare_equals_token_guard_is_never_flagged() {
+        // Shape variant on the COMPARISON half of the fix: a bare `=` (not `<>`) used as a
+        // genuine WHERE-clause guard, proving `is_guard_context` recognizes WHERE as well as
+        // IF, not just the `<>`/`!=` operators that never need the ambiguity check at all.
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.handle_webhook(p_token text, p_order_id uuid) \
+             returns void as $$ \
+             begin \
+             if not exists (select 1 from webhook_secrets where token = p_token) then \
+               raise exception 'invalid token'; \
+             end if; \
+             update orders set status = 'paid' where id = p_order_id; \
+             end; \
+             $$ language plpgsql security definer;\n\
+             grant execute on function public.handle_webhook(text, uuid) to anon;\n",
+        )]);
+        assert!(rule_hits(&PrivilegedFunctionNoAuthzChecker.check(&view(&f))).is_empty());
+    }
+
+    #[test]
+    fn not_equals_spelling_of_a_secret_comparison_guard_is_never_flagged() {
+        // Shape variant: `!=` instead of `<>` for the same inequality-comparison guard shape.
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.handle_webhook(p_secret text, p_order_id uuid) \
+             returns void as $$ \
+             begin \
+             if p_secret != current_setting('app.settings.webhook_secret') then \
+               raise exception 'invalid secret'; \
+             end if; \
+             update orders set status = 'paid' where id = p_order_id; \
+             end; \
+             $$ language plpgsql security definer;\n\
+             grant execute on function public.handle_webhook(text, uuid) to anon;\n",
+        )]);
+        assert!(rule_hits(&PrivilegedFunctionNoAuthzChecker.check(&view(&f))).is_empty());
+    }
+
+    #[test]
+    fn bare_secret_assignment_plus_genuine_guard_in_one_file_discriminates_correctly() {
+        // One file: the vulnerable bare-assignment function from the regression test above,
+        // next to the genuine WHERE-guard safe twin — proves the fix discriminates by
+        // MECHANISM within the same scan, not just in isolation.
+        let f = files(vec![(
+            "supabase/migrations/0001_fns.sql",
+            "create function public.revoke_token(p_user_id uuid) returns void as $$ \
+             begin update users set api_token = null where id = p_user_id; end; \
+             $$ language plpgsql security definer;\n\
+             create function public.handle_webhook(p_token text, p_order_id uuid) \
+             returns void as $$ \
+             begin \
+             if not exists (select 1 from webhook_secrets where token = p_token) then \
+               raise exception 'invalid token'; \
+             end if; \
+             update orders set status = 'paid' where id = p_order_id; \
+             end; \
+             $$ language plpgsql security definer;\n\
+             grant execute on function public.revoke_token(uuid) to authenticated;\n\
+             grant execute on function public.handle_webhook(text, uuid) to anon;\n",
+        )]);
+        let violations = PrivilegedFunctionNoAuthzChecker.check(&view(&f));
+        let vs = rule_hits(&violations);
+        assert_eq!(
+            vs.len(),
+            1,
+            "expected exactly the bare-assignment function to fire: {vs:#?}"
+        );
+        assert_eq!(vs[0].object.as_deref(), Some("public.revoke_token"));
     }
 
     #[test]
