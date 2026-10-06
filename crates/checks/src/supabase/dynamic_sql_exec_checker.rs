@@ -58,19 +58,55 @@
 //! - `format()`/`||` where every operand is a literal (a quoted string, a number, `NULL`) —
 //!   carries no runtime-determined content, so there is nothing to inject.
 //!
+//! # Intra-function dataflow: the build-then-EXECUTE idiom
+//!
+//! The inline shape above (`EXECUTE format(...)` / `EXECUTE '...' || p` with the unsafe
+//! expression written directly at the `EXECUTE` site) is not the only way plpgsql code builds
+//! dynamic SQL — arguably the MORE common idiom assembles the string into a local variable
+//! first, then `EXECUTE`s the variable:
+//!
+//! ```sql
+//! declare v_sql text;
+//! begin
+//!   v_sql := 'select * from reports where name = ' || p_name;
+//!   execute v_sql;
+//! end;
+//! ```
+//!
+//! [`unsafe_dynamic_exec`] tracks this with a single forward scan over the (comment-stripped)
+//! body, bounded to that ONE function — no cross-function analysis, matching every other
+//! checker in this corpus's "a function body is the unit of analysis" convention. As it walks
+//! the body left to right, it maintains a map from local-variable name to that variable's
+//! CURRENT classification (unsafe-with-mechanism, or safe), updated every time an
+//! `<ident> := <expr>;` assignment statement is seen — reusing [`classify_execute_expr`]
+//! verbatim, so a variable assigned `format('...%s...', p)` or `'...' || p` is marked unsafe
+//! exactly like the inline case, and a later REASSIGNMENT to a safe expression (`format(
+//! '...%L...', p)`, a literal) overwrites that state, matching plpgsql's own "last write wins"
+//! runtime semantics. When the scan later reaches a bare `EXECUTE <ident>;` or
+//! `EXECUTE <ident> USING ...;` / `EXECUTE <ident> INTO ...;` statement whose target is
+//! nothing but that one variable reference, it looks up the variable's CURRENT state at that
+//! point in the scan and fires if it is still unsafe. The existing GRANT-driven CRITICAL/HIGH
+//! severity split is untouched — it is computed once per function after a hit is found,
+//! regardless of which scan path (inline or dataflow) produced it.
+//!
+//! Only the `:=` assignment operator is tracked (not PL/pgSQL's alternate bare-`=` assignment
+//! form) — `=` is also a comparison operator throughout `IF`/`WHEN`/`WHERE` conditions, and
+//! disambiguating "statement-level assignment" from "equality test" from text alone risks
+//! treating a conditional comparison as if it reassigned the variable; `:=` is unambiguous, so
+//! restricting to it accepts a handful of false negatives (an unusual `=`-style assignment)
+//! rather than invent a new false-positive surface. A `DECLARE v_sql text := format(...);`
+//! initializer (the assignment folded into the declaration itself, rather than a separate
+//! statement in the body) is likewise not tracked — same "false negative over false positive"
+//! floor-detector call as every other scope line in this module.
+//!
 //! # What this deliberately does NOT do
 //!
 //! Only DOLLAR-QUOTED function bodies (`AS $$ ... $$` / `AS $tag$ ... $tag$`) are parsed — a
 //! function body supplied as an ordinary single-quoted string (rare for plpgsql, since the
-//! body would need to double every embedded quote) is not inspected. No cross-statement
-//! dataflow tracking: a `v_sql := '...' || p; EXECUTE v_sql;` two-statement pattern is not
-//! connected (the `EXECUTE` keyword's own argument is examined, not a variable fed to it
-//! earlier) — this is a conscious floor-detector scope line, matching
-//! `query_grammar_injection_checker`'s "false negative over false positive from a more
-//! aggressive parser" discipline. No positional mapping between a `format()` call's `%s`
-//! occurrences and its argument list — ANY non-literal argument alongside ANY `%s` in the
-//! template is flagged, even if that particular argument's position corresponds to a `%L`/`%I`
-//! placeholder instead.
+//! body would need to double every embedded quote) is not inspected. No positional mapping
+//! between a `format()` call's `%s` occurrences and its argument list — ANY non-literal
+//! argument alongside ANY `%s` in the template is flagged, even if that particular argument's
+//! position corresponds to a `%L`/`%I` placeholder instead.
 
 use super::splitter::{parse_dollar_tag, split_statements, SqlStatement};
 use crate::arch_checker::{ArchChecker, ArchViolation, RepoView, SEVERITY_CRITICAL, SEVERITY_HIGH};
@@ -146,7 +182,7 @@ impl ArchChecker for DynamicSqlExecInjectionChecker {
                     line: f.line,
                     object: Some(format!("{}.{}", f.schema, f.name)),
                     severity,
-                    message: message_for(f, hit, severity),
+                    message: message_for(f, &hit, severity),
                 })
             })
             .collect()
@@ -769,23 +805,123 @@ fn classify_execute_expr(expr: &str) -> Option<&'static str> {
     None
 }
 
-/// Scan a function body for the FIRST unsafe `EXECUTE` statement (see [`classify_execute_expr`]).
-/// Comments are stripped before scanning (see [`strip_sql_comments`]) so a `-- EXECUTE
-/// format(...)` mention inside a comment is never mistaken for live code.
-fn unsafe_dynamic_exec(body: &str) -> Option<&'static str> {
+/// Parse a bare (unquoted) identifier starting EXACTLY at `lower[pos]`, requiring a real word
+/// boundary immediately before `pos` (start of string, or a non-identifier character) — used
+/// by [`unsafe_dynamic_exec`]'s single forward scan to recognize both a `:=` assignment target
+/// and the `execute` keyword without re-deriving a word-boundary scan from scratch at every
+/// position. Returns `(lowercased identifier, index just past it)`; `None` if `pos` is not the
+/// START of a bare identifier.
+fn parse_bare_ident_at(lower: &[char], pos: usize) -> Option<(String, usize)> {
+    let c = *lower.get(pos)?;
+    if !(c.is_alphabetic() || c == '_') {
+        return None;
+    }
+    if pos > 0 {
+        let prev = lower[pos - 1];
+        if prev.is_alphanumeric() || prev == '_' {
+            return None;
+        }
+    }
+    let mut i = pos;
+    while i < lower.len() && (lower[i].is_alphanumeric() || lower[i] == '_') {
+        i += 1;
+    }
+    Some((lower[pos..i].iter().collect(), i))
+}
+
+/// Whether `expr` (a trimmed `EXECUTE`-statement argument) is NOTHING but a bare variable
+/// reference — optionally followed by `USING ...` or `INTO ...` (plpgsql's own trailing
+/// clauses on a plain `EXECUTE`) — as opposed to an inline expression (`v || p`,
+/// `format(...)`) that [`classify_execute_expr`] already classifies directly. Returns the
+/// lowercased variable name when it matches this shape.
+fn execute_target_variable(expr: &str) -> Option<String> {
+    let trimmed = expr.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    let c0 = *chars.first()?;
+    if !(c0.is_alphabetic() || c0 == '_') {
+        return None;
+    }
+    let mut i = 0usize;
+    while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+        i += 1;
+    }
+    let ident: String = chars[..i].iter().collect::<String>().to_lowercase();
+    let rest: String = chars[i..].iter().collect::<String>();
+    let rest_trimmed = rest.trim_start();
+    if rest_trimmed.is_empty() {
+        return Some(ident);
+    }
+    let rest_lower = rest_trimmed.to_ascii_lowercase();
+    if rest_lower == "using"
+        || rest_lower.starts_with("using ")
+        || rest_lower.starts_with("using(")
+        || rest_lower == "into"
+        || rest_lower.starts_with("into ")
+    {
+        return Some(ident);
+    }
+    None
+}
+
+/// Scan a function body for an unsafe `EXECUTE` — either built INLINE at the `EXECUTE` site
+/// (see [`classify_execute_expr`]), or built in a local variable one or more statements
+/// earlier and `EXECUTE`d by bare reference (see the module doc's "intra-function dataflow"
+/// section). Comments are stripped before scanning (see [`strip_sql_comments`]) so a
+/// `-- EXECUTE format(...)` mention inside a comment is never mistaken for live code.
+///
+/// Implemented as a SINGLE forward pass over the body: a map of variable name -> current
+/// classification is threaded through the scan and updated in place every time a `name :=
+/// expr;` assignment is encountered, so a variable's state at any `EXECUTE` always reflects
+/// its MOST RECENT assignment at that point in the body, not merely its first one.
+fn unsafe_dynamic_exec(body: &str) -> Option<String> {
     let stripped = strip_sql_comments(body);
     let chars: Vec<char> = stripped.chars().collect();
     let lower: Vec<char> = chars.iter().map(|c| c.to_ascii_lowercase()).collect();
 
-    let mut from = 0usize;
-    while let Some(kw_idx) = find_word_from(&lower, from, "execute") {
-        let expr_start = skip_ws(&chars, kw_idx + "execute".chars().count());
-        let (expr_end, next_from) = find_statement_end(&chars, expr_start);
-        let expr: String = chars[expr_start..expr_end.max(expr_start)].iter().collect();
-        if let Some(hit) = classify_execute_expr(&expr) {
-            return Some(hit);
+    // Variable name -> current classification (`None` once reassigned to something safe).
+    let mut var_state: std::collections::HashMap<String, Option<&'static str>> =
+        std::collections::HashMap::new();
+
+    let mut pos = 0usize;
+    while pos < lower.len() {
+        let Some((ident, after_ident)) = parse_bare_ident_at(&lower, pos) else {
+            pos += 1;
+            continue;
+        };
+
+        if ident == "execute" {
+            let expr_start = skip_ws(&chars, after_ident);
+            let (expr_end, next_from) = find_statement_end(&chars, expr_start);
+            let expr: String = chars[expr_start..expr_end.max(expr_start)].iter().collect();
+
+            // Inline shape: the expression is built directly at the EXECUTE site.
+            if let Some(hit) = classify_execute_expr(&expr) {
+                return Some(hit.to_string());
+            }
+            // Dataflow shape: EXECUTE references a variable built earlier in this body.
+            if let Some(var_name) = execute_target_variable(&expr) {
+                if let Some(Some(hit)) = var_state.get(&var_name) {
+                    return Some(format!(
+                        "{hit}, assigned to a local variable before being EXECUTEd"
+                    ));
+                }
+            }
+            pos = next_from.max(after_ident);
+            continue;
         }
-        from = next_from.max(kw_idx + 1);
+
+        // Assignment? `ident := expr;` — the ONLY assignment form tracked (see module doc).
+        let after_ws = skip_ws(&lower, after_ident);
+        if lower.get(after_ws) == Some(&':') && lower.get(after_ws + 1) == Some(&'=') {
+            let expr_start = skip_ws(&chars, after_ws + 2);
+            let (expr_end, next_from) = find_statement_end(&chars, expr_start);
+            let expr: String = chars[expr_start..expr_end.max(expr_start)].iter().collect();
+            var_state.insert(ident, classify_execute_expr(&expr));
+            pos = next_from.max(after_ws + 2);
+            continue;
+        }
+
+        pos = after_ident;
     }
     None
 }
@@ -1136,6 +1272,306 @@ mod tests {
         assert!(
             rule_hits(&DynamicSqlExecInjectionChecker.check(&view(&f))).is_empty(),
             "the LATER (safe) definition must win, mirroring timeline's CREATE OR REPLACE semantics"
+        );
+    }
+
+    // ── intra-function dataflow: build-then-EXECUTE (the two-statement idiom) ────────
+
+    #[test]
+    fn declare_then_concat_assignment_then_bare_execute_fires() {
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.search_users(p text) returns void as $$ \
+             declare v_sql text; \
+             begin \
+             v_sql := 'select * from users where name = ' || p; \
+             execute v_sql; \
+             end; \
+             $$ language plpgsql;\n",
+        )]);
+        let violations = DynamicSqlExecInjectionChecker.check(&view(&f));
+        let vs = rule_hits(&violations);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].severity, SEVERITY_HIGH);
+        assert!(
+            vs[0].message.contains("local variable"),
+            "the message should name the dataflow mechanism: {}",
+            vs[0].message
+        );
+    }
+
+    #[test]
+    fn declare_then_format_percent_s_assignment_then_bare_execute_fires_critical_with_grant() {
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.run_report(p text) returns void as $$ \
+             declare v_sql text; \
+             begin \
+             v_sql := format('select * from reports where name = %s', p); \
+             execute v_sql; \
+             end; \
+             $$ language plpgsql;\n\
+             grant execute on function public.run_report(text) to anon;\n",
+        )]);
+        let violations = DynamicSqlExecInjectionChecker.check(&view(&f));
+        let vs = rule_hits(&violations);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+        assert_eq!(vs[0].severity, SEVERITY_CRITICAL);
+    }
+
+    #[test]
+    fn multi_segment_concat_assignment_then_bare_execute_fires() {
+        // A shape variant on the concat form: more than two `||` segments, the non-literal
+        // operand in the MIDDLE rather than at the end.
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.f(p text) returns void as $$ \
+             declare v_sql text; \
+             begin \
+             v_sql := 'select * from t where x = ' || p || ' limit 1'; \
+             execute v_sql; \
+             end; \
+             $$ language plpgsql;\n",
+        )]);
+        let violations = DynamicSqlExecInjectionChecker.check(&view(&f));
+        let vs = rule_hits(&violations);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+    }
+
+    #[test]
+    fn return_query_execute_of_a_dataflow_built_variable_fires() {
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.search_users(p text) returns setof text as $$ \
+             declare v_sql text; \
+             begin \
+             v_sql := 'select name from users where name = ' || p; \
+             return query execute v_sql; \
+             end; \
+             $$ language plpgsql;\n",
+        )]);
+        let violations = DynamicSqlExecInjectionChecker.check(&view(&f));
+        let vs = rule_hits(&violations);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+    }
+
+    #[test]
+    fn execute_bare_variable_with_using_clause_still_classifies_the_assignment() {
+        // `USING` on a bare-variable EXECUTE doesn't change the mechanism search — the variable
+        // itself was still built by unsafe concatenation.
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.f(p text, q text) returns void as $$ \
+             declare v_sql text; \
+             begin \
+             v_sql := 'select * from t where x = ' || p; \
+             execute v_sql using q; \
+             end; \
+             $$ language plpgsql;\n",
+        )]);
+        let violations = DynamicSqlExecInjectionChecker.check(&view(&f));
+        let vs = rule_hits(&violations);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+    }
+
+    #[test]
+    fn create_or_replace_dialect_variant_fires_for_dataflow_shape() {
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create or replace function public.search_users(p text) returns void as $$ \
+             declare v_sql text; \
+             begin \
+             v_sql := 'select * from users where name = ' || p; \
+             execute v_sql; \
+             end; \
+             $$ language plpgsql;\n",
+        )]);
+        let violations = DynamicSqlExecInjectionChecker.check(&view(&f));
+        let vs = rule_hits(&violations);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+    }
+
+    #[test]
+    fn clauses_after_the_dollar_quoted_body_dialect_variant_fires_for_dataflow_shape() {
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.search_users(p text) returns void as $$ \
+             declare v_sql text; \
+             begin \
+             v_sql := 'select * from users where name = ' || p; \
+             execute v_sql; \
+             end; \
+             $$ language plpgsql security definer set search_path = public, pg_temp;\n",
+        )]);
+        let violations = DynamicSqlExecInjectionChecker.check(&view(&f));
+        let vs = rule_hits(&violations);
+        assert_eq!(vs.len(), 1, "{vs:#?}");
+    }
+
+    #[test]
+    fn reassignment_to_an_unsafe_expression_after_a_safe_one_still_fires_at_the_later_execute() {
+        // Last-assignment-wins semantics: the variable is first assigned safely, then
+        // reassigned unsafely before the one EXECUTE that actually runs it.
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.f(p text) returns void as $$ \
+             declare v_sql text; \
+             begin \
+             v_sql := format('select * from t where x = %L', p); \
+             v_sql := 'select * from t where x = ' || p; \
+             execute v_sql; \
+             end; \
+             $$ language plpgsql;\n",
+        )]);
+        let violations = DynamicSqlExecInjectionChecker.check(&view(&f));
+        let vs = rule_hits(&violations);
+        assert_eq!(
+            vs.len(),
+            1,
+            "the LATER (unsafe) assignment must be what the EXECUTE sees: {vs:#?}"
+        );
+    }
+
+    // ── intra-function dataflow: safe twins ───────────────────────────────────────────
+
+    #[test]
+    fn dataflow_variable_built_with_percent_l_is_never_flagged() {
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.f(p text) returns void as $$ \
+             declare v_sql text; \
+             begin \
+             v_sql := format('select * from t where x = %L', p); \
+             execute v_sql; \
+             end; \
+             $$ language plpgsql;\n",
+        )]);
+        assert!(rule_hits(&DynamicSqlExecInjectionChecker.check(&view(&f))).is_empty());
+    }
+
+    #[test]
+    fn dataflow_variable_built_with_percent_i_is_never_flagged() {
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.f(col text) returns void as $$ \
+             declare v_sql text; \
+             begin \
+             v_sql := format('select * from t order by %I', col); \
+             execute v_sql; \
+             end; \
+             $$ language plpgsql;\n",
+        )]);
+        assert!(rule_hits(&DynamicSqlExecInjectionChecker.check(&view(&f))).is_empty());
+    }
+
+    #[test]
+    fn dataflow_variable_is_a_static_string_executed_with_using_placeholder_is_never_flagged() {
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.f(p text) returns void as $$ \
+             declare v_sql text; \
+             begin \
+             v_sql := 'select * from t where x = $1'; \
+             execute v_sql using p; \
+             end; \
+             $$ language plpgsql;\n",
+        )]);
+        assert!(rule_hits(&DynamicSqlExecInjectionChecker.check(&view(&f))).is_empty());
+    }
+
+    #[test]
+    fn dataflow_variable_built_from_literals_only_is_never_flagged() {
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.f() returns void as $$ \
+             declare v_sql text; \
+             begin \
+             v_sql := 'select ' || '* from t'; \
+             execute v_sql; \
+             end; \
+             $$ language plpgsql;\n",
+        )]);
+        assert!(rule_hits(&DynamicSqlExecInjectionChecker.check(&view(&f))).is_empty());
+    }
+
+    #[test]
+    fn dataflow_variable_assigned_unsafely_but_never_executed_is_never_flagged() {
+        // The unsafe variable is only RAISE NOTICE'd, never EXECUTEd — no finding, because the
+        // defect this rule targets is the EXECUTE of attacker-controlled SQL, not merely
+        // building an interpolated string.
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.f(p text) returns void as $$ \
+             declare v_sql text; \
+             begin \
+             v_sql := 'select * from t where x = ' || p; \
+             raise notice 'would run: %', v_sql; \
+             end; \
+             $$ language plpgsql;\n",
+        )]);
+        assert!(rule_hits(&DynamicSqlExecInjectionChecker.check(&view(&f))).is_empty());
+    }
+
+    #[test]
+    fn dataflow_variable_returned_but_never_executed_is_never_flagged() {
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.f(p text) returns text as $$ \
+             declare v_sql text; \
+             begin \
+             v_sql := 'select * from t where x = ' || p; \
+             return v_sql; \
+             end; \
+             $$ language plpgsql;\n",
+        )]);
+        assert!(rule_hits(&DynamicSqlExecInjectionChecker.check(&view(&f))).is_empty());
+    }
+
+    #[test]
+    fn reassignment_to_a_safe_expression_after_an_unsafe_one_is_never_flagged() {
+        // The mirror image of the "reassignment still fires" test above: the variable is
+        // first assigned UNSAFELY, then reassigned SAFELY before the one EXECUTE that runs it.
+        let f = files(vec![(
+            "supabase/migrations/0001_fn.sql",
+            "create function public.f(p text) returns void as $$ \
+             declare v_sql text; \
+             begin \
+             v_sql := 'select * from t where x = ' || p; \
+             v_sql := format('select * from t where x = %L', p); \
+             execute v_sql; \
+             end; \
+             $$ language plpgsql;\n",
+        )]);
+        assert!(
+            rule_hits(&DynamicSqlExecInjectionChecker.check(&view(&f))).is_empty(),
+            "the LATER (safe) assignment must be what the EXECUTE sees"
+        );
+    }
+
+    #[test]
+    fn dataflow_and_inline_shapes_coexist_and_discriminate_in_one_file() {
+        let f = files(vec![(
+            "supabase/migrations/0001_fns.sql",
+            "create function public.inline_unsafe(p text) returns void as $$ \
+             begin execute 'select * from t where x = ' || p; end; \
+             $$ language plpgsql;\n\
+             create function public.dataflow_unsafe(p text) returns void as $$ \
+             declare v_sql text; \
+             begin v_sql := 'select * from t where x = ' || p; execute v_sql; end; \
+             $$ language plpgsql;\n\
+             create function public.dataflow_safe(p text) returns void as $$ \
+             declare v_sql text; \
+             begin v_sql := format('select * from t where x = %L', p); execute v_sql; end; \
+             $$ language plpgsql;\n",
+        )]);
+        let violations = DynamicSqlExecInjectionChecker.check(&view(&f));
+        let vs = rule_hits(&violations);
+        let mut objects: Vec<&str> = vs.iter().filter_map(|v| v.object.as_deref()).collect();
+        objects.sort();
+        assert_eq!(
+            objects,
+            vec!["public.dataflow_unsafe", "public.inline_unsafe"],
+            "{vs:#?}"
         );
     }
 }
