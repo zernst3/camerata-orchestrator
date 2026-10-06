@@ -1463,6 +1463,7 @@ mod tests {
             },
             recommendations: std::collections::HashMap::new(),
             failed_passes: Vec::new(),
+            ledger: crate::scan_ledger::ScanLedger::new(),
         }
     }
 

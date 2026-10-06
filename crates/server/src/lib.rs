@@ -101,6 +101,11 @@ pub mod usage_ledger;
 pub mod update_branch_run;
 pub mod workitems;
 pub mod workspace;
+/// W1: the pipeline-integrity ledger — per-rule "did it actually run" tracking and
+/// per-stage row-accounting, so a rule that never ran can never be reported as
+/// "verified clean" and a row that vanishes between pipeline stages can never go
+/// unnoticed. See the module doc comment and `docs/plans/` for the defects this closes.
+pub mod scan_ledger;
 /// W1 item 4: corpus-level build gate — every rule declaring `enforcement = "mechanical"`
 /// must resolve to a real wired detector. See the module doc comment.
 mod mechanical_gate;
@@ -22384,6 +22389,7 @@ mod tests {
             provenance: crate::onboard::ScanProvenance::default(),
             recommendations: std::collections::HashMap::new(),
             failed_passes: Vec::new(),
+            ledger: crate::scan_ledger::ScanLedger::new(),
         }
     }
 

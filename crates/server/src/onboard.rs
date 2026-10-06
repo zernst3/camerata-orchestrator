@@ -641,6 +641,16 @@ pub struct ScanReport {
     /// deserializes as empty rather than failing to load.
     #[serde(default)]
     pub failed_passes: Vec<crate::ai_audit::FailedPass>,
+    /// W1: the pipeline-integrity ledger — per-rule "did it actually run" facts and
+    /// per-stage row accounting, accumulated during this scan. `report_export::
+    /// build_report_json` derives "What's healthy" / "excluded from this audit" / the
+    /// scorecard's "Clean" badge FROM this ledger rather than from mere rule selection, and
+    /// adds its own report-build-time partition stage before deriving them. Empty (not
+    /// `None`) on any pre-W1 code path that hasn't been updated to populate it yet — an empty
+    /// ledger is the documented back-compat signal `build_report_json` falls back on.
+    /// `#[serde(default)]` so a report persisted before this field existed still deserializes.
+    #[serde(default)]
+    pub ledger: crate::scan_ledger::ScanLedger,
 }
 
 impl ScanReport {
@@ -672,6 +682,7 @@ impl ScanReport {
             provenance: ScanProvenance::default(),
             recommendations: std::collections::HashMap::new(),
             failed_passes: Vec::new(),
+            ledger: crate::scan_ledger::ScanLedger::new(),
         }
     }
 
@@ -705,6 +716,7 @@ impl ScanReport {
             provenance: ScanProvenance::default(),
             recommendations: std::collections::HashMap::new(),
             failed_passes: Vec::new(),
+            ledger: crate::scan_ledger::ScanLedger::new(),
         }
     }
 }

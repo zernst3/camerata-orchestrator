@@ -349,6 +349,7 @@ async fn regenerate_sample_report() {
         },
         recommendations: std::collections::HashMap::new(),
         failed_passes: Vec::new(),
+        ledger: camerata_server::scan_ledger::ScanLedger::new(),
     };
 
     // ═══ Load the REAL bundled rule corpus so citations/domains/titles resolve for real ═══
