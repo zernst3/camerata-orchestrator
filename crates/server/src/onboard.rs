@@ -1001,6 +1001,11 @@ pub async fn audit_repos(
     // W6: any pass that failed/timed out for a repo, across the whole scan — see
     // `ScanReport::failed_passes`'s doc comment. Never omitted from the export.
     let mut all_failed_passes: Vec<crate::ai_audit::FailedPass> = Vec::new();
+    // W1: the pipeline-integrity ledger for this scan — see `crate::scan_ledger`'s module
+    // doc. Named `pipeline_ledger` (not `ledger`) to avoid colliding with this function's own
+    // `ledger: Option<Arc<UsageLedger>>` parameter above, which is a completely different
+    // thing (cumulative token-usage accounting, not pipeline row/rule integrity).
+    let mut pipeline_ledger = crate::scan_ledger::ScanLedger::new();
     // Provenance (P1): the git identity of every source dir this run touched (sha/branch/
     // dirty), captured unconditionally per source — even a repo whose file-read later fails
     // still gets its ref recorded, since the dir is what was attempted. A dirty tree never
@@ -1186,6 +1191,21 @@ pub async fn audit_repos(
                         jstore.det_tool_done(jid, "floor", floor.len());
                         jstore.add_findings(jid, floor.clone());
                     }
+                    // W1: the content floor runs AUDIT_RULES unconditionally over every file
+                    // in this repo whenever `run_deterministic` is on — record each as
+                    // genuinely ran, with its real per-rule finding count, so "verified
+                    // clean" below means exactly that.
+                    for rid in AUDIT_RULES {
+                        let emitted = floor.iter().filter(|f| f.rule_id == *rid).count();
+                        pipeline_ledger.record_rule(
+                            *rid,
+                            crate::scan_ledger::RuleTier::Deterministic,
+                            true,
+                            None,
+                            files.len(),
+                            emitted,
+                        );
+                    }
                     repo_findings = floor;
 
                     // Deterministic architectural engine (Pass 1 — the scan surface only;
@@ -1204,7 +1224,96 @@ pub async fn audit_repos(
                         jstore.det_tool_done(jid, "architectural", arch.len());
                         jstore.add_findings(jid, arch.clone());
                     }
+                    // W1: classify every CI-tier (mechanical/architectural) rule SELECTED for
+                    // this repo into the SAME four detector channels the build-time corpus
+                    // gate checks (`crate::mechanical_gate`) — a rule answered by a registered
+                    // ArchChecker or the gate's own rule registry genuinely ran; one with NO
+                    // channel is the exact W1-item-4 defect (declares mechanical enforcement,
+                    // nothing ever evaluates it) and is recorded as not-run, never silently
+                    // "verified clean".
+                    let semgrep_ids = crate::mechanical_gate::semgrep_covered_rule_ids();
+                    for rid in repo_selected_ids.iter().filter(|r| is_ci_tier_rule(r, corpus)) {
+                        let emitted = arch.iter().filter(|f| f.rule_id == *rid).count();
+                        match crate::mechanical_gate::detector_channel(
+                            rid,
+                            &arch_checker_rule_ids,
+                            &semgrep_ids,
+                            corpus,
+                        ) {
+                            Some("arch_checker") => pipeline_ledger.record_rule(
+                                *rid,
+                                crate::scan_ledger::RuleTier::Deterministic,
+                                true,
+                                None,
+                                files.len(),
+                                emitted,
+                            ),
+                            Some("gateway_rule_registry") => pipeline_ledger.record_rule(
+                                *rid,
+                                crate::scan_ledger::RuleTier::Deterministic,
+                                true,
+                                None,
+                                0,
+                                0,
+                            ),
+                            Some("semgrep") => pipeline_ledger.record_rule(
+                                *rid,
+                                crate::scan_ledger::RuleTier::ExternalTool,
+                                true,
+                                None,
+                                files.len(),
+                                0,
+                            ),
+                            Some("scan_preview_linter") => pipeline_ledger.record_rule(
+                                *rid,
+                                crate::scan_ledger::RuleTier::ExternalTool,
+                                true,
+                                None,
+                                files.len(),
+                                0,
+                            ),
+                            _ => pipeline_ledger.record_rule(
+                                *rid,
+                                crate::scan_ledger::RuleTier::Deterministic,
+                                false,
+                                Some(
+                                    "declares mechanical/architectural enforcement but has no \
+                                     wired detector (not in the arch_checker registry, gateway \
+                                     rule registry, Semgrep mapping, or scan-preview linter \
+                                     source)"
+                                        .to_string(),
+                                ),
+                                0,
+                                0,
+                            ),
+                        };
+                    }
                     repo_findings.extend(arch);
+                } else {
+                    // W1: an honestly-disclosed scope choice, not a pipeline defect — every
+                    // rule the floor/architectural engine would otherwise have evaluated is
+                    // recorded as not-run WITH a reason, so it can never be miscounted as
+                    // "verified clean" just because it was selected.
+                    for rid in AUDIT_RULES {
+                        pipeline_ledger.record_rule(
+                            *rid,
+                            crate::scan_ledger::RuleTier::Deterministic,
+                            false,
+                            Some("deterministic scan deselected for this run".to_string()),
+                            0,
+                            0,
+                        );
+                    }
+                    for rid in repo_selected_ids.iter().filter(|r| is_ci_tier_rule(r, corpus)) {
+                        pipeline_ledger.record_rule(
+                            *rid,
+                            crate::scan_ledger::RuleTier::Deterministic,
+                            false,
+                            Some("deterministic scan deselected for this run".to_string()),
+                            0,
+                            0,
+                        );
+                    }
                 }
 
                 // ── Incremental: only the AI audit (the token cost) is short-circuited. ──
@@ -1250,6 +1359,22 @@ pub async fn audit_repos(
                                 "{spec}: no changes — AI audit skipped (fully cached)"
                             ));
                         }
+                        // W1: nothing fresh ran this turn, but a carried-forward result IS
+                        // real evidence from a prior scan of the SAME files — record `ran`
+                        // true (0 files freshly evaluated) rather than leaving these rules to
+                        // default-"clean" via mere selection.
+                        for (rid, _) in &semantic {
+                            let emitted =
+                                part.carried.iter().filter(|f| &f.rule_id == rid).count();
+                            pipeline_ledger.record_rule(
+                                rid.clone(),
+                                crate::scan_ledger::RuleTier::Semantic,
+                                true,
+                                None,
+                                0,
+                                emitted,
+                            );
+                        }
                     } else {
                         match crate::ai_audit::audit_repo(
                             &llm,
@@ -1272,7 +1397,51 @@ pub async fn audit_repos(
                         )
                         .await
                         {
-                            Ok((ai_findings, _ai_rules, repo_recs, repo_failed_passes)) => {
+                            Ok((
+                                ai_findings,
+                                _ai_rules,
+                                repo_recs,
+                                repo_failed_passes,
+                                repo_stage_samples,
+                            )) => {
+                                for sample in repo_stage_samples {
+                                    pipeline_ledger.record_stage_sample(sample);
+                                }
+                                // W1: every PRE-DECLARED semantic rule id for this repo
+                                // genuinely ran this turn (the model was asked to judge the
+                                // whole set in one pass) — record its real finding count,
+                                // counted at DETECTION time (before any later merge stage can
+                                // fold it into another row's `also_matches`), so a rule that
+                                // fires and is later merged away still counts as fired (never
+                                // "verified clean"). An AD HOC `AI-`-prefixed id the model
+                                // invented (never pre-declared — it only exists because it
+                                // fired) is recorded as its own new entry, same tier.
+                                let mut ai_counts: std::collections::HashMap<String, usize> =
+                                    std::collections::HashMap::new();
+                                for f in &ai_findings {
+                                    *ai_counts.entry(f.rule_id.clone()).or_insert(0) += 1;
+                                }
+                                for (rid, _) in &semantic {
+                                    let emitted = ai_counts.remove(rid).unwrap_or(0);
+                                    pipeline_ledger.record_rule(
+                                        rid.clone(),
+                                        crate::scan_ledger::RuleTier::Semantic,
+                                        true,
+                                        None,
+                                        files.len(),
+                                        emitted,
+                                    );
+                                }
+                                for (rid, emitted) in ai_counts {
+                                    pipeline_ledger.record_rule(
+                                        rid,
+                                        crate::scan_ledger::RuleTier::Semantic,
+                                        true,
+                                        None,
+                                        files.len(),
+                                        emitted,
+                                    );
+                                }
                                 ai_for_repo.extend(ai_findings);
                                 for rec in repo_recs {
                                     recommendations.insert(rec.rule_id.clone(), rec);
@@ -1283,6 +1452,24 @@ pub async fn audit_repos(
                                 all_failed_passes.extend(repo_failed_passes);
                             }
                             Err(e) => {
+                                // W1 (closes the "semantic tier emitted zero rows and nothing
+                                // noticed" defect): a total pass failure for this repo must
+                                // NEVER be indistinguishable from "genuinely clean" — every
+                                // rule this repo would have been audited against is recorded
+                                // as NOT RUN, with the real error, rather than left to default
+                                // to "verified clean" via mere selection.
+                                for (rid, _) in &semantic {
+                                    pipeline_ledger.record_rule(
+                                        rid.clone(),
+                                        crate::scan_ledger::RuleTier::Semantic,
+                                        false,
+                                        Some(format!(
+                                            "AI/semantic audit pass failed for this repo: {e}"
+                                        )),
+                                        0,
+                                        0,
+                                    );
+                                }
                                 let msg = format!("{spec}: AI audit skipped ({e})");
                                 if first_ai_error.is_none() {
                                     first_ai_error = Some(msg.clone());
@@ -1293,6 +1480,16 @@ pub async fn audit_repos(
                     }
                 } else if !files.is_empty() {
                     notes.push(format!("{spec}: AI review deselected — deterministic only"));
+                    for (rid, _) in &semantic {
+                        pipeline_ledger.record_rule(
+                            rid.clone(),
+                            crate::scan_ledger::RuleTier::Semantic,
+                            false,
+                            Some("AI/semantic review not requested this run".to_string()),
+                            0,
+                            0,
+                        );
+                    }
                 }
 
                 // Record this repo into the fresh manifest: fingerprints of EVERY current file
@@ -1307,19 +1504,56 @@ pub async fn audit_repos(
                 // any rule/stack pair a `[[stack_exception]]` block declares), so this runs
                 // unconditionally whenever a corpus is loaded, not just for the one wired rule.
                 if let Some(c) = corpus {
+                    let rows_in = repo_findings.len();
                     repo_findings = crate::ai_audit::apply_stack_exceptions(
                         repo_findings,
                         &repo_stack.frameworks,
                         c,
                     );
+                    let rows_out = repo_findings.len();
+                    // W1: a stack exception DROPS a finding outright (it names an idiomatic
+                    // platform pattern, not a violation) — the one stage in this loop that
+                    // reduces the row count without a merge target, so it gets its own
+                    // explicit `other` bucket rather than silently vanishing into
+                    // "unaccounted".
+                    if rows_in != rows_out {
+                        let mut acc = crate::scan_ledger::StageAccounting::default();
+                        acc.other
+                            .push(("stack_exception_excluded".to_string(), rows_in - rows_out));
+                        pipeline_ledger.record_stage(
+                            "stack-exception-filter",
+                            rows_in,
+                            rows_out,
+                            acc,
+                        );
+                    }
                 }
                 // Bug 3: second, cross-FAMILY merge pass over the COMBINED floor + arch + AI set
                 // (exact-location merge + snippet anchoring already ran inside the AI tier). Fuses
                 // the same defect flagged by two rule families a few lines apart, keeping the
                 // deterministic/most-specific primary + its exact line, siblings → `also_matches`.
                 // Runs BEFORE suppression classification so a waiver still sees the merged row.
+                let pre_merge_also_matches: std::collections::HashSet<String> = repo_findings
+                    .iter()
+                    .flat_map(|f| f.also_matches.iter().cloned())
+                    .collect();
+                let rows_in = repo_findings.len();
                 let mut repo_findings =
                     crate::ai_audit::merge_semantic_groups(repo_findings, &files);
+                let rows_out = repo_findings.len();
+                // W1: every id absorbed into a primary's `also_matches` by THIS merge (i.e.
+                // not already there before the call) counts as "merged into" that primary —
+                // see `ScanLedger`'s module doc for why this is the "merged-into (with
+                // target)" breakdown rather than a bare count.
+                let mut acc = crate::scan_ledger::StageAccounting::default();
+                for f in &repo_findings {
+                    for id in &f.also_matches {
+                        if !pre_merge_also_matches.contains(id) {
+                            acc.push_merge(id.clone(), f.rule_id.clone());
+                        }
+                    }
+                }
+                pipeline_ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
                 classify_repo_findings(&mut repo_findings, spec, &files);
                 // P2: generate a codebase-specific `fix_specific` for every finding in this
                 // repo (deterministic floor + architectural + AI alike — see the design
@@ -1404,6 +1638,26 @@ pub async fn audit_repos(
     report.actual_usage = Some(meter.snapshot());
     report.deep = deep_report;
     report.recommendations = recommendations;
+    // W1: fold every scan-time ledger integrity gap into the SAME existing `FailedPass`
+    // disclosure mechanism `all_failed_passes` already uses — runtime never refuses the
+    // export or drops a row; an unaccounted pipeline stage, or a rule declaring mechanical/
+    // architectural enforcement with no wired detector, is recorded here so the export's
+    // methodology and executive summary state it plainly instead of silently calling the
+    // rule "verified clean". See `scan_ledger::stage_disclosure`/`rule_disclosure`'s doc
+    // comments for why an ordinary, honestly-scoped skip (AI not requested, deterministic
+    // deselected) does NOT raise one of these — only a genuine integrity gap does.
+    let repo_label = report.repos.join(", ");
+    for stage in pipeline_ledger.stages() {
+        if let Some(fp) = crate::scan_ledger::stage_disclosure(&repo_label, stage) {
+            all_failed_passes.push(fp);
+        }
+    }
+    for rule in pipeline_ledger.rules() {
+        if let Some(fp) = crate::scan_ledger::rule_disclosure(&repo_label, rule) {
+            all_failed_passes.push(fp);
+        }
+    }
+    report.ledger = pipeline_ledger;
     // W6: never a silent omission — surface every failed/timed-out pass so the export's
     // methodology and summary can disclose it explicitly instead of shipping quietly
     // incomplete.

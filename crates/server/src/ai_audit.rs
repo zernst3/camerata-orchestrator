@@ -5627,10 +5627,21 @@ pub async fn audit_repo(
     // incremental scan `files` is only the CHANGED bodies, but the repo map should still cover
     // the WHOLE repo so cross-file rules keep their architectural view. `None` → use `files`.
     map_files: Option<&[(String, String)]>,
-) -> anyhow::Result<(Vec<Finding>, Vec<ProposedRule>, Vec<RuleRecommendation>, Vec<FailedPass>)> {
+) -> anyhow::Result<(
+    Vec<Finding>,
+    Vec<ProposedRule>,
+    Vec<RuleRecommendation>,
+    Vec<FailedPass>,
+    Vec<crate::scan_ledger::StageSample>,
+)> {
     if files.is_empty() {
-        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()));
     }
+    // W1: this call's own merge/calibration stage samples, returned alongside the normal
+    // result (mirroring the EXISTING `Vec<FailedPass>` accumulation pattern already used
+    // throughout this function) rather than threading a `&mut ScanLedger` through this
+    // already-large parameter list — see `crate::scan_ledger::StageSample`'s doc comment.
+    let mut stage_samples: Vec<crate::scan_ledger::StageSample> = Vec::new();
     // Cross-file context for every chunk (which dirs are which layer, where types live). On an
     // incremental scan this is built from the whole repo, not just the changed files.
     let repo_map = build_repo_map(map_files.unwrap_or(files));
@@ -5960,9 +5971,31 @@ pub async fn audit_repo(
     // on LOCATION (not title) is what makes this work — titles vary per invented name. This
     // is N-in / M-out (M < N), a true dedup, not the calibration pass's N-in/N-out scoring.
     {
+        let rows_in = all_findings.len();
         let mut seen = std::collections::HashSet::new();
         all_findings.retain(|f| seen.insert((f.path.clone(), f.line, f.rule_id.clone())));
+        let rows_after_dedup = all_findings.len();
         all_findings = merge_by_location(all_findings, files);
+        let rows_out = all_findings.len();
+        // W1: these freshly-generated findings carry no `also_matches` yet (this is the
+        // FIRST merge they pass through), so every id in a post-merge row's `also_matches` is
+        // genuinely new here — no pre-existing-set diff needed, unlike the cross-family merge
+        // at the onboard.rs call site, which runs over an ALREADY-merged set.
+        let mut acc = crate::scan_ledger::StageAccounting {
+            deduped: rows_in.saturating_sub(rows_after_dedup),
+            ..Default::default()
+        };
+        for f in &all_findings {
+            for id in &f.also_matches {
+                acc.push_merge(id.clone(), f.rule_id.clone());
+            }
+        }
+        stage_samples.push(crate::scan_ledger::StageSample {
+            stage: "ai-location-merge".to_string(),
+            rows_in,
+            rows_out,
+            accounting: acc,
+        });
         let mut seen_p = std::collections::HashSet::new();
         all_proposed.retain(|p| seen_p.insert(p.id.clone()));
     }
@@ -5979,6 +6012,7 @@ pub async fn audit_repo(
     // see its doc comment) so the cockpit shows "calibrating N findings" with actual
     // content instead of a mystery hang or an empty placeholder. (Dedup/merge also
     // shrinks N, so this round is now faster too.)
+    let pre_calibration_len = all_findings.len();
     let verified = if all_findings.is_empty() {
         all_findings
     } else {
@@ -6030,6 +6064,25 @@ pub async fn audit_repo(
             });
         }
     }
+    // W1: calibration itself never drops a row (see this block's own doc comment above); the
+    // ONLY row-count reduction between `pre_calibration_len` and here is the P7
+    // not-applicable filter just above, so that is the one explicit disposition this stage
+    // accounts for.
+    {
+        let rows_out = verified.len();
+        let mut acc = crate::scan_ledger::StageAccounting::default();
+        let dropped = pre_calibration_len.saturating_sub(rows_out);
+        if dropped > 0 {
+            acc.other
+                .push(("not_applicable_rule_filtered".to_string(), dropped));
+        }
+        stage_samples.push(crate::scan_ledger::StageSample {
+            stage: "ai-calibration".to_string(),
+            rows_in: pre_calibration_len,
+            rows_out,
+            accounting: acc,
+        });
+    }
     // Tag every finding under a multi-option rule with the option it was actually judged
     // against — the report layer (`report_export::resolve_fix`) reads this so the Fix text
     // matches the evaluated option, never a stale default. Every finding for a given rule_id
@@ -6046,7 +6099,13 @@ pub async fn audit_repo(
             }
         }
     }
-    Ok((verified, all_proposed, recommendations, failed_passes))
+    Ok((
+        verified,
+        all_proposed,
+        recommendations,
+        failed_passes,
+        stage_samples,
+    ))
 }
 
 // ════════════════════════════════════════════════════════════════════════════════════
@@ -10666,7 +10725,7 @@ mod tests {
             "ARCH-NO-DIRECT-DB-1".to_string(),
             "Controllers must not call the database directly.".to_string(),
         )];
-        let (findings, _proposed, _recs, _failed) = audit_repo(
+        let (findings, _proposed, _recs, _failed, _stage_samples) = audit_repo(
             &llm,
             "me/api",
             &files,
@@ -10938,7 +10997,7 @@ mod tests {
         )];
         let selected = vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
         let alternatives = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
-        let (findings, _proposed, recs, _failed) = audit_repo(
+        let (findings, _proposed, recs, _failed, _stage_samples) = audit_repo(
             &llm,
             "me/api",
             &files,
@@ -10996,7 +11055,7 @@ mod tests {
         )];
         let selected = vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
         let alternatives = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
-        let (findings, _proposed, recs, _failed) = audit_repo(
+        let (findings, _proposed, recs, _failed, _stage_samples) = audit_repo(
             &llm,
             "me/api",
             &files,
@@ -11049,7 +11108,7 @@ mod tests {
         let mut forced = std::collections::HashMap::new();
         forced.insert("MULTI-RULE-1".to_string(), "opt-b".to_string());
 
-        let (findings, _proposed, recs, _failed) = audit_repo(
+        let (findings, _proposed, recs, _failed, _stage_samples) = audit_repo(
             &llm,
             "me/api",
             &files,
@@ -11089,7 +11148,7 @@ mod tests {
         let mut forced = std::collections::HashMap::new();
         forced.insert("MULTI-RULE-1".to_string(), "opt-does-not-exist".to_string());
 
-        let (_findings, _proposed, recs, _failed) = audit_repo(
+        let (_findings, _proposed, recs, _failed, _stage_samples) = audit_repo(
             &llm,
             "me/api",
             &files,
@@ -11153,7 +11212,7 @@ mod tests {
             // the removed "must choose an alternative" gate used to block on.
             two_option_alternatives("MULTI-NO-DEFAULT-1", None),
         ];
-        let (findings, _proposed, recs, _failed) = audit_repo(
+        let (findings, _proposed, recs, _failed, _stage_samples) = audit_repo(
             &llm,
             "me/api",
             &files,

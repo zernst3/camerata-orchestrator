@@ -4413,7 +4413,7 @@ async fn rescan_alternatives_handler(
         )
         .await
         {
-            Ok((findings, _proposed, recs, failed)) => {
+            Ok((findings, _proposed, recs, failed, _stage_samples)) => {
                 all_findings.extend(findings);
                 for r in recs {
                     all_recs.insert(r.rule_id.clone(), r);
