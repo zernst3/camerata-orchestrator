@@ -3,7 +3,14 @@ title = "SQL queries are parameterized with PreparedStatement or JPA parameters;
 tag = "stack"
 domain = "java"
 layer = "language"
-enforcement = "mechanical"
+# W1 item 4 (mechanical-enforcement build gate, crates/server/src/mechanical_gate.rs): this
+# rule's `qualifies` text names SpotBugs/Semgrep/IDE linters, but no such check is actually
+# wired today (no registered ArchChecker, no gateway rule arm, no bundled Semgrep rule, and
+# Java is not one of the Clippy/Ruff/ESLint preview tools). Declaring `mechanical` here
+# claimed a hard check that never ran. Corrected to `structured` (evaluated by the
+# semantic/AI audit tier, not mechanically enforced) until a real SpotBugs/Semgrep detector
+# is wired.
+enforcement = "structured"
 default = true
 qualifies = "Enforced by static analysis (SpotBugs, Semgrep, IDE linters) that detect SQL string concatenation, string interpolation, or format() flowing into query execution. Conformance holds when the gate runs in CI and concatenated queries fail the build."
 verification = "grounded"

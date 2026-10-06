@@ -3,7 +3,13 @@ title = "SQL queries use parameterized queries via SqlParameter or Entity Framew
 tag = "stack"
 domain = "csharp"
 layer = "language"
-enforcement = "mechanical"
+# W1 item 4 (mechanical-enforcement build gate, crates/server/src/mechanical_gate.rs): this
+# rule's `qualifies` text names Roslyn analyzers / Semgrep, but no such check is actually
+# wired today (no registered ArchChecker, no gateway rule arm, no bundled Semgrep rule, no
+# Clippy/Ruff/ESLint preview source). Declaring `mechanical` here claimed a hard check that
+# never ran. Corrected to `structured` (evaluated by the semantic/AI audit tier, not
+# mechanically enforced) until a real Roslyn-analyzer or Semgrep detector is wired.
+enforcement = "structured"
 default = true
 qualifies = "Enforced by static analysis (Roslyn analyzers, Semgrep) that detect string concatenation or string interpolation in SQL queries flowing to execution. Conformance holds when the gate runs in CI and concatenated queries fail the build."
 

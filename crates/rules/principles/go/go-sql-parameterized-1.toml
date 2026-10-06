@@ -3,7 +3,13 @@ title = "SQL is parameterized via prepared statements or ORM query builders; que
 tag = "stack"
 domain = "go"
 layer = "language"
-enforcement = "mechanical"
+# W1 item 4 (mechanical-enforcement build gate, crates/server/src/mechanical_gate.rs): this
+# rule's `qualifies` text names gosec (G201/G202), but gosec is not a wired detector today
+# (not a registered ArchChecker, not a gateway rule arm, not a bundled Semgrep rule, and Go
+# is not one of the Clippy/Ruff/ESLint preview tools). Declaring `mechanical` here claimed a
+# hard check that never ran. Corrected to `structured` (evaluated by the semantic/AI audit
+# tier, not mechanically enforced) until a real gosec/Semgrep detector is wired.
+enforcement = "structured"
 default = true
 verification = "grounded"
 

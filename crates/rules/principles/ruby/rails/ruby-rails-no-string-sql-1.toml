@@ -3,7 +3,14 @@ title = "ActiveRecord queries use placeholders or hash conditions; SQL is never 
 tag = "stack"
 domain = "ruby:rails"
 layer = "framework"
-enforcement = "mechanical"
+# W1 item 4 (mechanical-enforcement build gate, crates/server/src/mechanical_gate.rs): this
+# rule's `qualifies` text names brakeman / a Rubocop-Rails cop, but no such check is actually
+# wired today (no registered ArchChecker, no gateway rule arm, no bundled Semgrep rule, and
+# Ruby is not one of the Clippy/Ruff/ESLint preview tools). Declaring `mechanical` here
+# claimed a hard check that never ran. Corrected to `structured` (evaluated by the
+# semantic/AI audit tier, not mechanically enforced) until a real brakeman/Semgrep detector
+# is wired.
+enforcement = "structured"
 default = true
 qualifies = "Enforced by brakeman (SQL injection findings) and a Rubocop-Rails rule. Conformance holds when every `.where`, `.order`, `.joins`, `.group`, and `.having` call either passes a hash condition or a string literal with `?`/named-bind placeholders (`where('active = ? AND role = ?', true, role)`), never an interpolated string (`where(\"role = '#{role}'\")`). Any site where a Ruby variable or expression is interpolated directly into a SQL fragment string fails."
 verification = "grounded"

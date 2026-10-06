@@ -3,7 +3,13 @@ title = "All SQL queries use parameterized arguments, never string interpolation
 tag = "stack"
 domain = "go:gorm"
 layer = "library"
-enforcement = "mechanical"
+# W1 item 4 (mechanical-enforcement build gate, crates/server/src/mechanical_gate.rs): no
+# detector is actually wired for this rule (not a registered ArchChecker, not a gateway rule
+# arm, not a bundled Semgrep rule, and Go is not one of the Clippy/Ruff/ESLint preview
+# tools). Declaring `mechanical` here claimed a hard check that never ran. Corrected to
+# `structured` (evaluated by the semantic/AI audit tier, not mechanically enforced) until a
+# real gosec/Semgrep detector is wired for GORM raw-SQL usage.
+enforcement = "structured"
 default = true
 verification = "grounded"
 

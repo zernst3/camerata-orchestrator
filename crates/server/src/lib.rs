@@ -101,6 +101,9 @@ pub mod usage_ledger;
 pub mod update_branch_run;
 pub mod workitems;
 pub mod workspace;
+/// W1 item 4: corpus-level build gate — every rule declaring `enforcement = "mechanical"`
+/// must resolve to a real wired detector. See the module doc comment.
+mod mechanical_gate;
 
 use std::sync::Arc;
 
@@ -5409,8 +5412,7 @@ async fn onboard_audit(
 /// at Layer 1 (gate); semgrep enforces at Layers 2-3 (CI). Trimming semgrep would punch
 /// a hole in CI coverage. The fix is presentation-time dedup at scan preview only (see
 /// `dedup_scan_previews`). Decision: docs/decisions/2026-06-22_scan_floor_semgrep_dedup.md
-#[cfg_attr(not(test), allow(dead_code))]
-fn semgrep_floor_category(semgrep_rule_id: &str) -> Option<&'static str> {
+pub(crate) fn semgrep_floor_category(semgrep_rule_id: &str) -> Option<&'static str> {
     match semgrep_rule_id {
         "camerata.security.hardcoded-secret"
         | "camerata.security.hardcoded-secret-dquote" => Some("SEC-NO-HARDCODED-SECRETS-1"),
