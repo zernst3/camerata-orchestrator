@@ -519,6 +519,78 @@ mod tests {
         assert!(excluded[0].1.contains("no wired detector"));
     }
 
+    /// W4 (root-cause fix) regression: a corpus rule that declares `mechanical` enforcement
+    /// but ships NO deterministic detector is, as of W4, ALWAYS routed to the semantic/AI pass
+    /// (see `onboard::semantic_rule_ids_for_repo`). This mirrors the EXACT `record_rule` call
+    /// sequence `onboard::audit_repos`'s loop makes for that case: NOTHING is recorded during
+    /// the deterministic phase (no detector channel matched, so that loop skips it entirely —
+    /// see its doc comment), and the semantic phase records it directly as `RuleTier::Semantic`
+    /// with the model's real finding count once the AI pass actually runs. The rule must land
+    /// as genuinely FIRED (not healthy), and it must NEVER be recorded as excluded/not-run —
+    /// the old defect this whole fix closes was exactly a no-detector rule ending up "checked"
+    /// in name only; the new behavior is that it is checked for real, by the model.
+    #[test]
+    fn a_mechanical_rule_with_no_detector_that_the_model_evaluated_is_recorded_as_fired_semantic_never_excluded(
+    ) {
+        let mut ledger = ScanLedger::new();
+        // The semantic-phase recording `onboard::audit_repos` makes once `audit_repo` returns:
+        // one real finding for this id, at the Semantic tier.
+        ledger.record_rule(
+            "RUBY-FROZEN-STRING-LITERAL-1",
+            RuleTier::Semantic,
+            true,
+            None,
+            3, // files_evaluated
+            1, // the model's one real finding
+        );
+        let entry = ledger
+            .rule("RUBY-FROZEN-STRING-LITERAL-1")
+            .expect("just recorded");
+        assert!(entry.ran, "the semantic pass genuinely ran this rule");
+        assert_eq!(entry.tier, RuleTier::Semantic);
+        assert!(
+            !entry.verified_clean(),
+            "a rule that fired must never read as verified clean"
+        );
+        assert!(
+            ledger.excluded_rules().is_empty(),
+            "a rule the model actually ran must never appear as excluded/not-run"
+        );
+        assert!(
+            ledger
+                .fired_rule_ids()
+                .contains("RUBY-FROZEN-STRING-LITERAL-1"),
+            "the rule must be recorded as genuinely fired"
+        );
+    }
+
+    /// The companion zero-findings case: the SAME no-detector mechanical rule, model-reviewed,
+    /// came back clean this run. It is honestly healthy (the model looked and found nothing —
+    /// a true claim), tagged `RuleTier::Semantic` (never silently implied to be a mechanical
+    /// check), and critically still NEVER appears in `excluded_rules()`.
+    #[test]
+    fn a_mechanical_rule_with_no_detector_that_the_model_reviewed_clean_is_healthy_via_semantic_tier(
+    ) {
+        let mut ledger = ScanLedger::new();
+        ledger.record_rule(
+            "RUBY-FROZEN-STRING-LITERAL-1",
+            RuleTier::Semantic,
+            true,
+            None,
+            3,
+            0,
+        );
+        let entry = ledger
+            .rule("RUBY-FROZEN-STRING-LITERAL-1")
+            .expect("just recorded");
+        assert_eq!(entry.tier, RuleTier::Semantic);
+        assert!(entry.verified_clean());
+        assert!(ledger
+            .healthy_rule_ids()
+            .contains(&"RUBY-FROZEN-STRING-LITERAL-1".to_string()));
+        assert!(ledger.excluded_rules().is_empty());
+    }
+
     #[test]
     fn a_rule_that_fired_is_never_healthy_and_counts_as_fired() {
         let mut ledger = ScanLedger::new();
