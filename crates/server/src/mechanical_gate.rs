@@ -1,31 +1,37 @@
-//! W1 item 4 — the mechanical-enforcement build gate.
+//! W1 item 4 (inverted by W4) — the mechanical-enforcement build gate.
 //!
-//! A corpus rule that declares `enforcement = "mechanical"` is a promise: Camerata runs a
-//! REAL, deterministic check for it, so a scan report can honestly say the rule was
-//! "mechanically checked" (never flagged "verified clean" on a rule nothing ever evaluated).
-//! That promise has exactly four ways to be kept today:
+//! A corpus rule that declares `enforcement = "mechanical"` promises a REAL check exists for
+//! it — but, as W4 established (see `onboard::audit_repos`'s top-level doc comment), that
+//! check does NOT have to be a deterministic one. "Mechanical" means "deterministically
+//! checkable IN PRINCIPLE, once someone builds a repo-specific CI gate" — on a repo Camerata
+//! has never scanned, that gate usually does not exist yet. The W1-era version of this gate
+//! got the invariant backwards: it REQUIRED a wired deterministic detector for every
+//! `mechanical` rule and grandfathered ~35 pre-existing ids that had none, which is exactly
+//! backwards — those 35 ids were never actually unchecked (once the semantic/AI pass stopped
+//! being withheld from CI-tier rules), they just had no DETERMINISTIC check, which was always
+//! fine as long as the model still saw them.
 //!
-//! 1. A registered [`camerata_checks::arch_checker::ArchChecker`] answers the rule id
-//!    (`camerata_checks::arch_checker::all_checker_rule_ids`).
-//! 2. The gate's own rule registry answers it (`camerata_gateway::lookup_arm`/`RULE_REGISTRY`)
-//!    — the deterministic content-scan path the brownfield floor reuses.
-//! 3. A bundled Semgrep rule answers it, derived from the ACTUAL shipped ruleset
-//!    (`assets/semgrep-rules/security.yml`) rather than a hand-maintained list, so adding real
-//!    Semgrep coverage for a rule clears it here automatically.
-//! 4. The rule's own `[[sources]]` names a linter the scan-time preview actually runs
-//!    (`crate::scan_tools::tool_for_linter` — Clippy, Ruff, ESLint, or Semgrep), the SAME
-//!    generic, data-driven mechanism `onboard`'s preview pass already uses to run that tool
-//!    against the repo and produce a real, deterministic finding. This is not a hand-waved
-//!    4th category: it is the exact detector `scan_tools::run_scan_tools` wires today, for
-//!    exactly this rule's own `[[sources]]`, with no additional allowlisting.
+//! A rule's promise is kept by ONE of two routes:
 //!
-//! A rule declaring `mechanical` that matches NONE of the four is a phantom: the corpus
-//! claims a hard check exists, but nothing in the pipeline ever runs it, and the gap is
-//! invisible until a report ships that calls it "clean". [`mechanical_rules_missing_detector`]
-//! is the audit function; the test below is the CI-time gate (fails the build, lists the
-//! offending ids) — see the module's companion runtime piece, `ScanLedger`
-//! (`crate::scan_ledger`), which handles the SAME gap at scan time via disclosure rather than
-//! a build failure (runtime must never refuse a scan; only tests may fail hard).
+//! 1. A REAL deterministic detector answers it — one of four channels (see
+//!    [`detector_channel`]): a registered [`camerata_checks::arch_checker::ArchChecker`], the
+//!    gate's own rule registry (`camerata_gateway::lookup_arm`), a bundled Semgrep rule
+//!    (derived from the ACTUAL shipped ruleset, not a hand-maintained list), or the rule's own
+//!    `[[sources]]` naming a linter the scan-time preview actually runs
+//!    (`crate::scan_tools::tool_for_linter`).
+//! 2. NO deterministic detector exists, but the rule is GUARANTEED to reach the semantic/AI
+//!    pass — every selected, applicable rule does, as of W4, UNLESS it is a governance/process
+//!    rule (`ORCH-*`/`SPIRIT-*`/`PROC-*` — see `onboard::audit::is_code_auditable_rule`), which
+//!    is a category error to code-audit regardless of enforcement tier.
+//!
+//! The ONLY genuine phantom left is a `mechanical` rule that is BOTH routes' failure at once:
+//! no deterministic detector AND not code-auditable (so nothing would ever hand it to the
+//! model either). [`mechanical_rules_missing_detector`] finds route-1 failures;
+//! [`every_mechanical_rule_with_no_detector_is_code_auditable`] below is the CI-time gate that
+//! asserts route 2 always catches what route 1 misses — see the module's companion runtime
+//! piece, `ScanLedger` (`crate::scan_ledger`), which records the SAME per-rule facts at scan
+//! time via disclosure rather than a build failure (runtime must never refuse a scan; only
+//! tests may fail hard).
 
 use std::collections::HashSet;
 
@@ -131,7 +137,9 @@ pub const REGEX_DEMOTED_FOR_SEMGREP: &[&str] = &["SEC-NO-RAW-SQL-CONCAT-1"];
 
 /// Every rule id in `corpus` that declares `enforcement = "mechanical"` but resolves to NONE
 /// of the four wired-detector channels (see module doc). Sorted for stable, readable test
-/// output. Empty on a healthy corpus.
+/// output. Having no detector is NOT itself a defect since W4 — see
+/// [`every_mechanical_rule_with_no_detector_is_code_auditable`], the test that asserts every
+/// id this returns is still guaranteed to reach the semantic pass.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn mechanical_rules_missing_detector(corpus: &camerata_rules::RuleSet) -> Vec<String> {
     let checker_ids = camerata_checks::arch_checker::all_checker_rule_ids();
@@ -147,68 +155,6 @@ pub fn mechanical_rules_missing_detector(corpus: &camerata_rules::RuleSet) -> Ve
     offenders.sort();
     offenders
 }
-
-/// Pre-existing corpus debt this gate finds but W1 does NOT fix: rules declaring
-/// `enforcement = "mechanical"` with no wired detector, UNRELATED to the parameterized-SQL
-/// defect this commit closes (testing-convention rules, CI/CD meta-rules, Supabase rules,
-/// integration-contract rules, C#/Java/Ruby language rules with no registered checker). A
-/// full-corpus run of [`mechanical_rules_missing_detector`] on the day this gate landed found
-/// 35 of these, spanning concerns well beyond "pipeline-integrity ledger" scope — auditing
-/// and correcting each one (wire a real detector, or correct its declared tier) is real,
-/// legitimate follow-up work, tracked here explicitly rather than silently fixed or silently
-/// ignored.
-///
-/// This list is a GRANDFATHER, not a permanent exemption: it must never grow for a rule
-/// authored after this gate landed (a NEW mechanical rule with no detector fails the test
-/// below immediately, which is the whole point of the gate) — it only shrinks, as each
-/// pre-existing id is resolved and removed. [`every_mechanical_rule_has_a_wired_detector`]
-/// below asserts BOTH that the live offender set is a SUBSET of this list (no new phantom
-/// mechanical rules) AND that it does not already contain an entry this list no longer
-/// needs (the list itself must not go stale once an id is actually fixed). Only read from
-/// this module's own tests (see the `has_preview_tool_source` doc comment for why that's
-/// marked the same way).
-///
-/// W3 (commodity-class taint layer) removed `RUBY-AVOID-EVAL-SEND-1`: it now resolves via
-/// channel 3 (`camerata.security.taint-ruby-eval-send`, a real taint-mode detector — see
-/// `assets/semgrep-rules/taint-security.yml`), closing the gap where it declared a Brakeman
-/// integration Camerata never actually ran.
-#[cfg_attr(not(test), allow(dead_code))]
-const KNOWN_PRE_W1_MECHANICAL_GAPS: &[&str] = &[
-    "CICD-CODEQL-SECURITY-SCAN-1",
-    "CICD-DEPENDENCY-AUDIT-1",
-    "CSHARP-ASPNETCORE-ASYNC-ACTIONS-1",
-    "CSHARP-IDISPOSABLE-USING-1",
-    "CSHARP-NO-HARDCODED-SECRETS-1",
-    "CSHARP-NO-SWALLOWED-EXCEPTIONS-1",
-    "CSHARP-NULLABLE-REFERENCE-TYPES-1",
-    "GO-ERRORS-MUST-BE-CHECKED-1",
-    "GO-PACKAGE-BOUNDARIES-CLEAR-1",
-    "GO-TESTING-COLOCATED-TEST-FILES-1",
-    "GO-TESTING-DETERMINISTIC-NO-TIME-SLEEP-1",
-    "GO-TESTING-HELPER-T-HELPER-1",
-    "INTEGRATION-API-CONTRACT-1",
-    "INTEGRATION-AUTH-SEAM-1",
-    "INTEGRATION-EVENT-WIRING-1",
-    "JAVA-EXCEPTION-HANDLING-1",
-    "JAVA-NO-HARDCODED-SECRETS-1",
-    "JAVA-RESOURCE-MANAGEMENT-1",
-    "JAVA-TESTING-AAA-STRUCTURE-1",
-    "JAVA-TESTING-DETERMINISTIC-1",
-    "JAVA-TESTING-INTEGRATION-TEST-LOCATION-1",
-    "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1",
-    "JAVASCRIPT-REACT-RULES-OF-HOOKS-1",
-    "JAVASCRIPT-TESTING-NAMING-1",
-    "JAVASCRIPT-TESTING-NO-DISABLED-TESTS-1",
-    "JAVASCRIPT-TESTING-UNIT-COLOCATION-1",
-    "RUBY-FROZEN-STRING-LITERAL-1",
-    "RUBY-RAILS-NO-SECRETS-IN-CODE-1",
-    "RUBY-RAILS-STRONG-PARAMS-1",
-    "RUBY-TESTING-DESCRIBE-NAMING-1",
-    "RUBY-TESTING-UNIT-FILE-LOCATION-1",
-    "SUPABASE-AUTH-EDGE-JWT-1",
-    "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
-    "SUPABASE-RLS-USER-METADATA-1",
-];
 
 #[cfg(test)]
 mod tests {
@@ -274,58 +220,52 @@ mod tests {
         );
     }
 
-    /// The CI-time gate: every `mechanical` corpus rule must have a real detector, OR be an
-    /// already-tracked, pre-existing gap (see [`KNOWN_PRE_W1_MECHANICAL_GAPS`]). This is a
-    /// TEST — it fails the build loudly, which is the point (see the module doc contrasting
-    /// this with the runtime disclosure path in `scan_ledger`). If a NEW id shows up here
-    /// (not in the grandfather list), the honest fix is EITHER wire a real detector for it OR
-    /// correct its declared `enforcement` field to the tier that matches reality — never
-    /// delete the rule and never fake a detector just to turn this green. If an id in the
-    /// grandfather list is fixed, remove it from the list — leaving it in would silently hide
-    /// a real fix instead of shrinking the tracked debt.
+    /// W4's INVERTED CI-time gate. The W1-era version of this test required a wired
+    /// deterministic detector for every `mechanical` rule, with a ~35-id grandfather list for
+    /// the ones that had none — backwards, per this module's doc comment: having no
+    /// deterministic detector is fine as long as the rule is GUARANTEED to reach the
+    /// semantic/AI pass instead. That guarantee holds for every rule that is code-auditable
+    /// (`onboard::audit::is_code_auditable_rule`) — as of W4, `onboard::audit_repos` hands the
+    /// model every selected, applicable, code-auditable rule, CI-tier or not (see that
+    /// function's top-level doc comment). So the real invariant is narrower than "must have a
+    /// detector": a `mechanical` rule with no detector must NOT ALSO be a governance/process
+    /// rule (`ORCH-*`/`SPIRIT-*`/`PROC-*`) — that combination is the one shape with NO route to
+    /// ever being evaluated by anything. This is a TEST — it fails the build loudly, which is
+    /// the point (see the module doc contrasting this with the runtime disclosure path in
+    /// `scan_ledger`). A corpus author hitting this should either wire a real detector, or
+    /// correct the rule's `enforcement` tier, or correct its id prefix/category — never add a
+    /// grandfather list back.
     #[tokio::test]
-    async fn every_mechanical_rule_has_a_wired_detector() {
+    async fn every_mechanical_rule_with_no_detector_is_code_auditable() {
         let path = camerata_rules::corpus_path();
         let corpus = camerata_rules::load_corpus(&path)
             .await
             .expect("corpus must load cleanly");
         let offenders = mechanical_rules_missing_detector(&corpus);
-        let known: HashSet<&str> = KNOWN_PRE_W1_MECHANICAL_GAPS.iter().copied().collect();
-        let new_offenders: Vec<&String> = offenders
+        let orphaned: Vec<&String> = offenders
             .iter()
-            .filter(|id| !known.contains(id.as_str()))
+            .filter(|id| !crate::onboard::audit::is_code_auditable_rule(id))
             .collect();
         assert!(
-            new_offenders.is_empty(),
-            "NEW mechanical-enforcement rule(s) with no wired detector (none of: arch_checker \
-             registry, gateway rule registry, bundled Semgrep mapping, scan-preview linter \
-             source) — these are counted as checked in every report but nothing ever evaluates \
-             them: {new_offenders:?}"
-        );
-        let stale_grandfather: Vec<&&str> = KNOWN_PRE_W1_MECHANICAL_GAPS
-            .iter()
-            .filter(|id| !offenders.iter().any(|o| o == *id))
-            .collect();
-        assert!(
-            stale_grandfather.is_empty(),
-            "these ids in KNOWN_PRE_W1_MECHANICAL_GAPS now have a real detector (or were \
-             corrected) — remove them from the grandfather list so it stays an accurate debt \
-             count: {stale_grandfather:?}"
+            orphaned.is_empty(),
+            "mechanical-enforcement rule(s) with NO wired deterministic detector AND NOT \
+             code-auditable (governance/process ids are filtered out of the semantic prompt) — \
+             these have NO route to ever being evaluated by anything: {orphaned:?}"
         );
     }
 
-    /// The W1 item-4 regression guard: the parameterized-SQL family this commit's "honest
-    /// fix" corrected (mechanical -> structured, since no detector exists for any of them)
-    /// must never reappear as a mechanical-with-no-detector offender, and must never be
-    /// grandfathered either — they were genuinely fixed, not swept under the known-gaps list.
+    /// W1 item-4 regression guard, generalized by W4: the parameterized-SQL family an earlier
+    /// fix corrected (mechanical -> structured, since no detector exists for any of them) must
+    /// never reappear as a mechanical-with-no-detector offender UNLESS it is code-auditable
+    /// (in which case that is fine now, per the inverted gate above) — this just pins their
+    /// declared enforcement tier so a future edit can't silently re-declare them `mechanical`
+    /// without someone noticing the diff.
     #[tokio::test]
-    async fn the_w1_sql_parameterized_fix_set_is_resolved_not_grandfathered() {
+    async fn the_w1_sql_parameterized_fix_set_stays_non_mechanical() {
         let path = camerata_rules::corpus_path();
         let corpus = camerata_rules::load_corpus(&path)
             .await
             .expect("corpus must load cleanly");
-        let offenders = mechanical_rules_missing_detector(&corpus);
-        let known: HashSet<&str> = KNOWN_PRE_W1_MECHANICAL_GAPS.iter().copied().collect();
         for id in [
             "CSHARP-SQL-PARAMETERIZED-1",
             "GO-SQL-PARAMETERIZED-1",
@@ -333,14 +273,6 @@ mod tests {
             "JAVA-SQL-PARAMETERIZED-1",
             "RUBY-RAILS-NO-STRING-SQL-1",
         ] {
-            assert!(
-                !offenders.iter().any(|o| o == id),
-                "{id} must no longer be a mechanical-with-no-detector offender"
-            );
-            assert!(
-                !known.contains(id),
-                "{id} must not be grandfathered — it was genuinely fixed"
-            );
             let rule = corpus
                 .get_by_id(id)
                 .unwrap_or_else(|| panic!("{id} missing from corpus"));
