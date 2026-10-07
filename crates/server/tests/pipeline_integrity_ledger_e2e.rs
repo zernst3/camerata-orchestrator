@@ -7,10 +7,19 @@
 //! `report_export`'s synthetic-ledger invariant tests):
 //!
 //! 1. A rule declaring `enforcement = "mechanical"` with NO wired detector (the corpus's own
-//!    `RUBY-FROZEN-STRING-LITERAL-1` — a real, pre-existing gap the `mechanical_gate` build
-//!    test already tracks, deliberately reused here rather than inventing a fake corpus
-//!    entry) is selected for this scan and must land in "excluded from this audit" with the
-//!    real reason, NEVER in "What's healthy" just because it was selected.
+//!    `RUBY-FROZEN-STRING-LITERAL-1` — a real, pre-existing gap `mechanical_gate` tracks,
+//!    deliberately reused here rather than inventing a fake corpus entry) is selected for
+//!    this scan and must land in "excluded from this audit" with the real reason, NEVER in
+//!    "What's healthy" just because it was selected. W4 changed WHAT that real reason is:
+//!    this scan runs with `run_ai_review: false` (zero API spend), and as of W4 this rule's
+//!    ONLY possible route to evaluation is the semantic/AI pass (it has no deterministic
+//!    detector) — so with AI review off, it is excluded for the ordinary, honestly-scoped
+//!    reason "AI/semantic review not requested this run", the SAME reason any other
+//!    AI-tier-only rule gets when AI review is off, rather than a "no wired detector"
+//!    pipeline-integrity alarm (that alarm is now reserved for a rule that SHOULD have
+//!    reached the semantic pass but somehow didn't — see `semantic_tier_covers_mechanical_no_detector_rule_e2e.rs`
+//!    for the companion test proving the happy path: the SAME rule, with AI review ON and a
+//!    stubbed model, genuinely gets evaluated and reaches `ran = true` via `RuleTier::Semantic`).
 //! 2. Every pipeline stage this scan touches (the floor, the architectural engine, the
 //!    cross-family merge) reconciles with ZERO unaccounted rows, and no rule id appears in
 //!    both the fired set and the clean/excluded lists.
@@ -30,11 +39,13 @@ use camerata_server::report_export::{self, DispositionWire, ReportOptions};
 
 const RULE_SECRETS: &str = "SEC-NO-HARDCODED-SECRETS-1";
 const RULE_SQL_CONCAT: &str = "SEC-NO-RAW-SQL-CONCAT-1";
-/// A real, pre-existing corpus gap `crate::mechanical_gate`'s build-time gate already tracks
-/// (see `KNOWN_PRE_W1_MECHANICAL_GAPS`): declares `enforcement = "mechanical"` but has no
-/// registered `ArchChecker`, gateway rule arm, bundled Semgrep rule, or scan-preview linter
-/// source. Reused here (not a fake/synthetic id) so this E2E test proves the ledger correctly
-/// identifies a REAL phantom-mechanical rule through the real pipeline.
+/// A real, pre-existing corpus gap `crate::mechanical_gate::mechanical_rules_missing_detector`
+/// still finds: declares `enforcement = "mechanical"` but has no registered `ArchChecker`,
+/// gateway rule arm, bundled Semgrep rule, or scan-preview linter source. Reused here (not a
+/// fake/synthetic id) so this E2E test proves the ledger correctly tracks a REAL
+/// no-deterministic-detector rule through the real pipeline — NOT a phantom since W4 (it has a
+/// second, real route: the semantic/AI pass), just one this particular run (AI review off)
+/// never takes.
 const RULE_NO_DETECTOR: &str = "RUBY-FROZEN-STRING-LITERAL-1";
 
 /// Mirrors every sibling `*_executor_e2e.rs`'s own fixture-staging helper (each e2e file owns
@@ -185,8 +196,13 @@ async fn ledger_reconciles_and_the_no_detector_rule_is_excluded_never_healthy() 
         .iter()
         .find(|(id, _)| *id == RULE_NO_DETECTOR)
         .unwrap_or_else(|| panic!("{RULE_NO_DETECTOR} must appear in excluded_rules: {excluded:?}"));
+    // W4: this run has `run_ai_review: false`, and `RUBY-FROZEN-STRING-LITERAL-1` has no
+    // deterministic detector — its only possible route (the semantic pass) was never taken
+    // this run, which is an ORDINARY, honestly-scoped skip, not a pipeline-integrity alarm.
     assert!(
-        no_detector_entry.1.contains("no wired detector"),
+        no_detector_entry
+            .1
+            .contains("AI/semantic review not requested"),
         "the excluded entry must carry the REAL reason, not a placeholder: {:?}",
         no_detector_entry.1
     );
@@ -250,13 +266,18 @@ async fn ledger_reconciles_and_the_no_detector_rule_is_excluded_never_healthy() 
             "a fully-reconciled scan must never disclose a pipeline-integrity gap: {note}"
         );
     }
-    // But the no-wired-detector rule's own disclosure MUST be present end-to-end.
+    // W4: with AI review off, skipping the no-detector rule is an ORDINARY scope choice (its
+    // only route was never attempted this run), not a pipeline-integrity defect — so it must
+    // NOT ride the `rule_disclosure` alarm mechanism into methodology/executive-summary at all.
+    // Contrast with `semantic_tier_covers_mechanical_no_detector_rule_e2e.rs`, where the SAME
+    // rule, reviewed by a stubbed model, genuinely reaches `ran = true`.
     assert!(
-        json.methodology
+        !json
+            .methodology
             .failed_passes
             .iter()
-            .any(|n| n.contains(RULE_NO_DETECTOR) && n.contains("no wired detector")),
-        "the no-detector rule's disclosure must reach the methodology section: {:?}",
+            .any(|n| n.contains(RULE_NO_DETECTOR)),
+        "an ordinary 'AI review not requested' skip must not produce a rule-level disclosure: {:?}",
         json.methodology.failed_passes
     );
 }
