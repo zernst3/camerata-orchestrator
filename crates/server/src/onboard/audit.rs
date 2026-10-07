@@ -354,25 +354,22 @@ pub(crate) fn is_code_auditable_rule(id: &str) -> bool {
     !(id.starts_with("ORCH-") || id.starts_with("SPIRIT-") || id.starts_with("PROC-"))
 }
 
-/// Whether `id` is a CI-tier (mechanical or architectural) corpus rule — i.e. one enforced by
-/// a deterministic CI gate (lint pattern or AST/static-analysis pass), never by the LLM code
-/// audit. Mirrors `crate::split_scannable_rules`'s own `is_ci_tier` closure exactly (same
-/// corpus lookup, same `unwrap_or(false)` fallback for an id the corpus doesn't know about —
-/// an unrecognized id defaults to "scannable" rather than silently excluded).
+/// Whether `id` is a CI-tier (mechanical or architectural) corpus rule — i.e. one that DECLARES
+/// deterministic CI enforcement (lint pattern or AST/static-analysis pass) as its enforcement
+/// tier. `unwrap_or(false)` for an id the corpus doesn't know about — an unrecognized id
+/// defaults to "not CI-tier" rather than silently excluded from anything that branches on this.
 ///
-/// This exists so `audit_repos`'s own semantic (AI-prompt) filter can exclude CI-tier rules
-/// ITSELF, from the corpus, rather than depending on its `selected` parameter having already
-/// been pre-stripped by a caller. That pre-stripping is exactly the C3-3 bug: `selected` also
-/// feeds `repo_selected_ids` (the deterministic architectural engine's arming gate — see
-/// `audit_repos`'s `repo_selected_ids` local), so a caller that hands `audit_repos` the
-/// ALREADY CI-tier-stripped output of `split_scannable_rules` (as every real caller —
-/// `onboard_audit`, `onboard_audit_start`, `camerata inspect` — did) starves the architectural
-/// engine of every CI-tier rule id, including every corpus-sourced Supabase RLS/search-path
-/// rule: `audit_architectural` never sees them armed, no matter how correctly they are
-/// proposed/selected upstream. Callers now pass the FULL curated selection into `audit_repos`
-/// (so `repo_selected_ids` is complete), and this filter keeps CI-tier rules out of the LLM
-/// prompt exactly like `split_scannable_rules` used to — just computed here instead of by the
-/// caller, so `audit_repos` is self-sufficient regardless of whether its caller pre-strips.
+/// W4 (root-cause fix): this predicate used to ALSO mean "never shown to the LLM" — `audit_repos`
+/// filtered its semantic/AI prompt on `!is_ci_tier_rule(...)`, on the theory that a CI-tier
+/// declaration meant a deterministic gate already covered it. That conflated "deterministically
+/// checkable IN PRINCIPLE" with "actually checked on this repo" — a rule like strict layering
+/// needs a repo-specific layer map no generic detector ships with, so on a repo Camerata has
+/// never seen, declaring it `mechanical` bought it NO detector and NO LLM coverage either: it was
+/// checked by nothing, while the report called it clean. `audit_repos` no longer excludes
+/// CI-tier rules from its semantic prompt at all — see that function's per-repo `semantic`
+/// construction. This predicate is kept for what is still genuinely true about a CI-tier rule:
+/// which [`crate::mechanical_gate::detector_channel`] (if any) answers it deterministically, for
+/// the pipeline-integrity ledger's per-rule accounting and the scan-time linter preview.
 pub(crate) fn is_ci_tier_rule(id: &str, corpus: Option<&camerata_rules::RuleSet>) -> bool {
     corpus
         .and_then(|c| c.get_by_id(id))
@@ -382,14 +379,19 @@ pub(crate) fn is_ci_tier_rule(id: &str, corpus: Option<&camerata_rules::RuleSet>
 
 /// Whether `rule` is a MULTI-OPTION SEMANTIC rule eligible for the audit-integrated
 /// alternative-recommendation feature (see
-/// `docs/design/2026-09-22_audit-integrated-alternatives.md`): AI-judged (NOT CI-tier
-/// mechanical/architectural — those are enforced by a deterministic CI gate, never scanned by
-/// the LLM), NOT gate-armed (a deterministic detector already answers it exactly, so feeding
-/// it to the model would be strictly worse), code-auditable (not a governance/process rule),
-/// and offers two or more `[[option]]` alternatives — a single-option rule keeps today's
-/// one-directive behavior untouched. Shared by the main scan's per-repo alternative-set
-/// construction ([`build_rule_alternatives`]) and the `rescan-alternatives` endpoint, so the
-/// two paths can never drift on which rules are eligible.
+/// `docs/design/2026-09-22_audit-integrated-alternatives.md`): NOT gate-armed (a deterministic
+/// detector already answers it exactly, so offering the model a choice between directive
+/// WORDINGS would be moot — the detector enforces the one behavior regardless of phrasing),
+/// NOT CI-tier mechanical/architectural for the same reason (a registered architectural checker
+/// answers one specific behavior, not a chosen wording), code-auditable (not a
+/// governance/process rule), and offers two or more `[[option]]` alternatives — a single-option
+/// rule keeps today's one-directive behavior untouched. This is UNRELATED to whether the rule
+/// reaches the model's code-audit prompt (as of W4, every code-auditable selected rule does,
+/// CI-tier or not — see `is_ci_tier_rule`'s doc comment); it is specifically about whether the
+/// model is asked to pick AMONG DIRECTIVE WORDINGS for a rule that doesn't have one fixed, exact
+/// answer. Shared by the main scan's per-repo alternative-set construction
+/// ([`build_rule_alternatives`]) and the `rescan-alternatives` endpoint, so the two paths can
+/// never drift on which rules are eligible.
 pub(crate) fn is_semantic_multi_option_rule(rule: &camerata_rules::Rule) -> bool {
     let id = rule.id.0.as_str();
     rule.options.len() >= 2

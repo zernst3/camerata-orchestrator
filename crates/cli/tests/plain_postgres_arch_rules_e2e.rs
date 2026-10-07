@@ -3,13 +3,15 @@
 //! through the REAL selection path — not a unit test that hand-constructs a `SelectedRule` or
 //! calls `propose_corpus_rules` in isolation.
 //!
-//! Both rules regressed the same way, for the same reason, previously (see the doc comment on
-//! `camerata_server::onboard::audit::is_ci_tier_rule`): every real caller
+//! Both rules regressed the same way, for the same reason, previously (this is the C3-3 bug —
+//! see `camerata_server::split_scannable_rules`'s doc comment): every real caller
 //! (`onboard_audit`/`onboard_audit_start`/`camerata inspect`) fed `audit_repos` the OUTPUT of
 //! `split_scannable_rules` — a rule list with every CI-tier (mechanical/architectural) id
-//! already stripped out, because that's what the AI code-audit prompt needs. But
-//! `audit_repos` ALSO derives `repo_selected_ids` (the deterministic architectural engine's
-//! arming gate) from that SAME parameter, so every corpus-sourced architectural rule —
+//! already stripped out, because that's what the AI code-audit prompt used to need (that
+//! exclusion is gone now — see W4 / `crate::mechanical_gate`'s module doc — but the arming
+//! bug this file guards predates and is independent of that later fix). But `audit_repos`
+//! ALSO derives `repo_selected_ids` (the deterministic architectural engine's arming gate)
+//! from that SAME parameter, so every corpus-sourced architectural rule —
 //! `SUPABASE-RLS-ENABLED-1` included, not just the two rules this file names — was silently
 //! never armed in a real scan, regardless of how correctly `domains_for_stack` /
 //! `propose_corpus_rules` / `extra_domains` computed its selection upstream. This file drives

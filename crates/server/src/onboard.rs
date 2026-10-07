@@ -807,6 +807,27 @@ impl SelectedRule {
     }
 }
 
+/// The SEMANTIC (LLM-audited) rule set `audit_repos` hands to `ai_audit::audit_repo` for one
+/// repo: every rule in `selected` that applies to `spec`, minus ONLY governance/process rules
+/// (`is_code_auditable_rule`) — see `audit_repos`'s top-level doc comment for the W4 root-cause
+/// fix this encodes. Extracted as its own pure, independently-testable function (rather than
+/// left inline in `audit_repos`'s per-repo loop) specifically so a unit test can assert the W4
+/// regression directly: a selected rule whose corpus `enforcement` is CI-tier
+/// (`mechanical`/`architectural`) — or that already has a deterministic gate arm / registered
+/// architectural checker — is NOT excluded here. This function does not even look at
+/// enforcement tier or detector registration at all anymore; that IS the fix.
+pub(crate) fn semantic_rule_ids_for_repo(
+    selected: &[SelectedRule],
+    spec: &str,
+) -> Vec<(String, String)> {
+    selected
+        .iter()
+        .filter(|r| r.applies_to(spec))
+        .filter(|r| is_code_auditable_rule(&r.id))
+        .map(|r| (r.id.clone(), r.directive.clone()))
+        .collect()
+}
+
 // ── Orchestration functions ───────────────────────────────────────────────────────
 pub async fn suppression_registry(
     sources: &[(String, std::path::PathBuf)],
@@ -1096,35 +1117,44 @@ pub async fn audit_repos(
         store.clear(key);
     }
 
-    // ROUTE BY ENGINE, not by domain. A rule with a deterministic gate arm
-    // (secrets / raw-SQL / secret-URL / path / secret-files) runs through real
-    // deterministic code (`audit_files`) and must NEVER go to the LLM — fuzzy
-    // keyword-matching a deterministic rule is the flood. Only the SEMANTIC rules
-    // (no arm: layering, idempotency, authz, …) are handed to the model.
+    // EVERY selected, code-auditable rule reaches the model (W4 / root-cause fix).
     //
-    // SECOND, drop GOVERNANCE / PROCESS / ORCHESTRATION rules from the CODE audit.
-    // ORCH-* / SPIRIT-* / PROC-* describe how the fleet and team OPERATE (track AI
-    // spend, split author/reviewer agents, cite convention ids in commits, document
-    // decisions). They are correct to ARM into a repo's governance, but auditing
-    // application SOURCE against them is a category error ("this app doesn't track its
-    // AI token budget"). The arm path still installs them; only the AI code-audit
-    // prompt is filtered.
+    // The pipeline used to ROUTE BY ENGINE: a rule with a deterministic gate arm, a
+    // registered architectural checker, or a declared CI-tier (`mechanical`/
+    // `architectural`) `enforcement` was withheld from the LLM prompt entirely, on the
+    // theory that "mechanical" meant a deterministic CI gate already covered it so a
+    // model pass would be redundant at best. That theory conflated two different things:
+    // "deterministically checkable IN PRINCIPLE, once someone builds a repo-specific CI
+    // gate" is not the same as "actually checked, on THIS unseen repo, right now". A
+    // strict-layering rule depends on a repo-specific layer map no generic detector ships
+    // with the product — on a repo Camerata has never seen, no gate exists for it yet.
+    // The old filter withheld such rules from the model AND they had no shipped
+    // detector, so they were checked by NOTHING while the report called them clean. On a
+    // benchmark run this silently lost a large share of the planted architectural
+    // defects. See `crate::mechanical_gate` and `crate::scan_ledger` for the build-time
+    // and scan-time halves of the fix.
     //
-    // THIRD, drop rules a NATIVE ARCHITECTURAL CHECKER already answers deterministically
-    // (the RLS/search-path migration-replay engine, ~line 726 below) from the LLM prompt —
-    // exactly the same reasoning as the gate-arm exclusion above: fuzzing a rule the checker
-    // answers exactly is strictly worse than deterministic code answering it. Pass 4b-1 (D3)
-    // made this exclusion PER-REPO CONFIG-AWARE rather than a single static set computed once:
-    // a config-gated checker (e.g. the future `ImportBoundaryChecker`, Pass 4b-2) only answers
-    // deterministically for a repo that actually carries `.camerata/architecture.toml` — for
-    // an unconfigured repo its rule ids must STAY in the LLM prompt (see
-    // `camerata_checks::arch_checker::checker_rule_ids_for_repo`, computed per repo below
-    // AFTER that repo's files are read, since config presence is a file-content fact).
+    // The fix is additive, not a reshuffle: the deterministic engines below (the content
+    // floor, the native architectural checkers, the gateway rule registry, the scan-time
+    // linter preview) are UNCHANGED — they still run exactly the rules they always did.
+    // The model is now ALSO handed the full selected ruleset, including rules that
+    // already have a deterministic detector, as a deliberate second pair of eyes; a
+    // model finding that duplicates a deterministic one at the same site collapses back
+    // into a single row (`crate::ai_audit::merge_semantic_groups`), never doubling a row.
     //
-    // FOURTH, scope by REPO. The engine/governance filters above are global, but which
-    // rules reach a given repo's LLM audit is decided PER REPO inside the loop, from each
-    // SelectedRule's binding — so a multi-repo scan runs each repo against its own chosen
-    // rules ∪ the project-level set, never the whole selection across the board.
+    // ONE exclusion remains, and it is NOT about enforcement tier: GOVERNANCE / PROCESS /
+    // ORCHESTRATION rules are dropped from the CODE audit. `ORCH-*` / `SPIRIT-*` /
+    // `PROC-*` describe how the fleet and team OPERATE (track AI spend, split
+    // author/reviewer agents, cite convention ids in commits, document decisions). They
+    // are correct to ARM into a repo's governance, but auditing application SOURCE
+    // against them is a category error ("this app doesn't track its AI token budget").
+    // The arm path still installs them; only the AI code-audit prompt is filtered
+    // (`is_code_auditable_rule`).
+    //
+    // Scope by REPO: which rules reach a given repo's LLM audit is decided PER REPO
+    // inside the loop, from each `SelectedRule`'s binding — so a multi-repo scan runs
+    // each repo against its own chosen rules ∪ the project-level set, never the whole
+    // selection across the board.
 
     for (spec, dir) in sources {
         let spec = spec.trim();
@@ -1171,37 +1201,28 @@ pub async fn audit_repos(
                     .iter()
                     .filter(|(p, _)| is_test_or_fixture_path(p))
                     .count();
-                // The SEMANTIC (LLM-audited) rule set for THIS repo: rules bound to it (or
-                // project-level), minus the deterministic-arm, native-architectural-checker,
-                // CI-tier (mechanical/architectural), and governance/process families. The
-                // architectural-checker exclusion is computed HERE (not before the file read)
-                // because it's PER-REPO CONFIG-AWARE (D3) — it needs this repo's actual files
-                // to know whether `.camerata/architecture.toml` is present.
+                // The SEMANTIC (LLM-audited) rule set for THIS repo: every rule bound to it (or
+                // project-level), minus ONLY the governance/process families
+                // (`is_code_auditable_rule`) — not code, so not code-auditable. As of the W4
+                // root-cause fix, this NO LONGER excludes a rule just because it has a
+                // deterministic gate arm, a registered architectural checker, or a declared
+                // CI-tier (`mechanical`/`architectural`) `enforcement`: see this function's
+                // top-level doc comment for why that exclusion was wrong (it starved a rule
+                // with no SHIPPED detector of the only pass that could ever evaluate it,
+                // while the report still called it clean). `repo_selected_ids` below still
+                // feeds the deterministic architectural engine's arming gate exactly as
+                // before — this is purely additive, the model now reviews the same full set.
                 //
-                // The CI-tier exclusion (`is_ci_tier_rule`) is computed HERE, from `corpus`,
-                // rather than relying on `selected` having already been stripped of CI-tier
-                // ids by a caller (`split_scannable_rules`) — see that function's own `pub`
-                // doc comment and `is_ci_tier_rule`'s doc comment for why: `selected` also
-                // feeds `repo_selected_ids` above, the deterministic architectural engine's
-                // arming gate, so a caller that pre-strips CI-tier ids out of `selected`
-                // before calling `audit_repos` (every real caller used to) starves that engine
-                // of every CI-tier rule id, INCLUDING every corpus-sourced Supabase
-                // RLS/search-path rule — this was the C3-3 real-path arming bug. Filtering
-                // here instead makes `audit_repos` correct regardless of what its caller does
-                // with `selected` upstream.
+                // `arch_checker_rule_ids` is computed HERE (not before the file read) because
+                // it's PER-REPO CONFIG-AWARE (D3) — it needs this repo's actual files to know
+                // whether `.camerata/architecture.toml` is present. It is still used below (not
+                // for this filter) to classify each CI-tier rule's detector channel for the
+                // pipeline-integrity ledger.
                 let repo_view =
                     camerata_checks::arch_checker::RepoView { spec, files: &files };
                 let arch_checker_rule_ids =
                     camerata_checks::arch_checker::checker_rule_ids_for_repo(&repo_view);
-                let semantic: Vec<(String, String)> = selected
-                    .iter()
-                    .filter(|r| r.applies_to(spec))
-                    .filter(|r| camerata_gateway::lookup_arm(&r.id).is_none())
-                    .filter(|r| !arch_checker_rule_ids.contains(r.id.as_str()))
-                    .filter(|r| !is_ci_tier_rule(&r.id, corpus))
-                    .filter(|r| is_code_auditable_rule(&r.id))
-                    .map(|r| (r.id.clone(), r.directive.clone()))
-                    .collect();
+                let semantic: Vec<(String, String)> = semantic_rule_ids_for_repo(selected, spec);
                 // Multi-option semantic rules in THIS repo's `semantic` set (audit-integrated
                 // alternative recommendation — see `build_rule_alternatives`'s doc comment).
                 // Empty when the corpus isn't loaded or none of this repo's semantic rules
@@ -1235,6 +1256,13 @@ pub async fn audit_repos(
                 // is skipped. It also emits PER-TOOL progress into the job (tool name `floor`,
                 // running → done with its findings count) so the cockpit's deterministic
                 // progress view has live state even in deterministic-only mode.
+                // Shared by both branches below: which detector channel (if any) answers each
+                // CI-tier rule id deterministically — needed whether or not `run_deterministic`
+                // is on, so a rule WITH a real detector is correctly recorded as "deterministic
+                // scan deselected" (turning the toggle back on fixes it) while a rule with NO
+                // detector is correctly left for the semantic-phase ledger recording further
+                // down to account for (see that recording's doc comment).
+                let semgrep_ids = crate::mechanical_gate::semgrep_covered_rule_ids();
                 let mut repo_findings = Vec::new();
                 if run_deterministic {
                     if let Some((jstore, jid)) = job {
@@ -1284,18 +1312,18 @@ pub async fn audit_repos(
                         jstore.det_tool_done(jid, "architectural", arch.len());
                         jstore.add_findings(jid, arch.clone());
                     }
-                    // W1: classify every CI-tier (mechanical/architectural) rule SELECTED for
-                    // this repo into the SAME four detector channels the build-time corpus
+                    // W1 / W4: classify every CI-tier (mechanical/architectural) rule SELECTED
+                    // for this repo into the SAME four detector channels the build-time corpus
                     // gate checks (`crate::mechanical_gate`) — a rule answered by a registered
-                    // ArchChecker or the gate's own rule registry genuinely ran; one with NO
-                    // channel is the exact W1-item-4 defect (declares mechanical enforcement,
-                    // nothing ever evaluates it) and is recorded as not-run, never silently
-                    // "verified clean". Recorded as `RuleTier::Architectural` (not
-                    // `Deterministic`) for the `arch_checker`/`gateway_rule_registry` channels
-                    // and the no-detector fallback — this is the deterministic architectural
-                    // engine, a distinct family from the content floor above for the
-                    // `camerata inspect` ledger-summary breakdown (`RuleTier::family_label`).
-                    let semgrep_ids = crate::mechanical_gate::semgrep_covered_rule_ids();
+                    // ArchChecker or the gate's own rule registry genuinely ran deterministically
+                    // here. A rule with NO channel is NOT a defect anymore (W4 — see this
+                    // function's top-level doc comment): it is simply NOT recorded in THIS loop
+                    // at all. It is `semantic` now (nothing excludes it from the model prompt),
+                    // so the semantic-phase ledger recording further down (which iterates the
+                    // SAME `semantic` set `audit_repo` was actually handed) is the one and only
+                    // place its `ran`/`findings_emitted` facts get recorded — `RuleTier::Semantic`,
+                    // never silently "verified clean" via mere selection, and never double-counted
+                    // here as an Architectural not-run.
                     for rid in repo_selected_ids.iter().filter(|r| is_ci_tier_rule(r, corpus)) {
                         let emitted = arch.iter().filter(|f| f.rule_id == *rid).count();
                         match crate::mechanical_gate::detector_channel(
@@ -1304,56 +1332,58 @@ pub async fn audit_repos(
                             &semgrep_ids,
                             corpus,
                         ) {
-                            Some("arch_checker") => pipeline_ledger.record_rule(
-                                *rid,
-                                crate::scan_ledger::RuleTier::Architectural,
-                                true,
-                                None,
-                                files.len(),
-                                emitted,
-                            ),
-                            Some("gateway_rule_registry") => pipeline_ledger.record_rule(
-                                *rid,
-                                crate::scan_ledger::RuleTier::Architectural,
-                                true,
-                                None,
-                                0,
-                                0,
-                            ),
-                            Some("semgrep") => pipeline_ledger.record_rule(
-                                *rid,
-                                crate::scan_ledger::RuleTier::ExternalTool,
-                                true,
-                                None,
-                                files.len(),
-                                0,
-                            ),
-                            Some("scan_preview_linter") => pipeline_ledger.record_rule(
-                                *rid,
-                                crate::scan_ledger::RuleTier::ExternalTool,
-                                true,
-                                None,
-                                files.len(),
-                                0,
-                            ),
-                            _ => pipeline_ledger.record_rule(
-                                *rid,
-                                crate::scan_ledger::RuleTier::Architectural,
-                                false,
-                                // Embeds `scan_ledger::NO_WIRED_DETECTOR_REASON` verbatim (not
-                                // retyped) so `rule_disclosure`'s substring check can never
-                                // silently decouple from this producer — see that constant's
-                                // doc comment.
-                                Some(format!(
-                                    "declares mechanical/architectural enforcement but has {} \
-                                     (not in the arch_checker registry, gateway rule registry, \
-                                     Semgrep mapping, or scan-preview linter source)",
-                                    crate::scan_ledger::NO_WIRED_DETECTOR_REASON,
-                                )),
-                                0,
-                                0,
-                            ),
-                        };
+                            Some("arch_checker") => {
+                                pipeline_ledger.record_rule(
+                                    *rid,
+                                    crate::scan_ledger::RuleTier::Architectural,
+                                    true,
+                                    None,
+                                    files.len(),
+                                    emitted,
+                                );
+                            }
+                            Some("gateway_rule_registry") => {
+                                pipeline_ledger.record_rule(
+                                    *rid,
+                                    crate::scan_ledger::RuleTier::Architectural,
+                                    true,
+                                    None,
+                                    0,
+                                    0,
+                                );
+                            }
+                            Some("semgrep") => {
+                                pipeline_ledger.record_rule(
+                                    *rid,
+                                    crate::scan_ledger::RuleTier::ExternalTool,
+                                    true,
+                                    None,
+                                    files.len(),
+                                    0,
+                                );
+                            }
+                            Some("scan_preview_linter") => {
+                                pipeline_ledger.record_rule(
+                                    *rid,
+                                    crate::scan_ledger::RuleTier::ExternalTool,
+                                    true,
+                                    None,
+                                    files.len(),
+                                    0,
+                                );
+                            }
+                            // W4: NO channel is no longer recorded here at all — this rule has
+                            // no shipped deterministic detector, so its only possible route is
+                            // the semantic pass. It is in `semantic` (nothing excludes it
+                            // anymore), and the semantic-phase recording further down is the
+                            // single source of truth for its `ran`/`findings_emitted` facts.
+                            // Recording a not-run entry here too would just be overwritten by
+                            // the OR-accumulate semantics of `record_rule`, but would also pin
+                            // `tier` to `Architectural` forever (tier is set on first insert
+                            // only) instead of `Semantic` — so it is correctly left unrecorded
+                            // here, full stop.
+                            _ => {}
+                        }
                     }
                     repo_findings.extend(arch);
                 } else {
@@ -1371,15 +1401,33 @@ pub async fn audit_repos(
                             0,
                         );
                     }
+                    // W4: only record "deterministic scan deselected" for a CI-tier rule that
+                    // actually HAS a wired detector channel — turning `run_deterministic` back
+                    // on genuinely fixes those. A CI-tier rule with NO detector channel was
+                    // never going to run deterministically regardless of this toggle; its only
+                    // possible route is the semantic pass, so it is deliberately left
+                    // unrecorded here too and accounted for entirely by the semantic-phase
+                    // recording further down (which correctly reports "AI/semantic review not
+                    // requested" when `run_ai_review` is also off, or a real semantic result
+                    // otherwise).
                     for rid in repo_selected_ids.iter().filter(|r| is_ci_tier_rule(r, corpus)) {
-                        pipeline_ledger.record_rule(
-                            *rid,
-                            crate::scan_ledger::RuleTier::Architectural,
-                            false,
-                            Some("deterministic scan deselected for this run".to_string()),
-                            0,
-                            0,
-                        );
+                        let has_detector = crate::mechanical_gate::detector_channel(
+                            rid,
+                            &arch_checker_rule_ids,
+                            &semgrep_ids,
+                            corpus,
+                        )
+                        .is_some();
+                        if has_detector {
+                            pipeline_ledger.record_rule(
+                                *rid,
+                                crate::scan_ledger::RuleTier::Architectural,
+                                false,
+                                Some("deterministic scan deselected for this run".to_string()),
+                                0,
+                                0,
+                            );
+                        }
                     }
                 }
 
@@ -1920,6 +1968,115 @@ mod tests {
         assert_eq!(for_repo("acme/api"), vec!["ARCH-1", "SQL-1"]);
     }
 
+    // ── W4 root-cause fix: the semantic/AI rule set no longer excludes CI-tier rules ────────
+
+    /// THE PRECISE REGRESSION: a selected rule whose corpus `enforcement` is CI-tier
+    /// (`mechanical`) and that ALSO already has a real deterministic detector (a gateway rule
+    /// arm — `SEC-NO-HARDCODED-SECRETS-1`'s `env-or-secrets-manager` option is enforced via
+    /// `camerata_gateway::lookup_arm`) must STILL appear in `semantic_rule_ids_for_repo`'s
+    /// output. The OLD code excluded a rule for EITHER reason alone (CI-tier enforcement, or a
+    /// gate arm, or a registered architectural checker); this proves neither exclusion survived
+    /// the W4 fix — the model is now a deliberate second pair of eyes over the whole selected
+    /// ruleset, deterministic detector or not.
+    #[tokio::test]
+    async fn semantic_rule_set_includes_a_ci_tier_rule_with_an_existing_deterministic_detector() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let rule = corpus
+            .get_by_id("SEC-NO-HARDCODED-SECRETS-1")
+            .expect("precondition: the real corpus must carry this id");
+        assert!(
+            rule.enforcement.is_ci_enforced(),
+            "precondition: this id must declare CI-tier (mechanical) enforcement"
+        );
+        assert!(
+            camerata_gateway::lookup_arm("SEC-NO-HARDCODED-SECRETS-1").is_some(),
+            "precondition: this id must ALREADY have a real gateway-arm detector"
+        );
+
+        let selected = vec![sel("SEC-NO-HARDCODED-SECRETS-1", &[])];
+        let semantic = semantic_rule_ids_for_repo(&selected, "acme/api");
+        assert!(
+            semantic.iter().any(|(id, _)| id == "SEC-NO-HARDCODED-SECRETS-1"),
+            "a CI-tier rule with an existing deterministic detector must still reach the \
+             model's rule set: {semantic:?}"
+        );
+    }
+
+    /// The other half of the same regression: a CI-tier (`architectural`) rule answered by a
+    /// registered native `ArchChecker` (not a gateway arm) must ALSO still reach the model.
+    #[tokio::test]
+    async fn semantic_rule_set_includes_a_ci_tier_rule_with_a_registered_arch_checker() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let rule = corpus
+            .get_by_id("SUPABASE-RLS-ENABLED-1")
+            .expect("precondition: the real corpus must carry this id");
+        assert!(
+            rule.enforcement.is_ci_enforced(),
+            "precondition: this id must declare CI-tier (architectural) enforcement"
+        );
+
+        let selected = vec![sel("SUPABASE-RLS-ENABLED-1", &[])];
+        let semantic = semantic_rule_ids_for_repo(&selected, "acme/api");
+        assert!(
+            semantic.iter().any(|(id, _)| id == "SUPABASE-RLS-ENABLED-1"),
+            "a CI-tier rule with a registered architectural checker must still reach the \
+             model's rule set: {semantic:?}"
+        );
+    }
+
+    /// The root-cause case this whole fix exists for: a CI-tier rule with NO shipped detector
+    /// at all (`RUBY-FROZEN-STRING-LITERAL-1` — a real, tracked gap, see
+    /// `crate::mechanical_gate`) must reach the model too. Before the fix, this id was excluded
+    /// from the prompt AND had no detector, so NOTHING ever evaluated it.
+    #[tokio::test]
+    async fn semantic_rule_set_includes_a_ci_tier_rule_with_no_detector_at_all() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let rule = corpus
+            .get_by_id("RUBY-FROZEN-STRING-LITERAL-1")
+            .expect("precondition: the real corpus must carry this id");
+        assert!(
+            rule.enforcement.is_ci_enforced(),
+            "precondition: this id must declare CI-tier (mechanical) enforcement"
+        );
+        assert!(
+            camerata_gateway::lookup_arm("RUBY-FROZEN-STRING-LITERAL-1").is_none(),
+            "precondition: no gateway-arm detector"
+        );
+
+        let selected = vec![sel("RUBY-FROZEN-STRING-LITERAL-1", &[])];
+        let semantic = semantic_rule_ids_for_repo(&selected, "acme/api");
+        assert!(
+            semantic
+                .iter()
+                .any(|(id, _)| id == "RUBY-FROZEN-STRING-LITERAL-1"),
+            "a CI-tier rule with no detector must still reach the model's rule set — this is \
+             its ONLY possible route to ever being evaluated: {semantic:?}"
+        );
+    }
+
+    /// The one exclusion that DOES survive: a governance/process rule (`ORCH-`/`SPIRIT-`/
+    /// `PROC-`) is still filtered out of the code-audit prompt, CI-tier or not — auditing
+    /// application source against a fleet-process rule is a category error, not a coverage gap.
+    #[test]
+    fn semantic_rule_set_still_excludes_governance_process_rules() {
+        let selected = vec![sel("ORCH-TRACK-AI-SPEND-1", &[]), sel("ARCH-STRICT-LAYERING-1", &[])];
+        let semantic = semantic_rule_ids_for_repo(&selected, "acme/api");
+        assert!(
+            !semantic.iter().any(|(id, _)| id == "ORCH-TRACK-AI-SPEND-1"),
+            "a governance/process rule must stay out of the code-audit prompt: {semantic:?}"
+        );
+        assert!(
+            semantic.iter().any(|(id, _)| id == "ARCH-STRICT-LAYERING-1"),
+            "a normal code rule in the same selection must still pass: {semantic:?}"
+        );
+    }
+
     // ── W1 ledger fix: pipeline-integrity accounting for merge stages ──────────────────────
 
     fn structural_site(repo: &str, path: &str, line: usize, rule_id: &str) -> Finding {
@@ -2050,6 +2207,94 @@ mod tests {
              other: {entry:?}"
         );
         assert_eq!(entry.merged_into.len(), n - 1);
+    }
+
+    /// W4 NEW case the root-cause fix makes reachable for the first time: a deterministic
+    /// finding and a MODEL finding for the SAME rule id at the same site. Before W4 this could
+    /// never happen — a rule with a deterministic detector was excluded from the AI prompt
+    /// entirely, so the model never had the chance to cite it. Now that every selected rule
+    /// reaches the model as a deliberate second pair of eyes, this collision is a real,
+    /// reachable shape and must still collapse to ONE row with the deterministic finding as
+    /// primary — never two rows, and never silently dropping the model's corroborating
+    /// evidence.
+    #[test]
+    fn cross_family_merge_collapses_a_deterministic_and_model_finding_sharing_one_rule_id() {
+        let mut det = structural_site(
+            "acme/api",
+            "handler.rs",
+            50,
+            "SEC-NO-HARDCODED-SECRETS-1",
+        );
+        det.severity = "medium".to_string();
+        det.detail = "deterministic-detected-secret".to_string();
+        // `confidence: None` (the `structural_site` default) + a non-`AI-` rule id ->
+        // `Origin::Deterministic`.
+
+        let mut model = structural_site(
+            "acme/api",
+            "handler.rs",
+            52, // within SEMANTIC_MERGE_WINDOW of the deterministic finding's line
+            "SEC-NO-HARDCODED-SECRETS-1", // the SAME corpus rule id — the model adopted it
+        );
+        model.severity = "critical".to_string(); // uncalibrated AI severity, routinely inflated
+        model.detail = "ai-detected-secret".to_string();
+        model.confidence = Some("high".to_string()); // calibration touched it -> Origin::AdoptedAi
+
+        let findings = vec![det, model];
+        let pre_merge_findings = findings.clone();
+        let rows_in = findings.len();
+        let out = crate::ai_audit::merge_semantic_groups(findings, &[]);
+        let rows_out = out.len();
+        assert_eq!(
+            rows_out, 1,
+            "a deterministic + model finding for the SAME rule id at one site must collapse \
+             to one row, never two: {out:?}"
+        );
+        assert_eq!(out[0].rule_id, "SEC-NO-HARDCODED-SECRETS-1");
+        // `merged_severity` only returns the PRIMARY's own severity (never `max()`) when the
+        // primary's origin is Deterministic in a mixed-tier group — "medium" surviving (not
+        // "critical") is only possible if the deterministic finding actually won primacy.
+        assert_eq!(
+            out[0].severity, "medium",
+            "the deterministic finding must win primacy over the model's inflated severity: \
+             {:?}",
+            out[0]
+        );
+        assert_eq!(
+            out[0].detail, "deterministic-detected-secret",
+            "the surviving row's own text must be the DETERMINISTIC finding's, not the \
+             model's: {:?}",
+            out[0]
+        );
+        // Sanity on the defect shape this collision is the NEW instance of: `also_matches` is a
+        // rule-id SET deduped against the primary's own id, so it can NEVER see an absorption
+        // whose rule id is identical to the primary's — same root cause as the N-site collapse
+        // tested above, just via ORIGIN instead of repeated occurrence.
+        assert!(
+            out[0].also_matches.is_empty(),
+            "sanity: also_matches alone can never see a same-rule-id absorption: {:?}",
+            out[0].also_matches
+        );
+        // The model's finding is NOT silently dropped: its own evidence site survives in
+        // `also_locations`, the mechanism `account_location_merge` reconciles on.
+        assert!(
+            out[0]
+                .also_locations
+                .iter()
+                .any(|l| l.line == 52 && l.rule_id == "SEC-NO-HARDCODED-SECRETS-1"),
+            "the model's absorbed finding must still have its own recorded site: {:?}",
+            out[0].also_locations
+        );
+
+        let acc = account_location_merge(&pre_merge_findings, &out);
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        let entry = ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
+        assert_eq!(
+            entry.unaccounted, 0,
+            "the model's absorbed finding must have a recorded disposition, not vanish into \
+             unaccounted: {entry:?}"
+        );
+        assert_eq!(entry.merged_into.len(), 1);
     }
 
     #[test]

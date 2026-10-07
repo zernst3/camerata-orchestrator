@@ -5060,20 +5060,28 @@ const SCAN_AUDIT_KEY: &str = "scan-audit";
 /// AI activity (prompts and output) registers into the transcript store so the UI can
 /// show, live, that the model is actually working.
 ///
-/// Partition selected audit rules into the ones the code-only AI scan should check
-/// (prose / structured) and the CI-tier ones it should NOT (mechanical / architectural).
-/// CI-tier rules are enforced in CI from build/runtime/DB context (query-plan, migration audit,
-/// AST static analysis), so scanning them from a static code digest only yields weak,
-/// low-confidence findings (e.g. "an index probably exists in a migration somewhere"). The
-/// corpus is the source of each rule's tier; a rule absent from the corpus (e.g. a custom rule)
-/// defaults to scannable.
-/// Returns `(scannable, excluded_ci_tier_ids, preview_rules, corpus)`.
+/// W4 (root-cause fix): this used to PARTITION selected audit rules into the ones the code-only
+/// AI scan should check (prose / structured) and the CI-tier ones it should NOT (mechanical /
+/// architectural), on the theory that a CI-tier declaration meant a deterministic CI gate
+/// already covered the rule, so a static-code LLM pass would be redundant at best. That theory
+/// was wrong: "mechanical" means "deterministically checkable IN PRINCIPLE, once someone builds
+/// a repo-specific CI gate", not "actually checked, on THIS unseen repo, right now" — a rule
+/// like strict layering depends on a repo-specific layer map no generic detector ships with the
+/// product, so on a repo Camerata has never scanned before, no gate exists for it yet. Excluding
+/// such a rule from the model AND shipping no detector for it meant NOTHING ever evaluated it,
+/// while the report still called it clean — the defect this function's rename-in-place fixes.
 ///
-/// `preview_rules` are the SUBSET of the excluded (CI-tier mechanical) rules that
-/// the SCAN-TIME deterministic preview pass ([`crate::scan_tools::run_scan_tools`])
-/// can run locally: mechanical, and NOT `layer3_only` (CodeQL / paid tiers never
-/// preview). The loaded `corpus` is returned so the caller can resolve each rule's
-/// linter source without re-loading it.
+/// Every selected rule is now AI-scannable (`scannable` == `selected`, unchanged); `excluded` is
+/// kept, ALWAYS EMPTY, purely for tuple-shape/JSON back-compat with existing callers — nothing
+/// is excluded from the semantic pass on CI-tier grounds anymore. `preview_rules` is UNRELATED
+/// to AI-scannability and keeps its original, narrower meaning: the subset of CI-tier mechanical
+/// rules the SCAN-TIME deterministic linter preview pass ([`crate::scan_tools::run_scan_tools`])
+/// can additionally run locally (mechanical, and NOT `layer3_only` — CodeQL / paid tiers never
+/// preview). The loaded `corpus` is returned so the caller can resolve each rule's linter source
+/// without re-loading it.
+///
+/// Returns `(scannable, excluded_ci_tier_ids, preview_rules, corpus)` — shape kept stable for
+/// every existing caller; `excluded_ci_tier_ids` is now always `Vec::new()`.
 ///
 /// `pub`: also called directly by `camerata inspect` (the headless CLI, mirroring
 /// `onboard_audit`'s own pipeline so the two never drift — see
@@ -5092,32 +5100,23 @@ pub async fn split_scannable_rules(
     } else {
         None
     };
-    let is_ci_tier = |id: &str| -> bool {
-        set.as_ref()
-            .and_then(|s| s.get_by_id(id))
-            .map(|r| r.enforcement.is_ci_enforced())
-            .unwrap_or(false)
-    };
-    // A CI-tier mechanical rule is PREVIEW-runnable unless it is layer3_only.
+    // A CI-tier mechanical rule is PREVIEW-runnable unless it is layer3_only. This is the ONLY
+    // thing this function still partitions on — see the doc comment above for why AI-scannability
+    // no longer depends on CI-tier at all.
     let is_preview_runnable = |id: &str| -> bool {
         set.as_ref()
             .and_then(|s| s.get_by_id(id))
             .map(|r| r.enforcement.is_ci_enforced() && !r.is_layer3_only())
             .unwrap_or(false)
     };
-    let mut scannable = Vec::new();
-    let mut excluded = Vec::new();
-    let mut preview = Vec::new();
-    for r in selected {
-        if is_ci_tier(&r.id) {
-            if is_preview_runnable(&r.id) {
-                preview.push(r.clone());
-            }
-            excluded.push(r.id);
-        } else {
-            scannable.push(r);
-        }
-    }
+    let preview: Vec<crate::onboard::SelectedRule> = selected
+        .iter()
+        .filter(|r| is_preview_runnable(&r.id))
+        .cloned()
+        .collect();
+    // Every selected rule reaches the semantic pass now — no CI-tier exclusion.
+    let scannable = selected;
+    let excluded: Vec<String> = Vec::new();
     (scannable, excluded, preview, set)
 }
 
@@ -5215,15 +5214,13 @@ async fn onboard_audit(
             repos: r.repos,
         })
         .collect();
-    // `split_scannable_rules` still derives `excluded_mechanical` (the report's "enforced in
-    // CI, not scanned" disclosure) and `preview_rules` (the scan-runnable mechanical subset
-    // that feeds the SCAN-TIME PREVIEW pass below). Its first return value — `selected` with
-    // every CI-tier (mechanical/architectural) id stripped — is deliberately NOT what's passed
-    // to `audit_repos`: that function needs the FULL curated `selected` (CI-tier ids included)
-    // to arm the deterministic architectural engine (`repo_selected_ids`); it excludes CI-tier
-    // ids from its own LLM-prompt construction itself (`onboard::audit::is_ci_tier_rule`).
-    // Feeding it the pre-stripped list — as this handler used to — silently starved that
-    // engine of every CI-tier corpus rule id in every real scan (the C3-3 bug).
+    // W4: `split_scannable_rules` no longer excludes anything on CI-tier grounds (see its doc
+    // comment) — `excluded_mechanical` is always empty now. It still derives `preview_rules`
+    // (the scan-runnable mechanical subset that feeds the SCAN-TIME PREVIEW pass below) and
+    // loads `corpus` for reuse. `audit_repos` gets the FULL curated `selected` (unchanged from
+    // before) — it needs every id, CI-tier included, both to arm the deterministic
+    // architectural engine (`repo_selected_ids`) and, as of W4, to build its own semantic/AI
+    // prompt (every selected, code-auditable rule now reaches the model).
     let (_ai_scannable_only, excluded_mechanical, preview_rules, corpus) =
         split_scannable_rules(selected.clone()).await;
     // Audit + calibration are UI-PICKED non-fleet steps: an explicit request model wins;
@@ -5942,14 +5939,12 @@ async fn onboard_audit_start(
             repos: r.repos,
         })
         .collect();
-    // `split_scannable_rules` still derives `excluded_mechanical` (the "enforced in CI, not
-    // scanned" disclosure) and `preview_rules` (the scan-runnable mechanical subset that feeds
-    // the SCAN-TIME PREVIEW below). Its first return value — CI-tier ids stripped out of
-    // `selected` — is NOT what gets passed to `audit_repos`: see the sync `onboard_audit`
-    // handler's identical comment (a few hundred lines up) for why feeding it the pre-stripped
-    // list silently starves the deterministic architectural engine of every CI-tier corpus
-    // rule id (the C3-3 bug). `audit_repos` filters CI-tier ids out of its own LLM prompt
-    // itself now (`onboard::audit::is_ci_tier_rule`), so the FULL `selected` is what it needs.
+    // W4: see the sync `onboard_audit` handler's identical comment (a few hundred lines up) —
+    // `excluded_mechanical` is always empty now (nothing is excluded on CI-tier grounds);
+    // `preview_rules` keeps its original, narrower meaning (the scan-runnable mechanical
+    // subset for the SCAN-TIME PREVIEW below). `audit_repos` gets the FULL `selected` — it
+    // needs every id both to arm the deterministic architectural engine and to build its own
+    // semantic/AI prompt, which now includes every selected, code-auditable rule.
     let (_ai_scannable_only, excluded_mechanical, preview_rules, corpus) =
         split_scannable_rules(selected.clone()).await;
     // Audit + calibration are UI-PICKED non-fleet steps: an explicit request model wins;
