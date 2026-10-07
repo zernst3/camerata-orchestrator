@@ -10170,7 +10170,7 @@ mod tests {
 // per function — so a future regression in ANY of them fails here first, by name, rather than
 // waiting to be independently rediscovered.
 //
-// The eleven invariants this gate owns (add new ones here as future cycles close more gaps —
+// The twelve invariants this gate owns (add new ones here as future cycles close more gaps —
 // this doc comment is the canonical index, not the individual test doc comments):
 //
 //  1. No client-facing field (headline/detail/snippet/fix) in the JSON or the xlsx begins with
@@ -10238,6 +10238,17 @@ mod tests {
 //      `curated_finding_site_fix_is_none_when_remediation_is_unauthored` above, which pins that
 //      as the accepted exception, not a regression.) STANDING (passes):
 //      `curated_rows_for_authored_floor_rules_have_a_non_empty_fix_and_estimate`.
+//  12. Pipeline-integrity ledger: a representative synthetic scan run through BOTH row-reducing
+//      merge stages (`ai_audit::merge_semantic_groups` — "cross-family-merge" — and
+//      `ai_audit::group_structural_needs_review` — "structural-needs-review-merge"), accounted
+//      for via `onboard::account_location_merge`, produces ZERO unaccounted rows at EVERY
+//      recorded stage. Traces to the real-world "cross-family-merge rows 45 -> 32 merged=8 ...
+//      unaccounted=5" defect: the OLD instrumentation diffed `also_matches` (a deduplicated
+//      rule-id SET) instead of `also_locations` (one entry per absorbed FINDING), so an
+//      absorption whose rule id collided with the primary's — the common "N occurrences of one
+//      rule" shape — vanished from the ledger with no recorded disposition even though its
+//      evidence site survived. STANDING (passes):
+//      `pipeline_integrity_ledger_has_zero_unaccounted_rows_across_every_merge_stage`.
 #[cfg(test)]
 mod export_invariants_gate {
     use super::*;
@@ -11504,6 +11515,136 @@ mod export_invariants_gate {
             "an unreconciled stage must disclose a pipeline-integrity gap naming the stage: \
              methodology={:?} executive_summary={:?}",
             json.methodology.failed_passes, json.executive_summary.failed_passes
+        );
+    }
+
+    /// Invariant 12. Builds a REPRESENTATIVE synthetic scan that deliberately exercises BOTH
+    /// row-reducing merge stages with the exact shapes that used to defeat the ledger:
+    ///
+    /// - An `also_matches`-id collision within `cross-family-merge` itself: three findings
+    ///   sharing ONE rule id collapse via `merge_semantic_group`'s "N occurrences of one rule"
+    ///   signal, which records NOTHING in `also_matches` (the id is already `seen` from the
+    ///   primary) — the exact shape of the real "rows 45 -> 32 ... unaccounted=5" defect.
+    /// - A SECOND collapse, `structural-needs-review-merge`, over findings that were themselves
+    ///   ALREADY-merged primaries carrying their own `also_matches`/`also_locations` — the real
+    ///   data-loss bug `build_structural_group_finding` used to have (nested absorbed members
+    ///   silently dropped on the second collapse).
+    ///
+    /// Both stages are instrumented the SAME way production code (`onboard::audit_repos`) does —
+    /// via `onboard::account_location_merge` — and the resulting ledger must reconcile to zero
+    /// unaccounted rows at EVERY stage. If a stage can structurally never reconcile, the fix
+    /// belongs in the instrumentation, never in loosening this assertion.
+    #[test]
+    fn pipeline_integrity_ledger_has_zero_unaccounted_rows_across_every_merge_stage() {
+        use crate::onboard::MergedLocation;
+
+        fn finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
+            Finding {
+                repo: "demo/portal".to_string(),
+                path: path.to_string(),
+                line,
+                rule_id: rule_id.to_string(),
+                severity: severity.to_string(),
+                snippet: format!("snippet-{line}"),
+                detail: format!("detail for {rule_id}"),
+                ..Finding::default()
+            }
+        }
+
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+
+        // ── Stage 1: cross-family-merge, same-rule-id N-site collapse ──────────────────────
+        let cross_family_input = vec![
+            finding("ARCH-NO-DIRECT-DB-1", "svc.rs", 10, "medium"),
+            finding("ARCH-NO-DIRECT-DB-1", "svc.rs", 200, "medium"),
+            finding("ARCH-NO-DIRECT-DB-1", "svc.rs", 400, "medium"),
+        ];
+        let rows_in = cross_family_input.len();
+        let pre = cross_family_input.clone();
+        let merged = crate::ai_audit::merge_semantic_groups(cross_family_input, &[]);
+        let rows_out = merged.len();
+        assert_eq!(
+            rows_out, 1,
+            "sanity: the N-site collapse must produce one row: {merged:?}"
+        );
+        let acc = crate::onboard::account_location_merge(&pre, &merged);
+        let stage1 = ledger
+            .record_stage("cross-family-merge", rows_in, rows_out, acc)
+            .clone();
+        assert_eq!(
+            stage1.unaccounted, 0,
+            "cross-family-merge must fully reconcile: {stage1:?}"
+        );
+
+        // ── Stage 2: structural-needs-review-merge, over ALREADY-merged primaries ──────────
+        // `a`/`b` each simulate a finding that survived stage 1 as a merged primary, carrying
+        // its own already-absorbed rule id + site — exactly what `build_structural_group_finding`
+        // used to silently drop on this second collapse.
+        let mut a = finding("ARCH-SOME-PREFERENCE-1", "a.rs", 1, "medium");
+        a.category = Some("arch-conformance".to_string());
+        a.confidence = Some("needs-review".to_string());
+        a.also_matches = vec!["AI-ALREADY-MERGED-A-1".to_string()];
+        a.also_locations = vec![MergedLocation {
+            repo: a.repo.clone(),
+            path: "already-merged-a.rs".to_string(),
+            line: 99,
+            rule_id: "AI-ALREADY-MERGED-A-1".to_string(),
+            snippet: "prior evidence".to_string(),
+            consequence: false,
+        }];
+        let mut b = finding("ARCH-SOME-PREFERENCE-1", "b.rs", 2, "medium");
+        b.category = Some("arch-conformance".to_string());
+        b.confidence = Some("needs-review".to_string());
+        b.also_matches = vec!["AI-ALREADY-MERGED-B-1".to_string()];
+        b.also_locations = vec![MergedLocation {
+            repo: b.repo.clone(),
+            path: "already-merged-b.rs".to_string(),
+            line: 199,
+            rule_id: "AI-ALREADY-MERGED-B-1".to_string(),
+            snippet: "prior evidence".to_string(),
+            consequence: false,
+        }];
+        let structural_input = vec![a, b];
+        let rows_in = structural_input.len();
+        let pre = structural_input.clone();
+        let grouped = crate::ai_audit::group_structural_needs_review(structural_input);
+        let rows_out = grouped.len();
+        assert_eq!(
+            rows_out, 1,
+            "sanity: both occurrences of one rule collapse to one row: {grouped:?}"
+        );
+        let acc = crate::onboard::account_location_merge(&pre, &grouped);
+        let stage2 = ledger
+            .record_stage("structural-needs-review-merge", rows_in, rows_out, acc)
+            .clone();
+        assert_eq!(
+            stage2.unaccounted, 0,
+            "structural-needs-review-merge must fully reconcile: {stage2:?}"
+        );
+
+        // Both already-absorbed ids/sites must still be reachable in the final grouped row —
+        // the second collapse must not have dropped what the first collapse already recorded.
+        assert!(grouped[0]
+            .also_matches
+            .contains(&"AI-ALREADY-MERGED-A-1".to_string()));
+        assert!(grouped[0]
+            .also_matches
+            .contains(&"AI-ALREADY-MERGED-B-1".to_string()));
+        assert!(grouped[0]
+            .also_locations
+            .iter()
+            .any(|l| l.path == "already-merged-a.rs" && l.line == 99));
+        assert!(grouped[0]
+            .also_locations
+            .iter()
+            .any(|l| l.path == "already-merged-b.rs" && l.line == 199));
+
+        // The whole-scan identity: every stage, summed, has zero unaccounted rows.
+        assert_eq!(
+            ledger.total_unaccounted(),
+            0,
+            "a representative synthetic scan must leave NO stage unaccounted: {:#?}",
+            ledger.stages()
         );
     }
 }

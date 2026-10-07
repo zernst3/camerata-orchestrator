@@ -5124,22 +5124,25 @@ pub fn group_structural_needs_review(findings: Vec<Finding>) -> Vec<Finding> {
 /// Build the single grouped [`Finding`] for `rule_id`'s `occurrences` — see
 /// [`group_structural_needs_review`]'s doc comment for the full contract. `occurrences` must be
 /// non-empty (the caller only calls this from a populated group).
+///
+/// # Pipeline-integrity fix: never drop an occurrence's ALREADY-absorbed data
+///
+/// This runs across the WHOLE scan, AFTER the per-repo `merge_semantic_groups` cross-family
+/// merge — so an `occurrence` arriving here can already be a merged PRIMARY from that earlier
+/// stage, carrying its own non-empty `also_matches` (other rule ids it already absorbed) and
+/// `also_locations` (their evidence sites). The previous version of this function built the
+/// group's `also_matches`/`also_locations` ONLY from each occurrence's own top-level
+/// `rule_id`/`repo`/`path`/`line` — silently discarding anything already nested inside an
+/// occurrence's `also_matches`/`also_locations` fields. That is genuine data loss (not just an
+/// accounting gap): the rule ids and sites a prior merge had already recorded vanish from the
+/// final output entirely, with no row anywhere still carrying them. Every occurrence's own
+/// nested `also_matches`/`also_locations` is now carried forward (deduplicated) alongside the
+/// fresh per-occurrence site entries this function has always built.
 fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) -> Finding {
     let n = occurrences.len();
     let primary = occurrences
         .first()
         .expect("build_structural_group_finding is only called with a non-empty group");
-    let also_locations: Vec<MergedLocation> = occurrences[1..]
-        .iter()
-        .map(|f| MergedLocation {
-            repo: f.repo.clone(),
-            path: f.path.clone(),
-            line: f.line,
-            rule_id: f.rule_id.clone(),
-            snippet: f.snippet.clone(),
-            consequence: false,
-        })
-        .collect();
     let locations_text = occurrences
         .iter()
         .map(|f| format!("{}:{}", f.path, f.line))
@@ -5152,6 +5155,46 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
          discretion.",
         if n == 1 { "" } else { "s" }
     );
+    // Carry forward every rule id ANY occurrence had already absorbed (from an earlier merge
+    // stage) before this grouping ran — never dropped just because every occurrence here shares
+    // the SAME top-level `rule_id` (that's exactly why they were grouped; it says nothing about
+    // what each one had already absorbed beneath it).
+    let mut also_matches: Vec<String> = Vec::new();
+    let mut also_matches_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    also_matches_seen.insert(rule_id.clone());
+    for f in &occurrences {
+        for id in &f.also_matches {
+            if also_matches_seen.insert(id.clone()) {
+                also_matches.push(id.clone());
+            }
+        }
+    }
+    // Every occurrence's own evidence site (for occurrences[1..] — the primary's own site is the
+    // group's own repo/path/line below) PLUS every occurrence's own already-nested
+    // `also_locations` (primary included — a merged primary's carried-in sites are not its own
+    // top-level site and would otherwise be lost entirely).
+    let mut also_locations: Vec<MergedLocation> = Vec::new();
+    for (i, f) in occurrences.iter().enumerate() {
+        if i > 0 {
+            also_locations.push(MergedLocation {
+                repo: f.repo.clone(),
+                path: f.path.clone(),
+                line: f.line,
+                rule_id: f.rule_id.clone(),
+                snippet: f.snippet.clone(),
+                consequence: false,
+            });
+        }
+        also_locations.extend(f.also_locations.iter().cloned());
+    }
+    // De-duplicate identical sites — the same site can arrive twice (e.g. already present in the
+    // primary's carried-in `also_locations` AND independently reachable via another occurrence),
+    // mirroring `merge_semantic_group`'s identical dedup step.
+    let mut location_seen: std::collections::HashSet<(String, String, usize, String)> =
+        std::collections::HashSet::new();
+    also_locations.retain(|l| {
+        location_seen.insert((l.repo.clone(), l.path.clone(), l.line, l.rule_id.clone()))
+    });
     Finding {
         repo: primary.repo.clone(),
         path: primary.path.clone(),
@@ -5161,7 +5204,7 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
         snippet: format!("{n} location(s)"),
         detail,
         status: "active".to_string(),
-        also_matches: Vec::new(),
+        also_matches,
         preview: false,
         preview_tool: None,
         in_test: false,
@@ -7309,6 +7352,60 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].severity, "low");
         assert!(out[0].detail.contains("only.rs:7"));
+    }
+
+    /// REAL DATA-LOSS REGRESSION (pipeline-integrity fix): `group_structural_needs_review` runs
+    /// AFTER the per-repo cross-family merge, so an occurrence arriving here can ALREADY be a
+    /// merged primary carrying its own non-empty `also_matches` (rule ids it already absorbed)
+    /// and `also_locations` (their sites). `build_structural_group_finding` used to build the
+    /// group's own `also_matches`/`also_locations` ONLY from each occurrence's top-level
+    /// rule_id/path/line — discarding anything already nested inside an occurrence. This proves
+    /// every already-absorbed rule id and site survives this SECOND collapse too.
+    #[test]
+    fn structural_grouping_preserves_already_absorbed_members_from_an_earlier_merge() {
+        // `a` simulates a finding that was ALREADY a merged primary from the earlier
+        // cross-family-merge stage: it carries "AI-ALREADY-MERGED-1" in `also_matches` and that
+        // id's own site in `also_locations`.
+        let mut a = structural_needs_review("a.rs", 10);
+        a.also_matches = vec!["AI-ALREADY-MERGED-1".to_string()];
+        a.also_locations = vec![MergedLocation {
+            repo: a.repo.clone(),
+            path: "already-merged-site.rs".to_string(),
+            line: 99,
+            rule_id: "AI-ALREADY-MERGED-1".to_string(),
+            snippet: "prior evidence".to_string(),
+            consequence: false,
+        }];
+        let b = structural_needs_review("b.rs", 20);
+
+        let out = group_structural_needs_review(vec![a, b]);
+        assert_eq!(out.len(), 1, "both occurrences collapse into one row: {out:?}");
+        let grouped = &out[0];
+
+        assert!(
+            grouped
+                .also_matches
+                .contains(&"AI-ALREADY-MERGED-1".to_string()),
+            "the rule id `a` had already absorbed must survive this SECOND collapse, not just \
+             the top-level rule ids of `a`/`b`: {:?}",
+            grouped.also_matches
+        );
+        assert!(
+            grouped
+                .also_locations
+                .iter()
+                .any(|l| l.path == "already-merged-site.rs" && l.line == 99),
+            "the SITE `a` had already absorbed must survive this SECOND collapse: {:?}",
+            grouped.also_locations
+        );
+        assert!(
+            grouped
+                .also_locations
+                .iter()
+                .any(|l| l.path == "b.rs" && l.line == 20),
+            "b's own site must still be recorded: {:?}",
+            grouped.also_locations
+        );
     }
 
     #[test]
