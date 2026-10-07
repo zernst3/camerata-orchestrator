@@ -137,3 +137,138 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
     assert!(names.contains(&"findings.json".to_string()), "{names:?}");
     assert!(names.contains(&"README.txt".to_string()), "{names:?}");
 }
+
+/// A bare-minimum synthetic git repo: no planted findings, no SQL-concat pattern anywhere —
+/// unlike `e2e_report_repo` (whose `src/db.rs` deliberately plants a `SEC-NO-RAW-SQL-CONCAT-1`
+/// hit via the gateway REGEX backstop), this fixture must produce ZERO real evidence for that
+/// rule id from the deterministic floor, so the ONLY way it could read "verified clean" is via
+/// the commodity taint (Semgrep) pass actually running and finding nothing — which this test
+/// deliberately prevents, to prove the pass's ABSENCE is disclosed rather than silently read as
+/// clean.
+fn stage_minimal_git_repo(dest: &Path) {
+    std::fs::create_dir_all(dest).unwrap();
+    std::fs::write(
+        dest.join("app.py"),
+        "def handler(request):\n    return {\"ok\": True}\n",
+    )
+    .unwrap();
+
+    let g = |args: &[&str]| {
+        let out = std::process::Command::new("git")
+            .current_dir(dest)
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("failed to spawn git {args:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    g(&["init", "-q", "-b", "main"]);
+    g(&["config", "user.email", "inspect-e2e@camerata.local"]);
+    g(&["config", "user.name", "Camerata Inspect E2E Test"]);
+    g(&["add", "."]);
+    g(&["commit", "-q", "-m", "e2e fixture: no planted findings"]);
+}
+
+/// W3 wiring-gap regression guard + the required degradation E2E: the HEADLESS `camerata
+/// inspect` path must reach the exact same `scan_tools::run_scan_tools` external-tool pass the
+/// server/UI scan path reaches (both go through the shared `camerata_server::merge_scan_preview`
+/// — see `crates/cli/src/inspect_cmd.rs`'s call around its own `merge_scan_preview` line, and
+/// `crates/server/src/lib.rs`'s `onboard_audit`/`onboard_audit_start` handlers), and when that
+/// pass cannot run, the product export must disclose it loudly rather than silently reporting
+/// the taint-covered rule as "verified clean".
+///
+/// `CAMERATA_DISABLE_SEMGREP` forces a deterministic, network-free "tool unavailable" outcome
+/// (mirrors `camerata_server::dep_audit::DISABLE_ENV_VAR`'s test-isolation rationale) rather than
+/// depending on whether semgrep happens to be installed on the machine running this test. If
+/// this test reached `run_scan_tools`'s Semgrep arm at all — the thing this test exists to prove
+/// — that env var is what turns the attempt into a clean, deterministic failure instead of a
+/// real (and in this environment, network-dependent) provisioning attempt.
+#[tokio::test]
+async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run() {
+    if !typst_on_path() {
+        eprintln!(
+            "skipping headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run: \
+             typst not on PATH"
+        );
+        return;
+    }
+
+    std::env::set_var(camerata_server::scan_tools::DISABLE_SEMGREP_ENV_VAR, "1");
+    std::env::set_var("CAMERATA_DISABLE_DEP_AUDIT", "1");
+
+    let repo_dir = tempfile::tempdir().expect("create temp dir for the synthetic git repo");
+    stage_minimal_git_repo(repo_dir.path());
+    let export_dir = tempfile::tempdir().expect("create temp dir for the export zip");
+    let export_path = export_dir.path().join("inspect.zip");
+
+    let args = InspectArgs {
+        repo: repo_dir.path().to_path_buf(),
+        export: export_path.clone(),
+        backend: ProjectBackend::Api,
+        batch: false,
+        model: None,
+        calibration_model: None,
+        full: true,
+    };
+
+    let outcome = run_inspect_with_key_presence(args, false).await;
+
+    std::env::remove_var(camerata_server::scan_tools::DISABLE_SEMGREP_ENV_VAR);
+    std::env::remove_var("CAMERATA_DISABLE_DEP_AUDIT");
+
+    let outcome = outcome.expect(
+        "a headless inspection must never refuse to export, even when a deterministic pass \
+         degrades",
+    );
+
+    assert!(
+        export_path.is_file(),
+        "the product-export zip must be written even when the commodity taint pass can't run"
+    );
+    assert!(outcome.export_zip_bytes > 0);
+
+    let bytes = std::fs::read(&export_path).expect("read the written export zip");
+    let mut archive =
+        zip::ZipArchive::new(std::io::Cursor::new(bytes)).expect("the export must be a valid zip");
+    let mut findings_json = String::new();
+    {
+        use std::io::Read;
+        let mut f = archive
+            .by_name("findings.json")
+            .expect("the export must contain findings.json");
+        f.read_to_string(&mut findings_json)
+            .expect("findings.json must be valid UTF-8");
+    }
+    let parsed: serde_json::Value =
+        serde_json::from_str(&findings_json).expect("findings.json must be valid JSON");
+    let failed_passes = parsed["summary"]["failed_passes"]
+        .as_array()
+        .expect("findings.json summary must carry a failed_passes array");
+    // The exact rule id(s) the commodity taint layer claims to cover for a Python repo (a
+    // universal id like `SEC-NO-RAW-SQL-CONCAT-1`, a Python-specific one like
+    // `PYTHON-PARAMETERIZED-SQL-1`, or both, depending on the stack-exception mechanism —
+    // see `crates/rules/principles/universal/sec-no-raw-sql-concat-1.toml`'s
+    // `stack_exceptions`) isn't this test's concern; what matters is that AT LEAST ONE
+    // semgrep-covered rule discloses the pass never ran, for EVERY such rule selected this
+    // scan — never silence.
+    let taint_disclosures: Vec<&str> = failed_passes
+        .iter()
+        .filter_map(|v| v.as_str())
+        .filter(|s| s.contains("commodity taint pass"))
+        .collect();
+    assert!(
+        !taint_disclosures.is_empty(),
+        "the exported product must disclose that the commodity taint pass did not run — got \
+         failed_passes: {failed_passes:?}"
+    );
+    for d in &taint_disclosures {
+        // Every such disclosure must say the pass did NOT run, never phrase it as a clean
+        // result — and must name the real reason it couldn't (the forced test-isolation var),
+        // not a vague placeholder.
+        assert!(d.contains("did not run"), "{d}");
+        assert!(d.contains("CAMERATA_DISABLE_SEMGREP"), "{d}");
+    }
+}

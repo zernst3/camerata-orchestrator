@@ -5719,6 +5719,13 @@ pub async fn merge_scan_preview(
     // with its findings count, mirroring the floor's progress.
     job: Option<(&crate::jobs::JobStore, &str)>,
 ) {
+    // Every tool NAME this call actually attempted to invoke, across every repo in `sources`
+    // (regardless of whether each attempt then succeeded or failed) — fed to
+    // `reconcile_external_tool_ledger` so it can tell "the tool ran and found nothing" apart
+    // from "the tool was never invoked this scan at all" (empty `preview_rules`/no corpus, or
+    // no selected rule this scan routed to it). See `scan_tools::run_scan_tools`'s doc comment.
+    let mut tools_attempted: std::collections::HashSet<&'static str> =
+        std::collections::HashSet::new();
     if !preview_rules.is_empty() {
         if let Some(set) = corpus {
             let lookup = |id: &str| set.get_by_id(id);
@@ -5742,7 +5749,7 @@ pub async fn merge_scan_preview(
                 })
                 .await
                 .unwrap_or_default();
-                let (previews, mut notes) = crate::scan_tools::run_scan_tools(
+                let (previews, mut notes, attempted) = crate::scan_tools::run_scan_tools(
                     spec,
                     dir,
                     &for_repo,
@@ -5751,6 +5758,7 @@ pub async fn merge_scan_preview(
                     job,
                 )
                 .await;
+                tools_attempted.extend(attempted);
                 // Dedup preview findings that overlap the deterministic floor or other preview
                 // tools BEFORE appending. When two tools flag the same (repo, path, line) for a
                 // compatible security category, the higher-precedence finding is kept canonical
@@ -5768,7 +5776,7 @@ pub async fn merge_scan_preview(
     // on the strength of "a semgrep rule maps to this corpus rule" — BEFORE this pass (the one
     // that actually runs the tool) executed at all. See `reconcile_external_tool_ledger`'s doc
     // comment for why this correction can't happen earlier.
-    reconcile_external_tool_ledger(report);
+    reconcile_external_tool_ledger(report, &tools_attempted);
 }
 
 /// Corrects the ledger's `RuleTier::ExternalTool` entries to reflect what the scan-time
@@ -5779,7 +5787,7 @@ pub async fn merge_scan_preview(
 /// successfully, or actually executes for THIS scan, because the two loops run in different,
 /// decoupled pipeline stages).
 ///
-/// Two outcomes, decided per rule id:
+/// Three outcomes, decided per rule id:
 ///
 /// 1. **The tool ran (or wasn't needed) for every repo this scan touched** — no hard-failure
 ///    `CoverageNote` names it. The entry is corrected to `ran = true` with the REAL emitted
@@ -5793,12 +5801,27 @@ pub async fn merge_scan_preview(
 ///    SAME disclosure mechanism every other degraded pass in this codebase uses. Never a
 ///    silent "verified clean", never a refused export (`report.findings`/`report.ledger`'s
 ///    OTHER entries are completely untouched).
+/// 3. **The tool was never even INVOKED this scan at all** — `tools_attempted` (from
+///    [`merge_scan_preview`], ultimately [`crate::scan_tools::run_scan_tools`]'s own
+///    `attempted` return value) doesn't contain `"semgrep"`. This happens when the whole
+///    preview loop never ran (`preview_rules` empty or no corpus), or every repo's selected
+///    rules happened to route away from Semgrep, or the language gate omitted it everywhere —
+///    none of which produce a `CoverageNote` (a tool nothing ever tried to invoke fails
+///    silently, by construction). Without this check, such a scan would fall through to
+///    outcome 1 purely because `emitted == 0 && failed_tools` is empty — exactly the silent
+///    "verified clean, except nothing ever ran" class this whole ledger exists to prevent. The
+///    entry is corrected to `ran = false` with a disclosed reason and a `FailedPass`, the same
+///    as outcome 2 — the pass-level outcome is what's authoritative here, not the absence of a
+///    per-finding failure note.
 ///
 /// A tool that failed for SOME repos but produced real findings for others is treated as
 /// outcome 1 (a nonzero `emitted` count wins) — the honest statement in that case is "ran, N
 /// findings", not "did not run", and the per-repo failure is still visible in
 /// `report.coverage_notes` either way (this function never removes a `CoverageNote`).
-pub(crate) fn reconcile_external_tool_ledger(report: &mut crate::onboard::ScanReport) {
+pub(crate) fn reconcile_external_tool_ledger(
+    report: &mut crate::onboard::ScanReport,
+    tools_attempted: &std::collections::HashSet<&str>,
+) {
     // "unrouted" is a ROUTING gap (a selected rule with no tool to drive it at all), not a
     // tool-execution failure — never treated as evidence the tool itself didn't run.
     let failed_tools: std::collections::HashSet<&str> = report
@@ -5822,7 +5845,14 @@ pub(crate) fn reconcile_external_tool_ledger(report: &mut crate::onboard::ScanRe
             .filter(|f| finding_grounds_to(f, &rule_id))
             .count();
 
-        if emitted == 0 && failed_tools.contains("semgrep") {
+        if emitted > 0 {
+            report
+                .ledger
+                .correct_rule_after_external_pass(rule_id, true, None, emitted);
+            continue;
+        }
+
+        if failed_tools.contains("semgrep") {
             let reason = report
                 .coverage_notes
                 .iter()
@@ -5840,11 +5870,32 @@ pub(crate) fn reconcile_external_tool_ledger(report: &mut crate::onboard::ScanRe
                 pass: "commodity taint pass".to_string(),
                 reason: format!("{rule_id}: commodity taint pass did not run: {reason}"),
             });
-        } else {
-            report
-                .ledger
-                .correct_rule_after_external_pass(rule_id, true, None, emitted);
+            continue;
         }
+
+        if !tools_attempted.contains("semgrep") {
+            // Outcome 3: a pass-level skip with no per-finding failure note to key off of.
+            let reason = "semgrep was never invoked for any scanned repo this scan (no selected \
+                          rule routed to it, no supported language was present, or the \
+                          preview pass did not run at all)";
+            report.ledger.correct_rule_after_external_pass(
+                rule_id.clone(),
+                false,
+                Some(format!("commodity taint pass did not run: {reason}")),
+                0,
+            );
+            report.failed_passes.push(crate::ai_audit::FailedPass {
+                repo: report.repos.join(", "),
+                pass: "commodity taint pass".to_string(),
+                reason: format!("{rule_id}: commodity taint pass did not run: {reason}"),
+            });
+            continue;
+        }
+
+        // Attempted, no hard failure, genuinely zero findings — a real clean result.
+        report
+            .ledger
+            .correct_rule_after_external_pass(rule_id, true, None, 0);
     }
 }
 
@@ -22846,7 +22897,8 @@ mod tests {
             "semgrep",
             &[],
         )];
-        reconcile_external_tool_ledger(&mut report);
+        let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted);
         let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
         assert!(entry.ran);
         assert_eq!(
@@ -22879,8 +22931,10 @@ mod tests {
                 "could not preview 1 rule(s) with semgrep: base interpreter not available: python3"
                     .to_string(),
         }];
-        // No findings at all — the tool never ran.
-        reconcile_external_tool_ledger(&mut report);
+        // No findings at all — the tool never ran. It WAS attempted (routed, then failed) —
+        // the hard-failure CoverageNote takes precedence over `tools_attempted` either way.
+        let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted);
         let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
         assert!(
             !entry.ran,
@@ -22897,6 +22951,185 @@ mod tests {
         assert!(report.failed_passes[0]
             .reason
             .contains("SEC-NO-RAW-SQL-CONCAT-1"));
+    }
+
+    /// Outcome 3 (pass-level skip): the external-tool pass never invoked semgrep AT ALL this
+    /// scan — no coverage note names it (a tool nothing ever tried to run fails silently, by
+    /// construction) — so `tools_attempted` is the ONLY signal that it didn't run. Before this
+    /// branch existed, this exact state (emitted == 0, no coverage note) fell through to
+    /// "genuinely clean", silently keeping the pre-pass speculative `ran=true` — the precise
+    /// silent-knowledge-loss class this ledger exists to prevent.
+    #[test]
+    fn reconcile_marks_rule_not_run_when_tool_never_attempted_this_scan() {
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0,
+        );
+        // No coverage notes, no findings — the pass genuinely never touched this id.
+        let attempted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        reconcile_external_tool_ledger(&mut report, &attempted);
+        let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
+        assert!(
+            !entry.ran,
+            "a tool never invoked this scan must never be recorded as ran=true"
+        );
+        assert!(!entry.verified_clean(), "must never read as verified clean");
+        let reason = entry.skip_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.starts_with("commodity taint pass did not run:"),
+            "got: {reason}"
+        );
+        assert_eq!(report.failed_passes.len(), 1);
+        assert_eq!(report.failed_passes[0].pass, "commodity taint pass");
+        assert!(report.failed_passes[0]
+            .reason
+            .contains("SEC-NO-RAW-SQL-CONCAT-1"));
+    }
+
+    /// W3 wiring-gap fix, full pipeline: over a REAL synthetic repo, with the REAL loaded
+    /// corpus, through `audit_repos` -> `merge_scan_preview` -> `report_export::build_report_json`
+    /// (the exact sequence both `onboard_audit` and `camerata inspect` run), with
+    /// `CAMERATA_DISABLE_SEMGREP` forcing a deterministic "tool unavailable" outcome:
+    /// `SEC-NO-COMMAND-INJECTION-1` must NEVER appear in `whats_healthy.rules` (the report's
+    /// literal "verified clean" list), MUST appear in `rules_not_run` ("excluded from this
+    /// audit") with the disclosed reason, and the disclosure MUST ride into both
+    /// `executive_summary.failed_passes` and `methodology.failed_passes` — proving the fix
+    /// holds all the way through the exact function the PDF/xlsx/findings.json export is built
+    /// from, not just the ledger in isolation.
+    ///
+    /// `SEC-NO-COMMAND-INJECTION-1` (not `SEC-NO-RAW-SQL-CONCAT-1`) is the right id for this
+    /// test: it has NO `camerata_gateway::lookup_arm` and is NOT in `onboard::AUDIT_RULES` (the
+    /// content floor's always-on regex set), so its ONLY detector is the commodity taint pass —
+    /// `SEC-NO-RAW-SQL-CONCAT-1` genuinely has a SECOND, independent, always-on gateway-regex
+    /// detector (the floor's `AUDIT_RULES` loop), so it legitimately stays `ran=true` via that
+    /// channel even when semgrep doesn't run — correct, not a gap, since it really was checked
+    /// by something. The silent-knowledge-loss class this fix closes is specifically "the
+    /// pass-claimed-to-cover-it tool never ran AND nothing else ever checked it either".
+    #[tokio::test]
+    async fn semgrep_covered_rule_never_reads_verified_clean_when_the_pass_does_not_run() {
+        std::env::set_var(crate::scan_tools::DISABLE_SEMGREP_ENV_VAR, "1");
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            dir.path().join("app.py"),
+            "def handler(request):\n    return {\"ok\": True}\n",
+        )
+        .unwrap();
+        let sources = vec![("me/svc".to_string(), dir.path().to_path_buf())];
+
+        let selected = vec![crate::onboard::SelectedRule {
+            id: "SEC-NO-COMMAND-INJECTION-1".to_string(),
+            directive: "no shell-interpreted invocation of externally-influenced values"
+                .to_string(),
+            repos: Vec::new(),
+        }];
+        let (corpus, _errs) =
+            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+        assert!(
+            corpus.get_by_id("SEC-NO-COMMAND-INJECTION-1").is_some(),
+            "precondition: the real corpus must carry this id"
+        );
+        assert!(
+            camerata_gateway::lookup_arm("SEC-NO-COMMAND-INJECTION-1").is_none(),
+            "precondition: this id must have NO gateway-regex backstop"
+        );
+        assert!(
+            !crate::onboard::AUDIT_RULES.contains(&"SEC-NO-COMMAND-INJECTION-1"),
+            "precondition: this id must have NO always-on content-floor detector either"
+        );
+        let (_scannable, excluded_mechanical, preview_rules, _set) =
+            split_scannable_rules(selected.clone()).await;
+        assert!(
+            preview_rules
+                .iter()
+                .any(|r| r.id == "SEC-NO-COMMAND-INJECTION-1"),
+            "precondition: this id must be CI-tier + preview-runnable"
+        );
+
+        let (mut report, _manifest) = crate::onboard::audit_repos(
+            &sources,
+            &selected,
+            Vec::new(),
+            None,
+            None,
+            crate::ai_audit::ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            false,
+            true,
+            false, // run_ai_review off — token-free, this test is about the deterministic tier
+            true,  // run_deterministic on
+            None,
+            crate::llm::BackendResolution::Cli,
+            Some(&corpus),
+            &std::collections::HashMap::new(),
+        )
+        .await;
+        report.excluded_mechanical_rules = excluded_mechanical;
+        merge_scan_preview(&mut report, &sources, &preview_rules, Some(&corpus), None).await;
+
+        std::env::remove_var(crate::scan_tools::DISABLE_SEMGREP_ENV_VAR);
+
+        let entry = report
+            .ledger
+            .rule("SEC-NO-COMMAND-INJECTION-1")
+            .expect("the ledger must carry this rule's outcome");
+        assert!(
+            !entry.ran,
+            "the tool never ran, so this must never be ran=true"
+        );
+        assert!(!entry.verified_clean());
+
+        let options = crate::report_export::ReportOptions::default();
+        let json = crate::report_export::build_report_json(
+            &report,
+            &std::collections::HashMap::new(),
+            Some(&corpus),
+            &options,
+        );
+
+        assert!(
+            !json
+                .whats_healthy
+                .rules
+                .iter()
+                .any(|r| r.rule_id == "SEC-NO-COMMAND-INJECTION-1"),
+            "a rule the commodity taint pass never ran for must NEVER appear in the report's \
+             'verified clean' section: {:?}",
+            json.whats_healthy.rules
+        );
+        let excluded = json
+            .rules_not_run
+            .iter()
+            .find(|r| r.rule_id == "SEC-NO-COMMAND-INJECTION-1");
+        assert!(
+            excluded.is_some_and(|r| r.reason.starts_with("commodity taint pass did not run:")),
+            "must appear in 'excluded from this audit' with the real reason: {:?}",
+            json.rules_not_run
+        );
+        assert!(
+            json.executive_summary
+                .failed_passes
+                .iter()
+                .any(|s| s.contains("SEC-NO-COMMAND-INJECTION-1") && s.contains("commodity taint")),
+            "{:?}",
+            json.executive_summary.failed_passes
+        );
+        assert!(
+            json.methodology
+                .failed_passes
+                .iter()
+                .any(|s| s.contains("SEC-NO-COMMAND-INJECTION-1") && s.contains("commodity taint")),
+            "{:?}",
+            json.methodology.failed_passes
+        );
     }
 
     /// An "unrouted" coverage note (a routing gap — a selected rule with no tool to drive it)
@@ -22917,7 +23150,10 @@ mod tests {
             message: "could not preview SOME-OTHER-RULE-1 — no scan-runnable tool wired"
                 .to_string(),
         }];
-        reconcile_external_tool_ledger(&mut report);
+        // Semgrep itself WAS attempted (routed + run) for this id — the unrouted note is about
+        // a different, unrelated rule entirely.
+        let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted);
         let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
         assert!(
             entry.ran,
@@ -22943,7 +23179,7 @@ mod tests {
             5,
             2,
         );
-        reconcile_external_tool_ledger(&mut report);
+        reconcile_external_tool_ledger(&mut report, &std::collections::HashSet::new());
         let entry = report.ledger.rule("SEC-NO-HARDCODED-SECRETS-1").unwrap();
         assert!(entry.ran);
         assert_eq!(

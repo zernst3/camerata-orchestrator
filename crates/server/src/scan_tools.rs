@@ -75,7 +75,9 @@ impl ScanTool {
 }
 
 /// Derive the scan tool a rule's findings would come from, by inspecting its
-/// grounding sources' `linter` field (the corpus's tool+rule provenance).
+/// grounding sources' `linter` field (the corpus's tool+rule provenance), falling
+/// back to [`crate::mechanical_gate::semgrep_covered_rule_ids`] when no source names
+/// one.
 ///
 /// Recognized prefixes (case-insensitive on the tool token):
 /// - `clippy: ...` / `clippy::...`            -> [`ScanTool::Clippy`]
@@ -87,11 +89,42 @@ impl ScanTool {
 /// Returns `None` when no source maps to a scan tool we drive (e.g. Checkstyle,
 /// RuboCop, golangci-lint, Roslyn — not wired end-to-end here; the caller emits a
 /// graceful NOTE for these).
+///
+/// # W3 wiring-gap fix: the `semgrep_covered_rule_ids` fallback
+///
+/// `mechanical_gate::detector_channel` (the build-time "does this mechanical rule have
+/// a real detector" gate, and the scan-time ledger's speculative pre-pass recording in
+/// `onboard::audit_repos`) both treat a rule id present in
+/// [`crate::mechanical_gate::semgrep_covered_rule_ids`] as "covered by Semgrep" —
+/// that set is derived from the bundled `security.yml`/`taint-security.yml` rule ids
+/// via `semgrep_floor_category`, INDEPENDENTLY of whether the corpus rule's own
+/// `[[sources]]` names `linter = "semgrep"`. `SEC-NO-RAW-SQL-CONCAT-1` and
+/// `SEC-NO-COMMAND-INJECTION-1` (among others) are claimed-covered that way but carry
+/// NO `linter` source at all. Before this fallback, that meant the build gate and the
+/// ledger's speculative pre-pass entry both believed Semgrep covered these (very
+/// commonly selected, default-on) rules, while THIS function — the one `group_by_tool`
+/// actually uses to decide whether to drive Semgrep at scan time — had no way to know
+/// that and routed them to `ungrouped` ("no scan-runnable tool wired") instead. The
+/// practical effect: Semgrep (and the whole `taint-security.yml` commodity layer) never
+/// actually ran in EITHER the headless or the server/UI scan path, for any repo,
+/// ever — `ensure_semgrep` was unreachable except via the opt-in-only
+/// `CICD-SEMGREP-SECURITY-SCAN-1` rule nobody selects by default. Because the failure
+/// mode was "unrouted" (a routing gap) rather than a hard tool failure, the ledger's
+/// reconciliation (`reconcile_external_tool_ledger`) correctly treats a routing gap as
+/// "not evidence the tool itself didn't run" and so never corrected the speculative
+/// `ran = true, findings_emitted = 0` entry — a silent false "verified clean" on every
+/// scan. This fallback makes the two "is this covered by Semgrep" definitions agree:
+/// one `semgrep_covered_rule_ids`, consulted everywhere.
 pub fn tool_for_rule(rule: &Rule) -> Option<ScanTool> {
     rule.sources
         .iter()
         .filter_map(|s| s.linter.as_deref())
         .find_map(tool_for_linter)
+        .or_else(|| {
+            crate::mechanical_gate::semgrep_covered_rule_ids()
+                .contains(rule.id.0.as_str())
+                .then_some(ScanTool::Semgrep)
+        })
 }
 
 /// Map a single `linter` source string to a scan tool. Pure; the core of the
@@ -757,6 +790,17 @@ async fn run_capture_stdout(
     }
 }
 
+/// When set (to any non-empty value), the `Semgrep` arm of [`run_one_tool`] fails
+/// IMMEDIATELY with a `CoverageNote`-producing error, skipping provisioning and every
+/// network/process call — mirrors `crate::dep_audit::DISABLE_ENV_VAR`'s test-isolation
+/// rationale, scoped to Semgrep specifically. Lets a test exercise the REAL "the
+/// commodity taint pass could not run this scan" degradation path deterministically,
+/// without depending on whether `semgrep` happens to be installed or network access is
+/// available to `pip install` it.
+///
+/// Never set this variable in production code paths.
+pub const DISABLE_SEMGREP_ENV_VAR: &str = "CAMERATA_DISABLE_SEMGREP";
+
 /// Run the SCAN-TIME deterministic preview pass for ONE repo: group the selected
 /// mechanical rules by tool, run each tool ONCE with a Camerata-supplied config
 /// enabling exactly those rules, parse the output into preview findings, and
@@ -778,6 +822,15 @@ async fn run_capture_stdout(
 /// (`(store, job_id)`): each tool registers (`starting`), is marked `running` before
 /// it executes, and `done` with its findings count when it finishes — mirroring how the
 /// AI passes stream progress. `None` runs silently (the synchronous path that has no job).
+///
+/// Returns `(findings, coverage_notes, attempted_tools)`. `attempted_tools` is the set
+/// of tool names THIS call actually invoked (i.e. `by_tool`'s keys, computed before any
+/// tool runs) — regardless of whether each one then succeeded or failed. A caller
+/// (`merge_scan_preview` / `reconcile_external_tool_ledger`) needs this to distinguish
+/// "the tool ran and genuinely found nothing" (ran = true) from "the tool was never
+/// even invoked this scan" (ran = false + disclosure) — a distinction a `CoverageNote`
+/// alone cannot make, since a tool nothing routed to emits no note at all (see
+/// [`tool_for_rule`]'s doc comment for the exact wiring gap this closes).
 pub async fn run_scan_tools<'r>(
     repo: &str,
     dir: &Path,
@@ -785,8 +838,9 @@ pub async fn run_scan_tools<'r>(
     lookup: &(dyn Fn(&str) -> Option<&'r Rule> + Send + Sync),
     present_languages: Option<&HashSet<String>>,
     progress: Option<(&crate::jobs::JobStore, &str)>,
-) -> (Vec<Finding>, Vec<CoverageNote>) {
+) -> (Vec<Finding>, Vec<CoverageNote>, HashSet<&'static str>) {
     let (by_tool, ungrouped) = group_by_tool(selected, lookup, present_languages);
+    let attempted: HashSet<&'static str> = by_tool.keys().map(|t| t.name()).collect();
     let mut findings = Vec::new();
     let mut coverage_notes: Vec<CoverageNote> = Vec::new();
 
@@ -861,7 +915,7 @@ pub async fn run_scan_tools<'r>(
         }
     }
 
-    (findings, coverage_notes)
+    (findings, coverage_notes, attempted)
 }
 
 /// Run a SINGLE tool over the repo with a Camerata-supplied config that enables
@@ -916,6 +970,15 @@ async fn run_one_tool<'r>(
 
     match tool {
         ScanTool::Semgrep => {
+            // Test isolation (see `DISABLE_SEMGREP_ENV_VAR`'s doc comment): fail exactly as
+            // a genuinely unavailable tool would (a `CoverageNote`, never a silent empty-
+            // but-"ran" result) without touching provisioning or the network.
+            if std::env::var(DISABLE_SEMGREP_ENV_VAR)
+                .map(|v| !v.is_empty())
+                .unwrap_or(false)
+            {
+                anyhow::bail!("semgrep disabled via {DISABLE_SEMGREP_ENV_VAR} (test isolation)");
+            }
             // Semgrep selects by config PACK, not individual ids.  Camerata
             // auto-provisions semgrep into a stable venv so the user never
             // needs to install it manually.  The preview runs against the
@@ -1155,6 +1218,121 @@ mod tests {
         assert_eq!(ungrouped[0].id, "GO-A");
     }
 
+    /// W3 wiring-gap regression guard: a corpus rule with NO `[[sources]].linter` at all
+    /// (exactly `SEC-NO-RAW-SQL-CONCAT-1`'s and `SEC-NO-COMMAND-INJECTION-1`'s real shape —
+    /// see `crates/rules/principles/universal/sec-no-raw-sql-concat-1.toml`) but present in
+    /// `mechanical_gate::semgrep_covered_rule_ids` must still resolve to `ScanTool::Semgrep` —
+    /// never `None`/`ungrouped`. Before the `tool_for_rule` fallback, this id silently never
+    /// drove Semgrep in EITHER the headless or server scan path; see that function's doc
+    /// comment for the full wiring-gap writeup.
+    #[test]
+    fn tool_for_rule_falls_back_to_semgrep_covered_rule_ids_when_no_linter_source() {
+        let semgrep_ids = crate::mechanical_gate::semgrep_covered_rule_ids();
+        assert!(
+            semgrep_ids.contains("SEC-NO-RAW-SQL-CONCAT-1"),
+            "precondition: this id must be claimed-covered by semgrep"
+        );
+        let rule = rule_with(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            EnforcementKind::Mechanical,
+            false,
+            &[],
+        );
+        assert!(
+            rule.sources.is_empty(),
+            "precondition: no linter source at all, mirroring the real corpus TOML"
+        );
+        assert_eq!(
+            tool_for_rule(&rule),
+            Some(ScanTool::Semgrep),
+            "a semgrep_covered_rule_ids id with no linter source must still route to Semgrep"
+        );
+    }
+
+    /// A rule with NO linter source AND absent from `semgrep_covered_rule_ids` must still fall
+    /// through to `None` — the fallback must not swallow every ungrouped rule indiscriminately.
+    #[test]
+    fn tool_for_rule_returns_none_when_not_semgrep_covered_and_no_linter_source() {
+        let rule = rule_with(
+            "SOME-UNRELATED-RULE-1",
+            EnforcementKind::Mechanical,
+            false,
+            &[],
+        );
+        assert_eq!(tool_for_rule(&rule), None);
+    }
+
+    /// `group_by_tool`-level proof of the same fix: the rule actually lands in
+    /// `by_tool[Semgrep]`, not `ungrouped` — this is what makes `run_scan_tools` actually
+    /// attempt (and `ensure_semgrep` provision) Semgrep for it at scan time.
+    #[test]
+    fn group_by_tool_routes_a_semgrep_covered_rule_with_no_linter_source_to_semgrep() {
+        let rules = vec![rule_with(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            EnforcementKind::Mechanical,
+            false,
+            &[],
+        )];
+        let lookup = lookup_over(&rules);
+        let sel = vec![selected("SEC-NO-RAW-SQL-CONCAT-1")];
+        let (by_tool, ungrouped) = group_by_tool(&sel, &lookup, None);
+        assert!(
+            by_tool
+                .get(&ScanTool::Semgrep)
+                .map(|v| v.iter().any(|s| s.id == "SEC-NO-RAW-SQL-CONCAT-1"))
+                .unwrap_or(false),
+            "must route to semgrep via the semgrep_covered_rule_ids fallback: {by_tool:?}"
+        );
+        assert!(
+            ungrouped.is_empty(),
+            "must never land in ungrouped now that the fallback resolves it"
+        );
+    }
+
+    /// `run_scan_tools`'s third return value reports a tool as "attempted" even when it then
+    /// FAILS — `CAMERATA_DISABLE_SEMGREP` forces a deterministic, network-free failure (see
+    /// `DISABLE_SEMGREP_ENV_VAR`'s doc comment) so this doesn't depend on whether semgrep
+    /// happens to be installed on the machine running the test.
+    #[tokio::test]
+    async fn run_scan_tools_reports_semgrep_as_attempted_even_when_it_fails() {
+        std::env::set_var(DISABLE_SEMGREP_ENV_VAR, "1");
+        let rules = vec![rule_with(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            EnforcementKind::Mechanical,
+            false,
+            &[],
+        )];
+        let lookup = lookup_over(&rules);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (findings, notes, attempted) = run_scan_tools(
+            "me/api",
+            dir.path(),
+            &[selected("SEC-NO-RAW-SQL-CONCAT-1")],
+            &lookup,
+            None,
+            None,
+        )
+        .await;
+        std::env::remove_var(DISABLE_SEMGREP_ENV_VAR);
+
+        assert!(
+            findings.is_empty(),
+            "a disabled tool must yield no finding rows"
+        );
+        assert!(
+            attempted.contains("semgrep"),
+            "semgrep was routed via group_by_tool, so it must count as attempted even though \
+             it was then disabled: {attempted:?}"
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|n| n.tool == "semgrep" && n.message.contains(DISABLE_SEMGREP_ENV_VAR)),
+            "a disabled tool must yield a real semgrep coverage note (never a silent clean): \
+             {notes:?}"
+        );
+    }
+
     // ── SARIF + per-tool JSON parsing ────────────────────────────────────────
 
     // ── normalize_semgrep_rule_id ─────────────────────────────────────────────
@@ -1389,10 +1567,16 @@ mod tests {
         // A non-existent dir + (almost certainly) absent `ruff` on the test host:
         // the pass must emit a coverage NOTE, NOT an empty (clean) result and NOT a finding.
         let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
-        let (findings, notes) = run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None, None).await;
+        let (findings, notes, attempted) =
+            run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None, None).await;
         assert!(findings.is_empty(), "missing tool must yield no finding rows");
         assert!(!notes.is_empty(), "missing tool must yield a coverage note");
         assert!(notes.iter().any(|n| n.message.contains("Could not preview") || !n.tool.is_empty()));
+        assert!(
+            attempted.contains("ruff"),
+            "ruff was routed via group_by_tool, so it must count as attempted even though it \
+             then failed: {attempted:?}"
+        );
     }
 
     #[test]
@@ -1434,10 +1618,11 @@ mod tests {
         )];
         let lookup = lookup_over(&rules);
         let dir = std::path::Path::new("/nonexistent-camerata-scan-preview-dir");
-        let (findings, notes) =
+        let (findings, notes, attempted) =
             run_scan_tools("me/api", dir, &[selected("PY-A")], &lookup, None, None).await;
         assert!(findings.is_empty(), "a missing tool must yield NO finding row");
         assert!(!notes.is_empty(), "a missing tool must yield a coverage note");
+        assert!(attempted.contains("ruff"), "{attempted:?}");
         assert!(
             notes
                 .iter()
