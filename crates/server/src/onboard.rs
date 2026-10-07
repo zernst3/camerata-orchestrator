@@ -1230,7 +1230,11 @@ pub async fn audit_repos(
                     // ArchChecker or the gate's own rule registry genuinely ran; one with NO
                     // channel is the exact W1-item-4 defect (declares mechanical enforcement,
                     // nothing ever evaluates it) and is recorded as not-run, never silently
-                    // "verified clean".
+                    // "verified clean". Recorded as `RuleTier::Architectural` (not
+                    // `Deterministic`) for the `arch_checker`/`gateway_rule_registry` channels
+                    // and the no-detector fallback — this is the deterministic architectural
+                    // engine, a distinct family from the content floor above for the
+                    // `camerata inspect` ledger-summary breakdown (`RuleTier::family_label`).
                     let semgrep_ids = crate::mechanical_gate::semgrep_covered_rule_ids();
                     for rid in repo_selected_ids.iter().filter(|r| is_ci_tier_rule(r, corpus)) {
                         let emitted = arch.iter().filter(|f| f.rule_id == *rid).count();
@@ -1242,7 +1246,7 @@ pub async fn audit_repos(
                         ) {
                             Some("arch_checker") => pipeline_ledger.record_rule(
                                 *rid,
-                                crate::scan_ledger::RuleTier::Deterministic,
+                                crate::scan_ledger::RuleTier::Architectural,
                                 true,
                                 None,
                                 files.len(),
@@ -1250,7 +1254,7 @@ pub async fn audit_repos(
                             ),
                             Some("gateway_rule_registry") => pipeline_ledger.record_rule(
                                 *rid,
-                                crate::scan_ledger::RuleTier::Deterministic,
+                                crate::scan_ledger::RuleTier::Architectural,
                                 true,
                                 None,
                                 0,
@@ -1274,7 +1278,7 @@ pub async fn audit_repos(
                             ),
                             _ => pipeline_ledger.record_rule(
                                 *rid,
-                                crate::scan_ledger::RuleTier::Deterministic,
+                                crate::scan_ledger::RuleTier::Architectural,
                                 false,
                                 // Embeds `scan_ledger::NO_WIRED_DETECTOR_REASON` verbatim (not
                                 // retyped) so `rule_disclosure`'s substring check can never
@@ -1310,7 +1314,7 @@ pub async fn audit_repos(
                     for rid in repo_selected_ids.iter().filter(|r| is_ci_tier_rule(r, corpus)) {
                         pipeline_ledger.record_rule(
                             *rid,
-                            crate::scan_ledger::RuleTier::Deterministic,
+                            crate::scan_ledger::RuleTier::Architectural,
                             false,
                             Some("deterministic scan deselected for this run".to_string()),
                             0,

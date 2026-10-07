@@ -144,6 +144,11 @@ enum Command {
         /// Ignore the on-disk incremental-scan cache and force a full re-scan of every file.
         #[arg(long)]
         full: bool,
+        /// Additionally print the pipeline-integrity ledger's per-rule detail (rule id, ran?,
+        /// files evaluated, findings) alongside the default concise stage/family/not-run
+        /// summary.
+        #[arg(long)]
+        verbose: bool,
     },
 }
 
@@ -231,6 +236,7 @@ async fn main() -> anyhow::Result<()> {
             model,
             calibration_model,
             full,
+            verbose,
         } => {
             run_inspect_cmd(InspectArgs {
                 repo,
@@ -240,6 +246,7 @@ async fn main() -> anyhow::Result<()> {
                 model,
                 calibration_model,
                 full,
+                verbose,
             })
             .await
         }
@@ -600,6 +607,7 @@ mod cli_parse_tests {
                 model,
                 calibration_model,
                 full,
+                verbose,
             } => {
                 assert_eq!(repo, PathBuf::from("/tmp/r"));
                 assert_eq!(export, PathBuf::from("/tmp/o.zip"));
@@ -608,6 +616,7 @@ mod cli_parse_tests {
                 assert!(model.is_none());
                 assert!(calibration_model.is_none());
                 assert!(!full);
+                assert!(!verbose);
             }
             other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
         }
@@ -630,6 +639,7 @@ mod cli_parse_tests {
             "--calibration-model",
             "claude-opus-5",
             "--full",
+            "--verbose",
         ])
         .expect("must parse");
         match cli.command {
@@ -639,6 +649,7 @@ mod cli_parse_tests {
                 model,
                 calibration_model,
                 full,
+                verbose,
                 ..
             } => {
                 assert_eq!(backend, ProjectBackend::Api);
@@ -646,6 +657,7 @@ mod cli_parse_tests {
                 assert_eq!(model.as_deref(), Some("claude-sonnet-5"));
                 assert_eq!(calibration_model.as_deref(), Some("claude-opus-5"));
                 assert!(full);
+                assert!(verbose);
             }
             other => panic!("expected Command::Inspect, got a different variant: {other:?}"),
         }

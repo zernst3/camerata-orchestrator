@@ -40,13 +40,46 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleTier {
-    /// Camerata's own code: the content floor (`onboard::audit_files`) or a registered
-    /// `ArchChecker` / gate rule arm.
+    /// Camerata's own code: the content floor (`onboard::audit_files`) — the always-on
+    /// platform/floor regex set run unconditionally over every file.
     Deterministic,
+    /// Camerata's own code: the deterministic architectural engine — a registered
+    /// `ArchChecker` or the gateway's own rule registry arm (`onboard::audit_architectural`).
+    /// Split out from [`RuleTier::Deterministic`] (CLI-inspect ledger-summary work) so a
+    /// human-readable family breakdown can tell "the content floor ran" apart from "the
+    /// architectural engine ran" instead of folding both into one undifferentiated bucket.
+    Architectural,
     /// A third-party static-analysis tool (Semgrep, Bandit, gosec, …) Camerata shells out to.
     ExternalTool,
     /// The LLM-judged semantic audit tier.
     Semantic,
+}
+
+impl RuleTier {
+    /// Human-readable family label for this tier, used by `camerata inspect`'s ledger summary
+    /// (`crates/cli/src/inspect_cmd.rs::render_ledger_summary`) to group rules the way an
+    /// operator actually reasons about coverage ("did the taint pass run at all?") rather than
+    /// by raw enum name.
+    pub fn family_label(&self) -> &'static str {
+        match self {
+            RuleTier::Deterministic => "Deterministic platform/floor checks",
+            RuleTier::Architectural => "Architectural checks",
+            RuleTier::ExternalTool => "External-tool / taint (Semgrep, etc.)",
+            RuleTier::Semantic => "Semantic / advisory tier",
+        }
+    }
+
+    /// Every family, in the fixed display order the ledger summary renders them — so a family
+    /// with ZERO recorded rules still gets its own line instead of being silently omitted (see
+    /// `render_ledger_summary`'s doc comment).
+    pub fn all() -> [RuleTier; 4] {
+        [
+            RuleTier::Deterministic,
+            RuleTier::Architectural,
+            RuleTier::ExternalTool,
+            RuleTier::Semantic,
+        ]
+    }
 }
 
 /// One rule's outcome for this scan. The load-bearing invariant the rest of the pipeline

@@ -29,14 +29,16 @@
 //! printing the run's real token usage + cost at the end.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use camerata_server::ai_audit::{ActualUsage, ScanMode};
+use camerata_server::ai_audit::{ActualUsage, FailedPass, ScanMode};
 use camerata_server::llm::{resolve_backend, ProjectBackend};
 use camerata_server::onboard::{ProposedRule, ScanReport, SelectedRule};
 use camerata_server::report_export::ReportOptions;
 use camerata_server::scan_cache::ScanManifest;
+use camerata_server::scan_ledger::{RuleLedgerEntry, RuleTier, ScanLedger};
 use camerata_server::usage_ledger::UsageLedger;
 
 /// Parsed + validated arguments for `camerata inspect`. Kept separate from clap's `Command`
@@ -66,6 +68,11 @@ pub struct InspectArgs {
     /// Ignore the on-disk incremental-scan cache (see [`manifest_cache_path`]) and force a
     /// full re-scan of every file.
     pub full: bool,
+    /// Additionally print the per-rule detail section of the pipeline-integrity ledger
+    /// summary (see [`render_ledger_summary`]) — rule id, ran?, files evaluated, findings, one
+    /// line per rule. Default output stays at the concise stage/family/not-run/failed-passes
+    /// summary.
+    pub verbose: bool,
 }
 
 /// What [`run_inspect`] reports back to its caller. `main.rs`'s handler prints this; tests
@@ -81,6 +88,12 @@ pub struct InspectOutcome {
     /// `ScanReport::actual_usage`'s own doc comment.
     pub actual_usage: Option<ActualUsage>,
     pub findings_count: usize,
+    /// The pipeline-integrity ledger summary (see [`render_ledger_summary`]) — stages,
+    /// detection families, not-run rules, and any `FailedPass` disclosures, rendered from
+    /// `report.ledger`/`report.failed_passes` exactly as they stood after the scan's final
+    /// reconciliation pass. Printed by [`format_outcome_report`]; tests assert on this field
+    /// directly rather than parsing stdout, matching this module's existing convention.
+    pub ledger_summary: String,
 }
 
 /// Validate the arguments BEFORE touching the filesystem for real work or resolving a
@@ -391,6 +404,15 @@ pub async fn run_inspect_with_key_presence(
         }
     }
 
+    // The ledger summary is rendered from `report.ledger`/`report.failed_passes` AS THEY STAND
+    // right here — after `audit_repos` (Phase 3) and `merge_scan_preview` (Phase 4, which runs
+    // `reconcile_external_tool_ledger` and is the LAST thing that corrects the ledger's
+    // `ExternalTool` entries from speculative to real; see that function's own doc comment).
+    // Computed before export so a PDF/typst failure below still leaves `report` fully
+    // reconciled, even though the summary itself is only surfaced via the returned
+    // `InspectOutcome`, never written into the export.
+    let ledger_summary = render_ledger_summary(&report.ledger, &report.failed_passes, args.verbose);
+
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
     let (_stem, zip_bytes) = build_product_export_bytes(&report, corpus.as_ref()).await?;
     std::fs::write(&args.export, &zip_bytes)
@@ -403,7 +425,154 @@ pub async fn run_inspect_with_key_presence(
         batch: args.batch,
         actual_usage: report.actual_usage.clone(),
         findings_count: report.findings.len(),
+        ledger_summary,
     })
+}
+
+/// Render the scan's pipeline-integrity ledger (`crate::scan_ledger::ScanLedger`) into a
+/// concise, human-scannable block for `camerata inspect`'s final stdout — see this module's
+/// doc comment and the ledger module's own: a scan that completes "successfully" while an
+/// entire detection layer (e.g. the external-tool/taint pass) silently never ran was, before
+/// this, invisible from the console. The ledger already recorded the facts; nothing printed
+/// them to a human.
+///
+/// Pure function — deterministic given `ledger`/`failed_passes`, no I/O, no wall-clock —
+/// which is what makes it unit-testable directly against hand-built ledgers (see this module's
+/// `tests` below) rather than only through a full scan.
+///
+/// Four sections, always in this order, concise mode (`verbose == false`):
+/// 1. **PIPELINE STAGES** — every stage's `rows_in -> rows_out` plus its accounted
+///    dispositions; any stage with `unaccounted > 0` gets a loud `!!` marker (never silently
+///    folded into a clean-looking line).
+/// 2. **DETECTION FAMILIES** — one line per [`RuleTier`] (`RuleTier::all()`, so a family with
+///    NO recorded rules still gets a line, not silent omission), each showing how many rules
+///    ran/were skipped and how many findings it emitted, plus the most common skip reasons. A
+///    family with zero rules recorded OR zero rules that actually ran is flagged with `!!` —
+///    the exact "an entire detection layer never executed" shape this was built to catch.
+/// 3. **NOT RUN** — every rule [`ScanLedger::excluded_rules`] confirms did not run, with its
+///    real reason, so a dark layer can never hide even when every stage happens to reconcile
+///    cleanly.
+/// 4. **FAILED PASSES** — every `FailedPass` disclosure, printed plainly (repo, pass name,
+///    reason), verbatim — never summarized or truncated.
+///
+/// `verbose == true` appends a fifth PER-RULE DETAIL section: one line per rule (id, ran?,
+/// files evaluated, findings), sorted by rule id for stable output.
+pub fn render_ledger_summary(
+    ledger: &ScanLedger,
+    failed_passes: &[FailedPass],
+    verbose: bool,
+) -> String {
+    let mut out = String::new();
+
+    writeln!(out, "== PIPELINE STAGES ==").ok();
+    if ledger.stages().is_empty() {
+        writeln!(out, "  (no stages recorded this scan)").ok();
+    } else {
+        for stage in ledger.stages() {
+            let marker = if stage.unaccounted > 0 {
+                "  !! UNACCOUNTED"
+            } else {
+                ""
+            };
+            writeln!(
+                out,
+                "  {:<28} rows {:>5} -> {:<5}  merged={:<3} held={:<3} informational={:<3} \
+                 deduped={:<3} unaccounted={}{}",
+                stage.stage,
+                stage.rows_in,
+                stage.rows_out,
+                stage.merged_into.len(),
+                stage.routed_held,
+                stage.routed_informational,
+                stage.deduped,
+                stage.unaccounted,
+                marker,
+            )
+            .ok();
+        }
+    }
+
+    writeln!(out, "\n== DETECTION FAMILIES ==").ok();
+    for tier in RuleTier::all() {
+        let rules: Vec<&RuleLedgerEntry> = ledger.rules().filter(|r| r.tier == tier).collect();
+        let ran = rules.iter().filter(|r| r.ran).count();
+        let skipped = rules.len() - ran;
+        let findings: usize = rules.iter().map(|r| r.findings_emitted).sum();
+
+        if rules.is_empty() {
+            writeln!(
+                out,
+                "  {:<40} !! ZERO RULES RECORDED — this family never ran at all this scan",
+                tier.family_label(),
+            )
+            .ok();
+            continue;
+        }
+        if ran == 0 {
+            writeln!(
+                out,
+                "  {:<40} !! ran=0 skipped={skipped} findings={findings} — NO rule in this \
+                 family ran this scan",
+                tier.family_label(),
+            )
+            .ok();
+        } else {
+            writeln!(
+                out,
+                "  {:<40} ran={ran} skipped={skipped} findings={findings}",
+                tier.family_label(),
+            )
+            .ok();
+        }
+        if skipped > 0 {
+            let mut reason_counts: HashMap<&str, usize> = HashMap::new();
+            for r in rules.iter().filter(|r| !r.ran) {
+                *reason_counts
+                    .entry(r.skip_reason.as_deref().unwrap_or("(no reason given)"))
+                    .or_insert(0) += 1;
+            }
+            let mut reasons: Vec<(&str, usize)> = reason_counts.into_iter().collect();
+            reasons.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+            for (reason, count) in reasons.into_iter().take(3) {
+                writeln!(out, "      skipped x{count}: {reason}").ok();
+            }
+        }
+    }
+
+    let excluded = ledger.excluded_rules();
+    writeln!(out, "\n== NOT RUN ({}) ==", excluded.len()).ok();
+    if excluded.is_empty() {
+        writeln!(out, "  (every selected rule ran this scan)").ok();
+    } else {
+        for (id, reason) in &excluded {
+            writeln!(out, "  {id:<40} {reason}").ok();
+        }
+    }
+
+    writeln!(out, "\n== FAILED PASSES ({}) ==", failed_passes.len()).ok();
+    if failed_passes.is_empty() {
+        writeln!(out, "  (none)").ok();
+    } else {
+        for fp in failed_passes {
+            writeln!(out, "  [{}] {}: {}", fp.repo, fp.pass, fp.reason).ok();
+        }
+    }
+
+    if verbose {
+        let mut rules: Vec<&RuleLedgerEntry> = ledger.rules().collect();
+        rules.sort_by(|a, b| a.rule_id.cmp(&b.rule_id));
+        writeln!(out, "\n== PER-RULE DETAIL ({}) ==", rules.len()).ok();
+        for r in rules {
+            writeln!(
+                out,
+                "  {:<40} ran={:<5} files_evaluated={:<6} findings={}",
+                r.rule_id, r.ran, r.files_evaluated, r.findings_emitted,
+            )
+            .ok();
+        }
+    }
+
+    out.trim_end().to_string()
 }
 
 /// Production entry point: reads the real `ANTHROPIC_API_KEY` presence from the environment
@@ -424,17 +593,19 @@ pub fn format_outcome_report(outcome: &InspectOutcome) -> String {
         ProjectBackend::Api => "api",
     };
     format!(
-        "camerata inspect: wrote {} ({} bytes) — backend: {backend_label}, findings: {}\n{}",
+        "camerata inspect: wrote {} ({} bytes) — backend: {backend_label}, findings: {}\n{}\n\n{}",
         outcome.export_path.display(),
         outcome.export_zip_bytes,
         outcome.findings_count,
         format_usage_report(outcome.actual_usage.as_ref(), outcome.batch),
+        outcome.ledger_summary,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camerata_server::scan_ledger::StageAccounting;
 
     fn base_args(repo: PathBuf, export: PathBuf) -> InspectArgs {
         InspectArgs {
@@ -445,6 +616,7 @@ mod tests {
             model: None,
             calibration_model: None,
             full: false,
+            verbose: false,
         }
     }
 
@@ -647,11 +819,218 @@ mod tests {
             batch: false,
             actual_usage: Some(synthetic_usage()),
             findings_count: 3,
+            ledger_summary: "== PIPELINE STAGES ==\n  (no stages recorded this scan)".to_string(),
         };
         let text = format_outcome_report(&outcome);
         assert!(text.contains("/tmp/out.zip"), "{text}");
         assert!(text.contains("4096"), "{text}");
         assert!(text.contains("backend: api"), "{text}");
         assert!(text.contains("findings: 3"), "{text}");
+        assert!(
+            text.contains("PIPELINE STAGES"),
+            "the ledger summary must be appended to the final report block: {text}"
+        );
+    }
+
+    // ── render_ledger_summary ────────────────────────────────────────────────────────
+
+    /// A fully healthy ledger: one rule per family, all ran, a single cleanly-reconciled
+    /// stage, no not-run rules, no failed passes. No `!!` marker anywhere — a clean scan must
+    /// read as unambiguously clean.
+    #[test]
+    fn render_ledger_summary_clean_ledger_has_no_alarms() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_rule(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            RuleTier::Deterministic,
+            true,
+            None,
+            10,
+            0,
+        );
+        ledger.record_rule(
+            "ARCH-STRICT-LAYERING-1",
+            RuleTier::Architectural,
+            true,
+            None,
+            5,
+            0,
+        );
+        ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            RuleTier::ExternalTool,
+            true,
+            None,
+            8,
+            0,
+        );
+        ledger.record_rule("AI-SITE-DEFECT-1", RuleTier::Semantic, true, None, 3, 1);
+        ledger.record_stage("cross-family-merge", 1, 1, StageAccounting::default());
+
+        let text = render_ledger_summary(&ledger, &[], false);
+
+        assert!(text.contains("PIPELINE STAGES"), "{text}");
+        assert!(text.contains("DETECTION FAMILIES"), "{text}");
+        assert!(text.contains("NOT RUN (0)"), "{text}");
+        assert!(text.contains("FAILED PASSES (0)"), "{text}");
+        assert!(
+            !text.contains("!!"),
+            "a clean ledger must raise no alarm markers: {text}"
+        );
+    }
+
+    /// The core integrity check, surfaced to a human: a stage that lost a row with no recorded
+    /// disposition must render with the loud `!!` marker, never blend into a normal-looking
+    /// line.
+    #[test]
+    fn render_ledger_summary_flags_a_stage_with_unaccounted_rows() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_stage("lossy-stage", 10, 8, StageAccounting::default()); // 2 vanish
+
+        let text = render_ledger_summary(&ledger, &[], false);
+
+        let stage_line = text
+            .lines()
+            .find(|l| l.contains("lossy-stage"))
+            .expect("the lossy stage must have its own line");
+        assert!(
+            stage_line.contains("!!"),
+            "a stage with unaccounted rows must carry a loud marker: {stage_line}"
+        );
+        assert!(stage_line.contains("unaccounted=2"), "{stage_line}");
+    }
+
+    /// The exact defect this feature exists to catch: an entire detection family (here,
+    /// external-tool/taint) recorded ZERO rules this scan. It must be impossible to miss —
+    /// flagged loudly, not silently absent from the output.
+    #[test]
+    fn render_ledger_summary_flags_a_family_with_zero_rules_recorded() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_rule(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            RuleTier::Deterministic,
+            true,
+            None,
+            10,
+            0,
+        );
+        // No ExternalTool, Architectural, or Semantic rule recorded at all this scan.
+
+        let text = render_ledger_summary(&ledger, &[], false);
+
+        let family_line = text
+            .lines()
+            .find(|l| l.contains(RuleTier::ExternalTool.family_label()))
+            .expect("every family must get its own line even with zero rules");
+        assert!(
+            family_line.contains("!!") && family_line.to_uppercase().contains("ZERO"),
+            "a family with no recorded rules must be flagged loudly, not silently omitted: {family_line}"
+        );
+    }
+
+    /// The flip side of the same defect: a family DID get ledger entries, but every single one
+    /// is recorded as not-run (e.g. the commodity taint pass's rules were all corrected to
+    /// `ran = false` after the tool failed to provision). `ran == 0` must be flagged exactly
+    /// like zero rules recorded — the family never actually executed either way.
+    #[test]
+    fn render_ledger_summary_flags_a_family_whose_rules_all_failed_to_run() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            RuleTier::ExternalTool,
+            false,
+            Some("commodity taint pass did not run: semgrep binary not found".to_string()),
+            0,
+            0,
+        );
+
+        let text = render_ledger_summary(&ledger, &[], false);
+
+        let family_line = text
+            .lines()
+            .find(|l| l.contains(RuleTier::ExternalTool.family_label()))
+            .expect("the external-tool family line must be present");
+        assert!(
+            family_line.contains("!!") && family_line.contains("ran=0"),
+            "a family with rules recorded but none that ran must be flagged: {family_line}"
+        );
+    }
+
+    /// Not-run rules (any reason) must render with their real reason text in the NOT RUN
+    /// section, so a dark layer can never hide even when every stage happens to reconcile.
+    #[test]
+    fn render_ledger_summary_renders_not_run_reasons() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_rule(
+            "PYTHON-PARAMETERIZED-SQL-1",
+            RuleTier::Architectural,
+            false,
+            Some("declares mechanical enforcement but has no wired detector".to_string()),
+            0,
+            0,
+        );
+        ledger.record_rule(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            RuleTier::Deterministic,
+            false,
+            Some("deterministic scan deselected for this run".to_string()),
+            0,
+            0,
+        );
+
+        let text = render_ledger_summary(&ledger, &[], false);
+
+        assert!(text.contains("NOT RUN (2)"), "{text}");
+        assert!(
+            text.contains("PYTHON-PARAMETERIZED-SQL-1") && text.contains("no wired detector"),
+            "{text}"
+        );
+        assert!(
+            text.contains("SEC-NO-HARDCODED-SECRETS-1")
+                && text.contains("deterministic scan deselected for this run"),
+            "{text}"
+        );
+    }
+
+    /// `FailedPass` disclosures must be printed plainly — repo, pass name, and the real reason
+    /// text verbatim, never summarized away.
+    #[test]
+    fn render_ledger_summary_prints_failed_passes_plainly() {
+        let ledger = ScanLedger::new();
+        let failed_passes = vec![FailedPass {
+            repo: "acme/widgets".to_string(),
+            pass: "commodity taint pass".to_string(),
+            reason: "SEC-NO-RAW-SQL-CONCAT-1: commodity taint pass did not run: semgrep absent"
+                .to_string(),
+        }];
+
+        let text = render_ledger_summary(&ledger, &failed_passes, false);
+
+        assert!(text.contains("FAILED PASSES (1)"), "{text}");
+        assert!(text.contains("acme/widgets"), "{text}");
+        assert!(text.contains("commodity taint pass"), "{text}");
+        assert!(text.contains("semgrep absent"), "{text}");
+    }
+
+    /// Default (non-verbose) output must NOT list individual rules — only `--verbose` does.
+    #[test]
+    fn render_ledger_summary_default_omits_per_rule_detail() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_rule(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            RuleTier::Deterministic,
+            true,
+            None,
+            10,
+            0,
+        );
+
+        let concise = render_ledger_summary(&ledger, &[], false);
+        assert!(!concise.contains("PER-RULE DETAIL"), "{concise}");
+
+        let verbose = render_ledger_summary(&ledger, &[], true);
+        assert!(verbose.contains("PER-RULE DETAIL"), "{verbose}");
+        assert!(verbose.contains("SEC-NO-HARDCODED-SECRETS-1"), "{verbose}");
+        assert!(verbose.contains("files_evaluated=10"), "{verbose}");
     }
 }

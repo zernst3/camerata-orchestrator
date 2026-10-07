@@ -99,6 +99,7 @@ async fn deterministic_only_inspect_runs_end_to_end_and_writes_a_valid_zip() {
         model: None,
         calibration_model: None,
         full: true,
+        verbose: false,
     };
 
     let outcome = run_inspect_with_key_presence(args, false)
@@ -212,6 +213,7 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
         model: None,
         calibration_model: None,
         full: true,
+        verbose: true,
     };
 
     let outcome = run_inspect_with_key_presence(args, false).await;
@@ -229,6 +231,35 @@ async fn headless_inspect_discloses_when_the_commodity_taint_pass_does_not_run()
         "the product-export zip must be written even when the commodity taint pass can't run"
     );
     assert!(outcome.export_zip_bytes > 0);
+
+    // The headless path must surface this exact defect — an entire detection layer (the
+    // external-tool/taint family) never executing — in the human-readable ledger summary, not
+    // just buried inside the exported JSON. This is the regression this whole feature exists
+    // to close (see `crates/cli/src/inspect_cmd.rs`'s `render_ledger_summary` doc comment).
+    assert!(
+        outcome.ledger_summary.contains("NOT RUN"),
+        "the ledger summary must be populated: {}",
+        outcome.ledger_summary
+    );
+    assert!(
+        outcome
+            .ledger_summary
+            .contains("commodity taint pass did not run"),
+        "the ledger summary's NOT-RUN section must name the taint-pass rule(s) that never ran: \
+         {}",
+        outcome.ledger_summary
+    );
+    assert!(
+        outcome.ledger_summary.contains("FAILED PASSES"),
+        "the ledger summary must include the FailedPass disclosure section: {}",
+        outcome.ledger_summary
+    );
+    // `verbose: true` above — the per-rule detail section must also be present.
+    assert!(
+        outcome.ledger_summary.contains("PER-RULE DETAIL"),
+        "--verbose must include the per-rule detail section: {}",
+        outcome.ledger_summary
+    );
 
     let bytes = std::fs::read(&export_path).expect("read the written export zip");
     let mut archive =
