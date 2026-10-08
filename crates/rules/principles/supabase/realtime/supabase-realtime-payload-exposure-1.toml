@@ -1,0 +1,67 @@
+id = "SUPABASE-REALTIME-PAYLOAD-EXPOSURE-1"
+title = "A Postgres Changes or Broadcast payload must not fan out sensitive columns to every channel subscriber by default"
+tag = "stack"
+domain = "supabase:realtime"
+layer = "platform"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan over Postgres Changes subscriptions (`.on('postgres_changes', { event, schema, table, ... })`) with no `select` column-list option set, on a table whose column shape includes a sensitive-looking name (email, phone, ssn, password_hash, address, dob, salary, and close variants), plus a scan over `broadcast` payload-construction call sites for the same sensitive-column heuristic being included in the payload object. Conformance holds when a subscribed table's sensitive columns are excluded via the `select` option (Postgres Changes) or simply never placed in the broadcast payload (Broadcast); a table/payload with no sensitive-looking column, or a `select` that already scopes to a safe subset, is conforming. Ambiguous column names are `needs_review`."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/realtime/postgres-changes"
+title = "Supabase docs — Postgres Changes: 'By default each change event contains the full row. Use select to receive only a subset of columns instead'; every subscriber incurs its own authorization check per change, but the full row is what gets evaluated and sent absent a column-scoped select"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/200.html"
+title = "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+
+[decision]
+question = "Does a Postgres Changes subscription or a Broadcast payload scope out sensitive columns explicitly, rather than fanning out the full row to every subscriber by default?"
+default = "scope-sensitive-columns-out-of-realtime-payloads"
+why = """
+Supabase's own Postgres Changes documentation states the default directly: 'by default each change event contains
+the full row,' with a `select` option to narrow it. For a table whose subscribers are legitimately authorized to
+see SOME of its columns (a shared document's title and status, say) but not others (the owning user's email, a
+billing field, an internal note), the default behavior sends every column to every subscriber of that change
+stream regardless of which columns the feature actually needed to update in real time. This is CWE-200 (Exposure
+of Sensitive Information to an Unauthorized Actor) delivered through a mechanism that is easy to overlook
+specifically because it is not a query or an API response a security review would normally scrutinize — it is a
+side effect of subscribing to table changes for an entirely different, narrower purpose (e.g. 'notify the UI when
+the document's status field changes') that happens to carry every other column along for the ride.
+
+The same risk applies to hand-constructed Broadcast payloads: a developer who broadcasts 'the new state of this
+order' by serializing the entire row (rather than the specific fields the subscribing clients actually need)
+reintroduces the identical exposure through the OTHER Realtime mechanism, independent of Postgres Changes
+entirely. RLS still gates WHO can subscribe to receive these events at all (per SUPABASE-REALTIME-AUTHORIZATION-1),
+but it says nothing about WHICH COLUMNS of an authorized row reach the subscriber — a user correctly authorized to
+see that a document changed is not necessarily someone who should see every column on it.
+"""
+
+[[option]]
+id = "scope-sensitive-columns-out-of-realtime-payloads"
+label = "Scope Postgres Changes subscriptions with select, and hand-construct Broadcast payloads to exclude sensitive columns"
+directive = """
+Scan `postgres_changes` subscriptions with no `select` option on a table whose columns include a sensitive-looking
+name. Flag as high severity: "Your subscription to `<table>` changes sends the FULL row — including `<column>` —
+to every subscriber, by default. Use the select option to send only the columns this feature actually needs."
+Separately scan Broadcast payload construction for a sensitive-looking column being included in the serialized
+object; flag identically. A `select` that already scopes to a safe subset, or a payload that never includes a
+sensitive column, is conforming.
+"""
+remediation = """
+Add a `select` option to the `postgres_changes` subscription on `<table>`, naming only the columns this feature's UI
+actually needs to react to in real time (the table's primary key is always included). For a hand-constructed
+Broadcast payload, build the payload object from an explicit allowlist of fields rather than the full row/entity,
+excluding `<column>` and any other sensitive field the subscribing clients don't need. Verify by subscribing as an
+authorized-but-not-privileged user and confirming the sensitive column never appears in a received change/broadcast
+event.
+"""
+effort = "low"
+why = "The select option (Postgres Changes) or a hand-built payload allowlist (Broadcast) costs nothing beyond naming the columns the feature already knows it needs, while the default (full row) silently fans out every column — including ones RLS never intended a given subscriber to see at the column level — to anyone authorized merely to know that a row changed at all."
+
+[[option]]
+id = "broadcast-the-full-row-and-filter-sensitive-fields-client-side"
+label = "Send the full row via the default postgres_changes behavior or a full-row Broadcast payload, filtering sensitive fields out in the receiving client"
+directive = "Accept the default full-row payload for Postgres Changes subscriptions, or broadcast the complete entity object, relying on client-side code to decide which fields to display or discard after receipt."
+why = "Rejected: by the time a client-side filter runs, the sensitive data has already been transmitted to and received by that client — a filter that only controls what's RENDERED does nothing to prevent the browser's network tab, a malicious or modified client, or a compromised extension from reading the full payload off the wire. The column-level exposure this rule targets happens at TRANSMISSION, not display, so a remediation scoped to the display layer leaves the actual defect (every subscriber receiving every column) fully intact."

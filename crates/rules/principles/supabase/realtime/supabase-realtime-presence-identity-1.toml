@@ -1,0 +1,66 @@
+id = "SUPABASE-REALTIME-PRESENCE-IDENTITY-1"
+title = "A Presence payload carries only the identity a feature genuinely needs — not a user's email, full name, or other PII broadcast to every channel subscriber"
+tag = "stack"
+domain = "supabase:realtime"
+layer = "platform"
+enforcement = "prose"
+default = true
+verification = "grounded"
+qualifies = "Whether a Presence payload includes more identity than the feature genuinely needs is a judgment call over what the UI consuming the presence state actually does with it, not a pattern match — so this rule routes to prose: the object passed to `channel.track(...)` and the UI code reading `presenceState()` are fed to Claude with the question: does this feature need the fields included (an avatar/display name for a 'who's online' list), or does it include more identity than that (a raw email address, a full legal name, an internal user id meant to stay server-side) for no functional reason? Conformance holds when the tracked payload is limited to what the consuming UI displays or needs; it fails when a payload includes PII the feature never renders or uses, broadcast to every other subscriber on the channel merely because it was convenient to pass the whole user object to track()."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/realtime/presence"
+title = "Supabase docs — Presence: track() broadcasts an arbitrary payload to every subscriber on the channel as part of the merged presence state; the documentation does not itself restrict payload content, leaving what to include entirely to the caller"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/200.html"
+title = "CWE-200: Exposure of Sensitive Information to an Unauthorized Actor"
+
+[decision]
+question = "Does a channel's Presence payload carry only the identity fields the consuming feature actually displays or uses, rather than whatever fields were convenient to pass to track()?"
+default = "presence-payload-scoped-to-what-the-feature-needs"
+why = """
+Presence exists to answer a narrow question — who else is here, and what is their minimal visible status (online,
+typing, viewing this document) — and Supabase broadcasts whatever payload `track()` is called with to every other
+subscriber on the channel, merged into a shared state object every client receives in full. The documentation
+places no restriction on payload content; it is entirely the caller's choice what goes in. The common shortcut this
+rule targets is passing an existing user/session object straight into `track()` because it was already in scope
+(`channel.track(currentUser)`) rather than constructing a minimal payload purpose-built for presence — which
+quietly broadcasts whatever that object happens to carry (an email address, a full legal name, an internal role
+field, anything else the session object holds) to every other person subscribed to the same channel, independent
+of whether the UI displaying 'who's online' ever renders any of it. This is CWE-200 (Exposure of Sensitive
+Information to an Unauthorized Actor): other channel members receive identity data the feature never asked for and
+the user never consented to share with strangers on the same document/room, merely because it rode along inside a
+convenient object.
+
+The fix is a minimal, purpose-built payload: whatever the consuming UI actually displays (a display name or
+pseudonymous handle, an avatar URL, a status flag) and nothing else — resisting the temptation to pass an entire
+user/session object to `track()` just because it is already available in scope.
+"""
+
+[[option]]
+id = "presence-payload-scoped-to-what-the-feature-needs"
+label = "Construct a minimal presence payload from exactly the fields the consuming UI displays; never pass a full user/session object to track()"
+directive = """
+Read the object passed to `channel.track(...)` alongside the UI code that reads the resulting presence state.
+Flag as medium-to-high severity (scaled by how sensitive the extra field is) a payload including fields the
+consuming UI never renders or uses — especially a raw email address, full legal name, or an internal id/role field:
+"Your presence payload includes `<field>`, which every other subscriber on this channel receives, but your UI
+never displays it. This leaks it to anyone else in the same room/document for no functional reason." A payload
+limited to display name/handle, avatar, and status-shaped fields the UI actually consumes is conforming.
+"""
+remediation = """
+Replace the object passed to `track()` at `<call site>` with a minimal payload constructed specifically for
+presence — a display name or pseudonymous handle, an avatar URL, and whatever status field the feature needs
+(typing, viewing, online) — rather than passing the full user/session object. Verify by joining the channel as a
+second user and confirming the received presence state for the first user contains only the fields your UI
+actually displays, not the full set of fields on that user's underlying record.
+"""
+effort = "low"
+why = "A purpose-built presence payload costs one small object-literal change at the track() call site and removes PII fan-out to every other subscriber entirely, whereas passing a convenient full user object broadcasts whatever that object happens to carry regardless of what the feature was ever designed to show."
+
+[[option]]
+id = "pass-the-full-user-object-to-track-for-convenience"
+label = "Pass the existing user/session object directly to track(), relying on client-side UI code to only render the fields it needs"
+directive = "Call channel.track(currentUser) (or an equivalent full user/session object already in scope) rather than constructing a minimal presence-specific payload, relying on the receiving client's UI to select and render only the fields it cares about."
+why = "Rejected: every OTHER subscriber's client receives the full payload over the wire the instant it's tracked, regardless of what that client's UI chooses to render — a client-side rendering choice provides zero protection against the data already having been transmitted to, and readable by, every other participant (via dev tools, a modified client, or simply reading the merged presence state object directly in application code). The exposure happens at broadcast time, not at render time, so scoping the fix to the UI layer leaves the actual leak fully intact."

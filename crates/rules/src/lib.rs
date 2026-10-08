@@ -3021,4 +3021,30 @@ mod tests {
         assert_eq!(rule.enforcement, EnforcementKind::Mechanical);
         assert!(is_code_auditable("SQL-MONEY-FLOAT-1"));
     }
+
+    #[tokio::test]
+    async fn new_realtime_subdomain_rules_are_well_formed_and_reachable() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        for id in [
+            "SUPABASE-REALTIME-AUTHORIZATION-1",
+            "SUPABASE-REALTIME-CHANNEL-SCOPE-1",
+            "SUPABASE-REALTIME-PAYLOAD-EXPOSURE-1",
+            "SUPABASE-REALTIME-PRESENCE-IDENTITY-1",
+        ] {
+            assert_well_formed_new_rule(&set, id, "supabase:realtime");
+        }
+        // The new sub-domain must be reachable the same way every other supabase:<area> domain
+        // is: select_for_domains matches on the exact domain string.
+        let selected = select_for_domains(&set, &["supabase:realtime"]);
+        assert!(
+            selected
+                .iter()
+                .any(|r| r.id_str() == "SUPABASE-REALTIME-AUTHORIZATION-1"),
+            "a repo whose stack resolves to the supabase:realtime domain must select the new rules"
+        );
+    }
 }

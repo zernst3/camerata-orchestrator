@@ -378,8 +378,8 @@ pub(crate) fn domains_for_stack(s: &RepoStack) -> Vec<String> {
             }
             // Supabase → every `supabase:*` child domain in the corpus
             // (crates/rules/principles/supabase/{rls,auth,secrets,storage,
-            // database-functions,exposure}/), plus `sql` since migrations are raw SQL.
-            // propose_corpus_rules matches on EXACT domain string (repo domain ==
+            // database-functions,exposure,realtime}/), plus `sql` since migrations are raw
+            // SQL. propose_corpus_rules matches on EXACT domain string (repo domain ==
             // rule.domain), so the parent `supabase` alone would match nothing — every
             // rule's domain is a `supabase:<area>` leaf. List each leaf explicitly; if a
             // new `supabase/<area>/` folder is added to the corpus, add its domain here too.
@@ -390,6 +390,7 @@ pub(crate) fn domains_for_stack(s: &RepoStack) -> Vec<String> {
                 domains.insert("supabase:storage");
                 domains.insert("supabase:database-functions");
                 domains.insert("supabase:exposure");
+                domains.insert("supabase:realtime");
                 domains.insert("sql");
             }
             // Infrastructure-as-code tooling → the `iac` corpus domain.

@@ -2800,6 +2800,7 @@ mod tests {
             "supabase:storage",
             "supabase:database-functions",
             "supabase:exposure",
+            "supabase:realtime",
             "sql",
         ] {
             assert!(
@@ -2840,7 +2841,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn propose_corpus_rules_proposes_all_31_supabase_rules_for_a_supabase_repo() {
+    async fn propose_corpus_rules_proposes_all_35_supabase_rules_for_a_supabase_repo() {
         // The end-to-end regression guard for the reported bug: given a repo whose stack
         // is unambiguously Supabase, the REAL onboarding path (detect_stack ->
         // domains_for_stack -> propose_corpus_rules against the real corpus) must
@@ -2898,6 +2899,10 @@ mod tests {
             "SUPABASE-AUTH-EMAIL-CONFIRMATION-1",
             "SUPABASE-AUTH-PASSWORD-POLICY-1",
             "SUPABASE-AUTH-MFA-PRIVILEGED-1",
+            "SUPABASE-REALTIME-AUTHORIZATION-1",
+            "SUPABASE-REALTIME-CHANNEL-SCOPE-1",
+            "SUPABASE-REALTIME-PAYLOAD-EXPOSURE-1",
+            "SUPABASE-REALTIME-PRESENCE-IDENTITY-1",
         ];
         // SUPABASE-RLS-INITPLAN-1 is deliberately `opt_in_only = true` (a performance
         // finding, not a security one — see its decision_why): the domain-match gate
@@ -2923,7 +2928,7 @@ mod tests {
                 );
             }
         }
-        // All 31 supabase rules — not just the ones spot-checked above — must be present
+        // All 35 supabase rules — not just the ones spot-checked above — must be present
         // and domain-matched to this repo, so a future corpus addition under
         // supabase/<area>/ that isn't wired into domains_for_stack would still be
         // caught here failing to match.
@@ -2933,8 +2938,8 @@ mod tests {
             .collect();
         assert_eq!(
             supabase_rules.len(),
-            31,
-            "expected all 31 supabase corpus rules in the payload: {:?}",
+            35,
+            "expected all 35 supabase corpus rules in the payload: {:?}",
             supabase_rules.iter().map(|r| &r.id).collect::<Vec<_>>()
         );
         assert!(
