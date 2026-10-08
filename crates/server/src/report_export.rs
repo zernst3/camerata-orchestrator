@@ -290,6 +290,30 @@ pub(crate) enum Disposition {
 /// partition loop) — a PDF export must never be able to panic the server on triage data, so a
 /// future refactor that lets one slip through fails soft to `Unresolved` (debug-asserts in
 /// debug builds so the invariant is still loud in tests/dev) rather than `unreachable!`.
+///
+/// Grading-cycle fix (2026-10-07): `BaselineAccepted` is a FALSE ATTESTATION unless a real
+/// baseline record backs it — the client text ("pre-existing accepted debt (baseline
+/// suppression)" / xlsx's "accepted in a PRIOR run") says someone already triaged and
+/// accepted this exact finding. The ONLY legitimate producer of `status ==
+/// "suppressed-baseline"` is `onboard::audit::classify_repo_findings`, which stamps it
+/// strictly when a finding's `(rule_id, content fingerprint)` matches an entry actually
+/// present in the repo's committed `.camerata/baseline.json` — and that classification pass
+/// runs ONLY over the pre-preview finding set (`repo_findings`, before `merge_scan_preview`
+/// appends anything). A PREVIEW/external-tool row (`finding.preview == true` — Semgrep,
+/// Clippy, Ruff, ESLint rows from `scan_tools::run_scan_tools`/`preview_finding`) is appended
+/// to the report AFTER that pass and so can NEVER have gone through real baseline matching,
+/// no matter what its raw `status` string claims. Before this fix, `scan_tools::
+/// preview_finding`/`note_finding` defaulted every preview row's `status` to
+/// `"suppressed-baseline"` (meaning only "not yet wired into CI") and this function trusted
+/// that string blindly — stamping "baseline accepted" on repos that had never been triaged
+/// at all (3/4/6 rows across three graded fixtures, zero baseline file, zero waiver). A
+/// preview row can therefore never classify as `BaselineAccepted` here, defense-in-depth,
+/// even if some future producer repeats the same mistake: it downgrades to `Unresolved`
+/// (open; still routes to `held` if another gate, e.g. `needs_review`, independently
+/// applies) rather than shipping as an accepted disposition with no record behind it. See
+/// `scan_tools::preview_finding`'s doc comment for the matching source-side fix, and
+/// `tests::a_preview_finding_with_suppressed_baseline_status_is_never_baseline_accepted` for
+/// the test-time guard.
 pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Disposition {
     match wire {
         Some(d) => match d.state.as_str() {
@@ -311,7 +335,9 @@ pub(crate) fn classify(finding: &Finding, wire: Option<&DispositionWire>) -> Dis
             }
             _ => Disposition::Unresolved,
         },
-        None if finding.status == "suppressed-baseline" => Disposition::BaselineAccepted,
+        None if finding.status == "suppressed-baseline" && !finding.preview => {
+            Disposition::BaselineAccepted
+        }
         None if finding.status == "suppressed-inline" => Disposition::WaivedInline,
         None => Disposition::Unresolved,
     }
@@ -5658,6 +5684,37 @@ mod tests {
         assert_eq!(json.matrix.accepted.len(), 1);
     }
 
+    /// Defect 2 (2026-10-07 grading pass): the SAME `status == "suppressed-baseline"` string
+    /// the test above correctly honors for a genuine floor finding must NEVER be honored for a
+    /// PREVIEW/external-tool row — no real baseline record can ever back one (see `classify`'s
+    /// doc comment: `classify_repo_findings`, the only legitimate producer of this status,
+    /// runs exclusively over the pre-preview finding set). Before this fix, every scan-time
+    /// preview finding (`scan_tools::preview_finding` defaults `status` to this exact string)
+    /// rendered "Pre-existing accepted debt (baseline suppression)" on a repo that had never
+    /// been triaged at all.
+    #[test]
+    fn a_preview_finding_with_suppressed_baseline_status_is_never_baseline_accepted() {
+        let mut f = finding("SEC-1", "a.rs", 1, "high");
+        f.status = "suppressed-baseline".to_string();
+        f.preview = true;
+        f.preview_tool = Some("semgrep".to_string());
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_ne!(
+            json.curated_findings[0].sites[0].disposition,
+            "Pre-existing accepted debt (baseline suppression)",
+            "a preview row must never be stamped as baseline-accepted"
+        );
+        assert_eq!(
+            json.matrix.accepted.len(),
+            0,
+            "a preview row with no real baseline record must not land in Accepted"
+        );
+        // It still renders — never dropped — as an ordinary open row the severity×effort
+        // quadrant can place normally.
+        assert_ne!(json.curated_findings[0].sites[0].bucket, "accepted");
+    }
+
     #[test]
     fn suppressed_baseline_with_explicit_wire_disposition_defers_to_client() {
         // The auditor re-triaged a previously-suppressed finding this session — the
@@ -10302,6 +10359,12 @@ mod tests {
 //      (no "arch_checker registry"/"gateway rule registry"/"Semgrep mapping" phrases, no raw
 //      rule ids) — regardless of how many rules the ledger excludes for that reason. STANDING
 //      (passes): `many_no_wired_detector_exclusions_collapse_to_one_plain_sentence`.
+//  14. (defect 2) A row with `Finding.status == "suppressed-baseline"` and `preview == true`
+//      (the scan-time preview/external-tool shape — no real baseline record can ever back it;
+//      see `classify`'s doc comment) NEVER classifies as `Disposition::BaselineAccepted` and
+//      NEVER renders "Pre-existing accepted debt" / "accepted in a prior run" anywhere in the
+//      exported report, no matter how many such rows exist. STANDING (passes):
+//      `tests::a_preview_finding_with_suppressed_baseline_status_is_never_baseline_accepted`.
 #[cfg(test)]
 mod export_invariants_gate {
     use super::*;
