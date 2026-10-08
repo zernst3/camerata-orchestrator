@@ -1,0 +1,70 @@
+id = "ARCH-CURRENCY-CONSISTENCY-1"
+title = "A payment amount's currency code and minor-unit denomination stay consistent from authorization through storage and comparison"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "prose"
+default = true
+qualifies = "Prose check, not a pattern scan: the defect is a MISMATCH between the currency/denomination a value was created in and the currency/denomination it is later compared against, stored as, or displayed as — which requires reading the surrounding business logic (what currency was this order placed in, what does the provider API expect, what does the persisted column represent) rather than a textual pattern. The two concrete, recurring shapes worth naming for the agent: (1) a monetary integer passed to a payment-provider API meant for a zero-decimal currency (JPY, KRW, and similar) as if it needed the usual x100 minor-unit conversion, producing a charge 100x too large or too small; (2) a value computed or compared in one currency (e.g. a cart total summed in the customer's display currency) being passed to, or compared against, a provider call or stored column denominated in a different currency (the merchant's settlement currency) with no conversion step. Conformance holds when every amount's currency and minor-unit convention is traceable to a single, consistent source through its full path from computation to the provider call and to storage; it fails when a currency or denomination change happens silently partway through that path."
+verification = "grounded"
+
+[[sources]]
+url = "https://docs.stripe.com/currencies#zero-decimal"
+title = "Stripe — Currencies: zero-decimal currencies (e.g. JPY, KRW) take the integer charge amount directly, with no x100 minor-unit multiplication — a documented, frequently-mishandled exception to the usual minor-unit convention"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/704.html"
+title = "CWE-704: Incorrect Type Conversion or Cast (the general class covering a value silently reinterpreted under the wrong unit/denomination)"
+
+[decision]
+question = "Does an amount's currency code and minor-unit denomination (cents vs. whole units, standard vs. zero-decimal currency) stay the same single, documented convention from where it is computed through the provider call and into storage, or can it change silently along that path?"
+default = "single-consistent-denomination-end-to-end"
+why = """
+Money-handling bugs caused by currency or denomination mismatch are a distinct failure mode from both floating-
+point imprecision (ARCH-EXACT-DECIMALS-1, which is about the NUMERIC TYPE used for arithmetic) and from client-
+supplied amounts (ARCH-SERVER-COMPUTED-AMOUNT-1, which is about WHO computes the number): this rule is about
+whether the same number, correctly computed and correctly typed, nonetheless represents the WRONG MAGNITUDE or the
+WRONG CURRENCY by the time it reaches the provider call, a comparison, or a stored column. The most common concrete
+case is the zero-decimal currency trap: most payment providers expect amounts in the currency's smallest unit
+(cents for USD, pence for GBP) and code written against that convention multiplies a decimal amount by 100 before
+calling the provider — but a currency like JPY or KRW has no minor unit at all, and the SAME x100 multiplication
+silently produces a charge 100 times too large (or, if the mistake runs the other direction at display/reconciliation
+time, a recorded amount 100 times too small). The second recurring case is a value computed in one currency (a
+cart total summed from prices tagged in the customer's selected display currency) flowing into a comparison,
+provider call, or stored amount that is denominated in a different currency (the merchant's settlement currency)
+with no conversion step and no code path that would even notice the mismatch, since both are 'just a number' once
+the currency tag is lost. Both failure modes are silent: nothing throws, the charge or comparison completes, and
+the wrongness surfaces only at reconciliation or when a customer disputes an amount that doesn't match what they
+expected.
+"""
+
+[[option]]
+id = "single-consistent-denomination-end-to-end"
+label = "Track currency and minor-unit convention as an explicit, carried property of the amount; handle zero-decimal currencies as a named exception"
+directive = """
+Every amount that reaches a payment-provider call, a cross-currency comparison, or a persisted monetary column
+carries its currency code alongside the numeric value (never a bare number with currency assumed from context), and
+the minor-unit convention applied before a provider call explicitly branches on whether the currency is zero-decimal
+(no multiplication) versus standard (x100, or the currency-specific minor-unit factor). A value computed in one
+currency is explicitly converted, with a recorded exchange rate and timestamp, before being compared against or
+combined with a value in a different currency — it is never compared or summed across currencies as if the numbers
+were on the same scale.
+"""
+remediation = """
+Add an explicit currency-and-denomination check at the payment-provider call site: before applying the usual
+minor-unit multiplication, branch on whether the order's currency is a zero-decimal currency (per the provider's
+documented list) and skip the multiplication for those. Where a value crosses from one currency context into
+another (a display-currency cart total being compared against or combined with a settlement-currency amount), add
+an explicit conversion step that records the rate and timestamp used, rather than combining the two numbers
+directly. Verify by placing a test order in a zero-decimal currency and confirming the charged amount matches the
+order total exactly (not 100x off in either direction), and by confirming a cross-currency comparison path
+converts explicitly rather than comparing raw numbers.
+"""
+effort = "medium"
+why = "The zero-decimal-currency branch and the explicit-conversion step are each a few lines once the provider's documented currency list and a conversion-rate source are available; the alternative — a silent 100x error or a same-numbers-different-currencies comparison — produces exactly the kind of wrong-amount bug that looks correct in code review and only surfaces against real customer disputes or reconciliation."
+
+[[option]]
+id = "assume-uniform-minor-unit-and-single-currency-throughout"
+label = "Apply the standard x100 minor-unit conversion uniformly and assume every amount is in the same currency, with no explicit tracking"
+directive = "amounts are converted to the payment provider's expected format using a single, uniform multiplication (e.g. always x100) regardless of the specific currency involved, and cross-currency comparisons or combinations are performed on raw numeric values with no currency tag or conversion step"
+why = "Rejected: a uniform x100 rule is wrong for every zero-decimal currency the project supports (silently 100x-ing the charge), and comparing or summing raw numbers across currencies with no conversion treats, say, 100 JPY and 100 USD as the same value — both failure modes are silent and only surface once an amount is visibly wrong to a customer or at reconciliation, by which point the charge or comparison has already completed."

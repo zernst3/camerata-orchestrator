@@ -1,0 +1,64 @@
+id = "ARCH-REFUND-AUTHORIZATION-1"
+title = "A refund or credit is authorized against the specific charge's owner and bounded by that charge's remaining refundable amount"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "structured"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://owasp.org/API-Security/editions/2023/en/0xa1-broken-object-level-authorization/"
+title = "OWASP API Security Top 10 2023 — API1:2023 Broken Object Level Authorization"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/639.html"
+title = "CWE-639: Authorization Bypass Through User-Controlled Key"
+
+[decision]
+question = "Does a refund/credit endpoint verify both that the caller is authorized to refund the SPECIFIC charge referenced and that the refund amount does not exceed what remains refundable on it?"
+default = "scoped-authorization-and-amount-bound"
+why = """
+A refund endpoint typically takes a charge or order identifier plus an amount, and two independent checks have to
+both hold before it runs: first, that the caller is authorized to act on THAT SPECIFIC charge — not merely
+authorized to issue refunds in the abstract — and second, that the amount requested does not exceed what remains
+refundable on it. Missing the first check is CWE-639 / OWASP API1:2023's object-level-authorization defect applied
+to money movement: a staff account scoped to refund orders within their own store, or a customer-facing 'request a
+refund on your own order' flow, that does not verify the referenced charge actually belongs to the caller's scope
+lets the caller refund (or trigger a credit against) a charge they have no legitimate claim over, simply by
+supplying a different charge/order id in the request — the classic IDOR shape, with a monetary payload instead of a
+data leak. Missing the second check is a distinct failure even for a correctly-scoped caller: without the endpoint
+tracking (or querying the provider for) how much of a charge has ALREADY been refunded, a refund request can be
+issued more than once, or for more than the original amount, resulting in a double-refund or over-refund that moves
+real money out with no corresponding reversal of goods or service. Both checks have to run server-side on every
+refund request; a client-side 'you can only refund your own orders' affordance is not a substitute for either,
+since the endpoint itself is reachable directly with an arbitrary charge id and amount.
+"""
+
+[[option]]
+id = "scoped-authorization-and-amount-bound"
+label = "Verify the caller's authorization scope over the specific charge AND that the amount stays within its remaining refundable balance"
+directive = """
+Scan refund/credit endpoints for two independent checks before the provider refund call: (1) an authorization check
+that loads the referenced charge/order and confirms it belongs to the caller's authorized scope (their own order,
+their organization, or — for staff — a role permitted to act on it), not merely that the caller holds a generic
+'can issue refunds' permission; and (2) a bound check comparing the requested refund amount against the charge's
+remaining refundable balance (original amount minus amounts already refunded), tracked locally or queried from the
+provider, rejecting any request that would exceed it. An endpoint missing either check is non-conforming.
+"""
+remediation = """
+In the refund endpoint, add a lookup of the referenced charge/order and verify it belongs to the caller's
+authorized scope before processing the refund — reject with 403/404 if it does not. Separately, track (or query
+the provider for) the amount already refunded against that charge, and reject any request whose amount would push
+the cumulative refunded total past the original charge amount. Verify by attempting to refund a charge that does
+not belong to the caller's scope (expect rejection) and by attempting to refund more than once against the same
+charge until the cumulative total exceeds the original amount (expect the excess rejected).
+"""
+effort = "medium"
+why = "Both checks reuse data the refund flow already needs to look up (the charge record, its owner, its refund history), so the cost is wiring two guard clauses rather than building new infrastructure — against a failure mode (refund an arbitrary charge, or refund the same charge repeatedly) that moves real money."
+
+[[option]]
+id = "role-permission-check-only-no-amount-bound"
+label = "Verify the caller holds a general 'can issue refunds' permission, with no per-charge ownership check or refundable-amount bound"
+directive = "the refund endpoint checks that the caller's role or permission set includes 'refund', then processes the request against whatever charge/order id and amount the request supplies, with no verification that the charge belongs to the caller's scope and no tracking of how much has already been refunded against it"
+why = "Rejected: a generic role check answers 'is this caller the kind of actor who is ever allowed to refund something,' not 'is this caller allowed to refund THIS charge, for THIS amount, given what has already been refunded against it' — both of the actual questions a refund request raises. A permission check alone leaves the charge id and amount as pure user input, so a caller who holds the general permission (a support rep across multiple stores, a customer's own refund-request flow) can act on any charge/order id they supply and indefinitely over-refund a single charge."

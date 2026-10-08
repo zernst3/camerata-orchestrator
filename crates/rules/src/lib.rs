@@ -3047,4 +3047,74 @@ mod tests {
             "a repo whose stack resolves to the supabase:realtime domain must select the new rules"
         );
     }
+
+    /// Regression guard: every id in `ids` appears EXACTLY ONCE across the whole loaded corpus.
+    /// `load_corpus` has no built-in duplicate-id detection (it just pushes every parsed file into
+    /// the `RuleSet`), so a copy-pasted id from an existing rule would otherwise silently shadow
+    /// rather than fail to load — this is the explicit check that would catch it.
+    fn assert_ids_unique_in_corpus(set: &RuleSet, ids: &[&str]) {
+        for id in ids {
+            let count = set.iter().filter(|r| r.id_str() == *id).count();
+            assert_eq!(
+                count, 1,
+                "{id} must appear exactly once in the corpus, found {count}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn new_payments_domain_rules_are_well_formed_and_reachable() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let ids = [
+            "ARCH-SERVER-COMPUTED-AMOUNT-1",
+            "ARCH-WEBHOOK-SIGNATURE-VERIFICATION-1",
+            "ARCH-REFUND-AUTHORIZATION-1",
+            "ARCH-CURRENCY-CONSISTENCY-1",
+            "ARCH-NO-PAN-STORAGE-1",
+            "ARCH-PAYMENT-RECONCILIATION-1",
+        ];
+        for id in ids {
+            assert_well_formed_new_rule(&set, id, "api-layer");
+        }
+        assert_ids_unique_in_corpus(&set, &ids);
+        // api-layer is an existing, already-wired domain — confirm the new rules are selected
+        // alongside the pre-existing ARCH-IDEMPOTENCY-KEYS-1 rather than needing new wiring.
+        let selected = select_for_domains(&set, &["api-layer"]);
+        for id in ids {
+            assert!(
+                selected.iter().any(|r| r.id_str() == id),
+                "a repo whose stack resolves to the api-layer domain must select {id}"
+            );
+        }
+        assert!(
+            selected
+                .iter()
+                .any(|r| r.id_str() == "ARCH-IDEMPOTENCY-KEYS-1"),
+            "the pre-existing idempotency-key rule must still be present (retry/double-charge is not duplicated here)"
+        );
+    }
+
+    /// `ARCH-NO-PAN-STORAGE-1` declares `mechanical` enforcement with no shipped detector — same
+    /// shape as `SQL-MONEY-FLOAT-1` above: deterministically checkable in principle (a column/
+    /// field-name and card-shape pattern scan), but Camerata does not ship that scanner yet.
+    /// Pinned here as a regression guard so a future change to its `enforcement` field, or to
+    /// `is_code_auditable`'s prefix list, is caught rather than silently leaving this rule
+    /// unreachable by the semantic pass.
+    #[tokio::test]
+    async fn arch_no_pan_storage_is_mechanical_with_no_detector_but_code_auditable() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let rule = set
+            .get_by_id("ARCH-NO-PAN-STORAGE-1")
+            .expect("ARCH-NO-PAN-STORAGE-1 must exist in the bundled corpus");
+        assert_eq!(rule.enforcement, EnforcementKind::Mechanical);
+        assert!(is_code_auditable("ARCH-NO-PAN-STORAGE-1"));
+    }
 }

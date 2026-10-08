@@ -1,0 +1,68 @@
+id = "ARCH-PAYMENT-RECONCILIATION-1"
+title = "Local order/payment state is kept in sync with the provider's own record via webhook-driven updates or a periodic reconciliation pass, not assumed from a single synchronous response"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "architectural"
+default = true
+qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: the predicate is 'this application has NO code path — neither a webhook handler updating local state on provider-side events, nor a scheduled job comparing local payment/order status against the provider's API — capable of correcting local state after the initial synchronous charge call returns,' which requires surveying the whole integration (route handlers, scheduled jobs, background workers) for the PRESENCE of any such path, not a single file's content. This is an absence-of-a-mechanism check, which an AST/pattern scan over one file cannot establish; it is a project-wide architectural review. Conformance holds when at least one of (webhook-driven status updates, a scheduled reconciliation job) exists and covers the payment/order states the application tracks; it fails when the only place payment status is ever set is the initial synchronous response handler, with no later correction path."
+verification = "grounded"
+
+[[sources]]
+url = "https://docs.stripe.com/webhooks#best-practices"
+title = "Stripe — Webhooks: best practice is to rely on webhook events (not just the synchronous API response) to keep your application's local record in sync with the definitive state in Stripe, since status can change asynchronously after the initial call returns"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
+title = "OWASP Logging Cheat Sheet (low authority — supports the general principle that state affecting money must be auditable and correctable after the fact; the specific reconciliation mechanism is this rule's own judgment grounded in the provider's documented async-state behavior, not something the cheat sheet itself prescribes)"
+
+[decision]
+question = "Does the application have a mechanism — webhook-driven updates, a scheduled reconciliation job, or both — that can correct local order/payment state after the fact, or is the synchronous charge-call response treated as the final word?"
+default = "webhook-or-scheduled-reconciliation"
+why = """
+A payment provider's state for a charge, subscription, or dispute does not always resolve at the moment the
+synchronous API call returns: a card payment can be pending and settle (or fail) asynchronously, a bank-debit or
+buy-now-pay-later method can take days to confirm, a customer can dispute or reverse a charge well after the order
+shipped, and a subscription can lapse on a renewal the application's server was never actively involved in. An
+application whose ONLY place that ever writes payment/order status is the handler for the initial synchronous
+charge-call response has no way to learn about, or correct for, any of those later-arriving outcomes — the local
+record silently diverges from the provider's own authoritative state, and the gap surfaces only when a customer
+complains that an order they were never charged for shipped, or a support ticket surfaces a 'paid' order that the
+provider's own dashboard shows as refunded or disputed. Payment providers build for exactly this gap by emitting
+webhook events for every state transition (`payment_intent.succeeded`, `charge.refunded`, `charge.dispute.created`,
+`invoice.payment_failed`, and similar) specifically so an application can update local state as the authoritative
+side effect of an event, rather than trusting its own initial assumption. Where webhook coverage is incomplete or a
+delivery is missed (webhooks can be delayed, retried, or — rarely — dropped), a periodic reconciliation job that
+queries the provider's API for the current status of open/pending orders and corrects any local mismatch is the
+backstop that catches what the event stream alone didn't. Neither mechanism needs to be elaborate; the defect this
+rule targets is the complete ABSENCE of either one, not the specific implementation.
+"""
+
+[[option]]
+id = "webhook-or-scheduled-reconciliation"
+label = "Maintain local state via webhook-driven updates, a scheduled reconciliation job against the provider's API, or both"
+directive = """
+Survey the integration for either: (a) a webhook endpoint that updates local order/payment/subscription state in
+response to provider-emitted events covering the states the application tracks (success, failure, refund, dispute,
+subscription renewal/cancellation, as applicable), or (b) a scheduled job that periodically queries the provider's
+API for the current status of locally-open/pending payment records and corrects any mismatch. An integration with
+at least one of these, covering the states the application actually tracks, is conforming; an integration relying
+solely on the initial synchronous charge-call response with no later correction path is not.
+"""
+remediation = """
+Add a webhook endpoint (verified per ARCH-WEBHOOK-SIGNATURE-VERIFICATION-1) that subscribes to the provider's
+relevant event types for the payment/order states this application tracks, and updates local state as the event
+arrives, OR add a scheduled job that queries the provider's API for the status of locally-open/pending records and
+corrects any local value that has drifted from the provider's own state. Verify by using the provider's test-mode
+tooling to trigger an asynchronous state change (e.g. a delayed-settlement test card, a manual test refund) after
+the initial charge call has already returned, and confirming local order/payment state updates to match without
+requiring a code deploy or manual intervention.
+"""
+effort = "medium"
+why = "Payment providers ship both mechanisms (webhooks and a queryable status API) specifically to solve this problem, so the engineering cost is wiring an endpoint or a scheduled job against infrastructure that already exists, rather than building state-reconciliation logic from scratch — against a failure mode (local records silently drifting from the provider's authoritative state) that is otherwise invisible until a customer or support ticket surfaces it."
+
+[[option]]
+id = "trust-the-synchronous-response-as-final"
+label = "Treat the synchronous charge-call response as the final, permanent record of payment status"
+directive = "local order/payment status is set once, from the initial synchronous charge-call response, with no webhook handler and no scheduled job ever revisiting or correcting that value afterward"
+why = "Rejected: a payment provider's own documentation describes charge, subscription, and dispute state as capable of changing asynchronously after the initial call returns — a card can settle or fail later, a dispute can be filed weeks after the order shipped, a subscription can lapse on an unattended renewal. Treating the first response as permanent means the local record has no path to ever reflect any of those later events, so it silently diverges from the provider's own authoritative state with no mechanism to notice or correct it."

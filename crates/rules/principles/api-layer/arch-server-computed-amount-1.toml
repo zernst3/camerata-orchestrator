@@ -1,0 +1,68 @@
+id = "ARCH-SERVER-COMPUTED-AMOUNT-1"
+title = "A charge's price, quantity, and discount are computed server-side from the merchant's own records; the client supplies only a selection, never an amount"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "architectural"
+default = true
+qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: the predicate is 'a value that reaches a payment-provider charge/amount/total/price/quantity/discount field was READ from the inbound request body/query/path rather than computed from a server-side product, price, or coupon lookup,' which requires tracing data flow from the request-parsing boundary to the charge call site — an AST/taint-analysis CI gate wired with the project's own request-DTO and pricing-service shapes. The generic pattern exists (don't trust client input for a security-sensitive value) but the specific fields that count as 'amount-bearing' are project-specific, so this is a bespoke check, not a citable off-the-shelf rule. Conformance holds when that gate runs in CI and a charge-call argument traced back to raw request input (with no intervening server-side lookup) fails the build; it fails when no such trace exists and a request body field can reach a charge amount unchanged."
+verification = "grounded"
+
+[[sources]]
+url = "https://docs.stripe.com/payments/accept-a-payment?platform=web&ui=elements"
+title = "Stripe — Accept a payment: the PaymentIntent amount is created on the server from the merchant's own order/price records, never passed through unchanged from client input"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/602.html"
+title = "CWE-602: Client-Side Enforcement of Server-Side Security"
+
+[decision]
+question = "Does a charge's amount, quantity, or discount get recomputed from the merchant's own product/price/coupon records on the server, or is a client-supplied value trusted directly?"
+default = "recompute-amount-server-side-from-authoritative-records"
+why = """
+A checkout or billing flow's only trustworthy inputs from the client are which items were selected and in what
+quantity the customer claims to want — never what those items cost, what a quantity-based total comes to, or
+whether a discount code reduces the price and by how much. Any of those three values (unit price, quantity-derived
+total, discount amount) accepted from the request body and passed through to the amount the payment provider is
+told to charge is CWE-602 (Client-Side Enforcement of Server-Side Security) in its most direct financial form: the
+'security' decision — what this costs — is made wherever the request originated, and the server merely relays it.
+A request is trivially replayable with an edited body (browser dev tools, a proxy, a hand-crafted API call), so
+'the UI never lets you type a negative price' is not a control; nothing prevents a client from sending one directly
+to the endpoint. The fix is the one Stripe's own integration docs describe for a reason: the server looks up the
+authoritative price for each selected product/SKU from its own database or price list, recomputes the total from
+server-held quantities and that authoritative price, independently validates and applies any discount/coupon code
+against server-held rules (expiry, eligibility, stacking limits), and passes ONLY that server-computed number to the
+payment provider's charge/PaymentIntent call. The client-supplied amount, if any arrives, is never read for this
+purpose — at most it is a non-authoritative value the server *compares against* its own computation to abort with a
+clear error on mismatch (catching integration bugs), never a value it uses.
+"""
+
+[[option]]
+id = "recompute-amount-server-side-from-authoritative-records"
+label = "Server recomputes price, total, and discount from its own records; the client supplies only a product/quantity selection"
+directive = """
+Trace every value that reaches a payment-provider charge call's amount/total/price field (or an internal ledger
+entry recording what was charged). Flag as high severity any such value whose data-flow path leads back to the
+request body, query string, or path parameters with NO intervening server-side lookup against an authoritative
+price/product/coupon record. A value that originates from a server-side price lookup, keyed only by a client-
+supplied product/SKU identifier and quantity, is conforming; a value where the price, line-item total, or discount
+amount itself comes from the request is not.
+"""
+remediation = """
+In the endpoint that creates the charge, change the amount/total passed to the payment provider so it is computed
+from a server-side lookup against the authoritative product/price table (and, for discounts, a server-side coupon
+validation) using only the client-supplied product id(s) and quantity — never the client-supplied price, line total,
+or discount amount directly. If a client-supplied amount is also present in the request for display/confirmation
+purposes, compare it against the server-computed value and reject the request on mismatch rather than using the
+client's number. Verify by submitting a request with a product's price, quantity total, or discount amount altered
+in the request body and confirming the actual charge amount is unaffected (recomputed from the server's own
+records) rather than reflecting the tampered value.
+"""
+effort = "medium"
+why = "A request is editable by anyone who can see it leave the browser, so any value the client supplies is, by construction, attacker-controlled; recomputing from server-held product/price/coupon data costs one lookup the endpoint usually needs anyway (it has to know what the customer bought) and closes the most direct path to charging whatever amount an attacker chooses."
+
+[[option]]
+id = "trust-client-supplied-amount-with-display-validation-only"
+label = "Trust the client-supplied amount/total/discount, validating only that it looks well-formed (a positive number, correct currency shape)"
+directive = "Accept the amount, line-item total, or discount value supplied in the request body and pass it to the payment-provider charge call after only syntactic validation (type, sign, format), with no comparison against a server-side price or coupon lookup."
+why = "Rejected: syntactic validation (is it a positive number) says nothing about whether the number is the CORRECT one for what was actually ordered. An attacker who edits a request from $499.99 to $4.99 still passes 'positive number' validation; the charge is for $4.99 regardless of what was in the cart, and nothing in this approach catches it."

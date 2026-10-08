@@ -1,0 +1,68 @@
+id = "ARCH-WEBHOOK-SIGNATURE-VERIFICATION-1"
+title = "A payment-provider webhook handler verifies the provider's signature on the raw request body before trusting the event"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan over webhook route handlers (a route whose path or handler name matches a webhook/callback naming pattern, or whose body is parsed into a payment-provider event-shaped object) for a call to the provider's signature-verification helper (e.g. Stripe's `constructEvent` / `constructEventAsync`, a raw HMAC-SHA256 comparison against the provider's signing secret and a documented header) occurring BEFORE the event payload is used to drive any business logic (updating order/subscription state, crediting an account, triggering a refund). Conformance holds when every payment-webhook route's handler verifies the signature first and rejects on failure before any other code runs; it fails when the handler parses and acts on the JSON body with no signature check, or checks it only after already acting on the payload."
+
+[[sources]]
+url = "https://docs.stripe.com/webhooks#verify-official-libraries"
+title = "Stripe — Webhooks: verify webhook signatures using the signing secret and the raw, unparsed request body before processing the event"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/REST_Security_Cheat_Sheet.html"
+title = "OWASP REST Security Cheat Sheet (receiver-side authenticity verification for inbound webhook-style callbacks)"
+
+[decision]
+question = "Does the payment-provider webhook handler verify the provider's cryptographic signature on the raw request body before trusting the event it describes?"
+default = "verify-signature-before-processing"
+why = """
+A payment webhook endpoint is, from the outside, just another public URL that accepts a POST body shaped like a
+provider event ('payment_intent.succeeded', 'charge.refunded', 'invoice.paid'). With no signature check, anyone who
+can guess or discover that URL can POST an arbitrary fabricated event and the handler will act on it exactly as if
+the real provider sent it — crediting an order as paid with no payment having occurred, marking a subscription
+active, or triggering a refund-driven state change, all without a cent moving. Payment providers sign each webhook
+delivery (Stripe signs with HMAC-SHA256 over the raw body plus a timestamp, carried in a `Stripe-Signature` header;
+other providers follow the same shape with their own header/secret) specifically so the receiver can verify the
+event genuinely originated from the provider's systems and was not replayed or forged. Verification requires the
+RAW, unparsed request body — most frameworks' default body-parsing middleware (JSON parse-then-stringify) does not
+reproduce the exact byte sequence the signature was computed over, which is why this is a common integration bug
+even on teams that intend to verify: the raw-body requirement has to be wired explicitly for the webhook route, and
+a handler that reads `req.body` already parsed by generic middleware cannot verify correctly even if it tries. The
+check belongs at the very top of the handler, before ANY business logic touches the payload — verifying after
+already crediting the account defeats the purpose of verifying at all.
+"""
+
+[[option]]
+id = "verify-signature-before-processing"
+label = "Verify the provider's signature against the raw body before any business logic runs; reject unverified events"
+directive = """
+Scan webhook route handlers whose body is parsed into a payment-provider event shape. Flag as CRITICAL severity any
+such handler with no call to the provider's signature-verification function (or an equivalent raw HMAC comparison
+against the configured signing secret) before the event's `type`/payload fields are read for business-logic
+purposes. Also flag a handler that calls the verification function against an ALREADY-JSON-PARSED body rather than
+the raw request bytes, since most providers' signatures are computed over the exact raw byte sequence and will
+never validate against a re-serialized body. A handler that verifies first and returns 400 on failure, before
+touching the payload, is conforming.
+"""
+remediation = """
+In the webhook route handler, add the provider's signature-verification call (e.g. Stripe's `constructEvent` with
+the raw request body, the `Stripe-Signature` header, and the endpoint's configured signing secret) as the FIRST
+thing the handler does, before any field of the parsed event is read. Configure the route to receive the raw,
+unparsed request body (bypassing generic JSON body-parsing middleware for this route specifically, since most
+frameworks' default parser does not preserve the exact bytes the signature was computed over). Return 400 and stop
+processing when verification fails. Verify by POSTing a fabricated event body with no valid signature header and
+confirming the handler rejects it without taking any action, then confirming a real event from the provider's test-
+mode webhook delivery still succeeds.
+"""
+effort = "low"
+why = "The provider ships a signature-verification helper for exactly this purpose; wiring it at the top of the handler and routing the raw body to it is a small, mechanical change that closes an otherwise trivially forgeable 'anyone who finds this URL can fabricate payment events' hole."
+
+[[option]]
+id = "trust-any-request-shaped-like-a-provider-event"
+label = "Process any request body shaped like a provider event, with no signature check"
+directive = "the webhook handler parses the request body into the provider's event shape and drives business logic (order status, subscription state, refund triggers) directly from it, with no verification that the request actually originated from the payment provider"
+why = "Rejected: a webhook URL with no signature check accepts a forged event from anyone who discovers it, with no payment ever having occurred — the handler cannot distinguish a genuine provider delivery from an attacker's hand-crafted POST, because the only thing distinguishing the two is the signature this option skips checking."
