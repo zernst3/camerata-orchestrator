@@ -3070,6 +3070,124 @@ fn total_hours_label(items: &[&FindingRefJson]) -> String {
     label
 }
 
+/// Defect 4 (2026-10-07 grading pass) — the "evidence of violation" gate: a conservative,
+/// deliberately simple NEGATION-PHRASE detector over a zero-finding rule's own
+/// [`crate::ai_audit::RuleRecommendation::evidence`] text. Across three graded fixtures, a
+/// multi-option/structured rule's own evidence sometimes reads as a plain description of the
+/// exact violation the rule exists to catch — e.g. "three sequential writes with no
+/// transaction", "an external chargeable call with no idempotency-key handling",
+/// "authorization done as ad hoc checks inside business logic" — while the rule still reports
+/// ZERO findings and ships under "What's healthy", because compliance was checked against
+/// whichever option the model picked (which can itself be the non-compliant option the
+/// evidence describes) rather than against the rule's own requirement. The engine wrote down
+/// WHY the rule is violated and then told the client the rule is satisfied.
+///
+/// Any one of these phrases appearing is treated as "this evidence negates the rule's own
+/// requirement" — deliberately conservative (a false positive costs a genuinely-healthy rule
+/// one extra human look in `held`, never a dropped finding or a refused export; a false
+/// negative is just the pre-existing gap this gate narrows, not a regression it introduces).
+/// See [`build_report_json`]'s "What's healthy" section for the call site, and
+/// [`parse_evidence_citation`] for how the matching advisory finding is anchored.
+pub(crate) fn evidence_negates_requirement(evidence: &str) -> bool {
+    const NEGATION_PHRASES: &[&str] = &["no ", "without ", "not ", "ad hoc", "only ", "missing"];
+    let lower = evidence.to_ascii_lowercase();
+    NEGATION_PHRASES.iter().any(|phrase| lower.contains(phrase))
+}
+
+/// Best-effort split of a [`crate::ai_audit::RuleRecommendation::evidence`] citation
+/// (`"path:line"` or `"path:line — short note"`, per that field's own doc comment) into its
+/// path/line parts, anchoring the [`evidence_negates_requirement`] advisory finding at a real
+/// location whenever the model's citation parses. Splits ONLY on an em dash or " - " (never a
+/// bare hyphen) so a hyphenated path (`src/my-service/orders.rs:142`) is never mistaken for a
+/// "path — note" separator. Falls back to `(evidence, 0)` — never panics, never drops the
+/// evidence text — when the citation doesn't parse into a real `path:line` shape.
+pub(crate) fn parse_evidence_citation(evidence: &str) -> (String, usize) {
+    let trimmed = evidence.trim();
+    let head = trimmed
+        .split(" — ")
+        .next()
+        .and_then(|s| s.split(" - ").next())
+        .unwrap_or(trimmed)
+        .trim();
+    if let Some((path, line_str)) = head.rsplit_once(':') {
+        if let Ok(line) = line_str.trim().parse::<usize>() {
+            if !path.is_empty() {
+                return (path.to_string(), line);
+            }
+        }
+    }
+    (trimmed.to_string(), 0)
+}
+
+/// Defect 4's injection point: for every rule the ledger would otherwise credit as healthy
+/// (`ran && findings_emitted == 0`, and genuinely zero findings in `report.findings` too) whose
+/// `RuleRecommendation::evidence` [`evidence_negates_requirement`], synthesize ONE advisory
+/// `Finding` and append it to a CLONED report, returned fresh — never mutates the caller's
+/// `report`. Deliberately runs BEFORE [`sanitize_report_findings`]/the partition loop in
+/// [`build_report_json`] rather than hand-building a `FindingRefJson`/`CuratedGroupJson` and
+/// splicing it into the matrix post hoc: this way the synthetic finding flows through the
+/// EXACT SAME classification, bucketing, citation, and counting machinery every real finding
+/// does, so it can never drift from (or break) this function's own reconciliation invariant
+/// (`candidates_reviewed == curated_total + held_for_review + excluded_false_positive +
+/// dependency_advisories`) the way a post-hoc splice into `matrix.held` without a matching
+/// `code_findings` entry would (an under-counted `curated_total` risking a `usize` underflow).
+/// `needs_review: true` is what actually routes it to the `held` bucket, via the PRE-EXISTING
+/// [`is_held_for_review`] gate — no new bucketing logic needed on that side. A no-op (returns
+/// an unmodified clone) when `report.recommendations` is empty, which covers the overwhelming
+/// majority of scans (deterministic-only, or no multi-option rule selected this run).
+fn inject_evidence_gate_findings(report: &ScanReport) -> ScanReport {
+    let mut report = report.clone();
+    if report.recommendations.is_empty() {
+        return report;
+    }
+    let healthy_ids: std::collections::HashSet<String> = if report.ledger.rules().next().is_some() {
+        report.ledger.healthy_rule_ids().into_iter().collect()
+    } else {
+        report.provenance.audited_rule_ids.iter().cloned().collect()
+    };
+    let rule_ids_with_any_finding: std::collections::HashSet<String> = report
+        .findings
+        .iter()
+        .flat_map(|f| std::iter::once(f.rule_id.clone()).chain(f.also_matches.iter().cloned()))
+        .collect();
+    let mut synthetic = Vec::new();
+    for rid in &healthy_ids {
+        if rule_ids_with_any_finding.contains(rid.as_str()) {
+            continue;
+        }
+        let Some(rec) = report.recommendations.get(&rid.to_ascii_uppercase()) else {
+            continue;
+        };
+        let Some(evidence) = rec.evidence.as_deref() else {
+            continue;
+        };
+        if !evidence_negates_requirement(evidence) {
+            continue;
+        }
+        let (path, line) = parse_evidence_citation(evidence);
+        synthetic.push(Finding {
+            repo: report.repos.first().cloned().unwrap_or_default(),
+            path,
+            line,
+            rule_id: rid.clone(),
+            severity: "medium".to_string(),
+            snippet: evidence.chars().take(200).collect(),
+            detail: format!(
+                "This rule's own evaluation evidence reads \"{evidence}\", which appears to \
+                 negate the rule's own requirement, even though the rule reported zero \
+                 findings this run. Flagged here for manual confirmation rather than listed as \
+                 healthy."
+            ),
+            needs_review: true,
+            confidence: Some("needs-review".to_string()),
+            located: true,
+            ..Finding::default()
+        });
+    }
+    report.findings.extend(synthetic);
+    report
+}
+
 /// Build the report's single output type from a completed scan + the client's triage
 /// dispositions + the (optional, best-effort) rule corpus. **Pure** — no I/O, fully
 /// unit-testable.
@@ -3097,6 +3215,10 @@ pub fn build_report_json(
     corpus: Option<&camerata_rules::RuleSet>,
     opts: &ReportOptions,
 ) -> AuditReportJson {
+    // Defect 4: fold in the evidence-of-violation gate's synthetic advisory findings (if any)
+    // BEFORE sanitization, so they're sanitized/counted/bucketed identically to every real
+    // finding — see `inject_evidence_gate_findings`'s doc comment.
+    let report = &inject_evidence_gate_findings(report);
     // C4-R3: sanitize zero-width/BOM code points out of every finding ONCE, here, before any
     // downstream section touches `path`/`snippet`/`detail`/`captures` — see
     // `sanitize_report_findings`'s doc comment. Shadows the parameter so every other line below
@@ -7053,6 +7175,77 @@ mod tests {
         assert!(!is_external_source_url(""));
     }
 
+    // ── Defect 4: evidence_negates_requirement / parse_evidence_citation ──────────────
+
+    #[test]
+    fn evidence_negates_requirement_detects_the_three_real_world_examples() {
+        assert!(evidence_negates_requirement(
+            "three sequential writes with no transaction"
+        ));
+        assert!(evidence_negates_requirement(
+            "an external chargeable call with no idempotency-key handling"
+        ));
+        assert!(evidence_negates_requirement(
+            "authorization done as ad hoc checks inside business logic"
+        ));
+    }
+
+    #[test]
+    fn evidence_negates_requirement_is_false_for_a_positive_confirmation() {
+        // The positive twin: evidence that CONFIRMS compliance, with no negation phrase, must
+        // never trip the gate.
+        assert!(!evidence_negates_requirement(
+            "opens a transaction and passes the handle to each repository call"
+        ));
+        assert!(!evidence_negates_requirement(
+            "every external chargeable call is issued with a client-generated idempotency key"
+        ));
+        assert!(!evidence_negates_requirement(
+            "authorization is centralized in a single policy-enforcement middleware"
+        ));
+    }
+
+    #[test]
+    fn evidence_negates_requirement_is_case_insensitive() {
+        assert!(evidence_negates_requirement(
+            "THREE SEQUENTIAL WRITES WITH NO TRANSACTION"
+        ));
+    }
+
+    #[test]
+    fn parse_evidence_citation_splits_path_and_line_on_em_dash() {
+        assert_eq!(
+            parse_evidence_citation("src/orders/service.rs:142 — three sequential writes"),
+            ("src/orders/service.rs".to_string(), 142)
+        );
+    }
+
+    #[test]
+    fn parse_evidence_citation_handles_a_bare_path_colon_line_with_no_note() {
+        assert_eq!(
+            parse_evidence_citation("src/billing/charge.rs:58"),
+            ("src/billing/charge.rs".to_string(), 58)
+        );
+    }
+
+    #[test]
+    fn parse_evidence_citation_never_mistakes_a_hyphenated_path_for_a_note_separator() {
+        // A bare hyphen inside the path (no surrounding spaces) must NOT be treated as a
+        // "path - note" separator — only " — " (em dash) or " - " (spaced hyphen) count.
+        assert_eq!(
+            parse_evidence_citation("src/my-service/orders.rs:142"),
+            ("src/my-service/orders.rs".to_string(), 142)
+        );
+    }
+
+    #[test]
+    fn parse_evidence_citation_falls_back_to_the_whole_text_when_unparseable() {
+        let (path, line) =
+            parse_evidence_citation("this evidence has no file:line citation at all");
+        assert_eq!(line, 0);
+        assert_eq!(path, "this evidence has no file:line citation at all");
+    }
+
     #[test]
     fn citation_join_still_labels_a_non_ai_tier_unknown_rule_id_as_ai_advisory() {
         // P3 scopes the citation gate to AI-TIER findings only (`is_ai_tier`) — a
@@ -10373,6 +10566,12 @@ mod tests {
 //      preview pass produced. STANDING (passes), in `xlsx_export::tests` (this invariant is
 //      about that module's own provenance computation, not this file's):
 //      `a_grounded_preview_row_never_renders_deterministic_provenance`.
+//  16. (defect 4) A zero-finding rule whose own `RuleRecommendation::evidence` text negates the
+//      rule's requirement (a conservative negation-phrase match) is NEVER listed under "what's
+//      healthy" — it is held for review instead, with its own advisory finding anchored at the
+//      evidence's citation. The positive twin (evidence CONFIRMS compliance, no negation
+//      phrase) stays healthy. STANDING (passes):
+//      `evidence_negating_rule_requirement_is_held_not_healthy_positive_twin_stays_healthy`.
 #[cfg(test)]
 mod export_invariants_gate {
     use super::*;
@@ -11884,5 +12083,168 @@ mod export_invariants_gate {
         assert_eq!(json.executive_summary.failed_passes.len(), 1);
         assert!(json.executive_summary.failed_passes[0].contains("1 rule"));
         assert!(!json.executive_summary.failed_passes[0].contains("PYTHON-PARAMETERIZED-SQL-1"));
+    }
+
+    // ── 16 (defect 4): the evidence-of-violation gate ────────────────────────────────────
+
+    /// Invariant 16, negative case: a zero-finding rule whose own `RuleRecommendation`
+    /// evidence NEGATES the rule's requirement (contains a conservative negation phrase —
+    /// here, literally the three real-world examples the grading pass surfaced) must NEVER
+    /// appear in "what's healthy" — it is held for review instead, as an advisory finding
+    /// anchored at the evidence's own citation.
+    #[tokio::test]
+    async fn evidence_negating_rule_requirement_is_held_not_healthy_positive_twin_stays_healthy() {
+        for (evidence, label) in [
+            (
+                "src/orders/service.rs:142 — three sequential writes with no transaction",
+                "no-transaction",
+            ),
+            (
+                "src/billing/charge.rs:58 — an external chargeable call with no \
+                 idempotency-key handling",
+                "no-idempotency",
+            ),
+            (
+                "src/api/admin.rs:30 — authorization done as ad hoc checks inside business \
+                 logic",
+                "ad-hoc-authz",
+            ),
+        ] {
+            let mut report = report_with(Vec::new(), vec!["ARCH-EXPLICIT-TX-1"]);
+            let mut ledger = crate::scan_ledger::ScanLedger::new();
+            ledger.record_rule(
+                "ARCH-EXPLICIT-TX-1",
+                crate::scan_ledger::RuleTier::Semantic,
+                true,
+                None,
+                10,
+                0,
+            );
+            report.ledger = ledger;
+            report.recommendations.insert(
+                "ARCH-EXPLICIT-TX-1".to_string(),
+                crate::ai_audit::RuleRecommendation {
+                    rule_id: "ARCH-EXPLICIT-TX-1".to_string(),
+                    recommended_option_id: "some-option".to_string(),
+                    recommendation_reasoning: "the model's pick".to_string(),
+                    hallucinated: false,
+                    operator_chosen: false,
+                    evidence: Some(evidence.to_string()),
+                    applicable: true,
+                },
+            );
+
+            let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+            assert!(
+                !json
+                    .whats_healthy
+                    .rules
+                    .iter()
+                    .any(|r| r.rule_id == "ARCH-EXPLICIT-TX-1"),
+                "[{label}] a rule whose own evidence negates its requirement must NEVER be \
+                 healthy: {:?}",
+                json.whats_healthy.rules
+            );
+            let held = json
+                .held_for_review_findings
+                .iter()
+                .find(|g| g.rule_id == "ARCH-EXPLICIT-TX-1");
+            assert!(
+                held.is_some(),
+                "[{label}] the preferred behavior (an advisory held row) must be present: \
+                 {:?}",
+                json.held_for_review_findings
+            );
+            let (expected_path, expected_line) = parse_evidence_citation(evidence);
+            let site = &held.unwrap().sites[0];
+            assert_eq!(
+                site.path, expected_path,
+                "[{label}] the advisory row must anchor at the evidence's own citation"
+            );
+            assert_eq!(
+                site.line, expected_line,
+                "[{label}] line must match the citation"
+            );
+            assert_eq!(site.bucket, "held");
+        }
+    }
+
+    /// Invariant 16, positive twin: the SAME rule, SAME shape, but evidence that CONFIRMS
+    /// compliance (no negation phrase) must stay healthy — the gate is conservative and must
+    /// never punish a genuinely clean rule.
+    #[tokio::test]
+    async fn evidence_confirming_compliance_still_renders_healthy() {
+        let mut report = report_with(Vec::new(), vec!["ARCH-EXPLICIT-TX-1"]);
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        ledger.record_rule(
+            "ARCH-EXPLICIT-TX-1",
+            crate::scan_ledger::RuleTier::Semantic,
+            true,
+            None,
+            10,
+            0,
+        );
+        report.ledger = ledger;
+        report.recommendations.insert(
+            "ARCH-EXPLICIT-TX-1".to_string(),
+            crate::ai_audit::RuleRecommendation {
+                rule_id: "ARCH-EXPLICIT-TX-1".to_string(),
+                recommended_option_id: "services-own-the-transaction-lifecycle-repositor"
+                    .to_string(),
+                recommendation_reasoning: "the codebase already does it this way".to_string(),
+                hallucinated: false,
+                operator_chosen: false,
+                evidence: Some(
+                    "src/orders/service.rs:140 — opens a transaction and passes the handle to \
+                     each repository call"
+                        .to_string(),
+                ),
+                applicable: true,
+            },
+        );
+
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        assert!(
+            json.whats_healthy
+                .rules
+                .iter()
+                .any(|r| r.rule_id == "ARCH-EXPLICIT-TX-1"),
+            "a rule whose evidence CONFIRMS compliance must stay healthy: {:?}",
+            json.whats_healthy.rules
+        );
+        assert!(
+            !json
+                .held_for_review_findings
+                .iter()
+                .any(|g| g.rule_id == "ARCH-EXPLICIT-TX-1"),
+            "a genuinely healthy rule must not ALSO render a spurious advisory row: {:?}",
+            json.held_for_review_findings
+        );
+    }
+
+    /// A rule with NO recommendation at all (no multi-option evidence ever recorded — the
+    /// overwhelming majority of rules/scans) must be completely unaffected by this gate: it
+    /// stays healthy exactly as before.
+    #[tokio::test]
+    async fn a_zero_finding_rule_with_no_recommendation_is_unaffected_by_the_evidence_gate() {
+        let mut report = report_with(Vec::new(), vec!["SEC-NO-HARDCODED-SECRETS-1"]);
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        ledger.record_rule(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            true,
+            None,
+            10,
+            0,
+        );
+        report.ledger = ledger;
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert!(json
+            .whats_healthy
+            .rules
+            .iter()
+            .any(|r| r.rule_id == "SEC-NO-HARDCODED-SECRETS-1"));
     }
 }
