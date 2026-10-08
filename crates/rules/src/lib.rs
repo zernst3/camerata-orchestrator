@@ -3072,6 +3072,7 @@ mod tests {
         let ids = [
             "ARCH-SERVER-COMPUTED-AMOUNT-1",
             "ARCH-WEBHOOK-SIGNATURE-VERIFICATION-1",
+            "ARCH-WEBHOOK-EVENT-DEDUP-1",
             "ARCH-REFUND-AUTHORIZATION-1",
             "ARCH-CURRENCY-CONSISTENCY-1",
             "ARCH-NO-PAN-STORAGE-1",
@@ -3116,5 +3117,85 @@ mod tests {
             .expect("ARCH-NO-PAN-STORAGE-1 must exist in the bundled corpus");
         assert_eq!(rule.enforcement, EnforcementKind::Mechanical);
         assert!(is_code_auditable("ARCH-NO-PAN-STORAGE-1"));
+    }
+
+    /// Server-to-client data-exposure defect class: spans three existing domains (api-layer,
+    /// fullstack, javascript) rather than one, so this groups the whole class in a single test
+    /// with one loop per domain, mirroring `assert_well_formed_new_rule`'s per-domain contract.
+    #[tokio::test]
+    async fn new_exposure_domain_rules_are_well_formed_and_reachable() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+
+        let api_layer_ids = [
+            "ARCH-NO-LEAKY-ERROR-DETAILS-1",
+            "ARCH-RESPONSE-FIELD-PROJECTION-1",
+            "ARCH-NO-STORE-SENSITIVE-RESPONSES-1",
+        ];
+        for id in api_layer_ids {
+            assert_well_formed_new_rule(&set, id, "api-layer");
+        }
+
+        let fullstack_ids = ["ARCH-SERVER-CLIENT-PROJECTION-1"];
+        for id in fullstack_ids {
+            assert_well_formed_new_rule(&set, id, "fullstack");
+        }
+
+        let javascript_ids = ["JAVASCRIPT-PUBLIC-ENV-PREFIX-SECRET-1"];
+        for id in javascript_ids {
+            assert_well_formed_new_rule(&set, id, "javascript");
+        }
+
+        let all_ids: Vec<&str> = api_layer_ids
+            .iter()
+            .chain(fullstack_ids.iter())
+            .chain(javascript_ids.iter())
+            .copied()
+            .collect();
+        assert_ids_unique_in_corpus(&set, &all_ids);
+
+        // Each domain is already wired (api-layer, fullstack, javascript are existing, armed
+        // domains) — confirm the new rules are selected per-domain with no new wiring needed.
+        let api_layer_selected = select_for_domains(&set, &["api-layer"]);
+        for id in api_layer_ids {
+            assert!(
+                api_layer_selected.iter().any(|r| r.id_str() == id),
+                "a repo whose stack resolves to the api-layer domain must select {id}"
+            );
+        }
+        let fullstack_selected = select_for_domains(&set, &["fullstack"]);
+        assert!(
+            fullstack_selected
+                .iter()
+                .any(|r| r.id_str() == "ARCH-SERVER-CLIENT-PROJECTION-1"),
+            "a repo whose stack resolves to the fullstack domain must select the new rule"
+        );
+        let javascript_selected = select_for_domains(&set, &["javascript"]);
+        assert!(
+            javascript_selected
+                .iter()
+                .any(|r| r.id_str() == "JAVASCRIPT-PUBLIC-ENV-PREFIX-SECRET-1"),
+            "a repo whose stack resolves to the javascript domain must select the new rule"
+        );
+    }
+
+    /// `JAVASCRIPT-PUBLIC-ENV-PREFIX-SECRET-1` declares `mechanical` enforcement with no shipped
+    /// detector — same shape as `SQL-MONEY-FLOAT-1` / `ARCH-NO-PAN-STORAGE-1` above.
+    #[tokio::test]
+    async fn javascript_public_env_prefix_secret_is_mechanical_with_no_detector_but_code_auditable()
+    {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let rule = set
+            .get_by_id("JAVASCRIPT-PUBLIC-ENV-PREFIX-SECRET-1")
+            .expect("JAVASCRIPT-PUBLIC-ENV-PREFIX-SECRET-1 must exist in the bundled corpus");
+        assert_eq!(rule.enforcement, EnforcementKind::Mechanical);
+        assert!(is_code_auditable("JAVASCRIPT-PUBLIC-ENV-PREFIX-SECRET-1"));
     }
 }

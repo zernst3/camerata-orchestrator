@@ -1,0 +1,74 @@
+id = "ARCH-WEBHOOK-EVENT-DEDUP-1"
+title = "Payment-provider webhook handlers deduplicate by the provider's event id so redelivery never re-applies a side effect"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan over payment-provider webhook handlers for a side effect (crediting a wallet, marking an order paid, extending a subscription, incrementing a usage counter, sending a fulfillment notification) applied directly from the event payload with no prior check against a persisted record of the provider's own event id (e.g. Stripe's evt_... id, PayPal's webhook event id). Conformance holds when the handler looks up (or inserts, via an atomic unique-constrained insert, not a check-then-act read) the event id in a dedicated processed-events record before applying the effect, and short-circuits with a 2xx acknowledgement on a duplicate without re-applying it; it fails when the side effect runs unconditionally on every delivery, or when deduplication is attempted by a non-atomic 'check if seen, then insert' pair that a concurrent redelivery can race."
+
+[[sources]]
+url = "https://docs.stripe.com/webhooks#handle-duplicate-events"
+title = "Stripe docs — Webhooks: 'Webhook endpoints might occasionally receive the same event more than once... We recommend... guarding against duplicated events by making your event processing idempotent'"
+
+[[sources]]
+url = "https://developer.paypal.com/api/rest/webhooks/rest/"
+title = "PayPal Developer docs — Webhooks REST API: webhook notifications are delivered at-least-once and a given event may be received more than once"
+
+[decision]
+question = "Does a payment-provider webhook handler deduplicate by the provider's own event id before applying its side effect, given that providers document at-least-once (possibly duplicate) delivery, or does it apply the effect unconditionally on every delivery it receives?"
+default = "dedupe-by-provider-event-id-before-applying-effect"
+why = """
+ARCH-WEBHOOK-SIGNATURE-VERIFICATION-1 establishes that an incoming webhook request actually came from the
+provider; it says nothing about whether this is the FIRST time the provider has sent this particular event. Every major payment
+provider documents at-least-once delivery semantics: a network blip, a slow response from the merchant's endpoint,
+or the provider's own retry policy after a non-2xx response can cause the exact same event to arrive two or more
+times, each one carrying a valid signature because it genuinely is the provider resending it. A handler that applies
+its side effect unconditionally on every delivery — crediting a wallet, extending a subscription period, or
+incrementing a usage counter — double-applies that effect on a redelivered event exactly as surely as a client-side
+retry without an idempotency key double-charges a card, except here the DEVELOPER has no control over whether or
+when the provider retries.
+
+The fix is the receiving side's responsibility: persist the provider's own event id (Stripe's `evt_...`, or PayPal's
+webhook event id) the first time it is processed, and treat any later delivery carrying the same id as a no-op that
+still returns a 2xx acknowledgement (so the provider does not keep retrying) without re-running the effect. The
+dedup check and the first-processing record must be a single atomic operation (an insert with a unique constraint on
+the event id, checked via the insert's own conflict result) rather than a 'look up, then act, then record' sequence,
+because two near-simultaneous redeliveries can both pass a non-atomic lookup before either has recorded the id.
+"""
+
+[[option]]
+id = "dedupe-by-provider-event-id-before-applying-effect"
+label = "Persist the provider's event id in an atomic, uniquely-constrained insert before applying the side effect; a duplicate delivery is a no-op 2xx"
+directive = """
+The webhook handler, after verifying the provider's signature, attempts to INSERT the event's provider-assigned id
+into a dedicated processed-events table (or equivalent key-value record) with a unique constraint on that id, as a
+single atomic operation. If the insert succeeds, the handler proceeds to apply the event's side effect. If the
+insert fails on the uniqueness constraint (this event id has already been recorded), the handler treats this as an
+already-processed duplicate: it does NOT re-apply the side effect, and it still returns a 2xx response so the
+provider stops retrying. The dedup check is never implemented as a separate read followed by a separate write, since
+that sequence is racy under concurrent redelivery.
+"""
+remediation = """
+Add a processed-events table (or equivalent) keyed by the payment provider's own event id with a unique constraint,
+and change the webhook handler to attempt an atomic insert of the incoming event's id before applying its side
+effect — treating a unique-constraint violation as an already-processed duplicate that still returns a 2xx response
+with no further action. Verify by replaying the same provider event payload (same event id, valid signature) twice
+and confirming the side effect (wallet credit, subscription extension, usage increment) occurs exactly once across
+both deliveries.
+"""
+effort = "medium"
+why = "Payment providers document and rely on at-least-once delivery, so a webhook handler that applies its effect unconditionally on every delivery WILL eventually double-apply it in production; an atomic unique-constrained insert on the provider's own event id is the standard, race-free way to make the handler idempotent against redelivery the developer cannot prevent or control."
+
+[[option]]
+id = "apply-the-effect-unconditionally-on-every-delivery"
+label = "Apply the webhook's side effect unconditionally every time the handler receives a signed event"
+directive = "The webhook handler verifies the provider's signature and then applies the event's side effect (crediting a wallet, extending a subscription, incrementing a counter) directly, with no check for whether this specific event id has already been processed."
+why = "Rejected: every major payment provider documents at-least-once delivery as expected, normal behavior, not an edge case — a handler with no dedup step is guaranteed to eventually double-apply an effect on a redelivered event, through no fault of the client and with no attacker involved at all. This is a correctness defect that WILL manifest in production operation, not merely a theoretical risk."
+
+[[option]]
+id = "non-atomic-check-then-insert-dedup"
+label = "Deduplicate by checking whether the event id has been seen, then inserting it as a separate step"
+directive = "The handler performs a SELECT to check whether the incoming event id already exists in a processed-events table, and if not, proceeds to apply the side effect and then INSERT the event id as a separate subsequent write."
+why = "Rejected: the read and the write are not atomic, so two redeliveries of the same event arriving close together can both pass the SELECT before either has completed its INSERT, both proceeding to apply the side effect — the exact race this rule exists to close. The insert attempt itself must be the uniqueness check (via its own constraint violation), not a value a prior read already decided."
