@@ -5481,6 +5481,80 @@ pub(crate) fn semgrep_floor_category(semgrep_rule_id: &str) -> Option<&'static s
     }
 }
 
+/// Map an external-tool (ESLint) rule id to the CORPUS rule id it is evidence for —
+/// the ESLint-backed counterpart to [`semgrep_floor_category`] above, doing the SAME two
+/// jobs for the ESLint-routed subset of the corpus: (1) the grounding map
+/// `crate::report_export::corpus_rule_for` joins against so a preview finding's citation,
+/// severity calibration, authored remediation, and effort estimate come from OUR corpus
+/// rule rather than a generic "found by this tool" label, and (2) a signal
+/// [`finding_grounds_to`] uses to recognize that a raw ESLint SARIF `ruleId` (e.g.
+/// `react-hooks/exhaustive-deps`) is evidence a specific corpus rule actually fired —
+/// needed for [`reconcile_external_tool_ledger`]'s emitted-count correction, exactly as
+/// `semgrep_floor_category` is needed there for Semgrep.
+///
+/// Every id on the left is ALSO present in some corpus rule's own
+/// `[[sources]].linter` annotation (`crates/rules/principles/javascript/**`) — this
+/// table exists only to join a raw tool-native rule id back to the corpus id that
+/// authored it, mirroring `semgrep_floor_category`'s hand-maintained style rather than
+/// deriving it from a scan (ESLint rule ids, unlike Semgrep's, are stable well-known
+/// plugin-namespaced strings; there is no bundled ruleset to derive the reverse map
+/// from the way `mechanical_gate::semgrep_covered_rule_ids` does).
+///
+/// `JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1` and `JAVASCRIPT-REACT-RULES-OF-HOOKS-1` are the
+/// motivating fix: both declare `enforcement = "mechanical"` with a `react-hooks:`
+/// linter source, but before `scan_tools::tool_for_linter` recognized that token at all,
+/// neither corpus id resolved to ANY detector channel (see `mechanical_gate::
+/// detector_channel`) — they relied entirely on the semantic/AI pass, which is exactly
+/// the class of gap a benchmark scoring near-zero on planted mechanical defects exposed.
+///
+/// One ambiguity: `jest/no-conditional-expect` is cited by TWO corpus rules
+/// (`JAVASCRIPT-TESTING-AAA-STRUCTURE-1` and `JAVASCRIPT-TESTING-DETERMINISTIC-1`). This
+/// table grounds that one raw id to `JAVASCRIPT-TESTING-DETERMINISTIC-1` only — its
+/// authored rationale is specifically about a conditional assert undermining a test's
+/// deterministic pass/fail behavior, the tighter semantic fit — rather than crediting
+/// both (which would double-count a single tool finding across two ledger rows).
+/// `JAVASCRIPT-TESTING-AAA-STRUCTURE-1` is NOT "no detector" as a result: `tool_for_linter`
+/// still recognizes its `jest: no-conditional-expect` source and routes it to Eslint for
+/// the scan-preview pass and the `detector_channel`/ledger "has a detector" check; this
+/// table just isn't the one that credits ITS corpus id when the raw finding arrives.
+pub(crate) fn eslint_floor_category(eslint_rule_id: &str) -> Option<&'static str> {
+    match eslint_rule_id {
+        "react-hooks/exhaustive-deps" => Some("JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1"),
+        "react-hooks/rules-of-hooks" => Some("JAVASCRIPT-REACT-RULES-OF-HOOKS-1"),
+        "eqeqeq" => Some("JAVASCRIPT-STRICT-EQUALITY-1"),
+        "no-var" => Some("JAVASCRIPT-NO-VAR-1"),
+        "prefer-const" => Some("JAVASCRIPT-CONST-DEFAULT-1"),
+        "no-restricted-imports" => Some("JAVASCRIPT-NEXT-DUAL-API-1"),
+        "@typescript-eslint/no-explicit-any" => Some("JAVASCRIPT-TYPESCRIPT-NO-EXPLICIT-ANY-1"),
+        "@typescript-eslint/no-floating-promises" => {
+            Some("JAVASCRIPT-TYPESCRIPT-NO-FLOATING-PROMISES-1")
+        }
+        "@typescript-eslint/no-non-null-assertion" => {
+            Some("JAVASCRIPT-TYPESCRIPT-NO-NON-NULL-ASSERTION-1")
+        }
+        "jest/no-conditional-expect" | "jest/expect-expect" | "jest/no-done-callback" => {
+            Some("JAVASCRIPT-TESTING-DETERMINISTIC-1")
+        }
+        "jest/prefer-spy-on" => Some("JAVASCRIPT-TESTING-MOCK-AT-BOUNDARIES-1"),
+        "jest/no-identical-title" | "jest/valid-title" => Some("JAVASCRIPT-TESTING-NAMING-1"),
+        "jest/no-disabled-tests" | "jest/no-focused-tests" => {
+            Some("JAVASCRIPT-TESTING-NO-DISABLED-TESTS-1")
+        }
+        _ => None,
+    }
+}
+
+/// Dispatch a tool-native rule id to WHICHEVER external-tool grounding table (Semgrep's
+/// or ESLint's) claims it, or `None` when neither does. The single place every grounding
+/// consumer ([`finding_grounds_to`], `report_export::corpus_rule_for`, and the
+/// newly-discovered-row pass in [`reconcile_external_tool_ledger`]) should call instead
+/// of hand-chaining `semgrep_floor_category`/`eslint_floor_category` themselves, so a
+/// THIRD external tool's grounding table (were one added later) only needs wiring here
+/// once rather than at every call site.
+pub(crate) fn external_tool_floor_category(tool_rule_id: &str) -> Option<&'static str> {
+    semgrep_floor_category(tool_rule_id).or_else(|| eslint_floor_category(tool_rule_id))
+}
+
 /// Map ANY finding's rule id (floor OR any preview tool) to a normalized security
 /// category string, or `None` when no category mapping exists. Used by
 /// `dedup_scan_previews` for cross-tool dedup: two findings on the same
@@ -5773,7 +5847,7 @@ pub async fn merge_scan_preview(
     // on the strength of "a semgrep rule maps to this corpus rule" — BEFORE this pass (the one
     // that actually runs the tool) executed at all. See `reconcile_external_tool_ledger`'s doc
     // comment for why this correction can't happen earlier.
-    reconcile_external_tool_ledger(report, &tools_attempted);
+    reconcile_external_tool_ledger(report, &tools_attempted, corpus);
 }
 
 /// Corrects the ledger's `RuleTier::ExternalTool` entries to reflect what the scan-time
@@ -5815,9 +5889,42 @@ pub async fn merge_scan_preview(
 /// outcome 1 (a nonzero `emitted` count wins) — the honest statement in that case is "ran, N
 /// findings", not "did not run", and the per-repo failure is still visible in
 /// `report.coverage_notes` either way (this function never removes a `CoverageNote`).
+/// Which external tool backs `rule_id`'s detector, for [`reconcile_external_tool_ledger`]'s
+/// per-rule disclosure text. Reuses `scan_tools::tool_for_rule` verbatim (the SAME function
+/// `group_by_tool`/`run_scan_tools` use to decide which tool actually drives a rule at scan
+/// time) against `corpus`, so this can never answer a different question than what really
+/// ran. Falls back to `"semgrep"` when `corpus` is absent or the rule id has no corpus
+/// record — this is the ONLY tool `reconcile_external_tool_ledger` ever had to reason about
+/// before ESLint-backed corpus rules existed, so every pre-existing caller that doesn't pass
+/// a corpus (every test written before this function learned about ESLint) keeps its exact
+/// original "semgrep" behavior.
+fn external_tool_name_for_ledger_rule(
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> &'static str {
+    corpus
+        .and_then(|c| c.get_by_id(rule_id))
+        .and_then(crate::scan_tools::tool_for_rule)
+        .map(|t| t.name())
+        .unwrap_or("semgrep")
+}
+
+/// Human-readable pass label for a tool name, used in disclosure text
+/// (`report.failed_passes` / the ledger's `skip_reason`). Semgrep keeps its original,
+/// already-tested "commodity taint pass" label verbatim; every other tool gets an honest
+/// "the `<tool>` preview pass" label naming itself.
+fn pass_label_for_tool(tool_name: &str) -> String {
+    if tool_name == "semgrep" {
+        "commodity taint pass".to_string()
+    } else {
+        format!("the {tool_name} preview pass")
+    }
+}
+
 pub(crate) fn reconcile_external_tool_ledger(
     report: &mut crate::onboard::ScanReport,
     tools_attempted: &std::collections::HashSet<&str>,
+    corpus: Option<&camerata_rules::RuleSet>,
 ) {
     // "unrouted" is a ROUTING gap (a selected rule with no tool to drive it at all), not a
     // tool-execution failure — never treated as evidence the tool itself didn't run.
@@ -5849,42 +5956,49 @@ pub(crate) fn reconcile_external_tool_ledger(
             continue;
         }
 
-        if failed_tools.contains("semgrep") {
+        // Which tool backs THIS rule id — "semgrep" unless the corpus says otherwise (see
+        // `external_tool_name_for_ledger_rule`'s doc comment for why that default is safe).
+        let tool_name = external_tool_name_for_ledger_rule(&rule_id, corpus);
+        let pass_label = pass_label_for_tool(tool_name);
+
+        if failed_tools.contains(tool_name) {
             let reason = report
                 .coverage_notes
                 .iter()
-                .find(|n| n.tool == "semgrep")
+                .find(|n| n.tool == tool_name)
                 .map(|n| n.message.clone())
-                .unwrap_or_else(|| "semgrep did not run this scan".to_string());
+                .unwrap_or_else(|| format!("{tool_name} did not run this scan"));
             report.ledger.correct_rule_after_external_pass(
                 rule_id.clone(),
                 false,
-                Some(format!("commodity taint pass did not run: {reason}")),
+                Some(format!("{pass_label} did not run: {reason}")),
                 0,
             );
             report.failed_passes.push(crate::ai_audit::FailedPass {
                 repo: report.repos.join(", "),
-                pass: "commodity taint pass".to_string(),
-                reason: format!("{rule_id}: commodity taint pass did not run: {reason}"),
+                pass: pass_label.clone(),
+                reason: format!("{rule_id}: {pass_label} did not run: {reason}"),
             });
             continue;
         }
 
-        if !tools_attempted.contains("semgrep") {
+        if !tools_attempted.contains(tool_name) {
             // Outcome 3: a pass-level skip with no per-finding failure note to key off of.
-            let reason = "semgrep was never invoked for any scanned repo this scan (no selected \
-                          rule routed to it, no supported language was present, or the \
-                          preview pass did not run at all)";
+            let reason = format!(
+                "{tool_name} was never invoked for any scanned repo this scan (no selected \
+                 rule routed to it, no supported language was present, or the preview pass \
+                 did not run at all)"
+            );
             report.ledger.correct_rule_after_external_pass(
                 rule_id.clone(),
                 false,
-                Some(format!("commodity taint pass did not run: {reason}")),
+                Some(format!("{pass_label} did not run: {reason}")),
                 0,
             );
             report.failed_passes.push(crate::ai_audit::FailedPass {
                 repo: report.repos.join(", "),
-                pass: "commodity taint pass".to_string(),
-                reason: format!("{rule_id}: commodity taint pass did not run: {reason}"),
+                pass: pass_label.clone(),
+                reason: format!("{rule_id}: {pass_label} did not run: {reason}"),
             });
             continue;
         }
@@ -5909,11 +6023,17 @@ pub(crate) fn reconcile_external_tool_ledger(
     // This second pass discovers any such row and records it fresh, so the ledger's
     // per-family counts always equal the rows actually exported, never a strict subset of
     // them keyed off selection alone.
-    // Discovery is deliberately scoped to the GROUNDING MAP only (`semgrep_floor_category`,
-    // a closed, well-known set) rather than trusting an untracked `f.rule_id`/`also_matches`
+    // Discovery is deliberately scoped to the GROUNDING MAPS only (`external_tool_floor_category`
+    // — Semgrep's `semgrep_floor_category` plus ESLint's `eslint_floor_category`, each a
+    // closed, well-known set) rather than trusting an untracked `f.rule_id`/`also_matches`
     // member verbatim as if it were itself a corpus id — a tool-native id with no grounding
     // mapping has no corpus rule to credit, and inventing a ledger row keyed on a raw
-    // `camerata.security.*` string would just add noise with no real rule behind it.
+    // `camerata.security.*`/eslint-plugin string would just add noise with no real rule
+    // behind it. ESLint's bundled base config (`assets/eslint/camerata.config.mjs`) runs a
+    // handful of core rules at "warn" UNCONDITIONALLY (not gated on selection) — `eqeqeq`,
+    // `no-var`, `prefer-const` among them — so exactly the same "the tool ran its whole
+    // baseline, not just the selected subset" shape Semgrep's whole-ruleset behavior already
+    // required this discovery pass for applies to ESLint too.
     let already_tracked: std::collections::HashSet<String> =
         report.ledger.rules().map(|r| r.rule_id.clone()).collect();
     let mut newly_discovered: std::collections::HashMap<String, usize> =
@@ -5929,7 +6049,7 @@ pub(crate) fn reconcile_external_tool_ledger(
         let candidates =
             std::iter::once(f.rule_id.as_str()).chain(f.also_matches.iter().map(String::as_str));
         for candidate in candidates {
-            if let Some(grounded) = semgrep_floor_category(candidate) {
+            if let Some(grounded) = external_tool_floor_category(candidate) {
                 if !already_tracked.contains(grounded) {
                     *newly_discovered.entry(grounded.to_string()).or_insert(0) += 1;
                 }
@@ -5950,22 +6070,22 @@ pub(crate) fn reconcile_external_tool_ledger(
 
 /// Whether finding `f` is evidence that the corpus rule `rule_id` was evaluated — either `f`
 /// IS that rule (a floor row, or a preview row whose own id already equals the corpus id), OR
-/// `f`'s own rule id GROUNDS to `rule_id` via [`semgrep_floor_category`] (a standalone preview
-/// row for a tool rule that hasn't been deduped into anything else), OR one of `f.also_matches`
-/// does (the tool's rule id was folded into a floor/higher-precedence row by
-/// [`dedup_scan_previews`] — the defect is still real and still counted, just not as its own
-/// top-level row). Mirrors `ScanLedger::fired_rule_ids`'s own "a merged-away rule still counts"
-/// principle at the cross-tool-grounding layer.
+/// `f`'s own rule id GROUNDS to `rule_id` via [`external_tool_floor_category`] (a standalone
+/// preview row for a tool rule that hasn't been deduped into anything else — Semgrep OR
+/// ESLint), OR one of `f.also_matches` does (the tool's rule id was folded into a
+/// floor/higher-precedence row by [`dedup_scan_previews`] — the defect is still real and
+/// still counted, just not as its own top-level row). Mirrors `ScanLedger::fired_rule_ids`'s
+/// own "a merged-away rule still counts" principle at the cross-tool-grounding layer.
 pub(crate) fn finding_grounds_to(f: &crate::onboard::Finding, rule_id: &str) -> bool {
     if f.rule_id == rule_id {
         return true;
     }
-    if semgrep_floor_category(&f.rule_id) == Some(rule_id) {
+    if external_tool_floor_category(&f.rule_id) == Some(rule_id) {
         return true;
     }
     f.also_matches
         .iter()
-        .any(|m| m == rule_id || semgrep_floor_category(m) == Some(rule_id))
+        .any(|m| m == rule_id || external_tool_floor_category(m) == Some(rule_id))
 }
 
 /// Mode 3 — START an async audit JOB. Spawns the same audit in the background and returns a
@@ -21962,6 +22082,69 @@ mod tests {
         assert!(existing[0].also_matches.is_empty());
     }
 
+    /// `finding_dedup_rank` treats an eslint preview row IDENTICALLY to clippy/ruff — rank
+    /// one, strictly below a floor row (rank zero) and strictly above semgrep (rank two).
+    /// This is the precedence table the ledger/merge-primacy guarantee ("our own
+    /// deterministic row wins, a preview row never outranks it") rests on; pinned directly
+    /// so a future edit to the match arms can't silently invert it for eslint specifically.
+    #[test]
+    fn finding_dedup_rank_treats_eslint_like_clippy_and_ruff() {
+        let floor = floor_finding("me/web", "src/x.ts", 1, "SOME-FLOOR-RULE-1");
+        let eslint = eslint_finding("me/web", "src/x.ts", 1, "react-hooks/exhaustive-deps");
+        let semgrep = semgrep_finding("me/web", "src/x.ts", 1, "camerata.security.whatever");
+        assert_eq!(finding_dedup_rank(&floor), 0);
+        assert_eq!(finding_dedup_rank(&eslint), 1);
+        assert_eq!(
+            finding_dedup_rank(&clippy_finding("me/web", "src/x.rs", 1, "clippy::x")),
+            1
+        );
+        assert_eq!(
+            finding_dedup_rank(&ruff_finding("me/web", "src/x.py", 1, "S608")),
+            1
+        );
+        assert_eq!(finding_dedup_rank(&semgrep), 2);
+    }
+
+    /// Merge primacy, ESLint edition: when our OWN deterministic row and an eslint preview
+    /// row land at the same (repo, path, line) for the SAME security-grounded category, the
+    /// deterministic row wins — it stays canonical, the eslint rule id is folded into
+    /// `also_matches`, and exactly ONE row survives. Mirrors
+    /// `crosstool_dedup_floor_semgrep_regression_unchanged` above, but tags the preview row
+    /// `preview_tool = "eslint"` specifically — before this task, no existing test exercised
+    /// an eslint-tagged row colliding with a floor row in the SAME category (only
+    /// "different categories" and "unrecognized category" were covered for eslint), so this
+    /// closes that gap in proving the general tool-agnostic merge mechanism — unchanged by
+    /// this task — already does the right thing for eslint rows, not just semgrep/ruff/clippy.
+    #[test]
+    fn crosstool_dedup_eslint_never_outranks_our_own_floor_row() {
+        let mut existing = vec![floor_finding(
+            "me/web",
+            "src/queries.py",
+            5,
+            "SEC-NO-RAW-SQL-CONCAT-1",
+        )];
+        // "S608" is already a recognized "sql"-category id (Ruff/flake8-bandit); tagging it
+        // `preview_tool = "eslint"` here exercises the eslint branch of `finding_dedup_rank`
+        // specifically, without needing a brand-new security-category mapping.
+        let previews = vec![eslint_finding("me/web", "src/queries.py", 5, "S608")];
+
+        let out = dedup_scan_previews(&mut existing, previews);
+
+        assert!(
+            out.is_empty(),
+            "an eslint duplicate of our own floor row must be collapsed: {out:?}"
+        );
+        assert_eq!(
+            existing[0].rule_id, "SEC-NO-RAW-SQL-CONCAT-1",
+            "the floor's own rule_id stays canonical — ours wins merge primacy"
+        );
+        assert!(
+            existing[0].also_matches.contains(&"S608".to_string()),
+            "the eslint rule id must be folded into also_matches, not dropped: {:?}",
+            existing[0].also_matches
+        );
+    }
+
     // ── ci_story_body helpers ─────────────────────────────────────────────────
     //
     // These tests verify that the enriched story bodies contain the SSOT model
@@ -22919,6 +23102,48 @@ mod tests {
         assert!(!finding_grounds_to(&f, "SEC-NO-RAW-SQL-CONCAT-1"));
     }
 
+    // ── ESLint grounding (`eslint_floor_category` / `external_tool_floor_category`) ────
+
+    #[test]
+    fn eslint_floor_category_grounds_react_hooks_rules() {
+        assert_eq!(
+            eslint_floor_category("react-hooks/exhaustive-deps"),
+            Some("JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1")
+        );
+        assert_eq!(
+            eslint_floor_category("react-hooks/rules-of-hooks"),
+            Some("JAVASCRIPT-REACT-RULES-OF-HOOKS-1")
+        );
+        // Unrelated / unmapped ids never ground to anything.
+        assert_eq!(eslint_floor_category("no-console"), None);
+        assert_eq!(eslint_floor_category("react-hooks/unknown-rule"), None);
+    }
+
+    /// A standalone ESLint preview row (never deduped) whose own rule id is the tool's
+    /// native id grounds to the corpus rule via `eslint_floor_category`, exactly mirroring
+    /// `finding_grounds_to_matches_via_semgrep_floor_category` for Semgrep above.
+    #[test]
+    fn finding_grounds_to_matches_via_eslint_floor_category() {
+        let f = preview_finding_for_test("react-hooks/exhaustive-deps", "eslint", &[]);
+        assert!(finding_grounds_to(&f, "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1"));
+        assert!(!finding_grounds_to(&f, "JAVASCRIPT-REACT-RULES-OF-HOOKS-1"));
+    }
+
+    /// `external_tool_floor_category` dispatches to whichever table (Semgrep or ESLint)
+    /// actually claims the id, and to neither when nothing does.
+    #[test]
+    fn external_tool_floor_category_dispatches_across_tools() {
+        assert_eq!(
+            external_tool_floor_category("camerata.security.hardcoded-secret"),
+            Some("SEC-NO-HARDCODED-SECRETS-1")
+        );
+        assert_eq!(
+            external_tool_floor_category("react-hooks/rules-of-hooks"),
+            Some("JAVASCRIPT-REACT-RULES-OF-HOOKS-1")
+        );
+        assert_eq!(external_tool_floor_category("no-such-rule-anywhere"), None);
+    }
+
     /// Helper: a minimal ScanReport (via the existing `gated` constructor, whose fields are
     /// all `pub`) with its `findings`/`ledger`/`coverage_notes` overwritten for the test.
     fn report_for_ledger_test() -> crate::onboard::ScanReport {
@@ -22945,7 +23170,7 @@ mod tests {
             &[],
         )];
         let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
-        reconcile_external_tool_ledger(&mut report, &attempted);
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
         let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
         assert!(entry.ran);
         assert_eq!(
@@ -22981,7 +23206,7 @@ mod tests {
         // No findings at all — the tool never ran. It WAS attempted (routed, then failed) —
         // the hard-failure CoverageNote takes precedence over `tools_attempted` either way.
         let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
-        reconcile_external_tool_ledger(&mut report, &attempted);
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
         let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
         assert!(
             !entry.ran,
@@ -23019,7 +23244,7 @@ mod tests {
             &[],
         )];
         let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
-        reconcile_external_tool_ledger(&mut report, &attempted);
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
         let entry = report
             .ledger
             .rule("SEC-NO-COMMAND-INJECTION-1")
@@ -23054,7 +23279,7 @@ mod tests {
             &[],
         )];
         let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
-        reconcile_external_tool_ledger(&mut report, &attempted);
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
         let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
         assert_eq!(
             entry.findings_emitted, 1,
@@ -23076,7 +23301,7 @@ mod tests {
         };
         report.findings = vec![folded];
         let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
-        reconcile_external_tool_ledger(&mut report, &attempted);
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
         let entry = report
             .ledger
             .rule("SEC-NO-COMMAND-INJECTION-1")
@@ -23103,7 +23328,7 @@ mod tests {
         );
         // No coverage notes, no findings — the pass genuinely never touched this id.
         let attempted: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        reconcile_external_tool_ledger(&mut report, &attempted);
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
         let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
         assert!(
             !entry.ran,
@@ -23284,7 +23509,7 @@ mod tests {
         // Semgrep itself WAS attempted (routed + run) for this id — the unrouted note is about
         // a different, unrelated rule entirely.
         let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
-        reconcile_external_tool_ledger(&mut report, &attempted);
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
         let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
         assert!(
             entry.ran,
@@ -23310,13 +23535,182 @@ mod tests {
             5,
             2,
         );
-        reconcile_external_tool_ledger(&mut report, &std::collections::HashSet::new());
+        reconcile_external_tool_ledger(&mut report, &std::collections::HashSet::new(), None);
         let entry = report.ledger.rule("SEC-NO-HARDCODED-SECRETS-1").unwrap();
         assert!(entry.ran);
         assert_eq!(
             entry.findings_emitted, 2,
             "must be untouched by the external-tool correction"
         );
+    }
+
+    // ── reconcile_external_tool_ledger, generalized to ESLint ─────────────────────────
+    //
+    // Everything above this block only ever exercised Semgrep (the only external tool
+    // that existed when this ledger was built). These tests prove the SAME three outcomes
+    // hold for an ESLint-backed corpus rule once a `corpus` is threaded through — using
+    // the REAL loaded corpus so `external_tool_name_for_ledger_rule`'s
+    // `scan_tools::tool_for_rule` lookup resolves `JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1` to
+    // `ScanTool::Eslint` exactly as the live pipeline would, never a hand-built stand-in
+    // that could silently drift from the real routing.
+
+    /// Outcome 1: ESLint genuinely ran and found the hooks violation — the pre-pass
+    /// speculative `ran=true, findings_emitted=0` entry is corrected to the REAL count.
+    #[tokio::test]
+    async fn reconcile_marks_eslint_rule_ran_with_real_count_when_tool_succeeded() {
+        let (corpus, _errs) =
+            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+        assert!(
+            corpus
+                .get_by_id("JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1")
+                .is_some(),
+            "precondition: the real corpus must carry this id"
+        );
+
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0, // the pre-pass speculative (hardcoded) count
+        );
+        report.findings = vec![preview_finding_for_test(
+            "react-hooks/exhaustive-deps",
+            "eslint",
+            &[],
+        )];
+        let attempted: std::collections::HashSet<&str> = ["eslint"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted, Some(&corpus));
+
+        let entry = report
+            .ledger
+            .rule("JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1")
+            .unwrap();
+        assert!(entry.ran);
+        assert_eq!(
+            entry.findings_emitted, 1,
+            "must reflect the REAL eslint count, not the pre-pass 0"
+        );
+        assert!(
+            report.failed_passes.is_empty(),
+            "a successful pass must not disclose a failure"
+        );
+    }
+
+    /// Outcome 2: ESLint is absent/failed for every repo this scan touched — the entry is
+    /// corrected to NOT RUN with a disclosed reason naming ESLINT (not "commodity taint
+    /// pass", which is Semgrep's label) and a `FailedPass` is pushed. Never a silent
+    /// "verified clean".
+    #[tokio::test]
+    async fn reconcile_marks_eslint_rule_not_run_and_discloses_when_tool_absent() {
+        let (corpus, _errs) =
+            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "JAVASCRIPT-REACT-RULES-OF-HOOKS-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0,
+        );
+        report.coverage_notes = vec![crate::onboard::CoverageNote {
+            tool: "eslint".to_string(),
+            message: "could not preview 1 rule(s) with eslint: base interpreter not available: \
+                      npm"
+            .to_string(),
+        }];
+        let attempted: std::collections::HashSet<&str> = ["eslint"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted, Some(&corpus));
+
+        let entry = report
+            .ledger
+            .rule("JAVASCRIPT-REACT-RULES-OF-HOOKS-1")
+            .unwrap();
+        assert!(
+            !entry.ran,
+            "a tool that never ran must never be recorded as ran=true"
+        );
+        assert!(!entry.verified_clean(), "must never read as verified clean");
+        let reason = entry.skip_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.starts_with("the eslint preview pass did not run:"),
+            "got: {reason}"
+        );
+        assert_eq!(report.failed_passes.len(), 1);
+        assert_eq!(report.failed_passes[0].pass, "the eslint preview pass");
+        assert!(report.failed_passes[0]
+            .reason
+            .contains("JAVASCRIPT-REACT-RULES-OF-HOOKS-1"));
+    }
+
+    /// Outcome 3: ESLint was never even INVOKED this scan (no selected rule routed to it,
+    /// no JS/TS language present, or the preview pass never ran at all) — same disclosure
+    /// shape as outcome 2, keyed off `tools_attempted` instead of a `CoverageNote`.
+    #[tokio::test]
+    async fn reconcile_marks_eslint_rule_not_run_when_tool_never_attempted_this_scan() {
+        let (corpus, _errs) =
+            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0,
+        );
+        // No coverage notes, no findings, and eslint is NOT in `tools_attempted`.
+        let attempted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        reconcile_external_tool_ledger(&mut report, &attempted, Some(&corpus));
+
+        let entry = report
+            .ledger
+            .rule("JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1")
+            .unwrap();
+        assert!(
+            !entry.ran,
+            "a tool never invoked this scan must never be recorded as ran=true"
+        );
+        assert!(!entry.verified_clean(), "must never read as verified clean");
+        let reason = entry.skip_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.starts_with("the eslint preview pass did not run:"),
+            "got: {reason}"
+        );
+        assert!(reason.contains("eslint was never invoked"), "got: {reason}");
+        assert_eq!(report.failed_passes.len(), 1);
+        assert_eq!(report.failed_passes[0].pass, "the eslint preview pass");
+    }
+
+    /// Passing `corpus = None` (every pre-existing caller) must leave Semgrep's exact
+    /// original behavior and disclosure text untouched — the default-to-"semgrep" fallback
+    /// in `external_tool_name_for_ledger_rule` is a true backward-compatibility guarantee,
+    /// not just "probably fine".
+    #[test]
+    fn reconcile_without_corpus_keeps_original_semgrep_wording() {
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0,
+        );
+        let attempted: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        reconcile_external_tool_ledger(&mut report, &attempted, None);
+        let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
+        let reason = entry.skip_reason.as_deref().unwrap_or("");
+        assert!(
+            reason.starts_with("commodity taint pass did not run:"),
+            "got: {reason}"
+        );
+        assert_eq!(report.failed_passes[0].pass, "commodity taint pass");
     }
 
     /// Helper: build a minimal ScanReport with one active finding.

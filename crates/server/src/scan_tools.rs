@@ -127,16 +127,29 @@ pub fn tool_for_rule(rule: &Rule) -> Option<ScanTool> {
         })
 }
 
+/// Whether `s` is shaped like a real lint rule identifier (`kebab-case`, optionally
+/// `scope/kebab-case` or `scope/kebab_case`) rather than a prose description of a tool
+/// CONVENTION. A handful of corpus `[[sources]].linter` annotations describe how a
+/// tool behaves by DEFAULT rather than naming an actual rule — e.g. `jest:
+/// jest.useFakeTimers() API`, `jest: testMatch default glob`, `vitest: include default
+/// glob` (see `crates/rules/principles/javascript/testing/*.toml`). Handing one of
+/// those to `eslint --rule` as if it were a real id would either silently no-op or
+/// error; this keeps them out of both the routing decision ([`tool_for_linter`]) and
+/// the generated `--rule` arguments ([`selector_for_linter`]), while leaving every
+/// genuine rule id (hyphens, underscores, scope slashes, `@scope` prefixes) untouched.
+fn looks_like_lint_rule_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/'))
+}
+
 /// Map a single `linter` source string to a scan tool. Pure; the core of the
 /// linter-source -> tool grouping that the tests pin.
 pub fn tool_for_linter(linter: &str) -> Option<ScanTool> {
-    let lower = linter.trim().to_ascii_lowercase();
+    let trimmed = linter.trim();
+    let lower = trimmed.to_ascii_lowercase();
     // The "tool token" is the bit before the first `:` or `::` separator.
-    let token = lower
-        .split([':'].as_ref())
-        .next()
-        .unwrap_or(&lower)
-        .trim();
+    let token = lower.split([':'].as_ref()).next().unwrap_or(&lower).trim();
 
     if token == "semgrep" {
         return Some(ScanTool::Semgrep);
@@ -148,17 +161,34 @@ pub fn tool_for_linter(linter: &str) -> Option<ScanTool> {
         return Some(ScanTool::Ruff);
     }
     // eslint family: bare `eslint`, scoped plugins (`@typescript-eslint`,
-    // `@angular-eslint`), `eslint-plugin-*`, and the `vue/` rule namespace which
-    // is enforced via eslint-plugin-vue.
-    if token == "eslint"
+    // `@angular-eslint`), `eslint-plugin-*`, the `vue/` rule namespace enforced via
+    // eslint-plugin-vue, and a few named plugin scopes the corpus grounds specific
+    // rules against today (`react-hooks` — eslint-plugin-react-hooks; `jest` —
+    // eslint-plugin-jest).
+    let is_eslint_family = token == "eslint"
         || token.starts_with("eslint-")
         || token.starts_with("@typescript-eslint")
         || token.starts_with("@angular-eslint")
         || token.starts_with("vue/")
-    {
-        return Some(ScanTool::Eslint);
+        || token == "react-hooks"
+        || token == "jest";
+    if !is_eslint_family {
+        return None;
     }
-    None
+    // No-colon forms (`@angular-eslint/prefer-inject`) are already fully-qualified
+    // rule ids; trust them as before — there is no "after the colon" to validate.
+    let Some((_, after)) = trimmed.split_once(':') else {
+        return Some(ScanTool::Eslint);
+    };
+    // A colon-separated source (`token: after`) must have an `after` shaped like a
+    // real rule id. Several `jest:` sources in the corpus describe a CONVENTION the
+    // tool enforces by its own defaults, not a lint rule — those must never be
+    // claimed as eslint-routable (see `looks_like_lint_rule_id`'s doc comment).
+    if looks_like_lint_rule_id(after.trim()) {
+        Some(ScanTool::Eslint)
+    } else {
+        None
+    }
 }
 
 /// The tool-specific rule SELECTOR token derived from a `linter` source, used to
@@ -170,7 +200,13 @@ pub fn tool_for_linter(linter: &str) -> Option<ScanTool> {
 /// - `"clippy: unwrap_used"`   -> `"unwrap_used"`
 /// - `"eslint: eqeqeq"`        -> `"eqeqeq"`
 /// - `"@typescript-eslint: no-explicit-any"` -> `"@typescript-eslint/no-explicit-any"`
+/// - `"react-hooks: exhaustive-deps"` -> `"react-hooks/exhaustive-deps"`
+/// - `"jest: no-conditional-expect"` -> `"jest/no-conditional-expect"`
+/// - `"eslint-plugin-vue: vue/component-api-style"` -> `"vue/component-api-style"`
+///   (the corpus already wrote the rule in fully-qualified form after the colon —
+///   NOT re-prefixed to `vue/vue/component-api-style`)
 /// - `"semgrep"`               -> `None` (semgrep selects by config pack, not id)
+/// - `"jest: jest.useFakeTimers() API"` -> `None` (a convention, not a rule id)
 pub fn selector_for_linter(linter: &str) -> Option<String> {
     let trimmed = linter.trim();
     let tool = tool_for_linter(trimmed)?;
@@ -178,7 +214,10 @@ pub fn selector_for_linter(linter: &str) -> Option<String> {
         return None;
     }
     // Split on the first `:` (the corpus convention is `Tool: rule-id`).
-    let after = trimmed.splitn(2, ':').nth(1).map(str::trim).unwrap_or("");
+    let after = trimmed
+        .split_once(':')
+        .map(|(_, after)| after.trim())
+        .unwrap_or("");
     if after.is_empty() {
         // No `:` separator — the whole token IS the rule id for some eslint
         // plugins recorded as `@angular-eslint/prefer-inject` with no colon.
@@ -187,17 +226,34 @@ pub fn selector_for_linter(linter: &str) -> Option<String> {
         }
         return None;
     }
-    // eslint scoped plugins record `@typescript-eslint: no-explicit-any`; the
-    // real eslint rule id is `@typescript-eslint/no-explicit-any`.
+    if tool == ScanTool::Eslint && !looks_like_lint_rule_id(after) {
+        // `tool_for_linter` already filters most of these at the routing stage, but
+        // this guard is defensive — a rule id this function is ever asked about must
+        // never be handed to `eslint --rule` unless it is actually shaped like one.
+        return None;
+    }
+    // eslint scoped plugins record `@typescript-eslint: no-explicit-any`; the real
+    // eslint rule id is `@typescript-eslint/no-explicit-any`. Likewise `react-hooks:
+    // exhaustive-deps` -> `react-hooks/exhaustive-deps` and `jest:
+    // no-conditional-expect` -> `jest/no-conditional-expect`.
     let lower = trimmed.to_ascii_lowercase();
     if tool == ScanTool::Eslint
         && (lower.starts_with("@typescript-eslint")
             || lower.starts_with("@angular-eslint")
-            || lower.starts_with("eslint-plugin"))
+            || lower.starts_with("eslint-plugin")
+            || lower.starts_with("react-hooks:")
+            || lower.starts_with("jest:"))
     {
-        let scope = trimmed.splitn(2, ':').next().unwrap_or("").trim();
+        let scope = trimmed.split(':').next().unwrap_or("").trim();
         // eslint-plugin-foo: rule  ->  foo/rule ; @scope: rule -> @scope/rule
         let scope = scope.strip_prefix("eslint-plugin-").unwrap_or(scope);
+        // Guard against double-prefixing when the corpus already wrote the rule in
+        // fully-qualified `scope/rule` form after the colon (the convention used by
+        // the Vue sources: `eslint-plugin-vue: vue/component-api-style`) — keep it
+        // as-is rather than producing `vue/vue/component-api-style`.
+        if after.starts_with(&format!("{scope}/")) {
+            return Some(after.to_string());
+        }
         return Some(format!("{scope}/{after}"));
     }
     Some(after.to_string())
@@ -1204,6 +1260,114 @@ mod tests {
         assert_eq!(selector_for_linter("semgrep"), None);
     }
 
+    /// JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1 / JAVASCRIPT-REACT-RULES-OF-HOOKS-1 regression
+    /// guard: the `react-hooks:` scope (eslint-plugin-react-hooks) must route to
+    /// `ScanTool::Eslint` and produce the real `react-hooks/<rule>` eslint id — before this
+    /// fix, `tool_for_linter` did not recognize the `react-hooks` token at all, so both
+    /// corpus rules (declared `enforcement = "mechanical"`) silently had NO deterministic
+    /// detector of any kind, relying entirely on the semantic/AI pass.
+    #[test]
+    fn react_hooks_sources_route_to_eslint() {
+        assert_eq!(
+            tool_for_linter("react-hooks: exhaustive-deps"),
+            Some(ScanTool::Eslint)
+        );
+        assert_eq!(
+            tool_for_linter("react-hooks: rules-of-hooks"),
+            Some(ScanTool::Eslint)
+        );
+        assert_eq!(
+            selector_for_linter("react-hooks: exhaustive-deps").as_deref(),
+            Some("react-hooks/exhaustive-deps")
+        );
+        assert_eq!(
+            selector_for_linter("react-hooks: rules-of-hooks").as_deref(),
+            Some("react-hooks/rules-of-hooks")
+        );
+    }
+
+    /// eslint-plugin-jest: real rule ids route and produce `jest/<rule>`.
+    #[test]
+    fn jest_rule_sources_route_to_eslint() {
+        for (source, expected) in [
+            ("jest: no-conditional-expect", "jest/no-conditional-expect"),
+            ("jest: expect-expect", "jest/expect-expect"),
+            ("jest: no-done-callback", "jest/no-done-callback"),
+            ("jest: prefer-spy-on", "jest/prefer-spy-on"),
+            ("jest: no-identical-title", "jest/no-identical-title"),
+            ("jest: valid-title", "jest/valid-title"),
+            ("jest: no-disabled-tests", "jest/no-disabled-tests"),
+            ("jest: no-focused-tests", "jest/no-focused-tests"),
+        ] {
+            assert_eq!(tool_for_linter(source), Some(ScanTool::Eslint), "{source}");
+            assert_eq!(
+                selector_for_linter(source).as_deref(),
+                Some(expected),
+                "{source}"
+            );
+        }
+    }
+
+    /// A handful of `linter` annotations describe a tool CONVENTION (Jest's/Vitest's own
+    /// default glob matching, or a method-call mention) rather than naming a real lint
+    /// rule — these must route to NO tool at all (never Eslint with a bogus selector that
+    /// would either no-op or error when handed to `eslint --rule`).
+    #[test]
+    fn non_rule_jest_and_vitest_conventions_are_not_eslint_routable() {
+        assert_eq!(
+            tool_for_linter("jest: jest.useFakeTimers() API"),
+            None,
+            "a method-call mention is not a rule id"
+        );
+        assert_eq!(
+            tool_for_linter("jest: testMatch default glob"),
+            None,
+            "a config-default description is not a rule id"
+        );
+        assert_eq!(
+            tool_for_linter("vitest: include default glob"),
+            None,
+            "vitest is not a recognized eslint-family token, and this isn't a rule id either"
+        );
+        assert_eq!(selector_for_linter("jest: jest.useFakeTimers() API"), None);
+        assert_eq!(selector_for_linter("jest: testMatch default glob"), None);
+    }
+
+    /// Regression: `eslint-plugin-vue: vue/component-api-style` must resolve to
+    /// `vue/component-api-style`, NOT `vue/vue/component-api-style`. Before this fix the
+    /// scope-prefixing branch always prepended `{scope}/` without checking whether `after`
+    /// already carried it — every Vue corpus rule (which records the rule in
+    /// already-fully-qualified `vue/<rule>` form after the colon) produced a doubled,
+    /// invalid eslint rule id that could never have matched a real rule when handed to
+    /// `eslint --rule`.
+    #[test]
+    fn vue_plugin_sources_are_not_double_prefixed() {
+        for (source, expected) in [
+            (
+                "eslint-plugin-vue: vue/component-api-style",
+                "vue/component-api-style",
+            ),
+            (
+                "eslint-plugin-vue: vue/no-side-effects-in-computed-properties",
+                "vue/no-side-effects-in-computed-properties",
+            ),
+            (
+                "eslint-plugin-vue: vue/no-mutating-props",
+                "vue/no-mutating-props",
+            ),
+            (
+                "eslint-plugin-vue: vue/enforce-style-attribute",
+                "vue/enforce-style-attribute",
+            ),
+        ] {
+            assert_eq!(
+                selector_for_linter(source).as_deref(),
+                Some(expected),
+                "{source}"
+            );
+        }
+    }
+
     #[test]
     fn group_by_tool_routes_and_excludes_layer3() {
         let rules = vec![
@@ -1478,6 +1642,160 @@ mod tests {
             "must carry preview=true (external-tool), never our own tier"
         );
         assert_eq!(f[0].preview_tool.as_deref(), Some("semgrep"));
+    }
+
+    /// Shape-variant coverage for the hooks rules: a SYNTHETIC eslint SARIF payload with one
+    /// `react-hooks/exhaustive-deps` result in a `.tsx` file, one in a plain `.jsx` file, and
+    /// one `react-hooks/rules-of-hooks` result in a `.ts` custom-hook file — covering the
+    /// realistic range of file extensions eslint's `ruleId`/location fields take no notice
+    /// of (eslint reports the SAME rule ids regardless of `.jsx` vs `.tsx`, unlike semgrep's
+    /// per-language rule id suffixes). No eslint binary required; this is the ingestion/
+    /// mapping unit test the task calls for, exercising `parse_sarif` exactly as the live
+    /// pass's ingestion path does.
+    #[test]
+    fn parse_sarif_ingests_synthetic_react_hooks_shape_variants() {
+        let sarif = r#"{
+          "version": "2.1.0",
+          "runs": [{
+            "results": [
+              {
+                "ruleId": "react-hooks/exhaustive-deps",
+                "level": "warning",
+                "message": { "text": "React Hook useEffect has a missing dependency: 'id'." },
+                "locations": [{
+                  "physicalLocation": {
+                    "artifactLocation": { "uri": "src/components/Thing.tsx" },
+                    "region": { "startLine": 12 }
+                  }
+                }]
+              },
+              {
+                "ruleId": "react-hooks/exhaustive-deps",
+                "level": "warning",
+                "message": { "text": "React Hook useMemo has a missing dependency: 'value'." },
+                "locations": [{
+                  "physicalLocation": {
+                    "artifactLocation": { "uri": "src/components/Other.jsx" },
+                    "region": { "startLine": 7 }
+                  }
+                }]
+              },
+              {
+                "ruleId": "react-hooks/rules-of-hooks",
+                "level": "error",
+                "message": {
+                  "text": "React Hook \"useState\" is called conditionally. React Hooks must be called in the exact same order in every component render."
+                },
+                "locations": [{
+                  "physicalLocation": {
+                    "artifactLocation": { "uri": "src/hooks/useThing.ts" },
+                    "region": { "startLine": 5 }
+                  }
+                }]
+              }
+            ]
+          }]
+        }"#;
+        let f = parse_sarif("me/web", ScanTool::Eslint, sarif).unwrap();
+        assert_eq!(f.len(), 3);
+
+        let tsx = f
+            .iter()
+            .find(|x| x.path == "src/components/Thing.tsx")
+            .unwrap();
+        assert_eq!(tsx.rule_id, "react-hooks/exhaustive-deps");
+        assert_eq!(tsx.line, 12);
+        assert_eq!(
+            tsx.severity, "medium",
+            "SARIF 'warning' level normalizes to medium"
+        );
+
+        let jsx = f
+            .iter()
+            .find(|x| x.path == "src/components/Other.jsx")
+            .unwrap();
+        assert_eq!(jsx.rule_id, "react-hooks/exhaustive-deps");
+        assert_eq!(jsx.line, 7);
+
+        let hook = f
+            .iter()
+            .find(|x| x.path == "src/hooks/useThing.ts")
+            .unwrap();
+        assert_eq!(hook.rule_id, "react-hooks/rules-of-hooks");
+        assert_eq!(hook.line, 5);
+        assert_eq!(
+            hook.severity, "high",
+            "SARIF 'error' level normalizes to high"
+        );
+
+        // External-tool provenance on every variant — never our own deterministic tier,
+        // regardless of file extension or SARIF level.
+        for finding in &f {
+            assert!(finding.preview, "must carry preview=true: {finding:?}");
+            assert_eq!(finding.preview_tool.as_deref(), Some("eslint"));
+        }
+    }
+
+    /// End-to-end ingestion + grounding, from raw SARIF all the way to OUR citation,
+    /// severity, and authored remediation — the exact chain the task calls for ("an eslint
+    /// finding maps to the right corpus rule with our citation/severity/fix and preview
+    /// provenance"), starting from `parse_sarif` (not a hand-built `Finding`) and ending at
+    /// `report_export::resolve_citation`/`resolve_fix` against the REAL loaded corpus.
+    #[tokio::test]
+    async fn eslint_sarif_finding_grounds_to_corpus_citation_severity_and_fix() {
+        let (corpus, errors) =
+            camerata_rules::load_corpus_lenient(&camerata_rules::corpus_path()).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got: {errors:?}"
+        );
+
+        let sarif = r#"{
+          "version": "2.1.0",
+          "runs": [{
+            "results": [{
+              "ruleId": "react-hooks/rules-of-hooks",
+              "level": "error",
+              "message": { "text": "React Hook \"useState\" is called conditionally." },
+              "locations": [{
+                "physicalLocation": {
+                  "artifactLocation": { "uri": "src/hooks/useThing.ts" },
+                  "region": { "startLine": 5 }
+                }
+              }]
+            }]
+          }]
+        }"#;
+        let findings = parse_sarif("me/web", ScanTool::Eslint, sarif).expect("must parse SARIF");
+        assert_eq!(findings.len(), 1);
+        let f = &findings[0];
+        assert_eq!(f.rule_id, "react-hooks/rules-of-hooks");
+        assert!(f.preview && f.preview_tool.as_deref() == Some("eslint"));
+
+        let citation = crate::report_export::resolve_citation(
+            &f.rule_id,
+            f.preview_tool.as_deref(),
+            Some(&corpus),
+        );
+        assert_eq!(
+            citation.kind, "grounded",
+            "must resolve to OUR corpus citation, not a generic preview label: {citation:?}"
+        );
+        assert!(
+            citation.sources.iter().any(|s| s
+                .url
+                .contains("react.dev/reference/eslint-plugin-react-hooks")),
+            "must cite the SAME React docs source JAVASCRIPT-REACT-RULES-OF-HOOKS-1 cites: \
+             {citation:?}"
+        );
+
+        let fix = crate::report_export::resolve_fix(&f.rule_id, Some(&corpus), f, None);
+        assert!(
+            fix.as_deref()
+                .is_some_and(|s| s.to_ascii_lowercase().contains("top level")),
+            "must resolve OUR authored remediation (moving the hook to the top level), got: \
+             {fix:?}"
+        );
     }
 
     #[test]
@@ -2268,5 +2586,87 @@ def get_user_safe_constant():
                 "safe twin at line {line} must NOT be flagged, got lines: {lines:?}"
             );
         }
+    }
+
+    /// Whether a Camerata-managed eslint workspace, with `eslint-plugin-react-hooks`
+    /// already installed inside it, is cached on THIS machine from a prior real
+    /// provisioning run. Mirrors `which_semgrep`'s role above: gates the live test on
+    /// tool presence WITHOUT triggering a network `npm install` at test time (which would
+    /// make this test flaky/slow/offline-hostile — `ensure_eslint`'s probe-first design
+    /// means this check and the live test below never provision anything new). A bare
+    /// `eslint` binary on PATH is not enough here (unlike `which_semgrep`, which only
+    /// needs semgrep itself): the assertion below needs `eslint-plugin-react-hooks`
+    /// registered, which only Camerata's OWN managed workspace + bundled config provide.
+    fn cached_eslint_workspace_with_react_hooks_plugin() -> Option<std::path::PathBuf> {
+        let tooling = tool_provisioning::tooling_dir()?;
+        let workspace = tool_provisioning::eslint_workspace_dir(&tooling);
+        let bin = tool_provisioning::eslint_bin(&workspace);
+        if !bin.exists() {
+            return None;
+        }
+        let plugin_marker = workspace
+            .join("node_modules")
+            .join("eslint-plugin-react-hooks")
+            .join("package.json");
+        if !plugin_marker.exists() {
+            return None;
+        }
+        Some(workspace)
+    }
+
+    /// Live end-to-end proof (gated on tool presence, like `live_semgrep_detects_shape_
+    /// variant_sqli_and_spares_safe_twins` above): over a REAL `useEffect` that omits a
+    /// reactive dependency, the full `run_scan_tools` path — provisioning probe, bundled
+    /// config, `--rule` override, SARIF parse — produces a real
+    /// `react-hooks/exhaustive-deps` finding. Skips (never fails) when no Camerata-managed
+    /// eslint workspace with the react-hooks plugin is cached on this machine.
+    #[tokio::test]
+    async fn live_eslint_detects_a_real_exhaustive_deps_violation() {
+        if cached_eslint_workspace_with_react_hooks_plugin().is_none() {
+            eprintln!(
+                "skipping live_eslint_detects_a_real_exhaustive_deps_violation: no cached \
+                 Camerata eslint workspace with eslint-plugin-react-hooks provisioned on this \
+                 machine (this test never provisions over the network)"
+            );
+            return;
+        }
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let src = r#"
+import { useEffect, useState } from "react";
+
+export function Thing({ id }) {
+  const [value, setValue] = useState(0);
+  useEffect(() => {
+    console.log(id, value);
+  }, []); // missing both `id` and `value`
+  return value;
+}
+"#;
+        std::fs::write(dir.path().join("Thing.jsx"), src).expect("write fixture");
+
+        let rules = vec![rule_with(
+            "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1",
+            camerata_rules::EnforcementKind::Mechanical,
+            false,
+            &["react-hooks: exhaustive-deps"],
+        )];
+        let lookup = lookup_over(&rules);
+        let selection = vec![selected("JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1")];
+
+        let (findings, notes, attempted) =
+            run_scan_tools("me/web", dir.path(), &selection, &lookup, None, None).await;
+
+        assert!(
+            attempted.contains("eslint"),
+            "eslint must have been attempted this run: notes={notes:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule_id == "react-hooks/exhaustive-deps" && f.path.contains("Thing")),
+            "a real missing-dependency violation must produce a real eslint finding: \
+             findings={findings:?} notes={notes:?}"
+        );
     }
 }

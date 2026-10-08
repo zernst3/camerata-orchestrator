@@ -1406,14 +1406,15 @@ fn is_external_source_url(url: &str) -> bool {
     url.starts_with("http://") || url.starts_with("https://")
 }
 
-/// Join `rule_id` against `corpus`, falling back to the W3 grounding map
-/// (`crate::semgrep_floor_category`) when `rule_id` is an external tool's OWN rule id
-/// (e.g. `camerata.security.taint-sql-injection-python`) rather than one of our corpus
-/// ids. This is the single place "which corpus TOML entry supplies this finding's
-/// citation/remediation/effort" is decided, so `resolve_citation`, `resolve_fix`, and
-/// `resolve_effort` can't drift from each other on what "grounded" means for a preview
-/// finding. The finding's OWN `rule_id` (and `preview_tool`) are never touched by this —
-/// only which corpus rule's authored facts get joined in.
+/// Join `rule_id` against `corpus`, falling back to the external-tool grounding maps
+/// (`crate::external_tool_floor_category` — Semgrep's `semgrep_floor_category` plus
+/// ESLint's `eslint_floor_category`) when `rule_id` is an external tool's OWN rule id
+/// (e.g. `camerata.security.taint-sql-injection-python`, or `react-hooks/exhaustive-deps`)
+/// rather than one of our corpus ids. This is the single place "which corpus TOML entry
+/// supplies this finding's citation/remediation/effort" is decided, so `resolve_citation`,
+/// `resolve_fix`, and `resolve_effort` can't drift from each other on what "grounded"
+/// means for a preview finding. The finding's OWN `rule_id` (and `preview_tool`) are never
+/// touched by this — only which corpus rule's authored facts get joined in.
 ///
 /// A direct hit (`rule_id` IS a corpus id) always wins over the grounding map, so this
 /// is fully backward compatible with every existing call site that already passes a
@@ -1424,7 +1425,8 @@ pub(crate) fn corpus_rule_for<'c>(
 ) -> Option<&'c camerata_rules::Rule> {
     corpus.and_then(|c| {
         c.get_by_id(rule_id).or_else(|| {
-            crate::semgrep_floor_category(rule_id).and_then(|grounded_id| c.get_by_id(grounded_id))
+            crate::external_tool_floor_category(rule_id)
+                .and_then(|grounded_id| c.get_by_id(grounded_id))
         })
     })
 }
@@ -6659,6 +6661,74 @@ mod tests {
             .curated_findings
             .iter()
             .find(|g| g.rule_id == "camerata.security.taint-sql-injection-go")
+            .expect("must be curated, not held out as uncited");
+        assert_eq!(group.citation.kind, "grounded");
+    }
+
+    /// ESLint wiring (JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1 / RULES-OF-HOOKS-1): a SYNTHETIC
+    /// eslint finding whose OWN rule id is the real ESLint SARIF `ruleId`
+    /// (`react-hooks/exhaustive-deps`, not a corpus id) still resolves to OUR grounded
+    /// citation (the React docs lint-rule page), OUR authored remediation, and never loses
+    /// its external-tool provenance (`preview = true`, `preview_tool = Some("eslint")`) —
+    /// it must never render as our own deterministic tier. Mirrors
+    /// `taint_sqli_tool_rule_id_resolves_through_the_grounding_map` above for Semgrep.
+    #[tokio::test]
+    async fn react_hooks_exhaustive_deps_tool_rule_id_resolves_through_the_grounding_map() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+
+        let mut f = finding(
+            "react-hooks/exhaustive-deps",
+            "src/UseThing.tsx",
+            42,
+            "medium",
+        );
+        f.preview = true;
+        f.preview_tool = Some("eslint".to_string());
+
+        let citation = resolve_citation(&f.rule_id, f.preview_tool.as_deref(), Some(&corpus));
+        assert_eq!(
+            citation.kind, "grounded",
+            "the eslint-native rule id must still resolve to a grounded citation via the \
+             grounding map, got: {citation:?}"
+        );
+        assert!(
+            citation.sources.iter().any(|s| s
+                .url
+                .contains("react.dev/reference/eslint-plugin-react-hooks")),
+            "must cite the SAME React docs source JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1 cites, \
+             got: {:?}",
+            citation.sources
+        );
+
+        let fix = resolve_fix(&f.rule_id, Some(&corpus), &f, None);
+        assert!(
+            fix.is_some_and(|s| !s.trim().is_empty()),
+            "must resolve OUR authored remediation via the grounding map"
+        );
+
+        // Provenance stays honest: never promoted to our own deterministic tier.
+        assert!(
+            f.preview,
+            "grounding a citation must never flip preview to false"
+        );
+        assert_eq!(
+            f.preview_tool.as_deref(),
+            Some("eslint"),
+            "grounding a citation must never clear preview_tool (never 'our own tier')"
+        );
+
+        // End-to-end: the curated-set builder renders it grounded too, not advisory.
+        let report = report_with(vec![f], vec![]);
+        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let group = json
+            .curated_findings
+            .iter()
+            .find(|g| g.rule_id == "react-hooks/exhaustive-deps")
             .expect("must be curated, not held out as uncited");
         assert_eq!(group.citation.kind, "grounded");
     }
