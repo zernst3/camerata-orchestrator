@@ -220,6 +220,48 @@ mod tests {
         );
     }
 
+    /// ESLint wiring regression guard: `JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1` and
+    /// `JAVASCRIPT-REACT-RULES-OF-HOOKS-1` both declare `enforcement = "mechanical"` with a
+    /// `react-hooks:` linter source, but before `scan_tools::tool_for_linter` recognized that
+    /// token, NEITHER resolved to any detector channel at all — zero Rust source anywhere
+    /// referenced either id (confirmed by grep before this fix), so both relied entirely on
+    /// the semantic/AI pass despite being literal, off-the-shelf ESLint rules
+    /// (`react-hooks/exhaustive-deps`, `react-hooks/rules-of-hooks`). This is exactly the
+    /// class of gap `mechanical_rules_missing_detector` exists to surface (even though W4
+    /// made "no detector" non-fatal as long as the rule is code-auditable — see this
+    /// module's top-level doc comment): a genuinely wireable ESLint rule should resolve to
+    /// channel 4 (`has_preview_tool_source` / `"scan_preview_linter"`), not silently fall
+    /// through to "no channel at all".
+    #[tokio::test]
+    async fn react_hooks_rules_resolve_to_the_scan_preview_linter_channel() {
+        let path = camerata_rules::corpus_path();
+        let corpus = camerata_rules::load_corpus(&path)
+            .await
+            .expect("corpus must load cleanly");
+        let checker_ids: HashSet<&str> = HashSet::new();
+        let semgrep_ids = semgrep_covered_rule_ids();
+
+        for id in [
+            "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1",
+            "JAVASCRIPT-REACT-RULES-OF-HOOKS-1",
+        ] {
+            let rule = corpus
+                .get_by_id(id)
+                .unwrap_or_else(|| panic!("{id} missing from corpus"));
+            assert_eq!(
+                rule.enforcement,
+                camerata_rules::EnforcementKind::Mechanical,
+                "{id} must still declare mechanical enforcement"
+            );
+            assert_eq!(
+                detector_channel(id, &checker_ids, &semgrep_ids, Some(&corpus)),
+                Some("scan_preview_linter"),
+                "{id} must resolve to the scan-preview-linter channel now that \
+                 `tool_for_linter` recognizes its `react-hooks:` source"
+            );
+        }
+    }
+
     /// W4's INVERTED CI-time gate. The W1-era version of this test required a wired
     /// deterministic detector for every `mechanical` rule, with a ~35-id grandfather list for
     /// the ones that had none — backwards, per this module's doc comment: having no
