@@ -1788,22 +1788,29 @@ pub async fn audit_repos(
     report.actual_usage = Some(meter.snapshot());
     report.deep = deep_report;
     report.recommendations = recommendations;
-    // W1: fold every scan-time ledger integrity gap into the SAME existing `FailedPass`
-    // disclosure mechanism `all_failed_passes` already uses — runtime never refuses the
-    // export or drops a row; an unaccounted pipeline stage, or a rule declaring mechanical/
-    // architectural enforcement with no wired detector, is recorded here so the export's
-    // methodology and executive summary state it plainly instead of silently calling the
-    // rule "verified clean". See `scan_ledger::stage_disclosure`/`rule_disclosure`'s doc
-    // comments for why an ordinary, honestly-scoped skip (AI not requested, deterministic
-    // deselected) does NOT raise one of these — only a genuine integrity gap does.
+    // W1: fold every scan-time STAGE-level ledger integrity gap into the SAME existing
+    // `FailedPass` disclosure mechanism `all_failed_passes` already uses — runtime never
+    // refuses the export or drops a row; an unaccounted pipeline stage is recorded here so
+    // the export's methodology and executive summary state it plainly instead of silently
+    // calling the rule "verified clean". See `scan_ledger::stage_disclosure`'s doc comment for
+    // why an ordinary, honestly-scoped skip (AI not requested, deterministic deselected) does
+    // NOT raise one of these — only a genuine integrity gap does.
+    //
+    // Client-report fix (2026-10-07 grading pass): a rule declaring mechanical/architectural
+    // enforcement with no wired detector is deliberately NOT folded in here per-rule anymore.
+    // `rule_disclosure` used to be called once per such rule, each becoming its own
+    // internal-vocabulary `FailedPass` ("PYTHON-PARAMETERIZED-SQL-1 declares mechanical
+    // enforcement but has no wired detector...") — a corpus with 19 such rules shipped 19 of
+    // these bullets to the CLIENT, duplicated across the executive summary and methodology
+    // (`report_export::build_report_json` renders `failed_passes` in both sections). The full
+    // per-rule detail is NOT lost: `report.ledger = pipeline_ledger` below still carries every
+    // rule's `skip_reason`, which `camerata inspect`'s `render_ledger_summary` prints in full,
+    // and `report_export::build_report_json` now derives ONE plain client-facing sentence
+    // ("N rules could not be mechanically checked...") directly from the ledger instead of
+    // from a pile of per-rule `FailedPass` entries.
     let repo_label = report.repos.join(", ");
     for stage in pipeline_ledger.stages() {
         if let Some(fp) = crate::scan_ledger::stage_disclosure(&repo_label, stage) {
-            all_failed_passes.push(fp);
-        }
-    }
-    for rule in pipeline_ledger.rules() {
-        if let Some(fp) = crate::scan_ledger::rule_disclosure(&repo_label, rule) {
             all_failed_passes.push(fp);
         }
     }

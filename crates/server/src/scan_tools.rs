@@ -592,8 +592,24 @@ pub fn parse_clippy_json(repo: &str, ndjson: &str) -> anyhow::Result<Vec<Finding
 }
 
 /// Build one preview [`Finding`] with the shared shape: `preview = true`, the
-/// tool recorded, a snippet that names the tool/rule honestly, and the detail
-/// carrying the not-enforced caveat so it is honest wherever it surfaces.
+/// tool recorded, a snippet that names the tool/rule honestly, and a client-readable
+/// detail (never internal gate vocabulary) so it is honest wherever it surfaces.
+///
+/// `status`: left as `"suppressed-baseline"` for back-compat with the internal
+/// active/suppressed accounting several OTHER consumers do over this string (e.g.
+/// `render_scan_results_for_chat`'s "N active (enforced), M suppressed" line, which — like
+/// this finding — is correct in calling a preview row "not active/enforced"). This does
+/// NOT mean, and must never be read to mean, "a prior run accepted this exact finding into
+/// a committed baseline" — no such record exists for a scan-time preview row; the ONLY
+/// legitimate producer of that specific claim is `onboard::audit::classify_repo_findings`,
+/// which stamps this same string strictly when a finding's content fingerprint matches an
+/// entry actually present in `.camerata/baseline.json`, and which never sees preview
+/// findings (they are appended to the report AFTER that pass runs). The CLIENT-facing
+/// disposition layer (`report_export::classify`) is the one place this ambiguity could
+/// have mattered, and it is guarded there: a `preview == true` row can never classify as
+/// `Disposition::BaselineAccepted` regardless of this field's value. See `classify`'s doc
+/// comment for the full defect history (a preview row used to render "pre-existing accepted
+/// debt (baseline suppression)" on a repo nobody had ever triaged).
 fn preview_finding(
     repo: &str,
     tool: ScanTool,
@@ -603,15 +619,16 @@ fn preview_finding(
     severity: &str,
     message: &str,
 ) -> Finding {
+    let tool_name = tool.name();
     let detail = if message.is_empty() {
         format!(
-            "Preview ({tool}): {rule_id} — found by Camerata; NOT enforced until wired into CI.",
-            tool = tool.name()
+            "Found by {tool_name} during this scan ({rule_id}). This check has not yet been \
+             added to your CI pipeline, so it does not block builds on its own yet."
         )
     } else {
         format!(
-            "{message} · Preview ({tool}): NOT enforced until wired into CI.",
-            tool = tool.name()
+            "{message} (found by {tool_name} during this scan; not yet part of your CI \
+             pipeline)."
         )
     };
     Finding {
@@ -622,7 +639,8 @@ fn preview_finding(
         severity: severity.to_string(),
         snippet: message.chars().take(160).collect(),
         detail,
-        // A preview is advisory, not an enforced/active gate hit.
+        // A preview is advisory, not an enforced/active gate hit. See this function's own
+        // doc comment above for why this is NOT a baseline-acceptance claim.
         status: "suppressed-baseline".to_string(),
         preview: true,
         preview_tool: Some(tool.name().to_string()),
@@ -1551,6 +1569,48 @@ mod tests {
         let f2: Finding = serde_json::from_str(legacy).unwrap();
         assert!(!f2.preview);
         assert_eq!(f2.preview_tool, None);
+    }
+
+    /// Defect 1 (2026-10-07 grading pass): a preview finding's `detail` text is rendered
+    /// VERBATIM in the client PDF/xlsx whenever the rule has no authored floor-finding
+    /// template (`client_headline_and_detail`'s fallback) — so this text must never carry
+    /// internal engineering phrasing like "NOT enforced until wired into CI" or raw gate
+    /// jargon. The message-present and message-absent branches both get a client-readable
+    /// rewrite.
+    #[test]
+    fn preview_finding_detail_has_no_engineering_phrasing() {
+        let no_message = preview_finding("me/api", ScanTool::Ruff, "a.py", 1, "S608", "medium", "");
+        for banned in ["NOT enforced until wired into CI", "wired into CI"] {
+            assert!(
+                !no_message.detail.contains(banned),
+                "preview detail (no message) must not leak engineering phrasing {banned:?}: \
+                 {}",
+                no_message.detail
+            );
+        }
+        assert!(
+            no_message.detail.contains("Ruff")
+                || no_message.detail.to_ascii_lowercase().contains("ruff")
+        );
+
+        let with_message = preview_finding(
+            "me/api",
+            ScanTool::Ruff,
+            "a.py",
+            1,
+            "S608",
+            "medium",
+            "raw msg",
+        );
+        for banned in ["NOT enforced until wired into CI", "wired into CI"] {
+            assert!(
+                !with_message.detail.contains(banned),
+                "preview detail (with message) must not leak engineering phrasing {banned:?}: \
+                 {}",
+                with_message.detail
+            );
+        }
+        assert!(with_message.detail.contains("raw msg"));
     }
 
     // ── graceful no-tool path emits a NOTE, never a clean ─────────────────────

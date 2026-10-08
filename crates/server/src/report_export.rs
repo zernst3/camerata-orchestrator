@@ -1433,11 +1433,16 @@ pub(crate) fn resolve_citation(
         }
     }
     if let Some(tool) = preview_tool {
+        // Client-facing fix (2026-10-07): this used to read "Deterministic preview, enforced
+        // by {tool} ({rule_id}); not yet wired into the CI gate" — calling a tool-sourced row
+        // "Deterministic" (a word this report otherwise reserves for Camerata's own proven
+        // floor checks) in the SAME sentence that says nothing enforces it, plus internal
+        // "wired into the CI gate" phrasing. The row's own tier IS "preview", named with its
+        // tool, never "Deterministic" — see `classify_ai_finding`'s sibling fix and the
+        // `xlsx_export::provenance` computation this label feeds.
         return CitationJson {
             kind: "preview".to_string(),
-            label: format!(
-                "Deterministic preview, enforced by {tool} ({rule_id}); not yet wired into the CI gate"
-            ),
+            label: format!("Preview check by {tool} ({rule_id}); not yet part of your CI pipeline"),
             sources: Vec::new(),
         };
     }
@@ -3829,13 +3834,13 @@ pub fn build_report_json(
     let dependency_advisories = dependency_snapshot.rows.len();
     // W6: never a silent omission — one explicit sentence per pass that failed/timed out
     // this scan, shared verbatim between the summary and the methodology below.
-    // W1: fold in a disclosure for EVERY ledger integrity gap — every scan-time stage/rule
-    // `report.ledger` already carried PLUS this function's own just-recorded report-build-
-    // partition stage — deduped against whatever `report.failed_passes` already carries (the
-    // real pipeline, `onboard::audit_repos`, pushes scan-time disclosures there itself; a
-    // report built directly from a populated ledger, e.g. in tests, has none yet). Rides the
-    // SAME existing `FailedPass` mechanism as every other disclosure, rather than a parallel
-    // string list.
+    // W1: fold in a disclosure for EVERY stage-level ledger integrity gap — every scan-time
+    // stage `report.ledger` already carried PLUS this function's own just-recorded
+    // report-build-partition stage — deduped against whatever `report.failed_passes` already
+    // carries (the real pipeline, `onboard::audit_repos`, pushes scan-time disclosures there
+    // itself; a report built directly from a populated ledger, e.g. in tests, has none yet).
+    // Rides the SAME existing `FailedPass` mechanism as every other disclosure, rather than a
+    // parallel string list.
     let mut failed_passes_for_report = report.failed_passes.clone();
     let repo_label_for_ledger = report.repos.join(", ");
     for stage in report_ledger.stages() {
@@ -3845,14 +3850,39 @@ pub fn build_report_json(
             }
         }
     }
-    for rule in report_ledger.rules() {
-        if let Some(fp) = crate::scan_ledger::rule_disclosure(&repo_label_for_ledger, rule) {
-            if !failed_passes_for_report.contains(&fp) {
-                failed_passes_for_report.push(fp);
-            }
-        }
+    let mut failed_pass_notes = failed_pass_disclosures(&failed_passes_for_report);
+    // Client-report fix (2026-10-07 grading pass): a rule that declares mechanical/
+    // architectural enforcement but has no wired detector IS a real pipeline gap worth
+    // disclosing, but it is an ENGINEERING fact, not a client-facing one — the registry names
+    // ("arch_checker registry", "gateway rule registry", "Semgrep mapping", ...) and the
+    // per-rule repetition belong in the ledger (`camerata inspect` / `render_ledger_summary`)
+    // and the logs, never in the deliverable. This used to call `rule_disclosure` once PER
+    // excluded rule and push each as its own `FailedPass`, so a corpus with 19 such rules
+    // printed 19 internal-vocabulary bullets, duplicated in both the executive summary and
+    // methodology (38 bullets total, ~3 pages on a real export). The client gets exactly ONE
+    // plain, factual sentence instead, and only when the count is nonzero.
+    let no_wired_detector_count = report_ledger
+        .rules()
+        .filter(|r| {
+            !r.ran
+                && r.skip_reason
+                    .as_deref()
+                    .unwrap_or("")
+                    .contains(crate::scan_ledger::NO_WIRED_DETECTOR_REASON)
+        })
+        .count();
+    if no_wired_detector_count > 0 {
+        failed_pass_notes.push(format!(
+            "{} could not be mechanically checked this run and {} reviewed by the model \
+             instead.",
+            noun(no_wired_detector_count, "rule", "rules"),
+            if no_wired_detector_count == 1 {
+                "was"
+            } else {
+                "were"
+            },
+        ));
     }
-    let failed_pass_notes = failed_pass_disclosures(&failed_passes_for_report);
     let (narrative, is_override) = match &opts.executive_summary_override {
         Some(text) if !text.trim().is_empty() => (text.clone(), true),
         _ => (
@@ -6463,6 +6493,24 @@ mod tests {
             resolve_citation("camerata.security.some-future-rule", Some("semgrep"), None);
         assert_eq!(citation.kind, "preview");
         assert!(citation.label.contains("semgrep"));
+    }
+
+    /// Defect 1/3 (2026-10-07 grading pass): the preview citation label must never say
+    /// "Deterministic" (reserved for Camerata's own proven floor checks) or use internal
+    /// "wired into the CI gate" phrasing — both leaked into the client PDF/xlsx via this
+    /// exact label before the fix.
+    #[test]
+    fn preview_citation_label_has_no_deterministic_or_ci_gate_phrasing() {
+        let citation =
+            resolve_citation("camerata.security.some-future-rule", Some("semgrep"), None);
+        assert_eq!(citation.kind, "preview");
+        for banned in ["Deterministic", "wired into the CI gate"] {
+            assert!(
+                !citation.label.contains(banned),
+                "preview citation label must never contain {banned:?}: {}",
+                citation.label
+            );
+        }
     }
 
     /// A clean repo (no floor findings at all) must still render without panicking, with an
@@ -10249,6 +10297,11 @@ mod tests {
 //      rule" shape — vanished from the ledger with no recorded disposition even though its
 //      evidence site survived. STANDING (passes):
 //      `pipeline_integrity_ledger_has_zero_unaccounted_rows_across_every_merge_stage`.
+//  13. (2026-10-07 grading pass, defect 1) Client-facing "no wired detector" disclosure is ONE
+//      plain sentence naming a count, never a per-rule bullet list in internal vocabulary
+//      (no "arch_checker registry"/"gateway rule registry"/"Semgrep mapping" phrases, no raw
+//      rule ids) — regardless of how many rules the ledger excludes for that reason. STANDING
+//      (passes): `many_no_wired_detector_exclusions_collapse_to_one_plain_sentence`.
 #[cfg(test)]
 mod export_invariants_gate {
     use super::*;
@@ -11646,5 +11699,119 @@ mod export_invariants_gate {
             "a representative synthetic scan must leave NO stage unaccounted: {:#?}",
             ledger.stages()
         );
+    }
+
+    // ── 13 (defect 1): no-wired-detector exclusions collapse to one plain sentence ──────
+
+    /// Invariant 13: N rules the ledger excludes for the W1-item-4 "no wired detector" reason
+    /// must read as ONE plain, factual sentence naming the real count — never one bullet per
+    /// rule, never duplicated beyond the ONE sentence each of the executive summary and
+    /// methodology carries (by the SAME pre-existing shared-disclosure design every other
+    /// `FailedPass` note uses), and never leaking the internal registry/mapping vocabulary a
+    /// real such reason string names. The full per-rule detail (rule id + real reason) is
+    /// NOT lost — it is still in `rules_not_run`, which is exactly what `camerata inspect`'s
+    /// `render_ledger_summary` (`crates/cli/src/inspect_cmd.rs`) prints in full under its own
+    /// `== NOT RUN (N) ==` section.
+    #[tokio::test]
+    async fn many_no_wired_detector_exclusions_collapse_to_one_plain_sentence() {
+        let mut report = report_with(Vec::new(), vec![]);
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        let rule_ids = [
+            "PYTHON-PARAMETERIZED-SQL-1",
+            "RUBY-FROZEN-STRING-LITERAL-1",
+            "JAVA-PREPARED-STATEMENT-1",
+            "GO-NO-RAW-SQL-1",
+            "RUST-NO-UNWRAP-IN-HANDLER-1",
+        ];
+        for rid in rule_ids {
+            ledger.record_rule(
+                rid,
+                crate::scan_ledger::RuleTier::Deterministic,
+                false,
+                Some(
+                    "declares mechanical/architectural enforcement but has no wired detector \
+                     (not in the arch_checker registry, gateway rule registry, Semgrep \
+                     mapping, or scan-preview linter source)"
+                        .to_string(),
+                ),
+                0,
+                0,
+            );
+        }
+        report.ledger = ledger;
+
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+
+        assert_eq!(
+            json.executive_summary.failed_passes.len(),
+            1,
+            "5 rules sharing the same reason must collapse to ONE sentence, not 5: {:?}",
+            json.executive_summary.failed_passes
+        );
+        assert_eq!(
+            json.methodology.failed_passes.len(),
+            1,
+            "methodology must carry exactly one sentence too, never a per-rule list: {:?}",
+            json.methodology.failed_passes
+        );
+        let sentence = &json.executive_summary.failed_passes[0];
+        assert!(
+            sentence.contains('5'),
+            "the sentence must name the real count: {sentence}"
+        );
+        for banned in [
+            "arch_checker",
+            "registry",
+            "Semgrep mapping",
+            "scan-preview linter",
+            "PYTHON-PARAMETERIZED-SQL-1",
+            "no wired detector",
+        ] {
+            assert!(
+                !sentence.contains(banned),
+                "client-facing sentence must never leak internal vocabulary {banned:?}: \
+                 {sentence}"
+            );
+        }
+
+        // The full per-rule detail still lives in `rules_not_run` — never dropped, just kept
+        // out of the client narrative.
+        assert_eq!(
+            json.rules_not_run.len(),
+            5,
+            "the full per-rule detail must still be present in rules_not_run: {:?}",
+            json.rules_not_run
+        );
+        for rid in rule_ids {
+            assert!(
+                json.rules_not_run.iter().any(|r| r.rule_id == rid),
+                "rules_not_run must still carry {rid}"
+            );
+        }
+    }
+
+    /// A single-digit edge case: exactly one excluded rule still gets the collapsed-sentence
+    /// treatment (singular "1 rule ... was reviewed", not a pluralization bug, and no bullet
+    /// list of one).
+    #[tokio::test]
+    async fn one_no_wired_detector_exclusion_still_renders_the_plain_sentence() {
+        let mut report = report_with(Vec::new(), vec![]);
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        ledger.record_rule(
+            "PYTHON-PARAMETERIZED-SQL-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            false,
+            Some(
+                "declares mechanical/architectural enforcement but has no wired detector"
+                    .to_string(),
+            ),
+            0,
+            0,
+        );
+        report.ledger = ledger;
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(json.executive_summary.failed_passes.len(), 1);
+        assert!(json.executive_summary.failed_passes[0].contains("1 rule"));
+        assert!(!json.executive_summary.failed_passes[0].contains("PYTHON-PARAMETERIZED-SQL-1"));
     }
 }
