@@ -1,0 +1,73 @@
+id = "CICD-PRIVILEGED-DEPLOY-GATE-1"
+title = "A production-impacting job (deploy, prod database migration, infra apply) requires a protected environment with required reviewers, never an unconditional push-triggered run"
+tag = "stack"
+domain = "ci-cd"
+layer = "universal"
+enforcement = "architectural"
+default = true
+verification = "grounded"
+qualifies = "Deterministically checkable in principle (does a job that deploys to production, runs a migration against a production database, or applies infrastructure changes reference a GitHub Environment — or the equivalent protected-deployment-target concept on another CI platform — configured with required reviewers/wait timer, versus running unconditionally on every push to its trigger branch), but confirming the environment protection rule is actually CONFIGURED (required reviewers added, not merely an environment referenced with no protection rules set) requires reading the platform's repository/environment settings, not only the workflow YAML — the YAML can reference an environment that has no protection configured at all, which looks identical to a correctly-gated job by file inspection alone. This is architectural: Camerata cannot confirm environment-level protection-rule configuration from repository file content; the project verifies it in its own platform settings. Conformance holds when the environment referenced by a privileged job has required reviewers (or an equivalent human gate) actually configured; it fails when no environment is referenced at all, or when one is referenced but has no protection rules configured."
+
+[[sources]]
+url = "https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment"
+title = "GitHub docs — Using environments for deployment: required reviewers, wait timer, and deployment branch restrictions as environment protection rules"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/CI_CD_Security_Cheat_Sheet.html"
+title = "OWASP CI/CD Security Cheat Sheet"
+
+[decision]
+question = "Does a job with production impact (deploy, a migration run against a production database, an infrastructure apply) require passing through a protected environment with a configured human-approval gate, or does it run unconditionally whenever its trigger (typically a push) fires?"
+default = "protected-environment-with-required-reviewers"
+why = """
+`ARCH-TRIGGER-ENV-1` establishes WHICH git ref maps to WHICH deploy environment; this rule is about what stands
+between that mapping and an actual production-impacting action running, because the two are not the same question.
+A workflow can have a perfectly correct trigger→environment mapping (a tag push deploys to prod, a release-branch
+push deploys to staging) and still have zero human gate in the path: the moment the triggering ref is pushed — by
+anyone with push access, by an automated process, or by a compromised CI token with write access to tags — the
+privileged job runs to completion with no pause point for a human to catch a mistake before it reaches production
+data or production infrastructure.
+
+A protected environment (GitHub Environments' required-reviewers protection rule, or the equivalent concept on
+another CI platform) inserts exactly that pause: the job is defined to target the protected environment, and the
+platform itself — not application code, not a convention, not a code-review step that happened earlier in the PR
+process — blocks the job from proceeding past that point until one of the designated reviewers approves the specific
+run. This catches failure modes a correct trigger mapping and a correct code review cannot: a tag accidentally
+pushed to the wrong place, a migration that was correct in review but targets the wrong database because of an
+environment-variable misconfiguration discovered only at run time, or a compromised automation credential that can
+push a tag but is not one of the designated human reviewers. The gate is deliberately scoped to PRIVILEGED actions
+specifically (production deploys, production-database migrations, infrastructure applies) — gating every CI job
+this way would reintroduce the friction continuous delivery exists to remove, for jobs (linting, running a test
+suite, building an artifact) that have no comparable blast radius if something goes wrong.
+"""
+
+[[option]]
+id = "protected-environment-with-required-reviewers"
+label = "Privileged jobs target a GitHub Environment (or platform equivalent) configured with required reviewers; the platform itself blocks the run until approved"
+directive = """
+Every job that deploys to production, runs a migration against a production database, or applies infrastructure
+changes to a production target is defined against a named environment in the CI platform (a GitHub Environment or
+equivalent), and that environment has a required-reviewers protection rule actually configured in the platform's
+own settings (not merely referenced in the workflow YAML with no protection rule attached). The job's trigger (a
+tag push, a release-branch push) may still fire automatically per ARCH-TRIGGER-ENV-1's mapping, but the job itself
+pauses at the environment boundary until a designated reviewer approves that specific run. Non-privileged jobs
+(linting, test execution, building an artifact, deploying to a dev/preview environment) are explicitly NOT required
+to carry this gate — scoping it to genuinely privileged actions is what keeps the control affordable to maintain.
+"""
+remediation = """
+Define (or confirm) a named environment in the CI platform for this privileged job's target (production, or a
+production database/infrastructure target), and configure a required-reviewers protection rule on that environment
+in the platform's own settings — not only in the workflow YAML, which can reference an environment with no
+protection rules actually attached. Reference that environment from the privileged job so the platform itself
+blocks the run pending approval. Verify by triggering the job's normal path (e.g. pushing the tag that maps to
+prod) and confirming the run pauses awaiting a reviewer's approval before any production-impacting step executes,
+rather than running to completion unconditionally.
+"""
+effort = "medium"
+why = "A correct trigger→environment mapping and a prior code-review step both operate before the moment a privileged job actually runs; an environment-level required-reviewers gate is the only control that pauses at the ACTUAL point of production impact, catching an accidentally-pushed tag, a run-time configuration mistake, or a compromised automation credential that none of the earlier controls are positioned to catch."
+
+[[option]]
+id = "privileged-job-runs-unconditionally-on-its-trigger"
+label = "A production deploy/migration/infra-apply job runs unconditionally whenever its trigger ref is pushed, with no environment protection rule and no human approval gate"
+directive = "A job that deploys to production, migrates a production database, or applies production infrastructure changes runs to completion automatically whenever its configured trigger (a tag push, a release-branch push) fires, with no environment-level protection rule and no pause point for human approval."
+why = "Rejected: this collapses the gap between 'the triggering ref was pushed' and 'the privileged action actually ran' to zero, so any mistake upstream of that point — an accidentally pushed tag, a misconfigured environment variable discovered only at run time, a compromised credential with push access — runs straight through to production impact with no opportunity for a human to catch it first. Code review earlier in the process does not substitute for this, because code review approves the CHANGE, not the specific run's actual target and timing."

@@ -1,0 +1,57 @@
+id = "CICD-BUILD-PROVENANCE-1"
+title = "Published build artifacts (container images, packages, binaries) carry signed build provenance a consumer can verify back to the exact source commit and workflow run"
+tag = "stack"
+domain = "ci-cd"
+layer = "universal"
+enforcement = "architectural"
+default = false
+opt_in_only = true
+verification = "grounded"
+qualifies = "Deterministically checkable (does the publish step generate and attach a provenance attestation, versus publishing the raw artifact with no accompanying signed statement), but adopting it is a genuine project decision rather than a universal floor: it requires the project's artifact type and distribution channel to actually support attestation verification (container registries, GitHub Packages, and several language package registries support it; many internal/ad hoc distribution channels do not), and it adds a real step and a real verification dependency for consumers. This is architectural, not mechanical — Camerata ships no detector; the project wires the attestation step itself and, ideally, a consumer-side verification step. Conformance holds when every publish step for a production artifact generates a provenance attestation signed by the CI platform's identity and a documented verification step exists for consumers; it fails when an artifact is published with no accompanying attestation at all, for a project that has the distribution channel to support one."
+
+[[sources]]
+url = "https://slsa.dev/spec/v1.0/provenance"
+title = "SLSA (Supply-chain Levels for Software Artifacts) v1.0 — Provenance: a verifiable statement about how an artifact was built, from what source, by what builder"
+
+[[sources]]
+url = "https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds"
+title = "GitHub docs — Using artifact attestations to establish provenance for builds: generating and verifying SLSA-conformant provenance for GitHub Actions builds"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/345.html"
+title = "CWE-345: Insufficient Verification of Data Authenticity"
+
+[decision]
+question = "Does every published production artifact (container image, package, binary) carry a signed provenance attestation a consumer can verify back to the exact source commit and CI run that produced it, or is the artifact published with no verifiable record of its own build origin?"
+why = "Provenance answers a question none of this corpus's other CI/CD rules answer: given an artifact sitting in a registry, can a CONSUMER of it (a deployment pipeline, another team, an external user installing the package) verify where it actually came from, independent of trusting the registry's own access controls? CICD-PIN-THIRD-PARTY-ACTIONS-1 and CICD-LEAST-PRIVILEGE-TOKEN-1 both harden the BUILD process itself against compromise; provenance is the complementary control that lets anyone DOWNSTREAM of a successful build detect if the artifact they received did not actually come from that hardened process — a compromised publish step, a registry-level tampering, or an artifact substituted somewhere in the distribution path all produce an artifact with no attached provenance, or provenance that fails verification against the expected source repository and commit, even though the artifact might otherwise look identical. Weighed against this is a real cost: not every artifact type or distribution channel supports attestation verification yet, and wiring it adds both a build-time step and a consumer-side verification step that only pays off once something downstream actually checks it — a project publishing to a registry with no consumer ever verifying provenance gets the generation cost with none of the detection benefit until that verification step is added too."
+
+[[option]]
+id = "signed-provenance-attestation-on-every-published-artifact"
+label = "Every production artifact publish step generates a signed provenance attestation; consumers verify it before use"
+directive = """
+The CI workflow step that publishes a production artifact (a container image push, a package publish, a release
+binary upload) also generates a signed provenance attestation (the CI platform's native attestation mechanism — for
+example GitHub Actions' artifact attestations, built on Sigstore/in-toto and conformant with the SLSA provenance
+format — or an equivalent for the project's platform) binding the artifact's digest to the exact source repository,
+commit SHA, and workflow run that produced it. At least one consumer of the artifact (a deployment pipeline pulling
+the image, a documented manual verification step for external consumers) verifies the attestation against the
+expected source and commit before using the artifact, so the control has an actual point where a tampered or
+substituted artifact would be caught rather than only a generation step with nothing downstream checking it.
+"""
+remediation = """
+Add a provenance-attestation generation step immediately after this artifact's publish step, using the CI
+platform's native attestation mechanism (GitHub Actions artifact attestations, or the platform equivalent) to bind
+the published artifact's digest to its source commit and workflow run. Add a verification step in whatever consumes
+this artifact (a deployment pipeline, a documented check for external consumers) that confirms the attestation
+before the artifact is used. Verify by attempting to verify an artifact that was NOT produced by this pipeline (a
+locally-built copy with the same name/tag) and confirming verification fails, while a genuinely pipeline-built
+artifact verifies successfully.
+"""
+effort = "high"
+why = "Provenance is the one control in this rule set that protects a CONSUMER of the artifact rather than the build process itself, closing the gap between 'the build pipeline is hardened' and 'this specific artifact in the registry actually came from that hardened pipeline' — without it, a compromise anywhere between a successful build and the artifact's eventual use (registry tampering, a substituted upload, a compromised publish credential used out-of-band) produces an artifact indistinguishable from a legitimate one to anyone who only checks the registry's own access controls."
+
+[[option]]
+id = "publish-artifacts-with-no-provenance-attestation"
+label = "Publish artifacts with no provenance attestation, relying on registry access controls alone"
+directive = "Production artifacts are published to their registry or distribution channel with no accompanying signed provenance attestation, relying entirely on the registry's own access controls (who can push) to establish trust in what gets published."
+why = "This is a reasonable default for a project whose distribution channel does not yet support attestation verification, or whose threat model does not currently justify the added build- and consumer-side complexity — it is not a universal floor the way signature verification on a payment webhook is. But it does mean a consumer has no way to verify an artifact's actual build origin independent of trusting the registry's access controls were never bypassed, which is precisely the gap a registry-level compromise or a substituted upload exploits."

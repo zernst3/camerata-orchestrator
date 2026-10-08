@@ -2893,11 +2893,18 @@ mod tests {
         !(id.starts_with("ORCH-") || id.starts_with("SPIRIT-") || id.starts_with("PROC-"))
     }
 
-    /// Common shape assertions for a newly-authored rule: it loads, resolves a default option
-    /// with a non-empty directive, is grounded (cites a real external authority), carries at
-    /// least one `[[sources]]` entry, is code-auditable (so it is guaranteed to reach the
-    /// semantic pass even with no shipped detector), and — when its default option carries
-    /// remediation — also carries an authored `effort` band.
+    /// Common shape assertions for a newly-authored rule: it loads, is grounded (cites a real
+    /// external authority), carries at least one `[[sources]]` entry, is code-auditable (so it
+    /// is guaranteed to reach the semantic pass even with no shipped detector), offers at least
+    /// one alternative option alongside its adopted choice, and every option with a non-empty
+    /// directive — and, where an option carries remediation, an authored `effort` band too.
+    ///
+    /// Most new rules adopt a default (`default = true`, resolvable via `resolved_option(None)`);
+    /// this is checked when a default is present. A rule can ALSO legitimately ship with no
+    /// adopted default (`default = false`, typically paired with `opt_in_only = true` — e.g. a
+    /// rule whose right answer depends on project-specific infrastructure the architect must
+    /// consciously choose, per RULE_AUTHORING's "else the architect MUST choose" note); in that
+    /// case every option is still checked for a non-empty directive instead of just the default.
     fn assert_well_formed_new_rule(set: &RuleSet, id: &str, expected_domain: &str) {
         let rule = set
             .get_by_id(id)
@@ -2915,28 +2922,42 @@ mod tests {
             is_code_auditable(id),
             "{id} must be code-auditable (reachable by semantic pass)"
         );
-        let default = rule
-            .resolved_option(None)
-            .unwrap_or_else(|| panic!("{id} must resolve a default option"));
-        assert!(
-            !default.directive.trim().is_empty(),
-            "{id} default option directive"
-        );
-        if let Some(remediation) = default.remediation.as_deref() {
-            if !remediation.trim().is_empty() {
-                assert!(
-                    default.effort.is_some(),
-                    "{id}'s default option carries remediation and must also carry an authored effort band"
-                );
-            }
-        }
         // Every one of these new rules ships at least one rejected/alternative option alongside
-        // the adopted default, per RULE_AUTHORING's "options/alternatives" expectation.
+        // the adopted (or, for a no-default rule, the architect-chosen) option, per
+        // RULE_AUTHORING's "options/alternatives" expectation.
         assert!(
             rule.options.len() >= 2,
             "{id} must offer at least one alternative option alongside its default: {} option(s)",
             rule.options.len()
         );
+        if rule.default_option.is_some() {
+            let default = rule
+                .resolved_option(None)
+                .unwrap_or_else(|| panic!("{id} must resolve a default option"));
+            assert!(
+                !default.directive.trim().is_empty(),
+                "{id} default option directive"
+            );
+        } else {
+            for opt in &rule.options {
+                assert!(
+                    !opt.directive.trim().is_empty(),
+                    "{id} option {} directive",
+                    opt.id
+                );
+            }
+        }
+        for opt in &rule.options {
+            if let Some(remediation) = opt.remediation.as_deref() {
+                if !remediation.trim().is_empty() {
+                    assert!(
+                        opt.effort.is_some(),
+                        "{id}'s option {} carries remediation and must also carry an authored effort band",
+                        opt.id
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -3224,7 +3245,11 @@ mod tests {
             assert_well_formed_new_rule(&set, id, "permissions");
         }
 
-        let all_ids: Vec<&str> = ui_ids.iter().chain(permissions_ids.iter()).copied().collect();
+        let all_ids: Vec<&str> = ui_ids
+            .iter()
+            .chain(permissions_ids.iter())
+            .copied()
+            .collect();
         assert_ids_unique_in_corpus(&set, &all_ids);
 
         let ui_selected = select_for_domains(&set, &["ui"]);
@@ -3248,5 +3273,111 @@ mod tests {
             set.get_by_id("ARCH-NO-SECRETS-IN-URL-1").is_some(),
             "the pre-existing tokens-in-URLs rule must still be present (not duplicated)"
         );
+    }
+
+    // ── New domain-class rules: CI/CD pipeline security ───────────────────────────────────────
+    //
+    // ci-cd was thin (~7 pre-existing rules) before this pass. Seven new rules cover: secrets
+    // injected as workflow-YAML literals rather than the platform's secrets store (and unscoped
+    // across jobs that don't need them), steps that print the environment or fail to mask a
+    // derived secret, privileged deploy/migration jobs with no environment-protection approval
+    // gate, third-party actions pinned to a mutable tag/branch instead of a commit SHA, the
+    // default job token left at a broad permission scope, pull_request_target combined with
+    // checking out and executing a fork PR's own untrusted code, and published artifacts with no
+    // verifiable build provenance.
+
+    #[tokio::test]
+    async fn new_cicd_security_domain_rules_are_well_formed_and_reachable() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+
+        let ids = [
+            "CICD-SECRETS-VIA-SECRETS-STORE-1",
+            "CICD-NO-SECRET-LOGGING-1",
+            "CICD-PRIVILEGED-DEPLOY-GATE-1",
+            "CICD-PIN-THIRD-PARTY-ACTIONS-1",
+            "CICD-LEAST-PRIVILEGE-TOKEN-1",
+            "CICD-NO-SECRETS-ON-FORK-PR-1",
+        ];
+        for id in ids {
+            assert_well_formed_new_rule(&set, id, "ci-cd");
+        }
+        assert_ids_unique_in_corpus(&set, &ids);
+
+        let selected = select_for_domains(&set, &["ci-cd"]);
+        for id in ids {
+            assert!(
+                selected.iter().any(|r| r.id_str() == id),
+                "a repo whose stack resolves to the ci-cd domain must select {id}"
+            );
+        }
+        // Pre-existing ci-cd rules must still be reachable alongside the new ones — this batch
+        // extends the domain rather than replacing anything in it.
+        for pre_existing in [
+            "CICD-CODEQL-SECURITY-SCAN-1",
+            "CICD-SEMGREP-SECURITY-SCAN-1",
+            "CICD-DEPENDENCY-AUDIT-1",
+            "ARCH-TRIGGER-ENV-1",
+            "ARCH-TRUNK-SYNC-1",
+        ] {
+            assert!(
+                set.get_by_id(pre_existing).is_some(),
+                "pre-existing ci-cd rule {pre_existing} must still be present"
+            );
+        }
+
+        // CICD-BUILD-PROVENANCE-1 is deliberately opt_in_only with no adopted default (a genuine
+        // project decision — not every artifact type/distribution channel supports attestation
+        // verification yet — not a universal floor), same shape as CICD-CODEQL-SECURITY-SCAN-1 /
+        // CICD-SEMGREP-SECURITY-SCAN-1 above, so it is checked separately rather than through
+        // `assert_well_formed_new_rule` (which requires a resolvable default option).
+        let provenance = set
+            .get_by_id("CICD-BUILD-PROVENANCE-1")
+            .expect("CICD-BUILD-PROVENANCE-1 must exist in the bundled corpus");
+        assert_eq!(provenance.domain, "ci-cd");
+        assert!(
+            provenance.is_grounded(),
+            "CICD-BUILD-PROVENANCE-1 must be grounded"
+        );
+        assert!(!provenance.sources.is_empty());
+        assert!(
+            provenance.is_opt_in_only(),
+            "CICD-BUILD-PROVENANCE-1 is opt_in_only"
+        );
+        assert!(
+            !provenance.has_default(),
+            "CICD-BUILD-PROVENANCE-1 has no adopted default — it forces a conscious project decision"
+        );
+        assert_eq!(provenance.options.len(), 2, "two options: attest, or don't");
+        assert!(
+            !(provenance.is_auto_recommended() && !provenance.is_opt_in_only()),
+            "CICD-BUILD-PROVENANCE-1 must never be auto-recommended"
+        );
+        assert_ids_unique_in_corpus(&set, &["CICD-BUILD-PROVENANCE-1"]);
+    }
+
+    /// `CICD-PIN-THIRD-PARTY-ACTIONS-1` and `CICD-LEAST-PRIVILEGE-TOKEN-1` both declare
+    /// `mechanical` enforcement with no shipped detector (a regex/header-presence scan over
+    /// workflow YAML) — same shape as the other no-detector mechanical rules pinned above.
+    #[tokio::test]
+    async fn cicd_mechanical_rules_have_no_detector_but_are_code_auditable() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        for id in [
+            "CICD-PIN-THIRD-PARTY-ACTIONS-1",
+            "CICD-LEAST-PRIVILEGE-TOKEN-1",
+        ] {
+            let rule = set
+                .get_by_id(id)
+                .unwrap_or_else(|| panic!("{id} must exist in the bundled corpus"));
+            assert_eq!(rule.enforcement, EnforcementKind::Mechanical);
+            assert!(is_code_auditable(id));
+        }
     }
 }

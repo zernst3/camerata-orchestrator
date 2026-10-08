@@ -1,0 +1,75 @@
+id = "CICD-LEAST-PRIVILEGE-TOKEN-1"
+title = "The CI job token's default permissions are scoped to least privilege explicitly, never left at the platform's broad default"
+tag = "stack"
+domain = "ci-cd"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+verification = "grounded"
+qualifies = "Deterministically checkable by scanning workflow files for the presence (or absence) of a top-level `permissions:` block, and — where present — whether it sets `contents: write` or broader scopes a given job's steps do not actually need. A workflow with NO `permissions:` key at all inherits the repository's or organization's configured default for the automatic GITHUB_TOKEN, which on many repositories (particularly older ones, or ones that have not explicitly tightened the organization default) is read/write access to most scopes. Conformance holds when every workflow (or, more granularly, every job) sets an explicit `permissions:` block granting only the scopes its own steps use, defaulting the rest to `read` or none; it fails when no `permissions:` key is present and the repository/organization default has not been independently confirmed to already be least-privilege, or when a broader scope than a job's steps require is explicitly granted."
+
+[[sources]]
+url = "https://docs.github.com/en/actions/security-guides/automatic-token-authentication#permissions-for-the-github_token"
+title = "GitHub docs — Automatic token authentication: setting the permissions for the GITHUB_TOKEN, and the recommendation to set the default to read-only at the repository/organization level"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/CI_CD_Security_Cheat_Sheet.html"
+title = "OWASP CI/CD Security Cheat Sheet"
+
+[[sources]]
+url = "https://github.com/ossf/scorecard/blob/main/docs/checks.md#token-permissions"
+title = "OpenSSF Scorecard — Token-Permissions check: workflows should declare top-level permissions as read-only or none, and grant write scopes only where needed, job-by-job"
+linter = "scorecard: Token-Permissions"
+
+[decision]
+question = "Does every workflow (or job) explicitly scope its GITHUB_TOKEN permissions to only what its own steps need, or does any workflow run with no explicit permissions block, inheriting the platform/organization's default (often broad read/write)?"
+default = "explicit-least-privilege-permissions-per-workflow"
+why = """
+The automatic job token GitHub Actions (and equivalent platforms) injects into every workflow run by default has,
+historically and on many existing repositories, broad read/write permissions across most of the scopes it could
+plausibly need — contents, issues, pull requests, packages, deployments — regardless of whether a given workflow
+actually touches any of them. A workflow that only lints and runs a test suite has no legitimate reason to hold a
+token capable of writing to repository contents, modifying releases, or publishing a package, but by default it
+often can, simply because nobody scoped it down.
+
+This matters specifically because the token is available to every step in every job of that workflow, including
+steps that execute code the project does not fully control — a test suite exercising third-party dependencies, a
+build step running a package manager's install scripts, a linter plugin. If any of that executing code is
+compromised (a supply-chain attack in a dependency, exactly the scenario `CICD-PIN-THIRD-PARTY-ACTIONS-1` and
+dependency-auditing both defend against from different angles), the broader the token's permissions, the more
+damage that compromise can do with it: a read/write-contents token can push a malicious commit or tag directly;
+a packages-write token can publish a poisoned package version under the project's own name. Explicitly setting
+`permissions:` to `read` (or specific narrow scopes) at the top of the workflow, and elevating only the specific job
+that genuinely needs a write scope (a release job that needs `contents: write` to create a GitHub release, for
+example) rather than the whole workflow, bounds the damage a compromised step can do to exactly what that specific
+job's own task required.
+"""
+
+[[option]]
+id = "explicit-least-privilege-permissions-per-workflow"
+label = "Set an explicit, minimal permissions block at the workflow or job level, granting only the scopes each job's steps actually use"
+directive = """
+Every workflow file declares an explicit top-level `permissions:` block defaulting to `read` or `{}` (no
+permissions), rather than omitting the key and inheriting whatever default the repository or organization currently
+has configured. Where a specific job genuinely needs a write scope (creating a release, commenting on a PR, writing
+to a package registry), that elevated permission is granted at the JOB level, scoped to only that job and only the
+specific scope it needs, rather than elevating the whole workflow's default. The repository or organization-level
+default for the automatic token is itself also set to read-only, so any workflow that forgets to declare its own
+`permissions:` block fails safe rather than silently inheriting a broad default.
+"""
+remediation = """
+Add an explicit `permissions:` block to the top of this workflow file, defaulting to `read` or `{}`. For any job
+that genuinely needs a write scope, move that elevated permission to a job-level `permissions:` override scoped to
+only that job and only the specific scope required, rather than granting it workflow-wide. Confirm (or request) the
+repository or organization's default GITHUB_TOKEN permission is also set to read-only, so a workflow that omits the
+key entirely still fails safe. Verify by confirming a job that does not need to write (lint, test) genuinely cannot
+write to repository contents, issues, or packages even if its own code attempted to.
+"""
+effort = "low"
+why = "The default token scope on many repositories is broad read/write across most of what it could plausibly need, available to every step including third-party code the project does not fully control; an explicit least-privilege permissions block bounds what a compromised step in that job can actually do, rather than leaving the ceiling at whatever the platform or organization default happens to be."
+
+[[option]]
+id = "no-explicit-permissions-block-inherit-platform-default"
+label = "Omit the permissions block entirely and inherit whatever the platform/organization's default GITHUB_TOKEN scope currently is"
+directive = "Workflow files set no explicit permissions: key at all, relying on the repository or organization's currently-configured default token scope, whatever that happens to be."
+why = "Rejected: the default scope varies by repository age, organization policy, and settings nobody reviewing this specific workflow necessarily controls or has verified — a workflow that looks correct by its own content can still run with a broad read/write token simply because the organization default was never tightened. Every step in the workflow, including any executing third-party code, inherits that scope; explicitly declaring the minimum needed removes the dependency on an assumption about a setting that lives outside the workflow file entirely."
