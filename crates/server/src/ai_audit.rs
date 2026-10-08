@@ -5016,7 +5016,14 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
             also.push(r);
         }
     }
-    let mut also_locations: Vec<MergedLocation> = primary.also_locations.drain(..).collect();
+    // NESTED sites only — carried in from an EARLIER stage via the primary's own pre-existing
+    // `also_locations`. Deliberately kept separate from each member's FRESH own-site entry
+    // below: this list alone is what the "same already-absorbed record reachable via two
+    // paths" dedup further down is allowed to collapse.
+    let mut nested_locations: Vec<MergedLocation> = primary.also_locations.drain(..).collect();
+    // FRESH sites only — THIS stage's own absorption of each group member. See the dedup
+    // comment below for why these must never be deduplicated away.
+    let mut fresh_locations: Vec<MergedLocation> = Vec::new();
     // C5-1: computed before the loop below (which only reads `f.fix_specific` incidentally via
     // `&group`, never consumes it) — a deterministic primary inherits the first member's
     // codebase-specific fix when it has none of its own yet.
@@ -5034,7 +5041,7 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
                 also.push(r.clone());
             }
         }
-        also_locations.push(MergedLocation {
+        fresh_locations.push(MergedLocation {
             repo: f.repo.clone(),
             path: f.path.clone(),
             line: f.line,
@@ -5042,16 +5049,34 @@ fn merge_semantic_group(group: Vec<Finding>) -> Finding {
             snippet: f.snippet.clone(),
             consequence: !f.located,
         });
-        also_locations.extend(f.also_locations.iter().cloned());
+        nested_locations.extend(f.also_locations.iter().cloned());
     }
-    // De-duplicate identical sites (the same absorbed rule id/site can arrive twice across a
-    // nested merge — e.g. it was already in the primary's carried-in `also_locations` AND is
-    // also a direct member of this group).
+    // De-duplicate identical NESTED sites only (the same already-absorbed record can arrive
+    // twice across a nested merge — e.g. it was already in the primary's carried-in
+    // `also_locations` AND independently reachable via another member's own already-nested
+    // `also_locations`).
+    //
+    // Pipeline-integrity fix: this dedup must NEVER reach a member's FRESH own-site entry
+    // (pushed into `fresh_locations` above, never into this `nested_locations` list). A fresh
+    // entry represents THIS stage absorbing `f` itself — a real, distinct input row — and
+    // `f`'s (repo, path, line, rule_id) key can coincide with a site an EARLIER stage already
+    // recorded (e.g. two different detectors independently flagging the identical rule at the
+    // identical line) without `f` being that same record. Collapsing the two together, as the
+    // old single-pass dedup over one combined list did, made `f`'s absorption invisible to
+    // `onboard::account_location_merge`: it counts `also_locations` entries as a multiset
+    // against what was ALREADY present pre-stage, and a key that was already present is
+    // reconciled as "carried forward, not new" the first time it is seen — so `f` vanished with
+    // no recorded disposition at all (real-world `cross-family-merge rows 116 -> 83 merged=32
+    // ... unaccounted=1`). Every fresh entry is now kept unconditionally, so every group member
+    // always leaves its own site behind regardless of what the primary or a sibling already
+    // carried in.
     let mut location_seen: std::collections::HashSet<(String, String, usize, String)> =
         std::collections::HashSet::new();
-    also_locations.retain(|l| {
+    nested_locations.retain(|l| {
         location_seen.insert((l.repo.clone(), l.path.clone(), l.line, l.rule_id.clone()))
     });
+    let mut also_locations = nested_locations;
+    also_locations.extend(fresh_locations);
     primary.severity = merged_severity(&primary, max_sev, all_same_tier);
     primary.also_matches = also;
     primary.also_locations = also_locations;

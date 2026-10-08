@@ -2334,6 +2334,104 @@ mod tests {
         assert_eq!(entry.merged_into.len(), 1);
     }
 
+    /// REGRESSION for a REAL scan's `cross-family-merge rows 116 -> 83 merged=32 ... held=0
+    /// informational=0 deduped=0 unaccounted=1 !! UNACCOUNTED` — a DIFFERENT leak than the
+    /// same-rule-id-N-site-collapse case above, and different from the already-fixed
+    /// `structural-needs-review-merge` second collapse: this one lives INSIDE
+    /// `ai_audit::merge_semantic_group` itself.
+    ///
+    /// `pre_primary` already absorbed a site (acme/api, handler.rs, 52, RULE-1) in an EARLIER
+    /// stage — simulated here by pre-populating its own `also_locations`, exactly like a merged
+    /// primary surviving the intra-AI-tier exact-location merge would arrive carrying one.
+    /// `y` is a SEPARATE, genuinely distinct top-level `Finding` whose OWN identity
+    /// (repo/path/line/rule_id) happens to be IDENTICAL to that already-absorbed site — a real,
+    /// reachable shape: two different detectors (or two different pipeline stages) independently
+    /// flagging the exact same rule at the exact same line. `semantic_pair_merges`'s
+    /// `same_rule_adjacent` signal (same rule id + same file + same severity) groups `y` together
+    /// with `pre_primary`.
+    ///
+    /// The old `merge_semantic_group` pushed `y`'s own site into the SAME `also_locations` list
+    /// as `pre_primary`'s pre-existing entry, then deduplicated the WHOLE list by
+    /// `(repo, path, line, rule_id)` in one pass — so `y`'s fresh entry collided with the
+    /// pre-existing one and was silently dropped. `account_location_merge` then saw only ONE
+    /// occurrence of that key post-stage, found it already present pre-stage, and reconciled it
+    /// as "carried forward, not new" — so `y` left no trace anywhere: not a surviving row, not a
+    /// new `also_locations` entry, not counted as merged. This proves the fix keeps every
+    /// member's fresh absorption as its OWN entry regardless of a pre-existing key collision, so
+    /// `y` is never lost.
+    #[test]
+    fn cross_family_merge_ledger_reconciles_when_a_fresh_absorption_collides_with_an_already_absorbed_site(
+    ) {
+        let mut pre_primary = structural_site("acme/api", "handler.rs", 50, "RULE-1");
+        pre_primary.also_locations = vec![MergedLocation {
+            repo: "acme/api".to_string(),
+            path: "handler.rs".to_string(),
+            line: 52,
+            rule_id: "RULE-1".to_string(),
+            snippet: "already-absorbed-earlier".to_string(),
+            consequence: false,
+        }];
+        let y = structural_site("acme/api", "handler.rs", 52, "RULE-1");
+
+        let findings = vec![pre_primary, y];
+        let n = findings.len();
+        let pre_merge_findings = findings.clone();
+        let rows_in = findings.len();
+        let out = crate::ai_audit::merge_semantic_groups(findings, &[]);
+        let rows_out = out.len();
+        assert_eq!(
+            rows_out, 1,
+            "sanity: the same-rule-id/same-file/same-severity signal must still merge these \
+             into one row: {out:?}"
+        );
+        // Both the pre-existing absorbed site AND `y`'s own fresh absorption must leave a
+        // DISTINCT recorded site — not collapsed into one just because the key coincides.
+        let sites_at_52 = out[0]
+            .also_locations
+            .iter()
+            .filter(|l| l.path == "handler.rs" && l.line == 52 && l.rule_id == "RULE-1")
+            .count();
+        assert_eq!(
+            sites_at_52, 2,
+            "the pre-existing absorbed site and y's own fresh absorption must BOTH survive as \
+             distinct also_locations entries: {:?}",
+            out[0].also_locations
+        );
+
+        let acc = account_location_merge(&pre_merge_findings, &out);
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        let entry = ledger.record_stage("cross-family-merge", rows_in, rows_out, acc);
+        assert_eq!(
+            entry.unaccounted, 0,
+            "y must have a recorded disposition, not vanish into unaccounted just because its \
+             own site coincides with something the primary already absorbed: {entry:?}"
+        );
+        assert_eq!(
+            entry.rows_in,
+            entry.rows_out + entry.accounted_total(),
+            "rows_in == rows_out + accounted must hold exactly for N={n}: {entry:?}"
+        );
+        assert_eq!(
+            entry.merged_into.len(),
+            1,
+            "exactly one NEW merge (y into pre_primary) must be recorded this stage: {entry:?}"
+        );
+
+        // Every input rule id must still be reachable.
+        let reachable: std::collections::HashSet<String> = out
+            .iter()
+            .flat_map(|f| {
+                std::iter::once(f.rule_id.clone())
+                    .chain(f.also_matches.iter().cloned())
+                    .chain(f.also_locations.iter().map(|l| l.rule_id.clone()))
+            })
+            .collect();
+        assert!(
+            reachable.contains("RULE-1"),
+            "the absorbed rule id must remain reachable: {reachable:?}"
+        );
+    }
+
     #[test]
     fn read_local_pulls_code_files_and_prunes_noise() {
         use std::fs;

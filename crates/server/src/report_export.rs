@@ -12228,19 +12228,60 @@ mod export_invariants_gate {
 
         let mut ledger = crate::scan_ledger::ScanLedger::new();
 
-        // ── Stage 1: cross-family-merge, same-rule-id N-site collapse ──────────────────────
+        // ── Stage 1: cross-family-merge, same-rule-id N-site collapse PLUS a fresh-vs-
+        // already-absorbed key collision ───────────────────────────────────────────────────
+        // The first three rows are the N-site collapse shape (`also_matches` records nothing —
+        // the id is already `seen` from the primary). The last two rows are the DIFFERENT,
+        // real-world `rows 116 -> 83 merged=32 ... unaccounted=1` shape: `collision_primary`
+        // already absorbed a site (acme/widgets, handler.rs, 52, SEC-COLLISION-DEMO-1) in an
+        // EARLIER stage (simulated via its own pre-populated `also_locations`), and
+        // `collision_fresh` is a SEPARATE, genuinely distinct top-level finding whose own
+        // identity happens to be IDENTICAL to that already-absorbed site —
+        // `ai_audit::merge_semantic_group` used to silently drop `collision_fresh`'s own
+        // absorption because its key collided with the pre-existing entry.
+        let mut collision_primary = finding("SEC-COLLISION-DEMO-1", "handler.rs", 50, "medium");
+        collision_primary.repo = "acme/widgets".to_string();
+        collision_primary.also_locations = vec![crate::onboard::MergedLocation {
+            repo: "acme/widgets".to_string(),
+            path: "handler.rs".to_string(),
+            line: 52,
+            rule_id: "SEC-COLLISION-DEMO-1".to_string(),
+            snippet: "already-absorbed-earlier".to_string(),
+            consequence: false,
+        }];
+        let mut collision_fresh = finding("SEC-COLLISION-DEMO-1", "handler.rs", 52, "medium");
+        collision_fresh.repo = "acme/widgets".to_string();
+
         let cross_family_input = vec![
             finding("ARCH-NO-DIRECT-DB-1", "svc.rs", 10, "medium"),
             finding("ARCH-NO-DIRECT-DB-1", "svc.rs", 200, "medium"),
             finding("ARCH-NO-DIRECT-DB-1", "svc.rs", 400, "medium"),
+            collision_primary,
+            collision_fresh,
         ];
         let rows_in = cross_family_input.len();
         let pre = cross_family_input.clone();
         let merged = crate::ai_audit::merge_semantic_groups(cross_family_input, &[]);
         let rows_out = merged.len();
         assert_eq!(
-            rows_out, 1,
-            "sanity: the N-site collapse must produce one row: {merged:?}"
+            rows_out, 2,
+            "sanity: the N-site collapse and the collision pair are two independent groups, \
+             each producing one row: {merged:?}"
+        );
+        let collision_row = merged
+            .iter()
+            .find(|f| f.repo == "acme/widgets")
+            .expect("the collision group's primary must survive as its own row");
+        let sites_at_52 = collision_row
+            .also_locations
+            .iter()
+            .filter(|l| l.path == "handler.rs" && l.line == 52)
+            .count();
+        assert_eq!(
+            sites_at_52, 2,
+            "the pre-existing absorbed site and collision_fresh's own fresh absorption must \
+             BOTH survive as distinct also_locations entries: {:?}",
+            collision_row.also_locations
         );
         let acc = crate::onboard::account_location_merge(&pre, &merged);
         let stage1 = ledger
@@ -12248,7 +12289,8 @@ mod export_invariants_gate {
             .clone();
         assert_eq!(
             stage1.unaccounted, 0,
-            "cross-family-merge must fully reconcile: {stage1:?}"
+            "cross-family-merge must fully reconcile, including the fresh-vs-already-absorbed \
+             collision: {stage1:?}"
         );
 
         // ── Stage 2: structural-needs-review-merge, over ALREADY-merged primaries ──────────
