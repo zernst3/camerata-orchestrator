@@ -256,11 +256,28 @@ pub async fn eslint_is_provisioned(workspace: &Path) -> bool {
 /// - `eslint` — the linter itself.
 /// - `@typescript-eslint/parser` — lets eslint parse TypeScript files for
 ///   TS-specific rule previews.
+/// - `@typescript-eslint/eslint-plugin` — supplies the TS-specific RULES
+///   (`no-explicit-any`, `no-floating-promises`, `no-non-null-assertion`) the
+///   parser above only lets eslint read; without this package registered, a
+///   `--rule` override naming `@typescript-eslint/no-explicit-any` has no plugin
+///   to resolve the rule against and eslint cannot enable it.
+/// - `eslint-plugin-react-hooks` — supplies `react-hooks/exhaustive-deps` and
+///   `react-hooks/rules-of-hooks` (`JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1` /
+///   `JAVASCRIPT-REACT-RULES-OF-HOOKS-1`'s detector).
+/// - `eslint-plugin-jest` — supplies the `jest/*` rules the testing-domain corpus
+///   rules ground against (`no-conditional-expect`, `no-disabled-tests`, …).
 /// - `@microsoft/eslint-formatter-sarif` — the SARIF output formatter the
 ///   scan pass requests via `--format @microsoft/eslint-formatter-sarif`.
+///
+/// Every package here must also be REGISTERED in the bundled flat config
+/// (`assets/eslint/camerata.config.mjs`'s `plugins` field) — installing a plugin
+/// without registering it leaves `--rule` unable to resolve its namespace.
 const ESLINT_NPM_PACKAGES: &[&str] = &[
     "eslint",
     "@typescript-eslint/parser",
+    "@typescript-eslint/eslint-plugin",
+    "eslint-plugin-react-hooks",
+    "eslint-plugin-jest",
     "@microsoft/eslint-formatter-sarif",
 ];
 

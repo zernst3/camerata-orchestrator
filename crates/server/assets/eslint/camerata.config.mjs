@@ -6,15 +6,22 @@
  * repo's own eslint config or the npm registry.
  *
  * It is intentionally minimal: only the rules that appear in the Camerata
- * corpus with an `eslint:` or `@typescript-eslint:` linter source are listed
- * here.  The scan-time pass overrides individual rules via `--rule` anyway, so
- * this config is primarily a stable base that prevents eslint from erroring out
- * on "no config found".
+ * corpus with an `eslint:`, `@typescript-eslint:`, `react-hooks:`, or `jest:`
+ * linter source are listed here.  The scan-time pass overrides individual
+ * rules via `--rule` anyway, so this config is primarily a stable base that
+ * prevents eslint from erroring out on "no config found" AND, for any rule
+ * backed by a PLUGIN (as opposed to an eslint core rule), registers that
+ * plugin under the namespace its rules are addressed by — `--rule` can only
+ * resolve `"react-hooks/exhaustive-deps": "error"` if something has already
+ * registered the `react-hooks` plugin here; it does not install plugins on
+ * its own.
  *
- * For TypeScript targets the TypeScript parser is referenced by the local
- * node_modules path that Camerata provisions.  If the parser is absent, eslint
- * falls back to the default (JS-only) parser and the TS-specific rules are
- * silently ignored — graceful degradation, not a hard failure.
+ * Every plugin import below is wrapped in its own try/catch and dynamically
+ * imported, exactly like the TypeScript parser below: a partial or offline
+ * `npm install` (see `tool_provisioning::ensure_eslint`) must degrade that ONE
+ * plugin's rules gracefully (silently unavailable, `--rule` warns and no-ops
+ * rather than erroring the whole config out) rather than taking down every
+ * OTHER rule's preview for the whole scan.
  */
 
 // eslint-disable-next-line no-undef
@@ -27,6 +34,34 @@ try {
   tsParser = mod.default ?? mod;
 } catch {
   tsParser = undefined;
+}
+
+// Plugin packages, dynamically imported by bare specifier (resolved via this
+// file's own node_modules, provisioned by `tool_provisioning::ensure_eslint`).
+// Each is independently optional — see the module doc comment above.
+
+let tsEslintPlugin;
+try {
+  const mod = await import("@typescript-eslint/eslint-plugin");
+  tsEslintPlugin = mod.default ?? mod;
+} catch {
+  tsEslintPlugin = undefined;
+}
+
+let reactHooksPlugin;
+try {
+  const mod = await import("eslint-plugin-react-hooks");
+  reactHooksPlugin = mod.default ?? mod;
+} catch {
+  reactHooksPlugin = undefined;
+}
+
+let jestPlugin;
+try {
+  const mod = await import("eslint-plugin-jest");
+  jestPlugin = mod.default ?? mod;
+} catch {
+  jestPlugin = undefined;
 }
 
 /** @type {import('eslint').Linter.FlatConfig[]} */
@@ -43,6 +78,14 @@ const config = [
       "coverage/**",
     ],
     ...(tsParser ? { languageOptions: { parser: tsParser } } : {}),
+    plugins: {
+      // Only registered when the corresponding package actually provisioned —
+      // an absent plugin here means its rules are simply never previewable
+      // this run, surfaced as a graceful CoverageNote, never a crash.
+      ...(tsEslintPlugin ? { "@typescript-eslint": tsEslintPlugin } : {}),
+      ...(reactHooksPlugin ? { "react-hooks": reactHooksPlugin } : {}),
+      ...(jestPlugin ? { jest: jestPlugin } : {}),
+    },
     rules: {
       // ── Security baseline ───────────────────────────────────────────────────
       // These rules correspond to the corpus entries that map to the eslint
