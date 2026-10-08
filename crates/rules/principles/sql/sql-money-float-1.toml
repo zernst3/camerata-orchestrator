@@ -1,0 +1,67 @@
+id = "SQL-MONEY-FLOAT-1"
+title = "Money and currency amounts are stored as numeric/decimal, never as a floating-point type"
+tag = "stack"
+domain = "sql"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan over CREATE TABLE / ALTER TABLE ADD COLUMN (and the ORM's equivalent column-type declaration) for a column whose name matches a money-shaped heuristic (amount, price, cost, fee, balance, total, subtotal, tax, charge, payout, salary, or a `_usd`/`_cents`-style currency suffix) typed as a floating-point representation (`real`, `float4`, `double precision`, `float8`, or an ORM's `Float`/`double` column type). Conformance holds when every such column uses `numeric`/`decimal` (or, for a well-understood integer-minor-units convention, an exact integer type representing cents/minor units) instead; it does not apply to columns that are genuinely non-monetary despite a superficially similar name (a `price_tier` enum-like integer, a `cost_estimate_confidence` ratio) — names this ambiguous are `needs_review`."
+
+[[sources]]
+url = "https://www.postgresql.org/docs/current/datatype-numeric.html"
+title = "PostgreSQL — Numeric Types: 'If you require exact storage and calculations (such as for monetary amounts), use the numeric type instead' of real/double precision, which are inexact and can show discrepancies on storage, retrieval, and equality comparison"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/1339.html"
+title = "CWE-1339: Insufficient Precision or Accuracy of a Real Number"
+
+[decision]
+question = "Is every column that represents a money or currency amount declared as numeric/decimal (or an exact integer minor-units convention), rather than a floating-point type?"
+default = "money-is-numeric-or-integer-minor-units"
+why = """
+PostgreSQL's own documentation states this as plainly as a vendor doc ever states anything: `real` and `double
+precision` are INEXACT types — 'storing and retrieving a value might show slight discrepancies' and 'comparing two
+floating-point values for equality might not always work as expected' — and the documentation explicitly recommends
+`numeric` 'for storing monetary amounts and other quantities where exactness is required.' This is not a stylistic
+preference; it is CWE-1339 (Insufficient Precision or Accuracy of a Real Number) manifesting in the single domain
+where the gap between 'close enough' and 'exact' has a direct dollar cost: a running total computed by summing
+float-typed line items can genuinely diverge from the sum a human would compute by hand, by an amount that grows
+with the number of operations, and `WHERE amount = 19.99` can fail to match a row that was inserted with the
+literal value 19.99, because neither the comparison value nor the stored value round-trips through IEEE 754 binary
+floating point exactly.
+
+The accepted alternative to `numeric`/`decimal` is an exact INTEGER representing minor units (cents) — `amount_cents
+integer` — which is also exact and sometimes preferred for arithmetic-heavy ledger systems; what is never acceptable
+is a floating-point type for any column representing an amount of money, since the entire category of bug (off-by-a-
+fraction-of-a-cent totals, equality checks that silently fail) is one PostgreSQL's own type system exists to make
+impossible to write by accident.
+"""
+
+[[option]]
+id = "money-is-numeric-or-integer-minor-units"
+label = "Flag money-shaped columns declared as real/double precision; require numeric/decimal or an exact integer minor-units type"
+directive = """
+Scan column declarations for a money-shaped name (amount, price, cost, fee, balance, total, subtotal, tax, charge,
+payout, salary, or a currency-minor-unit suffix) typed `real`, `double precision`, `float4`, `float8`, or an ORM
+`Float`/`double` type. Flag as high severity: "Your `<table>.<column>` column stores a dollar amount as floating
+point. Summed totals and equality checks on this column can silently drift from the exact value." Columns whose
+name is ambiguously money-shaped (could plausibly be a ratio, confidence score, or non-monetary quantity) are
+`needs_review` rather than asserted.
+"""
+remediation = """
+Change `<table>.<column>` from a floating-point type to `numeric(precision, scale)` (choosing scale to match your
+currency's minor-unit convention, typically 2) or, if your codebase already works in integer minor units elsewhere,
+an exact integer column (`amount_cents integer`). Migrate existing data by casting through numeric rather than
+re-deriving values from the lossy floats already stored, where the original exact inputs are still recoverable.
+Verify by summing a set of known decimal amounts in the new column type and confirming the total matches the exact
+expected value, including a case that would have exposed floating-point drift in the old type.
+"""
+effort = "medium"
+why = "PostgreSQL's own documentation names numeric as the correct type for monetary amounts specifically because real/double precision are inexact by design — there is no legitimate case for a money column to use a type whose own documentation warns it may not even compare equal to itself after a round trip."
+
+[[option]]
+id = "use-floating-point-for-money-and-round-at-display-time"
+label = "Store money as real/double precision and round to two decimal places only when displaying it"
+directive = "Store monetary amounts in a floating-point column, applying rounding only in the presentation layer when the value is formatted for display, while keeping the underlying stored and computed values as floats."
+why = "Rejected: rounding at display time does nothing to fix accumulation error in STORED and COMPUTED values — a running balance updated by repeated float addition/subtraction drifts from the true value regardless of how it is later formatted, and an equality comparison against a float column can fail to match a value that is, to the cent, the same amount, purely because of binary floating-point representation. The bug lives in the arithmetic and the storage, not the display, so fixing only the display leaves the actual defect class (silently wrong totals, broken equality checks) fully intact."

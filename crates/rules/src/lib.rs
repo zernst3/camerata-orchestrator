@@ -2982,4 +2982,43 @@ mod tests {
             "the pre-existing user-metadata-authorization rule must still be present (not duplicated)"
         );
     }
+
+    #[tokio::test]
+    async fn new_sql_integrity_domain_rules_are_well_formed_and_reachable() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        for id in [
+            "SQL-FK-CASCADE-FINANCIAL-1",
+            "SQL-MONEY-FLOAT-1",
+            "SQL-INVARIANTS-CONSTRAINTS-1",
+            "SQL-TIMESTAMPTZ-1",
+            "SQL-ENUM-TEXT-CONSTRAINT-1",
+            "SQL-PRIVILEGED-WRITE-AUDIT-1",
+            "SQL-SOFT-DELETE-PARTIAL-INDEX-1",
+        ] {
+            assert_well_formed_new_rule(&set, id, "sql");
+        }
+    }
+
+    /// `SQL-MONEY-FLOAT-1` declares `mechanical` enforcement with no shipped detector — the
+    /// W4 mechanical-gate invariant (see `mechanical_gate` in camerata-server) requires that any
+    /// such rule be code-auditable so it still reaches the semantic pass. Pinned here as a
+    /// regression guard specific to this rule, since it is the one new rule in this pass that
+    /// chose the mechanical tier.
+    #[tokio::test]
+    async fn sql_money_float_is_mechanical_with_no_detector_but_code_auditable() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let rule = set
+            .get_by_id("SQL-MONEY-FLOAT-1")
+            .expect("SQL-MONEY-FLOAT-1 must exist in the bundled corpus");
+        assert_eq!(rule.enforcement, EnforcementKind::Mechanical);
+        assert!(is_code_auditable("SQL-MONEY-FLOAT-1"));
+    }
 }

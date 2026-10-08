@@ -1,0 +1,70 @@
+id = "SQL-FK-CASCADE-FINANCIAL-1"
+title = "A foreign key from a mutable user table into a financial, audit, or historical record never cascades deletes onto that record"
+tag = "stack"
+domain = "sql"
+layer = "universal"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan over FOREIGN KEY declarations (REFERENCES clauses or the ORM's FK helper) for `ON DELETE CASCADE` where the REFERENCING table (the one holding the FK, deletion of whose row triggers the cascade) is a routine, user-mutable table (a session, a cart, a profile edit, anything a user or an automated job deletes in the ordinary course of the product) and the REFERENCED table's name or column shape suggests financial, audit, or historical semantics (invoices, payments, transactions, orders, ledger_entries, audit_log, charges, receipts, statements). Conformance holds when such a relationship uses `ON DELETE RESTRICT` (or `NO ACTION`, or a nullable FK with `ON DELETE SET NULL`) instead; a cascade whose target naming is ambiguous is `needs_review` rather than asserted."
+
+[[sources]]
+url = "https://www.postgresql.org/docs/current/ddl-constraints.html"
+title = "PostgreSQL — Foreign Keys: ON DELETE CASCADE deletes the referencing row(s) automatically when the referenced row is deleted"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
+title = "OWASP Logging Cheat Sheet (low authority — supports the general principle that records needed for accountability must remain available for audit/incident review; the specific financial/audit-table carve-out from ordinary cascade behavior is this rule's own judgment, not something the cheat sheet itself prescribes)"
+
+[decision]
+question = "Does a foreign key from a routine, user-mutable table into a financial, audit, or historical record use ON DELETE CASCADE, silently destroying that record when the ordinary-course row is deleted?"
+default = "restrict-or-null-cascades-into-financial-records"
+why = """
+`ON DELETE CASCADE` is the right choice for genuinely dependent data — delete a blog post, cascade-delete its
+comments, because the comments have no meaning without the post. The same mechanism applied in the other direction
+— a user's session row, cart, or profile edit cascading a DELETE onto a payment, invoice, or audit-log entry that
+happens to reference it — turns an everyday, routine deletion (a cleanup job purging old sessions, a user deleting
+their own cart) into an IRREVERSIBLE destruction of a financial or audit record that existed specifically to be the
+durable, after-the-fact evidence of what happened. Once a migration ships `ON DELETE CASCADE` in this direction,
+the loss happens silently, the moment the ordinary-course row is deleted by code that has no idea a financial
+record is wired to disappear with it — there is no error, no review, nothing in application logs pointing at the
+financial table at all.
+
+The fix is almost always `ON DELETE RESTRICT` (block the delete until the financial/audit reference is dealt with
+explicitly, usually by archiving or reassigning it first) or, where the relationship is genuinely optional, `ON
+DELETE SET NULL` on a nullable FK column — either way, the deletion of the routine row can no longer silently take
+the financial/audit record down with it.
+
+Detection necessarily relies on a naming heuristic (the referenced table's name suggesting financial/audit/
+historical semantics), since there is no syntactic marker in SQL distinguishing 'data that must survive' from 'data
+that's fine to cascade' — ambiguous names are `needs_review`, matching the same honesty standard this corpus
+applies to SUPABASE-STORAGE-PUBLIC-BUCKET-1's bucket-naming heuristic.
+"""
+
+[[option]]
+id = "restrict-or-null-cascades-into-financial-records"
+label = "Flag ON DELETE CASCADE from a routine table into a financial/audit/historical-named table; prefer RESTRICT or SET NULL"
+directive = """
+Scan FOREIGN KEY declarations for `ON DELETE CASCADE` where the referenced table's name matches a financial/audit/
+historical heuristic (invoice, payment, transaction, order, ledger, audit_log, charge, receipt, statement, and
+close variants). Flag as high severity: "Deleting a row in `<referencing_table>` would permanently destroy
+matching rows in `<referenced_table>` — including records you likely need to keep for accounting or audit
+purposes." Ambiguous table-name matches are `needs_review` rather than asserted outright.
+"""
+remediation = """
+Change the foreign key from `<referencing_table>` to `<referenced_table>` from `ON DELETE CASCADE` to `ON DELETE
+RESTRICT` (forcing an explicit decision before the financial/audit row can be removed) or, if the relationship is
+genuinely optional, to a nullable column with `ON DELETE SET NULL`. If routine cleanup of the referencing table is
+expected (e.g. purging old sessions), archive or otherwise handle the financial/audit reference explicitly in that
+cleanup job rather than letting the database cascade-delete it. Verify by deleting a referencing row and confirming
+the financial/audit row survives (or the delete is rejected until handled explicitly), rather than disappearing
+silently.
+"""
+effort = "medium"
+why = "A cascading delete into a financial or audit table converts an everyday, often-automated row deletion into irreversible, silent destruction of exactly the records that exist to document what happened — RESTRICT/SET NULL costs nothing in the common case and forces a conscious decision in the rare case where the financial record genuinely should go away too."
+
+[[option]]
+id = "cascade-deletes-uniformly-regardless-of-referenced-table-semantics"
+label = "Apply ON DELETE CASCADE uniformly to every foreign key, regardless of what the referenced table represents"
+directive = "Use ON DELETE CASCADE as the default referential action for every foreign key relationship, including ones that reference financial, audit, or historical tables, without a naming-based or semantic carve-out."
+why = "Rejected: CASCADE is the correct default for genuinely dependent data, but applying it uniformly treats a financial or audit record as equally disposable as a comment or a cache row. The entire point of an audit or financial record is that it outlives the routine-course row that happened to reference it; a uniform cascade policy removes that guarantee silently, with no error at delete time pointing at what was actually destroyed."

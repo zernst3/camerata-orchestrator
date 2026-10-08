@@ -1,0 +1,70 @@
+id = "SQL-INVARIANTS-CONSTRAINTS-1"
+title = "Domain invariants that matter (required fields, valid ranges/enums, uniqueness) are declared as NOT NULL/CHECK/UNIQUE constraints, not left to application code alone"
+tag = "stack"
+domain = "sql"
+layer = "universal"
+enforcement = "prose"
+default = true
+verification = "grounded"
+qualifies = "Prose check: which columns genuinely represent an invariant worth enforcing at the database (a required field, a bounded/valid range, a value that must be unique across rows) versus a column that is legitimately optional or whose validity is contextual and not expressible as a simple predicate, is a judgment call over the schema and its surrounding application logic, not a regex. The realistic mechanism is a migration-review checklist plus a periodic schema audit comparing application-level validation (model-layer 'required'/'unique' declarations, request-body validators) against what the database itself enforces, surfacing columns validated only in application code with no matching database constraint. Conformance holds when every invariant the application code treats as load-bearing (required, bounded, or unique) has a matching database-level constraint; it fails when application code is the ONLY layer enforcing an invariant the schema itself stays silent on."
+[[sources]]
+url = "https://www.postgresql.org/docs/current/ddl-constraints.html"
+title = "PostgreSQL — Constraints: 'constraints give you as much control over the data in your tables as you wish... this applies even if the value came from the default value definition'; NOT NULL, CHECK, and UNIQUE constraints enforce invariants regardless of which code path produced the write"
+
+[decision]
+question = "Does every domain invariant the application treats as load-bearing (required fields, valid ranges/enums, uniqueness) have a matching database-level NOT NULL/CHECK/UNIQUE constraint, rather than being enforced only in application code?"
+default = "constraints-enforce-invariants-the-app-cannot-bypass"
+why = """
+PostgreSQL's own documentation is explicit that the point of a constraint is enforcement that holds 'even if the
+value came from the default value definition' — i.e. a constraint is the one place an invariant holds regardless
+of which code path produced the write. Application-level validation (a model's 'required: true', a request
+validator checking a field is one of a fixed set of strings, an ORM-level uniqueness check) is necessary for good
+error messages and early feedback, but it only runs for requests that go through that specific validation path. A
+data migration, a bulk import script, a different service writing to the same table, an admin tool, or simply a
+second code path a future developer adds without remembering the original validation, all bypass it entirely — the
+database accepts the write regardless, silently entrenching exactly the kind of invalid state the validation was
+meant to prevent.
+
+The three constraint types this rule covers map to three distinct, common gaps: NOT NULL for a column the
+application always expects to be populated but the schema allows to be empty; CHECK for a value that must fall
+within a valid range or match one of a fixed set of options (the 'documentation says the status is only ever
+pending/active/closed, but the column accepts any string' gap); UNIQUE for a value the application assumes is
+one-of-a-kind (an email, a slug, an external-id) but the schema does not actually guarantee is. PostgreSQL's
+documentation notes that 'in most database designs the majority of columns should be marked not null' — the
+unusual case is the nullable column, not the required one.
+
+This is a judgment-heavy rule, not a mechanical one: deciding WHICH columns genuinely represent an invariant worth
+enforcing (as opposed to a legitimately optional field, or a value whose validity depends on context a simple CHECK
+predicate cannot express) requires reading the schema alongside the application code that validates it, the same
+shape of judgment `sql-db-index-2-where-indexes` already applies to index placement.
+"""
+
+[[option]]
+id = "constraints-enforce-invariants-the-app-cannot-bypass"
+label = "Require a database constraint for every invariant the application code treats as load-bearing"
+directive = """
+Compare application-level validation (required-field declarations, enum/range checks, uniqueness assumptions)
+against the schema's own constraints. For every invariant the application clearly depends on but the database does
+not enforce, add the matching NOT NULL, CHECK, or UNIQUE constraint. Do not blanket-apply NOT NULL to every column
+or CHECK to every value — the majority of columns should be required, per Postgres's own guidance, but a column
+that is genuinely optional (and whose optionality the application itself relies on) stays nullable. Favor the
+explicit NOT NULL / CHECK form over an equivalent hand-written trigger, since PostgreSQL notes an explicit not-null
+constraint is more efficient than the equivalent CHECK, and both are more efficient than a trigger-based
+reimplementation.
+"""
+remediation = """
+Add the missing constraint directly to `<table>.<column>` — `ALTER TABLE <table> ALTER COLUMN <column> SET NOT
+NULL` for a required field (after backfilling any existing NULLs), `ALTER TABLE <table> ADD CONSTRAINT ... CHECK
+(...)` for a bounded/enum-shaped value, or `ALTER TABLE <table> ADD CONSTRAINT ... UNIQUE (...)` for a value the
+application assumes is one-of-a-kind. Verify by attempting a write that violates the constraint through a path that
+bypasses your application's own validation (a raw SQL statement, a migration script, a direct database client) and
+confirming the database itself rejects it rather than only your application code.
+"""
+effort = "medium"
+why = "Application-level validation only runs for requests that pass through it; a database constraint holds for every write regardless of which code path produced it, which is the entire reason PostgreSQL's own documentation frames constraints as control over the data that holds 'even if the value came from the default value definition.'"
+
+[[option]]
+id = "application-code-is-the-sole-enforcement-layer-for-invariants"
+label = "Enforce required fields, valid ranges, and uniqueness only in application code; leave the schema permissive"
+directive = "Validate required fields, value ranges/enums, and uniqueness exclusively in application-layer code (model validations, request validators, service-layer checks), without adding matching NOT NULL/CHECK/UNIQUE constraints to the schema."
+why = "Rejected: application-only enforcement holds only for writes that go through the specific code path implementing the check. A migration, a bulk import, a second service, or a future code path that doesn't call the same validator all bypass it silently, and the resulting invalid state (a null where the app assumes a value, a duplicate where the app assumes uniqueness, an out-of-range value where the app assumes a fixed set) then has to be discovered and cleaned up after the fact, rather than having been impossible to write in the first place."

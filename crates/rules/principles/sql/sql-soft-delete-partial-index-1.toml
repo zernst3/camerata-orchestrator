@@ -1,0 +1,64 @@
+id = "SQL-SOFT-DELETE-PARTIAL-INDEX-1"
+title = "A soft-deleted row's unique constraints are partial (excluding deleted rows), and ordinary reads filter it out by default"
+tag = "stack"
+domain = "sql"
+layer = "universal"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan over tables carrying a soft-delete column (deleted_at, is_deleted, archived_at, and close variants) for two distinct facets: (1) a sibling UNIQUE constraint or unique index on that table with no `WHERE deleted_at IS NULL` (or equivalent) partial qualifier — crisp and near-mechanical, since a plain unique index plus a soft-delete column WILL eventually block re-creating a row with a previously-soft-deleted value; and (2) whether the table's normal read paths (application queries, or an RLS policy on a Supabase/Postgres-backed table) filter the soft-delete column by default rather than requiring every caller to remember the predicate — a more semantic judgment requiring the query/policy code as evidence. Conformance holds when every unique constraint on a soft-deletable table is partial and ordinary reads exclude soft-deleted rows without each caller having to opt in."
+
+[[sources]]
+url = "https://www.postgresql.org/docs/current/indexes-partial.html"
+title = "PostgreSQL — Partial Indexes: a unique partial index (`CREATE UNIQUE INDEX ... WHERE <condition>`) enforces uniqueness only among the rows matching the predicate, the documented mechanism for 'ensure there is only one successful entry... but there might be any number of unsuccessful ones'"
+
+[decision]
+question = "Is every unique constraint on a soft-deletable table scoped to exclude soft-deleted rows, and do ordinary reads filter soft-deleted rows out by default rather than requiring every caller to remember to?"
+default = "partial-unique-constraints-and-default-filtered-reads"
+why = """
+Soft deletion (a `deleted_at`/`is_deleted` column instead of an actual `DELETE`) is a common, legitimate pattern —
+it preserves history, supports undo, and keeps foreign-key relationships intact. It interacts badly with a PLAIN
+unique constraint, though: once a row with `email = 'a@example.com'` is soft-deleted (the row still physically
+exists, just flagged), re-signing up with the same email — which the product almost always wants to allow, since
+the old account is gone as far as the user is concerned — fails with a unique-constraint violation the database
+cannot distinguish from a genuine duplicate, because a plain unique index has no idea the conflicting row is
+'soft-deleted' and therefore shouldn't count. PostgreSQL's own partial-index documentation describes the exact
+mechanism that fixes this: a unique index scoped with `WHERE deleted_at IS NULL` enforces uniqueness only among
+LIVE rows, while allowing any number of soft-deleted rows to share the same value.
+
+The second, related failure mode is on the READ side: if every query site has to remember to add
+`WHERE deleted_at IS NULL` by hand, the first one that forgets — a report, an admin list view, a join from an
+unrelated feature, or (on a Supabase/Postgres-backed table) an RLS policy whose predicate never mentions the
+soft-delete column at all — surfaces soft-deleted rows as if they were still live, which is either a confusing bug
+(a 'deleted' item reappearing in a list) or a genuine access-control gap if the soft-delete was standing in for a
+revoked grant (a membership or permission row that was 'removed' but a policy with no deleted_at filter still
+authorizes against it). The safer default scopes the filter once — a view, a default scope in the ORM, or the RLS
+policy predicate itself — rather than trusting every future caller to add it.
+"""
+
+[[option]]
+id = "partial-unique-constraints-and-default-filtered-reads"
+label = "Scope unique constraints to exclude soft-deleted rows; filter soft-deleted rows out by default rather than per-caller"
+directive = """
+Scan tables carrying a soft-delete column for a sibling UNIQUE constraint/index with no partial `WHERE` qualifier
+excluding soft-deleted rows; flag as high severity: "Your `<table>` table can't let a user reuse `<column>`'s value
+after a soft-deleted row occupies it — the unique constraint doesn't know the conflicting row is gone." Separately,
+inspect whether default read paths (an RLS policy, a default ORM scope, a shared base query) exclude soft-deleted
+rows without each caller opting in; flag as `needs_review` (semantic judgment) when soft-deleted rows appear
+reachable through a path with no deleted_at/is_deleted predicate at all.
+"""
+remediation = """
+Replace the plain unique constraint on `<table>.<column>` with a partial unique index scoped to live rows:
+`CREATE UNIQUE INDEX ... ON <table> (<column>) WHERE deleted_at IS NULL`. Scope the soft-delete filter once at a
+shared layer — an RLS policy predicate, a default ORM scope, or a view — rather than requiring every query site to
+add `WHERE deleted_at IS NULL` by hand. Verify by soft-deleting a row and confirming a new row can reuse its
+previously-unique value, and that a default (unfiltered) read of the table no longer surfaces the soft-deleted row.
+"""
+effort = "medium"
+why = "A plain unique constraint has no notion of 'soft-deleted,' so it blocks legitimate reuse the moment any row with that value has ever been soft-deleted; a partial index fixes this with the exact mechanism PostgreSQL's own documentation describes for 'only one success, any number of failures' uniqueness, and scoping the read-side filter once removes an entire class of per-caller forgetting."
+
+[[option]]
+id = "require-every-caller-to-filter-soft-deleted-rows-by-hand"
+label = "Use a plain (non-partial) unique constraint and require every query site to add its own deleted_at filter"
+directive = "Leave unique constraints unscoped (blocking reuse of a value from a soft-deleted row) and rely on each individual query, policy, or report to remember to add its own `WHERE deleted_at IS NULL` predicate, rather than centralizing the filter or partial-scoping the constraint."
+why = "Rejected: a plain unique constraint actively blocks a legitimate, common product behavior (letting a user reuse a value after their prior row was soft-deleted) with no workaround short of a schema change. Requiring every caller to remember its own deleted_at filter is the same per-call-site-discipline failure mode SUPABASE-STORAGE-OBJECT-POLICY-1 and the generic invariants rule both reject elsewhere in this corpus: the first forgotten call site (a report, a join, a policy) surfaces soft-deleted rows as if they were live, with no error anywhere pointing at the omission."

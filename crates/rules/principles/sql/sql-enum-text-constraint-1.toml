@@ -1,0 +1,77 @@
+id = "SQL-ENUM-TEXT-CONSTRAINT-1"
+title = "A column representing a closed set of values is constrained — a native enum, a CHECK list, or a lookup-table FK — never a bare, unconstrained text column"
+tag = "stack"
+domain = "sql"
+layer = "universal"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan over column declarations for a `text`/`varchar` column whose name suggests a closed set of values (status, state, role, type, kind, tier, category, and close variants) with no corresponding CHECK constraint, native ENUM type, or FK to a lookup table constraining it. Conformance holds when the column's valid values are constrained by one of the three mechanisms below; it fails when the column accepts any string and the 'closed set' exists only as a convention documented in application code (a TypeScript union, a constant list) with nothing enforcing it at the database. A column whose name is ambiguous (could be genuinely free-form text) is `needs_review`."
+
+[[sources]]
+url = "https://www.postgresql.org/docs/current/ddl-constraints.html"
+title = "PostgreSQL — CHECK constraints: 'the value in a certain column must satisfy a Boolean expression', the mechanism for constraining a column to a fixed set of valid values"
+
+[[sources]]
+url = "https://www.postgresql.org/docs/current/datatype-enum.html"
+title = "PostgreSQL — Enumerated Types: a native enum type restricts a column to a static, ordered set of values"
+
+[decision]
+question = "What position does the project take on constraining a closed-set-valued column — native enum, CHECK list, or lookup-table FK — versus leaving it an unconstrained text column?"
+default = "pick-one-enum-strategy-by-volatility-and-cross-table-reuse"
+why = """
+A column like `status`, `role`, or `type` very often represents a closed, application-meaningful set of values —
+'pending/active/closed', 'admin/member/viewer' — that the application code treats as closed (a TypeScript union, a
+switch statement with no default case, a constant array used for validation). Declared as a bare `text`/`varchar`
+column with no database-level constraint, that closedness is a convention enforced ONLY by the application layer
+that happens to validate it, which means a migration, a bulk import, a different service, or a typo in a literal
+string ('pedning' instead of 'pending') is silently accepted by the database and produces a row the application's
+own switch/match logic was never written to handle — exactly the kind of state that looks fine until the one code
+path that reads it unexpectedly falls through to a default case or, worse, has none.
+
+There are three legitimate constraint mechanisms, and the right one depends on how the set changes and whether it's
+shared:
+
+- A native PostgreSQL `ENUM` type is the tightest fit when the set is small, rarely changes, and doesn't need to be
+  queried as data in its own right — but adding a new value requires a schema migration (`ALTER TYPE ... ADD
+  VALUE`), and in older PostgreSQL versions that could not run inside a transaction with other DDL.
+- A `CHECK (column IN (...))` constraint is more flexible to change (an ordinary `ALTER TABLE ... DROP CONSTRAINT`
+  / `ADD CONSTRAINT`) and keeps the set local to the one table, at the cost of duplicating the literal list anywhere
+  else the same set is checked.
+- A foreign key to a dedicated lookup table is the most flexible: the set can be queried, joined, annotated (a
+  `description` column on each status), and extended without a schema migration (just an INSERT into the lookup
+  table) — at the cost of an extra table and a join to resolve the human-readable value.
+
+This rule does not mandate one mechanism over the others (unlike a strategy rule with a single adopted default,
+this is closer in shape to SQL-AUDIT-COLUMNS-1's 'pick by semantics' framing): it requires that SOME database-level
+mechanism constrain the column, rather than the set existing purely as an application-code convention with the
+schema itself silently accepting anything.
+"""
+
+[[option]]
+id = "pick-one-enum-strategy-by-volatility-and-cross-table-reuse"
+label = "Constrain closed-set columns via native enum, CHECK list, or lookup-table FK, chosen by how often the set changes and whether it's reused"
+directive = """
+Scan text/varchar columns whose name suggests a closed set (status, state, role, type, kind, tier, category) for
+the absence of a CHECK constraint, native enum type, or lookup-table FK. Flag as medium severity: "Your
+`<table>.<column>` column is meant to hold one of a fixed set of values, but the database accepts any string —
+nothing stops a typo or a bad migration from inserting a value your application code was never written to handle."
+Pick the constraint mechanism by the set's volatility and reuse: a small, stable, single-table set fits a native
+enum or CHECK list; a set that changes often, needs descriptive metadata, or is shared across multiple tables fits
+a lookup-table FK.
+"""
+remediation = """
+Add a `CHECK (<column> IN (...))` constraint listing the valid values, convert `<column>` to a native PostgreSQL
+enum type, or introduce a lookup table and a foreign key to it — whichever mechanism matches how often this
+particular set changes and whether other tables need to reference the same set of values. Verify by attempting to
+insert a row with a value outside the valid set through a path that bypasses your application's own validation (a
+raw SQL statement or migration script) and confirming the database itself rejects it.
+"""
+effort = "medium"
+why = "The application-code convention that a column is 'really' a closed set provides zero protection against any write path that doesn't go through the specific validator enforcing it; a database-level constraint (whichever of the three fits the set's volatility) makes an out-of-set value impossible to write at all, regardless of which code wrote it."
+
+[[option]]
+id = "leave-closed-set-columns-as-unconstrained-text"
+label = "Represent closed-set values as a plain text/varchar column with no database-level constraint, relying on application code to validate the set"
+directive = "Store status/role/type-shaped values in an unconstrained text or varchar column, with the valid set of values enforced only by application-layer validation (a TypeScript union, a constant list, a request validator)."
+why = "Rejected: this is application-only enforcement for a value the application itself treats as closed — exactly the gap SQL-INVARIANTS-CONSTRAINTS-1 names generically, specialized here to the enum shape specifically because it is common enough, and the resulting bug (a stray string value the application's own switch/match logic has no case for) distinctive enough, to warrant calling it out by name rather than leaving it to the generic invariants rule alone."

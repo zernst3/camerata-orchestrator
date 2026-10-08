@@ -1,0 +1,68 @@
+id = "SQL-PRIVILEGED-WRITE-AUDIT-1"
+title = "A privileged write (a role grant, a permission change, a financial adjustment, an admin override) leaves an append-only audit-log entry, not just the mutated row"
+tag = "stack"
+domain = "sql"
+layer = "universal"
+enforcement = "prose"
+default = true
+verification = "grounded"
+qualifies = "Whether a given write is 'privileged' enough to require an audit-log entry, and whether the code path performing it actually writes one, is a judgment call over the schema and the handler/function performing the write, not a pattern match — so this rule routes to prose: a write already identified as privileged by a neighboring rule (a role/permission grant, a SECURITY DEFINER function per SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1, a financial-adjustment endpoint, an admin-override action) is fed to Claude with the question: does this code path also insert an append-only record of who did this, to what, when, and what changed? Conformance holds when every privileged write has a matching audit-log insert in the same transaction; it fails when the ONLY trace of a privileged action is the mutated row itself, with its prior state and the identity of who changed it unrecoverable once overwritten."
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
+title = "OWASP Logging Cheat Sheet — log security-relevant events including privileged operations, with enough detail (who, what, when) to support accountability and incident investigation"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/778.html"
+title = "CWE-778: Insufficient Logging"
+
+[decision]
+question = "Does every privileged write (role/permission grants, financial adjustments, admin overrides) produce an append-only audit-log entry, distinct from the ordinary row the write mutates?"
+default = "privileged-writes-produce-an-append-only-audit-entry"
+why = """
+SQL-AUDIT-COLUMNS-1 already covers WHO created or last touched an ordinary row (created_by/modified_by-style
+columns) — but a column on the mutated row only ever holds the CURRENT state and the LAST writer. For a genuinely
+privileged action — granting a role, changing a permission, adjusting a financial balance, an admin override that
+bypasses a user's own normal constraints — that is not enough: if the row is overwritten again (or deleted), the
+fact that the privileged action ever happened, who performed it, what the value was immediately before, and what it
+became, is gone. This is CWE-778 (Insufficient Logging) applied to exactly the class of action where after-the-fact
+accountability matters most — an incident investigation, a dispute over a financial adjustment, or a security review
+asking 'who had admin granted to them and when' needs a durable record that survives the row being changed again,
+not just the row's current value.
+
+The fix is a dedicated, APPEND-ONLY audit-log table (distinct from the audit COLUMNS convention) written in the
+SAME transaction as the privileged write itself — never a best-effort write from application code after the fact,
+which can fail, be skipped by a different code path, or simply be forgotten when a second way to perform the same
+privileged action gets added later. The entry should capture who performed the action, what was changed (old and
+new values, not just the new), when, and ideally why (a reason/ticket reference where the action supports one).
+"""
+
+[[option]]
+id = "privileged-writes-produce-an-append-only-audit-entry"
+label = "Require an append-only audit-log insert, in the same transaction, for every identified privileged write"
+directive = """
+For every write already identified as privileged (role/permission grants, SECURITY DEFINER financial/admin
+functions, admin-override endpoints), evaluate whether the same transaction also inserts a record into an
+append-only audit-log table capturing the actor, the action, the before/after state, and a timestamp. Report at
+high severity when no such record is found: "This privileged action changes `<table>` with no durable record of who
+did it or what the value was before — if the row changes again, there is no way to reconstruct what happened
+here." When an audit entry is found, report it as informational, noting whether it captures the prior value or
+only the new one.
+"""
+remediation = """
+In the same transaction as `<privileged action>`, insert a row into an append-only audit-log table (e.g.
+`audit_log`) recording the acting user, the action performed, the affected row's identifier, its value immediately
+before and after the change, and a timestamp. Do not rely on a best-effort write from application code outside the
+transaction — perform the insert as part of the same database transaction (a trigger, or an explicit statement
+inside the same SECURITY DEFINER function) so the audit entry cannot be silently skipped by a failure or a future
+code path that forgets it. Verify by performing the privileged action and confirming a corresponding audit-log row
+exists capturing the prior state, even after the underlying row is changed again or deleted.
+"""
+effort = "medium"
+why = "A privileged action's row-level audit columns (last modified by/when) only ever reflect the CURRENT state; an append-only log entry written in the same transaction is the only mechanism that survives the row being changed again, which is exactly when an incident investigation or a dispute actually needs the record."
+
+[[option]]
+id = "rely-on-audit-columns-and-application-logs-for-privileged-actions"
+label = "Rely on the row's own audit columns (modified_by/modified_on) and best-effort application logging for privileged actions"
+directive = "Do not add a dedicated append-only audit-log table for privileged writes; rely on the mutated row's own created_by/modified_by columns plus whatever the application's general-purpose logging framework happens to emit for the request."
+why = "Rejected: audit columns on the row itself are overwritten by the NEXT write to that row — they cannot answer 'what was this value before the last three changes' or 'who performed the change that was later reverted.' Application logs are typically rotated, are not transactionally tied to the database write (a log line can be emitted even if the transaction later rolls back, or dropped even if the transaction commits), and are not queryable with the same guarantees as a table the database itself enforces append-only-ness on. Neither substitute provides the durable, query-ready, transactionally-consistent record a privileged-action investigation actually needs."

@@ -1,0 +1,64 @@
+id = "SQL-TIMESTAMPTZ-1"
+title = "A column recording when an EVENT happened uses timestamp WITH time zone, never the bare, zone-less timestamp type"
+tag = "stack"
+domain = "sql"
+layer = "universal"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan over column type declarations for `timestamp` / `TIMESTAMP` with no `with time zone` qualifier (and the ORM-equivalent zone-less datetime type) on a column whose name suggests an EVENT instant (created_at, updated_at, occurred_at, started_at, completed_at, expires_at, and close variants) rather than a zone-agnostic wall-clock value (birth_date-as-timestamp, a recurring local daily time, a column explicitly documented as intentionally zone-less). Conformance holds when every event-instant column uses `timestamptz`; a column whose name plausibly represents a zone-agnostic local time is `needs_review` rather than asserted."
+
+[[sources]]
+url = "https://www.postgresql.org/docs/current/datatype-datetime.html"
+title = "PostgreSQL — Date/Time Types: 'we recommend using date/time types that contain both date and time when using time zones' and, for timestamps specifically, timestamptz stores internally as UTC and converts for display, avoiding the ambiguity of a zone-less value"
+
+[decision]
+question = "Does every column recording when an event happened use timestamp WITH time zone, rather than the bare, zone-less timestamp type?"
+default = "event-timestamps-are-timestamptz"
+why = """
+`timestamp without time zone` stores a date and a wall-clock time with no information about which time zone that
+clock reading was taken in. For a column meant to record WHEN something happened — a row's creation, an order's
+completion, a token's expiry — this is a structural ambiguity, not a minor style issue: the same stored value means
+a different absolute instant depending on which server's session time zone later reads it back, a team spanning
+multiple time zones (or a server whose configured zone ever changes) can silently compute wrong deltas ('3 hours
+ago' becomes wrong by however many hours separate the writer's and reader's assumed zones), and any comparison
+against `now()` (which IS zone-aware) is comparing an absolute instant against a value with no zone information to
+align it to. `timestamptz` resolves this by storing the value normalized to UTC internally and converting for
+display based on the session's `TimeZone` setting, so the stored value always represents one unambiguous instant
+regardless of which zone later reads it.
+
+The rule is scoped to EVENT-instant columns specifically, because there is a real, narrower, legitimate use for a
+zone-less value: data that represents a local WALL-CLOCK time independent of any particular zone (a recurring daily
+reminder at '9:00am, whatever zone the user is in', a birth date with no time-of-day component that matters). Those
+cases are the exception, not the common shape a `created_at`/`occurred_at`/`expires_at` column represents, which is
+why an ambiguous column name is `needs_review` rather than an outright violation — the scan cannot always tell the
+two apart from the name alone.
+"""
+
+[[option]]
+id = "event-timestamps-are-timestamptz"
+label = "Flag zone-less timestamp columns whose name suggests an event instant; timestamptz is the default for created_at/occurred_at/expires_at-shaped columns"
+directive = """
+Scan column type declarations for a bare `timestamp` (no `with time zone`) on a column whose name matches an
+event-instant heuristic (created_at, updated_at, occurred_at, started_at, completed_at, expires_at, and close
+variants). Flag as medium severity: "Your `<table>.<column>` column has no time zone. The same stored value means
+a different real-world moment depending on which time zone later reads it back." A column name that plausibly
+represents a zone-agnostic wall-clock value (a recurring local time, a birth date) is `needs_review` rather than
+asserted.
+"""
+remediation = """
+Change `<table>.<column>` from `timestamp` to `timestamp with time zone` (`timestamptz`). For an existing column
+with data already in it, confirm what zone the existing zone-less values were actually written in before
+converting (`ALTER TABLE ... ALTER COLUMN ... TYPE timestamptz USING <column> AT TIME ZONE '<known-write-zone>'`),
+since a blind cast assumes the session's current time zone was also the zone every historical row was written
+under. Verify by inserting a row from two different session time zones and confirming both compute the same,
+correct absolute instant when read back.
+"""
+effort = "medium"
+why = "A zone-less timestamp for an event instant is ambiguous by construction — the same stored value is a different real-world moment depending on who reads it — while timestamptz removes the ambiguity entirely at no cost beyond the type declaration itself, which is exactly why PostgreSQL's own documentation steers toward the zone-aware type for date/time values used across time zones."
+
+[[option]]
+id = "store-event-timestamps-as-zone-less-and-track-the-write-zone-separately"
+label = "Store event timestamps as zone-less `timestamp`, tracking the writing server's time zone in a separate column or application convention"
+directive = "Use timestamp without time zone for event-instant columns, relying on an application-level convention (e.g. 'the app always writes UTC wall-clock values into this column') or a separate zone-tracking column to recover the actual instant when needed."
+why = "Rejected: this reconstructs, by convention, exactly what timestamptz already does natively — and conventions are invisible to the database and to anyone querying it directly (a BI tool, a data migration, a different service), none of which know the unstated 'this column is secretly always UTC' rule unless it is documented and followed perfectly everywhere, forever. A single write that doesn't follow the convention (a developer testing locally, a script run with a different session time zone) silently corrupts the column's meaning with no error raised, since the type itself carries no zone information to catch the mistake."
