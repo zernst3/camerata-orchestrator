@@ -1,0 +1,81 @@
+id = "ARCH-SERVER-CLIENT-PROJECTION-1"
+title = "Server-rendered output and hydration payloads carry only the client-facing projected fields, never a full raw row, internal id, or token"
+tag = "stack"
+domain = "fullstack"
+layer = "universal"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan over server component/loader/getServerSideProps-style data-fetching functions for a database query result (an ORM entity, a raw row, a `SELECT *`-shaped object) passed directly as a prop into a client component, into a serialized hydration payload, or interpolated into server-rendered HTML (a data attribute, a hidden input, an inline `<script type=\"application/json\">` state blob) with no intervening projection to an explicit, narrower shape. Conformance holds when every value crossing the server-to-client boundary (RSC serialization, SSR hydration state, server-rendered markup) is an explicitly-shaped projection naming only the fields the client view needs; it fails when a query result or ORM entity is passed through unprojected, even if the client UI currently only renders a subset of its fields — the whole object is still present in the shipped payload and inspectable via browser devtools or view-source regardless of what the UI chooses to display."
+
+[[sources]]
+url = "https://nextjs.org/docs/app/getting-started/server-and-client-components#how-do-server-and-client-components-work-in-nextjs"
+title = "Next.js docs — Server and Client Components: props passed from a Server Component to a Client Component must be serializable, and are included in the client bundle's hydration payload"
+
+[[sources]]
+url = "https://owasp.org/www-project-api-security/"
+title = "OWASP API Security Top 10 (2023) — API3: Broken Object Property Level Authorization (excessive data exposure): returning a full object representation rather than fields the client actually needs"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/213.html"
+title = "CWE-213: Exposure of Sensitive Information Due to Incompatible Policies"
+
+[decision]
+question = "Does server-rendered/hydrated output (React Server Component serialization, SSR hydration state, server-rendered HTML) carry an explicit, client-shaped projection of a resource, or the resource's full raw database row/entity, however much of it the UI currently chooses to render?"
+default = "project-explicit-client-shape-before-crossing-the-boundary"
+why = """
+The defining trap of a server/client boundary (React Server Components passing props to Client Components, a
+traditional SSR framework's getServerSideProps/loader hydrating client-side state, or classic server-rendered HTML
+embedding a JSON state blob for a client script to read) is that 'the UI only displays three fields' says nothing
+about what actually CROSSES the boundary. If the loader fetches `SELECT * FROM users WHERE id = ?` and passes the
+resulting row straight into a prop, every column that row has — a password hash, an internal role flag, another
+user's foreign-key id sitting in a column the UI never reads, an audit timestamp meant for admin tooling only — is
+serialized into the RSC payload or the hydration `<script>` blob and is visible to anyone who opens browser devtools
+or views the page source, regardless of what the rendered DOM happens to show. This is NOT a client-side bug the UI
+layer can fix by simply not rendering those fields; the data has already left the server's trust boundary the
+moment it was serialized into something the browser receives, and 'the component didn't render it' provides zero
+protection once it is sitting in a `<script>` tag or a React Server Component payload that any visitor can read.
+
+The only sound fix is architectural: define an explicit, named shape for what a client view of this resource looks
+like (a narrower type, a projection function, a dedicated select-list) and apply it BEFORE the value crosses the
+boundary — inside the server component, the loader, or the page's data-fetching function — never after, and never
+by relying on the UI to simply not render the extra fields it received. This is the same discipline
+ARCH-API-DTOS-1 and ARCH-RESPONSE-FIELD-PROJECTION-1 apply to a conventional JSON API response, generalized to the
+SSR/RSC hydration channel, which carries data to the browser just as surely as a fetch response does even though it
+never appears in the network tab as a traditional XHR.
+"""
+
+[[option]]
+id = "project-explicit-client-shape-before-crossing-the-boundary"
+label = "Define an explicit client-facing projection and apply it before the value crosses the server/client boundary"
+directive = """
+Every value that crosses from server-side data fetching (a Server Component, an SSR loader, a traditional
+server-rendered template) into client-visible output (a Client Component prop, hydration state, server-rendered
+markup including data attributes and inline JSON state) is first passed through an explicit projection — a
+dedicated type, a select-list, or a mapping function — that names exactly the fields the client view needs. The raw
+query result or ORM entity is never passed through directly, even when the current UI only renders a subset of it:
+the projection is enforced at the point data leaves server-only code, not left to the rendering layer's choice of
+what to display.
+"""
+remediation = """
+Add an explicit projection type or mapping function for this resource's client-facing shape, and change the server
+component/loader/data-fetching function to apply it to the query result before passing the value as a prop, into
+hydration state, or into server-rendered markup — rather than passing the raw query result or ORM entity through
+directly. Verify by inspecting the actual RSC/hydration payload or page source (not just the rendered UI) and
+confirming it contains only the projected fields, with no hidden column, internal id, or token present even though
+the UI never displays it.
+"""
+effort = "medium"
+why = "Data serialized across the server/client boundary is inspectable regardless of what the UI renders, so 'the component doesn't display that field' provides no protection; the fix has to happen before the value leaves server-only code, as an explicit named projection, the same discipline a conventional API response needs and for the same reason."
+
+[[option]]
+id = "pass-raw-query-result-rely-on-ui-to-not-render-extra-fields"
+label = "Pass the raw query result/ORM entity through to the client, relying on the UI to render only the fields it needs"
+directive = "Server components/loaders pass the full database row or ORM entity returned by the query directly as a prop or into hydration state, trusting that the client-side rendering code simply chooses not to display fields the user shouldn't see."
+why = "Rejected: whatever the UI chooses to render says nothing about what was actually shipped to the browser. The full object is present in the RSC payload, the hydration state blob, or the inline JSON on the page regardless of which fields the component happens to read, and is trivially visible via devtools or view-source to any visitor — including every hidden column, internal id, and any token or secret that was accidentally still attached to the entity at fetch time."
+
+[[option]]
+id = "strip-sensitive-fields-client-side-after-hydration"
+label = "Ship the full object to the client, then strip or redact sensitive fields in client-side JavaScript after hydration"
+directive = "The full raw row crosses the server/client boundary unmodified, and a client-side effect or render-time filter removes or masks sensitive fields from the in-memory object before the UI reads from it."
+why = "Rejected: by the time client-side JavaScript runs to strip anything, the sensitive data has already been transmitted to and received by the browser — it is present in the initial HTML/RSC payload/hydration state before the stripping code ever executes, and is visible to anyone who inspects the raw response or disables JavaScript. Client-side redaction is security theater against exactly the threat model (a user inspecting their own browser's network traffic or page source) that this rule exists to address."

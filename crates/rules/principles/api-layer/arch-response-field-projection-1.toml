@@ -1,0 +1,72 @@
+id = "ARCH-RESPONSE-FIELD-PROJECTION-1"
+title = "REST and GraphQL responses expose an explicit, allowlisted set of fields the consumer needs, not a serialize-the-whole-model default"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "architectural"
+default = true
+verification = "grounded"
+qualifies = "Deterministically checkable, but no off-the-shelf linter enforces it: the predicate is 'does this endpoint/resolver's output include a field outside its documented client-facing contract,' and which fields belong in that contract is project-specific domain knowledge no generic tool carries. It requires a custom CI gate — a contract/schema test per endpoint or GraphQL type asserting the response field set against an approved allowlist, or a project-configured serializer convention (an explicit field list rather than a default-serialize-all-properties model/ORM-entity passthrough) checked by a project-specific static rule. Conformance holds when such a gate runs in CI and a response/resolver that adds a field outside the allowlist fails it; it fails when no such check exists and a model's own full property set is the only thing standing in for the API contract."
+
+[[sources]]
+url = "https://owasp.org/www-project-api-security/"
+title = "OWASP API Security Top 10 (2023) — API3: Broken Object Property Level Authorization (formerly API3:2019 Excessive Data Exposure): 'Looking forward to shiny new gadgets... developers tend to expose all object properties without considering their individual sensitivity, relying on clients to filter the data'"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/213.html"
+title = "CWE-213: Exposure of Sensitive Information Due to Incompatible Policies"
+
+[decision]
+question = "Does an endpoint's or resolver's response contain an explicit, allowlisted projection of the fields its consumer actually needs, or does it default to serializing the whole underlying model/entity and rely on the client to simply not use the extra fields?"
+default = "explicit-allowlist-projection-not-default-serialize-all"
+why = """
+`ARCH-API-DTOS-1` frames the DTO-vs-domain-type choice as an architectural trade-off with no universally correct
+answer — a project may reasonably choose to return domain types directly for an internal API. This rule is
+narrower and not optional in the same way: WHICHEVER wire-type strategy a project adopts, no endpoint or resolver
+should emit a field its consumer does not need, because 'the ORM's default serialization includes every column' is
+a decision made by the ORM's defaults, not by anyone reviewing what a specific endpoint's consumers should see. A
+`GET /users/:id` handler that calls a framework's default `toJSON()`/serializer on the fetched entity ships
+whatever that entity happens to hold today — a password hash, a 2FA secret, an internal risk score, another
+tenant's foreign-key id sitting in a column nobody meant to expose — and keeps shipping each new column added to
+that table in the future, with no step in the development process that would ever notice, because adding a column
+to a table does not touch the endpoint's code at all.
+
+The OWASP API Security project renamed this from 'Excessive Data Exposure' to 'Broken Object Property Level
+Authorization' between its 2019 and 2023 top-ten lists specifically because the pattern recurs at the PROPERTY
+level even on endpoints whose object-level and function-level authorization are otherwise correct: the caller is
+allowed to fetch this user record, and is still handed fields of it they were never meant to see. GraphQL schemas
+have the identical failure mode at the type level — a type's field list growing to match its backing model rather
+than being curated per the type's actual purpose. An explicit allowlist (named response fields, a schema the
+backing model must be mapped onto rather than passed through) makes 'what does this endpoint expose' a reviewable,
+version-controlled decision instead of an emergent property of whatever the ORM happens to return.
+"""
+
+[[option]]
+id = "explicit-allowlist-projection-not-default-serialize-all"
+label = "Define an explicit field allowlist per endpoint/resolver/GraphQL type; map the backing model onto it rather than serializing it by default"
+directive = """
+Every REST endpoint response and every GraphQL type's resolver set is backed by an explicit, named list of the
+fields its consumers need — a response schema, a GraphQL type definition reviewed against its actual callers, or a
+serializer with an explicit field allowlist — rather than the framework or ORM's default whole-object
+serialization. Adding a new column or property to the backing model does not automatically appear in any response;
+exposing it requires a deliberate, reviewable addition to the relevant endpoint's or type's own field list. Field
+sensitivity (does this field belong in this specific response, even if the caller is otherwise authorized to read
+the object at all) is reviewed per endpoint/type, not assumed from object-level authorization alone.
+"""
+remediation = """
+Replace the endpoint's or resolver's default whole-model serialization with an explicit field list naming only
+what this specific response needs, and remove reliance on a framework/ORM default `toJSON()`/serializer that
+exposes every property of the backing model. For a GraphQL type, review its field set against its actual consumers
+rather than letting it mirror the backing model's columns automatically. Add a contract test asserting the
+response's field set matches the allowlist, so a newly-added model column does not silently start appearing in the
+response. Verify by adding a new column to the backing table/model and confirming it does NOT appear in the
+endpoint's response until explicitly added to the allowlist.
+"""
+effort = "medium"
+why = "An ORM or framework's default serializer exposes whatever the backing model happens to hold today, with no review step when the model gains a new column tomorrow; an explicit, version-controlled field allowlist makes 'what this endpoint exposes' a deliberate decision instead of an emergent property of the data layer's shape, closing the property-level exposure gap that survives even correct object- and function-level authorization."
+
+[[option]]
+id = "default-serialize-whole-model-rely-on-client-to-not-use-extra-fields"
+label = "Serialize the backing model/entity's full property set by default, relying on the client to use only the fields its UI needs"
+directive = "REST endpoints and GraphQL resolvers return the backing model's or ORM entity's default full serialization (every column/property it holds), with no endpoint-specific field allowlist, on the expectation that client code will simply read and use only the subset of fields its current UI needs."
+why = "Rejected: whatever fields a client's CURRENT UI happens to read says nothing about what the response actually contains or who else can read that same response (another consumer of the same endpoint, a browser devtools network-tab inspection, an API client calling the endpoint directly). Object-level authorization (the caller may fetch this record) does not imply property-level authorization (the caller should see every field of it); this is exactly the gap OWASP's API3 names. The defect also compounds silently over time: a new column added to the backing model starts appearing in every response that serializes it by default, with no code change to the endpoint and therefore no review step that would ever catch it."

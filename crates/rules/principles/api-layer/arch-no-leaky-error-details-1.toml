@@ -1,0 +1,80 @@
+id = "ARCH-NO-LEAKY-ERROR-DETAILS-1"
+title = "Error responses never surface raw database error text, exception stack traces, or internal file paths, regardless of the envelope shape"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan over error-handling/catch paths for a caught exception, database driver error, or error object whose raw `.message`, `.stack`, `.detail`, or `.hint` property (or the exception's string representation generally) is written into an HTTP response body with no sanitization step, particularly in code paths with no environment check gating that behavior to development only. Conformance holds when every error response's content is drawn from a controlled, pre-written set of client-safe messages (keyed by error type/code) rather than from a caught exception's own fields, with the exception's full raw detail routed only to server-side logging/APM, never the HTTP response; it fails when a raw exception/driver-error message, a stack trace, or a filesystem path reaches the response body in a build that could run in production, even if guarded by an environment check that is easy to misconfigure or bypass."
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/209.html"
+title = "CWE-209: Generation of Error Message Containing Sensitive Information"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Error_Handling_Cheat_Sheet.html"
+title = "OWASP Error Handling Cheat Sheet"
+
+[decision]
+question = "Does an error response's CONTENT ever include a raw caught exception's message, a database driver's error text/hint, a stack trace, or an internal file path, or is response content always drawn from a controlled set of client-safe messages regardless of what the underlying exception says?"
+default = "sanitize-error-content-regardless-of-envelope-shape"
+why = """
+ARCH-STRUCTURED-ERRORS-1 governs the SHAPE every error response takes (a stable code, a message, optional details) —
+it says nothing about what text is allowed to populate those fields. A handler can faithfully implement the
+structured envelope and still put the raw caught exception's `.message` into the envelope's own message field,
+which is the far more common way this defect actually ships: a generic catch-all error handler that does
+`res.status(500).json({ error: { code: 'INTERNAL_ERROR', message: err.message } })` looks correct by every check
+that only inspects the envelope's shape, while leaking a Postgres constraint-violation detail that names an internal
+table and column, a stack trace revealing the server's absolute filesystem path and dependency versions, or an ORM
+error exposing the exact SQL that ran. None of that is useful to a legitimate API consumer, and all of it is useful
+reconnaissance to an attacker — a constraint-violation message alone can reveal a schema's structure, a stack trace
+can fingerprint the framework and library versions in use for targeting known CVEs, and either can appear in a
+response long after the developer who wrote the catch-all handler assumed 'this only happens in development.'
+
+Gating this behind an environment check (`if (process.env.NODE_ENV !== 'production')`) is a common mitigation but
+not a sufficient one: the check can be misconfigured, the variable can be unset in a staging environment mistakenly
+treated as safe, and a code path reached before the check runs (an error during startup, a middleware ordering bug)
+can still leak. The robust fix is that the response-content code path never has ACCESS to the raw exception's
+user-facing text at all — it maps the exception's TYPE to a pre-written, reviewed, client-safe message, and routes
+the exception's full raw detail only to server-side logging or an APM tool, where a developer can see it without it
+ever having been a candidate for the HTTP response body.
+"""
+
+[[option]]
+id = "sanitize-error-content-regardless-of-envelope-shape"
+label = "Map the exception's type to a pre-written client-safe message; route the raw exception's full detail only to server-side logging, never the response body"
+directive = """
+The error-handling layer maps a caught exception to a response using the exception's TYPE/CODE (a validation error,
+a not-found error, a generic internal error), never by forwarding the exception's own `.message`, `.stack`,
+`.detail`, or `.hint` text into the response body. Each error type has a pre-written, reviewed, client-safe message
+baked into the handler itself. The exception's full raw detail (message, stack, driver-specific fields) is logged
+server-side (structured logging, an APM/error-tracking tool) with a correlation id that is also returned in the
+response, so a developer can look up the full detail by that id without the detail itself ever having been a
+candidate for the HTTP response. This holds in every environment, not only production — a staging or locally-run
+build is not exempt, because sanitization at the response layer has no legitimate downside even where leaking
+would be 'merely' embarrassing rather than a genuine production incident.
+"""
+remediation = """
+Change the error-handling layer to map the exception's type/code to a pre-written, client-safe message instead of
+forwarding the exception's own message, stack trace, or database driver detail into the response body. Log the raw
+exception's full detail server-side (structured logging or an APM tool) alongside a correlation id, and return that
+correlation id in the response so a developer can look up the detail without it ever reaching the client. Verify by
+triggering a database constraint violation or an unhandled exception against the endpoint and confirming the
+response contains only the pre-written message and a correlation id, with no raw exception text, stack trace, or
+file path present, in every environment the endpoint runs in.
+"""
+effort = "medium"
+why = "An environment check that gates raw-exception forwarding is a mitigation with known failure modes (misconfiguration, an unexpected code path, a staging environment treated as safe); routing the raw detail to logging only and never giving the response-content code a raw exception to forward in the first place removes the failure mode architecturally rather than relying on a conditional being correctly set everywhere, every time."
+
+[[option]]
+id = "forward-raw-exception-message-gated-by-environment-check"
+label = "Forward the raw exception's message/stack into the response, but only when an environment check indicates non-production"
+directive = "The error handler includes the caught exception's raw message and/or stack trace in the response body, guarded by a check against the current environment (e.g. NODE_ENV) so the behavior is intended to be disabled in production."
+why = "Rejected as the sole control: an environment check is one misconfigured variable, one staging environment mistakenly treated as safe, or one code path reached before the check runs away from leaking the exact same detail in a context the developer assumed was protected. The response-content code having access to the raw exception at all is the root cause; gating access to it after the fact is strictly weaker than never exposing it to the response-building code in the first place."
+
+[[option]]
+id = "forward-raw-exception-message-unconditionally"
+label = "Forward the raw exception's message/stack/driver detail into the response body unconditionally, in every environment"
+directive = "A generic catch-all error handler serializes the caught exception's own message, stack trace, or database driver error text directly into the HTTP response body, with no environment check and no mapping to a pre-written message."
+why = "Rejected: this discloses internal schema details, filesystem paths, dependency versions, and exact SQL to any caller who can trigger an error, including unauthenticated callers at a public endpoint — it is reconnaissance handed to an attacker for free, and the information disclosed (table/column names, stack traces revealing library versions) is routinely useful for crafting a more targeted follow-up attack."

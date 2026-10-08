@@ -1,0 +1,69 @@
+id = "ARCH-NO-STORE-SENSITIVE-RESPONSES-1"
+title = "API responses carrying auth tokens or PII set Cache-Control: no-store, so browser disk cache and shared/intermediate caches never retain them"
+tag = "stack"
+domain = "api-layer"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+verification = "grounded"
+qualifies = "Deterministically checkable as a header-presence scan: does a response from a route that returns an auth/session token, a password-reset/magic-link token, or a payload containing PII fields set a Cache-Control header including no-store (or an equivalent private, no-cache, max-age=0, must-revalidate combination at minimum), versus a route with no Cache-Control header at all (inheriting whatever default the framework, a CDN, or an intermediate proxy applies) or an explicit max-age permitting retention. Camerata ships no detector for this scan; a project wiring an actual CI gate would assert the header via a contract/integration test hitting the representative routes. Conformance holds when every such response sets no-store (or equivalently strict directives); it fails when a token- or PII-bearing response has no Cache-Control header, or sets one that permits any caching."
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/525.html"
+title = "CWE-525: Use of Web Browser Cache Containing Sensitive Information"
+
+[[sources]]
+url = "https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Cache-Control#no-store"
+title = "MDN — Cache-Control: no-store: 'The no-store response directive indicates that any caches of any kind (private or shared) should not store this response'"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html"
+title = "OWASP Session Management Cheat Sheet — applications should send Cache-Control: no-store on pages/responses containing sensitive content"
+
+[decision]
+question = "Does every API response carrying an auth/session token or PII explicitly set Cache-Control: no-store (or equivalently strict directives), or is the response left with no explicit caching policy (inheriting whatever default a browser, CDN, or intermediate proxy applies)?"
+default = "explicit-no-store-on-token-and-pii-responses"
+why = """
+`UI-AUTH-TOKEN-STORAGE-1` governs where a token lives once the client has it; this rule governs a DIFFERENT copy of
+the same value that is easy to overlook entirely: the HTTP response itself, as retained by the browser's own disk
+cache, a shared proxy sitting between the client and the server, or a CDN configured to cache by default based on
+response shape rather than content sensitivity. An endpoint can do everything right at the application layer —
+tokenized storage, HttpOnly cookies, short-lived credentials — and still have the literal HTTP response that
+DELIVERED the token or a user's PII sitting in a shared machine's browser disk cache, retrievable by the next
+person to use that machine, or cached at a CDN edge node if the response's caching headers do not say otherwise.
+
+Browsers and intermediate caches are permitted to cache ANY response with no explicit instruction not to, and the
+specific defaults vary by browser, proxy, and CDN configuration — relying on 'probably nothing caches this by
+default' is relying on an assumption the application has no control over and cannot verify held at every layer the
+response passes through. `no-store` is the one directive that unambiguously means what it says: no cache of any
+kind, private or shared, may retain the response at all. Any login response, token-refresh response, password-reset
+confirmation, or any response whose body contains PII (not just auth material) should carry it explicitly rather
+than relying on the absence of a header to mean the same thing everywhere this response is ever served from.
+"""
+
+[[option]]
+id = "explicit-no-store-on-token-and-pii-responses"
+label = "Set Cache-Control: no-store explicitly on every response carrying an auth/session token or PII"
+directive = """
+Every response from a login, token-issuance, token-refresh, password-reset, or any other endpoint whose body
+contains an auth/session token, a password-reset/magic-link token, or PII sets Cache-Control: no-store explicitly
+(not merely omitting a caching header and assuming a safe default). This is set at the response layer for these
+specific routes — a blanket no-store on every response is not required and would defeat legitimate caching of
+genuinely public, non-sensitive data, so the directive is scoped to the sensitive routes specifically, applied
+consistently rather than left to whichever framework/CDN default happens to be in effect.
+"""
+remediation = """
+Add an explicit Cache-Control: no-store header to the response from this route, rather than relying on the absence
+of a caching header to mean the same thing across every browser, proxy, and CDN the response might pass through.
+Verify by inspecting the actual response headers for this endpoint (via browser devtools or a direct request) and
+confirming Cache-Control: no-store is present, then confirm a shared/intermediate cache in front of the application
+(if one exists) honors it by checking its own cache-hit behavior for the route.
+"""
+effort = "low"
+why = "A browser, proxy, or CDN is permitted to cache any response with no explicit instruction otherwise, and the specific default varies by layer and configuration in ways the application cannot verify or control; an explicit no-store on sensitive responses removes the ambiguity entirely rather than depending on every cache in the chain happening to default the safe way."
+
+[[option]]
+id = "no-explicit-caching-header-rely-on-framework-default"
+label = "Leave Cache-Control unset on token/PII responses, relying on the framework's or CDN's default caching behavior to not retain them"
+directive = "Responses carrying auth tokens or PII are returned with no explicit Cache-Control header, on the assumption that the framework, browser, or CDN in front of the application defaults to not caching dynamic or authenticated responses."
+why = "Rejected: default caching behavior varies by browser, by whether an intermediate proxy or CDN sits in front of the application, and by configuration changes made by people who never see this specific endpoint's sensitivity — a safe default today is not a guarantee against a CDN configuration change, a new reverse proxy added later, or a browser quirk, and the application has no way to verify the assumption holds everywhere the response is ever served from. An explicit no-store removes the dependency on an assumption entirely."
