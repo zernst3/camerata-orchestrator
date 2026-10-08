@@ -5577,6 +5577,43 @@ pub(crate) fn external_tool_floor_category(tool_rule_id: &str) -> Option<&'stati
     semgrep_floor_category(tool_rule_id).or_else(|| eslint_floor_category(tool_rule_id))
 }
 
+/// Rule-id prefix for the OBSERVABILITY/under-logging convention class (a swallowed error
+/// logged nowhere, inconsistent unstructured logging alongside an adopted structured
+/// logger, missing correlation/request id propagation — the three corpus rules under
+/// `crates/rules/principles/universal/arch-observability-*.toml`). Every rule in this
+/// class shares this prefix BY CONVENTION — deliberately a prefix check rather than a
+/// hand-maintained id list (the shape `semgrep_floor_category`/`eslint_floor_category`
+/// use for EXTERNAL tool ids, which we do not control and so must enumerate): these are
+/// OUR OWN authored corpus ids, so a shared naming convention we commit to at authoring
+/// time is sufficient, scales to a future fourth rule in the same class with zero code
+/// changes here, and is exercised directly by `observability_convention_class_matches_
+/// only_its_own_prefix` in this module's test suite below.
+pub(crate) const OBSERVABILITY_CONVENTION_RULE_PREFIX: &str = "ARCH-OBSERVABILITY-";
+
+/// Whether `rule_id` belongs to the owner-mandated, SEVERITY-CAPPED-AT-LOW observability
+/// convention class — the single source of truth both halves of that structural cap read
+/// from:
+///   - `ai_audit`'s D8 severity-ceiling pass forces the EXPORTED SEVERITY STRING to exactly
+///     `"low"` for a matching finding, regardless of what any other calibration pass
+///     proposed.
+///   - `report_export::is_informational` checks this FIRST (ahead of its own hard
+///     "critical/high is never informational" invariant) so a matching finding routes to
+///     the `informational` appendix — never an action bucket (do_now/do_next/plan) —
+///     EVEN IF some caller fed a raw high/critical severity straight in without the D8
+///     ceiling pass having run first. Both halves exist because capping the severity STRING
+///     alone is not sufficient: `report_export::matrix_bucket` routes a bare "low" severity
+///     to `"plan"` (an action bucket) by default, same as "medium" — only an explicit
+///     bucket-routing override (the `is_informational` check) actually keeps this class out
+///     of every action tier.
+///
+/// See `docs/RULE_AUTHORING.md`'s channel guidance: this is NOT a mechanical gate/check
+/// (channel B) — there is no detector that blocks a write. It is a calibration-pipeline
+/// classification that decides how a SEMANTIC finding's severity and bucket get rendered
+/// once the model (or the deterministic floor, in principle) has already produced one.
+pub(crate) fn is_observability_convention_class(rule_id: &str) -> bool {
+    rule_id.starts_with(OBSERVABILITY_CONVENTION_RULE_PREFIX)
+}
+
 /// Map ANY finding's rule id (floor OR any preview tool) to a normalized security
 /// category string, or `None` when no category mapping exists. Used by
 /// `dedup_scan_previews` for cross-tool dedup: two findings on the same
@@ -21717,6 +21754,35 @@ mod tests {
                 semgrep_floor_category(id),
                 Some("SEC-NO-SENSITIVE-DATA-IN-LOGS-1"),
                 "{id} must ground to SEC-NO-SENSITIVE-DATA-IN-LOGS-1"
+            );
+        }
+    }
+
+    /// `is_observability_convention_class` matches ONLY the `ARCH-OBSERVABILITY-` prefix —
+    /// the three real corpus ids match, a near-miss (different prefix, or the prefix as a
+    /// SUBSTRING rather than a true prefix) does not, and an empty string does not panic.
+    #[test]
+    fn observability_convention_class_matches_only_its_own_prefix() {
+        for id in [
+            "ARCH-OBSERVABILITY-SILENT-FAILURE-1",
+            "ARCH-OBSERVABILITY-LOG-CONSISTENCY-1",
+            "ARCH-OBSERVABILITY-CORRELATION-ID-1",
+        ] {
+            assert!(
+                is_observability_convention_class(id),
+                "{id} must match its own class"
+            );
+        }
+        for id in [
+            "ARCH-NO-PAN-STORAGE-1",
+            "SEC-NO-SENSITIVE-DATA-IN-LOGS-1",
+            "GO-LOGGING-STRUCTURED-1",
+            "SOME-ARCH-OBSERVABILITY-LOOKALIKE-1", // prefix as a substring, not a true prefix
+            "",
+        ] {
+            assert!(
+                !is_observability_convention_class(id),
+                "{id} must NOT match the observability convention class"
             );
         }
     }

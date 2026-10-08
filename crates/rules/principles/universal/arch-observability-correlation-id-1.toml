@@ -1,0 +1,67 @@
+id = "ARCH-OBSERVABILITY-CORRELATION-ID-1"
+title = "A single request's handling path carries one correlation/request id across every log line it writes and every downstream call it makes"
+tag = "stack"
+domain = "universal"
+layer = "universal"
+enforcement = "architectural"
+default = true
+verification = "grounded"
+qualifies = "SEMANTIC, opinion-shaped, and deliberately CAPPED LOW (owner directive): whether a given handler's log lines and downstream calls are missing correlation-id propagation is a repo-relative judgment call about an observability PRACTICE, not a universal defect — it has no shipped detector and reaches the codebase only through the semantic/AI audit pass. This is distinct from ARCH-MIDDLEWARE-FIRST-1's bare mention of 'request ID generation' as one of many cross-cutting concerns that belong in middleware (that rule is about WHERE cross-cutting code lives, not about propagation across a request's full path) and from ARCH-NO-LEAKY-ERROR-DETAILS-1's narrower use of a correlation id specifically in the client-facing error-envelope contract (that rule is about what an ERROR RESPONSE contains, not about every log line and downstream call along the way). `ai_audit`'s D8 observability cap plus `report_export::is_informational`'s structural bypass force this rule's findings to severity Low and out of every action bucket regardless of the model's proposed severity."
+
+[[sources]]
+url = "https://www.w3.org/TR/trace-context/"
+title = "W3C Trace Context — a standard header (traceparent) for propagating a single trace/correlation identifier across a request's full call path, including downstream services"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
+title = "OWASP Logging Cheat Sheet — correlating log events across a distributed request path requires a shared identifier attached at the point logs are generated"
+
+[decision]
+question = "Does a single request's handling path carry ONE correlation/request id across every log line it writes and every downstream call it makes, or can the same request's logs/downstream calls show no shared id, or mint a new one partway through?"
+default = "one-id-generated-at-the-edge-and-threaded-through"
+why = """
+Without a shared identifier, reconstructing what happened for one specific request means correlating
+log lines by timestamp and content alone — fragile the moment two requests interleave (concurrent
+traffic, retried requests, a background job firing around the same time) or a downstream service's own
+logs need to be joined to the originating request. The W3C Trace Context standard exists precisely
+because this is a solved, well-understood problem: generate or extract one id at the edge (the first
+middleware a request passes through), attach it to every log line emitted while handling that request
+(via the logger's structured-context mechanism — MDC, a logging context object, or an explicit field
+passed to every call), and forward it on any outbound call the handler makes (as a header, so a
+downstream service's own logs can be joined back to the same originating request). A request path that
+logs without the id, or that drops it on an outbound call, breaks the chain at exactly the point a real
+incident investigation would need it intact.
+"""
+
+[[option]]
+id = "one-id-generated-at-the-edge-and-threaded-through"
+label = "Generate/extract one correlation id at the request's entry point, attach it to every log line for that request, and forward it on every downstream call"
+directive = """
+Scan a request-handling path (an HTTP handler, a message consumer, a job's execution path) for whether
+a correlation/request id is: (1) generated or extracted once at the entry point (middleware, or the
+consumer's own dispatch code) rather than ad hoc per-handler; (2) attached to the logger's context (MDC,
+a structured-log field, or an explicit argument) so every log line written while handling that request
+carries it, not just some of them; and (3) forwarded as a header (or equivalent) on any outbound
+HTTP/RPC call the handler makes. Flag, as a LOW finding (never higher — see `qualifies`), a request path
+where log lines inside the SAME handler show no shared id, where an outbound call visibly drops it, or
+where a handler mints its own new id instead of reusing (or deriving a child span from) the one
+generated at the entry point.
+"""
+remediation = """
+Add (or reuse, if one already exists elsewhere in the repo) a middleware/entry-point step that generates
+a correlation/request id when none is present on the incoming request (or extracts one from a standard
+incoming header, e.g. traceparent/X-Request-Id, when the caller already supplied one), attaches it to the
+logger's per-request context so every subsequent log call in that request's handling path includes it
+automatically, and forwards it as a header on every outbound call the handler makes. Verify by triggering
+a request that fans out to a downstream call and confirming every log line across the whole path — the
+entry point, any intermediate handler, and the downstream service's own logs, if reachable in the same
+test — carries the identical id.
+"""
+effort = "medium"
+why = "The fix is almost always a single middleware addition plus wiring the logger's existing context mechanism (most structured loggers already support per-request context fields) — it is a one-time plumbing cost that pays off on every future incident investigation, rather than a per-handler discipline every new handler must remember independently."
+
+[[option]]
+id = "correlate-after-the-fact-by-timestamp-and-content"
+label = "Log without a request-scoped id; correlate related log lines after the fact by timestamp and content"
+directive = "Request handling paths log without attaching any shared correlation/request id, relying on timestamp proximity and message content to reconstruct which log lines belong to the same request during an investigation."
+why = "Rejected: timestamp-and-content correlation degrades exactly when it matters most — under concurrent load, retried requests, or once a request fans out to a downstream service with its own independent log stream, there is no reliable way to prove two log lines belong to the same request without a shared identifier linking them."

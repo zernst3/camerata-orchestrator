@@ -3407,4 +3407,37 @@ mod tests {
         );
         assert_ids_unique_in_corpus(&set, &["SEC-NO-SENSITIVE-DATA-IN-LOGS-1"]);
     }
+
+    /// Camerata capability: under-logging / observability thoroughness (SEMANTIC, CAPPED
+    /// LOW). Three narrowly-scoped corpus rules — a swallowed error with no logging,
+    /// inconsistent unstructured logging alongside an adopted structured logger, and missing
+    /// correlation/request id propagation. Well-formedness only; the structural LOW-severity
+    /// cap and action-bucket exclusion are exercised by `camerata_server::ai_audit`'s and
+    /// `camerata_server::report_export`'s own test suites (that cap is implemented in the
+    /// server crate, not here — this crate only owns the corpus data).
+    #[tokio::test]
+    async fn observability_convention_rules_are_well_formed_and_reachable() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let ids = [
+            "ARCH-OBSERVABILITY-SILENT-FAILURE-1",
+            "ARCH-OBSERVABILITY-LOG-CONSISTENCY-1",
+            "ARCH-OBSERVABILITY-CORRELATION-ID-1",
+        ];
+        for id in ids {
+            assert_well_formed_new_rule(&set, id, "universal");
+            let rule = set
+                .get_by_id(id)
+                .unwrap_or_else(|| panic!("{id} must exist in the bundled corpus"));
+            assert_eq!(
+                rule.enforcement,
+                EnforcementKind::Architectural,
+                "{id} is SEMANTIC/judgment-shaped, not mechanically gated"
+            );
+        }
+        assert_ids_unique_in_corpus(&set, &ids);
+    }
 }

@@ -1540,6 +1540,35 @@ fn mentions_client_only_privilege_gate(text: &str) -> bool {
 /// finding's prose, and must never demote it). R3 is a full bidirectional clamp like R2; R4 is
 /// cap-only like R1. R1 is checked last.
 fn apply_severity_ceiling_rule(mut f: Finding) -> Finding {
+    // D8 (owner-mandated opinion-class cap): the ARCH-OBSERVABILITY-* convention class
+    // (a swallowed error logged nowhere, inconsistent unstructured logging alongside an
+    // adopted structured logger, missing correlation/request id propagation) is SEMANTIC
+    // and repo-relative by the owner's own framing — never a universal defect like the R1-R4
+    // classes below, which all derive from the finding's TEXT. This one derives from the
+    // finding's RULE IDENTITY instead (`crate::is_observability_convention_class`), checked
+    // FIRST and unconditionally: it is authoritative over every other ceiling/floor result,
+    // clamping to exactly Low bidirectionally (like R2's CORS clamp, not a cap-only ceiling
+    // like R1/R4) — an inflated Critical/High from this class is exactly as wrong as a
+    // silently-buried Info, since both misrepresent an opinionated convention. Capping the
+    // severity STRING here is only HALF of the structural guarantee the owner asked for; the
+    // other half — keeping this class out of every action bucket regardless of severity — is
+    // `report_export::is_informational`'s matching rule-identity check, which holds even if
+    // this pass somehow did not run first. See `crate::is_observability_convention_class`'s
+    // doc comment for the full two-part design.
+    if crate::is_observability_convention_class(&f.rule_id) {
+        f.severity = "low".to_string();
+        f.calibration_rationale = Some(
+            "Severity ceiling: this is the observability/under-logging convention class \
+             (a swallowed error logged nowhere, inconsistent unstructured logging alongside \
+             an adopted structured logger, or missing correlation/request id propagation) — \
+             a repo-relative judgment call the owner designated as never a universal defect. \
+             Capped to exactly Low and routed out of every action bucket, regardless of any \
+             other calibrated severity."
+                .to_string(),
+        );
+        return f;
+    }
+
     let text = calibration_floor_scan_text(&f);
 
     if mentions_cors_misconfig(&text) {

@@ -1,0 +1,62 @@
+id = "ARCH-OBSERVABILITY-LOG-CONSISTENCY-1"
+title = "Once a repo has adopted a structured logger, every log call site goes through it; bare print/console-style calls do not sit alongside it"
+tag = "stack"
+domain = "universal"
+layer = "universal"
+enforcement = "architectural"
+default = true
+verification = "grounded"
+qualifies = "SEMANTIC, opinion-shaped, and deliberately CAPPED LOW (owner directive): this is an INCONSISTENCY check, not a 'you must adopt structured logging' stance — it only fires once a repo has ALREADY adopted a structured logger (slog/zap/winston/pino/slf4j/serilog/tracing, or an equivalent project-specific wrapper) and some OTHER call site in the same repo still uses a bare print/console-style call alongside it. For Go and Java specifically, the 'always use structured logging' stance itself is already covered by GO-LOGGING-STRUCTURED-1 and JAVA-LOGGING-STRUCTURED-1 (both full-severity, per-language prose rules) — this rule does not re-litigate that stance for those two languages; it exists for (a) every OTHER stack (Python, JS/TS, Rust, C#, Ruby) where no per-language stance rule already covers the question, and (b) the cross-stack/multi-language case where the inconsistency is between files or layers rather than within a single language's own convention. Camerata ships no detector for this; it reaches the codebase only through the semantic/AI audit pass, and `ai_audit`'s D8 observability cap plus `report_export::is_informational`'s structural bypass force this rule's findings to severity Low and out of every action bucket regardless of the model's proposed severity."
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
+title = "OWASP Logging Cheat Sheet — 'Use a standard logging library/format': consistent use of one logging approach across an application, rather than ad hoc print statements alongside it"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Vocabulary_Cheat_Sheet.html"
+title = "OWASP Logging Vocabulary Cheat Sheet — a shared log event vocabulary/format presupposes every event is emitted through the same logging mechanism"
+
+[decision]
+question = "Once a structured logger is already in use somewhere in the repo, does every log-shaped call site go through it, or do bare print/console.log/puts/fmt.Println-style calls still sit alongside it?"
+default = "one-logger-for-the-whole-repo"
+why = """
+A structured logger's entire value — machine-parseable fields, consistent levels, a single place to
+configure output format/destination/filtering — is undermined the moment some call sites bypass it: a
+log aggregator built to parse the structured logger's JSON output silently drops (or mis-parses) a bare
+`print`/`console.log` line sitting in the same log stream, and a developer searching logs by field
+learns nothing from the call sites that never emitted one. This is specifically an INTERNAL CONSISTENCY
+defect, not a stance about whether structured logging is good (that question belongs to the per-language
+rules, e.g. GO-LOGGING-STRUCTURED-1): a repo that has already paid the cost of adopting slog/zap/pino/
+slf4j and then leaves some fraction of its own call sites on bare print statements gets none of the
+consistency benefit and all of the adoption cost. Scoped deliberately to REPOS THAT HAVE ALREADY
+ADOPTED a structured logger somewhere — a repo with no structured logger anywhere is a different
+question (the per-language stance rules), not this one.
+"""
+
+[[option]]
+id = "one-logger-for-the-whole-repo"
+label = "Every log call site in the repo goes through the same adopted structured logger; no bare print/console-style calls alongside it"
+directive = """
+Scan for a repo that already uses a structured logger (slog/zap/winston/pino/slf4j/serilog/tracing, or
+an equivalent project-specific wrapper) at one or more call sites. Within that same repo, flag a bare
+print/console.log/puts/fmt.Println-style call that is clearly emitting a log-shaped message (an
+operational event, an error, a status update — not a CLI tool's actual stdout product, and not a
+test/script file where print output IS the point) as a LOW finding (never higher — see `qualifies`). A
+call site that goes through the adopted logger is conforming regardless of its level or format.
+"""
+remediation = """
+Replace the ad hoc print/console-style call with a call through the repo's existing structured logger,
+at the same log level and with the same message content, rather than introducing a second logging
+mechanism. If no equivalent level/call exists yet in the adopted logger's usage elsewhere in the repo,
+add one rather than falling back to a bare print. Verify by confirming the replaced call site's output
+now appears in the same structured format (and, where applicable, the same aggregated log stream) as
+every other log line in the repo.
+"""
+effort = "low"
+why = "The fix is a like-for-like swap (the same message, the same level, through the already-adopted logger instead of a bare print call), so it carries none of the cost of adopting structured logging in the first place — only the cost of finishing an adoption the repo already started."
+
+[[option]]
+id = "allow-mixed-logging-styles"
+label = "Allow bare print/console-style calls to coexist with the repo's adopted structured logger"
+directive = "Individual files or call sites may use a bare print/console.log/puts/fmt.Println-style call even in a repo that has otherwise adopted a structured logger elsewhere."
+why = "Rejected: a log aggregator or a field-based search built around the structured logger's output format gets a silently incomplete picture the moment some call sites bypass it — the repo pays the full cost of adopting structured logging and still does not get a complete, uniformly-parseable log stream out of it."

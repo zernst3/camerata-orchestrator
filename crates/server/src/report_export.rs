@@ -2561,11 +2561,15 @@ pub(crate) fn is_held_for_review(finding: &Finding, disposition: Disposition) ->
 /// Whether a finding is a "convention to consider" rather than an action item (Bug 4). Routes
 /// to the `informational` matrix appendix instead of do_now/do_next/plan. NEVER true for a
 /// critical/high finding or for a finding the auditor has explicitly dispositioned — the hard
-/// invariant that keeps true defects in the action tiers. `severity` must already be
-/// normalized. The three independent informational signals (design §2a/2d + the `info` tier
-/// itself) — the calibrator's own `needs-review` hedge (former §2c) is now its OWN gate,
-/// [`is_held_for_review`], checked ahead of this one in [`effective_bucket`]: a hedge routes to
-/// the `held` bucket at ANY severity, never into this severity-capped appendix:
+/// invariant that keeps true defects in the action tiers, with ONE deliberate exception (D8,
+/// below). `severity` must already be normalized. The four independent informational signals
+/// (design §2a/2d + the `info` tier itself, plus D8) — the calibrator's own `needs-review`
+/// hedge (former §2c) is now its OWN gate, [`is_held_for_review`], checked ahead of this one in
+/// [`effective_bucket`]: a hedge routes to the `held` bucket at ANY severity, never into this
+/// severity-capped appendix:
+///   - D8: the `ARCH-OBSERVABILITY-*` convention class (`crate::is_observability_convention_class`),
+///     checked BEFORE the hard critical/high invariant — the one rule-identity-driven signal
+///     that is exempt from it, by owner mandate (see that function's doc comment),
 ///   - `info`-severity (e.g. the unexposed-schema RLS note from I3),
 ///   - `testing-style` category in a repo below the test-corpus threshold (§2d),
 ///   - absence-type (`located == false`) `structured` stance-layer rule at ≤ medium (§2a).
@@ -2580,6 +2584,24 @@ pub(crate) fn is_informational(
     // keeps its own destination.
     if disposition != Disposition::Unresolved {
         return false;
+    }
+    // D8 (owner-mandated opinion-class cap): the ARCH-OBSERVABILITY-* convention class is
+    // checked FIRST, ahead of the hard "critical/high is never informational" invariant right
+    // below — deliberately, and ONLY for this one rule-IDENTITY-driven class. Every other
+    // signal this function owns is a SEVERITY-DERIVED heuristic (an info-tier note, an
+    // under-corpus testing-style deviation, an absence-type stance rule), which is exactly
+    // what that hard invariant exists to protect — a buggy heuristic must never bury a real
+    // high/critical defect. A rule-id match against an explicitly-authored, owner-mandated
+    // LOW-cap class is not that kind of signal: it is an authored classification applied
+    // before any severity was even assigned, not a derived guess about an already-produced
+    // severity. `ai_audit`'s D8 ceiling pass (`apply_severity_ceiling_rule`) also forces this
+    // class's exported severity to exactly Low in the normal pipeline; this check is the
+    // structural backstop that keeps the bucket guarantee holding even if that pass somehow
+    // did not run first (see `crate::is_observability_convention_class`'s doc comment for the
+    // full two-part design — capping the severity string alone is not sufficient, since
+    // `matrix_bucket` routes a bare "low" severity to the `"plan"` action bucket by default).
+    if crate::is_observability_convention_class(&finding.rule_id) {
+        return true;
     }
     // Hard invariant: a critical or high finding is never auto-informational, whatever family.
     if severity == "critical" || severity == "high" {
@@ -9023,6 +9045,122 @@ mod tests {
             bucket, "do_now",
             "a medium finding must never displace a critical in do_now"
         );
+    }
+
+    // ── D8 ceiling (owner-mandated observability/under-logging convention-class cap) ──────
+    //
+    // Capability 2: under-logging / observability thoroughness is SEMANTIC and opinion-shaped
+    // by the owner's own framing, so it must be capped structurally — a finding from this
+    // class must NEVER occupy an action bucket (do_now/do_next/plan) on its own, regardless of
+    // what severity is PROPOSED for it (by a model, by the D5 floor, by anything). The two
+    // tests below are the bidirectional pin the task calls for: the gate fires for every
+    // ARCH-OBSERVABILITY-* id at every proposed severity (including critical), and a genuine,
+    // non-observability rule id at the SAME proposed severities reaches its normal action
+    // bucket unchanged — proving this is a rule-IDENTITY gate, not a global neutering of high/
+    // critical severities.
+
+    /// Every `ARCH-OBSERVABILITY-*` rule, at every severity band a model could possibly
+    /// propose (including critical), routes to `"informational"` — never an action bucket.
+    #[test]
+    fn observability_convention_class_never_reaches_an_action_bucket_at_any_proposed_severity() {
+        for rule_id in [
+            "ARCH-OBSERVABILITY-SILENT-FAILURE-1",
+            "ARCH-OBSERVABILITY-LOG-CONSISTENCY-1",
+            "ARCH-OBSERVABILITY-CORRELATION-ID-1",
+        ] {
+            for proposed_severity in ["critical", "high", "medium", "low", "info"] {
+                let mut f = finding(rule_id, "a.rs", 1, proposed_severity);
+                // Even a "low-effort" hint must not help it sneak into do_now via the
+                // high+low-effort matrix cell — the gate must win regardless of effort too.
+                f.effort = Some("low".to_string());
+                let bucket = effective_bucket(
+                    &f,
+                    Disposition::Unresolved,
+                    proposed_severity,
+                    None,
+                    0,
+                    None,
+                );
+                assert_eq!(
+                    bucket, "informational",
+                    "{rule_id} at proposed severity {proposed_severity} must route to \
+                     informational, got {bucket}"
+                );
+                assert!(
+                    !matches!(bucket, "do_now" | "do_next" | "plan"),
+                    "{rule_id} at proposed severity {proposed_severity} must never occupy an \
+                     action bucket, got {bucket}"
+                );
+            }
+        }
+    }
+
+    /// Bidirectional control for the test above: a genuine (non-observability) rule id DOES
+    /// reach its normal action bucket at the severities that earn one, proving the D8 gate is
+    /// scoped to rule IDENTITY rather than a hidden global change to bucket placement.
+    #[test]
+    fn non_observability_rule_still_reaches_its_action_bucket_at_matching_proposed_severities() {
+        let critical = finding("SEC-SOME-REAL-DEFECT-1", "a.rs", 1, "critical");
+        assert_eq!(
+            effective_bucket(
+                &critical,
+                Disposition::Unresolved,
+                "critical",
+                None,
+                0,
+                None
+            ),
+            "do_now",
+            "a genuine critical finding must still reach do_now"
+        );
+
+        let mut high_low_effort = finding("SEC-SOME-REAL-DEFECT-1", "a.rs", 1, "high");
+        high_low_effort.effort = Some("low".to_string());
+        assert_eq!(
+            effective_bucket(
+                &high_low_effort,
+                Disposition::Unresolved,
+                "high",
+                None,
+                0,
+                None
+            ),
+            "do_now",
+            "a genuine high+low-effort finding must still reach do_now"
+        );
+
+        let medium = finding("SEC-SOME-REAL-DEFECT-1", "a.rs", 1, "medium");
+        assert_eq!(
+            effective_bucket(&medium, Disposition::Unresolved, "medium", None, 0, None),
+            "plan",
+            "a genuine medium finding must still reach plan"
+        );
+    }
+
+    /// End-to-end at the `ai_audit` calibration-pipeline level: `apply_severity_ceiling_rules`
+    /// (D8) forces an ARCH-OBSERVABILITY-* finding's severity to exactly `"low"` regardless of
+    /// whatever severity it carried going in — including a model proposing critical — never
+    /// raising OR lowering any OTHER rule's severity in the same pass.
+    #[test]
+    fn d8_ceiling_forces_observability_findings_to_low_regardless_of_input_severity() {
+        for input_severity in ["critical", "high", "medium", "info"] {
+            let f = finding(
+                "ARCH-OBSERVABILITY-SILENT-FAILURE-1",
+                "a.rs",
+                1,
+                input_severity,
+            );
+            let out = crate::ai_audit::apply_severity_ceiling_rules(vec![f]);
+            assert_eq!(
+                out[0].severity, "low",
+                "input severity {input_severity} must be forced to low"
+            );
+        }
+
+        // Control: an unrelated rule's severity is untouched by this pass.
+        let untouched = finding("SEC-SOME-REAL-DEFECT-1", "a.rs", 1, "critical");
+        let out = crate::ai_audit::apply_severity_ceiling_rules(vec![untouched]);
+        assert_eq!(out[0].severity, "critical");
     }
 
     /// End-to-end at the `build_report_json` level: an `info`-severity finding lands in the

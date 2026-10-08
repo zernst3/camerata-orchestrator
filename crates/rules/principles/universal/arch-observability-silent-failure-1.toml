@@ -1,0 +1,67 @@
+id = "ARCH-OBSERVABILITY-SILENT-FAILURE-1"
+title = "A caught or inspected error is never discarded with zero action; it is logged, rethrown, transformed, or its silence is explicitly justified"
+tag = "stack"
+domain = "universal"
+layer = "universal"
+enforcement = "architectural"
+default = true
+verification = "grounded"
+qualifies = "SEMANTIC, opinion-shaped, and deliberately CAPPED LOW (owner directive): whether a given empty catch/except/rescue block or ignored error value is a real defect or a deliberate, locally-justified no-op is a repo-relative judgment call Camerata cannot verify mechanically — unlike CSHARP-NO-SWALLOWED-EXCEPTIONS-1 (a C#-specific, full-severity, MECHANICALLY enforced rule backed by real Roslyn/Sonar analyzers, which remains authoritative wherever it applies), this rule has no shipped detector and reaches the codebase only through the semantic/AI audit pass. Camerata's own severity-ceiling pass (see `ai_audit`'s D8 observability cap, and `report_export::is_informational`'s structural bypass of its own severity invariant for this exact rule-id class) forces every finding of this rule to severity Low and routes it OUT of every action bucket (do_now/do_next/plan) regardless of what severity the model itself proposes — this class must never occupy an action tier on its own. Conformance holds when every catch/except/rescue block that does not rethrow or return the error upward, and every explicit error-value check (Go's `if err != nil`, Rust's `Err(e)` match arm) that does not propagate it, either calls the project's logger with the error or carries an inline comment explicitly justifying the silence; it is flagged when a block is empty (or equivalent to empty: a bare `pass`, a comment-only body, a `_ = err`/discarded binding with no accompanying log call or justification comment)."
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/390.html"
+title = "CWE-390: Detection of Error Condition Without Action"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
+title = "OWASP Logging Cheat Sheet — 'Which events to log': a caught error or exception is a loggable event; silently discarding it removes the only record that the failure occurred"
+
+[decision]
+question = "When a function catches/rescues an exception, or inspects an error value it does not propagate upward, does it always log the error (or justify its silence inline) before proceeding, or can it discard the error with literally zero action?"
+default = "log-or-justify-every-caught-error"
+why = """
+CWE-390 names this precisely: detecting that an error condition occurred and then taking no action is
+its own defect class, independent of whatever the original error was. An empty `catch (Exception e) {}`,
+a bare Python `except: pass`, a Go `if err != nil { }` with nothing inside, or a Rust `let _ = result;`
+all share the same shape — the code recognized that something went wrong and then behaved as if nothing
+happened. The cost is not the original failure (which may well have been recoverable) but the LOST
+SIGNAL: the one place in the program that knew the failure occurred chose not to record it, so a human
+debugging a downstream symptom — a stale cache, a missing record, a silently-failed background job —
+has no trail back to the actual root cause. This is deliberately scoped NARROWLY to the zero-action
+case, not "every catch block must do something elaborate": a catch block that rethrows, returns a
+wrapped error, or recovers with an inline comment explaining why silence is intentional (a best-effort
+cleanup step, a known-benign race) is already conforming. The owner was explicit that this whole class
+is a judgment call, not a universal floor — a repo's own context (is this a hot path where even a log
+call has a real cost? is this truly best-effort cleanup?) decides whether a given empty block is
+defensible, which is exactly why Camerata ships no mechanical detector for it and caps its severity at
+Low structurally rather than letting a model's enthusiasm inflate it.
+"""
+
+[[option]]
+id = "log-or-justify-every-caught-error"
+label = "Every caught/inspected error is logged, rethrown, transformed, or explicitly justified; no empty catch/except/rescue bodies"
+directive = """
+Scan for a catch/except/rescue block (or an explicit error-value check that does not propagate the
+error upward) whose body contains no call to the project's logger, no rethrow/return of the error (or a
+wrapped version of it), and no inline comment explaining why the silence is intentional. Flag a match as
+a LOW finding (never higher — see `qualifies`): the block is empty, contains only a comment, or merely
+discards the error binding (`_ = err`, a bare `pass`, a caught variable never referenced). A block that
+logs the error, propagates it, or carries a justifying comment is conforming regardless of what else it
+does.
+"""
+remediation = """
+Add a call to the project's existing logger (passing the caught error/exception so its message and
+stack trace are captured) inside the empty block, OR rethrow/return the error (or a wrapped, more
+specific version of it) to the caller, OR — if the silence is genuinely intentional — add a short inline
+comment explaining why (e.g. "intentionally ignored: best-effort cache invalidation"). Verify by
+triggering the failure path in a test and confirming the error now appears in the logs, propagates to
+the caller, or is visibly, deliberately justified in the code — never silently vanishes.
+"""
+effort = "low"
+why = "Logging (or explicitly justifying) a caught error is the minimum action that keeps the failure visible to whoever debugs the system next; the fix is almost always a single line, and it is the only way an empty catch block can be distinguished from a genuinely considered, locally-justified no-op after the fact."
+
+[[option]]
+id = "allow-silent-discards"
+label = "Allow a caught or inspected error to be discarded with no log call, no propagation, and no comment"
+directive = "Catch/except/rescue blocks and error-value checks may be left empty, or may discard the error binding, with no logging, rethrow, or explanatory comment required."
+why = "Rejected: an empty catch block and a deliberately-justified no-op are visually indistinguishable without either a log call or a comment, so allowing silent discards means every empty block looks the same as a genuine bug — a reviewer (or a future maintainer) has no way to tell which empty blocks were considered and which were simply never finished."
