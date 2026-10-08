@@ -1,0 +1,69 @@
+id = "SUPABASE-STORAGE-UPLOAD-CONSTRAINTS-1"
+title = "Every bucket that accepts user uploads declares a file-size limit and a content-type allowlist at the bucket level"
+tag = "stack"
+domain = "supabase:storage"
+layer = "platform"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan over bucket-creation statements — `createBucket(name, { ... })` in application code and `insert into storage.buckets (...)` / `update storage.buckets set ...` in migrations — for the presence of both `fileSizeLimit`/`file_size_limit` and `allowedMimeTypes`/`allowed_mime_types`. Conformance holds when a bucket that application code uploads user-supplied content into declares both fields with a finite, non-default value; it fails when a write-accepting bucket is created with neither field set (both default to unlimited/unrestricted), or with only one of the two. A bucket that is read-only from the application's perspective (no upload call site writes to it) is out of scope for this rule."
+
+[[sources]]
+url = "https://supabase.com/docs/reference/javascript/storage-createbucket"
+title = "Supabase JS client reference — storage.createBucket: fileSizeLimit and allowedMimeTypes bucket options"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/434.html"
+title = "CWE-434: Unrestricted Upload of File with Dangerous Type"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html"
+title = "OWASP File Upload Cheat Sheet — validate file size and content type server-side, not just in the client"
+
+[decision]
+question = "Does every bucket that accepts user uploads declare a file-size limit and a content-type allowlist as bucket-level configuration, rather than relying on application-code validation alone?"
+default = "declare-both-constraints-at-bucket-creation"
+why = """
+Supabase's `createBucket` API exposes `fileSizeLimit` and `allowedMimeTypes` as first-class bucket options, and
+`storage.buckets` carries the matching `file_size_limit` / `allowed_mime_types` columns — both default to unset
+(unlimited size, any MIME type accepted) unless the bucket declares otherwise. An upload-accepting bucket with
+neither constraint lets any authenticated (or, with a public-write policy, any anonymous) caller push an
+arbitrarily large file or a file of any content type into storage: an attacker can fill the bucket with
+multi-gigabyte uploads to run up storage cost or exhaust quota, or upload an executable/HTML/SVG file disguised as
+an image that gets served back to other users from the same origin — the textbook CWE-434 shape (Unrestricted
+Upload of File with Dangerous Type).
+
+The reason this belongs at the BUCKET level, not only in application-code validation before the upload call: a
+bucket-level constraint is enforced by the Storage API itself on every write to that bucket, regardless of which
+code path performs the upload. Application-only validation is bypassable the moment a second call site (a bulk
+import script, an admin tool, a future endpoint) writes to the same bucket without re-implementing the same check
+— the constraint has to be re-derived and re-applied at every call site instead of being a property of the bucket
+itself.
+"""
+
+[[option]]
+id = "declare-both-constraints-at-bucket-creation"
+label = "Declare fileSizeLimit and allowedMimeTypes on every upload-accepting bucket"
+directive = """
+Scan `createBucket` calls and `storage.buckets` migration statements for buckets that application code uploads
+user-supplied content into. Flag as high severity any such bucket missing `fileSizeLimit`/`file_size_limit`
+("Your `<bucket>` bucket has no upload size limit — anyone can fill it with arbitrarily large files") and
+separately flag any missing `allowedMimeTypes`/`allowed_mime_types` ("Your `<bucket>` bucket accepts any file type,
+including executable or HTML content that your app might later serve back to other users"). A bucket with only one
+of the two set is still a finding for the missing field.
+"""
+remediation = """
+Add `fileSizeLimit`/`file_size_limit` and `allowedMimeTypes`/`allowed_mime_types` to the `<bucket>` bucket's
+creation statement (or an `update storage.buckets` migration for an existing bucket), scoped to what the feature
+actually needs (e.g. `{ fileSizeLimit: '10MB', allowedMimeTypes: ['image/png', 'image/jpeg'] }`), rather than
+leaving either unset. Verify by attempting an upload that exceeds the size limit or uses a disallowed content type
+and confirming the Storage API itself rejects it, not just your application's own pre-upload validation.
+"""
+effort = "low"
+why = "Both constraints are declared once at the bucket level and then enforced by the Storage API on every call site forever, which is strictly more robust than re-implementing the same size/type checks in application code at each place a file might be uploaded — and the two knobs are set in the same bucket-configuration statement, so there is no reason to enforce one without the other."
+
+[[option]]
+id = "validate-size-and-type-in-application-code-only"
+label = "Validate file size and content type only in application code before calling upload(), without bucket-level constraints"
+directive = "Rely entirely on a pre-upload check in the application's own request handler (reading Content-Length and Content-Type headers, or inspecting the File object client-side) to reject oversized or disallowed uploads, leaving the bucket's own fileSizeLimit/allowedMimeTypes unset."
+why = "Rejected: an application-layer check only runs for the specific call site that implements it. The Storage API itself still accepts anything once called directly — a different endpoint, an admin script, a bulk-import job, or simply a future developer who adds a new upload path without copying the same validation, bypasses the constraint entirely. A client-side-only check is also trivially bypassed by any direct API call that skips the browser altogether. The bucket-level fields exist precisely so the constraint is a property of the bucket, enforced once, rather than a duty every future call site has to remember to re-implement correctly."

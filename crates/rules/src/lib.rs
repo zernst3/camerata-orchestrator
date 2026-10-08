@@ -2873,4 +2873,87 @@ mod tests {
              camerata-server). Missing on: {missing:#?}"
         );
     }
+
+    // ── New domain-class rules: storage / auth / sql-integrity / realtime ────────────────
+    //
+    // Domain-class authoring pass (not fixture-driven): object/file storage defect class,
+    // Supabase auth-configuration defect class, relational schema-integrity defect class, and
+    // a brand-new `supabase:realtime` sub-domain for the pub/sub channel-authorization defect
+    // class. Each assertion below is a minimal "does this rule exist, is it shaped correctly,
+    // and will it ever reach anything" check — the real content lives in the rule's own prose,
+    // reviewed by hand against `docs/RULE_AUTHORING.md`'s checklist at authoring time.
+
+    /// A rule id is "code-auditable" (reachable by the semantic/AI pass per
+    /// `onboard::audit::is_code_auditable_rule` in camerata-server) unless it carries a
+    /// governance/process prefix (`ORCH-`/`SPIRIT-`/`PROC-`). None of the ids below do, so each
+    /// is guaranteed a route to evaluation regardless of its declared enforcement tier (see
+    /// `mechanical_gate`'s module doc in camerata-server) — this local check mirrors that
+    /// predicate without taking a dependency on the server crate.
+    fn is_code_auditable(id: &str) -> bool {
+        !(id.starts_with("ORCH-") || id.starts_with("SPIRIT-") || id.starts_with("PROC-"))
+    }
+
+    /// Common shape assertions for a newly-authored rule: it loads, resolves a default option
+    /// with a non-empty directive, is grounded (cites a real external authority), carries at
+    /// least one `[[sources]]` entry, is code-auditable (so it is guaranteed to reach the
+    /// semantic pass even with no shipped detector), and — when its default option carries
+    /// remediation — also carries an authored `effort` band.
+    fn assert_well_formed_new_rule(set: &RuleSet, id: &str, expected_domain: &str) {
+        let rule = set
+            .get_by_id(id)
+            .unwrap_or_else(|| panic!("{id} must be present in the bundled corpus"));
+        assert_eq!(rule.domain, expected_domain, "{id} domain");
+        assert!(
+            rule.is_grounded(),
+            "{id} must be grounded (cites a real authority)"
+        );
+        assert!(
+            !rule.sources.is_empty(),
+            "{id} must carry at least one [[sources]] entry"
+        );
+        assert!(
+            is_code_auditable(id),
+            "{id} must be code-auditable (reachable by semantic pass)"
+        );
+        let default = rule
+            .resolved_option(None)
+            .unwrap_or_else(|| panic!("{id} must resolve a default option"));
+        assert!(
+            !default.directive.trim().is_empty(),
+            "{id} default option directive"
+        );
+        if let Some(remediation) = default.remediation.as_deref() {
+            if !remediation.trim().is_empty() {
+                assert!(
+                    default.effort.is_some(),
+                    "{id}'s default option carries remediation and must also carry an authored effort band"
+                );
+            }
+        }
+        // Every one of these new rules ships at least one rejected/alternative option alongside
+        // the adopted default, per RULE_AUTHORING's "options/alternatives" expectation.
+        assert!(
+            rule.options.len() >= 2,
+            "{id} must offer at least one alternative option alongside its default: {} option(s)",
+            rule.options.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn new_storage_domain_rules_are_well_formed_and_reachable() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        for id in [
+            "SUPABASE-STORAGE-KEY-SANITIZATION-1",
+            "SUPABASE-STORAGE-UPLOAD-CONSTRAINTS-1",
+            "SUPABASE-STORAGE-SIGNED-URL-1",
+            "SUPABASE-STORAGE-DOWNLOAD-OWNERSHIP-1",
+        ] {
+            assert_well_formed_new_rule(&set, id, "supabase:storage");
+        }
+    }
+
 }

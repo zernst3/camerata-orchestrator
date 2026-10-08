@@ -1,0 +1,66 @@
+id = "SUPABASE-STORAGE-KEY-SANITIZATION-1"
+title = "Storage object keys must never be built directly from a client-supplied filename or path segment"
+tag = "stack"
+domain = "supabase:storage"
+layer = "platform"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan over storage upload call sites (`.from(bucket).upload(path, ...)` / `.uploadToSignedUrl(...)` and server-side equivalents) for a destination-path argument built directly from an unsanitized client-controlled value — the browser `File.name`, a multipart field's `originalname`, or a raw query/body/form parameter — with no server-generated component (a UUID, a content hash, or an owner-id-prefixed path) and no rejection of path-traversal sequences (`../`, a leading `/`, URL-encoded traversal, null bytes). Conformance holds when every upload path is either entirely server-generated or is a sanitized, owner-scoped prefix plus a server-generated suffix; it fails when the object key is the client's original filename (or a trivial concatenation of it) with no traversal rejection and no collision-proof uniqueness."
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html"
+title = "OWASP File Upload Cheat Sheet — generate a new name for the file on upload; never trust the client-supplied filename for a server-side path"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/22.html"
+title = "CWE-22: Improper Limitation of a Pathname to a Restricted Directory ('Path Traversal')"
+
+[decision]
+question = "Is the storage object key for every upload either entirely server-generated or a sanitized owner-scoped prefix plus a server-generated suffix, rather than the client's own filename?"
+default = "server-generates-the-key-rejects-traversal"
+why = """
+A client-supplied filename is attacker-controlled input the moment it reaches a storage path argument. Two distinct
+failure modes follow from trusting it directly: path traversal (a filename containing `../` or an absolute path
+segment resolves to a location in the bucket's key-space the uploader was never meant to reach — in Supabase Storage
+this typically means overwriting or shadowing another user's object if the policy scoping is any looser than
+perfectly precise) and collision/overwrite (two uploads of a file literally named `invoice.pdf` silently clobber each
+other, or an enumerable/predictable key lets one user guess another user's object path even when no traversal
+sequence is involved). OWASP's File Upload Cheat Sheet states the fix plainly: generate a new name for the uploaded
+file server-side rather than reusing the client's.
+
+The correct pattern is a server-generated key — a UUID or content hash, optionally prefixed with the owner's id for
+natural per-user scoping (`${auth.uid()}/${uuid()}.${ext}`) — with the client's original filename retained only as
+display metadata in a database column, never as the object's actual storage path. This also closes the traversal
+case for free: a UUID has no `../` to reject in the first place.
+"""
+
+[[option]]
+id = "server-generates-the-key-rejects-traversal"
+label = "Generate the object key server-side (UUID/hash, optionally owner-id-prefixed); never use the client's filename as the path"
+directive = """
+Scan storage upload call sites for a destination-path argument built from `file.name`, `.originalname`, or a raw
+client-supplied parameter with no server-generated component. Flag as high severity: "Your upload path is the
+visitor's own filename. Two uploads named the same thing overwrite each other, and a crafted filename can escape the
+intended folder." Where a path is partially client-influenced (e.g. an owner-id prefix the server itself sets,
+followed by a server-generated suffix), treat it as conforming. Where the path is ambiguous (helper function whose
+caller isn't visible in the scanned file), mark `needs_review` rather than asserting a violation.
+"""
+remediation = """
+In `<file>`, replace the upload path with a server-generated identifier — a UUID or content hash — optionally
+prefixed with the authenticated user's id for natural per-user scoping, instead of the client-supplied filename.
+Store the original filename in a database column for display purposes if the UI needs to show it, never as the
+object's own storage path. Reject any client-supplied path component containing `..`, a leading `/`, or a null byte
+before it reaches the storage call, as defense in depth even once the key itself is server-generated. Verify by
+uploading two files with the identical original name and confirming neither overwrites the other, and by attempting
+an upload whose supplied filename contains a `../` sequence and confirming it is rejected rather than silently
+resolved.
+"""
+effort = "low"
+why = "A server-generated key removes both failure modes (traversal and collision/overwrite/enumeration) at once, is a small, localized code change at the upload call site, and has no legitimate downside — the client never needed to control the storage path to begin with."
+
+[[option]]
+id = "sanitize-but-keep-client-filename-as-the-key"
+label = "Strip only `../` sequences from the client filename but keep it as the object key"
+directive = "Apply a blocklist filter that strips or rejects `../` sequences from the client-supplied filename, then use the remaining string as the storage object key unchanged."
+why = "Rejected: a blocklist against one traversal spelling is an incomplete defense (URL-encoded traversal, backslash variants on some storage backends, or simply a null byte can still slip through a hand-rolled filter), and even a perfectly sanitized filename is still the client's own string — two uploads of `report.pdf` from two different users still collide or overwrite, and a predictable filename is still trivially enumerable. Sanitizing in place treats only the traversal symptom while leaving the underlying trust-the-client-string problem, and the collision/enumeration risk, fully intact."

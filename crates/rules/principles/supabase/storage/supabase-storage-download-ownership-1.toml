@@ -1,0 +1,72 @@
+id = "SUPABASE-STORAGE-DOWNLOAD-OWNERSHIP-1"
+title = "A handler that signs or downloads a client-supplied object path must verify the caller is entitled to that specific object first"
+tag = "stack"
+domain = "supabase:storage"
+layer = "platform"
+enforcement = "prose"
+default = true
+verification = "grounded"
+qualifies = "Whether a download/signed-URL handler validates the caller's entitlement to the SPECIFIC object path it was asked for is a semantic judgment over the handler's control flow, not a pattern match — so this rule routes to the prose tier: the handler body and the object-path source (a client-supplied id/path from params/body/query) are fed to Claude as evidence. Conformance holds when the handler confirms the requesting user owns, or is otherwise entitled to, the exact object identified by the client-supplied path before calling createSignedUrl/download; it fails when the handler passes that client-supplied value straight into the storage call with no ownership/membership check of its own."
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/639.html"
+title = "CWE-639: Authorization Bypass Through User-Controlled Key — the object path IS the user-controlled key in this shape"
+
+[[sources]]
+url = "https://owasp.org/Top10/2021/A01_2021-Broken_Access_Control/index.html"
+title = "OWASP Top 10:2021 — A01 Broken Access Control"
+
+[decision]
+question = "Does every handler that signs or downloads a client-supplied storage object path verify the caller is entitled to that exact object before doing so?"
+default = "require-ownership-check-before-signing"
+why = """
+The single most common real-world Supabase storage vulnerability has nothing to do with bucket policies: a
+'download my invoice' or 'get this attachment' endpoint accepts an object id/path from the client (a route
+parameter, a query string, a request body field) and passes it straight into `createSignedUrl` or `download()`
+without checking that the requesting user is the one who is actually entitled to that specific object. Changing the
+id in the request — an IDOR, CWE-639's Authorization Bypass Through User-Controlled Key in its most literal shape —
+then downloads someone else's file. This is especially easy to miss when the handler constructs its storage client
+with a service_role key (common for 'the backend fetches the file for the user' patterns): service_role bypasses
+RLS entirely, so there is no RLS-level backstop on that call at all, and the handler's own logic IS the complete
+access-control layer for that request — exactly the shape SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1 covers generically,
+specialized here to the download/signed-URL call site specifically because it is the single highest-frequency
+instance of that general pattern in a Supabase app, and because the fix (a WHERE clause tying the object to its
+owner before signing) is concrete enough to state directly rather than leaving it to the generic rule's broader
+framing.
+
+Even when the client uses the anon/authenticated key (no service_role involved), a storage.objects SELECT policy
+that is scoped too loosely — or scoped correctly but to a FOLDER rather than an exact object — can still let an
+authenticated user successfully sign a URL for an object outside what the feature intends, if the handler itself
+places no additional constraint on which object id the policy is being asked to authorize. Relying on policy text
+alone to catch this duplicates SUPABASE-STORAGE-OBJECT-POLICY-1's job and misses the service-role case entirely,
+which is the actual dominant failure mode in practice.
+"""
+
+[[option]]
+id = "require-ownership-check-before-signing"
+label = "Require an explicit ownership/entitlement check on the exact object before signing or downloading it"
+directive = """
+For every handler that calls createSignedUrl or download with a path argument sourced from client input (a route
+param, query string, or request body field), evaluate whether the handler validates that the requesting user owns
+or is otherwise entitled to that SPECIFIC object before the storage call — typically a database lookup keyed by
+both the object identifier and the caller's user id, or an explicit storage.objects owner check, rather than
+trusting the policy alone. Report at high severity when no such check is found: "Anyone who changes the file id in
+this request can download someone else's file." When a check is found, report it as informational (what the check
+validates), not a finding.
+"""
+remediation = """
+In `<file>`, before calling createSignedUrl/download with the client-supplied object path, add an explicit lookup
+that confirms the requesting user owns (or is a member of the resource that owns) the EXACT object being requested
+— e.g. a query scoped to `WHERE object_path = $1 AND owner_id = $2`, not just `WHERE object_path = $1`. If the
+handler constructs a service_role-backed storage client, treat this check as non-negotiable, since no RLS backstop
+exists on that path at all. Verify by confirming a request that substitutes another user's valid object id/path is
+now rejected rather than returning that user's file.
+"""
+effort = "medium"
+why = "The object id/path is attacker-controlled the instant it comes from the request, and signing a URL for it is the functional equivalent of granting read access — an explicit entitlement check at that exact call site is the only backstop when the client is calling through a service-role-backed handler, which has no RLS check running at all."
+
+[[option]]
+id = "trust-the-storage-objects-rls-policy-alone"
+label = "Rely on the storage.objects RLS policy to gate who can sign/download which object; add no handler-level check"
+directive = "Do not add an application-level entitlement check in the download/signed-URL handler; treat the storage.objects RLS policy (SUPABASE-STORAGE-OBJECT-POLICY-1) as sufficient authorization for whatever object path the client supplies."
+why = "Rejected: a handler that constructs its storage client with a service_role key bypasses RLS entirely, so there is no policy evaluation happening on that call at all — this is the dominant real-world shape of this bug, and policy-only coverage misses it completely. Even with the anon/authenticated client, a policy scoped to a folder or bucket rather than an exact object still permits signing a URL for any object within that scope, which is broader than what a specific feature intends; the handler is the only place that knows which single object this particular request is supposed to be allowed to touch."

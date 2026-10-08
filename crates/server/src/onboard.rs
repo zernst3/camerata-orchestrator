@@ -2840,7 +2840,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn propose_corpus_rules_proposes_all_21_supabase_rules_for_a_supabase_repo() {
+    async fn propose_corpus_rules_proposes_all_25_supabase_rules_for_a_supabase_repo() {
         // The end-to-end regression guard for the reported bug: given a repo whose stack
         // is unambiguously Supabase, the REAL onboarding path (detect_stack ->
         // domains_for_stack -> propose_corpus_rules against the real corpus) must
@@ -2882,6 +2882,10 @@ mod tests {
             "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
             "SUPABASE-STORAGE-OBJECT-POLICY-1",
             "SUPABASE-STORAGE-PUBLIC-BUCKET-1",
+            "SUPABASE-STORAGE-KEY-SANITIZATION-1",
+            "SUPABASE-STORAGE-UPLOAD-CONSTRAINTS-1",
+            "SUPABASE-STORAGE-SIGNED-URL-1",
+            "SUPABASE-STORAGE-DOWNLOAD-OWNERSHIP-1",
             "SUPABASE-FUNC-SEARCH-PATH-1",
             "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1",
             "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1",
@@ -2913,7 +2917,7 @@ mod tests {
                 );
             }
         }
-        // All 21 supabase rules — not just the ones spot-checked above — must be present
+        // All 25 supabase rules — not just the ones spot-checked above — must be present
         // and domain-matched to this repo, so a future corpus addition under
         // supabase/<area>/ that isn't wired into domains_for_stack would still be
         // caught here failing to match.
@@ -2923,8 +2927,8 @@ mod tests {
             .collect();
         assert_eq!(
             supabase_rules.len(),
-            21,
-            "expected all 21 supabase corpus rules in the payload: {:?}",
+            25,
+            "expected all 25 supabase corpus rules in the payload: {:?}",
             supabase_rules.iter().map(|r| &r.id).collect::<Vec<_>>()
         );
         assert!(
