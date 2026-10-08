@@ -1,0 +1,80 @@
+id = "SEC-NO-SENSITIVE-DATA-IN-LOGS-1"
+title = "A secret, credential, or regulated PII value never reaches a logging sink unredacted"
+tag = "universal"
+domain = "universal"
+layer = "universal"
+enforcement = "mechanical"
+default = true
+verification = "grounded"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/532.html"
+title = "CWE-532: Insertion of Sensitive Information into Log File"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html"
+title = "OWASP Logging Cheat Sheet — 'Which events to log' and 'Data to exclude': never log authentication credentials, session identifiers, access tokens, or regulated personal data in cleartext"
+
+[[sources]]
+url = "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Vocabulary_Cheat_Sheet.html"
+title = "OWASP Logging Vocabulary Cheat Sheet — sensitive-data categories a log event must exclude or mask"
+
+[decision]
+question = "When a secret/credential or a regulated PII value is in scope at a log call site, does it reach the log sink in cleartext, or is it redacted/masked/excluded first?"
+default = "redact-sensitive-values-before-logging"
+why = """
+A log line is written for operability, not secrecy, and the pipeline it flows into (a log aggregator,
+an APM tool, a file on disk, a third-party log-shipping vendor) is almost never held to the same
+access-control standard as the primary datastore the value came from — more engineers, support staff,
+and integrations can read "the logs" than can read "the database." CWE-532 names this precisely:
+inserting sensitive information into a log file is itself the vulnerability, independent of whether the
+log store is later breached — the value is now sitting in a system that was never scoped or audited
+as a place to hold it. The blast radius differs by value class, which is why this rule's enforcement
+distinguishes two severities rather than treating every sensitive log line identically: a credential or
+secret (an API key, a password, a session token, an Authorization header, a private key) reaching a log
+sink hands a reader of that log line a LIVE, reusable credential — it is a direct path to full account
+or system compromise, independent of any other control, so it is HIGH. Regulated PII (an SSN, a full
+credit-card/PAN number) reaching a log sink is a real exposure and a compliance violation, but it is not
+itself a reusable credential — a reader of the log cannot authenticate AS anyone with it alone — so it
+is calibrated MEDIUM; treating it as HIGH would inflate it past genuinely credential-bearing findings
+and dull the signal those carry. Both severities fall out of the SAME mechanical defect shape (a
+sensitive-identity value flowing, unredacted, into a logging call) and both are closed the same way: a
+redact/mask/hash helper (or simply never passing the raw value to the logger) sits between the value
+and the sink.
+"""
+
+[[option]]
+id = "redact-sensitive-values-before-logging"
+label = "Redact, mask, hash, or omit a secret/credential or regulated-PII value before any log call that could emit it"
+directive = """
+Scan for a value whose own identity marks it as a secret/credential (an identifier or object field
+matching token/secret/password/passwd/api_key/apikey/private_key/access_token/authorization/session/
+cookie, or a value read from a secret-shaped environment variable) or as regulated PII (ssn,
+social_security, credit_card/card_number, PAN, cvv/cvc) flowing — directly, through string
+concatenation/interpolation, or through an intermediate variable — into a logging sink
+(console.log/warn/error/debug, a logger.*/log.* call, print/pprint, println!/eprintln!/dbg!,
+System.out/err.*, fmt.Print*, Rails.logger.*) with no redact/mask/scrub/sanitize/hash/truncate
+helper (or equivalent `[REDACTED]`-style placeholder) applied to the value first. A secret/credential
+reaching the sink this way is a HIGH finding; a regulated-PII value reaching the sink this way is a
+MEDIUM finding — the two are calibrated differently because a live credential in a log line is directly
+reusable by anyone who can read that log, while PII is a real exposure but not itself a credential.
+A value that has passed through a redaction/masking/hashing helper before the sink call is conforming
+regardless of which class it belongs to.
+"""
+remediation = """
+Redact, mask, hash, or drop the sensitive value before it reaches the log call — pass it through the
+project's existing redaction/masking helper (or add one: a thin wrapper that replaces a secret with
+`[REDACTED]` and a PII value with a masked/truncated form, e.g. the last 4 digits only) rather than
+handing the logger the raw value or a format string that embeds it. For a value that does not need to
+appear in the log at all, remove it from the log call's arguments entirely rather than masking it in
+place. Verify by triggering the log call with a real-shaped (but synthetic) secret or PII value and
+confirming the emitted log line contains no reconstructable version of it.
+"""
+effort = "low"
+why = "Redaction at the log call site is a narrow, mechanical fix (wrap the value, or drop it from the call's arguments) that removes the exposure at its one true source — the log call itself — rather than relying on every downstream log consumer (an aggregator's access policy, a retention/encryption setting, a vendor's own security posture) to compensate for a value that never needed to be there."
+
+[[option]]
+id = "log-values-as-is-rely-on-log-store-access-controls"
+label = "Log values as-is and rely on the log storage/aggregation system's own access controls"
+directive = "Secret/credential and PII values are passed to logging calls without redaction, masking, or omission, relying entirely on the log aggregator's or log file's own access controls (who can read the logs) to keep the value confidential."
+why = "Rejected: the log pipeline (aggregator, APM tool, on-disk file, a third-party log-shipping vendor) is routinely broader-access and less audited than the datastore the value came from in the first place, and CWE-532 treats the insertion into the log as the defect regardless of whether the log store is later breached. A single retention-policy change, a misconfigured log-export integration, or a support engineer with broad log read access is enough to expose every credential or PII value this option chose not to redact — and unlike the datastore, nobody scoped the log pipeline as a place sensitive values were meant to live."

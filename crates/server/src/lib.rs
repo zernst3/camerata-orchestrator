@@ -5419,6 +5419,8 @@ async fn onboard_audit(
 /// | `camerata.security.exec-injection` / `-js`             | `SEC-NO-COMMAND-INJECTION-1`     | no (grounding-only) |
 /// | `camerata.security.taint-command-injection-{python,js,rust,csharp,go,ruby,java}` | `SEC-NO-COMMAND-INJECTION-1` | no (grounding-only) |
 /// | `camerata.security.taint-ruby-eval-send`               | `RUBY-AVOID-EVAL-SEND-1`         | no (grounding-only; closes a pre-existing phantom detector) |
+/// | `camerata.security.taint-log-secret-{python,js,rust,csharp,go,ruby,java}` | `SEC-NO-SENSITIVE-DATA-IN-LOGS-1` | no (grounding-only; `severity: ERROR` -> "high") |
+/// | `camerata.security.taint-log-pii-{python,js,rust,csharp,go,ruby,java}` | `SEC-NO-SENSITIVE-DATA-IN-LOGS-1` | no (grounding-only; `severity: WARNING` -> "medium") |
 ///
 /// The remaining semgrep rules (`weak-hash-*`, `path-traversal-python`,
 /// `subprocess-shell-true`) have no corpus-grounded twin yet and map to `None`.
@@ -5477,6 +5479,26 @@ pub(crate) fn semgrep_floor_category(semgrep_rule_id: &str) -> Option<&'static s
         // Brakeman integration Camerata never ran) with a real taint-mode detector for the
         // exact defect the corpus TOML already describes.
         "camerata.security.taint-ruby-eval-send" => Some("RUBY-AVOID-EVAL-SEND-1"),
+        // Sensitive-data-in-logs taint class (new): both the secret/credential (ERROR ->
+        // "high") and PII (WARNING -> "medium") rule families ground to the SAME corpus rule
+        // — SEC-NO-SENSITIVE-DATA-IN-LOGS-1's own `[decision].why` is what documents the two
+        // severities, not two separate corpus rules. See
+        // `crates/server/assets/semgrep-rules/taint-security.yml`'s "Sensitive data reaching
+        // a log sink" section for the full rationale. CWE-532.
+        "camerata.security.taint-log-secret-python"
+        | "camerata.security.taint-log-secret-js"
+        | "camerata.security.taint-log-secret-rust"
+        | "camerata.security.taint-log-secret-csharp"
+        | "camerata.security.taint-log-secret-go"
+        | "camerata.security.taint-log-secret-ruby"
+        | "camerata.security.taint-log-secret-java"
+        | "camerata.security.taint-log-pii-python"
+        | "camerata.security.taint-log-pii-js"
+        | "camerata.security.taint-log-pii-rust"
+        | "camerata.security.taint-log-pii-csharp"
+        | "camerata.security.taint-log-pii-go"
+        | "camerata.security.taint-log-pii-ruby"
+        | "camerata.security.taint-log-pii-java" => Some("SEC-NO-SENSITIVE-DATA-IN-LOGS-1"),
         _ => None,
     }
 }
@@ -5576,6 +5598,7 @@ pub(crate) fn external_tool_floor_category(tool_rule_id: &str) -> Option<&'stati
 /// - `"tls"`    — disabled TLS / cert verification
 /// - `"xss"`    — cross-site scripting via a raw-HTML sink (W3)
 /// - `"redirect"` — open redirect via an unvalidated redirect target (W3)
+/// - `"log-sensitive"` — a secret/credential or regulated-PII value reaching a logging sink
 ///
 /// Decision: docs/decisions/2026-06-23_stack_gating_and_crosstool_dedup.md and
 /// docs/decisions/2026-10-06_w3_commodity_taint_layer.md
@@ -5654,6 +5677,24 @@ pub(crate) fn finding_security_category(rule_id: &str) -> Option<&'static str> {
         | "camerata.security.taint-open-redirect-go"
         | "camerata.security.taint-open-redirect-ruby"
         | "camerata.security.taint-open-redirect-java" => Some("redirect"),
+        // Sensitive-data-in-logs taint class: secret and PII sources share one category —
+        // no floor twin either way, so this only matters for collapsing the two SEVERITY
+        // tiers against each other if both ever fired on the identical (repo, path, line),
+        // which keeps the stronger (secret/"high") row canonical per `finding_dedup_rank`.
+        "camerata.security.taint-log-secret-python"
+        | "camerata.security.taint-log-secret-js"
+        | "camerata.security.taint-log-secret-rust"
+        | "camerata.security.taint-log-secret-csharp"
+        | "camerata.security.taint-log-secret-go"
+        | "camerata.security.taint-log-secret-ruby"
+        | "camerata.security.taint-log-secret-java"
+        | "camerata.security.taint-log-pii-python"
+        | "camerata.security.taint-log-pii-js"
+        | "camerata.security.taint-log-pii-rust"
+        | "camerata.security.taint-log-pii-csharp"
+        | "camerata.security.taint-log-pii-go"
+        | "camerata.security.taint-log-pii-ruby"
+        | "camerata.security.taint-log-pii-java" => Some("log-sensitive"),
         // Ruff / ESLint lints that overlap with floor or semgrep in the same category.
         // S608 = possible SQL injection (Ruff/flake8-bandit) — same category as the floor SQL rule.
         "S608" => Some("sql"),
@@ -21651,6 +21692,33 @@ mod tests {
             semgrep_floor_category("camerata.security.taint-ruby-eval-send"),
             Some("RUBY-AVOID-EVAL-SEND-1")
         );
+
+        // Sensitive-data-in-logs taint class: BOTH the secret/credential and PII rule
+        // families ground to the SAME corpus rule (severity differs at the SARIF level, not
+        // the grounding map — see that rule's own doc comment).
+        let log_sink_taint = [
+            "camerata.security.taint-log-secret-python",
+            "camerata.security.taint-log-secret-js",
+            "camerata.security.taint-log-secret-rust",
+            "camerata.security.taint-log-secret-csharp",
+            "camerata.security.taint-log-secret-go",
+            "camerata.security.taint-log-secret-ruby",
+            "camerata.security.taint-log-secret-java",
+            "camerata.security.taint-log-pii-python",
+            "camerata.security.taint-log-pii-js",
+            "camerata.security.taint-log-pii-rust",
+            "camerata.security.taint-log-pii-csharp",
+            "camerata.security.taint-log-pii-go",
+            "camerata.security.taint-log-pii-ruby",
+            "camerata.security.taint-log-pii-java",
+        ];
+        for id in log_sink_taint {
+            assert_eq!(
+                semgrep_floor_category(id),
+                Some("SEC-NO-SENSITIVE-DATA-IN-LOGS-1"),
+                "{id} must ground to SEC-NO-SENSITIVE-DATA-IN-LOGS-1"
+            );
+        }
     }
 
     // ── FIX 2: cross-preview-tool dedup tests ────────────────────────────────
@@ -21818,6 +21886,24 @@ mod tests {
             "camerata.security.taint-command-injection-java",
         ] {
             assert_eq!(finding_security_category(id), Some("exec"), "{id}");
+        }
+        for id in [
+            "camerata.security.taint-log-secret-python",
+            "camerata.security.taint-log-secret-js",
+            "camerata.security.taint-log-secret-rust",
+            "camerata.security.taint-log-secret-csharp",
+            "camerata.security.taint-log-secret-go",
+            "camerata.security.taint-log-secret-ruby",
+            "camerata.security.taint-log-secret-java",
+            "camerata.security.taint-log-pii-python",
+            "camerata.security.taint-log-pii-js",
+            "camerata.security.taint-log-pii-rust",
+            "camerata.security.taint-log-pii-csharp",
+            "camerata.security.taint-log-pii-go",
+            "camerata.security.taint-log-pii-ruby",
+            "camerata.security.taint-log-pii-java",
+        ] {
+            assert_eq!(finding_security_category(id), Some("log-sensitive"), "{id}");
         }
     }
 

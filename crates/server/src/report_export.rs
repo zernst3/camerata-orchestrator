@@ -6665,6 +6665,76 @@ mod tests {
         assert_eq!(group.citation.kind, "grounded");
     }
 
+    /// Sensitive-data-in-logs taint class grounded-mapping test: SYNTHETIC external-tool
+    /// findings for BOTH the secret/credential family (`...taint-log-secret-python`, "high")
+    /// and the PII family (`...taint-log-pii-python`, "medium") resolve to the SAME grounded
+    /// corpus rule (SEC-NO-SENSITIVE-DATA-IN-LOGS-1 / CWE-532) with our citation and authored
+    /// remediation, while each KEEPS its own distinct severity — confirming the grounding join
+    /// (`corpus_rule_for`) never touches a finding's own severity (see that function's doc
+    /// comment), which is what makes the two-severity design in the YAML's section comment
+    /// actually hold end to end rather than being silently flattened once grounded.
+    #[tokio::test]
+    async fn taint_log_sink_tool_rule_ids_resolve_through_the_grounding_map_with_distinct_severities(
+    ) {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(
+            errors.is_empty(),
+            "corpus must load cleanly, got errors: {errors:?}"
+        );
+
+        for (rule_id, severity) in [
+            ("camerata.security.taint-log-secret-python", "high"),
+            ("camerata.security.taint-log-pii-python", "medium"),
+        ] {
+            let mut f = finding(rule_id, "app/handlers.py", 23, severity);
+            f.preview = true;
+            f.preview_tool = Some("semgrep".to_string());
+
+            let citation = resolve_citation(&f.rule_id, f.preview_tool.as_deref(), Some(&corpus));
+            assert_eq!(
+                citation.kind, "grounded",
+                "{rule_id} must resolve to a grounded citation via the grounding map, got: {citation:?}"
+            );
+            assert!(
+                citation
+                    .sources
+                    .iter()
+                    .any(|s| s.url.contains("cwe.mitre.org/data/definitions/532")),
+                "{rule_id} must cite CWE-532 (Insertion of Sensitive Information into Log File), got: {:?}",
+                citation.sources
+            );
+
+            let fix = resolve_fix(&f.rule_id, Some(&corpus), &f, None);
+            assert!(
+                fix.is_some_and(|s| !s.trim().is_empty()),
+                "{rule_id} must resolve OUR authored remediation via the grounding map"
+            );
+
+            assert!(
+                f.preview,
+                "grounding a citation must never flip preview to false"
+            );
+            assert_eq!(f.preview_tool.as_deref(), Some("semgrep"));
+
+            // End-to-end: the curated-set builder renders it grounded, AND preserves this
+            // finding's own distinct severity — never flattened to one shared value.
+            let report = report_with(vec![f], vec![]);
+            let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+            let group = json
+                .curated_findings
+                .iter()
+                .find(|g| g.rule_id == rule_id)
+                .unwrap_or_else(|| panic!("{rule_id} must be curated, not held out as uncited"));
+            assert_eq!(group.citation.kind, "grounded");
+            assert_eq!(
+                group.sites.first().map(|s| s.severity.as_str()),
+                Some(severity),
+                "{rule_id} must keep its own severity ({severity}) through the curated-set builder"
+            );
+        }
+    }
+
     /// ESLint wiring (JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1 / RULES-OF-HOOKS-1): a SYNTHETIC
     /// eslint finding whose OWN rule id is the real ESLint SARIF `ruleId`
     /// (`react-hooks/exhaustive-deps`, not a corpus id) still resolves to OUR grounded

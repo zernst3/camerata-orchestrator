@@ -1644,6 +1644,88 @@ mod tests {
         assert_eq!(f[0].preview_tool.as_deref(), Some("semgrep"));
     }
 
+    /// Sensitive-data-in-logs taint class, secret/credential family: a SYNTHETIC semgrep SARIF
+    /// payload for `camerata.security.taint-log-secret-js` (the real id's absolute-`--config`-
+    /// path-prefixed form) parses into a preview `Finding` with the clean rule id and `"high"`
+    /// severity — `severity: ERROR` in the bundled YAML maps through `norm_severity` to
+    /// `"high"`, confirming this class's secret/credential severity is set by the detector
+    /// itself, not inflated or calibrated afterward.
+    #[test]
+    fn parse_sarif_ingests_a_synthetic_taint_log_secret_finding() {
+        let sarif = r#"{
+          "version": "2.1.0",
+          "runs": [{
+            "results": [{
+              "ruleId": "Users.ci.camerata.tooling.semgrep-rules.camerata.security.taint-log-secret-js",
+              "level": "error",
+              "message": { "text": "Possible sensitive-data logging (taint)." },
+              "locations": [{
+                "physicalLocation": {
+                  "artifactLocation": { "uri": "src/auth.ts" },
+                  "region": { "startLine": 17 }
+                }
+              }]
+            }]
+          }]
+        }"#;
+        let f = parse_sarif("me/svc", ScanTool::Semgrep, sarif).unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(
+            f[0].rule_id, "camerata.security.taint-log-secret-js",
+            "path prefix must be stripped"
+        );
+        assert_eq!(f[0].path, "src/auth.ts");
+        assert_eq!(f[0].line, 17);
+        assert_eq!(
+            f[0].severity, "high",
+            "a secret/credential value reaching a log sink must be HIGH, not inflated or deflated"
+        );
+        assert!(f[0].preview);
+        assert_eq!(f[0].preview_tool.as_deref(), Some("semgrep"));
+    }
+
+    /// Sensitive-data-in-logs taint class, PII family: the SAME synthetic ingestion as above,
+    /// but for `camerata.security.taint-log-pii-python` with `level: "warning"` — confirming
+    /// the PII family's `severity: WARNING` maps through `norm_severity` to `"medium"`, the
+    /// deliberately LOWER severity than the secret/credential family above (a PII value is a
+    /// real exposure but not itself a reusable credential — see
+    /// `SEC-NO-SENSITIVE-DATA-IN-LOGS-1`'s `[decision].why`). Pinned as its own test (not just
+    /// an assertion added to the secret-family test) because the entire point is that the TWO
+    /// severities must differ, which only a side-by-side pair of tests makes obvious.
+    #[test]
+    fn parse_sarif_ingests_a_synthetic_taint_log_pii_finding_at_medium_not_high() {
+        let sarif = r#"{
+          "version": "2.1.0",
+          "runs": [{
+            "results": [{
+              "ruleId": "Users.ci.camerata.tooling.semgrep-rules.camerata.security.taint-log-pii-python",
+              "level": "warning",
+              "message": { "text": "Possible sensitive-data logging (taint)." },
+              "locations": [{
+                "physicalLocation": {
+                  "artifactLocation": { "uri": "app/billing.py" },
+                  "region": { "startLine": 9 }
+                }
+              }]
+            }]
+          }]
+        }"#;
+        let f = parse_sarif("me/svc", ScanTool::Semgrep, sarif).unwrap();
+        assert_eq!(f.len(), 1);
+        assert_eq!(
+            f[0].rule_id, "camerata.security.taint-log-pii-python",
+            "path prefix must be stripped"
+        );
+        assert_eq!(f[0].path, "app/billing.py");
+        assert_eq!(f[0].line, 9);
+        assert_eq!(
+            f[0].severity, "medium",
+            "PII reaching a log sink must be MEDIUM — never inflated to HIGH alongside a real credential"
+        );
+        assert!(f[0].preview);
+        assert_eq!(f[0].preview_tool.as_deref(), Some("semgrep"));
+    }
+
     /// Shape-variant coverage for the hooks rules: a SYNTHETIC eslint SARIF payload with one
     /// `react-hooks/exhaustive-deps` result in a `.tsx` file, one in a plain `.jsx` file, and
     /// one `react-hooks/rules-of-hooks` result in a `.ts` custom-hook file — covering the

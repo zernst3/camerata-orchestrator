@@ -3380,4 +3380,31 @@ mod tests {
             assert!(is_code_auditable(id));
         }
     }
+
+    /// Camerata capability: sensitive data reaching a log sink (TAINT). The corpus rule both
+    /// taint-log-{secret,pii} semgrep rule families ground to via
+    /// `camerata_server::semgrep_floor_category` (see
+    /// `crates/server/assets/semgrep-rules/taint-security.yml`'s "Sensitive data reaching a
+    /// log sink" section). `mechanical` with a REAL detector (the bundled semgrep taint
+    /// rules), unlike this test module's other no-detector mechanical pins above.
+    #[tokio::test]
+    async fn sensitive_data_in_logs_rule_is_well_formed_and_reachable() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        assert_well_formed_new_rule(&set, "SEC-NO-SENSITIVE-DATA-IN-LOGS-1", "universal");
+        let rule = set
+            .get_by_id("SEC-NO-SENSITIVE-DATA-IN-LOGS-1")
+            .expect("must exist in the bundled corpus");
+        assert_eq!(rule.enforcement, EnforcementKind::Mechanical);
+        assert!(
+            rule.sources
+                .iter()
+                .any(|s| s.url.contains("cwe.mitre.org/data/definitions/532")),
+            "must cite CWE-532 (Insertion of Sensitive Information into Log File)"
+        );
+        assert_ids_unique_in_corpus(&set, &["SEC-NO-SENSITIVE-DATA-IN-LOGS-1"]);
+    }
 }

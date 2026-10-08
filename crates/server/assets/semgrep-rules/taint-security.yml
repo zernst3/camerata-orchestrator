@@ -808,3 +808,691 @@ rules:
       - patterns:
           - pattern: Runtime.getRuntime().exec($QUERY)
           - focus-metavariable: $QUERY
+
+  # ── Sensitive data reaching a log sink (taint) ───────────────────────────
+  #
+  # New class, distinct in shape from every rule above: those all source on "a value THIS
+  # FUNCTION did not construct itself" (the enclosing function's own formal parameter) —
+  # a TRUST-BOUNDARY signal. This class sources on "a value whose own IDENTITY marks it as
+  # sensitive" instead — the taint here is intrinsic to the variable/field/env-var NAME, not
+  # to where the value entered the function, so sources below match a bare identifier or a
+  # `$OBJ.$FIELD` member access by NAME (via `metavariable-regex`), regardless of whether
+  # that identifier happens to be a parameter, a local, or anything else. The `$OBJ.$FIELD`
+  # shape is also what generalizes this to "request bodies and auth objects" WITHOUT naming
+  # any one framework's request shape (the same anti-enumeration principle the rest of this
+  # file already follows for sources) — `req.body.password`, `auth.token`, `user.ssn` all
+  # match it the same way regardless of framework, because the FIELD name is the signal, not
+  # the object's type or origin.
+  #
+  # Two severities, by design (grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1's own severity
+  # calibration — see that TOML's `[decision].why`): a credential/secret source family is
+  # `severity: ERROR` (-> Finding.severity "high" per `scan_tools::norm_severity`) because a
+  # live, reusable credential in a log line is a direct path to compromise; a regulated-PII
+  # source family is `severity: WARNING` (-> "medium") because PII exposure is a real
+  # violation but is not itself a reusable credential. This is NOT inflated further by any
+  # later pass — `report_export::corpus_rule_for`'s grounding join never touches a finding's
+  # own severity (see that function's doc comment), so the severity set here is final.
+  #
+  # Sanitizers are shared across both severity tiers: a redact/mask/scrub/sanitize/hash/
+  # truncate helper call wrapping the value neutralizes it before any sink, regardless of
+  # which source family produced it.
+  #
+  # Sink coverage is intentionally the two most security-relevant log levels (info/error) per
+  # language's logger family, plus that language's plain print-style call — not an exhaustive
+  # enumeration of every debug/warn/trace level. A secret or PII value logged at ANY level is
+  # already the defect; the omitted levels would only add pattern volume, not new coverage of
+  # a materially different call shape. Every sink pattern is listed in BOTH a direct
+  # single-argument form (`$SINK($ARG)`) and a trailing-argument form (`$SINK(..., $ARG)`),
+  # so a bare `logger.info(password)` and a `logger.info("leaked: {}", password)`-style call
+  # (format text first, tainted value last) are both covered uniformly across every language
+  # and every sink family below, without enumerating argument count per call site.
+  #
+  # Rust is INCLUDED here (unlike the XSS/open-redirect classes above) because this class's
+  # sink idioms (`println!`/`eprintln!`/`dbg!`, the `log`/`tracing` crates' `info!`/`error!`
+  # macros) are as dominant and unambiguous in Rust as in every other language — there is no
+  # "no single dominant idiom" gap the way there is for a raw-HTML sink or a redirect response
+  # in the Rust web ecosystem.
+  #
+  # Grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1 (new universal corpus rule — see
+  # `crates/rules/principles/universal/sec-no-sensitive-data-in-logs-1.toml`). CWE-532
+  # (Insertion of Sensitive Information into Log File).
+
+  - id: camerata.security.taint-log-secret-python
+    mode: taint
+    message: >
+      Possible sensitive-data logging: a secret/credential-shaped value (a password, token,
+      API key, private key, session id, or Authorization value) reaches a logging sink
+      unredacted. Mask, redact, or omit the value before logging it.
+      [Grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1.]
+    severity: ERROR
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern: $SECRET
+          - metavariable-regex:
+              metavariable: $SECRET
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|
+                authorization|session|cookie|token)
+      - patterns:
+          - pattern: $OBJ.$FIELD
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|
+                authorization|session|cookie|token)
+      - patterns:
+          - pattern-either:
+              - pattern: os.environ.get("$NAME")
+              - pattern: os.environ["$NAME"]
+              - pattern: os.getenv("$NAME")
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|token)
+    pattern-sanitizers:
+      - pattern: redact($X)
+      - pattern: mask($X)
+      - pattern: scrub($X)
+      - pattern: sanitize($X)
+      - pattern: hash($X)
+      - pattern: truncate($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: print($ARG)
+              - pattern: print(..., $ARG)
+              - pattern: logging.info($ARG)
+              - pattern: logging.info(..., $ARG)
+              - pattern: logging.error($ARG)
+              - pattern: logging.error(..., $ARG)
+              - pattern: $LOGGER.info($ARG)
+              - pattern: $LOGGER.info(..., $ARG)
+              - pattern: $LOGGER.error($ARG)
+              - pattern: $LOGGER.error(..., $ARG)
+          - focus-metavariable: $ARG
+
+  - id: camerata.security.taint-log-pii-python
+    mode: taint
+    message: >
+      Possible sensitive-data logging: a regulated-PII-shaped value (an SSN or full credit-
+      card/PAN number) reaches a logging sink unredacted. Mask, redact, or omit the value
+      before logging it. [Grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1.]
+    severity: WARNING
+    languages: [python]
+    pattern-sources:
+      - patterns:
+          - pattern: $PII
+          - metavariable-regex:
+              metavariable: $PII
+              regex: (?i)(ssn|social_security|credit_card|card_number|cardnumber|cvv|cvc)
+      - patterns:
+          - pattern: $OBJ.$FIELD
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: (?i)(ssn|social_security|credit_card|card_number|cardnumber|cvv|cvc)
+    pattern-sanitizers:
+      - pattern: redact($X)
+      - pattern: mask($X)
+      - pattern: scrub($X)
+      - pattern: sanitize($X)
+      - pattern: hash($X)
+      - pattern: truncate($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: print($ARG)
+              - pattern: print(..., $ARG)
+              - pattern: logging.info($ARG)
+              - pattern: logging.info(..., $ARG)
+              - pattern: logging.error($ARG)
+              - pattern: logging.error(..., $ARG)
+              - pattern: $LOGGER.info($ARG)
+              - pattern: $LOGGER.info(..., $ARG)
+              - pattern: $LOGGER.error($ARG)
+              - pattern: $LOGGER.error(..., $ARG)
+          - focus-metavariable: $ARG
+
+  - id: camerata.security.taint-log-secret-js
+    mode: taint
+    message: >
+      Possible sensitive-data logging: a secret/credential-shaped value (a password, token,
+      API key, private key, session id, or Authorization value) reaches a logging sink
+      unredacted. Mask, redact, or omit the value before logging it.
+      [Grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1.]
+    severity: ERROR
+    languages: [javascript, typescript]
+    pattern-sources:
+      - patterns:
+          - pattern: $SECRET
+          - metavariable-regex:
+              metavariable: $SECRET
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|
+                authorization|session|cookie|token)
+      - patterns:
+          - pattern: $OBJ.$FIELD
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|
+                authorization|session|cookie|token)
+      - patterns:
+          - pattern: process.env.$NAME
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|token)
+    pattern-sanitizers:
+      - pattern: redact($X)
+      - pattern: mask($X)
+      - pattern: scrub($X)
+      - pattern: sanitize($X)
+      - pattern: hash($X)
+      - pattern: truncate($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: console.log($ARG)
+              - pattern: console.log(..., $ARG)
+              - pattern: console.error($ARG)
+              - pattern: console.error(..., $ARG)
+              - pattern: console.warn($ARG)
+              - pattern: console.warn(..., $ARG)
+              - pattern: $LOGGER.info($ARG)
+              - pattern: $LOGGER.info(..., $ARG)
+              - pattern: $LOGGER.error($ARG)
+              - pattern: $LOGGER.error(..., $ARG)
+          - focus-metavariable: $ARG
+
+  - id: camerata.security.taint-log-pii-js
+    mode: taint
+    message: >
+      Possible sensitive-data logging: a regulated-PII-shaped value (an SSN or full credit-
+      card/PAN number) reaches a logging sink unredacted. Mask, redact, or omit the value
+      before logging it. [Grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1.]
+    severity: WARNING
+    languages: [javascript, typescript]
+    pattern-sources:
+      - patterns:
+          - pattern: $PII
+          - metavariable-regex:
+              metavariable: $PII
+              regex: (?i)(ssn|social_security|credit_card|card_number|cardnumber|cvv|cvc)
+      - patterns:
+          - pattern: $OBJ.$FIELD
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: (?i)(ssn|social_security|credit_card|card_number|cardnumber|cvv|cvc)
+    pattern-sanitizers:
+      - pattern: redact($X)
+      - pattern: mask($X)
+      - pattern: scrub($X)
+      - pattern: sanitize($X)
+      - pattern: hash($X)
+      - pattern: truncate($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: console.log($ARG)
+              - pattern: console.log(..., $ARG)
+              - pattern: console.error($ARG)
+              - pattern: console.error(..., $ARG)
+              - pattern: console.warn($ARG)
+              - pattern: console.warn(..., $ARG)
+              - pattern: $LOGGER.info($ARG)
+              - pattern: $LOGGER.info(..., $ARG)
+              - pattern: $LOGGER.error($ARG)
+              - pattern: $LOGGER.error(..., $ARG)
+          - focus-metavariable: $ARG
+
+  - id: camerata.security.taint-log-secret-rust
+    mode: taint
+    message: >
+      Possible sensitive-data logging: a secret/credential-shaped value (a password, token,
+      API key, private key, session id, or Authorization value) reaches a logging sink
+      unredacted. Mask, redact, or omit the value before logging it.
+      [Grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1.]
+    severity: ERROR
+    languages: [rust]
+    pattern-sources:
+      - patterns:
+          - pattern: $SECRET
+          - metavariable-regex:
+              metavariable: $SECRET
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|
+                authorization|session|cookie|token)
+      - patterns:
+          - pattern: $OBJ.$FIELD
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|
+                authorization|session|cookie|token)
+      - patterns:
+          - pattern-either:
+              - pattern: std::env::var("$NAME")
+              - pattern: env::var("$NAME")
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|token)
+    pattern-sanitizers:
+      - pattern: redact($X)
+      - pattern: mask($X)
+      - pattern: scrub($X)
+      - pattern: sanitize($X)
+      - pattern: hash($X)
+      - pattern: truncate($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: println!($ARG)
+              - pattern: println!(..., $ARG)
+              - pattern: eprintln!($ARG)
+              - pattern: eprintln!(..., $ARG)
+              - pattern: dbg!($ARG)
+              - pattern: info!($ARG)
+              - pattern: info!(..., $ARG)
+              - pattern: error!($ARG)
+              - pattern: error!(..., $ARG)
+          - focus-metavariable: $ARG
+
+  - id: camerata.security.taint-log-pii-rust
+    mode: taint
+    message: >
+      Possible sensitive-data logging: a regulated-PII-shaped value (an SSN or full credit-
+      card/PAN number) reaches a logging sink unredacted. Mask, redact, or omit the value
+      before logging it. [Grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1.]
+    severity: WARNING
+    languages: [rust]
+    pattern-sources:
+      - patterns:
+          - pattern: $PII
+          - metavariable-regex:
+              metavariable: $PII
+              regex: (?i)(ssn|social_security|credit_card|card_number|cardnumber|cvv|cvc)
+      - patterns:
+          - pattern: $OBJ.$FIELD
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: (?i)(ssn|social_security|credit_card|card_number|cardnumber|cvv|cvc)
+    pattern-sanitizers:
+      - pattern: redact($X)
+      - pattern: mask($X)
+      - pattern: scrub($X)
+      - pattern: sanitize($X)
+      - pattern: hash($X)
+      - pattern: truncate($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: println!($ARG)
+              - pattern: println!(..., $ARG)
+              - pattern: eprintln!($ARG)
+              - pattern: eprintln!(..., $ARG)
+              - pattern: dbg!($ARG)
+              - pattern: info!($ARG)
+              - pattern: info!(..., $ARG)
+              - pattern: error!($ARG)
+              - pattern: error!(..., $ARG)
+          - focus-metavariable: $ARG
+
+  - id: camerata.security.taint-log-secret-csharp
+    mode: taint
+    message: >
+      Possible sensitive-data logging: a secret/credential-shaped value (a password, token,
+      API key, private key, session id, or Authorization value) reaches a logging sink
+      unredacted. Mask, redact, or omit the value before logging it.
+      [Grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1.]
+    severity: ERROR
+    languages: [csharp]
+    pattern-sources:
+      - patterns:
+          - pattern: $SECRET
+          - metavariable-regex:
+              metavariable: $SECRET
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|
+                authorization|session|cookie|token)
+      - patterns:
+          - pattern: $OBJ.$FIELD
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|
+                authorization|session|cookie|token)
+      - patterns:
+          - pattern: Environment.GetEnvironmentVariable("$NAME")
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|token)
+    pattern-sanitizers:
+      - pattern: redact($X)
+      - pattern: mask($X)
+      - pattern: scrub($X)
+      - pattern: sanitize($X)
+      - pattern: hash($X)
+      - pattern: truncate($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $LOGGER.LogInformation($ARG)
+              - pattern: $LOGGER.LogInformation(..., $ARG)
+              - pattern: $LOGGER.LogError($ARG)
+              - pattern: $LOGGER.LogError(..., $ARG)
+              - pattern: Console.WriteLine($ARG)
+              - pattern: Console.WriteLine(..., $ARG)
+          - focus-metavariable: $ARG
+
+  - id: camerata.security.taint-log-pii-csharp
+    mode: taint
+    message: >
+      Possible sensitive-data logging: a regulated-PII-shaped value (an SSN or full credit-
+      card/PAN number) reaches a logging sink unredacted. Mask, redact, or omit the value
+      before logging it. [Grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1.]
+    severity: WARNING
+    languages: [csharp]
+    pattern-sources:
+      - patterns:
+          - pattern: $PII
+          - metavariable-regex:
+              metavariable: $PII
+              regex: (?i)(ssn|social_security|credit_card|card_number|cardnumber|cvv|cvc)
+      - patterns:
+          - pattern: $OBJ.$FIELD
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: (?i)(ssn|social_security|credit_card|card_number|cardnumber|cvv|cvc)
+    pattern-sanitizers:
+      - pattern: redact($X)
+      - pattern: mask($X)
+      - pattern: scrub($X)
+      - pattern: sanitize($X)
+      - pattern: hash($X)
+      - pattern: truncate($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $LOGGER.LogInformation($ARG)
+              - pattern: $LOGGER.LogInformation(..., $ARG)
+              - pattern: $LOGGER.LogError($ARG)
+              - pattern: $LOGGER.LogError(..., $ARG)
+              - pattern: Console.WriteLine($ARG)
+              - pattern: Console.WriteLine(..., $ARG)
+          - focus-metavariable: $ARG
+
+  - id: camerata.security.taint-log-secret-go
+    mode: taint
+    message: >
+      Possible sensitive-data logging: a secret/credential-shaped value (a password, token,
+      API key, private key, session id, or Authorization value) reaches a logging sink
+      unredacted. Mask, redact, or omit the value before logging it.
+      [Grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1.]
+    severity: ERROR
+    languages: [go]
+    pattern-sources:
+      - patterns:
+          - pattern: $SECRET
+          - metavariable-regex:
+              metavariable: $SECRET
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|
+                authorization|session|cookie|token)
+      - patterns:
+          - pattern: $OBJ.$FIELD
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|
+                authorization|session|cookie|token)
+      - patterns:
+          - pattern: os.Getenv("$NAME")
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|token)
+    pattern-sanitizers:
+      - pattern: redact($X)
+      - pattern: mask($X)
+      - pattern: scrub($X)
+      - pattern: sanitize($X)
+      - pattern: hash($X)
+      - pattern: truncate($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: fmt.Println($ARG)
+              - pattern: fmt.Println(..., $ARG)
+              - pattern: fmt.Printf($ARG)
+              - pattern: fmt.Printf(..., $ARG)
+              - pattern: log.Println($ARG)
+              - pattern: log.Println(..., $ARG)
+              - pattern: $LOGGER.Info($ARG)
+              - pattern: $LOGGER.Info(..., $ARG)
+              - pattern: $LOGGER.Error($ARG)
+              - pattern: $LOGGER.Error(..., $ARG)
+          - focus-metavariable: $ARG
+
+  - id: camerata.security.taint-log-pii-go
+    mode: taint
+    message: >
+      Possible sensitive-data logging: a regulated-PII-shaped value (an SSN or full credit-
+      card/PAN number) reaches a logging sink unredacted. Mask, redact, or omit the value
+      before logging it. [Grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1.]
+    severity: WARNING
+    languages: [go]
+    pattern-sources:
+      - patterns:
+          - pattern: $PII
+          - metavariable-regex:
+              metavariable: $PII
+              regex: (?i)(ssn|social_security|credit_card|card_number|cardnumber|cvv|cvc)
+      - patterns:
+          - pattern: $OBJ.$FIELD
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: (?i)(ssn|social_security|credit_card|card_number|cardnumber|cvv|cvc)
+    pattern-sanitizers:
+      - pattern: redact($X)
+      - pattern: mask($X)
+      - pattern: scrub($X)
+      - pattern: sanitize($X)
+      - pattern: hash($X)
+      - pattern: truncate($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: fmt.Println($ARG)
+              - pattern: fmt.Println(..., $ARG)
+              - pattern: fmt.Printf($ARG)
+              - pattern: fmt.Printf(..., $ARG)
+              - pattern: log.Println($ARG)
+              - pattern: log.Println(..., $ARG)
+              - pattern: $LOGGER.Info($ARG)
+              - pattern: $LOGGER.Info(..., $ARG)
+              - pattern: $LOGGER.Error($ARG)
+              - pattern: $LOGGER.Error(..., $ARG)
+          - focus-metavariable: $ARG
+
+  - id: camerata.security.taint-log-secret-ruby
+    mode: taint
+    message: >
+      Possible sensitive-data logging: a secret/credential-shaped value (a password, token,
+      API key, private key, session id, or Authorization value) reaches a logging sink
+      unredacted. Mask, redact, or omit the value before logging it.
+      [Grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1.]
+    severity: ERROR
+    languages: [ruby]
+    pattern-sources:
+      - patterns:
+          - pattern: $SECRET
+          - metavariable-regex:
+              metavariable: $SECRET
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|
+                authorization|session|cookie|token)
+      - patterns:
+          - pattern: $OBJ.$FIELD
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|
+                authorization|session|cookie|token)
+      - patterns:
+          - pattern-either:
+              - pattern: ENV["$NAME"]
+              - pattern: ENV.fetch("$NAME")
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|token)
+    pattern-sanitizers:
+      - pattern: redact($X)
+      - pattern: mask($X)
+      - pattern: scrub($X)
+      - pattern: sanitize($X)
+      - pattern: hash($X)
+      - pattern: truncate($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: Rails.logger.info($ARG)
+              - pattern: Rails.logger.info(..., $ARG)
+              - pattern: Rails.logger.error($ARG)
+              - pattern: Rails.logger.error(..., $ARG)
+              - pattern: $LOGGER.info($ARG)
+              - pattern: $LOGGER.info(..., $ARG)
+              - pattern: $LOGGER.error($ARG)
+              - pattern: $LOGGER.error(..., $ARG)
+          - focus-metavariable: $ARG
+
+  - id: camerata.security.taint-log-pii-ruby
+    mode: taint
+    message: >
+      Possible sensitive-data logging: a regulated-PII-shaped value (an SSN or full credit-
+      card/PAN number) reaches a logging sink unredacted. Mask, redact, or omit the value
+      before logging it. [Grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1.]
+    severity: WARNING
+    languages: [ruby]
+    pattern-sources:
+      - patterns:
+          - pattern: $PII
+          - metavariable-regex:
+              metavariable: $PII
+              regex: (?i)(ssn|social_security|credit_card|card_number|cardnumber|cvv|cvc)
+      - patterns:
+          - pattern: $OBJ.$FIELD
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: (?i)(ssn|social_security|credit_card|card_number|cardnumber|cvv|cvc)
+    pattern-sanitizers:
+      - pattern: redact($X)
+      - pattern: mask($X)
+      - pattern: scrub($X)
+      - pattern: sanitize($X)
+      - pattern: hash($X)
+      - pattern: truncate($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: Rails.logger.info($ARG)
+              - pattern: Rails.logger.info(..., $ARG)
+              - pattern: Rails.logger.error($ARG)
+              - pattern: Rails.logger.error(..., $ARG)
+              - pattern: $LOGGER.info($ARG)
+              - pattern: $LOGGER.info(..., $ARG)
+              - pattern: $LOGGER.error($ARG)
+              - pattern: $LOGGER.error(..., $ARG)
+          - focus-metavariable: $ARG
+
+  - id: camerata.security.taint-log-secret-java
+    mode: taint
+    message: >
+      Possible sensitive-data logging: a secret/credential-shaped value (a password, token,
+      API key, private key, session id, or Authorization value) reaches a logging sink
+      unredacted. Mask, redact, or omit the value before logging it.
+      [Grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1.]
+    severity: ERROR
+    languages: [java]
+    pattern-sources:
+      - patterns:
+          - pattern: $SECRET
+          - metavariable-regex:
+              metavariable: $SECRET
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|
+                authorization|session|cookie|token)
+      - patterns:
+          - pattern: $OBJ.$FIELD
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|
+                authorization|session|cookie|token)
+      - patterns:
+          - pattern: System.getenv("$NAME")
+          - metavariable-regex:
+              metavariable: $NAME
+              regex: >-
+                (?i)(password|passwd|secret|api_key|apikey|private_key|access_token|token)
+    pattern-sanitizers:
+      - pattern: redact($X)
+      - pattern: mask($X)
+      - pattern: scrub($X)
+      - pattern: sanitize($X)
+      - pattern: hash($X)
+      - pattern: truncate($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: System.out.println($ARG)
+              - pattern: System.out.println(..., $ARG)
+              - pattern: System.err.println($ARG)
+              - pattern: System.err.println(..., $ARG)
+              - pattern: $LOGGER.info($ARG)
+              - pattern: $LOGGER.info(..., $ARG)
+              - pattern: $LOGGER.error($ARG)
+              - pattern: $LOGGER.error(..., $ARG)
+          - focus-metavariable: $ARG
+
+  - id: camerata.security.taint-log-pii-java
+    mode: taint
+    message: >
+      Possible sensitive-data logging: a regulated-PII-shaped value (an SSN or full credit-
+      card/PAN number) reaches a logging sink unredacted. Mask, redact, or omit the value
+      before logging it. [Grounded to SEC-NO-SENSITIVE-DATA-IN-LOGS-1.]
+    severity: WARNING
+    languages: [java]
+    pattern-sources:
+      - patterns:
+          - pattern: $PII
+          - metavariable-regex:
+              metavariable: $PII
+              regex: (?i)(ssn|social_security|credit_card|card_number|cardnumber|cvv|cvc)
+      - patterns:
+          - pattern: $OBJ.$FIELD
+          - metavariable-regex:
+              metavariable: $FIELD
+              regex: (?i)(ssn|social_security|credit_card|card_number|cardnumber|cvv|cvc)
+    pattern-sanitizers:
+      - pattern: redact($X)
+      - pattern: mask($X)
+      - pattern: scrub($X)
+      - pattern: sanitize($X)
+      - pattern: hash($X)
+      - pattern: truncate($X)
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: System.out.println($ARG)
+              - pattern: System.out.println(..., $ARG)
+              - pattern: System.err.println($ARG)
+              - pattern: System.err.println(..., $ARG)
+              - pattern: $LOGGER.info($ARG)
+              - pattern: $LOGGER.info(..., $ARG)
+              - pattern: $LOGGER.error($ARG)
+              - pattern: $LOGGER.error(..., $ARG)
+          - focus-metavariable: $ARG

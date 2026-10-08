@@ -262,6 +262,47 @@ mod tests {
         }
     }
 
+    /// Sensitive-data-in-logs taint class: `SEC-NO-SENSITIVE-DATA-IN-LOGS-1` declares
+    /// `mechanical` enforcement and must resolve to the REAL semgrep detector channel (the 14
+    /// new `camerata.security.taint-log-{secret,pii}-*` rules in `taint-security.yml`), not
+    /// fall through to "no channel at all" — mirrors
+    /// `react_hooks_rules_resolve_to_the_scan_preview_linter_channel` above for the ESLint
+    /// case. `semgrep_covered_rule_ids` derives this set from the bundled YAML's own `id:`
+    /// lines plus `semgrep_floor_category`, so this test is also a regression guard against
+    /// a future edit to either file silently dropping the grounding-map wiring.
+    #[tokio::test]
+    async fn sensitive_data_in_logs_rule_resolves_to_the_semgrep_channel() {
+        let path = camerata_rules::corpus_path();
+        let corpus = camerata_rules::load_corpus(&path)
+            .await
+            .expect("corpus must load cleanly");
+        let checker_ids: HashSet<&str> = HashSet::new();
+        let semgrep_ids = semgrep_covered_rule_ids();
+
+        assert!(
+            semgrep_ids.contains("SEC-NO-SENSITIVE-DATA-IN-LOGS-1"),
+            "the 14 taint-log-{{secret,pii}}-* ids must ground to SEC-NO-SENSITIVE-DATA-IN-LOGS-1 \
+             via semgrep_floor_category"
+        );
+        let rule = corpus
+            .get_by_id("SEC-NO-SENSITIVE-DATA-IN-LOGS-1")
+            .expect("SEC-NO-SENSITIVE-DATA-IN-LOGS-1 missing from corpus");
+        assert_eq!(
+            rule.enforcement,
+            camerata_rules::EnforcementKind::Mechanical
+        );
+        assert_eq!(
+            detector_channel(
+                "SEC-NO-SENSITIVE-DATA-IN-LOGS-1",
+                &checker_ids,
+                &semgrep_ids,
+                Some(&corpus)
+            ),
+            Some("semgrep"),
+            "must resolve to the semgrep channel now that the bundled taint ruleset covers it"
+        );
+    }
+
     /// W4's INVERTED CI-time gate. The W1-era version of this test required a wired
     /// deterministic detector for every `mechanical` rule, with a ~35-id grandfather list for
     /// the ones that had none — backwards, per this module's doc comment: having no
