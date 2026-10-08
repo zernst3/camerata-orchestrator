@@ -1,0 +1,88 @@
+id = "ARCH-TOKEN-REFRESH-ROTATION-1"
+title = "Access tokens are short-lived; a long-lived session is maintained by a rotating refresh token whose reuse is detected and revokes the whole token family"
+tag = "stack"
+domain = "permissions"
+layer = "universal"
+enforcement = "architectural"
+default = true
+verification = "grounded"
+qualifies = "Deterministically checkable in principle (does an access token's own expiry fall within a short window, does a refresh exchange issue a NEW refresh token while invalidating the one just used, does replaying an already-used refresh token revoke the session rather than silently succeeding or silently failing), but confirming it requires understanding the project's specific auth/session issuance code, not a pattern any generic linter recognizes. This is architectural: a custom integration test exercising the refresh endpoint (issue a token, use it, replay the same one, confirm the session is revoked) is the only reliable check, and the project builds it. Conformance holds when such a test passes; it fails when access-token lifetime is long enough to substitute for session management (making revocation ineffective until expiry), when a refresh token is reusable (no rotation), or when a reused refresh token is accepted rather than triggering revocation."
+
+[[sources]]
+url = "https://datatracker.ietf.org/doc/html/rfc6749#section-10.4"
+title = "RFC 6749 §10.4 (OAuth 2.0) — Refresh Token Rotation / handling of refresh tokens"
+
+[[sources]]
+url = "https://datatracker.ietf.org/doc/html/draft-ietf-oauth-security-topics"
+title = "IETF OAuth Security Best Current Practice — refresh token rotation and reuse detection as a mitigation for refresh token replay"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/613.html"
+title = "CWE-613: Insufficient Session Expiration"
+
+[decision]
+question = "Is a long-lived client session maintained by a SHORT-lived access token plus a rotating refresh token (whose reuse revokes the session), or does the application simply issue a long-lived access token and treat it as the session itself?"
+default = "short-access-token-rotating-refresh-with-reuse-detection"
+why = """
+`UI-AUTH-TOKEN-STORAGE-1` establishes WHERE a session credential lives in the browser; this rule governs its
+LIFETIME and what happens when one is compromised regardless of storage discipline, because even a perfectly
+HttpOnly-stored token is eventually exposed by some other vector (a device left unlocked, a token leaked through a
+third-party integration misconfiguration, a server-side log that briefly captured it before ARCH-NO-STORE-
+SENSITIVE-RESPONSES-1-style hygiene caught up). The question that matters once that happens is: how long does the
+stolen credential remain useful, and does the legitimate user's OWN continued use of the system ever surface the
+theft?
+
+A single long-lived access token used as the entire session answers both questions badly: it remains valid for its
+full lifetime regardless of compromise (revoking it generally means maintaining and checking a blocklist, which
+many JWT-based designs specifically avoid for statelessness, meaning many such systems have NO revocation
+mechanism at all short of waiting out the expiry), and an attacker who has stolen the token can use it silently
+forever with no event the legitimate user would ever see. The standard mitigation splits the session into two
+artifacts with different lifetimes: a SHORT-lived access token (minutes, not days) that is cheap to let expire
+naturally and therefore safe to leave effectively unrevocable, and a longer-lived refresh token that the client
+exchanges for a new access token periodically. Making the refresh token ROTATE on every use (each exchange issues a
+new refresh token and invalidates the one just spent) turns a single stolen refresh token into a time-boxed
+problem: the legitimate client's next ordinary refresh, using the current valid token, is unaffected, but if an
+attacker has ALSO obtained a copy of that same refresh token and either party uses it after the other already has,
+one of the two refresh attempts will present an already-used token. Detecting that specific condition (reuse of a
+refresh token already consumed) and responding by revoking the ENTIRE token family — not just the one token — is
+what actually surfaces the compromise: the legitimate user gets logged out and has to re-authenticate, which is a
+real signal, rather than the attacker's parallel use continuing undetected indefinitely alongside the legitimate
+session.
+"""
+
+[[option]]
+id = "short-access-token-rotating-refresh-with-reuse-detection"
+label = "Access tokens expire in minutes; refresh tokens rotate on every use and reuse of a spent one revokes the whole token family"
+directive = """
+Access tokens are issued with a short expiry (minutes, not hours or days) and are not individually revocable —
+their short lifetime is the entire revocation mechanism, so no blocklist is needed for them specifically. A longer-
+lived refresh token is exchanged for a new access token (and a new refresh token) at each refresh; the refresh token
+just used is immediately invalidated server-side as part of that same exchange, never reusable afterward. If an
+already-invalidated refresh token is ever presented again, the server treats this as evidence of token theft (the
+legitimate chain of rotation has branched) and revokes every token in that token's family, forcing full
+re-authentication, rather than silently accepting or silently rejecting the single reused token.
+"""
+remediation = """
+Shorten the access token's expiry to a short window (minutes) and remove any reliance on individually revoking
+access tokens before their natural expiry. Add rotation to the refresh-token exchange: each use issues a brand-new
+refresh token and immediately invalidates the one just presented, tracked by a token-family identifier. Add reuse
+detection: if an already-invalidated refresh token from a given family is presented again, revoke every token in
+that family rather than accepting or silently rejecting just the one request. Verify with an integration test that
+issues a token, performs a refresh, then replays the ORIGINAL (now-stale) refresh token, and confirms the session is
+fully revoked rather than the stale token being silently accepted or silently ignored with the session otherwise
+intact.
+"""
+effort = "high"
+why = "A stolen refresh token used alongside the legitimate client's own continued use is the specific compromise scenario rotation-plus-reuse-detection is built to surface; a single long-lived access token with no equivalent mechanism gives a stolen credential its full validity window with no event the legitimate user would ever observe, which is the difference between a compromise that gets caught in one refresh cycle and one that silently persists for as long as the token remains valid."
+
+[[option]]
+id = "single-long-lived-access-token-as-the-session"
+label = "Issue one long-lived access token per login and use it as the session for its full validity window, with no refresh/rotation mechanism"
+directive = "A single access token is issued at login with a long expiry (hours to weeks) and is used directly as the session credential for its entire lifetime, with no shorter-lived token, no refresh exchange, and no rotation."
+why = "Rejected: a long-lived token used this way is difficult to revoke before its natural expiry (many designs specifically avoid a server-side revocation list for statelessness), so a stolen copy remains fully valid for as long as the token's lifetime, with no mechanism that would ever surface the theft to the legitimate user — the attacker's use is indistinguishable from the legitimate user's own continued use, forever, until expiry."
+
+[[option]]
+id = "non-rotating-refresh-token-reused-indefinitely"
+label = "Use a short-lived access token with a longer-lived refresh token, but the same refresh token is reused across every refresh with no rotation"
+directive = "Access tokens are short-lived and exchanged periodically for new ones using a refresh token, but the SAME refresh token value is presented and accepted on every exchange, with no new refresh token issued and no invalidation of the one just used."
+why = "Rejected: this correctly bounds the access token's own exposure window but does nothing for the refresh token itself, which becomes the new long-lived, effectively-permanent credential in the attacker's place — a stolen refresh token remains valid and silently reusable by an attacker in parallel with the legitimate client's own use, for as long as the refresh token's own (typically much longer) lifetime, with the same 'no signal the legitimate user would ever see' problem this rule exists to close, just shifted one layer down."

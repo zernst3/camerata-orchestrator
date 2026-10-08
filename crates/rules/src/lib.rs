@@ -3198,4 +3198,55 @@ mod tests {
         assert_eq!(rule.enforcement, EnforcementKind::Mechanical);
         assert!(is_code_auditable("JAVASCRIPT-PUBLIC-ENV-PREFIX-SECRET-1"));
     }
+
+    /// Client-side credential/sensitive-data storage defect class: spans two existing domains
+    /// (ui, permissions). `ARCH-NO-SECRETS-IN-URL-1` already covers tokens-in-URLs (a different
+    /// transport-location question), so that sub-case is deliberately not re-covered here — see
+    /// `UI-AUTH-TOKEN-STORAGE-1`'s own `why` for the explicit cross-reference. Cookies missing
+    /// Secure/SameSite are likewise not a separate rule: `UI-AUTH-TOKEN-STORAGE-1`'s own default
+    /// option directive already mandates HttpOnly+Secure+SameSite as the single cookie-issuance
+    /// remediation, so a standalone "cookie attributes" rule would just restate the same
+    /// checklist from a narrower angle.
+    #[tokio::test]
+    async fn new_client_credential_storage_domain_rules_are_well_formed_and_reachable() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+
+        let ui_ids = ["UI-AUTH-TOKEN-STORAGE-1"];
+        for id in ui_ids {
+            assert_well_formed_new_rule(&set, id, "ui");
+        }
+        let permissions_ids = ["ARCH-TOKEN-REFRESH-ROTATION-1"];
+        for id in permissions_ids {
+            assert_well_formed_new_rule(&set, id, "permissions");
+        }
+
+        let all_ids: Vec<&str> = ui_ids.iter().chain(permissions_ids.iter()).copied().collect();
+        assert_ids_unique_in_corpus(&set, &all_ids);
+
+        let ui_selected = select_for_domains(&set, &["ui"]);
+        assert!(
+            ui_selected
+                .iter()
+                .any(|r| r.id_str() == "UI-AUTH-TOKEN-STORAGE-1"),
+            "a repo whose stack resolves to the ui domain must select the new rule"
+        );
+        let permissions_selected = select_for_domains(&set, &["permissions"]);
+        assert!(
+            permissions_selected
+                .iter()
+                .any(|r| r.id_str() == "ARCH-TOKEN-REFRESH-ROTATION-1"),
+            "a repo whose stack resolves to the permissions domain must select the new rule"
+        );
+
+        // Regression guard against duplicating ARCH-NO-SECRETS-IN-URL-1: tokens-in-URLs is
+        // already covered there, so no new rule in this batch should re-cover that sub-case.
+        assert!(
+            set.get_by_id("ARCH-NO-SECRETS-IN-URL-1").is_some(),
+            "the pre-existing tokens-in-URLs rule must still be present (not duplicated)"
+        );
+    }
 }
