@@ -1213,15 +1213,21 @@ pub async fn audit_repos(
                 // feeds the deterministic architectural engine's arming gate exactly as
                 // before — this is purely additive, the model now reviews the same full set.
                 //
-                // `arch_checker_rule_ids` is computed HERE (not before the file read) because
-                // it's PER-REPO CONFIG-AWARE (D3) — it needs this repo's actual files to know
-                // whether `.camerata/architecture.toml` is present. It is still used below (not
-                // for this filter) to classify each CI-tier rule's detector channel for the
-                // pipeline-integrity ledger.
+                // `ledger_checker_rule_ids` is computed HERE (not before the file read)
+                // because it's PER-REPO CONFIG-AWARE (D3) — it needs this repo's actual files
+                // to know whether `.camerata/architecture.toml` is present. It is used below to
+                // classify each CI-tier rule's detector channel for the pipeline-integrity
+                // ledger — specifically `ledger_detector_rule_ids_for_repo`, NOT the sibling
+                // `checker_rule_ids_for_repo` (that one answers a different question, "should
+                // this id be subtracted from the LLM-advisory prompt", and deliberately
+                // excludes an `advisory_coexisting` checker's ids for that purpose; reusing it
+                // here was an accounting bug — see that function's doc comment — because it
+                // made `ARCH-RESOURCE-LIFECYCLE-1`'s unconditionally-real checker misclassify
+                // as "no wired detector" the moment the semantic phase didn't also flag it).
                 let repo_view =
                     camerata_checks::arch_checker::RepoView { spec, files: &files };
-                let arch_checker_rule_ids =
-                    camerata_checks::arch_checker::checker_rule_ids_for_repo(&repo_view);
+                let ledger_checker_rule_ids =
+                    camerata_checks::arch_checker::ledger_detector_rule_ids_for_repo(&repo_view);
                 let semantic: Vec<(String, String)> = semantic_rule_ids_for_repo(selected, spec);
                 // Multi-option semantic rules in THIS repo's `semantic` set (audit-integrated
                 // alternative recommendation — see `build_rule_alternatives`'s doc comment).
@@ -1328,7 +1334,7 @@ pub async fn audit_repos(
                         let emitted = arch.iter().filter(|f| f.rule_id == *rid).count();
                         match crate::mechanical_gate::detector_channel(
                             rid,
-                            &arch_checker_rule_ids,
+                            &ledger_checker_rule_ids,
                             &semgrep_ids,
                             corpus,
                         ) {
@@ -1382,7 +1388,24 @@ pub async fn audit_repos(
                             // `tier` to `Architectural` forever (tier is set on first insert
                             // only) instead of `Semantic` — so it is correctly left unrecorded
                             // here, full stop.
-                            _ => {}
+                            //
+                            // W5: that silence is honest ONLY when nothing was ever shipped for
+                            // this id. A rule a REAL checker answers but that didn't produce a
+                            // credited verdict for THIS repo (config-gated,
+                            // `.camerata/architecture.toml` absent — `ARCH-HANDLER-NO-DB-1`,
+                            // `ARCH-API-DTOS-1`, `ARCH-STRICT-LAYERING-1`,
+                            // `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1` today) must NOT silently read
+                            // the same as an ordinary prose-only rule once the semantic phase
+                            // records it `ran=true` — queue the honest disclosure now, before
+                            // that later recording settles `ran`, so it lands on whichever entry
+                            // results (see `ScanLedger::note_config_gated_rule`'s doc comment).
+                            _ => {
+                                if camerata_checks::arch_checker::any_registered_checker_answers(
+                                    rid,
+                                ) {
+                                    pipeline_ledger.note_config_gated_rule(*rid);
+                                }
+                            }
                         }
                     }
                     repo_findings.extend(arch);
@@ -1413,7 +1436,7 @@ pub async fn audit_repos(
                     for rid in repo_selected_ids.iter().filter(|r| is_ci_tier_rule(r, corpus)) {
                         let has_detector = crate::mechanical_gate::detector_channel(
                             rid,
-                            &arch_checker_rule_ids,
+                            &ledger_checker_rule_ids,
                             &semgrep_ids,
                             corpus,
                         )
@@ -1427,6 +1450,13 @@ pub async fn audit_repos(
                                 0,
                                 0,
                             );
+                        } else if camerata_checks::arch_checker::any_registered_checker_answers(rid)
+                        {
+                            // W5: same honest disclosure as the `run_deterministic == true`
+                            // branch above — this id has a real, registered, config-gated
+                            // checker that still would not have answered it even if the toggle
+                            // were on, since the config it needs is absent for this repo.
+                            pipeline_ledger.note_config_gated_rule(*rid);
                         }
                     }
                 }

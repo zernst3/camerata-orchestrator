@@ -30,7 +30,7 @@
 //! plan), which closes the SOURCE of the six-phantom-rule defect rather than just detecting
 //! its symptom at scan time.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -99,6 +99,21 @@ pub struct RuleLedgerEntry {
     pub skip_reason: Option<String>,
     pub files_evaluated: usize,
     pub findings_emitted: usize,
+    /// An honest, ADDITIVE disclosure that survives regardless of `ran`/`skip_reason` — unlike
+    /// `skip_reason` (which only ever means "why this rule did NOT run" and is cleared the
+    /// moment `ran` becomes true), this field exists for a rule that DOES have a registered
+    /// checker but did not get a credited deterministic verdict for THIS repo (today: a
+    /// config-gated architectural checker — `ARCH-HANDLER-NO-DB-1`, `ARCH-API-DTOS-1`,
+    /// `ARCH-STRICT-LAYERING-1`, `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1` — with no
+    /// `.camerata/architecture.toml` present). Set via [`ScanLedger::note_config_gated_rule`]
+    /// BEFORE the rule's `ran` fact is known (the semantic phase settles that later), so a
+    /// reader of a "ran=true, Semantic tier, healthy" row still learns this was really a
+    /// mechanical/architectural rule that only ever got a model's semantic read, not the
+    /// deterministic check its enforcement tier promised — never silently indistinguishable
+    /// from an ordinary prose-only rule. `None` for every rule this doesn't apply to (the
+    /// overwhelming majority).
+    #[serde(default)]
+    pub coverage_note: Option<String>,
 }
 
 impl RuleLedgerEntry {
@@ -197,6 +212,13 @@ impl StageLedgerEntry {
 pub struct ScanLedger {
     rules: HashMap<String, RuleLedgerEntry>,
     stages: Vec<StageLedgerEntry>,
+    /// Rule ids queued for [`RuleLedgerEntry::coverage_note`] via
+    /// [`Self::note_config_gated_rule`], consumed by every subsequent [`Self::record_rule`]
+    /// call for the same id. Transient scan-time plumbing only — a rule's settled
+    /// `coverage_note` lives on its [`RuleLedgerEntry`] once recorded, so this queue is never
+    /// meaningful to persist across a (de)serialize round-trip.
+    #[serde(skip)]
+    config_gated_pending: BTreeSet<String>,
 }
 
 impl ScanLedger {
@@ -208,10 +230,28 @@ impl ScanLedger {
         self.rules.is_empty() && self.stages.is_empty()
     }
 
+    /// Queue the honest "config-gated, reviewed semantically instead" disclosure for
+    /// `rule_id`, consumed by [`Self::record_rule`] on every call (past or future) for the
+    /// same id. Called from `onboard::audit_repos`'s deterministic-phase loop for a CI-tier
+    /// rule that [`camerata_checks::arch_checker::any_registered_checker_answers`] confirms
+    /// has a REAL registered checker, but whose checker produced no credited deterministic
+    /// verdict for THIS repo (missing `.camerata/architecture.toml`) — see
+    /// [`CONFIG_GATED_NOTE`]. Called BEFORE the rule's `ran` fact is known (the semantic-phase
+    /// recording further down `audit_repos`'s loop settles that), which is why this queues the
+    /// note rather than writing it directly onto an entry that may not exist yet.
+    pub fn note_config_gated_rule(&mut self, rule_id: impl Into<String>) {
+        self.config_gated_pending.insert(rule_id.into());
+    }
+
     /// Record (or, for a rule already seen this scan — e.g. a multi-repo run — ACCUMULATE)
     /// one rule's outcome. Accumulation rule: `ran` is OR'd (one repo running it is enough to
     /// call it run), `skip_reason` is kept from the first not-run observation and cleared the
     /// moment any repo actually ran it, and the usage counters sum across repos.
+    ///
+    /// If [`Self::note_config_gated_rule`] was ever called for this `rule_id` (in this call or
+    /// an earlier one), the resulting entry's `coverage_note` is set to [`CONFIG_GATED_NOTE`]
+    /// and stays set regardless of `ran` — see [`RuleLedgerEntry::coverage_note`]'s doc comment
+    /// for why this is deliberately independent of the `ran`/`skip_reason` accumulation rules.
     pub fn record_rule(
         &mut self,
         rule_id: impl Into<String>,
@@ -222,6 +262,10 @@ impl ScanLedger {
         findings_emitted: usize,
     ) -> &RuleLedgerEntry {
         let rule_id = rule_id.into();
+        let coverage_note = self
+            .config_gated_pending
+            .contains(&rule_id)
+            .then(|| CONFIG_GATED_NOTE.to_string());
         self.rules
             .entry(rule_id.clone())
             .and_modify(|e| {
@@ -233,6 +277,9 @@ impl ScanLedger {
                 }
                 e.files_evaluated += files_evaluated;
                 e.findings_emitted += findings_emitted;
+                if coverage_note.is_some() {
+                    e.coverage_note = coverage_note.clone();
+                }
             })
             .or_insert(RuleLedgerEntry {
                 rule_id: rule_id.clone(),
@@ -241,6 +288,7 @@ impl ScanLedger {
                 skip_reason,
                 files_evaluated,
                 findings_emitted,
+                coverage_note,
             });
         self.rules.get(&rule_id).expect("just inserted")
     }
@@ -298,9 +346,12 @@ impl ScanLedger {
     /// actually completed, to replace a speculative pre-pass entry with the real outcome —
     /// never to downgrade a rule that genuinely ran somewhere.
     ///
-    /// Preserves the existing entry's `tier`/`files_evaluated` when one is already present
-    /// (there usually is, from the pre-pass optimistic record); defaults to
-    /// [`RuleTier::ExternalTool`] / `0` for a rule_id the ledger hasn't seen at all yet.
+    /// Preserves the existing entry's `tier`/`files_evaluated`/`coverage_note` when one is
+    /// already present (there usually is, from the pre-pass optimistic record); defaults to
+    /// [`RuleTier::ExternalTool`] / `0` / `None` for a rule_id the ledger hasn't seen at all
+    /// yet. Also applies [`Self::note_config_gated_rule`]'s queued note, same as
+    /// [`record_rule`](Self::record_rule), for consistency even though no external-tool rule
+    /// is config-gated today.
     pub fn correct_rule_after_external_pass(
         &mut self,
         rule_id: impl Into<String>,
@@ -309,11 +360,16 @@ impl ScanLedger {
         findings_emitted: usize,
     ) -> &RuleLedgerEntry {
         let rule_id = rule_id.into();
-        let (tier, files_evaluated) = self
+        let (tier, files_evaluated, existing_note) = self
             .rules
             .get(&rule_id)
-            .map(|e| (e.tier, e.files_evaluated))
-            .unwrap_or((RuleTier::ExternalTool, 0));
+            .map(|e| (e.tier, e.files_evaluated, e.coverage_note.clone()))
+            .unwrap_or((RuleTier::ExternalTool, 0, None));
+        let coverage_note = existing_note.or_else(|| {
+            self.config_gated_pending
+                .contains(&rule_id)
+                .then(|| CONFIG_GATED_NOTE.to_string())
+        });
         self.rules.insert(
             rule_id.clone(),
             RuleLedgerEntry {
@@ -323,6 +379,7 @@ impl ScanLedger {
                 skip_reason,
                 files_evaluated,
                 findings_emitted,
+                coverage_note,
             },
         );
         self.rules.get(&rule_id).expect("just inserted")
@@ -423,6 +480,21 @@ pub fn stage_disclosure(
 /// "no detector" skip reason MUST embed this constant verbatim (not retype the phrase), and
 /// `rule_disclosure` checks against the SAME constant, so the two can never drift apart.
 pub const NO_WIRED_DETECTOR_REASON: &str = "no wired detector";
+
+/// The honest [`RuleLedgerEntry::coverage_note`] text for a CI-tier rule whose registered
+/// architectural checker is CONFIG-GATED and could not produce a deterministic verdict for
+/// this repo because `.camerata/architecture.toml` is absent — `ARCH-HANDLER-NO-DB-1`,
+/// `ARCH-API-DTOS-1`, `ARCH-STRICT-LAYERING-1`, `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1` today. This
+/// is NOT the `NO_WIRED_DETECTOR_REASON` shape — a real checker exists and is registered
+/// (`camerata_checks::arch_checker::any_registered_checker_answers` confirms it); it just
+/// didn't run for THIS repo. Set via [`ScanLedger::note_config_gated_rule`] /
+/// [`ScanLedger::record_rule`]; never a `skip_reason` (which only ever describes why a rule
+/// did NOT run — this rule, as of the W4 fix, still reaches and is genuinely evaluated by the
+/// semantic/AI pass).
+pub const CONFIG_GATED_NOTE: &str =
+    "config-gated: no architecture config present (.camerata/architecture.toml); the \
+     registered architectural checker produced no deterministic verdict for this repo — \
+     reviewed semantically instead of mechanically";
 
 /// A runtime disclosure for a rule that declared mechanical/architectural enforcement but has
 /// no wired detector (the W1-item-4 defect, closed at build time by `crate::mechanical_gate`
@@ -796,6 +868,196 @@ mod tests {
         assert!(ledger.is_empty());
         assert_eq!(ledger.total_unaccounted(), 0);
         assert!(ledger.healthy_rule_ids().is_empty());
+        assert!(ledger.excluded_rules().is_empty());
+    }
+
+    // ── Config-gated architectural rules (the five-rule misclassification) ─────────────
+    //
+    // `ARCH-HANDLER-NO-DB-1`, `ARCH-API-DTOS-1`, `ARCH-STRICT-LAYERING-1`, and
+    // `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1` each have a REGISTERED checker
+    // (`camerata_checks::arch_checker::any_registered_checker_answers` confirms it), but that
+    // checker is config-gated and produces nothing without `.camerata/architecture.toml`. The
+    // real `onboard::audit_repos` sequence for one of these on an unconfigured repo is:
+    // `note_config_gated_rule` during the deterministic-phase loop (no detector channel this
+    // repo), then a LATER `record_rule` call once the semantic phase settles `ran`/
+    // `findings_emitted`. These tests drive exactly that two-call sequence.
+
+    const CONFIG_GATED_FOUR: [&str; 4] = [
+        "ARCH-HANDLER-NO-DB-1",
+        "ARCH-API-DTOS-1",
+        "ARCH-STRICT-LAYERING-1",
+        "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1",
+    ];
+
+    #[test]
+    fn a_config_gated_rule_the_model_evaluated_is_healthy_with_an_accurate_note_never_a_no_detector_alarm(
+    ) {
+        let mut ledger = ScanLedger::new();
+        // Deterministic phase: no detector channel for this repo, but a real checker exists.
+        ledger.note_config_gated_rule("ARCH-HANDLER-NO-DB-1");
+        // Semantic phase settles it later: the model reviewed it and found nothing this run.
+        ledger.record_rule("ARCH-HANDLER-NO-DB-1", RuleTier::Semantic, true, None, 5, 0);
+        let entry = ledger.rule("ARCH-HANDLER-NO-DB-1").expect("recorded");
+        assert!(entry.ran, "the semantic pass genuinely reviewed it");
+        assert_eq!(entry.tier, RuleTier::Semantic);
+        assert!(
+            entry.verified_clean(),
+            "reviewed and found nothing — honestly healthy"
+        );
+        assert_eq!(
+            entry.coverage_note.as_deref(),
+            Some(CONFIG_GATED_NOTE),
+            "must carry the honest config-gated disclosure even though it ran and is healthy"
+        );
+        assert!(
+            ledger.excluded_rules().is_empty(),
+            "a rule the model actually ran must never appear as excluded/not-run"
+        );
+        assert!(
+            rule_disclosure("acme/app", entry).is_none(),
+            "a rule that genuinely reached the semantic pass is not a pipeline-integrity alarm, \
+             regardless of its coverage_note"
+        );
+    }
+
+    #[test]
+    fn a_config_gated_rule_the_model_flagged_is_fired_with_an_accurate_note_tier_stays_semantic() {
+        let mut ledger = ScanLedger::new();
+        ledger.note_config_gated_rule("ARCH-STRICT-LAYERING-1");
+        ledger.record_rule(
+            "ARCH-STRICT-LAYERING-1",
+            RuleTier::Semantic,
+            true,
+            None,
+            5,
+            2,
+        );
+        let entry = ledger.rule("ARCH-STRICT-LAYERING-1").expect("recorded");
+        assert!(!entry.verified_clean());
+        assert!(ledger.fired_rule_ids().contains("ARCH-STRICT-LAYERING-1"));
+        assert_eq!(entry.coverage_note.as_deref(), Some(CONFIG_GATED_NOTE));
+        assert_eq!(entry.tier, RuleTier::Semantic);
+    }
+
+    #[test]
+    fn a_config_gated_rule_never_reviewed_at_all_keeps_its_ordinary_skip_reason_and_the_note_but_is_not_a_no_detector_alarm(
+    ) {
+        let mut ledger = ScanLedger::new();
+        ledger.note_config_gated_rule("ARCH-API-DTOS-1");
+        // AI review was off this run too — the ONLY possible route also didn't run.
+        ledger.record_rule(
+            "ARCH-API-DTOS-1",
+            RuleTier::Semantic,
+            false,
+            Some("AI/semantic review not requested this run".to_string()),
+            0,
+            0,
+        );
+        let entry = ledger.rule("ARCH-API-DTOS-1").expect("recorded");
+        assert!(!entry.ran);
+        assert_eq!(
+            entry.skip_reason.as_deref(),
+            Some("AI/semantic review not requested this run")
+        );
+        assert_eq!(
+            entry.coverage_note.as_deref(),
+            Some(CONFIG_GATED_NOTE),
+            "the config-gated disclosure must survive even when the fallback route also didn't \
+             run this time"
+        );
+        let excluded = ledger.excluded_rules();
+        assert_eq!(excluded.len(), 1);
+        assert_eq!(excluded[0].0, "ARCH-API-DTOS-1");
+        assert!(
+            rule_disclosure("acme/app", entry).is_none(),
+            "an ordinary, honestly-scoped skip is not the W1-item-4 'no wired detector' alarm, \
+             even for a config-gated rule"
+        );
+    }
+
+    #[test]
+    fn note_config_gated_rule_called_before_any_record_rule_call_still_attaches_on_first_insert() {
+        // The real call order in `onboard::audit_repos`: `note_config_gated_rule` always runs
+        // BEFORE the entry exists at all (the deterministic-phase loop queues it; the
+        // semantic-phase loop further down is what actually inserts the entry). This pins that
+        // ordering explicitly rather than relying on the other tests' incidental sequencing.
+        let mut ledger = ScanLedger::new();
+        assert!(ledger.rule("ARCH-NO-CROSS-BOUNDARY-IMPORTS-1").is_none());
+        ledger.note_config_gated_rule("ARCH-NO-CROSS-BOUNDARY-IMPORTS-1");
+        assert!(
+            ledger.rule("ARCH-NO-CROSS-BOUNDARY-IMPORTS-1").is_none(),
+            "queuing a note must not fabricate an entry before the rule's real outcome is known"
+        );
+        ledger.record_rule(
+            "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1",
+            RuleTier::Semantic,
+            true,
+            None,
+            3,
+            0,
+        );
+        assert_eq!(
+            ledger
+                .rule("ARCH-NO-CROSS-BOUNDARY-IMPORTS-1")
+                .unwrap()
+                .coverage_note
+                .as_deref(),
+            Some(CONFIG_GATED_NOTE)
+        );
+    }
+
+    /// Per-rule unit assertion for all four config-gated rules at once: every one of them, run
+    /// through the exact queue-then-settle sequence, ends up healthy/fired as appropriate, with
+    /// the honest note, and NEVER with the `NO_WIRED_DETECTOR_REASON` substring anywhere in its
+    /// `skip_reason` — the literal misclassification the real scan exhibited.
+    #[test]
+    fn none_of_the_four_config_gated_rules_ever_classify_as_no_wired_detector() {
+        for id in CONFIG_GATED_FOUR {
+            let mut ledger = ScanLedger::new();
+            ledger.note_config_gated_rule(id);
+            ledger.record_rule(id, RuleTier::Semantic, true, None, 4, 0);
+            let entry = ledger
+                .rule(id)
+                .unwrap_or_else(|| panic!("{id} must be recorded"));
+            assert_eq!(
+                entry.coverage_note.as_deref(),
+                Some(CONFIG_GATED_NOTE),
+                "{id} must carry the config-gated disclosure"
+            );
+            if let Some(reason) = &entry.skip_reason {
+                assert!(
+                    !reason.contains(NO_WIRED_DETECTOR_REASON),
+                    "{id} must never be classified as '{NO_WIRED_DETECTOR_REASON}': {reason}"
+                );
+            }
+            assert!(rule_disclosure("acme/app", entry).is_none());
+        }
+    }
+
+    /// `ARCH-RESOURCE-LIFECYCLE-1` is the fifth rule, but a DIFFERENT shape from the other
+    /// four: its checker is not config-gated at all (it is unconditionally advisory-coexisting
+    /// by design), so the FIXED pipeline credits it directly at the Architectural tier — it
+    /// never goes through `note_config_gated_rule` at all. This pins that it is genuinely
+    /// healthy/fired via a real deterministic run, with NO coverage_note (there is nothing to
+    /// disclose — the checker really did run), distinguishing it from the four config-gated
+    /// siblings above.
+    #[test]
+    fn resource_lifecycle_is_credited_directly_as_architectural_never_needs_a_config_gated_note() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_rule(
+            "ARCH-RESOURCE-LIFECYCLE-1",
+            RuleTier::Architectural,
+            true,
+            None,
+            6,
+            1,
+        );
+        let entry = ledger.rule("ARCH-RESOURCE-LIFECYCLE-1").unwrap();
+        assert_eq!(entry.tier, RuleTier::Architectural);
+        assert!(entry.coverage_note.is_none());
+        assert!(ledger
+            .fired_rule_ids()
+            .contains("ARCH-RESOURCE-LIFECYCLE-1"));
         assert!(ledger.excluded_rules().is_empty());
     }
 }

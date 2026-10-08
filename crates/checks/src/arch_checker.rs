@@ -282,6 +282,59 @@ pub fn checker_rule_ids_for_repo(repo: &RepoView<'_>) -> std::collections::HashS
         .collect()
 }
 
+/// Whether ANY registered checker in [`all_checkers`] answers `rule_id` at all — i.e. the
+/// corpus id has a REAL implementation somewhere in this registry, independent of whether
+/// that implementation currently produces a credited deterministic verdict for any
+/// particular repo. Deliberately ignores both [`ArchChecker::advisory_coexisting`] and
+/// [`ArchChecker::config_unsatisfied_for`]: this answers "does a checker exist for this id at
+/// all" (a build-time, repo-independent fact), not "did it run for this repo this scan".
+///
+/// This is the fact the scan-time ledger (`onboard::audit_repos`, `scan_ledger::ScanLedger::
+/// note_config_gated_rule`) needs to tell apart two very differently-shaped "no credited
+/// channel" outcomes for a CI-tier rule: a genuine phantom (no checker was ever written for
+/// this id — the W4 "no wired detector" case) versus a rule a real checker DOES answer, that
+/// simply didn't produce a credited verdict for THIS repo (missing `.camerata/
+/// architecture.toml`, for a config-gated checker). The latter deserves an honest
+/// "config-gated, reviewed semantically instead" disclosure; the former does not — there is
+/// nothing to disclose beyond "this rule has no detector yet," which the semantic pass
+/// already covers silently (W4).
+pub fn any_registered_checker_answers(rule_id: &str) -> bool {
+    all_checkers()
+        .iter()
+        .any(|c| c.rule_ids().contains(&rule_id))
+}
+
+/// The LEDGER-CREDIT sibling of [`checker_rule_ids_for_repo`]: the set of rule ids a
+/// registered checker answers deterministically FOR THIS SPECIFIC `repo`, for the purpose of
+/// "did a real detector run and produce a trustworthy verdict here" — NOT "should this id be
+/// subtracted from the LLM-advisory prompt" (that is what `checker_rule_ids_for_repo` answers,
+/// and the two questions diverge for exactly one case today).
+///
+/// The divergence: a checker that opts into [`ArchChecker::advisory_coexisting`] (today only
+/// `ResourceLifecycleChecker` / `ARCH-RESOURCE-LIFECYCLE-1`) is excluded from
+/// `checker_rule_ids_for_repo` ON PURPOSE, so its rule id stays eligible for an independent
+/// model read even though a native checker also runs over it (D3). But the checker's own run
+/// is still completely real and deterministic — it is NOT config-gated, it runs unconditionally
+/// whenever armed and applicable, and its findings are genuine. A caller asking "did a
+/// detector run for this repo" (the scan-time ledger's `detector_channel` classification,
+/// `mechanical_gate::detector_channel`'s channel 1) must credit that real run; reusing the
+/// LLM-prompt-subtraction set there was an accounting bug — it made a checker that
+/// unconditionally executes and found real violations misclassify as "no wired detector"
+/// whenever its findings didn't happen to also get a semantic-phase recording. This function
+/// is that corrected set: identical to `checker_rule_ids_for_repo` EXCEPT it does not filter
+/// out `advisory_coexisting` checkers — only [`ArchChecker::config_unsatisfied_for`] can
+/// exclude a checker's ids here, since that is the only fact ("this checker genuinely could
+/// not answer for this repo") the ledger's detector-channel credit actually depends on.
+pub fn ledger_detector_rule_ids_for_repo(
+    repo: &RepoView<'_>,
+) -> std::collections::HashSet<&'static str> {
+    all_checkers()
+        .iter()
+        .filter(|c| !c.config_unsatisfied_for(repo))
+        .flat_map(|c| c.rule_ids().iter().copied())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -525,5 +578,123 @@ allowed_in = ["repositories"]
         let files: Vec<(String, String)> = vec![(".camerata/architecture.toml".to_string(), cfg.to_string())];
         let repo = RepoView { spec: "test/repo", files: &files };
         assert_eq!(checker_rule_ids_for_repo(&repo), all_checker_rule_ids());
+    }
+
+    // ── `any_registered_checker_answers` / `ledger_detector_rule_ids_for_repo` ──────────
+    //
+    // The five corpus ids a real scan misclassified as "no wired detector" even though each
+    // has a registered checker: `ARCH-HANDLER-NO-DB-1`, `ARCH-API-DTOS-1`,
+    // `ARCH-STRICT-LAYERING-1`, `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1` (all config-gated — their
+    // checkers answer nothing without `.camerata/architecture.toml`) and
+    // `ARCH-RESOURCE-LIFECYCLE-1` (not config-gated at all — its checker always runs; it was
+    // excluded from ledger credit only because the ledger reused the wrong set).
+
+    const FIVE_REAL_DETECTOR_RULES: [&str; 5] = [
+        "ARCH-HANDLER-NO-DB-1",
+        "ARCH-API-DTOS-1",
+        "ARCH-STRICT-LAYERING-1",
+        "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1",
+        "ARCH-RESOURCE-LIFECYCLE-1",
+    ];
+
+    #[test]
+    fn any_registered_checker_answers_is_true_for_every_one_of_the_five_real_detector_rules() {
+        for id in FIVE_REAL_DETECTOR_RULES {
+            assert!(
+                any_registered_checker_answers(id),
+                "{id} has a registered checker in all_checkers() — any_registered_checker_answers must be true"
+            );
+        }
+    }
+
+    #[test]
+    fn any_registered_checker_answers_is_false_for_a_genuine_phantom_rule() {
+        // A corpus id with NO checker anywhere in the registry (the W4 "no wired detector"
+        // shape this function must NOT also flag) — contrast with the five above.
+        assert!(!any_registered_checker_answers(
+            "RUBY-FROZEN-STRING-LITERAL-1"
+        ));
+        assert!(!any_registered_checker_answers(
+            "NOT-A-REAL-RULE-ID-AT-ALL-1"
+        ));
+    }
+
+    #[test]
+    fn ledger_detector_rule_ids_for_repo_still_excludes_the_four_config_gated_rules_when_unconfigured(
+    ) {
+        // Unlike `advisory_coexisting`, `config_unsatisfied_for` IS still respected here — a
+        // genuinely config-gated checker that emits nothing without its config must NOT be
+        // ledger-credited just because this function stops filtering on advisory_coexisting.
+        let files: Vec<(String, String)> = vec![("README.md".to_string(), String::new())];
+        let repo = RepoView {
+            spec: "test/repo",
+            files: &files,
+        };
+        let ledger_ids = ledger_detector_rule_ids_for_repo(&repo);
+        for gated in [
+            "ARCH-NO-CROSS-BOUNDARY-IMPORTS-1",
+            "ARCH-API-DTOS-1",
+            "ARCH-STRICT-LAYERING-1",
+            "ARCH-HANDLER-NO-DB-1",
+        ] {
+            assert!(
+                !ledger_ids.contains(gated),
+                "{gated} is genuinely config-gated (checker emits nothing without config) — \
+                 must stay excluded from ledger credit when unconfigured: {ledger_ids:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ledger_detector_rule_ids_for_repo_includes_resource_lifecycle_even_when_unconfigured() {
+        // THE divergence from `checker_rule_ids_for_repo`: `ResourceLifecycleChecker` is not
+        // config-gated at all (its `config_unsatisfied_for` is the trait default `false`), so
+        // it must be ledger-credited unconditionally — proving the ledger no longer
+        // misclassifies this rule as having no wired detector just because its checker is
+        // ALSO kept LLM-advisory-eligible.
+        let files: Vec<(String, String)> = vec![("README.md".to_string(), String::new())];
+        let repo = RepoView {
+            spec: "test/repo",
+            files: &files,
+        };
+        let ledger_ids = ledger_detector_rule_ids_for_repo(&repo);
+        assert!(
+            ledger_ids.contains("ARCH-RESOURCE-LIFECYCLE-1"),
+            "ARCH-RESOURCE-LIFECYCLE-1's checker is unconditional, not config-gated — must be \
+             ledger-credited even with no architecture config present: {ledger_ids:?}"
+        );
+        // Sanity: the OTHER function (LLM-prompt-subtraction) still excludes it — the two
+        // functions must genuinely diverge here, not coincidentally agree.
+        assert!(!checker_rule_ids_for_repo(&repo).contains("ARCH-RESOURCE-LIFECYCLE-1"));
+    }
+
+    #[test]
+    fn ledger_detector_rule_ids_for_repo_includes_all_four_config_gated_rules_once_configured() {
+        let cfg = r#"
+version = 1
+[layers]
+handlers = ["src/routes/**"]
+repositories = ["src/repositories/**"]
+[imports]
+handlers = []
+repositories = []
+[db]
+handles = ["db"]
+allowed_in = ["repositories"]
+"#;
+        let files: Vec<(String, String)> =
+            vec![(".camerata/architecture.toml".to_string(), cfg.to_string())];
+        let repo = RepoView {
+            spec: "test/repo",
+            files: &files,
+        };
+        let ledger_ids = ledger_detector_rule_ids_for_repo(&repo);
+        for id in FIVE_REAL_DETECTOR_RULES {
+            assert!(
+                ledger_ids.contains(id),
+                "{id} must be ledger-credited once this repo's architecture config satisfies \
+                 every config-gated checker: {ledger_ids:?}"
+            );
+        }
     }
 }
