@@ -8218,6 +8218,80 @@ mod tests {
         );
     }
 
+    /// UTF8-BREAK-1: `breakable()` used to chunk a path/snippet by raw BYTE offset
+    /// (`s.slice(i, e)`), and Typst hard-errors the WHOLE compile when a slice index lands
+    /// mid-character — so any finding whose path, snippet, or package name contained a
+    /// multi-byte character (an accented Latin letter, a CJK character, an emoji) crashed the
+    /// entire PDF export with NO deliverable produced at all. `UNIT` mixes all three; the path
+    /// repeats it 5x and the snippet 8x specifically because that lands a UTF-8 continuation
+    /// byte exactly at byte offset 40 (the path's default chunk size) and 70 (the snippet's
+    /// explicit `n: 70`) — i.e. this is a literal repro of the byte-boundary crash, not just
+    /// "contains some multi-byte text somewhere".
+    #[tokio::test]
+    async fn compile_pdf_survives_multi_byte_characters_in_path_and_snippet() {
+        if which_typst().is_none() {
+            eprintln!(
+                "skipping compile_pdf_survives_multi_byte_characters_in_path_and_snippet: \
+                 typst not on PATH"
+            );
+            return;
+        }
+        const UNIT: &str = "café日本語😀";
+        let multibyte_path = format!("apps/{}/file.tsx", UNIT.repeat(5));
+        let multibyte_snippet = format!(
+            "const secretToken = '{}'; // trailing comment to extend the line further for padding",
+            UNIT.repeat(8)
+        );
+
+        let mut f = finding(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            &multibyte_path,
+            10,
+            "critical",
+        );
+        f.snippet = multibyte_snippet.clone();
+        let report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
+        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        assert_eq!(
+            json.curated_findings.len(),
+            1,
+            "the multi-byte finding must survive triage into curated findings"
+        );
+        assert_eq!(json.curated_findings[0].sites[0].path, multibyte_path);
+        assert_eq!(json.curated_findings[0].sites[0].snippet, multibyte_snippet);
+
+        let pdf = compile_pdf(&json).await.expect(
+            "compile_pdf must not crash on a multi-byte path/snippet — breakable() must chunk \
+             by character cluster, never by raw byte offset",
+        );
+        assert!(
+            pdf.starts_with(b"%PDF"),
+            "output must start with the PDF magic bytes"
+        );
+
+        let text = pdf_extract::extract_text_from_mem(&pdf)
+            .expect("must be able to extract text from the compiled PDF");
+        assert!(
+            !text.contains('\u{FFFD}'),
+            "no UTF-8 replacement character may appear in the extracted text: {text:?}"
+        );
+        // Same discriminator the C4-R3 zero-width-space test uses: a real visual line wrap
+        // introduces only ORDINARY whitespace at the break point, so collapsing all whitespace
+        // must still reconstruct every multi-byte run byte-for-byte, with nothing dropped,
+        // reordered, or replaced.
+        let collapsed: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            collapsed.contains(&UNIT.repeat(5)),
+            "the path's accented/CJK/emoji characters must survive intact: \
+             reconstructed={collapsed:?}"
+        );
+        assert!(
+            collapsed.contains(&UNIT.repeat(8)),
+            "the snippet's accented/CJK/emoji characters must survive intact: \
+             reconstructed={collapsed:?}"
+        );
+    }
+
     // ── End-to-end PDF compile (typst-present-only) ────────────────────────────
 
     /// Compiles a small report to a real PDF via the bundled template. Skips gracefully

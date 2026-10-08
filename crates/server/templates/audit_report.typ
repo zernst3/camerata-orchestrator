@@ -42,18 +42,28 @@
 // point between the surrounding raw() chunks. Returns CONTENT (one raw() per chunk), never a
 // plain string — call sites use the result directly; wrapping it in another raw() call would
 // flatten everything back into one unbreakable run and reintroduce the overflow this fixes.
+// UTF8-BREAK-1: `s.slice(i, e)` indexes BYTES, and Typst's `str.slice` hard-errors the whole
+// compile when an index lands mid-character ("byte index is not a char boundary"). `s.len()`
+// is also a byte count. Chunking by byte offset is therefore only safe for pure-ASCII input —
+// any path, snippet or package name containing a multi-byte character (an accented letter, a
+// CJK character, an emoji) took down the entire PDF export with no deliverable produced. Fix:
+// chunk over `.clusters()` (extended grapheme clusters — the "perceived character" unit, so a
+// multi-codepoint emoji/ZWJ sequence stays exactly one chunk-unit rather than being split
+// across chunks) instead of raw bytes. `n` keeps its original meaning of "roughly how many
+// characters before a break", just measured in clusters instead of bytes now.
 #let breakable(s, n: 40) = {
   // Guard: a none/empty input must yield empty content, never `none` or a crash. Typst's
   // raw(none) fails the whole compile ("expected string, found none") — so any finding with an
   // empty path/snippet/package would crash the report without this.
   if s == none { return raw("") }
-  let len = s.len()
+  let clusters = s.clusters()
+  let len = clusters.len()
   if len == 0 { return raw("") }
   let i = 0
   let out = ()
   while i < len {
     let e = calc.min(i + n, len)
-    out.push(raw(s.slice(i, e)))
+    out.push(raw(clusters.slice(i, e).join()))
     i = e
   }
   out.intersperse(h(0pt, weak: true)).join()
