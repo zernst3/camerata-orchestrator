@@ -10365,6 +10365,14 @@ mod tests {
 //      NEVER renders "Pre-existing accepted debt" / "accepted in a prior run" anywhere in the
 //      exported report, no matter how many such rows exist. STANDING (passes):
 //      `tests::a_preview_finding_with_suppressed_baseline_status_is_never_baseline_accepted`.
+//  15. (defect 3) A preview/external-tool row's `xlsx_export` provenance column always names
+//      its tool ("Preview: {tool}"), even when its citation independently resolves to
+//      `"grounded"` via the P3/commodity-taint grounding map — provenance and citation-kind
+//      are different axes, and only the citation axis is allowed to say "grounded"/cite a
+//      standard; the provenance axis never says "Deterministic" for a row this scan's own
+//      preview pass produced. STANDING (passes), in `xlsx_export::tests` (this invariant is
+//      about that module's own provenance computation, not this file's):
+//      `a_grounded_preview_row_never_renders_deterministic_provenance`.
 #[cfg(test)]
 mod export_invariants_gate {
     use super::*;

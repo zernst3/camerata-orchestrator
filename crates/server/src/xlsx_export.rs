@@ -301,13 +301,26 @@ fn partition_rows(
         // than falling through to "AI-advisory, model-inferred." in the product export only.
         let citation = citation_for_finding(f, corpus);
         let citation_kind = citation.kind.clone();
-        let provenance = match citation.kind.as_str() {
-            "preview" => format!(
-                "Preview: {}",
-                f.preview_tool.as_deref().unwrap_or("unknown tool")
-            ),
-            "grounded" => "Deterministic".to_string(),
-            _ => "AI-advisory".to_string(),
+        // Grading-cycle fix (2026-10-07): provenance is the tier of THIS ROW'S OWN SOURCE —
+        // who/what produced it — which is NOT the same axis as `citation.kind` (whether a
+        // real external standard backs its citation). A commodity-taint/preview row can
+        // legitimately resolve to a "grounded" citation via the P3 grounding map (it cites
+        // the SAME CWE/OWASP standard a deterministic floor rule for the same defect class
+        // would), while still having been produced by an external tool this run that may
+        // have found zero results on other repos/files. The OLD code derived `provenance`
+        // straight from `citation.kind`, so such a row rendered "Deterministic" — a word this
+        // export otherwise reserves for Camerata's own proven floor check — even though the
+        // ledger's own per-family count can show the tool found nothing. Checking
+        // `f.preview_tool` FIRST (before falling back to citation kind) fixes this: ANY row
+        // this scan's preview/external-tool pass produced always says "Preview: {tool}",
+        // never "Deterministic", regardless of how well-grounded its citation is.
+        let provenance = if let Some(tool) = f.preview_tool.as_deref() {
+            format!("Preview: {tool}")
+        } else {
+            match citation.kind.as_str() {
+                "grounded" => "Deterministic".to_string(),
+                _ => "AI-advisory".to_string(),
+            }
         };
         let citation_urls = citation
             .sources
@@ -1795,6 +1808,59 @@ mod tests {
             "the Recommended Fix column must be populated from authored remediation, got: {:?}",
             rows[0].fix
         );
+    }
+
+    // ── Provenance: a preview row never renders "Deterministic" (defect 3, 2026-10-07) ──
+
+    /// A preview/external-tool row whose rule id resolves through the P3/commodity-taint
+    /// grounding map to a GROUNDED corpus citation (the exact shape
+    /// `report_export::taint_sqli_tool_rule_id_resolves_through_the_grounding_map` proves for
+    /// `citation.kind`) must still show its OWN tool in the `provenance` column, never
+    /// "Deterministic" — that word is reserved for a row Camerata's own floor actually
+    /// produced. Provenance (who produced this row) and citation kind (whether a real
+    /// external standard backs it) are different axes; the citation itself is allowed to
+    /// resolve "grounded" here, the provenance column is not.
+    #[tokio::test]
+    async fn a_grounded_preview_row_never_renders_deterministic_provenance() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let mut f = finding(
+            "camerata.security.taint-sql-injection-go",
+            "internal/db.go",
+            88,
+            "high",
+        );
+        f.preview = true;
+        f.preview_tool = Some("semgrep".to_string());
+        let report = report_with(vec![f], vec![]);
+        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+
+        assert_eq!(
+            rows[0].citation_kind, "grounded",
+            "sanity: the citation itself resolves grounded via the tool-rule-id mapping"
+        );
+        assert_eq!(
+            rows[0].provenance, "Preview: semgrep",
+            "provenance must name the tool, never borrow 'Deterministic' from the grounded \
+             citation: {:?}",
+            rows[0].provenance
+        );
+    }
+
+    /// The flip side: a NON-preview, genuinely deterministic floor finding with a grounded
+    /// citation still renders "Deterministic" provenance — this fix must not have flipped
+    /// the common case.
+    #[tokio::test]
+    async fn a_non_preview_grounded_finding_still_renders_deterministic_provenance() {
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let f = finding("SEC-NO-RAW-SQL-CONCAT-1", "a.py", 1, "critical");
+        let report = report_with(vec![f], vec![]);
+        let (rows, _) = partition_rows(&report, &HashMap::new(), Some(&corpus), &HashMap::new());
+        assert_eq!(rows[0].provenance, "Deterministic");
     }
 
     #[test]

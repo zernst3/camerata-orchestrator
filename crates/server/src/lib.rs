@@ -5894,6 +5894,58 @@ pub(crate) fn reconcile_external_tool_ledger(
             .ledger
             .correct_rule_after_external_pass(rule_id, true, None, 0);
     }
+
+    // Grading-cycle fix (2026-10-07): the loop above only CORRECTS rule ids `onboard::
+    // audit_repos`'s speculative pre-pass already registered — which only ever covers
+    // corpus rules the user actually SELECTED this run. But once Semgrep runs at all, it
+    // runs its WHOLE bundled commodity-taint ruleset (`taint-security.yml`/`security.yml`
+    // — see `scan_tools`'s module doc comment), which can produce real, exported findings
+    // for a grounded corpus rule id (e.g. `SEC-NO-COMMAND-INJECTION-1`) the user never
+    // selected at all, and so was NEVER pre-registered as `RuleTier::ExternalTool` in the
+    // first place. Before this fix, such a finding shipped in the export while contributing
+    // ZERO to every ledger total (`render_ledger_summary`'s per-family `findings_emitted`
+    // sum only ever iterates `ledger.rules()`, which never contained that id) — the exact
+    // "family reports findings=0 while preview rows ARE present in the export" defect.
+    // This second pass discovers any such row and records it fresh, so the ledger's
+    // per-family counts always equal the rows actually exported, never a strict subset of
+    // them keyed off selection alone.
+    // Discovery is deliberately scoped to the GROUNDING MAP only (`semgrep_floor_category`,
+    // a closed, well-known set) rather than trusting an untracked `f.rule_id`/`also_matches`
+    // member verbatim as if it were itself a corpus id — a tool-native id with no grounding
+    // mapping has no corpus rule to credit, and inventing a ledger row keyed on a raw
+    // `camerata.security.*` string would just add noise with no real rule behind it.
+    let already_tracked: std::collections::HashSet<String> =
+        report.ledger.rules().map(|r| r.rule_id.clone()).collect();
+    let mut newly_discovered: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for f in &report.findings {
+        if !f.preview {
+            continue;
+        }
+        // The primary's own id, plus every absorbed sibling (`also_matches` — a merge can
+        // fold in MORE THAN ONE distinct tool rule id onto one primary row), each grounded
+        // independently; `also_matches` already-tracked members are the correction loop
+        // above's job, not this discovery pass's.
+        let candidates =
+            std::iter::once(f.rule_id.as_str()).chain(f.also_matches.iter().map(String::as_str));
+        for candidate in candidates {
+            if let Some(grounded) = semgrep_floor_category(candidate) {
+                if !already_tracked.contains(grounded) {
+                    *newly_discovered.entry(grounded.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    for (rule_id, emitted) in newly_discovered {
+        report.ledger.record_rule(
+            rule_id,
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            0,
+            emitted,
+        );
+    }
 }
 
 /// Whether finding `f` is evidence that the corpus rule `rule_id` was evaluated — either `f`
@@ -22946,6 +22998,90 @@ mod tests {
         assert!(report.failed_passes[0]
             .reason
             .contains("SEC-NO-RAW-SQL-CONCAT-1"));
+    }
+
+    /// Defect 3 (2026-10-07 grading pass): Semgrep, once invoked at all, runs its WHOLE
+    /// bundled commodity-taint ruleset — it can produce a real, exported finding for a
+    /// corpus rule id the user never selected this run, so `onboard::audit_repos`'s
+    /// speculative pre-pass never pre-registered a `RuleTier::ExternalTool` ledger entry for
+    /// it at all. Before this fix, such a finding shipped in `report.findings` while
+    /// contributing ZERO to every ledger total — this is the "family reports findings=0 while
+    /// preview rows ARE present in the export" shape. The second discovery pass in
+    /// `reconcile_external_tool_ledger` must register it fresh.
+    #[test]
+    fn reconcile_discovers_a_grounded_rule_the_pre_pass_never_registered() {
+        let mut report = report_for_ledger_test();
+        // NOTE: deliberately NO pre-registered ledger entry for SEC-NO-COMMAND-INJECTION-1 —
+        // the user never selected it this run.
+        report.findings = vec![preview_finding_for_test(
+            "camerata.security.taint-command-injection-go",
+            "semgrep",
+            &[],
+        )];
+        let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted);
+        let entry = report
+            .ledger
+            .rule("SEC-NO-COMMAND-INJECTION-1")
+            .expect("the discovery pass must register a fresh entry for the grounded id");
+        assert!(
+            entry.ran,
+            "a real exported finding must never read as not-run"
+        );
+        assert_eq!(
+            entry.findings_emitted, 1,
+            "the ledger's count must equal the rows actually exported"
+        );
+        assert_eq!(entry.tier, crate::scan_ledger::RuleTier::ExternalTool);
+    }
+
+    /// The discovery pass must never DOUBLE-count a rule id the correction loop already
+    /// handled (pre-registered AND corrected) just because a finding also carries it.
+    #[test]
+    fn reconcile_discovery_pass_never_double_counts_an_already_tracked_rule() {
+        let mut report = report_for_ledger_test();
+        report.ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            3,
+            0,
+        );
+        report.findings = vec![preview_finding_for_test(
+            "camerata.security.taint-sql-injection-python",
+            "semgrep",
+            &[],
+        )];
+        let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted);
+        let entry = report.ledger.rule("SEC-NO-RAW-SQL-CONCAT-1").unwrap();
+        assert_eq!(
+            entry.findings_emitted, 1,
+            "the correction loop already counted this finding once; the discovery pass must \
+             not add a second count for the same already-tracked id"
+        );
+    }
+
+    /// A finding grounded ONLY via an absorbed `also_matches` member (never its own primary
+    /// id) must still be discovered — the merge-absorption case, mirrored from
+    /// `finding_grounds_to_matches_via_also_matches` above.
+    #[test]
+    fn reconcile_discovery_pass_credits_a_grounded_also_matches_member() {
+        let mut report = report_for_ledger_test();
+        let folded = crate::onboard::Finding {
+            rule_id: "unrelated-id".to_string(),
+            also_matches: vec!["camerata.security.taint-command-injection-go".to_string()],
+            ..preview_finding_for_test("unrelated-id", "semgrep", &[])
+        };
+        report.findings = vec![folded];
+        let attempted: std::collections::HashSet<&str> = ["semgrep"].into_iter().collect();
+        reconcile_external_tool_ledger(&mut report, &attempted);
+        let entry = report
+            .ledger
+            .rule("SEC-NO-COMMAND-INJECTION-1")
+            .expect("an also_matches member grounding to a new id must still be discovered");
+        assert_eq!(entry.findings_emitted, 1);
     }
 
     /// Outcome 3 (pass-level skip): the external-tool pass never invoked semgrep AT ALL this
