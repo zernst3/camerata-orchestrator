@@ -1,0 +1,67 @@
+id = "SUPABASE-AUTH-EMAIL-CONFIRMATION-1"
+title = "A production-linked config disables email confirmation only deliberately, never by carrying the local-dev default forward unreviewed"
+tag = "stack"
+domain = "supabase:auth"
+layer = "platform"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan over supabase/config.toml's `[auth.email] enable_confirmations` field, scoped to configs that are actually pushed to a linked remote project (`supabase config push` / `supabase db push` usage, or a non-local project_id) rather than the local-development config in isolation — the CLI's scaffolded default is `false` specifically so local development doesn't require a working mail server, which is a legitimate, out-of-scope value for a file that never leaves the developer's machine. Conformance holds when a config that is actually applied to a remote/production project sets `enable_confirmations = true`, or the repo shows no evidence either way (in which case this is `needs_review`, not asserted); it fails when a config demonstrably pushed to a remote project carries `enable_confirmations = false` forward with no sign it was a deliberate choice."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/local-development/cli/config"
+title = "Supabase CLI config reference — auth.email.enable_confirmations (local-dev scaffold default: false)"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/287.html"
+title = "CWE-287: Improper Authentication — a signup succeeds and grants full access without the claimed email ever being verified"
+
+[decision]
+question = "Does the project's remote/production auth configuration require email confirmation before an unverified signup can authenticate, rather than silently inheriting the local-dev scaffold default?"
+default = "require-email-confirmation-before-production-signin"
+why = """
+Supabase's CLI scaffolds a fresh project's config.toml with `enable_confirmations = false` under `[auth.email]` —
+a sensible default for LOCAL development, where requiring a working outbound mail server just to sign up a test
+account during `supabase start` would be pure friction. The failure mode this rule targets is that same value
+surviving, unreviewed, into a config that is actually pushed to a real, internet-facing project: with confirmations
+off, anyone can sign up with ANY email address — including one they do not own — and immediately authenticate and
+use the app under that identity, with no step ever confirming the claimed owner consented. This is CWE-287
+(Improper Authentication): the system grants an authenticated session without verifying the identity claim the
+signup itself was built on. Two concrete harms follow directly: spam/fake-account creation at zero cost (no
+mailbox needs to exist), and a more targeted one — an attacker can pre-register a VICTIM's real email address before
+the victim ever signs up, occupying that identity and potentially intercepting any later password-reset or
+invitation flow tied to it.
+
+Scoping is the honest part of this rule: a repo scan can only see what is IN the repository. Confirmations could be
+toggled directly in the dashboard with no config.toml change at all, and a local-only config.toml legitimately
+leaves confirmations off for development convenience with zero production implication. The finding should name
+exactly what it can and cannot see from the repo — it is pushed/production-linked configuration this rule cares
+about, not the local file in isolation.
+"""
+
+[[option]]
+id = "require-email-confirmation-before-production-signin"
+label = "Flag enable_confirmations = false in a config shown to be pushed to a remote project; name the local-dev carve-out explicitly"
+directive = """
+Scan supabase/config.toml for `enable_confirmations = false` under `[auth.email]`. If the repo shows evidence this
+config is pushed to a remote project (a `project_id` that isn't the local scaffold placeholder, a CI step invoking
+`supabase config push` or `db push`, or a non-local `site_url`), flag at high severity: "Email confirmation is off.
+Anyone can sign up with an email address they don't own — including someone else's — and start using your app
+under that identity immediately." Where the repo shows no clear evidence either way, mark `needs_review` and state
+the local-dev default explicitly rather than asserting a violation.
+"""
+remediation = """
+Set `enable_confirmations = true` under `[auth.email]` in the configuration that is actually applied to your
+production/remote project (push the change via `supabase config push` or update it directly in the dashboard's Auth
+settings), while leaving the local development config as-is if keeping it convenient for `supabase start` is
+desired. Verify by signing up with a test email address and confirming the account cannot authenticate until the
+confirmation link is used.
+"""
+effort = "low"
+why = "The local-dev default exists purely to remove mail-server friction from `supabase start`; carrying it unreviewed into a production-facing config trades that convenience for letting anyone authenticate under an email address they never proved they control, including impersonating a real user's address before that user ever signs up."
+
+[[option]]
+id = "leave-confirmations-off-matching-local-dev-default"
+label = "Carry the local-dev scaffold default (enable_confirmations = false) into the production-linked configuration unreviewed"
+directive = "Keep enable_confirmations = false in the configuration that is pushed to the remote/production project, matching whatever the CLI scaffolded by default, without a deliberate review of whether production should require confirmation."
+why = "Rejected: this is precisely the gap the rule targets. The default exists for local-development convenience, not because unconfirmed production signups are an acceptable security posture — carrying it forward unreviewed means anyone, including someone impersonating a real user's email address, can authenticate under an identity nobody ever confirmed they own."

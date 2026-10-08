@@ -1,0 +1,69 @@
+id = "SUPABASE-AUTH-MFA-PRIVILEGED-1"
+title = "Privileged roles and actions must require a verified MFA factor (aal2), not just a password-only session (aal1)"
+tag = "stack"
+domain = "supabase:auth"
+layer = "platform"
+enforcement = "prose"
+default = true
+verification = "grounded"
+qualifies = "Whether a given role or action is 'privileged' enough to warrant requiring aal2, and whether the policies/handlers that gate it actually check the JWT's aal claim, is a semantic judgment over the schema and handler code, not a pattern match — so this rule routes to prose: the privileged-looking table/policy/handler (admin actions, role grants, destructive or financial operations, anything already identified as privileged by SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1 or SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1's evidence) is fed to Claude with the question: does an aal2 check gate this, or does any authenticated (aal1, password-only) session reach it? Conformance holds when privileged actions check `(auth.jwt()->>'aal') = 'aal2'` (in an RLS policy) or the client-side `getAuthenticatorAssuranceLevel()` equivalent (in a server-side handler) before proceeding; it fails when a privileged action is reachable by any authenticated session regardless of whether MFA was ever enrolled or verified."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/auth/auth-mfa"
+title = "Supabase docs — Multi-Factor Authentication: aal claim (aal1 = password-only, aal2 = password + verified factor), checked via auth.jwt()->>'aal' in RLS or getAuthenticatorAssuranceLevel() server-side"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/308.html"
+title = "CWE-308: Use of Single-Factor Authentication"
+
+[decision]
+question = "Do privileged roles/actions require a verified second factor (aal2) rather than being reachable by any password-only (aal1) authenticated session?"
+default = "require-aal2-on-privileged-actions"
+why = """
+Supabase's MFA implementation issues an Authenticator Assurance Level claim in every session's JWT: `aal1` for a
+plain password (or OAuth) sign-in, `aal2` once the user has also verified an enrolled MFA factor. The claim is
+directly checkable — `auth.jwt()->>'aal'` inside an RLS policy, or `getAuthenticatorAssuranceLevel()` client/server
+side — which means requiring MFA for a sensitive action is a matter of adding one predicate, not building new
+infrastructure. The gap this rule targets is a project that supports MFA enrollment (so the feature exists and some
+users have turned it on) but never actually requires `aal2` anywhere: every privileged action — granting roles,
+touching another user's financial data, anything an admin-only dashboard route performs — remains reachable by any
+authenticated session regardless of whether that session ever verified a second factor. This is CWE-308 (Use of
+Single-Factor Authentication) applied specifically to the HIGH-VALUE subset of actions where it matters most,
+rather than to authentication in general.
+
+MFA enforcement is inherently a per-project judgment call about WHICH roles/actions count as privileged enough to
+warrant it — a note-taking app's own-content edits do not need the same bar as a role-grant or a financial transfer.
+That judgment, and confirming the enforcement actually checks `aal`, is not something a regex can resolve; it
+requires reading the policy/handler for the action already flagged as privileged by a neighboring rule
+(SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1's SECURITY DEFINER functions, SUPABASE-AUTH-SERVICE-ROLE-BYPASS-1's
+service-role handlers) and asking whether an aal2 check gates it.
+"""
+
+[[option]]
+id = "require-aal2-on-privileged-actions"
+label = "Require an aal2 check on privileged roles/actions; flag privileged surfaces reachable by any aal1 session"
+directive = """
+For every action already identified as privileged (admin-only routes, role/permission grants, SECURITY DEFINER
+functions performing cross-tenant or financial operations, service-role-backed handlers), evaluate whether an aal2
+check gates it — `(auth.jwt()->>'aal') = 'aal2'` in an RLS policy, or an equivalent `getAuthenticatorAssuranceLevel`
+check server-side. Report at high severity when no such check is found: "This privileged action can be performed by
+any logged-in session, whether or not MFA was ever set up or verified." When a check is found, report it as
+informational.
+"""
+remediation = """
+Add a restrictive policy or server-side check requiring `(select auth.jwt()->>'aal') = 'aal2'` before `<action>`
+proceeds, and ensure accounts that hold the privileged role are prompted to enroll an MFA factor (Supabase's MFA
+enrollment flow) rather than only optionally supporting it. Where a user has not enrolled a factor, redirect them to
+enrollment rather than silently denying — per Supabase's own documented UX pattern — instead of either silently
+allowing the aal1 session through or hard-locking a legitimate admin out with no path forward. Verify by confirming
+an aal1 (password-only) session can no longer perform `<action>` while an aal2 session (post-MFA-verification)
+still can.
+"""
+effort = "medium"
+why = "Supabase exposes the aal claim specifically so sensitive actions can require a verified second factor with a single predicate; a project that supports MFA enrollment but never actually checks aal anywhere has built the feature without using it for the actions it would matter most for."
+
+[[option]]
+id = "treat-mfa-enrollment-as-sufficient-without-enforcement"
+label = "Offer MFA enrollment but do not require aal2 anywhere; treat enrollment alone as sufficient hardening"
+directive = "Support MFA enrollment for users who opt in, but do not add any aal2 check to privileged roles, actions, or policies — an enrolled user's unverified (aal1) session is treated identically to a verified (aal2) one."
+why = "Rejected: an MFA factor that is enrolled but never REQUIRED provides no protection against the scenario MFA exists to defend — a password-only session (stolen password, successful phishing) still reaches every privileged action exactly as if MFA did not exist, because nothing ever checks whether the second factor was actually verified for this session. Enrollment without enforcement is security theater for the specific threat model MFA is meant to close."

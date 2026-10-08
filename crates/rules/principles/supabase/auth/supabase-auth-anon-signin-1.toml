@@ -1,0 +1,70 @@
+id = "SUPABASE-AUTH-ANON-SIGNIN-1"
+title = "When anonymous sign-ins are enabled, every policy meant for permanent users must exclude anonymous sessions via is_anonymous"
+tag = "stack"
+domain = "supabase:auth"
+layer = "platform"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a two-part scan: (1) supabase/config.toml's `[auth] enable_anonymous_sign_ins = true` (or the equivalent dashboard-exported setting); when present, (2) scan CREATE POLICY statements granted `to authenticated` for any reference to `is_anonymous` anywhere in the predicate. Conformance holds when every policy that is semantically meant to gate a capability for permanent, identity-verified users (posting content under a real identity, financial actions, anything the product would not want a disposable session to perform) excludes anonymous sessions via `(auth.jwt()->>'is_anonymous')::boolean is false`; it fails when anonymous sign-ins are enabled and no policy in the corpus references is_anonymous at all, since every `to authenticated` policy is then silently also a policy for anonymous users."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/auth/auth-anonymous"
+title = "Supabase docs — Anonymous Sign-Ins: 'Anonymous users use the authenticated role. To distinguish between anonymous users and permanent users, your policies need to check the is_anonymous field of the user's JWT.'"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/863.html"
+title = "CWE-863: Incorrect Authorization — a disposable anonymous session is granted the same authorization as a verified permanent account"
+
+[decision]
+question = "When anonymous sign-ins are enabled, does every RLS policy meant to gate a permanent-user capability explicitly exclude anonymous sessions via the JWT's is_anonymous claim?"
+default = "require-is-anonymous-exclusion-on-permanent-user-policies"
+why = """
+Supabase's own anonymous sign-ins documentation states the interaction directly: anonymous users are assigned the
+SAME `authenticated` role a real signed-up user gets — `auth.uid()` is populated, `to authenticated` policies
+evaluate true, and the only way to tell the two apart inside a policy predicate is the JWT's `is_anonymous` claim.
+A project that enables anonymous sign-ins (a legitimate, common pattern for frictionless onboarding — browse before
+you sign up, start a session before committing to an account) but never updates its existing `to authenticated`
+policies to check `is_anonymous` has, often without realizing it, silently extended every one of those policies to
+disposable sessions as well. For capabilities the product genuinely wants restricted to a verified, permanent
+identity — posting under a persistent profile, anything financial, anything the product would be unhappy to see an
+attacker spin up thousands of throwaway sessions to abuse — that is CWE-863 (Incorrect Authorization): the
+disposable session receives authorization the design intended only for the permanent one.
+
+Supabase's own recommended fix is exactly this: add a RESTRICTIVE policy (not permissive, since permissive policies
+OR together and a single unscoped permissive policy would still pass) checking
+`(select (auth.jwt()->>'is_anonymous')::boolean) is false` on the tables/actions that should be permanent-user-only.
+This rule does not ask that EVERY policy exclude anonymous users — some capabilities are deliberately fine for
+anonymous sessions too (that's the entire point of enabling the feature) — it asks that the project has reviewed
+and deliberately annotated which policies need the exclusion, rather than having enabled anonymous sign-ins against
+an untouched policy set that predates the feature.
+"""
+
+[[option]]
+id = "require-is-anonymous-exclusion-on-permanent-user-policies"
+label = "When anon sign-ins are enabled, require at least one is_anonymous-aware restrictive policy; flag silent extension of the pre-existing policy set"
+directive = """
+When `enable_anonymous_sign_ins = true` is found, scan every `CREATE POLICY ... to authenticated` statement in the
+corpus for a reference to `is_anonymous`. If NONE of them reference it, flag at high severity: "Anonymous sign-ins
+are enabled, but none of your access policies distinguish a real account from a disposable one — every policy
+written for `authenticated` users now also applies to anyone who never signed up." Where some but not all
+plausibly-permanent-user-gating policies reference it, mark the un-annotated ones `needs_review` rather than
+asserting a violation, since not every policy needs the exclusion and a scan cannot always tell which do from table
+and column names alone.
+"""
+remediation = """
+Add a RESTRICTIVE policy (not permissive) to `<table>` checking
+`(select (auth.jwt()->>'is_anonymous')::boolean) is false` for every capability that should be limited to permanent,
+signed-up users, following Supabase's documented pattern for anonymous-sign-in projects. Review the full existing
+policy set against the question "would I be comfortable with a disposable, never-verified session doing this?" for
+each one. Verify by signing in anonymously and confirming the restricted action is now rejected while it still
+succeeds for a permanent account.
+"""
+effort = "medium"
+why = "Supabase's own documentation calls this out as the single thing a project must do when turning on anonymous sign-ins; a policy set that predates the feature and was never revisited silently inherits the exposure, which is exactly the kind of enablement-without-review gap this rule exists to surface."
+
+[[option]]
+id = "enable-anonymous-signins-without-reviewing-existing-policies"
+label = "Enable anonymous sign-ins and leave the existing authenticated-role policy set untouched"
+directive = "Turn on enable_anonymous_sign_ins without auditing or updating any existing RLS policy that grants to the authenticated role."
+why = "Rejected: this is precisely the gap Supabase's own documentation warns against. Every policy written before anonymous sign-ins existed was authored under the assumption that `authenticated` meant a real, verified account; turning the feature on without revisiting those policies silently and retroactively extends every one of them to anonymous sessions, with no code change anywhere making that extension visible to a reviewer."

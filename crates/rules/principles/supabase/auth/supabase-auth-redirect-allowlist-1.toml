@@ -1,0 +1,64 @@
+id = "SUPABASE-AUTH-REDIRECT-ALLOWLIST-1"
+title = "OAuth and magic-link redirect URLs are an exact-origin allowlist, never a bare or broad wildcard"
+tag = "stack"
+domain = "supabase:auth"
+layer = "platform"
+enforcement = "structured"
+default = true
+verification = "grounded"
+qualifies = "Enforced by a scan over supabase/config.toml's `[auth] additional_redirect_urls` (and the dashboard-equivalent URL Configuration list) for an entry that is a bare wildcard (`*`), a wildcard occupying an entire host/domain segment (`https://*.example.com`), or a wildcard combined with a third-party or user-controllable hosting domain (a wildcard subdomain on a shared PaaS like `*.vercel.app`, `*.netlify.app`, `*.github.io`, where an attacker can register their own subdomain). Conformance holds when every redirect entry is an exact URL (or a narrowly-scoped path wildcard on a domain the project itself controls); it fails when any entry's wildcard scope includes hosts the project does not control."
+
+[[sources]]
+url = "https://supabase.com/docs/guides/auth/redirect-urls"
+title = "Supabase docs — Redirect URLs: additional_redirect_urls / site_url configuration and wildcard matching support"
+
+[[sources]]
+url = "https://cwe.mitre.org/data/definitions/601.html"
+title = "CWE-601: URL Redirection to Untrusted Site ('Open Redirect')"
+
+[decision]
+question = "Is every OAuth/magic-link redirect URL an exact, project-controlled origin, rather than a bare or broad wildcard that includes hosts the project does not control?"
+default = "scope-redirect-allowlist-to-exact-known-origins"
+why = """
+Supabase's auth redirect configuration supports wildcard matching in `additional_redirect_urls` as a convenience —
+most commonly to cover every preview-deploy subdomain a hosting provider mints per branch or PR. The convenience
+has a real cost: the redirect URL in an OAuth or magic-link flow is where the session gets handed off after
+authentication completes, so a wildcard broad enough to match a host the project does not control turns the login
+flow into an open redirect (CWE-601) with unusually high stakes — an attacker who can stand up a page on a matching
+host (any shared PaaS subdomain the wildcard covers, e.g. `*.vercel.app` when the attacker can register their own
+project there) can craft a login link that authenticates the victim normally and then redirects the resulting
+session straight to the attacker's page, which is session/token exfiltration, not merely a confusing bounce to the
+wrong site.
+
+The fix is not to avoid wildcards entirely — a project legitimately needs every preview-deploy URL to work — but to
+scope the wildcard to a domain only the project itself can create subdomains under (a project-owned domain with
+DNS the project controls), never a shared hosting domain where unrelated accounts can register sibling subdomains,
+and to prefer exact URLs for anything that doesn't genuinely need wildcard coverage.
+"""
+
+[[option]]
+id = "scope-redirect-allowlist-to-exact-known-origins"
+label = "Flag wildcard redirect entries whose scope includes a shared/third-party hosting domain; prefer exact URLs or project-owned-domain wildcards"
+directive = """
+Scan `additional_redirect_urls` (and the dashboard-exported equivalent) for a bare `*` entry, or a wildcard
+occupying a full host/domain segment on a known shared hosting domain (`*.vercel.app`, `*.netlify.app`,
+`*.github.io`, `*.herokuapp.com`, and comparable PaaS preview-domain patterns). Flag as high severity: "Your login
+redirect allowlist includes `<pattern>`, which matches any subdomain on a shared hosting platform — including ones
+an attacker can register. A crafted login link can redirect a real user's session to an attacker's page." A
+wildcard scoped to a domain the project's own DNS controls (`*.preview.yourapp.com`) is conforming.
+"""
+remediation = """
+Replace `<pattern>` in `additional_redirect_urls` with either the exact URL(s) your app actually redirects to, or
+— if wildcard coverage for preview deploys is genuinely needed — a wildcard scoped to a subdomain structure only
+your project's own DNS can create (e.g. `https://*.preview.yourapp.com`), never a shared hosting provider's bare
+domain. Verify by confirming an OAuth/magic-link flow started against a crafted redirect URL on the previously-
+matched shared domain is now rejected by Supabase Auth rather than completing the handoff.
+"""
+effort = "medium"
+why = "A redirect allowlist entry that matches hosts the project does not control converts a login-flow convenience into an attacker-reachable open redirect at the exact point a session token is handed off — the fix (scoping the wildcard to a domain the project owns) keeps the convenience for legitimate preview deploys while closing the hole for attacker-registrable ones."
+
+[[option]]
+id = "wildcard-redirect-for-convenience-across-all-previews"
+label = "Use a bare or shared-hosting-domain wildcard to cover every preview/staging deployment without restriction"
+directive = "additional_redirect_urls includes a bare `*` or a wildcard scoped to an entire shared hosting provider's domain, accepted for convenience so every preview deploy URL works without maintaining an allowlist."
+why = "Rejected: the convenience of not maintaining an allowlist is bought by accepting that anyone who can register a subdomain on the same shared hosting provider — which in most cases means anyone with a free account on that platform — can stand up a page the redirect allowlist treats as trusted. Combined with the OAuth/magic-link handoff being exactly where a session gets created, this is not a cosmetic open redirect; it is a session-token exfiltration path, which is a categorically worse outcome than the maintenance cost of a project-scoped wildcard or an exact-URL list."

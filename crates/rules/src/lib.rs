@@ -2956,4 +2956,30 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn new_auth_config_domain_rules_are_well_formed_and_reachable() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        for id in [
+            "SUPABASE-AUTH-ANON-SIGNIN-1",
+            "SUPABASE-AUTH-REDIRECT-ALLOWLIST-1",
+            "SUPABASE-AUTH-SESSION-LIFETIME-1",
+            "SUPABASE-AUTH-EMAIL-CONFIRMATION-1",
+            "SUPABASE-AUTH-PASSWORD-POLICY-1",
+            "SUPABASE-AUTH-MFA-PRIVILEGED-1",
+        ] {
+            assert_well_formed_new_rule(&set, id, "supabase:auth");
+        }
+        // Regression guard against duplicating SUPABASE-RLS-USER-METADATA-1: the "user-metadata
+        // trusted for authorization" defect is already covered there (supabase:rls domain), so
+        // no new supabase:auth rule should re-cover the same user_metadata/raw_user_meta_data
+        // token match.
+        assert!(
+            set.get_by_id("SUPABASE-RLS-USER-METADATA-1").is_some(),
+            "the pre-existing user-metadata-authorization rule must still be present (not duplicated)"
+        );
+    }
 }
