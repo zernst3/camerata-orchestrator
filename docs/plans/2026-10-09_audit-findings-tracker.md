@@ -96,6 +96,18 @@ deviations, suggested conventions with ZERO violations, and "no convention adopt
 new structure locked down tight and unambiguous before anything is built on it.
 Proposal under review in the response of 2026-10-09; open questions listed there.
 
+### [-] A5.7 — 58 ambiguous rule classifications: PAUSED BY ZACH (2026-10-09)
+W2 classified all 417 rules (`docs/plans/2026-10-09_rule-kind-classification.md`): defect 132,
+default_with_exceptions 117, decision-clear 110, decision-ambiguous 58. The 58 were presented to Zach
+grouped into five patterns (security-phrased-as-choice 16; detector-precision meta-rules 7; genuine
+philosophy debates 6; under-authored/every-option-degenerate 9; three that are personally his; plus
+~20 architectural/testing yes-no rules). **Zach: "pause the rule review for me for when I can sit
+down and look at these."** HOLD — do not classify these without him.
+
+Nothing is blocked by the hold: all 58 ship as `kind = "decision"` with no option marked `violates`,
+so none can emit a false defect. Worst case today is that a genuine security defect reports as a
+consistency observation instead of a violation, which is an under-call, not a false positive.
+
 ### [ ] A1/A2 — React rules fired and were counted as code quality; arming hypothesis refuted
 ### [ ] A3 — the ledger's "Architectural checks" family contains zero ARCH-* rules (naming/taxonomy)
 ### [ ] A4 — the 4 real ARCH checkers are config-gated off absent `.camerata/architecture.toml`
