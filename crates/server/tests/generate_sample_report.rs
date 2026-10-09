@@ -375,7 +375,12 @@ async fn regenerate_sample_report() {
         ..Default::default()
     };
 
-    let json = report_export::build_report_json(&report, &dispositions, Some(&corpus), &opts);
+    let json = report_export::build_report_json(
+        &report.clone().seal(),
+        &dispositions,
+        Some(&corpus),
+        &opts,
+    );
 
     // Sanity: the reconciliation M1 was fixing.
     assert_eq!(json.methodology.candidates_reviewed, 10);
@@ -390,8 +395,9 @@ async fn regenerate_sample_report() {
     std::fs::write(repo_root.join("data.json"), data_json + "\n").expect("write sample-report/data.json");
 
     // ═══ Build the REAL Excel workbook (the xlsx sibling of the PDF, same data pass) ═══
-    let xlsx = xlsx_export::build_workbook(&report, &dispositions, Some(&corpus), &opts)
-        .expect("build_workbook must succeed for the sample fixture");
+    let xlsx =
+        xlsx_export::build_workbook(&report.clone().seal(), &dispositions, Some(&corpus), &opts)
+            .expect("build_workbook must succeed for the sample fixture");
     assert_eq!(&xlsx[0..2], b"PK", "the workbook must be a valid xlsx (zip) container");
     std::fs::write(repo_root.join("camerata-sample-audit-findings.xlsx"), &xlsx)
         .expect("write sample-report/camerata-sample-audit-findings.xlsx");
@@ -433,7 +439,7 @@ async fn regenerate_sample_report() {
     // `xlsx_export::build_findings_export`'s doc comment. Both a standalone file (for Zach
     // to eyeball) and the zip entry below come from this one call.
     let findings_export = xlsx_export::build_findings_export(
-        &report,
+        &report.clone().seal(),
         &dispositions,
         Some(&corpus),
         &json,

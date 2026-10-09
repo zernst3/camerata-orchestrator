@@ -267,7 +267,12 @@ async fn grammar_injection_finding_reaches_curated_findings_high_and_not_rls_hed
         executive_summary_override: None,
         ..Default::default()
     };
-    let json = report_export::build_report_json(&report, &dispositions, Some(&corpus), &opts);
+    let json = report_export::build_report_json(
+        &report.clone().seal(),
+        &dispositions,
+        Some(&corpus),
+        &opts,
+    );
 
     // ═══ STEP 3: the finding survives as a CURATED finding — High severity (NOT downgraded ═══
     // to medium/needs-review despite the repo's genuine, clean RLS coverage), right file:line,

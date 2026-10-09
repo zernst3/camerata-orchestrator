@@ -35,7 +35,7 @@ use std::sync::Arc;
 
 use camerata_server::ai_audit::{ActualUsage, FailedPass, ScanMode};
 use camerata_server::llm::{resolve_backend, ProjectBackend};
-use camerata_server::onboard::{ProposedRule, ScanReport, SelectedRule};
+use camerata_server::onboard::{ProposedRule, SelectedRule};
 use camerata_server::report_export::ReportOptions;
 use camerata_server::scan_cache::ScanManifest;
 use camerata_server::scan_ledger::{RuleLedgerEntry, RuleTier, ScanLedger};
@@ -219,8 +219,13 @@ fn save_manifest(repo: &Path, manifest: &ScanManifest) {
 /// `ReportOptions::default()` folded through `apply_env_defaults()` — exactly like that
 /// handler. Pure aside from the `compile_pdf` shell-out to `typst`; no filesystem writes.
 /// Returns `(filename_stem, zip_bytes)`.
+///
+/// `report: &SealedReport` (Pass-1 W1 seal fix) — the caller, [`run_inspect_with_key_presence`],
+/// seals the report AFTER its own row-adding passes (the preview-linter merge, the dep-audit,
+/// and the evidence-of-violation gate) have all already run, exactly mirroring the server's
+/// `export_product` handler's own sealing point. See `ScanReport::seal`'s doc comment.
 pub async fn build_product_export_bytes(
-    report: &ScanReport,
+    report: &camerata_server::onboard::SealedReport,
     corpus: Option<&camerata_rules::RuleSet>,
 ) -> Result<(String, Vec<u8>), String> {
     let dispositions: HashMap<String, camerata_server::report_export::DispositionWire> =
@@ -391,6 +396,10 @@ pub async fn run_inspect_with_key_presence(
         None,
     )
     .await;
+    // Pass-1 W1 seal fix: one ledger stage entry for this loop's net additions — mirrors
+    // `onboard_audit`'s synchronous path in `camerata_server::lib` exactly (see
+    // `camerata_server::scan_ledger::record_addition_stage`'s doc comment).
+    let dep_audit_rows_in = report.findings.len();
     for (spec, dir) in &sources {
         let (dep_findings, dep_note) = camerata_server::dep_audit::run_dep_audit(spec, dir).await;
         if !dep_findings.is_empty() {
@@ -400,15 +409,36 @@ pub async fn run_inspect_with_key_presence(
             report.coverage_notes.push(note);
         }
     }
+    camerata_server::scan_ledger::record_addition_stage(
+        &mut report.ledger,
+        "dependency-audit-merge",
+        dep_audit_rows_in,
+        report.findings.len(),
+        "dep_audit_findings",
+    );
+
+    // ── Pass-1 W1 seal fix: evidence-of-violation gate — LAST row-adding pass ──────────
+    // Mirrors `onboard_audit`/`onboard_audit_start`'s own call site in `camerata_server::lib`
+    // exactly — see `camerata_server::report_export::apply_evidence_gate`'s doc comment. Must
+    // run before the ledger summary below (so a fired gate's stage shows up in it) and before
+    // `report` is sealed.
+    camerata_server::report_export::apply_evidence_gate(&mut report);
 
     // The ledger summary is rendered from `report.ledger`/`report.failed_passes` AS THEY STAND
-    // right here — after `audit_repos` (Phase 3) and `merge_scan_preview` (Phase 4, which runs
+    // right here — after `audit_repos` (Phase 3), `merge_scan_preview` (Phase 4, which runs
     // `reconcile_external_tool_ledger` and is the LAST thing that corrects the ledger's
-    // `ExternalTool` entries from speculative to real; see that function's own doc comment).
-    // Computed before export so a PDF/typst failure below still leaves `report` fully
+    // `ExternalTool` entries from speculative to real; see that function's own doc comment), the
+    // dependency audit, and the evidence gate — i.e. after every row-adding pass this pipeline
+    // runs. Computed before export so a PDF/typst failure below still leaves `report` fully
     // reconciled, even though the summary itself is only surfaced via the returned
     // `InspectOutcome`, never written into the export.
     let ledger_summary = render_ledger_summary(&report.ledger, &report.failed_passes, args.verbose);
+
+    // Pass-1 W1 seal fix: THE sealing point — every row-adding pass above has already run, and
+    // every exporter the rest of this function calls now takes `&SealedReport`, never
+    // `&ScanReport` (see `ScanReport::seal`'s doc comment for the compile-time guarantee this
+    // establishes).
+    let report = report.seal();
 
     // ── Phase 5: export — the exact `export_product` HTTP handler's assembly ───────────
     let (_stem, zip_bytes) = build_product_export_bytes(&report, corpus.as_ref()).await?;

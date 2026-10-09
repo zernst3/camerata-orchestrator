@@ -273,7 +273,12 @@ async fn mechanical_rule_with_no_detector_is_evaluated_and_fires_via_the_semanti
         prepared_by: "Camerata (automated e2e test)".to_string(),
         ..Default::default()
     };
-    let json = report_export::build_report_json(&report, &HashMap::new(), Some(&corpus), &opts);
+    let json = report_export::build_report_json(
+        &report.clone().seal(),
+        &HashMap::new(),
+        Some(&corpus),
+        &opts,
+    );
 
     assert!(
         !json

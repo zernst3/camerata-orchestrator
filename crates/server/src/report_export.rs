@@ -3146,23 +3146,37 @@ pub(crate) fn parse_evidence_citation(evidence: &str) -> (String, usize) {
 /// Defect 4's injection point: for every rule the ledger would otherwise credit as healthy
 /// (`ran && findings_emitted == 0`, and genuinely zero findings in `report.findings` too) whose
 /// `RuleRecommendation::evidence` [`evidence_negates_requirement`], synthesize ONE advisory
-/// `Finding` and append it to a CLONED report, returned fresh — never mutates the caller's
-/// `report`. Deliberately runs BEFORE [`sanitize_report_findings`]/the partition loop in
-/// [`build_report_json`] rather than hand-building a `FindingRefJson`/`CuratedGroupJson` and
-/// splicing it into the matrix post hoc: this way the synthetic finding flows through the
-/// EXACT SAME classification, bucketing, citation, and counting machinery every real finding
-/// does, so it can never drift from (or break) this function's own reconciliation invariant
-/// (`candidates_reviewed == curated_total + held_for_review + excluded_false_positive +
-/// dependency_advisories`) the way a post-hoc splice into `matrix.held` without a matching
-/// `code_findings` entry would (an under-counted `curated_total` risking a `usize` underflow).
-/// `needs_review: true` is what actually routes it to the `held` bucket, via the PRE-EXISTING
-/// [`is_held_for_review`] gate — no new bucketing logic needed on that side. A no-op (returns
-/// an unmodified clone) when `report.recommendations` is empty, which covers the overwhelming
-/// majority of scans (deterministic-only, or no multi-option rule selected this run).
-fn inject_evidence_gate_findings(report: &ScanReport) -> ScanReport {
-    let mut report = report.clone();
+/// `Finding` and append it to `report.findings` IN PLACE.
+///
+/// # Pass-1 W1 seal fix (2026-10-09)
+///
+/// This used to run INSIDE [`build_report_json`], against a CLONED report, with the clone then
+/// silently shadowing that function's own `report` parameter — so the PDF's JSON saw the
+/// synthetic rows, but `xlsx_export::build_workbook` / `build_findings_export` (which read the
+/// ORIGINAL, un-injected `ScanReport` directly, never the exporter-local clone) never did. That
+/// was the exact shape of the measured defect: `findings.json`'s own `summary` (cloned from the
+/// PDF's `AuditReportJson`) described `N+K` rows while its `findings` array held only `N`.
+///
+/// The fix is a POSITION fix, not a logic fix: this function is now part of the SCAN pipeline,
+/// not the export pipeline. It must run exactly once, after every other row-adding pass
+/// (`crate::onboard::audit_repos`'s merges, `crate::merge_scan_preview`, the dependency audit)
+/// and strictly BEFORE [`crate::onboard::ScanReport::seal`] — see that method's doc comment for
+/// the full pipeline order. Every exporter then reads the SAME already-sealed row set, so the
+/// three artifacts can never disagree on which rows exist. Records its own
+/// `"evidence-gate-synthesis"` [`crate::scan_ledger::StageAccounting`] entry (an ADDITION-side
+/// stage — see that type's doc comment) so the rows it adds are accounted exactly as a
+/// row-removing merge stage already is, never invisible to the pipeline-integrity ledger.
+///
+/// A no-op (including no ledger stage — nothing to disclose) when `report.recommendations` is
+/// empty, which covers the overwhelming majority of scans (deterministic-only, or no
+/// multi-option rule selected this run). **Test-fixture note:** a fixture that wants to exercise
+/// this gate must populate `recommendations` — the standing `export_invariants_gate` fixture in
+/// this file does NOT (by design, to keep its own invariants independent of this gate), which is
+/// exactly why this defect shipped undetected; see the `req_d1`/`req_d2`/`req_c1` fixtures below
+/// for ones that deliberately populate it and assert `K > 0`.
+pub fn apply_evidence_gate(report: &mut crate::onboard::ScanReport) {
     if report.recommendations.is_empty() {
-        return report;
+        return;
     }
     let healthy_ids: std::collections::HashSet<String> = if report.ledger.rules().next().is_some() {
         report.ledger.healthy_rule_ids().into_iter().collect()
@@ -3208,8 +3222,18 @@ fn inject_evidence_gate_findings(report: &ScanReport) -> ScanReport {
             ..Finding::default()
         });
     }
+    if synthetic.is_empty() {
+        return;
+    }
+    let rows_in = report.findings.len();
+    let added = synthetic.len();
     report.findings.extend(synthetic);
+    let rows_out = report.findings.len();
+    let mut acc = crate::scan_ledger::StageAccounting::default();
+    acc.push_added("evidence_gate_synthesized", added);
     report
+        .ledger
+        .record_stage("evidence-gate-synthesis", rows_in, rows_out, acc);
 }
 
 /// Build the report's single output type from a completed scan + the client's triage
@@ -3234,15 +3258,16 @@ fn inject_evidence_gate_findings(report: &ScanReport) -> ScanReport {
 /// SQL-concat bug" and "your lockfile pins a CVE'd package" into one table would blur two
 /// very different remediation types (edit code vs. bump a version).
 pub fn build_report_json(
-    report: &ScanReport,
+    report: &crate::onboard::SealedReport,
     dispositions: &HashMap<String, DispositionWire>,
     corpus: Option<&camerata_rules::RuleSet>,
     opts: &ReportOptions,
 ) -> AuditReportJson {
-    // Defect 4: fold in the evidence-of-violation gate's synthetic advisory findings (if any)
-    // BEFORE sanitization, so they're sanitized/counted/bucketed identically to every real
-    // finding — see `inject_evidence_gate_findings`'s doc comment.
-    let report = &inject_evidence_gate_findings(report);
+    // Pass-1 W1 seal fix: the evidence-of-violation gate used to run HERE, against a private
+    // clone that then shadowed `report` — see `apply_evidence_gate`'s doc comment for the full
+    // defect this caused. It now runs upstream, as part of the scan pipeline, strictly before
+    // `report` was ever sealed — `report: &SealedReport` above is the compile-time guarantee
+    // that it already has.
     // C4-R3: sanitize zero-width/BOM code points out of every finding ONCE, here, before any
     // downstream section touches `path`/`snippet`/`detail`/`captures` — see
     // `sanitize_report_findings`'s doc comment. Shadows the parameter so every other line below
@@ -4443,7 +4468,7 @@ mod tests {
     fn build_report_json_strips_zero_width_characters_from_finding_paths() {
         let f = finding("SEC-1", "apps/\u{200B}web/\u{FEFF}a.ts", 1, "critical");
         let report = report_with(vec![f], vec!["SEC-1"]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         let serialized = serde_json::to_string(&json).unwrap();
         for c in ZERO_WIDTH_CODEPOINTS {
             assert!(
@@ -4462,9 +4487,9 @@ mod tests {
     fn build_findings_export_strips_zero_width_characters_from_finding_paths() {
         let f = finding("SEC-1", "apps/\u{200B}web/\u{FEFF}a.ts", 1, "critical");
         let report = report_with(vec![f], vec!["SEC-1"]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         let export = crate::xlsx_export::build_findings_export(
-            &report,
+            &report.clone().seal(),
             &HashMap::new(),
             None,
             &json,
@@ -4573,7 +4598,7 @@ mod tests {
         let merged = crate::ai_audit::merge_semantic_groups(vec![f], &[]);
 
         let report = report_with(merged, vec!["SEC-REG5-IDENTIFIER-HEAVY-1"]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         let json_value = serde_json::to_value(&json).unwrap();
 
         let mut checked_any = false;
@@ -4639,7 +4664,7 @@ mod tests {
         );
 
         let findings_export = crate::xlsx_export::build_findings_export(
-            &report,
+            &report.clone().seal(),
             &HashMap::new(),
             None,
             &json,
@@ -4679,7 +4704,7 @@ mod tests {
             wire("FalsePositive", "generated fixture", ""),
         );
         let report = report_with(vec![f1, f2], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
 
         assert_eq!(json.methodology.candidates_reviewed, 2);
         assert_eq!(json.methodology.excluded_false_positive, 1);
@@ -4698,7 +4723,7 @@ mod tests {
         let mut dispositions = HashMap::new();
         dispositions.insert(finding_key(&f), confirmed_wire("accepted for now"));
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
 
         assert_eq!(
             json.curated_findings[0].sites[0].disposition,
@@ -4723,7 +4748,7 @@ mod tests {
             wire("Ignored", "looks like defense-in-depth only", ""),
         );
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
 
         assert_eq!(
             json.curated_findings[0].sites[0].disposition,
@@ -4738,7 +4763,7 @@ mod tests {
         let mut dispositions = HashMap::new();
         dispositions.insert(finding_key(&f), wire("Ignored", "", ""));
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
 
         assert_eq!(
             json.curated_findings[0].sites[0].disposition,
@@ -4756,7 +4781,7 @@ mod tests {
         dispositions.insert(finding_key(&now_f), wire("TechDebt", "", "Now"));
         dispositions.insert(finding_key(&later_f), wire("TechDebt", "", "Later"));
         let report = report_with(vec![now_f, later_f], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
 
         assert_eq!(json.matrix.do_now.len(), 1);
         assert_eq!(json.matrix.plan.len(), 1);
@@ -4771,7 +4796,7 @@ mod tests {
         let mut f = finding("SEC-1", "a.rs", 1, "critical");
         f.effort = Some("low".to_string());
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(json.matrix.do_now.len(), 1);
         assert_eq!(json.executive_summary.open, 1);
@@ -4786,7 +4811,7 @@ mod tests {
         // No calibration ran (effort = None) — must NOT be treated as low-effort.
         let f = finding("SEC-1", "a.rs", 1, "high");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.matrix.do_next.len(), 1);
         assert_eq!(json.matrix.do_now.len(), 0);
     }
@@ -4795,7 +4820,7 @@ mod tests {
     fn unresolved_low_severity_is_plan() {
         let f = finding("STYLE-1", "a.rs", 1, "low");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.matrix.plan.len(), 1);
     }
 
@@ -4810,7 +4835,7 @@ mod tests {
         let f = finding("SEC-NO-HARDCODED-SECRETS-1", "a.rs", 1, "critical");
         assert_eq!(f.effort, None, "test fixture must not carry an effort estimate");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.matrix.do_now.len(), 1, "{:?}", json.matrix);
         assert_eq!(json.matrix.do_next.len(), 0);
         assert!(
@@ -4825,7 +4850,7 @@ mod tests {
         // conservative behavior: Do next, never Do now, never silently downgraded to Plan.
         let f = finding("ARCH-1", "a.rs", 1, "high");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.matrix.do_next.len(), 1);
         assert_eq!(json.matrix.do_now.len(), 0);
         assert_eq!(json.matrix.plan.len(), 0);
@@ -4837,7 +4862,7 @@ mod tests {
     fn unresolved_disposition_label_names_do_next_bucket() {
         let f = finding("ARCH-1", "a.rs", 1, "high");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(
             json.curated_findings[0].sites[0].disposition,
             "Open (recommended: Do next)"
@@ -4848,7 +4873,7 @@ mod tests {
     fn unresolved_disposition_label_names_plan_bucket() {
         let f = finding("STYLE-1", "a.rs", 1, "low");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(
             json.curated_findings[0].sites[0].disposition,
             "Open (recommended: Plan)"
@@ -4861,7 +4886,7 @@ mod tests {
     fn severity_casing_drift_is_normalized_not_silently_demoted_to_low() {
         let f = finding("SEC-1", "a.rs", 1, "Critical"); // upstream casing drift
         let report = report_with(vec![f], vec!["SEC-1"]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         // Must land in `do_now` (critical), never counted as `low` in the scorecard.
         assert_eq!(json.matrix.do_now.len(), 1, "{:?}", json.matrix);
         assert_eq!(json.scorecard.rows[0].critical, 1);
@@ -5005,7 +5030,7 @@ mod tests {
                     Security."
             .to_string();
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(
             json.curated_findings[0].sites[0].headline,
@@ -5034,7 +5059,7 @@ mod tests {
         let mut f = finding("SEC-1", "a.rs", 1, "critical");
         f.detail = "The profiles table has no RLS.".to_string();
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(
             !json.executive_summary.narrative.contains("As shipped"),
             "{}",
@@ -5058,7 +5083,7 @@ mod tests {
         let f1 = finding("SEC-1", "a.rs", 1, "critical");
         let f2 = finding("SEC-2", "b.rs", 2, "low");
         let report = report_with(vec![f1, f2], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(
             !json.executive_summary.narrative.contains("still open"),
             "{}",
@@ -5098,7 +5123,7 @@ mod tests {
         f2.effort = Some("low".to_string());
         f2.detail = "The service_role key ships to the browser.".to_string();
         let report = report_with(vec![f1, f2], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(json.three_things.items.len(), 2);
         assert_eq!(json.three_things.items[0].hours_label, "2 to 4 hours");
@@ -5116,7 +5141,7 @@ mod tests {
         let f = finding("SEC-1", "a.rs", 1, "critical");
         assert_eq!(f.effort, None);
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.three_things.items[0].hours_label, "not yet estimated");
         assert!(
             json.three_things
@@ -5138,7 +5163,7 @@ mod tests {
         f2.effort = Some("low".to_string());
         let f3 = finding("SEC-3", "c.rs", 3, "critical"); // no effort estimate
         let report = report_with(vec![f1, f2, f3], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.three_things.items.len(), 3);
         assert_eq!(
             json.three_things.total_hours_label,
@@ -5150,7 +5175,7 @@ mod tests {
     #[test]
     fn three_things_box_is_empty_when_no_do_now_items_exist() {
         let report = report_with(vec![], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(json.three_things.items.is_empty());
         assert_eq!(json.three_things.total_hours_label, "No do-now items this run.");
     }
@@ -5197,7 +5222,7 @@ mod tests {
             vec![holder, constructor, call_site, distinct_a, distinct_b],
             vec![],
         );
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(
             json.matrix.do_now.len(),
@@ -5265,7 +5290,7 @@ mod tests {
              is reachable with a single unauthenticated request."
                 .to_string();
         let report = report_with(vec![preconditioned, unconditional], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(json.matrix.do_now.len(), 2, "both are critical do-now items");
         assert_eq!(
@@ -5281,7 +5306,7 @@ mod tests {
         let f1 = finding("SEC-FIRST", "a.rs", 1, "critical");
         let f2 = finding("SEC-SECOND", "b.rs", 2, "critical");
         let report = report_with(vec![f1, f2], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(json.matrix.do_now.len(), 2);
         assert_eq!(
@@ -5298,7 +5323,7 @@ mod tests {
     fn category_fallback_is_title_cased_without_a_corpus() {
         let f = finding("SUPABASE-RLS-ENABLED-1", "a.sql", 1, "critical");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.scorecard.rows[0].category, "Supabase RLS");
     }
 
@@ -5309,7 +5334,7 @@ mod tests {
         let audited_owned: Vec<String> = (0..15).map(|i| format!("SEC-{i}")).collect();
         let audited: Vec<&str> = audited_owned.iter().map(String::as_str).collect();
         let report = report_with(vec![], audited);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.whats_healthy.rules.len(), 10);
         assert_eq!(json.whats_healthy.further_clean_count, 5);
     }
@@ -5321,7 +5346,7 @@ mod tests {
         let mut f = finding("SEC-1", "a.rs", 1, "high");
         f.snippet = (0..50).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         let capped = &json.curated_findings[0].sites[0].snippet;
         assert!(capped.lines().count() <= SNIPPET_MAX_LINES + 1, "{capped}");
         assert!(capped.contains("(truncated)"), "{capped}");
@@ -5339,7 +5364,7 @@ mod tests {
         let mut dispositions = HashMap::new();
         dispositions.insert(finding_key(&ignored), wire("Ignored", "known", ""));
         let report = report_with(vec![critical, high, ignored, dep], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         assert_eq!(json.cover.stats.critical, 1);
         assert_eq!(json.cover.stats.high, 1);
         assert_eq!(json.cover.stats.medium, 1);
@@ -5428,7 +5453,12 @@ mod tests {
         );
 
         let report = report_with(merged, vec![]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
 
         // Cover critical count == distinct criticals: the SQL-injection defect is the only
         // critical among the three merged defects, and it must count ONCE.
@@ -5514,7 +5544,7 @@ mod tests {
             .contains(&"AI-SITE-DEFECT-1".to_string()));
 
         let report = report_with(merged, vec!["SEC-DETERMINISTIC-SITE-1", "AI-SITE-DEFECT-1"]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         let group = json
             .curated_findings
@@ -5604,7 +5634,7 @@ mod tests {
         );
 
         let report = report_with(merged, vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         // Every code finding gets a `FindingRefJson` in exactly one matrix bucket regardless of
         // citation (the uncited-AI gate only changes WHICH bucket, never whether it's counted at
         // all) — so scanning every bucket is the general "both survive, nothing silently
@@ -5671,7 +5701,7 @@ mod tests {
         );
 
         let report = report_with(merged, vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         let rendered_critical_rows = json
             .curated_findings
@@ -5712,7 +5742,7 @@ mod tests {
         let info_tier = finding("ARCH-INFO-NOTE-1", "b.rs", 2, "info");
 
         let report = report_with(vec![hedged_medium, info_tier], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(
             json.matrix.informational.len(),
             1,
@@ -5753,7 +5783,7 @@ mod tests {
             wire("Ignored", "accepted", ""),
         );
         let report = report_with(vec![action_needed, clean_category_finding], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         assert_eq!(json.scorecard.rows[0].status, "Action-needed");
         assert_eq!(json.scorecard.rows[0].category, "Zzz");
         assert_eq!(json.scorecard.rows[1].status, "Clean");
@@ -5772,7 +5802,7 @@ mod tests {
     fn scorecard_rules_checked_is_at_least_one_for_a_category_whose_rule_was_never_pre_declared() {
         let f = finding("SOME-UNDECLARED-RULE-1", "a.rs", 1, "critical");
         let report = report_with(vec![f], vec![]); // audited_rule_ids deliberately empty.
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         let row = json
             .scorecard
             .rows
@@ -5801,7 +5831,7 @@ mod tests {
             wire("FalsePositive", "not exploitable", ""),
         );
         let report = report_with(vec![flagged, clean_only], vec!["ZZZ-1", "AAA-1"]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         assert_eq!(json.scorecard.rows.len(), 2, "{:?}", json.scorecard.rows);
         let clean_row = json
             .scorecard
@@ -5822,7 +5852,7 @@ mod tests {
         let mut f = finding("SEC-1", "a.rs", 1, "high");
         f.status = "suppressed-baseline".to_string();
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(
             json.curated_findings[0].sites[0].disposition,
             "Pre-existing accepted debt (baseline suppression)"
@@ -5845,7 +5875,7 @@ mod tests {
         f.preview = true;
         f.preview_tool = Some("semgrep".to_string());
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_ne!(
             json.curated_findings[0].sites[0].disposition,
             "Pre-existing accepted debt (baseline suppression)",
@@ -5870,7 +5900,7 @@ mod tests {
         let mut dispositions = HashMap::new();
         dispositions.insert(finding_key(&f), wire("TechDebt", "", "Now"));
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         assert_eq!(json.matrix.do_now.len(), 1);
     }
 
@@ -5883,7 +5913,7 @@ mod tests {
         let mut f = finding("SEC-1", "a.rs", 1, "high");
         f.status = "suppressed-inline".to_string();
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(
             json.curated_findings[0].sites[0].disposition,
             "Waived in code (inline camerata:allow)"
@@ -5899,7 +5929,7 @@ mod tests {
         let mut dispositions = HashMap::new();
         dispositions.insert(finding_key(&f), wire("TechDebt", "", "Now"));
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         assert_eq!(json.matrix.do_now.len(), 1);
     }
 
@@ -5915,7 +5945,12 @@ mod tests {
         );
         let f = finding("SEC-NO-UNSAFE-DESERIALIZATION-1", "a.py", 1, "critical");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
 
         let group = &json.curated_findings[0];
         assert_eq!(group.citation.kind, "grounded");
@@ -6060,7 +6095,12 @@ mod tests {
         let mut f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 1, "critical");
         f.captures.insert("table".to_string(), "profiles".to_string());
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         let fix = json.curated_findings[0].sites[0]
             .fix
             .as_deref()
@@ -6077,7 +6117,7 @@ mod tests {
         // which would make `json.curated_findings[0]` panic here for an unrelated reason.
         let f = finding("CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.curated_findings[0].sites[0].fix, None);
     }
 
@@ -6106,7 +6146,12 @@ mod tests {
         // doesn't also re-route it to held and mask the assertion below.
         f.effort = Some("medium".to_string());
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         assert_eq!(
             json.curated_findings[0].sites[0].fix, None,
             "an unauthored rule's Fix block must be omitted (None), never backfilled from directive"
@@ -6128,7 +6173,12 @@ mod tests {
             "sanity check: the shared `finding()` helper must not default to a fix_specific"
         );
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
 
         assert!(
             json.curated_findings.is_empty(),
@@ -6179,7 +6229,12 @@ mod tests {
         // is isolating the FIX half only, exactly like the test above.
         with_specific.effort = Some("low".to_string());
         let report = report_with(vec![with_specific], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         assert_eq!(json.matrix.held.len(), 0);
         assert_eq!(json.matrix.do_now.len(), 1);
         assert_eq!(json.curated_findings.len(), 1);
@@ -6197,7 +6252,12 @@ mod tests {
         rls.captures
             .insert("table".to_string(), "profiles".to_string());
         let report2 = report_with(vec![rls], vec!["SUPABASE-RLS-ENABLED-1"]);
-        let json2 = build_report_json(&report2, &HashMap::new(), Some(&real_corpus), &empty_opts());
+        let json2 = build_report_json(
+            &report2.clone().seal(),
+            &HashMap::new(),
+            Some(&real_corpus),
+            &empty_opts(),
+        );
         assert_eq!(json2.matrix.held.len(), 0);
         assert_eq!(json2.matrix.do_now.len(), 1);
         assert_eq!(json2.curated_findings.len(), 1);
@@ -6251,7 +6311,12 @@ mod tests {
         );
 
         let report = report_with(findings, Vec::new());
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
 
         let mut offenders = Vec::new();
         for group in &json.curated_findings {
@@ -6298,7 +6363,12 @@ mod tests {
         let findings = crate::onboard::audit_files("owner/repo", &files);
         assert!(!findings.is_empty());
         let report = report_with(findings, Vec::new());
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         for group in &json.curated_findings {
             for site in &group.sites {
                 let (_, hours_label) = effort_hours_bounds(site.effort.as_deref());
@@ -6346,7 +6416,12 @@ mod tests {
         assert_eq!(f.effort, None, "fixture must simulate never-calibrated");
 
         let report = report_with(vec![f.clone()], vec!["SUPABASE-FUNC-SEARCH-PATH-1"]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
 
         // ── findings.json (CuratedSiteJson) ──
         let site = &json
@@ -6374,7 +6449,7 @@ mod tests {
         // sibling module inspects it the same way an external consumer of `findings.json`
         // would: through its serialized shape.
         let findings_export = crate::xlsx_export::build_findings_export(
-            &report,
+            &report.clone().seal(),
             &HashMap::new(),
             Some(&corpus),
             &json,
@@ -6431,7 +6506,7 @@ mod tests {
         let unlocated = finding("SUPABASE-RLS-POLICY-DISABLED-1", "", 0, "critical");
         assert_eq!(unlocated.confidence, None, "never calibrated");
         let report = report_with(vec![unlocated], vec!["SUPABASE-RLS-POLICY-DISABLED-1"]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(
             json.matrix.informational.len(),
@@ -6469,7 +6544,12 @@ mod tests {
         f.needs_review = true;
         f.effort = Some("medium".to_string());
         let report = report_with(vec![f], vec!["SUPABASE-RLS-ENABLED-1"]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         assert!(
             json.curated_findings.is_empty(),
             "a hedged row — even high severity — must never render under Curated findings: {:?}",
@@ -6508,7 +6588,7 @@ mod tests {
         assert_eq!(f.confidence, None);
         assert_eq!(f.effort, None);
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(
             json.curated_findings.len(),
@@ -6554,7 +6634,12 @@ mod tests {
         ];
         let findings = crate::onboard::audit_files("owner/repo", &files);
         let report = report_with(findings, Vec::new());
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         let group = json
             .curated_findings
             .iter()
@@ -6611,7 +6696,12 @@ mod tests {
         // must carry that same grounded citation — not fall through to "advisory".
         let f = finding("SEC-NO-RAW-SQL-CONCAT-1", "a.py", 1, "critical");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         let group = json
             .curated_findings
             .iter()
@@ -6678,7 +6768,12 @@ mod tests {
 
         // End-to-end: the curated-set builder renders it grounded too, not advisory.
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         let group = json
             .curated_findings
             .iter()
@@ -6742,7 +6837,12 @@ mod tests {
             // End-to-end: the curated-set builder renders it grounded, AND preserves this
             // finding's own distinct severity — never flattened to one shared value.
             let report = report_with(vec![f], vec![]);
-            let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+            let json = build_report_json(
+                &report.clone().seal(),
+                &HashMap::new(),
+                Some(&corpus),
+                &empty_opts(),
+            );
             let group = json
                 .curated_findings
                 .iter()
@@ -6816,7 +6916,12 @@ mod tests {
 
         // End-to-end: the curated-set builder renders it grounded too, not advisory.
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         let group = json
             .curated_findings
             .iter()
@@ -6866,7 +6971,12 @@ mod tests {
         let findings = crate::onboard::audit_files("owner/repo", &files);
         assert!(findings.is_empty(), "fixture must genuinely be clean");
         let report = report_with(findings, Vec::new());
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         assert!(json.curated_findings.is_empty());
         assert_eq!(json.matrix.do_now.len(), 0);
         assert_eq!(json.matrix.do_next.len(), 0);
@@ -6884,7 +6994,7 @@ mod tests {
                 .to_string(),
         );
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(
             json.curated_findings[0].sites[0]
                 .fix_for_this_finding
@@ -6898,7 +7008,7 @@ mod tests {
         // Back-compat / deterministic-only-scan case: `fix_specific` was never set.
         let f = finding("ARCH-1", "a.rs", 1, "high");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.curated_findings[0].sites[0].fix_for_this_finding, None);
     }
 
@@ -6943,7 +7053,12 @@ mod tests {
         f.confidence = None;
 
         let report = report_with(vec![f], vec!["SUPABASE-RLS-ENABLED-1"]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
 
         assert_eq!(
             json.matrix.do_now.len(),
@@ -7013,7 +7128,12 @@ mod tests {
         f.confidence = Some("needs-review".to_string());
         f.needs_review = true;
         let report = report_with(vec![f], vec!["SUPABASE-RLS-ENABLED-1"]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         assert!(
             json.curated_findings.is_empty(),
             "a hedged row, even high severity, must never render under Curated findings: {:?}",
@@ -7033,7 +7153,7 @@ mod tests {
         // bucket placement never depended on `fix_specific` being present.
         let f = finding("ARCH-1", "a.rs", 1, "critical");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.matrix.do_now.len(), 1);
     }
 
@@ -7417,7 +7537,7 @@ mod tests {
         // before, curated with the honest "AI-advisory, model-inferred." label.
         let f = finding("CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.curated_findings[0].citation.kind, "advisory");
         assert_eq!(
             json.curated_findings[0].citation.label,
@@ -7437,7 +7557,7 @@ mod tests {
     fn citation_gate_holds_an_unclassifiable_ai_finding_out_of_curated_as_uncited() {
         let f = finding("AI-CUSTOM-ARCH-RULE-1", "a.rs", 1, "medium");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(
             json.curated_findings.is_empty(),
             "an uncited AI finding must never appear in curated_findings: {:?}",
@@ -7486,7 +7606,7 @@ mod tests {
     fn citation_gate_routes_a_critical_uncited_ai_finding_to_held_not_informational() {
         let f = finding("AI-SOME-NOVEL-DEFECT", "a.rs", 1, "critical");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(json.curated_findings.is_empty());
         assert_eq!(json.matrix.do_now.len(), 0);
         assert_eq!(
@@ -7530,9 +7650,14 @@ mod tests {
         let grounded = finding("SEC-NO-HARDCODED-SECRETS-1", "a.rs", 1, "critical");
         let uncited_ai = finding("AI-SOME-NOVEL-DEFECT", "b.rs", 2, "critical");
         let report = report_with(vec![grounded, uncited_ai], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         let findings_export = crate::xlsx_export::build_findings_export(
-            &report,
+            &report.clone().seal(),
             &HashMap::new(),
             Some(&corpus),
             &json,
@@ -7596,7 +7721,12 @@ mod tests {
         );
         rls.detail = "Row Level Security is disabled on the payments table.".to_string();
         let report = report_with(vec![rls], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
 
         assert!(is_ai_tier(&finding(
             "AI-CROSS-TENANT-RLS-1",
@@ -7841,7 +7971,12 @@ mod tests {
             vec![rls, xss, redirect, token, grammar, cors, unmapped],
             vec![],
         );
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
 
         assert_eq!(
             json.curated_findings.len(),
@@ -7890,7 +8025,7 @@ mod tests {
         f.preview = true;
         f.preview_tool = Some("ruff".to_string());
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.curated_findings[0].citation.kind, "preview");
         assert!(json.curated_findings[0].citation.label.contains("ruff"));
     }
@@ -7901,7 +8036,7 @@ mod tests {
     fn whats_healthy_is_audited_rules_minus_rules_with_findings() {
         let f = finding("SEC-1", "a.rs", 1, "high");
         let report = report_with(vec![f], vec!["SEC-1", "SEC-2", "SEC-3"]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         let healthy_ids: Vec<&str> = json
             .whats_healthy
             .rules
@@ -7922,7 +8057,7 @@ mod tests {
             wire("FalsePositive", "not exploitable", ""),
         );
         let report = report_with(vec![f], vec!["SEC-1"]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         let healthy_ids: Vec<&str> = json
             .whats_healthy
             .rules
@@ -7940,7 +8075,7 @@ mod tests {
         f.snippet = "time@0.3.20".to_string();
         f.detail = "RUSTSEC-2023-0001: potential segfault (affects time@0.3.20)".to_string();
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert!(
             json.curated_findings.is_empty(),
@@ -7961,7 +8096,7 @@ mod tests {
     #[test]
     fn dependency_snapshot_clean_when_no_dep_findings() {
         let report = report_with(vec![], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(json.dependency_snapshot.clean);
         assert!(json.whats_healthy.dependency_clean);
     }
@@ -7979,7 +8114,7 @@ mod tests {
                 message: "ruff not installed".to_string(),
             },
         ];
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.dependency_snapshot.coverage_notes.len(), 1);
         assert!(json.dependency_snapshot.coverage_notes[0].contains("network unavailable"));
     }
@@ -7991,7 +8126,7 @@ mod tests {
         let report = report_with(vec![], vec![]);
         let mut opts = empty_opts();
         opts.executive_summary_override = Some("Custom hand-written summary.".to_string());
-        let json = build_report_json(&report, &HashMap::new(), None, &opts);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &opts);
         assert_eq!(
             json.executive_summary.narrative,
             "Custom hand-written summary."
@@ -8004,7 +8139,7 @@ mod tests {
         // S7: a zero-candidate scan gets its own honest sentence, not a mechanical
         // "0 candidate finding(s) were reviewed... 0 do now, 0 do next..." run-on.
         let report = report_with(vec![], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(!json.executive_summary.is_override);
         assert_eq!(
             json.executive_summary.narrative,
@@ -8017,7 +8152,7 @@ mod tests {
         // S8: real pluralization ("1 candidate finding", not "1 candidate finding(s)").
         let f = finding("SEC-1", "a.rs", 1, "critical");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(
             json.executive_summary.narrative.contains("1 candidate finding."),
             "expected singular 'finding', got: {:?}",
@@ -8066,7 +8201,12 @@ mod tests {
             vec![long_path_finding, other_finding],
             vec!["SEC-NO-UNSAFE-HTML-SINK-1", "SEC-NO-HARDCODED-SECRETS-1"],
         );
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         assert_eq!(
             json.review_state,
             ReviewState::Raw,
@@ -8251,7 +8391,7 @@ mod tests {
         );
         f.snippet = multibyte_snippet.clone();
         let report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(
             json.curated_findings.len(),
             1,
@@ -8318,7 +8458,7 @@ mod tests {
         opts.client_name = "Acme Corp".to_string();
         opts.project_title = "Acme Backend Audit".to_string();
         opts.prepared_by = "Camerata".to_string();
-        let json = build_report_json(&report, &HashMap::new(), None, &opts);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &opts);
 
         let pdf = compile_pdf(&json)
             .await
@@ -8355,7 +8495,7 @@ mod tests {
             pass: "rule-alternative recommendations".to_string(),
             reason: "Claude CLI timed out after 300s (no output).".to_string(),
         }];
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.executive_summary.failed_passes.len(), 1);
         assert_eq!(json.methodology.failed_passes.len(), 1);
 
@@ -8398,7 +8538,12 @@ mod tests {
                 .to_string(),
         );
         let report = report_with(vec![f], vec!["SUPABASE-RLS-ENABLED-1"]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         assert!(json.curated_findings[0].sites[0]
             .fix_for_this_finding
             .is_some());
@@ -8438,7 +8583,7 @@ mod tests {
             .to_string();
 
         let report = report_with(vec![low, critical, info], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         // JSON-level contract: 2 genuinely curated groups (ordered critical-first despite the
         // alphabetical trap), 1 fully-informational group moved out to its own list.
@@ -8562,7 +8707,7 @@ mod tests {
         findings.push(hedge);
 
         let report = report_with(findings, vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         // ── Counted ──
         assert_eq!(
@@ -8684,7 +8829,7 @@ mod tests {
         }
 
         let report = report_with(findings, vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         let rendered_critical_blocks = json
             .curated_findings
@@ -8805,7 +8950,7 @@ mod tests {
         }
 
         let report = report_with(findings, vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         for (bucket, sev, tag) in &expectations {
             let (group_list, group_list_name) = match *bucket {
@@ -9249,7 +9394,7 @@ mod tests {
             vec![action, advisory],
             vec!["SEC-NO-HARDCODED-SECRETS-1", "SOME-RULE-1"],
         );
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(json.matrix.informational.len(), 1, "the info finding is in the appendix");
         assert_eq!(json.matrix.informational[0].path, "b.rs");
@@ -9291,7 +9436,7 @@ mod tests {
                 "SUPABASE-RLS-POLICY-DISABLED-1",
             ],
         );
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         // Still present — downgraded, not dropped.
         assert_eq!(
@@ -9361,7 +9506,7 @@ mod tests {
             grouped,
             vec!["ARCH-SOME-PREFERENCE-1", "SEC-NO-HARDCODED-SECRETS-1"],
         );
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(
             json.matrix.held.len(),
@@ -9417,7 +9562,7 @@ mod tests {
         // actually about.
         hedged.preview_tool = Some("clippy".to_string());
         let report = report_with(vec![hedged], vec!["SOME-HEDGED-RULE-1"]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(json.matrix.held.len(), 1);
         assert_eq!(json.matrix.held[0].bucket, "held");
@@ -9514,7 +9659,7 @@ mod tests {
         let report = report_with(vec![f], vec![]);
         let mut opts = empty_opts();
         opts.brand = "Cantus Works".to_string();
-        let json = build_report_json(&report, &HashMap::new(), None, &opts);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &opts);
         assert_eq!(json.cover.brand, Some("Cantus Works".to_string()));
     }
 
@@ -9527,7 +9672,7 @@ mod tests {
         // "Camerata" on the cover.
         let f = finding("SEC-1", "a.rs", 1, "low");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.cover.brand, None);
     }
 
@@ -9582,7 +9727,7 @@ mod tests {
             vec![critical_low, high_medium, high_uncalibrated, low_sev],
             vec![],
         );
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         let grid = &json.priority_grid;
 
         // Row/column presence: critical, high, low severities all appear (all land in an
@@ -9621,7 +9766,7 @@ mod tests {
         let mut dispositions = HashMap::new();
         dispositions.insert(finding_key(&accepted), wire("Ignored", "accepted for now", ""));
         let report = report_with(vec![accepted, info], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
 
         // Neither finding appears in any grid cell.
         for row in &json.priority_grid.rows {
@@ -9639,7 +9784,7 @@ mod tests {
     #[test]
     fn priority_grid_is_empty_when_no_action_tier_findings_exist() {
         let report = report_with(vec![], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(json.priority_grid.rows.is_empty());
         assert!(json.priority_grid.columns.is_empty());
     }
@@ -9670,7 +9815,7 @@ mod tests {
         let mut f = finding("SUPABASE-RLS-ENABLED-1", "a.sql", 1, "critical");
         f.effort = Some("low".to_string());
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(
             json.three_things.items[0].impact,
             business_impact_for_rule("SUPABASE-RLS-ENABLED-1").map(str::to_string)
@@ -9681,7 +9826,7 @@ mod tests {
     fn three_things_items_impact_is_none_for_an_unauthored_rule() {
         let f = finding("ARCH-1", "a.rs", 1, "critical");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.three_things.items[0].impact, None);
     }
 
@@ -9690,7 +9835,7 @@ mod tests {
     #[test]
     fn methodology_next_steps_reports_no_fix_rate_for_a_zero_candidate_run() {
         let report = report_with(vec![], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(!json.methodology.next_steps.is_empty());
         assert!(
             json.methodology
@@ -9718,7 +9863,7 @@ mod tests {
             wire("FalsePositive", "generated fixture", ""),
         );
         let report = report_with(vec![f1, f2, f3, f4], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
 
         assert_eq!(json.methodology.candidates_reviewed, 4);
         assert_eq!(json.methodology.excluded_false_positive, 1);
@@ -9822,7 +9967,7 @@ mod tests {
             pass: "rule-alternative recommendations".to_string(),
             reason: "Claude CLI timed out after 300s (no output).".to_string(),
         }];
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(json.methodology.failed_passes.len(), 1);
         assert!(
@@ -9856,7 +10001,7 @@ mod tests {
             report.failed_passes.is_empty(),
             "sanity: the base fixture has no failed pass"
         );
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert!(
             json.methodology.failed_passes.is_empty(),
@@ -9939,7 +10084,7 @@ mod tests {
                      any finding this run"
                 .to_string(),
         }];
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(json.methodology.failed_passes.len(), 1);
         assert!(
@@ -10186,7 +10331,7 @@ mod tests {
     fn no_dispositions_at_all_is_raw_review_state() {
         let f = finding("SEC-1", "a.rs", 1, "critical");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.review_state, ReviewState::Raw);
         assert!(json.review_state.is_draft());
     }
@@ -10202,7 +10347,7 @@ mod tests {
         let mut inline = finding("SEC-2", "b.rs", 2, "high");
         inline.status = "suppressed-inline".to_string();
         let report = report_with(vec![baseline, inline], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(
             json.review_state,
             ReviewState::Raw,
@@ -10220,7 +10365,7 @@ mod tests {
         let mut dispositions = HashMap::new();
         dispositions.insert(finding_key(&f1), wire("Ignored", "defense in depth", ""));
         let report = report_with(vec![f1, f2], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         assert_eq!(json.review_state, ReviewState::Reviewed);
         assert!(!json.review_state.is_draft());
     }
@@ -10235,7 +10380,7 @@ mod tests {
         let mut f2 = finding("SEC-2", "b.rs", 2, "medium"); // -> needs-review, held
         f2.confidence = Some("needs-review".to_string());
         let report = report_with(vec![f1, f2], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         // The flag.
         assert_eq!(json.review_state, ReviewState::Raw);
@@ -10307,7 +10452,7 @@ mod tests {
         );
 
         let report = report_with(vec![ignored, held, excluded], vec![]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
 
         assert_eq!(json.review_state, ReviewState::Reviewed);
         assert!(!json.review_state.is_draft());
@@ -10351,7 +10496,7 @@ mod tests {
     #[test]
     fn zero_candidates_raw_scan_keeps_the_empty_state_sentence() {
         let report = report_with(vec![], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.review_state, ReviewState::Raw);
         assert_eq!(
             json.executive_summary.narrative,
@@ -10468,7 +10613,7 @@ mod tests {
         let report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
         // No dispositions recorded at all -> Raw/unreviewed, same source of truth the draft
         // banner and the sign-off block both read.
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.review_state, ReviewState::Raw);
         assert!(json.review_state.is_draft());
 
@@ -10495,7 +10640,7 @@ mod tests {
         }
         let f = finding("SEC-NO-HARDCODED-SECRETS-1", "", 0, "critical");
         let report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         let pdf = compile_pdf(&json)
             .await
             .expect("compile_pdf must succeed even when a finding has an empty path");
@@ -10521,7 +10666,7 @@ mod tests {
         let mut dispositions = HashMap::new();
         dispositions.insert(finding_key(&f), wire("Ignored", "test fixture only", ""));
         let report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
-        let json = build_report_json(&report, &dispositions, None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &dispositions, None, &empty_opts());
         assert_eq!(json.review_state, ReviewState::Reviewed);
 
         let pdf = compile_pdf(&json)
@@ -10674,7 +10819,7 @@ mod tests {
     fn cover_prepared_by_is_never_blank_with_default_options() {
         let f = finding("SEC-1", "a.rs", 1, "low");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.cover.prepared_by, DEFAULT_PREPARED_BY);
         assert_ne!(json.cover.prepared_by, "");
     }
@@ -10687,7 +10832,7 @@ mod tests {
         let mut report = report_with(vec![f], vec![]);
         report.code_lines = 0;
         report.code_lines_by_language = Vec::new();
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(
             json.cover.code_volume.is_none(),
             "zero code_lines must hide the row, not print a zero"
@@ -10701,7 +10846,7 @@ mod tests {
     fn cover_code_volume_is_some_with_real_lines_and_language_breakdown_when_known() {
         let f = finding("SEC-1", "a.rs", 1, "low");
         let report = report_with(vec![f], vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         let cv = json
             .cover
             .code_volume
@@ -10751,7 +10896,7 @@ mod tests {
             "two raw findings at the same file+line must merge to one before counting"
         );
         let report = report_with(merged, vec![]);
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(
             json.cover.stats.high, 1,
             "the merged high finding must count once, not twice"
@@ -10776,7 +10921,7 @@ mod tests {
         let mut report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
         report.code_lines = 0;
         report.code_lines_by_language = Vec::new();
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(json.cover.code_volume.is_none());
 
         let pdf = compile_pdf(&json)
@@ -11162,17 +11307,26 @@ mod export_invariants_gate {
             ],
         );
 
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         let findings_export = xlsx_export::build_findings_export(
-            &report,
+            &report.clone().seal(),
             &HashMap::new(),
             Some(&corpus),
             &json,
             &HashMap::new(),
         );
-        let workbook =
-            xlsx_export::build_workbook(&report, &HashMap::new(), Some(&corpus), &empty_opts())
-                .expect("the workbook must build for the representative synthetic report");
+        let workbook = xlsx_export::build_workbook(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        )
+        .expect("the workbook must build for the representative synthetic report");
 
         Fixture {
             json_value: serde_json::to_value(&json).expect("AuditReportJson must serialize"),
@@ -11378,17 +11532,26 @@ mod export_invariants_gate {
         f.detail = "A secret\u{FEFF} literal is hardcoded here\u{200D}.".to_string();
         f.snippet = "const API_KEY = \"abc\u{200C}def\";".to_string();
         let report = report_with(vec![f], vec!["SEC-NO-HARDCODED-SECRETS-1"]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         let findings_export = xlsx_export::build_findings_export(
-            &report,
+            &report.clone().seal(),
             &HashMap::new(),
             Some(&corpus),
             &json,
             &HashMap::new(),
         );
-        let workbook =
-            xlsx_export::build_workbook(&report, &HashMap::new(), Some(&corpus), &empty_opts())
-                .expect("workbook must build");
+        let workbook = xlsx_export::build_workbook(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        )
+        .expect("workbook must build");
 
         let json_text = serde_json::to_string(&json).expect("must serialize");
         let findings_text = serde_json::to_string(&findings_export).expect("must serialize");
@@ -11938,7 +12101,12 @@ mod export_invariants_gate {
         );
 
         let report = report_with(merged, vec![]);
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
         let groups: Vec<&str> = json
             .curated_findings
             .iter()
@@ -12086,7 +12254,12 @@ mod export_invariants_gate {
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
 
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
 
         let healthy_ids: std::collections::HashSet<&str> = json
             .whats_healthy
@@ -12174,7 +12347,12 @@ mod export_invariants_gate {
         let corpus_path = camerata_rules::corpus_path();
         let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
         assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
-        let json = build_report_json(&report, &HashMap::new(), Some(&corpus), &empty_opts());
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
 
         let found = json
             .methodology
@@ -12404,7 +12582,7 @@ mod export_invariants_gate {
         }
         report.ledger = ledger;
 
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert_eq!(
             json.executive_summary.failed_passes.len(),
@@ -12473,7 +12651,7 @@ mod export_invariants_gate {
             0,
         );
         report.ledger = ledger;
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.executive_summary.failed_passes.len(), 1);
         assert!(json.executive_summary.failed_passes[0].contains("1 rule"));
         assert!(!json.executive_summary.failed_passes[0].contains("PYTHON-PARAMETERIZED-SQL-1"));
@@ -12527,8 +12705,16 @@ mod export_invariants_gate {
                     applicable: true,
                 },
             );
+            // Pass-1 W1 seal fix (exception (a) — a deliberate code/data-structure change this
+            // test must adapt to): the evidence gate used to run IMPLICITLY inside
+            // `build_report_json` (see `apply_evidence_gate`'s doc comment for why that was
+            // itself the bug); it is now an explicit upstream pipeline step the caller runs
+            // BEFORE sealing, exactly like `onboard_audit`/`onboard_audit_start` do in
+            // `lib.rs`. Every assertion below is unchanged — only the missing call is added.
+            apply_evidence_gate(&mut report);
 
-            let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+            let json =
+                build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
             assert!(
                 !json
@@ -12597,8 +12783,13 @@ mod export_invariants_gate {
                 applicable: true,
             },
         );
+        // Pass-1 W1 seal fix (exception (a), same as the negative-case test above): the gate
+        // must run explicitly now. Without this call the test would still pass, but
+        // VACUOUSLY — it would no longer actually exercise the gate's "confirms compliance,
+        // never flags" branch at all.
+        apply_evidence_gate(&mut report);
 
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
 
         assert!(
             json.whats_healthy
@@ -12634,11 +12825,15 @@ mod export_invariants_gate {
             0,
         );
         report.ledger = ledger;
-        let json = build_report_json(&report, &HashMap::new(), None, &empty_opts());
+        // Pass-1 W1 seal fix: explicit now (a no-op here — `report.recommendations` is empty —
+        // but called for consistency with the real pipeline order; see the sibling tests above).
+        apply_evidence_gate(&mut report);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert!(json
             .whats_healthy
             .rules
             .iter()
             .any(|r| r.rule_id == "SEC-NO-HARDCODED-SECRETS-1"));
     }
+
 }

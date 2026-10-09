@@ -261,7 +261,12 @@ async fn cross_tenant_read_finding_reaches_curated_findings_high_and_grounded() 
         executive_summary_override: None,
         ..Default::default()
     };
-    let json = report_export::build_report_json(&report, &dispositions, Some(&corpus), &opts);
+    let json = report_export::build_report_json(
+        &report.clone().seal(),
+        &dispositions,
+        Some(&corpus),
+        &opts,
+    );
 
     // ═══ STEP 3: the finding survives as a CURATED finding — High, right file:line, ═══
     // grounded citation (CWE-639 — Authorization Bypass Through User-Controlled Key — the SAME

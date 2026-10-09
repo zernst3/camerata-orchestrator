@@ -242,7 +242,12 @@ async fn ledger_reconciles_and_the_no_detector_rule_is_excluded_never_healthy() 
         executive_summary_override: None,
         ..Default::default()
     };
-    let json = report_export::build_report_json(&report, &dispositions, Some(&corpus), &opts);
+    let json = report_export::build_report_json(
+        &report.clone().seal(),
+        &dispositions,
+        Some(&corpus),
+        &opts,
+    );
 
     let healthy_ids: std::collections::HashSet<&str> =
         json.whats_healthy.rules.iter().map(|r| r.rule_id.as_str()).collect();

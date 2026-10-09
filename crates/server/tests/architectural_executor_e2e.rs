@@ -223,7 +223,12 @@ async fn architectural_finding_rides_through_report_to_pdf() {
         executive_summary_override: None,
         ..Default::default()
     };
-    let json = report_export::build_report_json(&report, &dispositions, Some(&corpus), &opts);
+    let json = report_export::build_report_json(
+        &report.clone().seal(),
+        &dispositions,
+        Some(&corpus),
+        &opts,
+    );
 
     // ═══ STEP 3: the finding survives as a CURATED finding, with the table/file/line/caveat ═══
     // intact and (because SUPABASE-RLS-ENABLED-1 is a real grounded corpus rule) a citation

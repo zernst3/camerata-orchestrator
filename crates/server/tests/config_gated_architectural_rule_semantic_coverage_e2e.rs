@@ -277,7 +277,12 @@ async fn config_gated_rule_with_no_architecture_config_gets_an_accurate_note_and
         prepared_by: "Camerata (automated e2e test)".to_string(),
         ..Default::default()
     };
-    let json = report_export::build_report_json(&report, &HashMap::new(), Some(&corpus), &opts);
+    let json = report_export::build_report_json(
+        &report.clone().seal(),
+        &HashMap::new(),
+        Some(&corpus),
+        &opts,
+    );
     assert!(
         !json
             .whats_healthy

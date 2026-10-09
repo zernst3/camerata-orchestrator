@@ -257,7 +257,12 @@ async fn cross_file_config_handler_defect_survives_the_semantic_tier_to_the_expo
         prepared_by: "Camerata (automated e2e test)".to_string(),
         ..Default::default()
     };
-    let json = report_export::build_report_json(&report, &HashMap::new(), Some(&corpus), &opts);
+    let json = report_export::build_report_json(
+        &report.clone().seal(),
+        &HashMap::new(),
+        Some(&corpus),
+        &opts,
+    );
 
     // The row must be VISIBLE somewhere in the export — never silently dropped. A critical,
     // uncited (no grounded-citation vocabulary) AI-tier finding routes to the severity-

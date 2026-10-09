@@ -120,14 +120,19 @@ async fn server_path_export(report: &ScanReport) -> (String, Vec<u8>) {
     let mut options = ReportOptions::default();
     options.apply_env_defaults();
 
-    let json = report_export::build_report_json(report, &dispositions, None, &options);
+    // Pass-1 W1 seal fix: `report_export::build_report_json`/`xlsx_export::build_workbook`/
+    // `build_findings_export` now take `&SealedReport` — seal the fixture here (a cheap clone;
+    // this hand-built test fixture has no row-adding passes of its own left to run).
+    let sealed = report.clone().seal();
+
+    let json = report_export::build_report_json(&sealed, &dispositions, None, &options);
     let pdf_bytes = report_export::compile_pdf(&json)
         .await
         .expect("compile_pdf must succeed with typst on PATH");
-    let xlsx_bytes = xlsx_export::build_workbook(report, &dispositions, None, &options)
+    let xlsx_bytes = xlsx_export::build_workbook(&sealed, &dispositions, None, &options)
         .expect("build_workbook must succeed");
     let findings_export = xlsx_export::build_findings_export(
-        report,
+        &sealed,
         &dispositions,
         None,
         &json,
@@ -216,7 +221,7 @@ async fn cli_export_assembly_matches_the_server_product_export_path_byte_for_byt
 
     let report = fixture_report();
 
-    let (cli_stem, cli_zip) = build_product_export_bytes(&report, None)
+    let (cli_stem, cli_zip) = build_product_export_bytes(&report.clone().seal(), None)
         .await
         .expect("the CLI's export assembly must succeed");
     let (server_stem, server_zip) = server_path_export(&report).await;

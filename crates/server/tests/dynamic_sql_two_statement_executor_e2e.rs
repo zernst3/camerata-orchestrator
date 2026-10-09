@@ -262,7 +262,12 @@ async fn two_statement_finding_reaches_curated_findings_critical_and_grounded() 
         executive_summary_override: None,
         ..Default::default()
     };
-    let json = report_export::build_report_json(&report, &dispositions, Some(&corpus), &opts);
+    let json = report_export::build_report_json(
+        &report.clone().seal(),
+        &dispositions,
+        Some(&corpus),
+        &opts,
+    );
 
     // ═══ STEP 3: the finding survives as a CURATED finding — Critical, right file:line, ═══
     // grounded citation.

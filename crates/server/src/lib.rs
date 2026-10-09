@@ -5317,6 +5317,10 @@ async fn onboard_audit(
         if run_deterministic {
             use tokio::time::{timeout, Duration};
             let dep_audit_timeout = Duration::from_secs(60);
+            // Pass-1 W1 seal fix: snapshotted so the whole loop's net additions get ONE ledger
+            // stage entry (a no-op when every repo's dep-audit found nothing new) — see
+            // `crate::scan_ledger::record_addition_stage`'s doc comment.
+            let dep_audit_rows_in = report.findings.len();
             for (spec, dir) in &sources {
                 let spec = spec.as_str();
                 let run = crate::dep_audit::run_dep_audit(spec, dir);
@@ -5339,7 +5343,22 @@ async fn onboard_audit(
                     report.coverage_notes.push(note);
                 }
             }
+            crate::scan_ledger::record_addition_stage(
+                &mut report.ledger,
+                "dependency-audit-merge",
+                dep_audit_rows_in,
+                report.findings.len(),
+                "dep_audit_findings",
+            );
         }
+
+        // ── Pass-1 W1 seal fix: evidence-of-violation gate — LAST row-adding pass ────
+        // Runs strictly after every other pass above (the floor/AI/architectural merges
+        // inside `audit_repos`, the preview-linter merge, the dependency audit) and strictly
+        // before `report` is persisted into `last_scan`/`scan_cache` or returned to the
+        // caller — this IS the "row set is final" point for this scan. See
+        // `report_export::apply_evidence_gate`'s doc comment.
+        crate::report_export::apply_evidence_gate(&mut report);
 
         // ── Enforcement-catch ledger capture (terminal point 2: scan completion) ─────
         // After a scan completes, write one floor/catch record for each ACTIVE floor
@@ -5875,6 +5894,14 @@ pub async fn merge_scan_preview(
     // no selected rule this scan routed to it). See `scan_tools::run_scan_tools`'s doc comment.
     let mut tools_attempted: std::collections::HashSet<&'static str> =
         std::collections::HashSet::new();
+    // Pass-1 W1 seal fix: this pass runs AFTER `onboard::audit_repos`'s own merge stages and
+    // strictly APPENDS findings — the exact "row-adding pass that ran outside the ledger's
+    // view" shape this fixes (see `crate::scan_ledger::StageAccounting::added`'s doc comment).
+    // `rows_in` is snapshotted now, before the per-repo loop below mutates `report.findings`;
+    // `rows_out`/the ledger stage are recorded at the very end of this function, alongside
+    // `reconcile_external_tool_ledger` (the other end-of-pass reconciliation this function
+    // already does).
+    let rows_in = report.findings.len();
     if !preview_rules.is_empty() {
         if let Some(set) = corpus {
             let lookup = |id: &str| set.get_by_id(id);
@@ -5918,6 +5945,18 @@ pub async fn merge_scan_preview(
             }
         }
     }
+    // Pass-1 W1 seal fix: one ledger stage entry for every row this pass ADDED (net of its own
+    // internal `dedup_scan_previews` collapsing), a no-op when nothing was added this run. See
+    // the `rows_in` snapshot at the top of this function and
+    // `crate::scan_ledger::record_addition_stage`'s doc comment.
+    let rows_out = report.findings.len();
+    crate::scan_ledger::record_addition_stage(
+        &mut report.ledger,
+        "external-tool-preview-merge",
+        rows_in,
+        rows_out,
+        "external_tool_preview_findings",
+    );
     // W3: reconcile the ledger's ExternalTool-tier entries against what ACTUALLY happened in
     // the pass above — unconditionally, even when the pass above never ran at all (empty
     // `preview_rules` / no corpus), because `onboard::audit_repos`'s CI-tier rule loop may have
@@ -6375,6 +6414,9 @@ async fn onboard_audit_start(
             if run_deterministic {
                 use tokio::time::{timeout, Duration};
                 let dep_audit_timeout = Duration::from_secs(60);
+                // Pass-1 W1 seal fix: see the identical comment in `onboard_audit`'s synchronous
+                // path — one ledger stage entry for the whole loop's net additions.
+                let dep_audit_rows_in = report.findings.len();
                 for (spec, dir) in &sources {
                     let spec = spec.as_str();
                     let run = crate::dep_audit::run_dep_audit(spec, dir);
@@ -6401,7 +6443,20 @@ async fn onboard_audit_start(
                         report.coverage_notes.push(note);
                     }
                 }
+                crate::scan_ledger::record_addition_stage(
+                    &mut report.ledger,
+                    "dependency-audit-merge",
+                    dep_audit_rows_in,
+                    report.findings.len(),
+                    "dep_audit_findings",
+                );
             }
+
+            // ── Pass-1 W1 seal fix: evidence-of-violation gate — LAST row-adding pass ────
+            // Mirrors the synchronous `onboard_audit` handler's own call site exactly — see
+            // `report_export::apply_evidence_gate`'s doc comment. Must run before `report` is
+            // written into `last_scan`/`recent_scan` or handed to `body_jobs.finish` below.
+            crate::report_export::apply_evidence_gate(&mut report);
 
             // ── Enforcement-ledger scan-capture is done by the synchronous audit handler ──
             // (The job path is async; ledger capture lives in the synchronous `onboard_audit`
@@ -15464,6 +15519,13 @@ async fn export_audit_report(
         )
             .into_response();
     };
+    // Pass-1 W1 seal fix: `last_scan` is written only AFTER the scan pipeline's own row-adding
+    // passes (the external-tool preview merge, the dependency audit, the evidence-of-violation
+    // gate) have all already run — see `onboard_audit_start`'s doc comments at its own
+    // `apply_evidence_gate` call site. Sealing it here, immediately on retrieval and before any
+    // further processing, is therefore the correct "row set is final" point for this handler:
+    // every exporter below reads the identical sealed set.
+    let report = report.seal();
 
     // Best-effort corpus load for the citation join (§4.4) — mirrors `split_scannable_rules`'
     // own fallback: a missing/unreadable corpus degrades every citation to "AI-advisory,
@@ -15582,6 +15644,10 @@ async fn export_product(
         )
             .into_response();
     };
+    // Pass-1 W1 seal fix: see the identical comment in `export_audit_report` — this is the
+    // "row set is final" point for every artifact this handler builds (PDF, xlsx,
+    // findings.json), all three now reading the SAME sealed set.
+    let report = report.seal();
 
     let corpus_path = camerata_rules::corpus_path();
     let corpus = if corpus_path.exists() {
@@ -23597,7 +23663,7 @@ mod tests {
 
         let options = crate::report_export::ReportOptions::default();
         let json = crate::report_export::build_report_json(
-            &report,
+            &report.clone().seal(),
             &std::collections::HashMap::new(),
             Some(&corpus),
             &options,
@@ -24119,7 +24185,7 @@ mod tests {
     fn product_export_readme_names_the_product_and_never_says_audit() {
         let report = make_scan_report("SEC-NO-HARDCODED-SECRETS-1");
         let json = crate::report_export::build_report_json(
-            &report,
+            &report.clone().seal(),
             &std::collections::HashMap::new(),
             None,
             &crate::report_export::ReportOptions::default(),

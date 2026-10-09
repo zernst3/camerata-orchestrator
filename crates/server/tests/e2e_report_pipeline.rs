@@ -233,7 +233,12 @@ async fn e2e_deterministic_scan_to_pdf_report_pipeline() {
         executive_summary_override: None,
         ..Default::default()
     };
-    let json = report_export::build_report_json(&report, &dispositions, Some(&corpus), &opts);
+    let json = report_export::build_report_json(
+        &report.clone().seal(),
+        &dispositions,
+        Some(&corpus),
+        &opts,
+    );
 
     // FalsePositive: excluded from EVERY section, counted once in methodology.
     assert_eq!(json.methodology.excluded_false_positive, 1);
