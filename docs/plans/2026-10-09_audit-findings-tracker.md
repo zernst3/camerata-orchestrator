@@ -1,0 +1,201 @@
+# Audit findings tracker (2026-10-09)
+
+## FINAL DECISIONS (2026-10-09) — all requirement groups closed by Zach
+
+- **E2 AGREED** — rules may declare a maximum severity; no report may exceed it.
+- **G3 DECIDED** — coverage IS client-facing, but **concise and useful, not exhaustive**. A one-line
+  summary, written for a client, never an internal diagnostic dump.
+- **H1 AGREED, with a sharpening** — every rule must be CAPABLE of running. A rule that does not run
+  because it is irrelevant to the scanned stack is CORRECT. A rule that could never run for ANY stack
+  is a DEFECT. The ~94 orphaned rules are defects.
+- **I1 + I2 ABSOLUTELY AGREED** — self-measurement is a V1 requirement, not a nice-to-have. Zach's
+  added rationale: these two also **prevent overspending on tokens** by catching regressions before
+  an external graded run.
+- **GRADER UPGRADE CONFIRMED and BLOCKING for the next measured run.** The grader must distinguish the
+  finding kinds, must still abide by the answer key, and must ALSO grade on presentation.
+- **SEQUENCING** — Zach: "it really doesn't matter because both things need to be done." Mid-layer and
+  detection coverage both proceed.
+
+## THREE-PASS SEQUENCE (Zach, 2026-10-09)
+
+**Pass 1 — BACKEND (current).** The underlying data structure, the AI scanning, and every requirement
+group working as intended. Nothing about presentation. Confirmed working and accurate before Pass 2
+begins.
+
+**Pass 2 — UI.** How all of this is presented in Camerata for the human curator. One table that flips
+between views; a lot of interconnected data (findings, conventions, deviations, coverage). Zach's
+point: this cannot be designed until the data structures are concrete and visible. Likely a dedicated
+Fable agent specialising in UI/information design, producing presentation suggestions.
+**Design goal: make it as easy as possible for the curator to review everything and decide.** This is
+where Zach does the actual product work (triage, false positives, adoption), so the UI is not cosmetic.
+
+**Pass 3 — CLIENT DELIVERABLES.**
+- **PDF = the summary.** Does NOT need every row. Already correct in shape; leave it alone.
+- **Excel = the meat and potatoes.** Needs rethinking: separate worksheets for findings, conventions,
+  deviations, coverage. This is where the specifics live.
+- **JSON = just the data structure.** Fine as-is; no work needed.
+
+## TEST DISCIPLINE (Zach, non-negotiable)
+> "I don't want code that confidently thinks it's doing what is written here in the product
+> requirements, but actually isn't."
+
+1. Every product requirement above becomes **named unit and end-to-end tests**. The requirement id
+   appears in the test name or its doc comment so the mapping is machine-checkable.
+2. A traceability check fails the build if any requirement has **zero** tests referencing it.
+3. **Old tests must keep passing and must not be edited**, with exactly two exceptions, each of which
+   must be stated explicitly in the commit message:
+   (a) a deliberate code or data-structure change the test must adapt to;
+   (b) a product requirement here that supersedes the old test's expectation.
+   Any other edit to an existing test is treated as a regression being hidden.
+4. Tests must fail BEFORE the fix and pass after; a test that passes on unfixed code proves nothing.
+
+
+Working doc. Zach is reviewing each finding individually. Status is per-finding and only HE closes one.
+Nothing here is implemented until it is marked DECIDED with a direction.
+
+Legend: `[ ]` awaiting Zach · `[x] DECIDED` · `[~] PARTIAL` (decided in principle, detail open) · `[-] DEFERRED`
+
+---
+
+## AUDIT A — architecture coverage
+
+### [x] A5 — DECIDED (2026-10-09): architecture rules are decision rules, not defect detectors
+**Finding.** `ai_audit.rs:5906-5930` — the alternatives pass picks which option the repo follows and
+REPLACES the rule's directive with it. When the chosen option IS the defect ("No boundary validation",
+"No idempotency contract", "Direct handler database queries"), conformance is perfect and the rule
+emits zero. No `violates` field exists on `RuleOption`.
+
+**Zach's context (new, important).** The original design was: Zach picks the alternative, the AI holds
+the repo to it. He later changed it so the AI reads the repo, recommends the alternative, then judges
+violations against that recommendation. He now believes that may have been wrong, because
+**"consistently incorrect is still a violation" and the AI has no way to determine that.**
+He also notes the genuine ambiguity: for a rule like API versioning the alternatives really do hold
+equal weight, and even a human cannot easily say which a given repo should use. Greenfield decision-
+making reused for brownfield auditing is the underlying tension.
+
+**Zach's proposed product framing.** "All but 2 of your API endpoints do NOT use API versioning,
+therefore you have 2 consistency violations." Wants suggestions on a practical approach.
+
+**Direction agreed: three rule kinds, not one.** See the response for detail. Open sub-questions
+below still need his call.
+
+- [x] A5.1 DECIDED — three-kind taxonomy CONFIRMED (`defect` / `decision` / `default-with-exceptions`)
+- [~] A5.2 PARTIAL — consistency caps low/medium by DEFAULT, but must be able to reach HIGH when
+      genuinely problematic. Zach's key insight: **the real cost of inconsistency is on FUTURE
+      features, not existing code.** Severity driver is forward drift cost, not current risk.
+      Open: the exact escape-hatch mechanism (see `deviation_ceiling` proposal).
+- [x] A5.3 DECIDED — "no convention adopted" is ONE informational row, not N violations
+- [x] A5.4 DECIDED — the alternatives pass may never silence a rule; context only, never a gate
+- [x] A5.5 DECIDED — the proposed convention set SHIPS IN THIS PRODUCT (audit derives the decisions,
+      governance later enforces them)
+
+### [ ] A5.6 — NEW, raised by Zach: the finding data structure itself must change
+The product and its post-inspection table were built on a binary premise: a row is a violation or it
+is not. That premise no longer holds. An inspection now returns true violations, consistency
+deviations, suggested conventions with ZERO violations, and "no convention adopted". Zach wants the
+new structure locked down tight and unambiguous before anything is built on it.
+Proposal under review in the response of 2026-10-09; open questions listed there.
+
+### [ ] A1/A2 — React rules fired and were counted as code quality; arming hypothesis refuted
+### [ ] A3 — the ledger's "Architectural checks" family contains zero ARCH-* rules (naming/taxonomy)
+### [ ] A4 — the 4 real ARCH checkers are config-gated off absent `.camerata/architecture.toml`
+### [ ] A6 — 104 rules (25% of corpus) orphaned; their domains are never emitted for any stack
+### [ ] A7 — `UI-UTC-DATES-1` omits `verification`, defaults to Draft, has never armed anywhere
+### [ ] A8 — `SPIRIT-FILE-SIZE-1` doubly disarmed (policy verification + SPIRIT- prefix)
+### [ ] A9 — our taxonomy has no "architecture" family; `category` is the slugified domain
+### [ ] A10 — per-class verdict: 1 not-armed, 4 predicate-mismatch, 3 no-rule, 2 combination
+
+---
+
+## AUDIT B — artifact parity, hedge counts, merge
+
+### [ ] B1/B2/B3 — no sealed row set; two injection points after the merge horizon; findings.json self-contradicts
+### [ ] B4 — hedge divergence equals K exactly on all four repos
+### [ ] B5 — post-merge row addition equals the Semgrep preview row count on all four
+### [ ] B6 — `CREDENTIAL_IDENTIFIER_KEYWORDS` is a closed 12-word list; misses `VITE_SUPABASE_SERVICE_ROLE_KEY`
+### [ ] B7 — `same_construct` false for brace-free files; blind over .env/.sql/.toml/.yaml
+### [ ] B8 — clustering compares against the group SEED only; non-transitive, order-dependent
+### [ ] B9 — `e.g` registered as a structural object; 5 of 51 merge vetoes
+### [ ] B10 — the invariant gate's fixture has empty `recommendations`, so the gate it guards cannot fire
+### [ ] B11 — proposed fix: `SealedReport` newtype making post-seal injection a compile error
+
+---
+
+## AUDIT C — severity, decoys, ranking
+
+### [ ] C1 — both regressed classes have no deterministic detector; single model sample by design
+### [ ] C2 — the recommendation pass wrote down the planted site; the evidence gate skips rules with >=1 finding
+### [ ] C3 — `evidence_negates_requirement` is a 6-phrase substring scan; matches compliance prose
+### [ ] C4 — `objects_conflict` requires disjoint sets; one shared container token defeats it
+### [ ] C5 — `also_locations` reaches no artifact; over-merge is indistinguishable from a miss
+### [ ] C6 — xlsx Coverage counts primaries only; a merged-away rule renders "clean"
+### [ ] C7 — the D5 floor reads model prose, is class-blind and raise-only
+### [ ] C8 — no `max_severity` in the corpus schema; TOMLs author ceilings the pipeline cannot read
+### [ ] C9 — top-3 distinctness keys on the same credential allowlist; no-op in practice
+### [ ] C10 — an existing test asserts `items.len() == 3`, codifying the no-dedup bug
+### [ ] C11 — ESLint preview failed wholesale; zero detector coverage, all cost
+### [ ] C12 — synthesis: remedy is a different division of labour, not more downstream capping
+### [ ] C13 — proposed decisive measurement: paraphrase prose, require zero severity change
+
+---
+
+## FABLE REVIEW — returned 2026-10-09
+
+**Independently VERIFIED against source + artifacts:** A5, A3, A4, A6 (direction; count ~94 not 104),
+B1, B2, B3, B4, B6, B10, C1, C2, C3, C7, C8, C9.
+
+**STRUCK — C10 is WRONG.** The test at report_export.rs:5131-5148 concerns effort-total labelling and
+its three criticals are three DISTINCT rules in three DISTINCT files, so asserting 3 items is correct
+behaviour, not a codified bug. The adjacent test at :5167 shows the distinctness selector IS tested
+where identity exists. C10 is removed from the plan.
+
+**UNDER-EVIDENCED — B5.** The reviewer could not reconcile "post-merge delta == semgrep row count";
+the ledgers read external-tool findings 8/6/13/25, not 4/0/4/6. Plausible but unproven. Do not build on it.
+
+**Corrections to the audits:** tutorly's secret is 5 rows in the exported JSON, not 8 (the grader's 8
+likely counts the PDF tier). C7's second example is arguably a correct critical reached by an unsound
+mechanism — wrong-reason, not wrong-answer.
+
+**Narrative discipline:** B's "one cause" covers B1-B5 only; B6-B9 are unrelated merge defects grouped
+under the heading. C's "lexical stack" is real for C3/C4/C7/B6/C9 but NOT for C1 (sampling variance),
+C11 (plumbing) or C5/C6 (artifact plumbing); C12's "all three outcomes are interaction failures" is
+overreach. A's category error is correct and the deepest of the three.
+
+**The causal chain none of the three told (this is the remediation map):**
+A5 silences the architecture rule -> C3's lexical gate partially catches it -> B2 injects the catch
+into the PDF only -> the grader reads JSON -> hearth architecture 0/12 with 3 PDF-only ghosts.
+
+**Merge tension RESOLVED — both true, different mechanisms.** Cross-file merge needs a POSITIVE
+identity signal; absent, nothing joins (under-collapse). Within eligible groups the NEGATIVE veto
+requires full disjointness; one shared container token disables it (over-collapse). A merge keyed on
+prose-token overlap fails open in BOTH directions, and tuning one direction worsens the other.
+Implication: structured identity, never keyword-list adjustment.
+
+**SPLIT VERDICT on "running in circles":** the DETECTION substrate is (a) under-plumbed and converging
+(hearth 15->24, tutorly 11->12 present, lumen floor 3/5->4/5). The MID-LAYER (calibration, merge,
+packaging) is (b) accruing surface area faster than correctness.
+
+**The question none of the audits asked:** why does only the external grader ever catch these? The
+in-repo suite cannot see them by construction. The engine has elaborate HONESTY machinery (ledgers,
+FailedPass) and no SELF-MEASUREMENT machinery.
+
+### Fable's priority order
+1. [ ] Seal the row set (B11) + move evidence-gate injection inside the seal
+2. [ ] A5 at the corpus: `violates` marker + machine-readable severity ceiling (closes C8) + the
+       sites-vs-rows integrity check exporting shortfalls as HELD rows (never a refused export)
+3. [ ] Structured identity for merge and top-3 (detector-populated captures as join keys).
+       **EXPLICITLY BANNED: adding words to the credential keyword list.**
+4. [ ] Fix the eslint preview EOF (zero coverage at nonzero cost today)
+5. [ ] In-repo golden-fixture parity harness (synthetic, not the graded repos)
+
+### Explicitly NOT YET
+- C13's paraphrase gate — right ACCEPTANCE test after structured fields exist, useless as a first
+  measurement (it would fail trivially today and teach nothing).
+- Wholesale rewrite of the calibration stack — after step 2 most layers become DELETABLE, not rewritable.
+- Any new rules for uncovered classes — adding detection capacity while the mid-layer eats existing
+  recall is how the last two cycles were spent.
+
+### Watch list (cure repeating the disease)
+- Do NOT tune the evidence gate's six phrases; fixing A5 at the corpus demotes it to belt-and-braces.
+- Do NOT add `SERVICE_ROLE`/`KEY` to the credential list; the detector that matched the secret already
+  KNOWS its identity and should emit it as a structured capture.
