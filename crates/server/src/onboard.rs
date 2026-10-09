@@ -779,6 +779,67 @@ impl ScanReport {
             ledger: crate::scan_ledger::ScanLedger::new(),
         }
     }
+
+    /// THE sealing point (Pass-1 W1 — see
+    /// `docs/plans/2026-10-09_audit-findings-tracker.md`, requirement C1: "every row the
+    /// engine produces reaches the reader; nothing may be added to the report after the point
+    /// where the row set is final"). Consumes `self` — the ONLY way to produce a
+    /// [`SealedReport`]. Call this exactly once, as the LAST step of a scan pipeline, strictly
+    /// AFTER every row-adding pass has already run against `self.findings`: the deterministic
+    /// floor, the architectural engine, the semantic/AI tier and its cross-family/structural
+    /// merges (all inside [`audit_repos`]), the scan-time external-tool preview pass
+    /// (`crate::merge_scan_preview`), the dependency audit, and the evidence-of-violation gate
+    /// (`crate::report_export::apply_evidence_gate`) — see each of those call sites in
+    /// `lib.rs`'s `onboard_audit`/`onboard_audit_start` and `camerata-cli`'s
+    /// `run_inspect_with_key_presence` for the exact order.
+    ///
+    /// This is a type-level guarantee, not a convention: [`crate::report_export::
+    /// build_report_json`], [`crate::xlsx_export::build_workbook`], and
+    /// [`crate::xlsx_export::build_findings_export`] all take `&SealedReport`, never
+    /// `&ScanReport`. [`SealedReport`] only implements `Deref` (read-only) — there is no way to
+    /// obtain a `&mut Vec<Finding>` out of one, so a future change that tries to inject a
+    /// finding into an exporter's input (the exact shape of the shipped defect: the evidence
+    /// gate appended to a private clone INSIDE `build_report_json` while the xlsx/JSON siblings
+    /// read the un-injected original) fails to compile instead of silently reintroducing the
+    /// row-set divergence.
+    pub fn seal(self) -> SealedReport {
+        SealedReport(self)
+    }
+}
+
+/// A [`ScanReport`] whose row set is FINAL. See [`ScanReport::seal`]'s doc comment for the full
+/// rationale and the exact pipeline position this must be called from.
+///
+/// Deliberately `Deref`-only (never `DerefMut`, no public mutable accessor to the wrapped
+/// value): every READ an exporter needs (`sealed.findings.iter()`, `sealed.provenance`, field
+/// access, and passing `&sealed` anywhere a `&ScanReport` is expected via deref coercion) keeps
+/// working unchanged, but nothing can mutate `.findings` through a `&SealedReport` — that
+/// asymmetry IS the compile-time enforcement this type exists for.
+#[derive(Debug, Clone, Serialize)]
+pub struct SealedReport(ScanReport);
+
+impl std::ops::Deref for SealedReport {
+    type Target = ScanReport;
+    fn deref(&self) -> &ScanReport {
+        &self.0
+    }
+}
+
+impl SealedReport {
+    /// Borrow the wrapped report directly. Equivalent to `&*sealed` / relying on `Deref`
+    /// coercion at a call site that takes `&ScanReport` — spelled out for the (rare) place that
+    /// reads more clearly with an explicit method call.
+    pub fn as_scan_report(&self) -> &ScanReport {
+        &self.0
+    }
+
+    /// Unwrap back into an owned [`ScanReport`]. Only ever needed by code that must hand the
+    /// report to something requiring ownership (e.g. storing it back into a cache keyed by
+    /// project id) — never use this to regain a mutable findings vector and keep adding to it
+    /// as though still unsealed within the same export call.
+    pub fn into_inner(self) -> ScanReport {
+        self.0
+    }
 }
 
 /// One rule the architect selected for the Phase-2 audit, with its per-repo binding.
