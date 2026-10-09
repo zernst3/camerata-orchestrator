@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:gorm"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -27,6 +28,7 @@ why = "Transactions enforce all-or-nothing semantics; the database is always con
 
 [[option]]
 id = "no-transactions"
+violates = true
 label = "Writes are not coordinated; no transaction wrapping"
 directive = "Multiple writes are performed as separate db.Create(...) calls without a transaction wrapper. If one fails mid-operation, the database is left in a partial state."
 why = "Simpler to code; high risk of consistency violations. Acceptable only for truly independent writes with no invariants (e.g., logging)."

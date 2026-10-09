@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -29,6 +30,7 @@ why = "Loses compile-time FK-graph validation in the reverse direction and disab
 
 [[option]]
 id = "the-entities-crate-declares-no-foreign-key-relat"
+violates = true
 label = "No foreign-key relations declared at all"
 directive = "the entities crate declares no foreign-key relations at all and relies entirely on database-level FK enforcement, so all joined reads are hand-built rather than going through find_related"
 why = "The database still rejects bad writes, but find_related ergonomics are entirely gone: every read that needs joined data has to be hand-built with explicit joins, which is verbose, error-prone, and bypasses the compile-time relation checks the ORM provides."

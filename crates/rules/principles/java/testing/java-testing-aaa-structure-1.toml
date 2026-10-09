@@ -4,6 +4,7 @@ tag = "stack"
 domain = "java:testing"
 layer = "language"
 enforcement = "mechanical"
+kind = "decision"
 default = true
 qualifies = "Partially enforced by PMD's UnitTestShouldIncludeAssert (flags test methods with no assertions) and UnitTestContainsTooManyAsserts (flags tests with too many assertions, indicating multiple behaviors under test). The structural three-phase shape is prose-reviewed. Conformance holds when each test has a visible Arrange section (field or local setup), a single Act call, and one or more assertions covering exactly that call's outcome."
 verification = "grounded"

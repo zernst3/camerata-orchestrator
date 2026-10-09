@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:testing"
 layer = "language"
 enforcement = "prose"
+kind = "decision"
 default = true
 qualifies = "Unit tests and integration tests are kept in separate csproj files that mirror the production project name (e.g. MyApp.UnitTests, MyApp.IntegrationTests). The unit-test project must never reference infrastructure packages (databases, HTTP clients, file-system I/O); the integration-test project may. Separate projects allow CI to run unit tests on every commit while deferring slower integration runs."
 

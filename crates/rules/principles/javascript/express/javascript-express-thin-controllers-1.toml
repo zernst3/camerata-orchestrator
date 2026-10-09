@@ -4,6 +4,7 @@ tag = "stack"
 domain = "javascript:express"
 layer = "framework"
 enforcement = "structured"
+kind = "decision"
 default = true
 verification = "grounded"
 

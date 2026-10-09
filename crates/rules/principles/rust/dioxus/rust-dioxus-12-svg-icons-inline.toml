@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -39,6 +40,7 @@ why = "Adds a runtime font fetch, produces a flash of invisible text on slow net
 
 [[option]]
 id = "icons-are-loaded-from-an-external-svg-sprite-she"
+violates = true
 label = "External SVG sprite sheet over HTTP"
 directive = "icons are loaded from an external SVG sprite sheet served over HTTP, with the application referencing each icon by its fragment identifier"
 why = "Adds a separate HTTP request and a cache-invalidation surface that inline SVG eliminates entirely; it is rarely worth the operational overhead for the small number of icons most applications actually use, and a stale or missing sprite sheet silently blanks all icons."

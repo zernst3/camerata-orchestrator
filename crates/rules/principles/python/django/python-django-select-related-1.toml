@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python:django"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -23,6 +24,7 @@ why = "`select_related` collapses FK traversals into a single JOIN; `prefetch_re
 
 [[option]]
 id = "lazy-loading-accepted"
+violates = true
 label = "access related objects on demand; accept N+1 queries"
 directive = "Related objects are accessed via attribute traversal as needed, with no `select_related` or `prefetch_related`; the resulting N+1 queries are accepted."
 why = "Correct for one-off scripts or tiny datasets; catastrophic for any view whose queryset size is user-controlled."

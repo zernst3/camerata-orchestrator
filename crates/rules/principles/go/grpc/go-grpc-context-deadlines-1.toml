@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:grpc"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -37,6 +38,7 @@ why = "Trades deadline propagation for service independence; service operations 
 
 [[option]]
 id = "ignore-deadlines"
+violates = true
 label = "Services ignore deadlines; no deadline enforcement"
 directive = "RPC implementations do not use the context deadline or pass context to outbound calls; operations run to completion regardless of the client deadline."
 why = "Simplifies service implementation; high risk of resource exhaustion and timeout-less hangs if any downstream service is slow."

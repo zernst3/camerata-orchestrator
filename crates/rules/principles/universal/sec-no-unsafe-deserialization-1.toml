@@ -4,6 +4,7 @@ tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -105,6 +106,7 @@ justification via the suppression comment when a genuine exception exists.
 
 [[option]]
 id = "allow-on-trusted-input"
+violates = true
 label = "Allow unsafe deserializers when the input source is known-trusted and sandboxed"
 directive = "Unsafe deserializers may be called when the input is proven to originate from a trusted internal source with no user control; the call must carry a camerata:allow comment documenting the trust boundary"
 why = """

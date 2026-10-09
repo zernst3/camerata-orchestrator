@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = false
 verification = "grounded"
 
@@ -21,6 +22,7 @@ why = "All of these are ways to handle text that must satisfy a constraint, and 
 
 [[option]]
 id = "newtype-validated-strings-email-url-slug"
+violates = true
 label = "Newtype validated strings (Email, Url, Slug, …)"
 directive = "Constrained string types are newtypes with a fallible constructor (Email::try_new); the type itself is proof of validation. Free-form text stays as String."
 remediation = """
@@ -48,6 +50,7 @@ why = "Lets validation status travel with a value without introducing a distinct
 
 [[option]]
 id = "the-codebase-makes-no-distinction-between-valida"
+violates = true
 label = "No type distinction between validated and raw text"
 directive = "the codebase makes no distinction between validated and raw text; all string-shaped values use the same String type regardless of whether they have been checked"
 remediation = """

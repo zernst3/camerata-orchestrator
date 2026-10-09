@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a two-part scan: (1) supabase/config.toml's `[auth] enable_anonymous_sign_ins = true` (or the equivalent dashboard-exported setting); when present, (2) scan CREATE POLICY statements granted `to authenticated` for any reference to `is_anonymous` anywhere in the predicate. Conformance holds when every policy that is semantically meant to gate a capability for permanent, identity-verified users (posting content under a real identity, financial actions, anything the product would not want a disposable session to perform) excludes anonymous sessions via `(auth.jwt()->>'is_anonymous')::boolean is false`; it fails when anonymous sign-ins are enabled and no policy in the corpus references is_anonymous at all, since every `to authenticated` policy is then silently also a policy for anonymous users."
@@ -65,6 +66,7 @@ why = "Supabase's own documentation calls this out as the single thing a project
 
 [[option]]
 id = "enable-anonymous-signins-without-reviewing-existing-policies"
+violates = true
 label = "Enable anonymous sign-ins and leave the existing authenticated-role policy set untouched"
 directive = "Turn on enable_anonymous_sign_ins without auditing or updating any existing RLS policy that grants to the authenticated role."
 why = "Rejected: this is precisely the gap Supabase's own documentation warns against. Every policy written before anonymous sign-ins existed was authored under the assumption that `authenticated` meant a real, verified account; turning the feature on without revisiting those policies silently and retroactively extends every one of them to anonymous sessions, with no code change anywhere making that extension visible to a reviewer."

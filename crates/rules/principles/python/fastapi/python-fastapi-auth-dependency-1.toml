@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python:fastapi"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -23,6 +24,7 @@ why = "A declared dependency makes protection visible and a missing one a review
 
 [[option]]
 id = "in-handler-auth-check"
+violates = true
 label = "perform auth checks inside each handler body"
 directive = "Each protected handler performs its own authentication and authorization check at the top of the function body."
 why = "Makes protection opt-in per handler, so a new write endpoint can ship with no check and no signal that one is missing."

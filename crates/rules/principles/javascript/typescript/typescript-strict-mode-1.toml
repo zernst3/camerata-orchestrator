@@ -4,6 +4,7 @@ tag = "stack"
 domain = "javascript:typescript"
 layer = "language"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Enforced by tsconfig.json with \"strict\": true (which enables strictNullChecks, noImplicitAny, strictFunctionTypes, and the rest of the strict family) and a tsc --noEmit type-check wired into the build/CI. Conformance holds when strict is on and the type-check is a required gate that fails the build on a type error; it fails when strict is off, individual strict flags are disabled, or tsc is not run in CI. No ESLint/linter rule enforces the presence of strict: true in tsconfig; enforcement is via the TypeScript compiler itself."
 verification = "grounded"
@@ -28,6 +29,7 @@ why = "With strictNullChecks off, null and undefined are assignable to every typ
 
 [[option]]
 id = "the-compiler-runs-with-strict-mode-off-or-with-i"
+violates = true
 label = "Compiler runs with strict mode off"
 directive = "the compiler runs with strict mode off, or with individual strict flags such as strictNullChecks or noImplicitAny disabled, rather than enabling the full strict family and keeping it on"
 why = "Running with strict mode off, or cherry-picking individual strict flags, buys a smaller initial migration diff at the cost of a type system that claims to verify code it does not actually verify: with strictNullChecks off, null and undefined are assignable to every type and the compiler reports nothing on the null-dereference bugs that are most common at runtime; with noImplicitAny off, an un-annotated parameter becomes any and disables checking for everything downstream. Retrofitting strict onto a large untyped-by-default codebase later is far more expensive than starting strict and never accumulating the debt."

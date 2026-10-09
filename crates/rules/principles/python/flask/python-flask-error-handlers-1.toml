@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python:flask"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -29,6 +30,7 @@ why = "Duplicates error-handling logic across routes; each route has slightly di
 
 [[option]]
 id = "flask-default-error-pages"
+violates = true
 label = "rely on Flask's default error pages for all unhandled exceptions"
 directive = "No error handlers are registered; Flask's default HTML error pages (404 page, 500 page) handle all exceptions."
 why = "Returns HTML to clients expecting JSON; leaks stack traces in debug mode; provides no structured error information for API clients."

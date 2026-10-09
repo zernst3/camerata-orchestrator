@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python:flask"
 layer = "framework"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 qualifies = "Enforced by Bandit (B608), Semgrep, or Ruff (S608) flagging f-strings, `%`-formatting, `.format()`, or string concatenation inside `session.execute()`, `connection.execute()`, `cursor.execute()`, or `db.engine.execute()`. Conformance holds when the CI gate runs and any interpolated SQL site fails; it fails when no SQL injection lint runs in CI."
 verification = "grounded"
@@ -25,12 +26,14 @@ why = "The ORM parameterizes automatically; `text()` with bind parameters sends 
 
 [[option]]
 id = "f-string-in-sql"
+violates = true
 label = "build SQL strings with f-strings or % formatting"
 directive = "SQL strings are built by interpolating values via f-strings, `%`-formatting, or `.format()` before passing to an execute method."
 why = "The canonical SQL injection antipattern; every such site is a latent vulnerability regardless of how the value was obtained."
 
 [[option]]
 id = "stored-procedures-only"
+violates = true
 label = "move all parameterized logic into database stored procedures"
 directive = "Business logic involving dynamic SQL is pushed into stored procedures called from Python with only scalar arguments."
 why = "Eliminates injection at the application layer but tightly couples business logic to the database, makes schema migrations more complex, and removes Python-level testability."

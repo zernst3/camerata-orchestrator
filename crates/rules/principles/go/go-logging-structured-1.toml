@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go"
 layer = "language"
 enforcement = "prose"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -32,6 +33,7 @@ why = "Structured logs are machine-parseable and searchable in aggregation syste
 
 [[option]]
 id = "unstructured-printf-logging"
+violates = true
 label = "use Printf-style logging"
 directive = "Logs are written using fmt.Printf, log.Printf, or Printf methods, building the entire log line as a formatted string."
 why = "Produces flat, unstructured text that requires regex parsing; harder to search and aggregate."

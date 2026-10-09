@@ -4,6 +4,7 @@ tag = "stack"
 domain = "javascript:nest"
 layer = "framework"
 enforcement = "structured"
+kind = "decision"
 default = true
 verification = "grounded"
 

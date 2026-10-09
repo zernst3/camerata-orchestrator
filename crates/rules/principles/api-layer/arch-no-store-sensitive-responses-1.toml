@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Deterministically checkable as a header-presence scan: does a response from a route that returns an auth/session token, a password-reset/magic-link token, or a payload containing PII fields set a Cache-Control header including no-store (or an equivalent private, no-cache, max-age=0, must-revalidate combination at minimum), versus a route with no Cache-Control header at all (inheriting whatever default the framework, a CDN, or an intermediate proxy applies) or an explicit max-age permitting retention. Camerata ships no detector for this scan; a project wiring an actual CI gate would assert the header via a contract/integration test hitting the representative routes. Conformance holds when every such response sets no-store (or equivalently strict directives); it fails when a token- or PII-bearing response has no Cache-Control header, or sets one that permits any caching."
@@ -64,6 +65,7 @@ why = "A browser, proxy, or CDN is permitted to cache any response with no expli
 
 [[option]]
 id = "no-explicit-caching-header-rely-on-framework-default"
+violates = true
 label = "Leave Cache-Control unset on token/PII responses, relying on the framework's or CDN's default caching behavior to not retain them"
 directive = "Responses carrying auth tokens or PII are returned with no explicit Cache-Control header, on the assumption that the framework, browser, or CDN in front of the application defaults to not caching dynamic or authenticated responses."
 why = "Rejected: default caching behavior varies by browser, by whether an intermediate proxy or CDN sits in front of the application, and by configuration changes made by people who never see this specific endpoint's sensitivity — a safe default today is not a guarantee against a CDN configuration change, a new reverse proxy added later, or a browser quirk, and the application has no way to verify the assumption holds everywhere the response is ever served from. An explicit no-store removes the dependency on an assumption entirely."

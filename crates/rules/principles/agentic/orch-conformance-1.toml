@@ -4,6 +4,7 @@ tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Not enforceable by any off-the-shelf linter: this is a process commitment about the change pipeline itself, enforced by the orchestration system (e.g. Camerata's own governance gate and waiver log), not by a third-party tool with a citable rule-id. It is codified and reviewed at PR/pipeline-config time: a deterministic gate (a lint rule, a type-system constraint, an AST scan, a CI-run AI reviewer reading against the codified commitments, or a combination) is wired into the change pipeline, and a durable waiver log exists. Conformance holds when the pipeline configuration names that gate and a change that violates a known commitment is demonstrably blocked, escalated, or waivered with the violation and reviewer recorded, rather than merged silently. It fails when the commitments live only as documents that reviewers cite ad hoc with no enforced step on the agent's output."
 verification = "grounded"
@@ -36,6 +37,7 @@ why = "A commitment that nobody checks degrades into a commitment nobody respect
 
 [[option]]
 id = "architectural-commitments-are-held-as-advisory-d"
+violates = true
 label = "Advisory documents (ad hoc citations)"
 directive = "architectural commitments are held as advisory documents that reviewers cite ad hoc when they happen to notice violations during code review, with no mechanical or systematic enforcement step"
 why = "Advisory-only commitments work at small human-review scale but degrade at AI throughput, because ad hoc citations become inconsistent and selective across hundreds of changes."
@@ -48,6 +50,7 @@ why = "Enforcement without a waiver mechanism is overrigid; it pushes legitimate
 
 [[option]]
 id = "architectural-commitments-live-only-in-the-agent"
+violates = true
 label = "Prompt-only (no verification)"
 directive = "architectural commitments live only in the agent's prompt context for each run, with no separate verification step on the agent's output"
 why = "Prompt-only commitments drift between runs because nothing verifies adherence after the agent's turn ends; the next session may simply forget or selectively recall them."

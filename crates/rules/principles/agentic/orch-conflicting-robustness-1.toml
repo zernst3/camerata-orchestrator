@@ -4,6 +4,7 @@ tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 verification = "policy"
 
@@ -27,6 +28,7 @@ why = "Robustness is plural; picking one dimension unilaterally silently accepts
 
 [[option]]
 id = "when-options-are-each-robust-against-different-f"
+violates = true
 label = "Pick first robust option"
 directive = "when options are each robust against different failures, the agent treats the first robust option it encounters as the winner and proceeds"
 why = "Picking the first robust option found reduces the decision to search order rather than judgment, and silently accepts the unaddressed failure mode every time an option comes up first by accident."

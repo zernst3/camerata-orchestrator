@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python:flask"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -23,12 +24,14 @@ why = "Explicit decorators or Blueprint hooks make authentication requirements v
 
 [[option]]
 id = "manual-check-in-route-body"
+violates = true
 label = "check authentication inside the route function body"
 directive = "Route functions check `current_user.is_authenticated` or decode the token manually inside the function body before performing any protected action."
 why = "Moves the check away from the route declaration, making it easy to miss during review; a forgotten check silently makes the route public."
 
 [[option]]
 id = "no-auth-assumed-from-frontend"
+violates = true
 label = "assume only authenticated clients call protected routes"
 directive = "No authentication check is applied to protected routes; the application trusts that the frontend only calls protected routes after the user has logged in."
 why = "The server is the only enforcement point; the frontend's auth state is advisory, not authoritative; any caller with network access can invoke the route."

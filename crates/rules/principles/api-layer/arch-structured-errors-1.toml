@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: it requires a custom CI gate — a contract test that hits representative failure paths and validates each error body against the project's envelope schema (a top-level error object with a stable code, a human message, and optional details), optionally paired with a project-configured static check that handlers throw typed errors and route through the single error-rendering middleware rather than writing ad hoc bodies. No generic linter knows the project's envelope shape. Conformance holds when such a gate runs in CI and a handler that returns a bare string or an empty body fails it; it fails when error shapes vary per endpoint with no shared renderer."
 verification = "grounded"
@@ -29,6 +30,7 @@ why = "Stringly-typed error messages are a leading source of brittle client code
 
 [[option]]
 id = "error-responses-are-plain-strings-or-contain-onl"
+violates = true
 label = "Plain string error responses"
 directive = "error responses are plain strings (or contain only a free-form message field) and clients are expected to pattern-match on the human-readable wording"
 why = "Plain string errors force clients to pattern-match on text; one copy edit silently breaks every consumer that pattern-matched the old wording."

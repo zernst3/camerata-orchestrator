@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "prose"
+kind = "decision"
 default = false
 verification = "policy"
 

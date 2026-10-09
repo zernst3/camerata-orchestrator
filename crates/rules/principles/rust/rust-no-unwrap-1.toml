@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "mechanical"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Mechanical, enforced by clippy: set `clippy::unwrap_used = \"deny\"` under [workspace.lints.clippy] and run `cargo clippy -D warnings` as a required CI gate. Test code is exempt via `allow-unwrap-in-tests = true` in clippy.toml; integration tests under crates/*/tests/ carry a file-level `#![allow(clippy::unwrap_used)]`. Conformance holds when the clippy gate is green; it fails the moment any non-test `unwrap()` compiles. The strict frontier (`expect_used`, `panic`, slice indexing) is the natural next tier."
 verification = "grounded"
@@ -48,6 +49,7 @@ why = "Surfaces occurrences but lets them accumulate: warnings are easy to ignor
 
 [[option]]
 id = "discourage-unwrap-by-convention-and-code-review"
+violates = true
 label = "unwrap() discouraged by convention, no lint gate"
 directive = "unwrap() is discouraged by convention and caught in code review rather than by a lint; no mechanical gate is configured."
 why = "The failure mode this rule exists to replace: a single feature branch reintroduces one unwrap during a large merge and a human reviewer reading the diff easily skates past it, allowing a runtime panic to reach production that a mechanical gate would have caught at compile time."

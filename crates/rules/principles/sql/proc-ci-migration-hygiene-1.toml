@@ -4,6 +4,7 @@ tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "prose"
+kind = "decision"
 default = true
 qualifies = "Enforced by a CI migration-lint step that scans every migration in the change before the build: it requires idempotency guards (IF NOT EXISTS on creates), requires an explicit opt-in marker for destructive operations (DROP, TRUNCATE, column removal), and checks for migration-journal index/sequence-number collisions. Conformance holds when that lint job runs on every PR and a migration missing an IF NOT EXISTS guard, containing an unmarked destructive op, or colliding on the journal index fails the gate; it fails when migrations rely on human review alone with no mechanical CI check."
 verification = "grounded"

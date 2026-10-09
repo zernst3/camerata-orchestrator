@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python:fastapi"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -23,6 +24,7 @@ why = "A dependency-injected per-request session guarantees cleanup automaticall
 
 [[option]]
 id = "session-in-handler"
+violates = true
 label = "construct a session inside each handler"
 directive = "Each path operation opens and closes its own database session in the handler body, managing the lifecycle manually."
 why = "Couples every handler to the engine, reinvents lifecycle management per site, and leaks connections on early return or exception."

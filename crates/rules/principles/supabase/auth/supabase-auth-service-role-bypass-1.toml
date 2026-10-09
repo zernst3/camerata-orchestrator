@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "prose"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Whether a user-reachable handler that constructs a service_role client also performs an explicit authorization check is a semantic judgment — it requires reading the handler's control flow, not matching a pattern — so this rule routes to the prose tier: the handler body and the client-construction call site are fed to Claude as evidence. Conformance holds when every such handler validates that the calling user is entitled to the specific action/row being performed before delegating to the service_role client; it fails when the handler trusts the caller's request parameters directly, since service_role bypasses RLS entirely and no database-level backstop exists on that path."
@@ -62,6 +63,7 @@ why = "service_role bypassing RLS means the handler itself IS the entire access-
 
 [[option]]
 id = "trust-service-role-usage-in-any-server-side-code"
+violates = true
 label = "Treat any server-side (non-client-bundle) use of service_role as inherently trusted"
 directive = "Do not evaluate handler-level authorization for service_role usage as long as the client is constructed in server-side code (not shipped to the browser)."
 why = "Rejected: 'runs on the server' answers the SUPABASE-KEY-SERVICE-ROLE-CLIENT-1 exposure question (is the secret itself reachable by the browser) but says nothing about whether the SERVER CODE checks who is calling it before acting with full privileges on their behalf. A server-side handler with no auth check still lets any authenticated (or even unauthenticated) caller trigger service_role-privileged actions against arbitrary rows; conflating 'server-side' with 'authorized' is the exact gap this rule exists to close."

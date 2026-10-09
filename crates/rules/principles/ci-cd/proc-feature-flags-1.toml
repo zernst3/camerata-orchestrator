@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "structured"
+kind = "decision"
 default = false
 verification = "grounded"
 

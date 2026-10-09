@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python:fastapi"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -31,6 +32,7 @@ why = "Pydantic schemas validate input at the boundary and filter output, preven
 
 [[option]]
 id = "raw-dict-bodies"
+violates = true
 label = "accept raw dicts and return ORM objects directly with no response_model"
 directive = "Endpoints accept untyped `dict` request bodies and return ORM model instances directly with no `response_model` declared, validating and shaping data by hand where needed."
 why = "Discards FastAPI's boundary validation, risks unchecked KeyErrors, and — critically, because no response_model is declared to filter the output — leaks internal ORM fields (e.g. password hashes) into responses. This is a different failure mode from returning an ORM object under a compatible, sensitive-field-free response_model, which is a supported pattern; the danger is specifically the missing (or mismatched) response_model, not the mere fact that the returned object came from the ORM."

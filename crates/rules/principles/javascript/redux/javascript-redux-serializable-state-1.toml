@@ -4,6 +4,7 @@ tag = "stack"
 domain = "javascript:redux"
 layer = "library"
 enforcement = "prose"
+kind = "decision"
 default = true
 qualifies = "Enforced by Redux Toolkit's serializableCheck middleware (on by default under configureStore in development), which logs a console error when a non-serializable value is placed in the state tree or carried in an action payload. Conformance holds when configureStore is used and the serializability check is left enabled; it fails when the check is globally disabled or the store is assembled without it. No static ESLint rule enforces this at lint time; enforcement is runtime-only via RTK middleware."
 verification = "grounded"

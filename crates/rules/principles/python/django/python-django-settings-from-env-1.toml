@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python:django"
 layer = "framework"
 enforcement = "mechanical"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Enforced by Gitleaks, Trufflehog, or Bandit (B105 / B106 / B107) scanning for hardcoded secret patterns in `settings.py` and related config files. Conformance holds when the CI gate runs and any string literal matching a common secret pattern in a committed settings file fails; it fails when no secret-scan gate covers `settings.py`."
 verification = "grounded"
@@ -25,6 +26,7 @@ why = "Environment variables keep secrets outside the repository and git history
 
 [[option]]
 id = "hardcoded-in-settings"
+violates = true
 label = "embed credentials as string literals directly in settings.py"
 directive = "SECRET_KEY, database passwords, and API keys are defined as string literals in `settings.py` and committed to version control."
 why = "The credentials enter git history permanently; anyone with repository access can read them; rotation requires a commit."

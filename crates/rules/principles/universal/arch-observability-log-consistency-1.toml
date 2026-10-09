@@ -4,6 +4,7 @@ tag = "stack"
 domain = "universal"
 layer = "universal"
 enforcement = "architectural"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "SEMANTIC, opinion-shaped, and deliberately CAPPED LOW (owner directive): this is an INCONSISTENCY check, not a 'you must adopt structured logging' stance — it only fires once a repo has ALREADY adopted a structured logger (slog/zap/winston/pino/slf4j/serilog/tracing, or an equivalent project-specific wrapper) and some OTHER call site in the same repo still uses a bare print/console-style call alongside it. For Go and Java specifically, the 'always use structured logging' stance itself is already covered by GO-LOGGING-STRUCTURED-1 and JAVA-LOGGING-STRUCTURED-1 (both full-severity, per-language prose rules) — this rule does not re-litigate that stance for those two languages; it exists for (a) every OTHER stack (Python, JS/TS, Rust, C#, Ruby) where no per-language stance rule already covers the question, and (b) the cross-stack/multi-language case where the inconsistency is between files or layers rather than within a single language's own convention. Camerata ships no detector for this; it reaches the codebase only through the semantic/AI audit pass, and `ai_audit`'s D8 observability cap plus `report_export::is_informational`'s structural bypass force this rule's findings to severity Low and out of every action bucket regardless of the model's proposed severity."
@@ -57,6 +58,7 @@ why = "The fix is a like-for-like swap (the same message, the same level, throug
 
 [[option]]
 id = "allow-mixed-logging-styles"
+violates = true
 label = "Allow bare print/console-style calls to coexist with the repo's adopted structured logger"
 directive = "Individual files or call sites may use a bare print/console.log/puts/fmt.Println-style call even in a repo that has otherwise adopted a structured logger elsewhere."
 why = "Rejected: a log aggregator or a field-based search built around the structured logger's output format gets a silently incomplete picture the moment some call sites bypass it — the repo pays the full cost of adopting structured logging and still does not get a complete, uniformly-parseable log stream out of it."

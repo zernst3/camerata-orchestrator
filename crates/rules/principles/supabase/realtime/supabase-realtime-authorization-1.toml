@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:realtime"
 layer = "platform"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan mirroring SUPABASE-RLS-NO-POLICY-1's shape, retargeted at the `realtime.messages` table: does the migration timeline enable RLS on `realtime.messages` and declare at least one CREATE POLICY against it, AND does client code instantiating a channel set `config: { private: true }` for channels carrying anything beyond public broadcast data. Conformance holds when every channel the client marks (or should mark) private has a corresponding realtime.messages policy scoping who may join/broadcast/receive on that topic; it fails when a channel subscribes to or broadcasts non-public data with `private` unset (defaulting to public, no authorization check at all) or set but with no matching RLS policy, which Realtime's own authorization model treats as equivalent to no access being granted."
@@ -63,6 +64,7 @@ why = "Realtime's authorization model lives entirely on a different table (realt
 
 [[option]]
 id = "treat-application-table-rls-as-sufficient-for-realtime-channels"
+violates = true
 label = "Rely on the underlying application table's own RLS policies; do not configure realtime.messages policies or the private channel flag"
 directive = "Leave Realtime channels in public mode (no private flag, no realtime.messages policy), on the assumption that the application table's existing RLS policies already protect the underlying data the channel discusses."
 why = "Rejected: table RLS and realtime.messages RLS are evaluated by entirely separate code paths. A channel left in public mode broadcasts or accepts subscriptions with NO authorization check regardless of how tightly the application table itself is locked down — the channel is a second, independent access surface onto the same information, and Supabase's own documentation is explicit that the private flag plus a matching realtime.messages policy are both required for any check to run at all."

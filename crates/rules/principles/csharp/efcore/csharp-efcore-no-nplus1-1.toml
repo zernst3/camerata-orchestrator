@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 
 verification = "grounded"
@@ -23,6 +24,7 @@ why = "Explicit Include or projection makes the loading strategy visible at the 
 
 [[option]]
 id = "lazy-loading-via-proxies"
+violates = true
 label = "Lazy loading enabled via proxies; navigation properties loaded on first access"
 directive = "UseLazyLoadingProxies() is registered in DbContext configuration. Navigation properties are virtual, and EF Core loads them on first access via proxy interception. No Include calls are required."
 why = "Convenient for exploratory code and small datasets; produces silent N+1 queries for any loop over a result set that accesses navigation properties, and is invisible until load testing or query logging reveals the extra round-trips."

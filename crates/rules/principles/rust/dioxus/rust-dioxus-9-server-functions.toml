@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
+kind = "decision"
 default = false
 verification = "grounded"
 

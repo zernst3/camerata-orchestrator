@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -59,6 +60,7 @@ why = "Both checks reuse data the refund flow already needs to look up (the char
 
 [[option]]
 id = "role-permission-check-only-no-amount-bound"
+violates = true
 label = "Verify the caller holds a general 'can issue refunds' permission, with no per-charge ownership check or refundable-amount bound"
 directive = "the refund endpoint checks that the caller's role or permission set includes 'refund', then processes the request against whatever charge/order id and amount the request supplies, with no verification that the charge belongs to the caller's scope and no tracking of how much has already been refunded against it"
 why = "Rejected: a generic role check answers 'is this caller the kind of actor who is ever allowed to refund something,' not 'is this caller allowed to refund THIS charge, for THIS amount, given what has already been refunded against it' — both of the actual questions a refund request raises. A permission check alone leaves the charge id and amount as pure user input, so a caller who holds the general permission (a support rep across multiple stores, a customer's own refund-request flow) can act on any charge/order id they supply and indefinitely over-refund a single charge."

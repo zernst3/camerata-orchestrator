@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python"
 layer = "language"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 qualifies = "Enforced by a static type checker (mypy or pyright) configured at error severity in CI, with a coverage floor that fails when a public function signature is missing parameter or return annotations. Conformance holds when the type checker runs in CI in a strict-enough mode that an untyped public def fails the build; it fails when no type checker runs or it only warns."
 verification = "grounded"
@@ -25,12 +26,14 @@ why = "A checked, annotated codebase turns type mismatches into build failures a
 
 [[option]]
 id = "annotate-without-checker"
+violates = true
 label = "annotate signatures but run no type checker"
 directive = "Type hints are written on public signatures for documentation, but no static type checker runs in CI to verify them."
 why = "Gives the documentation benefit but no enforcement, so the annotations drift out of sync with the code over time."
 
 [[option]]
 id = "no-type-hints"
+violates = true
 label = "omit type hints and rely on runtime behavior"
 directive = "Functions are written without type annotations, and type correctness is verified only by tests and at runtime."
 why = "Keeps the source terser but forfeits every static guarantee and pushes type errors to runtime, often in production."

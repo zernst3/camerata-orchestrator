@@ -4,6 +4,7 @@ tag = "universal"
 domain = "testing"
 layer = "universal"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -35,6 +36,7 @@ why = "A test with a single reason to fail names the broken behavior in its fail
 
 [[option]]
 id = "no-assertion-count-constraint"
+violates = true
 label = "No constraint on assertion count per test"
 directive = "Tests may assert on as many properties as the author finds useful in a single test body."
 why = "Maximizes assertion density per test and avoids setup duplication, but when the test fails, only the first failing assertion is reported. The remaining assertions are untested until the first is fixed, hiding the full scope of breakage and slowing the debugging cycle."

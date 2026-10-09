@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp"
 layer = "language"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 
 verification = "grounded"
@@ -29,6 +30,7 @@ why = "Outside the Blazor component model, this hides dependencies (invisible un
 
 [[option]]
 id = "service-locator"
+violates = true
 label = "use a service locator or manual resolution from IServiceProvider"
 directive = "Dependencies are resolved on-demand from IServiceProvider.GetRequiredService<T>() within the method or constructor."
 why = "Obscures dependencies, makes testing harder (must mock IServiceProvider), and is generally considered an anti-pattern in dependency-injection frameworks."

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python"
 layer = "language"
 enforcement = "prose"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -23,6 +24,7 @@ why = "Explicit imports keep symbol origins obvious and tooling accurate; a cura
 
 [[option]]
 id = "permissive-imports"
+violates = true
 label = "allow wildcard imports and implicit surface"
 directive = "Wildcard imports are permitted and modules expose whatever is defined at the top level as their de facto public surface."
 why = "Convenient but obscures where names come from, defeats static tooling, and lets new exports silently shadow local names."

@@ -4,6 +4,7 @@ tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 

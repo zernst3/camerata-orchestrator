@@ -4,6 +4,7 @@ tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"
+kind = "decision"
 default = true
 verification = "policy"
 

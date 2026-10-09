@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -27,6 +28,7 @@ why = "Keeping the persistence representation an infrastructure detail is what m
 
 [[option]]
 id = "repository-methods-return-the-persistence-librar"
+violates = true
 label = "Return persistence types directly"
 directive = "repository methods return the persistence library's row or entity type directly, with no translation into a separate domain type at the boundary"
 why = "Returning the library's row type directly turns every persistence upgrade into a domain-wide refactor, and lazy-loading or session-scoped behavior leaks into business code that was not designed to handle it."

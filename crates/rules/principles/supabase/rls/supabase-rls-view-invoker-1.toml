@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a statement-granular scan of CREATE VIEW statements in exposed schemas (public by default, or per SUPABASE-EXPOSURE-SCHEMAS-1's config parse): a view lacking the `security_invoker = true` WITH-option (available Postgres 15+) executes with its OWNER's privileges by default, which silently bypasses the RLS policies on its underlying base tables. Conformance holds when every view in an exposed schema explicitly sets security_invoker = true, or is a security-barrier view intentionally curated as a controlled, narrower surface over a locked-down base table (a legitimate exception the finding should name, not silently allow)."
@@ -60,6 +61,7 @@ why = "A view with no security_invoker executes as its owner by default and is t
 
 [[option]]
 id = "allow-owner-privileged-views-for-convenience"
+violates = true
 label = "Permit owner-privileged (non-invoker) views when they aggregate or simplify data for internal dashboards"
 directive = "Allow views without security_invoker when their purpose is internal reporting/aggregation rather than direct end-user data access, on the theory that internal tooling does not need row-level scoping."
 why = "Rejected: 'internal dashboard' is not a property a static scan (or a reviewer, months later) can verify at the view definition site — the same view is routinely later exposed through PostgREST once someone builds a customer-facing feature against it, at which point the owner-privileged default silently reintroduces the bypass with no code change to flag. The security_invoker default (Postgres 15+, which Supabase runs) costs nothing and removes the failure mode entirely."

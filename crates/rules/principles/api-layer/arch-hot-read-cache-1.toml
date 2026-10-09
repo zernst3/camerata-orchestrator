@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = false
 verification = "grounded"
 
@@ -26,6 +27,7 @@ why = "Cache hits are typically sub-millisecond while a database round trip is t
 
 [[option]]
 id = "hot-reads-run-directly-against-the-database-with"
+violates = true
 label = "No cache layer"
 directive = "hot reads run directly against the database with no cache layer; every read request pays the full database round trip"
 remediation = """
@@ -35,6 +37,7 @@ why = "No cache layer makes every request pay the full database round trip; it w
 
 [[option]]
 id = "hot-reads-sit-behind-a-ttl-cache-with-no-write-s"
+violates = true
 label = "TTL only, no invalidation"
 directive = "hot reads sit behind a TTL cache with no write-side invalidation; the TTL is the only mechanism that controls staleness"
 remediation = """

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "javascript:testing"
 layer = "language"
 enforcement = "structured"
+kind = "decision"
 default = true
 qualifies = "No single ESLint rule enforces integration-test directory placement. The convention is structural: integration tests span multiple modules and therefore cannot have a canonical 'next to source' location. The Jest testPathIgnorePatterns or Vitest exclude option can isolate integration tests from unit test runs. Enforcement is via project convention (PR review + CI test-script split), not a linter gate."
 verification = "grounded"

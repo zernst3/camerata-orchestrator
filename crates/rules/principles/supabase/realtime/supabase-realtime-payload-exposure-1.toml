@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:realtime"
 layer = "platform"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over Postgres Changes subscriptions (`.on('postgres_changes', { event, schema, table, ... })`) with no `select` column-list option set, on a table whose column shape includes a sensitive-looking name (email, phone, ssn, password_hash, address, dob, salary, and close variants), plus a scan over `broadcast` payload-construction call sites for the same sensitive-column heuristic being included in the payload object. Conformance holds when a subscribed table's sensitive columns are excluded via the `select` option (Postgres Changes) or simply never placed in the broadcast payload (Broadcast); a table/payload with no sensitive-looking column, or a `select` that already scopes to a safe subset, is conforming. Ambiguous column names are `needs_review`."
@@ -62,6 +63,7 @@ why = "The select option (Postgres Changes) or a hand-built payload allowlist (B
 
 [[option]]
 id = "broadcast-the-full-row-and-filter-sensitive-fields-client-side"
+violates = true
 label = "Send the full row via the default postgres_changes behavior or a full-row Broadcast payload, filtering sensitive fields out in the receiving client"
 directive = "Accept the default full-row payload for Postgres Changes subscriptions, or broadcast the complete entity object, relying on client-side code to decide which fields to display or discard after receipt."
 why = "Rejected: by the time a client-side filter runs, the sensitive data has already been transmitted to and received by that client — a filter that only controls what's RENDERED does nothing to prevent the browser's network tab, a malicious or modified client, or a compromised extension from reading the full payload off the wire. The column-level exposure this rule targets happens at TRANSMISSION, not display, so a remediation scoped to the display layer leaves the actual defect (every subscriber receiving every column) fully intact."

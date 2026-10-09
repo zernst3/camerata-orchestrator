@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ruby"
 layer = "language"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 qualifies = "Enforced by Brakeman which flags eval, instance_eval, class_eval, and send/public_send with string or symbol parameters derived from user input. Conformance holds when the linter runs in CI and these patterns fail the build."
 verification = "grounded"
@@ -25,12 +26,14 @@ why = "A fixed whitelist eliminates the ability to invoke unintended methods."
 
 [[option]]
 id = "permitted-symbols"
+violates = true
 label = "Use send() with a hardcoded symbol or string-to-symbol allowlist"
 directive = "Dynamic method invocation uses send() with a hardcoded symbol (send(:method_name)) or a symbol converted from user input via a strict allowlist. Example: ALLOWED_METHODS = %i[create delete update]; send(params[:action].to_sym) if ALLOWED_METHODS.include?(params[:action].to_sym)."
 why = "Acceptable alternative when the allowlist is kept small and reviewed. Converts the user input to a symbol only after allowlist validation."
 
 [[option]]
 id = "eval-with-user-input"
+violates = true
 label = "Use eval() or send() with user input"
 directive = "Dynamic code or method names are dispatched directly from user input via eval(), instance_eval(), class_eval(), or send() with a string parameter."
 why = "Arbitrary code execution or method invocation vulnerability; every site is a vector for an attacker."

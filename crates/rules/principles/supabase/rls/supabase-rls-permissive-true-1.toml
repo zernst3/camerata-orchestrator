@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "structured"
+kind = "decision"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a statement-granular scan of CREATE POLICY statements (once SQL is split into statements, this is regex-grade — no timeline replay required, since a `true` predicate is a per-statement fact): a policy whose USING or WITH CHECK clause is the literal boolean `true`, targeting `anon` or `public` (an absent TO clause defaults to `public`), is flagged. Write-side matches (INSERT/UPDATE/DELETE, or WITH CHECK (true)) are high severity; read-side matches (SELECT, or USING (true) with no WITH CHECK) are medium and carry `needs_review`, since public read access to reference/lookup data is a legitimate, common pattern. Conformance holds when no exposed-schema policy grants unconditional true access without an explicit, reviewed justification."

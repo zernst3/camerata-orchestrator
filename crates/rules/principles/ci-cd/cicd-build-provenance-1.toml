@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "architectural"
+kind = "decision"
 default = false
 opt_in_only = true
 verification = "grounded"

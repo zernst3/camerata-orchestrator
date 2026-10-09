@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Deterministically checkable, but no off-the-shelf linter enforces it: the predicate is 'does this endpoint/resolver's output include a field outside its documented client-facing contract,' and which fields belong in that contract is project-specific domain knowledge no generic tool carries. It requires a custom CI gate — a contract/schema test per endpoint or GraphQL type asserting the response field set against an approved allowlist, or a project-configured serializer convention (an explicit field list rather than a default-serialize-all-properties model/ORM-entity passthrough) checked by a project-specific static rule. Conformance holds when such a gate runs in CI and a response/resolver that adds a field outside the allowlist fails it; it fails when no such check exists and a model's own full property set is the only thing standing in for the API contract."
@@ -67,6 +68,7 @@ why = "An ORM or framework's default serializer exposes whatever the backing mod
 
 [[option]]
 id = "default-serialize-whole-model-rely-on-client-to-not-use-extra-fields"
+violates = true
 label = "Serialize the backing model/entity's full property set by default, relying on the client to use only the fields its UI needs"
 directive = "REST endpoints and GraphQL resolvers return the backing model's or ORM entity's default full serialization (every column/property it holds), with no endpoint-specific field allowlist, on the expectation that client code will simply read and use only the subset of fields its current UI needs."
 why = "Rejected: whatever fields a client's CURRENT UI happens to read says nothing about what the response actually contains or who else can read that same response (another consumer of the same endpoint, a browser devtools network-tab inspection, an API client calling the endpoint directly). Object-level authorization (the caller may fetch this record) does not imply property-level authorization (the caller should see every field of it); this is exactly the gap OWASP's API3 names. The defect also compounds silently over time: a new column added to the backing model starts appearing in every response that serializes it by default, with no code change to the endpoint and therefore no review step that would ever catch it."

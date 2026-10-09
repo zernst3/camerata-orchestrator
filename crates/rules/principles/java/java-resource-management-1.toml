@@ -4,6 +4,7 @@ tag = "stack"
 domain = "java"
 layer = "language"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 qualifies = "Enforced by static analysis (SpotBugs, Checkstyle, IntelliJ inspections) that flag unmanaged closeable resources and recommend try-with-resources. Conformance holds when every resource implementing AutoCloseable (Connection, Statement, Stream, Reader, Writer, etc.) is guarded by try-with-resources or an explicit finally close."
 verification = "grounded"
@@ -40,12 +41,14 @@ why = "Try-with-resources is concise, reliable, and guarantees cleanup even if a
 
 [[option]]
 id = "explicit-close-method-calls"
+violates = true
 label = "explicitly call close() at the end of the method"
 directive = "Resources are closed by explicit close() calls at the end of the method or in a cleanup phase, without a try-with-resources or finally block."
 why = "Works if the method completes normally and always reaches the close statement, but if an exception is thrown before the close, the resource leaks. Error-prone and defeats the purpose of managed resources."
 
 [[option]]
 id = "garbage-collection-finalize"
+violates = true
 label = "rely on garbage collection and finalize() to close resources"
 directive = "Resources are not explicitly closed; they are left for the garbage collector and optional finalize() methods to handle."
 why = "Unreliable; finalize() is not guaranteed to run promptly or at all, and resources may leak before garbage collection occurs. Deprecated practice."

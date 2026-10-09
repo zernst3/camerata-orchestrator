@@ -4,6 +4,7 @@ tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over column declarations for a `text`/`varchar` column whose name suggests a closed set of values (status, state, role, type, kind, tier, category, and close variants) with no corresponding CHECK constraint, native ENUM type, or FK to a lookup table constraining it. Conformance holds when the column's valid values are constrained by one of the three mechanisms below; it fails when the column accepts any string and the 'closed set' exists only as a convention documented in application code (a TypeScript union, a constant list) with nothing enforcing it at the database. A column whose name is ambiguous (could be genuinely free-form text) is `needs_review`."
@@ -72,6 +73,7 @@ why = "The application-code convention that a column is 'really' a closed set pr
 
 [[option]]
 id = "leave-closed-set-columns-as-unconstrained-text"
+violates = true
 label = "Represent closed-set values as a plain text/varchar column with no database-level constraint, relying on application code to validate the set"
 directive = "Store status/role/type-shaped values in an unconstrained text or varchar column, with the valid set of values enforced only by application-layer validation (a TypeScript union, a constant list, a request validator)."
 why = "Rejected: this is application-only enforcement for a value the application itself treats as closed — exactly the gap SQL-INVARIANTS-CONSTRAINTS-1 names generically, specialized here to the enum shape specifically because it is common enough, and the resulting bug (a stray string value the application's own switch/match logic has no case for) distinctive enough, to warrant calling it out by name rather than leaving it to the generic invariants rule alone."

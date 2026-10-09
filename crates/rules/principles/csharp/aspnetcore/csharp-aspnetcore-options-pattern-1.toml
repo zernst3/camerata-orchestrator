@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 
 verification = "grounded"
@@ -29,6 +30,7 @@ why = "Injecting IConfiguration directly is simpler to set up and avoids the POC
 
 [[option]]
 id = "hardcoded-fallbacks"
+violates = true
 label = "Configuration values are read via IConfiguration with hardcoded fallbacks"
 directive = "Services read configuration values via GetValue<T>('Key', defaultValue) with hardcoded fallbacks, so missing keys silently resolve to the default rather than failing."
 why = "Hardcoded fallbacks hide misconfiguration; a service that should fail fast on a missing required value instead silently uses a hardcoded default that may be correct for local dev and wrong for production."

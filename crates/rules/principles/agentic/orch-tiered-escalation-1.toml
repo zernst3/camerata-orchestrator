@@ -4,6 +4,7 @@ tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -37,6 +38,7 @@ why = "Hard-pausing on everything produces constant halts that drain the forward
 
 [[option]]
 id = "never-pause"
+violates = true
 label = "never pause"
 directive = "the routine never pauses on any flagged item; everything is logged and the routine continues unconditionally"
 why = "Never pausing accepts dangerous drift: items that should have blocked the routine accumulate silently, and the absence of any halt signal removes the rule's relief valve entirely."

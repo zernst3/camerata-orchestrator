@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:grpc"
 layer = "framework"
 enforcement = "prose"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -27,12 +28,14 @@ why = "Clients can rely on status codes for error handling logic; the semantic m
 
 [[option]]
 id = "status-all-internal"
+violates = true
 label = "All errors are returned as INTERNAL"
 directive = "Every error, regardless of cause, is wrapped as a gRPC status.Internal. The error message contains the full detail."
 why = "Simplifies error handling in handlers; trades semantic error codes for a single catch-all. Clients cannot distinguish between validation failures and transient server faults."
 
 [[option]]
 id = "status-inconsistent"
+violates = true
 label = "Status codes are assigned inconsistently across handlers"
 directive = "Different handlers map similar errors to different status codes; the error code does not reliably indicate the error kind."
 why = "Common in transitional codebases; makes client-side error handling impossible."

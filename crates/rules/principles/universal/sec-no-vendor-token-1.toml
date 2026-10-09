@@ -4,6 +4,7 @@ tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "mechanical"
+kind = "decision"
 default = true
 verification = "grounded"
 

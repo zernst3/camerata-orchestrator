@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:testing"
 layer = "language"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Test method names consist of three underscore-separated parts: (1) the name of the method or behavior under test, (2) the scenario or input condition, and (3) the expected result. Test classes are named after the production class they test with a 'Tests' suffix (e.g. OrderServiceTests for OrderService). This naming makes a failing test self-documenting without opening the test body."
 
@@ -30,6 +31,7 @@ why = "Works well with BDD tooling (SpecFlow) but adds noise for pure unit tests
 
 [[option]]
 id = "no-convention"
+violates = true
 label = "freeform test names without a mandated pattern"
 directive = "Test methods are named with no enforced pattern; names like TestAdd or Verify_Stuff are allowed."
 why = "Freeform names degrade test-suite readability and make failure diagnosis harder; a failed test like 'TestAdd' reveals nothing about the failure mode."

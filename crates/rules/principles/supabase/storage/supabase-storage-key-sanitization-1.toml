@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:storage"
 layer = "platform"
 enforcement = "structured"
+kind = "decision"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over storage upload call sites (`.from(bucket).upload(path, ...)` / `.uploadToSignedUrl(...)` and server-side equivalents) for a destination-path argument built directly from an unsanitized client-controlled value — the browser `File.name`, a multipart field's `originalname`, or a raw query/body/form parameter — with no server-generated component (a UUID, a content hash, or an owner-id-prefixed path) and no rejection of path-traversal sequences (`../`, a leading `/`, URL-encoded traversal, null bytes). Conformance holds when every upload path is either entirely server-generated or is a sanitized, owner-scoped prefix plus a server-generated suffix; it fails when the object key is the client's original filename (or a trivial concatenation of it) with no traversal rejection and no collision-proof uniqueness."

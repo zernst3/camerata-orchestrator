@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:web"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -27,12 +28,14 @@ why = "Graceful shutdown ensures in-flight requests complete, database transacti
 
 [[option]]
 id = "immediate-termination"
+violates = true
 label = "Server terminates immediately on signal"
 directive = "The application ignores shutdown signals or calls os.Exit immediately upon receiving them, terminating all in-flight requests and goroutines."
 why = "Simplicity; trades request consistency and clean shutdown for speed. In-flight requests are interrupted mid-operation, potentially leaving partial transactions and resource leaks."
 
 [[option]]
 id = "shutdown-no-timeout"
+violates = true
 label = "Graceful shutdown without a deadline; waits indefinitely for requests to complete"
 directive = "Shutdown is called without a context deadline; the server waits for all in-flight requests to complete, no matter how long it takes."
 why = "Ensures all requests complete; risks indefinite hangs if a request is stuck or loops endlessly."

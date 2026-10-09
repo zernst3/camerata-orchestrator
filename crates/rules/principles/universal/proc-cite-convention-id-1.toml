@@ -4,6 +4,7 @@ tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "structured"
+kind = "decision"
 default = true
 verification = "policy"
 

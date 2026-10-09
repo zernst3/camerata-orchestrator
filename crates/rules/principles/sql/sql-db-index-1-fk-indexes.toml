@@ -4,6 +4,7 @@ tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Enforced by a migration linter that scans each migration for foreign-key declarations (REFERENCES clauses or the ORM's FK helper) and verifies a matching index on the same column lands in the same change. The linter can also run as a one-shot audit query against the live schema that lists every FK-constrained column with no covering index and returns rows for any gap. Conformance holds when the per-migration check runs in CI and the audit query returns zero rows; it fails when an FK column ships with no index in the same migration."
 verification = "grounded"
@@ -32,6 +33,7 @@ why = "Most major databases (PostgreSQL, SQL Server, Oracle, SQLite) do not auto
 
 [[option]]
 id = "the-project-relies-on-the-database-engine-to-aut"
+violates = true
 label = "Rely on the database engine to auto-index FKs"
 directive = "the project relies on the database engine to auto-index foreign-key columns and does not declare explicit indexes on FK columns in migrations"
 why = "Reduces migration boilerplate on MySQL with InnoDB, where auto-indexing holds, but is silently brittle on PostgreSQL, SQL Server, Oracle, and SQLite, which do not auto-index FK columns. The engine assumption is invisible in the migration file and breaks when the engine changes or the project deploys to a mixed environment."

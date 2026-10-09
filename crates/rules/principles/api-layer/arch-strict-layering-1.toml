@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: the boundary is 'direct database/query CALLS (e.g. db.select, db.insert) are forbidden outside the repository layer, with transaction flow-control in services exempted', which is a call-site-and-layer predicate, not an import predicate. It is enforced by a custom AST/static-analysis CI gate — a project-configured ESLint no-restricted-syntax rule scoped to non-repository directories, a bespoke ESLint rule, a Rust module-visibility constraint, or the stack equivalent. (import/no-restricted-paths blocks imports between directories, not the DB-client call itself, so it does not honestly cover this rule off the shelf.) Conformance holds when that custom gate runs in CI and a query issued from a controller or service is rejected; it fails when DB access can happen from any layer with no mechanical boundary."
 verification = "grounded"
@@ -37,6 +38,7 @@ why = "Prevents business logic hiding inside the query layer; keeps each layer t
 
 [[option]]
 id = "controllers-services-and-repositories-are-not-se"
+violates = true
 label = "No layer separation"
 directive = "controllers, services, and repositories are not separated by lint enforcement, and DB access can happen from any layer regardless of role"
 why = "Mixing layers leaks business logic into the query layer, where it becomes harder to test in isolation and harder to surface during review, because reviewers naturally focus on the layer the change appears to belong to."

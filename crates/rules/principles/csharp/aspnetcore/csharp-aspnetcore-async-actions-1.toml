@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "mechanical"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Enforced by Roslyn analyzers (AsyncFixer, Microsoft.VisualStudio.Threading.Analyzers) that flag synchronous action methods whose bodies call async code via .Result or .Wait(). Conformance holds when all actions that perform I/O are declared async Task<IActionResult> (or async Task<T> for Minimal API handlers) and no .Result or .Wait() appears on a Task inside the request pipeline."
 
@@ -25,6 +26,7 @@ why = "Async actions release the thread-pool thread during I/O wait, allowing th
 
 [[option]]
 id = "sync-actions-blocking"
+violates = true
 label = "Synchronous actions that call async code via .Result or .Wait()"
 directive = "Actions are declared void or T (not Task) and call async service methods synchronously via .Result or .GetAwaiter().GetResult(). The calling thread blocks until the I/O completes."
 why = "Exhausts thread-pool threads under load, degrading throughput. In ASP.NET Core specifically there is no captured synchronization context to deadlock on (that was the classic ASP.NET Framework failure mode); the Core-specific cost is purely starving the thread pool of threads needed to serve other concurrent requests."
@@ -37,6 +39,7 @@ why = "Avoids async complexity at the cost of blocking threads for every I/O cal
 
 [[option]]
 id = "async-void-handlers"
+violates = true
 label = "Fire-and-forget work is dispatched via async void methods"
 directive = "Fire-and-forget operations reachable from an action (background notifications, best-effort side effects) are implemented as async void methods invoked without await, instead of async Task dispatched through a tracked background-work mechanism (a hosted service queue, Task.Run with logging, or a library like TaskTracker)."
 why = "async void removes the caller's ability to await completion or observe exceptions: an exception thrown inside an async void method is raised on the SynchronizationContext that was active when the async void method started, which in ASP.NET Core has no meaningful handler and can crash the process instead of being caught by the caller. Prefer async Task with an explicitly tracked fire-and-forget mechanism."

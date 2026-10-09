@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
 enforcement = "prose"
+kind = "defect"
 default = true
 
 verification = "grounded"
@@ -23,12 +24,14 @@ why = "Disabling lazy loading makes every database round-trip explicit and visib
 
 [[option]]
 id = "lazy-loading-enabled-proxies"
+violates = true
 label = "Lazy loading enabled via UseLazyLoadingProxies"
 directive = "UseLazyLoadingProxies() is called in DbContext configuration. Navigation properties are declared virtual. Any access to an unloaded navigation property issues a transparent SELECT."
 why = "Convenient for CRUD scenarios with simple access patterns; produces silent N+1 queries in any loop and risks InvalidOperationException when the DbContext is disposed before the navigation is accessed."
 
 [[option]]
 id = "lazy-loading-enabled-interfaces"
+violates = true
 label = "Lazy loading enabled via ILazyLoader injection (non-proxy)"
 directive = "Entities implement lazy loading via constructor injection of ILazyLoader. Navigation properties call _lazyLoader.Load(this, ref _field) before returning their value."
 why = "Less magic than proxy-based lazy loading (no virtual requirement, no proxy class) but retains the same silent round-trip behavior and disposed-context risk."

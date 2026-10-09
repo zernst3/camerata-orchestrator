@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python"
 layer = "library"
 enforcement = "prose"
+kind = "decision"
 default = true
 qualifies = "Prose check: a query-count assertion exercises each list-returning code path and fails when round-trips grow with result-set size. The realistic mechanism for SQLAlchemy is a per-test query counter (an `after_cursor_execute` event listener counting statements, or a strict-loading / `raiseload` mode that raises on lazy access) plus review for relationship access inside a loop. Conformance holds when such a query-count guard runs in CI and a lazy-loaded relationship accessed in a loop fails it; it fails when no per-path query-count check exists and N+1 patterns merge unnoticed."
 verification = "grounded"

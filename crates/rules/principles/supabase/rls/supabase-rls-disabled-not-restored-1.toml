@@ -15,6 +15,7 @@ domain = "supabase:rls"
 extra_domains = ["sql"]
 layer = "platform"
 enforcement = "architectural"
+kind = "decision"
 default = true
 verification = "grounded"
 qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS-ENABLED-1, but over its OWN general-SQL timeline (**/*.sql, not scoped to supabase/migrations|schemas) so it also covers non-Supabase Postgres layouts: once a table's per-statement protection history is known, this rule flags a table whose CURRENT replayed end-state has RLS explicitly disabled (a real `DISABLE ROW LEVEL SECURITY` statement, not merely a table that never had RLS touched at all — that is SUPABASE-RLS-ENABLED-1's concern) and where the disable was never correctly restored — either no matching re-enable exists anywhere in the history, or the next re-enable statement in that migration targeted a DIFFERENT table (a copy-paste typo). Fires independent of supabase/config.toml exposure scoping and independent of any co-located rule's own severity: an explicit disable nobody restored is a security-relevant authoring defect in its own right, not a PostgREST-reachability question. Conformance holds when every table that is ever explicitly disabled is, by the end of the replayed timeline, correctly re-enabled on the SAME table."

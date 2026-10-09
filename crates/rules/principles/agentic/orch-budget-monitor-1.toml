@@ -4,6 +4,7 @@ tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"
+kind = "defect"
 default = true
 verification = "policy"
 
@@ -27,12 +28,14 @@ why = "A rolling-window cap plus per-session caps covers both the single-run run
 
 [[option]]
 id = "per-session-cap-only"
+violates = true
 label = "per-session cap only"
 directive = "Each autonomous run enforces a single per-session spend cap and halts when it is reached, with no rolling-window safety threshold across runs."
 why = "A defensible alternative that bounds any single run but leaves independent runs free to accumulate unbounded spend across a window, so it does not cover the aggregate runaway case."
 
 [[option]]
 id = "no-budget-caps"
+violates = true
 label = "no budget caps"
 directive = "The autonomous run operates with no budget caps and no rolling-window safety threshold."
 why = "A defensible alternative for attended, short runs where a human can intervene before spend escalates, but unsafe for unattended routines that have neither property."

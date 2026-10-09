@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = false
 verification = "grounded"
 
@@ -21,6 +22,7 @@ why = "The right pagination shape follows from how the list is consumed — its 
 
 [[option]]
 id = "list-endpoints-paginate-by-cursor-not-by-offset"
+violates = true
 label = "list endpoints paginate by opaque cursor"
 directive = "Any list endpoint that can grow uses opaque cursor tokens for pagination: the response includes a next_cursor, the next request passes it back. Bounded lists below a hard cap that does not grow may skip pagination entirely."
 remediation = """

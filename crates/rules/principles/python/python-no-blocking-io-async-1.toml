@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python"
 layer = "language"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -23,6 +24,7 @@ why = "Keeping the loop thread free preserves the concurrency the async stack is
 
 [[option]]
 id = "blocking-in-async"
+violates = true
 label = "allow synchronous I/O directly in async handlers"
 directive = "Async handlers may call synchronous I/O directly when an async client is inconvenient, accepting that the call runs on the event-loop thread."
 why = "Simpler to write but stalls the entire event loop under load, collapsing throughput with no error to diagnose."

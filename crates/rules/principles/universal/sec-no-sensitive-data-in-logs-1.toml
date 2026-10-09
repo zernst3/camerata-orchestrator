@@ -4,6 +4,7 @@ tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -75,6 +76,7 @@ why = "Redaction at the log call site is a narrow, mechanical fix (wrap the valu
 
 [[option]]
 id = "log-values-as-is-rely-on-log-store-access-controls"
+violates = true
 label = "Log values as-is and rely on the log storage/aggregation system's own access controls"
 directive = "Secret/credential and PII values are passed to logging calls without redaction, masking, or omission, relying entirely on the log aggregator's or log file's own access controls (who can read the logs) to keep the value confidential."
 why = "Rejected: the log pipeline (aggregator, APM tool, on-disk file, a third-party log-shipping vendor) is routinely broader-access and less audited than the datastore the value came from in the first place, and CWE-532 treats the insertion into the log as the defect regardless of whether the log store is later breached. A single retention-policy change, a misconfigured log-export integration, or a support engineer with broad log read access is enough to expose every credential or PII value this option chose not to redact — and unlike the datastore, nobody scoped the log pipeline as a place sensitive values were meant to live."

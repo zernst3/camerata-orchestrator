@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
+kind = "defect"
 default = true
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: the predicate is 'a value that reaches a payment-provider charge/amount/total/price/quantity/discount field was READ from the inbound request body/query/path rather than computed from a server-side product, price, or coupon lookup,' which requires tracing data flow from the request-parsing boundary to the charge call site — an AST/taint-analysis CI gate wired with the project's own request-DTO and pricing-service shapes. The generic pattern exists (don't trust client input for a security-sensitive value) but the specific fields that count as 'amount-bearing' are project-specific, so this is a bespoke check, not a citable off-the-shelf rule. Conformance holds when that gate runs in CI and a charge-call argument traced back to raw request input (with no intervening server-side lookup) fails the build; it fails when no such trace exists and a request body field can reach a charge amount unchanged."
 verification = "grounded"
@@ -63,6 +64,7 @@ why = "A request is editable by anyone who can see it leave the browser, so any 
 
 [[option]]
 id = "trust-client-supplied-amount-with-display-validation-only"
+violates = true
 label = "Trust the client-supplied amount/total/discount, validating only that it looks well-formed (a positive number, correct currency shape)"
 directive = "Accept the amount, line-item total, or discount value supplied in the request body and pass it to the payment-provider charge call after only syntactic validation (type, sign, format), with no comparison against a server-side price or coupon lookup."
 why = "Rejected: syntactic validation (is it a positive number) says nothing about whether the number is the CORRECT one for what was actually ordered. An attacker who edits a request from $499.99 to $4.99 still passes 'positive number' validation; the charge is for $4.99 regardless of what was in the cart, and nothing in this approach catches it."

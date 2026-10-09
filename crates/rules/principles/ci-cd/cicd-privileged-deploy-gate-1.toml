@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "architectural"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Deterministically checkable in principle (does a job that deploys to production, runs a migration against a production database, or applies infrastructure changes reference a GitHub Environment — or the equivalent protected-deployment-target concept on another CI platform — configured with required reviewers/wait timer, versus running unconditionally on every push to its trigger branch), but confirming the environment protection rule is actually CONFIGURED (required reviewers added, not merely an environment referenced with no protection rules set) requires reading the platform's repository/environment settings, not only the workflow YAML — the YAML can reference an environment that has no protection configured at all, which looks identical to a correctly-gated job by file inspection alone. This is architectural: Camerata cannot confirm environment-level protection-rule configuration from repository file content; the project verifies it in its own platform settings. Conformance holds when the environment referenced by a privileged job has required reviewers (or an equivalent human gate) actually configured; it fails when no environment is referenced at all, or when one is referenced but has no protection rules configured."
@@ -68,6 +69,7 @@ why = "A correct trigger→environment mapping and a prior code-review step both
 
 [[option]]
 id = "privileged-job-runs-unconditionally-on-its-trigger"
+violates = true
 label = "A production deploy/migration/infra-apply job runs unconditionally whenever its trigger ref is pushed, with no environment protection rule and no human approval gate"
 directive = "A job that deploys to production, migrates a production database, or applies production infrastructure changes runs to completion automatically whenever its configured trigger (a tag push, a release-branch push) fires, with no environment-level protection rule and no pause point for human approval."
 why = "Rejected: this collapses the gap between 'the triggering ref was pushed' and 'the privileged action actually ran' to zero, so any mistake upstream of that point — an accidentally pushed tag, a misconfigured environment variable discovered only at run time, a compromised credential with push access — runs straight through to production impact with no opportunity for a human to catch it first. Code review earlier in the process does not substitute for this, because code review approves the CHANGE, not the specific run's actual target and timing."

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "java:testing"
 layer = "language"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 qualifies = "Enforced by SpotBugs (IJU_ASSERT_METHOD_INVOKED_FROM_RUN_METHOD, the one SpotBugs pattern that actually targets JUnit threading anti-patterns — SIC_INNER_SHOULD_BE_STATIC_ANON and PMD's DoNotCallGarbageCollectionExplicitly are unrelated to test determinism and are not cited as enforcement here). Thread.sleep in tests can be caught by Checkstyle or Semgrep regex patterns. JUnit 5's @TestMethodOrder(MethodOrderer.Random.class) can reveal hidden ordering dependencies. Conformance holds when: no Thread.sleep() appears in test code; time-dependent logic uses an injected Clock mock; random inputs use a fixed seed; each @Test method is independent of every other @Test method in the class."
 verification = "grounded"
@@ -38,12 +39,14 @@ why = "Deterministic tests are the only tests worth having: they always give the
 
 [[option]]
 id = "sleep-based-timing"
+violates = true
 label = "Thread.sleep() to wait for async operations or time-based behavior"
 directive = "Tests use Thread.sleep(N) to wait for asynchronous callbacks, scheduled tasks, or time-based logic to complete."
 why = "Flaky: the sleep duration is an arbitrary guess. Under load, GC pause, or slow CI it may be too short. Over time it grows to mask real latency problems. Use Awaitility or inject a Clock/Scheduler instead."
 
 [[option]]
 id = "static-shared-state"
+violates = true
 label = "shared static or instance state mutated across multiple @Test methods"
 directive = "Test methods share mutable state through static fields or instance fields that are not reset between tests, implicitly depending on execution order."
 why = "JUnit 5 does not guarantee @Test execution order by default. Ordering-dependent tests produce intermittent failures that are nearly impossible to diagnose. Use @BeforeEach to reset all mutable state."

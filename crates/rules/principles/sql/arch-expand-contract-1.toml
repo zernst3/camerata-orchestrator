@@ -4,6 +4,7 @@ tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "prose"
+kind = "decision"
 default = true
 verification = "grounded"
 

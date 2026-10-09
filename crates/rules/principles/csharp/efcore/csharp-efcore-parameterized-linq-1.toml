@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 
 verification = "grounded"
@@ -29,6 +30,7 @@ why = "Equivalent safety to FromSqlInterpolated; more verbose and error-prone be
 
 [[option]]
 id = "string-concatenation-raw-sql"
+violates = true
 label = "String concatenation or interpolation of user values into raw SQL"
 directive = "Raw SQL queries are assembled via string interpolation or concatenation of user-provided values, passed to FromSqlRaw or ExecuteSqlRaw as a pre-built string."
 why = "Produces SQL injection vulnerabilities whenever a user-controlled value reaches the concatenation. Forbidden."

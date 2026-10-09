@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:web"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -33,6 +34,7 @@ why = "Minimal overhead; trades error information and client-side error handling
 
 [[option]]
 id = "ad-hoc-error-format"
+violates = true
 label = "Each handler defines its own error response format"
 directive = "Handlers return errors in their own format: some as {error: string}, others as {message: string}, others as raw strings, inconsistently."
 why = "Trades client-side consistency and error handling for freedom to tailor each response; creates parsing difficulties and logging inconsistency."

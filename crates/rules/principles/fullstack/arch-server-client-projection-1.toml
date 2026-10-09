@@ -4,6 +4,7 @@ tag = "stack"
 domain = "fullstack"
 layer = "universal"
 enforcement = "structured"
+kind = "decision"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over server component/loader/getServerSideProps-style data-fetching functions for a database query result (an ORM entity, a raw row, a `SELECT *`-shaped object) passed directly as a prop into a client component, into a serialized hydration payload, or interpolated into server-rendered HTML (a data attribute, a hidden input, an inline `<script type=\"application/json\">` state blob) with no intervening projection to an explicit, narrower shape. Conformance holds when every value crossing the server-to-client boundary (RSC serialization, SSR hydration state, server-rendered markup) is an explicitly-shaped projection naming only the fields the client view needs; it fails when a query result or ORM entity is passed through unprojected, even if the client UI currently only renders a subset of its fields — the whole object is still present in the shipped payload and inspectable via browser devtools or view-source regardless of what the UI chooses to display."

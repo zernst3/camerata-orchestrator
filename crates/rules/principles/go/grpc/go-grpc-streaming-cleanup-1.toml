@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:grpc"
 layer = "framework"
 enforcement = "prose"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -31,12 +32,14 @@ why = "Context-aware streaming loops ensure goroutines are bounded by the reques
 
 [[option]]
 id = "streaming-ignore-context"
+violates = true
 label = "Streaming loops ignore context cancellation; may loop indefinitely"
 directive = "Handlers read from the stream without checking context.Done(); goroutines may continue running after the client disconnects or the context deadline is reached."
 why = "Simplifies the loop logic; high risk of goroutine leaks and resource exhaustion."
 
 [[option]]
 id = "streaming-close-unchecked"
+violates = true
 label = "Streams are not explicitly checked for closure; no error handling on Send/Recv"
 directive = "Handlers call stream.Send() and stream.Recv() without error handling; failures and disconnects are not detected."
 why = "Can result in silent failures, incomplete data transfer, and undetected client disconnects."

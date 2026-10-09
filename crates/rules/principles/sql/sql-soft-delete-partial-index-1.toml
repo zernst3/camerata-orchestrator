@@ -4,6 +4,7 @@ tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over tables carrying a soft-delete column (deleted_at, is_deleted, archived_at, and close variants) for two distinct facets: (1) a sibling UNIQUE constraint or unique index on that table with no `WHERE deleted_at IS NULL` (or equivalent) partial qualifier — crisp and near-mechanical, since a plain unique index plus a soft-delete column WILL eventually block re-creating a row with a previously-soft-deleted value; and (2) whether the table's normal read paths (application queries, or an RLS policy on a Supabase/Postgres-backed table) filter the soft-delete column by default rather than requiring every caller to remember the predicate — a more semantic judgment requiring the query/policy code as evidence. Conformance holds when every unique constraint on a soft-deletable table is partial and ordinary reads exclude soft-deleted rows without each caller having to opt in."
@@ -59,6 +60,7 @@ why = "A plain unique constraint has no notion of 'soft-deleted,' so it blocks l
 
 [[option]]
 id = "require-every-caller-to-filter-soft-deleted-rows-by-hand"
+violates = true
 label = "Use a plain (non-partial) unique constraint and require every query site to add its own deleted_at filter"
 directive = "Leave unique constraints unscoped (blocking reuse of a value from a soft-deleted row) and rely on each individual query, policy, or report to remember to add its own `WHERE deleted_at IS NULL` predicate, rather than centralizing the filter or partial-scoping the constraint."
 why = "Rejected: a plain unique constraint actively blocks a legitimate, common product behavior (letting a user reuse a value after their prior row was soft-deleted) with no workaround short of a schema change. Requiring every caller to remember its own deleted_at filter is the same per-call-site-discipline failure mode SUPABASE-STORAGE-OBJECT-POLICY-1 and the generic invariants rule both reject elsewhere in this corpus: the first forgotten call site (a report, a join, a policy) surfaces soft-deleted rows as if they were live, with no error anywhere pointing at the omission."

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "javascript:testing"
 layer = "language"
 enforcement = "prose"
+kind = "defect"
 default = true
 qualifies = "No ESLint or Jest linter rule enforces the Arrange-Act-Assert (AAA) structure or single-act constraint at the AST level. The jest/no-conditional-expect rule (eslint-plugin-jest, recommended config) catches one class of AAA violation — assertions inside conditionals — but does not enforce the full pattern. AAA structure is a code-review / team convention enforced at PR time."
 verification = "grounded"
@@ -33,6 +34,7 @@ why = "AAA makes the intent of each test readable at a glance, the single-act co
 
 [[option]]
 id = "test-body-is-free-form-no-required-structure"
+violates = true
 label = "Test body structure is free-form; no required phase ordering"
 directive = "Test bodies have no required phase structure; each author organises setup, exercise, and assertion in whatever order is convenient for the scenario."
 why = "A free-form test body requires the reader to reconstruct the Arrange/Act/Assert phases mentally before understanding what the test does, adding cognitive load that compounds across a large suite. Without the single-act constraint, a failing test points to a sequence of operations rather than a single cause, forcing the reader to bisect the compound case to determine which act introduced the failure."

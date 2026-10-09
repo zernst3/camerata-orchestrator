@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust:tokio"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -23,6 +24,7 @@ why = "JoinSet ensures spawned tasks are joined and prevents orphaned tasks and 
 
 [[option]]
 id = "use-unstructured-spawn"
+violates = true
 label = "Use unstructured tokio::spawn"
 directive = "Tasks are spawned via tokio::spawn without a JoinSet. Tasks may run past the scope where they are spawned, and the application relies on explicit cancellation or task-local cleanup."
 why = "A spawned task can run past the scope where it was created, producing orphaned tasks, resource leaks, and subtle bugs where a task outlives its dependencies; if a task panics, the panic is silently lost rather than being propagated and handled at a well-defined join point."

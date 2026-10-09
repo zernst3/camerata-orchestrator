@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python:testing"
 layer = "language"
 enforcement = "structured"
+kind = "decision"
 default = true
 qualifies = "Conformance holds when each test function has a discernible arrange phase (setup/fixtures), a single act (the call under test), and an assert phase that checks the outcome of that act; composite assertions on independent conditions are split into separate tests or expressed with assert on a single logical value. Fails when a test function exercises multiple unrelated behaviors in one body (multiple act+assert cycles) or uses composite assert statements that obscure which condition failed."
 verification = "grounded"

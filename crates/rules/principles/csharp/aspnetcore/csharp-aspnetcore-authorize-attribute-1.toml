@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 
 verification = "grounded"
@@ -23,6 +24,7 @@ why = "Class-level [Authorize] is an opt-out model: new actions start protected 
 
 [[option]]
 id = "authorize-per-action"
+violates = true
 label = "[Authorize] applied individually to each action that requires authentication"
 directive = "No [Authorize] appears at the controller class level. Each action that requires authentication carries its own [Authorize] (or policy variant). Actions without [Authorize] are publicly accessible."
 why = "An opt-in model: new actions start public. Safe when the majority of endpoints are public and protected endpoints are the exception; high-risk when the majority of endpoints require auth and the absence of [Authorize] is the failure mode for a forgotten annotation."

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go"
 layer = "language"
 enforcement = "mechanical"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -34,6 +35,7 @@ why = "Checking every error keeps the contract visible and prevents silent casca
 
 [[option]]
 id = "ignore-low-consequence-errors"
+violates = true
 label = "ignore errors from calls deemed low-consequence"
 directive = "Some error-returning calls are assumed to be low-consequence (e.g., closing a file handle, flushing a buffer, or calling Fprintf to log); their errors are discarded with blank assignments to reduce visual noise."
 why = "Reduces error-check clutter for truly safe callsites, but leads to silent bugs when assumptions about consequence are wrong, e.g., a deferred Close() fails because the write buffer never flushed."

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:testing"
 layer = "testing"
 enforcement = "prose"
+kind = "decision"
 default = true
 verification = "grounded"
 

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = false
 verification = "grounded"
 
@@ -44,6 +45,7 @@ why = "Gives a complete, maintained, accessible element set immediately, with no
 
 [[option]]
 id = "the-ui-has-no-primitives-layer-views-inline-util"
+violates = true
 label = "No primitives layer; inline utility classes"
 directive = "the UI has no primitives layer; views inline utility classes and raw element markup for common UI elements rather than composing shared primitive components"
 remediation = """

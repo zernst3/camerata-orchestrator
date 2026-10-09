@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python"
 layer = "language"
 enforcement = "mechanical"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Enforced by a linter rule (Ruff E722 / flake8 bare-except, plus BLE001 for blind `except Exception`) at error severity. Conformance holds when the rule runs in CI and a `except:` or unjustified `except Exception:` fails the build; it fails when the rule is absent or only warns."
 verification = "grounded"
@@ -33,6 +34,7 @@ why = "Specific handlers recover from what they planned for and let every unanti
 
 [[option]]
 id = "allow-broad-catch"
+violates = true
 label = "allow bare except / blind except Exception anywhere"
 directive = "Handlers may use bare `except:` or `except Exception:` anywhere to keep the code running through unexpected failures."
 why = "Maximizes apparent robustness but swallows interrupts and masks real bugs, so failures vanish instead of surfacing."

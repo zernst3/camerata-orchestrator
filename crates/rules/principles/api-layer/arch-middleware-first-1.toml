@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -31,6 +32,7 @@ why = "Cross-cutting logic that lives inside individual handlers drifts."
 
 [[option]]
 id = "cross-cutting-concerns-are-inlined-in-each-handl"
+violates = true
 label = "Inline in each handler"
 directive = "cross-cutting concerns are inlined in each handler that needs them, with no shared middleware layer responsible for any of them"
 why = "Inlining is the duplicated-logic failure mode: handlers slowly diverge into subtly different implementations of the same concern, and new handlers omit the logic entirely by accident."

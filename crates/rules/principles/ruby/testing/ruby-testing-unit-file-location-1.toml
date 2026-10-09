@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ruby:testing"
 layer = "language"
 enforcement = "mechanical"
+kind = "decision"
 default = true
 qualifies = "Enforced by RuboCop RSpec/SpecFilePathFormat (rubocop-rspec) for RSpec projects. Conformance holds when every spec file lives in a spec/<subdirectory>/ path that mirrors the source file's app/ or lib/ path and is named <subject>_spec.rb; for Minitest, every test file lives in test/<subdirectory>/ and is named <subject>_test.rb. CI rejects files that deviate."
 verification = "grounded"

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: deciding which type/field/column 'requires exact arithmetic' (money, regulated quantity) is project-specific domain knowledge no generic linter carries. It requires a custom AST/static-analysis CI gate that bans binary floating-point types (f64, double, Number, REAL/DOUBLE columns) on the exactness-sensitive surface the project annotates, paired with a property test asserting a long chain of additions and roundings loses zero precision against an exact-decimal oracle. Conformance holds when the float ban runs in CI over the exactness-sensitive surface and the precision property test passes; it fails when float types reach those values or no precision oracle exists."
 verification = "grounded"
@@ -33,6 +34,7 @@ why = "Binary floating-point cannot represent most decimal fractions exactly."
 
 [[option]]
 id = "monetary-and-quantity-values-are-represented-in"
+violates = true
 label = "Use binary floating-point"
 directive = "monetary and quantity values are represented in code as binary floating-point (f64, double, Number) and stored as REAL or DOUBLE in the database"
 why = "Using floating-point everywhere silently loses precision: the failure mode is wrong numbers that look right and only surface at reconciliation time, which is far more expensive than catching the type error up front."

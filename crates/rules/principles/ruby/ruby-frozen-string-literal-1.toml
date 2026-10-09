@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ruby"
 layer = "language"
 enforcement = "mechanical"
+kind = "decision"
 default = true
 qualifies = "Enforced by RuboCop with the FrozenStringLiteral cop enabled (default in modern Rails). Conformance holds when all .rb files begin with # frozen_string_literal: true and CI rejects files without it."
 verification = "grounded"

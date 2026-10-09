@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
+kind = "decision"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a path-scoped regex for `getSession(` inside server-execution-context files: Next.js middleware.*/app/**/route.*/server components, SvelteKit +page.server.*/hooks.server.*, and comparable framework server-boundary paths. `getSession()` returns the session object built from the client-supplied cookie without re-validating it, so trusting it for an authorization decision on the server accepts a value the caller controls. Conformance holds when server-boundary code establishes identity via `getClaims()` (local, cryptographic JWT-signature verification, no network round-trip) or `getUser()` (a network call to the Auth server for a fully up-to-date record) rather than `getSession()`. FP carve-out: legitimate CLIENT-side usage of getSession() (browser components, client hooks) is unaffected — the path heuristic scopes this to server-execution files, and ambiguous paths are flagged `needs_review` rather than asserted as a violation."

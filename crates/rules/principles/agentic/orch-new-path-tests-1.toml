@@ -4,6 +4,7 @@ tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Not enforceable by any off-the-shelf linter (linters check source shape, not test-coverage-of-a-diff): this is a pipeline/coverage-tooling commitment, codified and enforced by the change pipeline itself. The realistic mechanism is a per-diff patch-coverage gate on the introduced lines (e.g. a coverage tool's diff/patch threshold) or an equivalent mutation check on the new branches. Conformance holds when the pipeline runs such a per-diff check and a diff that adds an untested branch is rejected; it fails when the only gate is a whole-project coverage percentage or a green run of the existing suite, both of which can pass while the new branch is entirely uncovered."
 verification = "grounded"
@@ -42,6 +43,7 @@ why = "Requiring only that the existing suite passes is the common industry defa
 
 [[option]]
 id = "the-change-pipeline-requires-the-project-to-stay"
+violates = true
 label = "Project-wide coverage percentage"
 directive = "the change pipeline requires the project to stay above a fixed coverage percentage on the full project, with no per-diff check that the introduced lines specifically are covered"
 why = "A project-wide percentage offers statistical comfort but masks targeted gaps in specific new paths: a single uncovered new branch barely moves the project-wide number."

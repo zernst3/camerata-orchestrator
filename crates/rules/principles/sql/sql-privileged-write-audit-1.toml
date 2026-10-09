@@ -4,6 +4,7 @@ tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "prose"
+kind = "decision"
 default = true
 verification = "grounded"
 qualifies = "Whether a given write is 'privileged' enough to require an audit-log entry, and whether the code path performing it actually writes one, is a judgment call over the schema and the handler/function performing the write, not a pattern match — so this rule routes to prose: a write already identified as privileged by a neighboring rule (a role/permission grant, a SECURITY DEFINER function per SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1, a financial-adjustment endpoint, an admin-override action) is fed to Claude with the question: does this code path also insert an append-only record of who did this, to what, when, and what changed? Conformance holds when every privileged write has a matching audit-log insert in the same transaction; it fails when the ONLY trace of a privileged action is the mutated row itself, with its prior state and the identity of who changed it unrecoverable once overwritten."

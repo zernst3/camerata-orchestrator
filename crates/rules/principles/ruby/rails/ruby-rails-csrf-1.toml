@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -23,12 +24,14 @@ why = "CSRF protection is necessary for all cookie-session-based state changes. 
 
 [[option]]
 id = "csrf-disabled-globally"
+violates = true
 label = "disable CSRF protection globally"
 directive = "CSRF verification is skipped application-wide via `skip_before_action :verify_authenticity_token` in ApplicationController or by removing `protect_from_forgery`."
 why = "Removes the defense for all cookie-based state changes; an attacker can trigger authenticated actions from any cross-origin page the user visits."
 
 [[option]]
 id = "csrf-double-submit-cookie"
+violates = true
 label = "use the double-submit cookie pattern instead of server-side token"
 directive = "CSRF protection is implemented as a double-submit cookie rather than Rails' default synchronizer-token pattern."
 why = "A valid alternative for stateless APIs, but requires careful implementation; the Rails built-in synchronizer token is simpler and the right default for server-rendered applications."

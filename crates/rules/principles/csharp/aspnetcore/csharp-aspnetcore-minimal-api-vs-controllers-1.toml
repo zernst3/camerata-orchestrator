@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "structured"
+kind = "decision"
 default = false
 
 verification = "grounded"

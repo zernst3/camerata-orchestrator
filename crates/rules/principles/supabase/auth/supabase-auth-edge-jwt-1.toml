@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Two-stage rule. Stage one (mechanical, always emitted): a regex scan over supabase/config.toml for a `[functions.<name>]` block setting `verify_jwt = false`, and over deploy scripts/CI for `--no-verify-jwt` on the CLI — this flag detection is near-zero-FP and fires unconditionally whenever the setting is present. Stage two (prose, evidence-fed): whether the function body implements its OWN compensating auth check is a semantic judgment not expressible as a regex, so the mechanical finding is escalated to prose review with the function source attached as evidence. Conformance holds when every verify_jwt = false function either legitimately needs to be public (a genuinely unauthenticated endpoint, e.g. a public webhook receiver that verifies the provider's own signature) or implements an equivalent auth check inline; it fails when the flag is off with no compensating check and no documented reason."
@@ -66,6 +67,7 @@ why = "Splitting mechanical evidence-gathering (the flag, which is deterministic
 
 [[option]]
 id = "flag-verify-jwt-false-as-always-critical"
+violates = true
 label = "Treat every verify_jwt = false function as a critical finding with no compensating-check review"
 directive = "Report every function with verify_jwt disabled as critical, without inspecting the function body for a compensating auth check."
 why = "Rejected: verify_jwt = false is a legitimate, Supabase-documented pattern for public webhook receivers and intentionally public endpoints. Flagging it unconditionally at critical severity would produce a false positive on every correctly-built webhook handler in the corpus, which is exactly the kind of naive-scanner mistake this audit product must not make (cf. the anon-key carve-out in SUPABASE-KEY-SERVICE-ROLE-CLIENT-1)."

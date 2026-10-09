@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -37,6 +38,7 @@ why = "Simpler with no wiring layer, but binds every service to a specific persi
 
 [[option]]
 id = "global-service-locator"
+violates = true
 label = "a global service locator resolves dependencies"
 directive = "Services resolve their repositories from a global singleton or service-locator registry at call time rather than receiving them as constructor dependencies."
 why = "Removes constructor boilerplate but hides each service's real dependencies and reintroduces the test-isolation problem through global state."

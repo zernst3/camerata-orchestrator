@@ -4,6 +4,7 @@ tag = "stack"
 domain = "java"
 layer = "language"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Enforced by Checkstyle rules that recommend final on classes (unless explicitly designed for subclassing) and fields (unless explicitly mutable). Code review verifies that mutability is intentional and documented."
 verification = "grounded"
@@ -34,6 +35,7 @@ why = "Immutable-by-default prevents bugs, is thread-safe, and makes code easier
 
 [[option]]
 id = "mutable-by-default"
+violates = true
 label = "classes and fields are mutable; mark final only when immutability is required"
 directive = "Classes are designed to be subclassed unless otherwise specified. Fields are mutable and can be reassigned. Immutability is added only when needed."
 why = "More flexibility, but allows accidental mutability and race conditions. Requires more vigilance in testing and reasoning."

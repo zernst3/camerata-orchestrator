@@ -4,6 +4,7 @@ tag = "stack"
 domain = "java:spring"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -37,6 +38,7 @@ why = "Reduces boilerplate for simple CRUD; bypasses @Transactional service-laye
 
 [[option]]
 id = "no-formal-layering"
+violates = true
 label = "no enforced layering; classes handle multiple concerns"
 directive = "Services and repositories are mixed; a single @Service class both handles business logic and queries the database directly instead of delegating to a @Repository."
 why = "Code is difficult to test (every test needs a database), hard to reuse (CLI or worker clients cannot call business logic without going through HTTP), and tightly coupled across concerns."

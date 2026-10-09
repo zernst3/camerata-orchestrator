@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust:testing"
 layer = "language"
 enforcement = "mechanical"
+kind = "decision"
 default = true
 verification = "grounded"
 qualifies = "Mechanical via the non_snake_case lint (deny-by-default for all Rust function names, including #[test] functions). Beyond the mechanical name-case gate, the scenario-description convention is prose-enforced at review: names like 'test_add' are acceptable but 'add_returns_sum_of_two_positive_numbers' is preferred because it makes test-failure output self-documenting. The clippy::tests_outside_test_module lint (restriction category) catches #[test] functions outside a #[cfg(test)] block — opt-in per repo."

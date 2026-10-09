@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:testing"
 layer = "testing"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -47,6 +48,7 @@ why = "Eliminates the most common sources of test flakiness. Tests run in any or
 
 [[option]]
 id = "sleep-based-timing"
+violates = true
 label = "use time.Sleep to wait for async operations in tests"
 directive = "Tests call time.Sleep with a duration expected to be long enough for the operation to complete."
 why = "Duration is a guess; passes on fast machines, fails on loaded CI. Makes the test suite artificially slow on every run."

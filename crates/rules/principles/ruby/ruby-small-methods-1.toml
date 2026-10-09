@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ruby"
 layer = "language"
 enforcement = "structured"
+kind = "decision"
 default = true
 verification = "grounded"
 

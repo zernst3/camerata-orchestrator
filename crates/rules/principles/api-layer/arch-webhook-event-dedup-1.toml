@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over payment-provider webhook handlers for a side effect (crediting a wallet, marking an order paid, extending a subscription, incrementing a usage counter, sending a fulfillment notification) applied directly from the event payload with no prior check against a persisted record of the provider's own event id (e.g. Stripe's evt_... id, PayPal's webhook event id). Conformance holds when the handler looks up (or inserts, via an atomic unique-constrained insert, not a check-then-act read) the event id in a dedicated processed-events record before applying the effect, and short-circuits with a 2xx acknowledgement on a duplicate without re-applying it; it fails when the side effect runs unconditionally on every delivery, or when deduplication is attempted by a non-atomic 'check if seen, then insert' pair that a concurrent redelivery can race."
@@ -63,6 +64,7 @@ why = "Payment providers document and rely on at-least-once delivery, so a webho
 
 [[option]]
 id = "apply-the-effect-unconditionally-on-every-delivery"
+violates = true
 label = "Apply the webhook's side effect unconditionally every time the handler receives a signed event"
 directive = "The webhook handler verifies the provider's signature and then applies the event's side effect (crediting a wallet, extending a subscription, incrementing a counter) directly, with no check for whether this specific event id has already been processed."
 why = "Rejected: every major payment provider documents at-least-once delivery as expected, normal behavior, not an edge case — a handler with no dedup step is guaranteed to eventually double-apply an effect on a redelivered event, through no fault of the client and with no attacker involved at all. This is a correctness defect that WILL manifest in production operation, not merely a theoretical risk."

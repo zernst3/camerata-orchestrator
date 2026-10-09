@@ -4,6 +4,7 @@ tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -40,6 +41,7 @@ why = "A disabled TLS verification flag is binary: it either protects the connec
 
 [[option]]
 id = "disable-for-dev-convenience"
+violates = true
 label = "Disable TLS verification in dev/test for convenience"
 directive = "TLS verification is disabled in development and test environments for convenience; a TODO comment notes that it should be re-enabled before production"
 why = "Rejected: TODO comments are not enforced. Dev code reaches production. The suppression-with-reason pattern gives the same development flexibility with an auditable paper trail and no risk of silent promotion to production."

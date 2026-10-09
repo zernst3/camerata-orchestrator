@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ui"
 layer = "universal"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over client-side code for an access token, refresh token, session id, or API key written via localStorage.setItem/sessionStorage.setItem, persisted into IndexedDB, or set as a cookie with no HttpOnly attribute (document.cookie writes are always JS-readable/writable and can never carry HttpOnly, which only a Set-Cookie response header can set). Conformance holds when every such credential is set only via a server response's Set-Cookie header carrying HttpOnly, Secure, and an explicit SameSite value, with no client-side JavaScript ever holding the token's own value in a readable store; it fails when a token is written to localStorage/sessionStorage/IndexedDB in any form (including a seemingly-opaque wrapper object), or when a cookie carrying a credential is set without HttpOnly."
@@ -72,12 +73,14 @@ why = "Any storage mechanism JavaScript can read is readable by any script that 
 
 [[option]]
 id = "store-token-in-local-or-session-storage"
+violates = true
 label = "Store the access/refresh token in localStorage or sessionStorage, read and attached manually by client-side request code"
 directive = "The client stores the access token (and often the refresh token) in localStorage or sessionStorage after login, and client-side request code reads it from there to attach as an Authorization header on each outgoing request."
 why = "Rejected: this is the single most common real-world path from 'an attacker achieved some script execution on this page' to 'the attacker now holds a replayable session credential,' because Web Storage is readable by any script running on the page with no further exploitation required. It is a popular pattern specifically because it is simpler to implement than cookie-based auth for a cross-origin SPA/API split, but the simplicity is exactly what trades away the XSS-resilience an HttpOnly cookie provides."
 
 [[option]]
 id = "cookie-set-via-client-side-javascript-no-httponly"
+violates = true
 label = "Set the session cookie via client-side JavaScript (document.cookie) rather than a server Set-Cookie header"
 directive = "After receiving a token from the login response body, client-side JavaScript sets it as a cookie via document.cookie, rather than the server setting it directly via a Set-Cookie response header."
 why = "Rejected: a cookie set via document.cookie can never carry the HttpOnly attribute — only a server's Set-Cookie response header can set it — so this pattern produces a cookie that LOOKS like the safer storage mechanism while remaining exactly as JS-readable (and therefore XSS-exfiltrable) as localStorage. The token must be set directly by the server's response header to actually gain HttpOnly's protection."

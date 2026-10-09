@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -37,12 +38,14 @@ why = "A single generic Repository-of-T does not fit aggregate-specific finder m
 
 [[option]]
 id = "the-domain-layer-declares-one-repository-abstrac"
+violates = true
 label = "One repository per use case"
 directive = "the domain layer declares one repository abstraction per use case (find-user-by-email, find-active-projects-in-org) rather than per aggregate"
 why = "Per-use-case abstractions proliferate across the codebase, lose aggregate cohesion, and produce a large surface of one-method interfaces with no grouping by domain boundary."
 
 [[option]]
 id = "the-domain-layer-declares-no-repository-abstract"
+violates = true
 label = "No repository abstraction"
 directive = "the domain layer declares no repository abstraction at all; services call the persistence library directly, with no boundary between domain logic and persistence implementation"
 why = "No abstraction couples every service to the chosen persistence library; the domain layer recompiles or breaks on every library upgrade."

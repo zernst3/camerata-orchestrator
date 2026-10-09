@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:testing"
 layer = "testing"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -47,6 +48,7 @@ why = "Complements build tags rather than replacing them for most projects: test
 
 [[option]]
 id = "no-separation"
+violates = true
 label = "no separation: all tests run together"
 directive = "Unit and integration tests are interleaved in the same _test.go files with no tagging or skipping."
 why = "go test ./... becomes slow and dependent on external infrastructure; CI without the infrastructure fails."

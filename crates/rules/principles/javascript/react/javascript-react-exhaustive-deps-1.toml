@@ -4,6 +4,7 @@ tag = "stack"
 domain = "javascript:react"
 layer = "framework"
 enforcement = "mechanical"
+kind = "decision"
 default = true
 qualifies = "Enforced by the react-hooks/exhaustive-deps rule from eslint-plugin-react-hooks, which fails the lint step when a useEffect / useCallback / useMemo dependency array omits a reactive value the body references. Conformance holds when the rule is at error severity and a missing dependency fails the build; it fails when the plugin is absent, the rule only warns, or dependencies are suppressed wholesale with a blanket lint-disable."
 verification = "grounded"

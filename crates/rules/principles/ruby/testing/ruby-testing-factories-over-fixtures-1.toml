@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ruby:testing"
 layer = "language"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -29,6 +30,7 @@ why = "Ships with Rails and requires no gems, but creates invisible coupling bet
 
 [[option]]
 id = "bare-active-record-create"
+violates = true
 label = "Create test objects with Model.create or Model.new inline in each test"
 directive = "Each test creates its own objects with explicit ActiveRecord calls and attribute hashes."
 why = "Fully explicit and self-contained but duplicates boilerplate across all tests and diverges silently when model validations change."

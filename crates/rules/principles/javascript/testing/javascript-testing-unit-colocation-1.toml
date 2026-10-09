@@ -4,6 +4,7 @@ tag = "stack"
 domain = "javascript:testing"
 layer = "language"
 enforcement = "mechanical"
+kind = "decision"
 default = true
 qualifies = "Enforced by Jest's default testMatch glob (**/__tests__/**/*.?([mc])[jt]s?(x) and **/?(*.)+(spec|test).?([mc])[jt]s?(x)) and Vitest's default include pattern (**/*.{test,spec}.?(c|m)[jt]s?(x)). Both frameworks discover co-located *.test.ts files without any configuration change. Conformance holds when test files follow the <source>.test.ts (or .spec.ts) naming pattern in the same directory as the source; it fails when tests live only in a remote top-level tests/ or __tests__/ tree that is disconnected from the source files."
 verification = "grounded"

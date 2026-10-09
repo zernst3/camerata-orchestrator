@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:auth"
 layer = "platform"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a statement-granular scan for SQL referencing auth.users inside a CREATE VIEW, CREATE MATERIALIZED VIEW, or GRANT statement whose target object lives in an API-exposed schema (public by default, or per SUPABASE-EXPOSURE-SCHEMAS-1). auth.users carries every account's email, phone number, and metadata; exposing any of it through PostgREST is a full account-directory leak. Conformance holds when no exposed-schema object selects from or grants access to auth.users directly — legitimate app-level user data belongs in an application-owned public.profiles-style table populated via trigger, never a direct view over auth.users."
@@ -55,6 +56,7 @@ why = "There is no legitimate reason for an exposed-schema object to reference a
 
 [[option]]
 id = "allow-column-restricted-views-over-auth-users"
+violates = true
 label = "Allow a view over auth.users when it explicitly selects only non-sensitive columns (e.g. just the id)"
 directive = "Permit an exposed view referencing auth.users if its column list is limited to non-identifying fields such as id, and flag only views that select email/phone/metadata columns."
 why = "Rejected: even an id-only view over auth.users still confirms which UUIDs exist as real accounts (an enumeration primitive) and, more importantly, is a fragile pattern that silently widens the moment someone adds `select *` or another column to the same view later — a change a reviewer is unlikely to recognize as security-relevant since the view already existed. The application-owned profiles-table pattern achieves the same legitimate need (referencing a user by id) without ever exposing the auth schema itself."

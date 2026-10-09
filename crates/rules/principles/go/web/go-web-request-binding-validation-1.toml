@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:web"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -31,6 +32,7 @@ why = "Type-safe, validation-consistent, and leverages the framework's or the la
 
 [[option]]
 id = "raw-map-access"
+violates = true
 label = "Handlers access raw maps or unvalidated json.RawMessage"
 directive = "Handlers receive request payloads as raw map[string]interface{} or json.RawMessage, extract fields manually, and validate them with ad-hoc checks inside the handler or a shared helper."
 why = "Trades type safety and validation consistency for flexibility in handling arbitrary or evolving payloads; requires explicit per-handler validation and error handling."

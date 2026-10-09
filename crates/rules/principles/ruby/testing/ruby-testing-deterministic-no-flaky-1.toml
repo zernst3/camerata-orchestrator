@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ruby:testing"
 layer = "language"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -23,6 +24,7 @@ why = "Random order + DatabaseCleaner eliminates the two most common sources of 
 
 [[option]]
 id = "fixed-order-no-cleanup"
+violates = true
 label = "Run tests in defined order; rely on AR rollback implicitly"
 directive = "Tests run in definition order (default before config.order = :random was added). No explicit DatabaseCleaner configuration; rely on ActiveRecord rollback happening automatically."
 why = "Simpler setup but hides order-dependent failures and can leak database state across examples in the same transaction group."

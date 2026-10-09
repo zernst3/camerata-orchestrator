@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -29,6 +30,7 @@ why = "Duplicates condition logic across call sites; a change to the condition r
 
 [[option]]
 id = "default-scope"
+violates = true
 label = "apply recurring conditions as a default scope on the model"
 directive = "Conditions that should apply to all queries for a model (e.g. soft-delete filter) are set via `default_scope { where(deleted_at: nil) }`."
 why = "Convenient for filters that must always apply but introduces invisible filtering that surprises callers who expect unfiltered results; `unscoped` must be remembered to escape it."

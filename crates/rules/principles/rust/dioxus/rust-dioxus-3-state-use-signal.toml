@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -23,6 +24,7 @@ why = "Signals are the framework's reactivity primitive: they automatically subs
 
 [[option]]
 id = "local-component-state-uses-the-legacy-hook-based"
+violates = true
 label = "Legacy hook-based state APIs, not signals"
 directive = "local component state uses the legacy hook-based state APIs from earlier framework versions rather than the current signal primitive"
 why = "Deprecated or removed in 0.7-era code: the APIs produce subtly different change-tracking behavior, the framework no longer maintains their error messages, and an AI agent must not introduce them because they may fail silently on framework upgrade."

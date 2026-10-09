@@ -4,6 +4,7 @@ tag = "stack"
 domain = "java:spring"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -33,6 +34,7 @@ why = "Eliminates N+1 by eliminating lazy loading; over-fetches on every query t
 
 [[option]]
 id = "lazy-with-open-session-in-view"
+violates = true
 label = "LAZY defaults with Open Session in View (OSIV) enabled to allow traversal in the view layer"
 directive = "LAZY defaults are kept; OSIV (spring.jpa.open-in-view=true, the Spring Boot default) keeps the JPA session open through the view/controller layer, allowing lazy associations to load transparently when serialized or accessed in the controller."
 why = "Masks N+1 queries behind HTTP serialization: the Hibernate session stays open, associations load silently during serialization, and profiling is required to detect the extra queries. OSIV is disabled in this project (spring.jpa.open-in-view=false); repositories must load what the caller needs explicitly."

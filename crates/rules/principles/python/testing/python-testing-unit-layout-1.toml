@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python:testing"
 layer = "language"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Conformance holds when unit tests live in a top-level tests/ (or src/-sibling tests/) directory whose layout mirrors the application package hierarchy; it fails when test files are scattered inside production modules without a dedicated tests/ root, or when the project has no clear unit/integration split."
 verification = "grounded"
@@ -30,6 +31,7 @@ why = "Useful when tests are tightly coupled to a package that ships as a librar
 
 [[option]]
 id = "scattered"
+violates = true
 label = "no fixed location; test files live wherever convenient"
 directive = "Test files are placed wherever the author chooses, mixed with production code or at the repo root."
 why = "Avoided: makes coverage reporting, CI filtering, and contributor orientation significantly harder."

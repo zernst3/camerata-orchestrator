@@ -4,6 +4,7 @@ tag = "stack"
 domain = "integration"
 layer = "universal"
 enforcement = "mechanical"
+kind = "default_with_exceptions"
 # No adopted default: this is a cross-agent seam rule, opted into per project when
 # the story spans a producer (API) and a consumer (UI / worker) agent.
 default = false
@@ -44,6 +45,7 @@ why = "The contract becomes a deterministic comparison of neutral records on the
 
 [[option]]
 id = "no-cross-agent-contract-check"
+violates = true
 label = "No cross-agent contract check (per-agent gates only)"
 directive = "the project relies solely on the per-agent Layer-1 and Layer-2 gates and does not reconcile consumer endpoint calls against producer routes on the assembled tree, so a producer/consumer contract drift across the agent seam ships undetected when the stack has no shared compiled type holding the boundary"
 why = "Both per-agent tiers can pass green for every agent while the seam between them is broken; without the integration gate the drift surfaces only when the pieces are combined in production, exactly the gap this tier exists to close."

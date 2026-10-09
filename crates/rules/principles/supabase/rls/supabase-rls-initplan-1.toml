@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "structured"
+kind = "decision"
 default = true
 opt_in_only = true
 verification = "grounded"

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:realtime"
 layer = "platform"
 enforcement = "prose"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Whether a channel's topic string is constructed in a way that an attacker could guess, enumerate, or directly control is a semantic judgment over the client code constructing the topic, not a pattern match — so this rule routes to prose: the `supabase.channel('<topic-expression>')` call site is fed to Claude with the question: is the topic built from a sequential/predictable id, or from a raw client-controlled value (a route param, query string, user-editable field) with no server-side validation that the caller is entitled to that specific topic? Conformance holds when topic construction either embeds an unguessable identifier (a UUID) scoped by an authorization check (SUPABASE-REALTIME-AUTHORIZATION-1's realtime.messages policy) that binds the connecting user to that specific topic, or the topic value itself is server-issued rather than client-chosen; it fails when the topic is built from a sequential integer id, a freely client-editable string with no server-side ownership/membership binding, or treated as if secrecy of the topic name were itself an access control."
@@ -67,6 +68,7 @@ why = "Topic secrecy and topic authorization solve different problems and neithe
 
 [[option]]
 id = "treat-an-unguessable-topic-name-as-sufficient-access-control"
+violates = true
 label = "Use a UUID or other hard-to-guess topic name and treat that alone as sufficient, without a realtime.messages policy"
 directive = "Construct channel topics from unguessable identifiers (UUIDs) and rely on that unguessability as the channel's access control, without also configuring the channel as private or adding a matching realtime.messages RLS policy."
 why = "Rejected: this is security through obscurity applied to a value that routinely leaks through entirely ordinary channels a developer doesn't think of as a secret-disclosure path — a shared link, browser history, a referrer header, a support screenshot, a logging pipeline that happens to capture the URL. Once the identifier is known to anyone outside the intended audience, there is no second check behind it, because the whole point of this option is that no realtime.messages policy exists to catch that case."

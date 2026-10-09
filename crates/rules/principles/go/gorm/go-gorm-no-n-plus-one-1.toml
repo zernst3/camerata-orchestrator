@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:gorm"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -27,6 +28,7 @@ why = "GORM's Preload and Join are optimized to load related data efficiently; o
 
 [[option]]
 id = "lazy-loading-in-loop"
+violates = true
 label = "Each record's related data is fetched in a loop"
 directive = "A handler or service fetches a list of parents, then iterates over them and calls a database query for each parent to fetch its children."
 why = "Simple to code; results in N+1 queries and poor performance. Easy to introduce without realizing the cost."

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 
 verification = "grounded"
@@ -29,6 +30,7 @@ why = "Eliminates the per-query AsNoTracking call; the trade-off is that write p
 
 [[option]]
 id = "always-track"
+violates = true
 label = "All queries tracked; AsNoTracking never used"
 directive = "No AsNoTracking calls appear. All returned entities are attached to the change tracker regardless of whether they will be mutated."
 why = "Simplest query authoring; wastes memory and CPU allocating and maintaining change-tracking snapshots for entities that are only read, not written."

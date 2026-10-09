@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 
 verification = "grounded"
@@ -29,6 +30,7 @@ why = "Cleaner than an explicit transaction when EF Core can detect and order th
 
 [[option]]
 id = "multiple-saveschanges-no-transaction"
+violates = true
 label = "Multiple SaveChanges calls without an explicit transaction"
 directive = "Service methods call SaveChangesAsync multiple times within a logical operation without wrapping them in an explicit transaction. Each SaveChanges has its own implicit per-call transaction."
 why = "Leaves the database in partial state if any call after the first fails; the committed rows from the first call remain, requiring compensating writes or manual cleanup. Forbidden when the second call's success is required for the first call's result to be valid."

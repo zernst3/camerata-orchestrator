@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over error-handling/catch paths for a caught exception, database driver error, or error object whose raw `.message`, `.stack`, `.detail`, or `.hint` property (or the exception's string representation generally) is written into an HTTP response body with no sanitization step, particularly in code paths with no environment check gating that behavior to development only. Conformance holds when every error response's content is drawn from a controlled, pre-written set of client-safe messages (keyed by error type/code) rather than from a caught exception's own fields, with the exception's full raw detail routed only to server-side logging/APM, never the HTTP response; it fails when a raw exception/driver-error message, a stack trace, or a filesystem path reaches the response body in a build that could run in production, even if guarded by an environment check that is easy to misconfigure or bypass."
@@ -69,12 +70,14 @@ why = "An environment check that gates raw-exception forwarding is a mitigation 
 
 [[option]]
 id = "forward-raw-exception-message-gated-by-environment-check"
+violates = true
 label = "Forward the raw exception's message/stack into the response, but only when an environment check indicates non-production"
 directive = "The error handler includes the caught exception's raw message and/or stack trace in the response body, guarded by a check against the current environment (e.g. NODE_ENV) so the behavior is intended to be disabled in production."
 why = "Rejected as the sole control: an environment check is one misconfigured variable, one staging environment mistakenly treated as safe, or one code path reached before the check runs away from leaking the exact same detail in a context the developer assumed was protected. The response-content code having access to the raw exception at all is the root cause; gating access to it after the fact is strictly weaker than never exposing it to the response-building code in the first place."
 
 [[option]]
 id = "forward-raw-exception-message-unconditionally"
+violates = true
 label = "Forward the raw exception's message/stack/driver detail into the response body unconditionally, in every environment"
 directive = "A generic catch-all error handler serializes the caught exception's own message, stack trace, or database driver error text directly into the HTTP response body, with no environment check and no mapping to a pre-written message."
 why = "Rejected: this discloses internal schema details, filesystem paths, dependency versions, and exact SQL to any caller who can trigger an error, including unauthenticated callers at a public endpoint — it is reconnaissance handed to an attacker for free, and the information disclosed (table/column names, stack traces revealing library versions) is routinely useful for crafting a more targeted follow-up attack."

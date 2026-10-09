@@ -4,6 +4,7 @@ tag = "universal"
 domain = "testing"
 layer = "universal"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -41,6 +42,7 @@ why = "Gives high confidence that the full stack works together and catches inte
 
 [[option]]
 id = "no-explicit-distribution-policy"
+violates = true
 label = "No explicit distribution policy; write tests at whichever layer feels natural"
 directive = "Let developers choose test layer freely with no prescribed distribution."
 why = "Gives each developer maximum flexibility and avoids policy overhead, but tends to produce the ice-cream-cone antipattern over time: developers reach for integration and E2E tests because they feel more confidence-inspiring, until the suite is slow, brittle, and expensive to maintain without a fast unit base underneath."

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "javascript:vue"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -36,6 +37,7 @@ why = "Unidirectional data flow makes component interactions predictable and deb
 
 [[option]]
 id = "direct-method-calls-and-shared-state"
+violates = true
 label = "Direct method calls and shared mutable state"
 directive = "Parent components call child methods directly via template refs. Parent and child components share and mutate the same state object. Data flow is bidirectional."
 why = "Direct parent-to-child method calls and shared mutable state create bidirectional data flow: debugging requires searching all places that mutate shared state rather than following a single direction, and a change to shared state can have effects in multiple components simultaneously, making the flow unpredictable. The unidirectional alternative (props down, events up) makes every state change traceable to its source."

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Deterministically checkable by scanning workflow files for the presence (or absence) of a top-level `permissions:` block, and — where present — whether it sets `contents: write` or broader scopes a given job's steps do not actually need. A workflow with NO `permissions:` key at all inherits the repository's or organization's configured default for the automatic GITHUB_TOKEN, which on many repositories (particularly older ones, or ones that have not explicitly tightened the organization default) is read/write access to most scopes. Conformance holds when every workflow (or, more granularly, every job) sets an explicit `permissions:` block granting only the scopes its own steps use, defaulting the rest to `read` or none; it fails when no `permissions:` key is present and the repository/organization default has not been independently confirmed to already be least-privilege, or when a broader scope than a job's steps require is explicitly granted."
@@ -70,6 +71,7 @@ why = "The default token scope on many repositories is broad read/write across m
 
 [[option]]
 id = "no-explicit-permissions-block-inherit-platform-default"
+violates = true
 label = "Omit the permissions block entirely and inherit whatever the platform/organization's default GITHUB_TOKEN scope currently is"
 directive = "Workflow files set no explicit permissions: key at all, relying on the repository or organization's currently-configured default token scope, whatever that happens to be."
 why = "Rejected: the default scope varies by repository age, organization policy, and settings nobody reviewing this specific workflow necessarily controls or has verified — a workflow that looks correct by its own content can still run with a broad read/write token simply because the organization default was never tightened. Every step in the workflow, including any executing third-party code, inherits that scope; explicitly declaring the minimum needed removes the dependency on an assumption about a setting that lives outside the workflow file entirely."

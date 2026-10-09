@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go"
 layer = "architecture"
 enforcement = "structured"
+kind = "decision"
 default = true
 
 [decision]

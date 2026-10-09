@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -29,12 +30,14 @@ why = "Misleads every reader and every consumer of the entity's derived metadata
 
 [[option]]
 id = "the-entity-carries-no-uniqueness-annotation-and"
+violates = true
 label = "No uniqueness annotation pending future macro support"
 directive = "the entity carries no uniqueness annotation and the rule waits for a future macro attribute that expresses partial, conditional, or deferrable uniques"
 why = "Not actionable today: the macro does not support partial, conditional, or deferrable uniques (it does already support plain composite uniques via #[sea_orm(unique_key = \"...\")]) and no roadmap signal suggests broader support is coming; waiting leaves the constraint undocumented in the entity indefinitely, which is the same outcome as omitting the citation entirely."
 
 [[option]]
 id = "the-composite-or-partial-uniqueness-constraint-i"
+violates = true
 label = "Uniqueness enforced only in application code"
 directive = "the partial, conditional, or deferrable uniqueness constraint is dropped at the database level and enforced exclusively in application code instead"
 why = "A clear regression: the database loses the ability to reject duplicates atomically, race conditions across concurrent writers become a correctness bug rather than a constraint violation, and application-code enforcement is inherently racy without a SELECT-FOR-UPDATE or similar construct."

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -29,6 +30,7 @@ why = "Forces every component to re-implement the loading-state plumbing: bugs h
 
 [[option]]
 id = "ui-data-fetching-runs-directly-in-the-component"
+violates = true
 label = "Data fetching runs directly in component body"
 directive = "UI data fetching runs directly in the component body outside any hook, with no automatic loading-state plumbing"
 why = "Produces request storms and inconsistent in-flight state: a fetch that runs on every render fires a new network request whenever any signal the component reads changes, including signals that have nothing to do with the fetch, and concurrent in-flight requests produce unpredictable race conditions on the result signal."

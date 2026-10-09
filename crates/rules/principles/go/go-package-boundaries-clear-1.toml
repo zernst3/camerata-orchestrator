@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go"
 layer = "architecture"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -34,6 +35,7 @@ why = "Clear boundaries prevent circular dependencies and keep the dependency gr
 
 [[option]]
 id = "minimal-boundary-enforcement"
+violates = true
 label = "rely on naming conventions and code review"
 directive = "Package structure is not enforced; the internal/ convention is optional. Circular imports are avoided only by developer discipline."
 why = "Harder to maintain as the codebase grows; circular imports and tangled dependencies are easier to introduce."

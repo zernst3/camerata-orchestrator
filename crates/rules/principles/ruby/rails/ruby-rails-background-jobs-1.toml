@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -29,6 +30,7 @@ why = "Blocks the request thread for the duration of the operation, exhausts the
 
 [[option]]
 id = "thread-spawn"
+violates = true
 label = "spawn a background thread from the controller"
 directive = "Slow work is performed by spawning a new thread (`Thread.new { ... }`) inside the controller action, outside the request cycle."
 why = "Avoids blocking the request thread but bypasses the job queue's retry, observability, and backpressure mechanisms; unhandled errors in the spawned thread are swallowed silently."

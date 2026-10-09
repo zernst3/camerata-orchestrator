@@ -4,6 +4,7 @@ tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -35,6 +36,7 @@ why = "A wrong 'clear' call on a one-way door costs a migration; on a two-way do
 
 [[option]]
 id = "the-agent-auto-decides-whenever-the-winner-feels"
+violates = true
 label = "Confidence gates autonomy"
 directive = "the agent auto-decides whenever the winner feels obvious, regardless of whether the call is hard to reverse"
 why = "Confidence-gated autonomy misses exactly the irreversible calls the rule exists to catch: high confidence on a structural change is still wrong when the change is hard to reverse."

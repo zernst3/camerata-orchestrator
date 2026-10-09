@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:gorm"
 layer = "library"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -31,6 +32,7 @@ why = "Context propagation is Go's idiomatic timeout and cancellation mechanism;
 
 [[option]]
 id = "no-context-in-queries"
+violates = true
 label = "Queries do not use context; no deadline enforcement at the database layer"
 directive = "Queries are called without context (db.Find(&users)) or with context.Background()."
 why = "Simpler to code; queries are not bounded by handler deadlines and may hang indefinitely if the database is slow."

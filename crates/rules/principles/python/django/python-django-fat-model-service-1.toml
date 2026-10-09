@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python:django"
 layer = "framework"
 enforcement = "structured"
+kind = "decision"
 default = true
 verification = "grounded"
 

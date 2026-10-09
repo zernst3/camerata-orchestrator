@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python"
 layer = "language"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 qualifies = "Enforced by a static-analysis gate (Bandit B608 / Ruff S608 / Semgrep) that flags f-strings, `%`-formatting, `.format()`, or `+` concatenation feeding a value into `cursor.execute(...)`, `session.execute(text(...))`, or `.raw(...)`. Conformance holds when the gate runs in CI and an interpolated query string fails the build; it fails when no SQL-injection lint runs."
 verification = "grounded"
@@ -25,6 +26,7 @@ why = "Parameterization sends SQL and values separately so a value can never be 
 
 [[option]]
 id = "interpolate-with-escaping"
+violates = true
 label = "interpolate values into the query with manual escaping"
 directive = "Dynamic values are formatted into the SQL string with manual escaping or quoting rather than bound as parameters."
 why = "Reads naturally but is error-prone and incomplete; every site is a latent injection waiting for one unsanitized input."

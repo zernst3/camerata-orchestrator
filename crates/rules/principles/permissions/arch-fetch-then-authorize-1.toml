@@ -4,6 +4,7 @@ tag = "stack"
 domain = "permissions"
 layer = "universal"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -35,6 +36,7 @@ why = "Resource-level policy can only be evaluated once the resource is loaded, 
 
 [[option]]
 id = "checks-in-business-logic"
+violates = true
 label = "ad hoc checks inside business logic"
 directive = "Business logic fetches the resource and performs authorization checks inline wherever a decision is needed, without a dedicated authorization step or an authorized-typed value."
 why = "Works but scatters the policy across every code path, making it easy to omit a check on one branch and hard to audit."

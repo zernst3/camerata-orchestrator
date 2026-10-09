@@ -4,6 +4,7 @@ tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -37,6 +38,7 @@ why = "Overriding then reviewing later trades pause cost for review-cadence cost
 
 [[option]]
 id = "documented-rules-are-absolute-the-agent-never-ov"
+violates = true
 label = "Absolute rules, no overrides"
 directive = "Documented rules are absolute; the agent never overrides them based on local context, and a poor-fit rule is filed to the decisions log for human revision without the agent producing any artifact in the meantime."
 why = "Absolute rules buy stability and can be right in regulated or safety-critical contexts, but they strand the agent on any rule whose context has genuinely shifted, since there is no path from 'this rule no longer fits' to a deviating artifact at all."

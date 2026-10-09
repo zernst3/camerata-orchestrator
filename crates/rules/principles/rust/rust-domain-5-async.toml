@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "prose"
+kind = "decision"
 default = true
 verification = "grounded"
 

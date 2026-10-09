@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:web"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -31,6 +32,7 @@ why = "Go framework middleware is the idiomatic mechanism for cross-cutting conc
 
 [[option]]
 id = "per-handler-inline"
+violates = true
 label = "Each handler re-implements authentication, logging, recovery inline"
 directive = "Handlers authenticate themselves, perform logging themselves, recover from panics themselves, and manage timeouts themselves via context.WithTimeout."
 why = "Trades maintenance overhead and inconsistency for handler independence and explicit control within each route; the framework's middleware chain is not used for infrastructure concerns."

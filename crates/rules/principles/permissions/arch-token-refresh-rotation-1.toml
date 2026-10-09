@@ -4,6 +4,7 @@ tag = "stack"
 domain = "permissions"
 layer = "universal"
 enforcement = "architectural"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Deterministically checkable in principle (does an access token's own expiry fall within a short window, does a refresh exchange issue a NEW refresh token while invalidating the one just used, does replaying an already-used refresh token revoke the session rather than silently succeeding or silently failing), but confirming it requires understanding the project's specific auth/session issuance code, not a pattern any generic linter recognizes. This is architectural: a custom integration test exercising the refresh endpoint (issue a token, use it, replay the same one, confirm the session is revoked) is the only reliable check, and the project builds it. Conformance holds when such a test passes; it fails when access-token lifetime is long enough to substitute for session management (making revocation ineffective until expiry), when a refresh token is reusable (no rotation), or when a reused refresh token is accepted rather than triggering revocation."
@@ -77,12 +78,14 @@ why = "A stolen refresh token used alongside the legitimate client's own continu
 
 [[option]]
 id = "single-long-lived-access-token-as-the-session"
+violates = true
 label = "Issue one long-lived access token per login and use it as the session for its full validity window, with no refresh/rotation mechanism"
 directive = "A single access token is issued at login with a long expiry (hours to weeks) and is used directly as the session credential for its entire lifetime, with no shorter-lived token, no refresh exchange, and no rotation."
 why = "Rejected: a long-lived token used this way is difficult to revoke before its natural expiry (many designs specifically avoid a server-side revocation list for statelessness), so a stolen copy remains fully valid for as long as the token's lifetime, with no mechanism that would ever surface the theft to the legitimate user — the attacker's use is indistinguishable from the legitimate user's own continued use, forever, until expiry."
 
 [[option]]
 id = "non-rotating-refresh-token-reused-indefinitely"
+violates = true
 label = "Use a short-lived access token with a longer-lived refresh token, but the same refresh token is reused across every refresh with no rotation"
 directive = "Access tokens are short-lived and exchanged periodically for new ones using a refresh token, but the SAME refresh token value is presented and accepted on every exchange, with no new refresh token issued and no invalidation of the one just used."
 why = "Rejected: this correctly bounds the access token's own exposure window but does nothing for the refresh token itself, which becomes the new long-lived, effectively-permanent credential in the attacker's place — a stolen refresh token remains valid and silently reusable by an attacker in parallel with the legitimate client's own use, for as long as the refresh token's own (typically much longer) lifetime, with the same 'no signal the legitimate user would ever see' problem this rule exists to close, just shifted one layer down."

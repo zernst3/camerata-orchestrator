@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python:django"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -23,12 +24,14 @@ why = "CSRF middleware protects all cookie-session state-changing requests globa
 
 [[option]]
 id = "remove-csrf-middleware"
+violates = true
 label = "remove CsrfViewMiddleware from MIDDLEWARE"
 directive = "CSRF protection is disabled globally by removing `django.middleware.csrf.CsrfViewMiddleware` from `MIDDLEWARE`."
 why = "Removes CSRF defense for all cookie-based state changes; any authenticated state-changing request can be triggered from a cross-origin page."
 
 [[option]]
 id = "permission-classes-drf"
+violates = true
 label = "use DRF IsAuthenticated permission class on DRF viewsets"
 directive = "Django REST Framework viewsets declare `permission_classes = [IsAuthenticated]` (or set it globally in DEFAULT_PERMISSION_CLASSES) rather than using `@login_required` or `LoginRequiredMixin`."
 why = "The correct pattern for DRF API viewsets; equivalent protection for API endpoints that do not render HTML. Complementary to (not a replacement for) CSRF middleware when the API uses session-cookie auth."

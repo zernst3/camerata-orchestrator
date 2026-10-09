@@ -4,6 +4,7 @@ tag = "stack"
 domain = "permissions"
 layer = "universal"
 enforcement = "structured"
+kind = "decision"
 default = true
 verification = "policy"
 

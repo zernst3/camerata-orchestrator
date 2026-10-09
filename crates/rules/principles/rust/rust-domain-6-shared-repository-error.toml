@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust"
 layer = "language"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = false
 verification = "grounded"
 
@@ -21,6 +22,7 @@ why = "This rule assumes `rust-domain-4-errors-via-thiserror`'s default (a typed
 
 [[option]]
 id = "errors-are-category-scoped-one-shared-enum-per-f"
+violates = true
 label = "Errors are organized by failure category, one shared enum per category"
 directive = "Each Rust crate exposes errors organized by failure category at its public boundary, with one shared enum per category. The categories are whatever distinct failure surfaces the crate exposes; examples include persistence and IO failures, input validation, business rule violations, parsing, and networking, but the actual set depends on what the crate does. Variants within an enum enumerate the distinct failure modes for that category. Driver-specific or framework-specific errors map into the appropriate category enum at the boundary; they do not leak through the public API directly."
 remediation = """
@@ -30,6 +32,7 @@ why = "Keeps callers matching a small, stable set of category enums even as the 
 
 [[option]]
 id = "each-function-or-aggregate-defines-its-own-error"
+violates = true
 label = "Errors are organized by module or aggregate, one enum per aggregate"
 directive = "Each module or aggregate owns its error enum, so an error type lives next to the code whose failures it describes, rather than being centralized into a small number of shared per-category enums. Driver-specific or framework-specific errors still map into the aggregate's own enum at the boundary; they do not leak through the public API directly."
 remediation = """

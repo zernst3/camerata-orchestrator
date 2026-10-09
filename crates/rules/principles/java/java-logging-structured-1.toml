@@ -4,6 +4,7 @@ tag = "stack"
 domain = "java"
 layer = "language"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Enforced by code review and Checkstyle rules that flag System.out.println() and System.err.println() in production code. Conformance requires slf4j or a similar logging framework with structured fields."
 verification = "grounded"
@@ -29,6 +30,7 @@ why = "Structured logging is machine-readable, searchable, and integrates with c
 
 [[option]]
 id = "system-print-statements"
+violates = true
 label = "print diagnostic output to System.out or System.err"
 directive = "Diagnostic information is printed via System.out.println() or System.err.println()."
 why = "Unstructured, unsearchable, hard to correlate with events, and inefficient in containerized environments. Lost in logs or buffered unpredictably."

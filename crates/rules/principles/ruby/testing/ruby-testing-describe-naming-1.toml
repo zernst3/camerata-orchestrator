@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ruby:testing"
 layer = "language"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 qualifies = "Enforced by rubocop-rspec cops RSpec/DescribeClass (top-level describe must be a constant), RSpec/DescribeMethod (#/. prefix on method name), RSpec/ContextWording (context prefix list), and RSpec/ExampleWording (no 'should'/'will' in it blocks). Conformance holds when all four cops report no offenses."
 verification = "grounded"
@@ -25,6 +26,7 @@ why = "Produces readable failure messages, mirrors Ruby docs conventions, and is
 
 [[option]]
 id = "freeform-strings"
+violates = true
 label = "Use arbitrary strings for all describe/context/it blocks"
 directive = "Describe blocks take any string; no convention on # vs . prefix or context wording."
 why = "Flexible but loses readable failure messages and breaks rubocop-rspec naming cops."

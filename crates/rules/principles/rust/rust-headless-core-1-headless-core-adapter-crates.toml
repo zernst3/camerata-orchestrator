@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust"
 layer = "library"
 enforcement = "structured"
+kind = "decision"
 default = false
 verification = "grounded"
 

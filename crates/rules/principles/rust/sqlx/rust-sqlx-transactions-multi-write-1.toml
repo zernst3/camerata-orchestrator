@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust:sqlx"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -23,6 +24,7 @@ why = "Explicit transactions ensure consistency and prevent partial state corrup
 
 [[option]]
 id = "no-explicit-transactions"
+violates = true
 label = "Rely on implicit transactions for each statement"
 directive = "Each SQL statement runs in an implicit transaction. Multiple writes are executed as separate statements without an explicit transaction group."
 why = "When one write in a multi-step operation fails after another has already succeeded, the database is left in a partial state with dangling references or stale data; there is no rollback to restore consistency, and the only recovery is manual correction of the database, often under production pressure."

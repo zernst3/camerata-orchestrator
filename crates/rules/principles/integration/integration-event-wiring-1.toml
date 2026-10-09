@@ -4,6 +4,7 @@ tag = "stack"
 domain = "integration"
 layer = "universal"
 enforcement = "mechanical"
+kind = "decision"
 default = false
 opt_in_only = true
 layer3_only = false

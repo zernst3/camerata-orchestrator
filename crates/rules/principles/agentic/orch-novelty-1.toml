@@ -4,6 +4,7 @@ tag = "stack"
 domain = "agentic"
 layer = "universal"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 verification = "policy"
 
@@ -39,6 +40,7 @@ why = "Shipping then flagging hedges in the wrong direction: the change is in pl
 
 [[option]]
 id = "the-agent-searches-for-analogies-in-adjacent-cod"
+violates = true
 label = "Search for analogies, pause only if none found"
 directive = "the agent searches for analogies in adjacent codebases or upstream libraries and proceeds autonomously if any analogy is found, only pausing when no analogy at all exists"
 why = "Finding an analogy elsewhere is not a replacement for the pause, because a weak analogy can be worse than admitting none exists, and the absence of an analogy is itself the signal the rule wants to act on."

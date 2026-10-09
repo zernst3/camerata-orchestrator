@@ -14,6 +14,7 @@ tag = "stack"
 domain = "javascript:next"
 layer = "framework"
 enforcement = "structured"
+kind = "decision"
 default = true
 opt_in_only = true
 verification = "grounded"

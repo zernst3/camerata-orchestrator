@@ -4,6 +4,7 @@ tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "prose"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Prose check: which columns genuinely represent an invariant worth enforcing at the database (a required field, a bounded/valid range, a value that must be unique across rows) versus a column that is legitimately optional or whose validity is contextual and not expressible as a simple predicate, is a judgment call over the schema and its surrounding application logic, not a regex. The realistic mechanism is a migration-review checklist plus a periodic schema audit comparing application-level validation (model-layer 'required'/'unique' declarations, request-body validators) against what the database itself enforces, surfacing columns validated only in application code with no matching database constraint. Conformance holds when every invariant the application code treats as load-bearing (required, bounded, or unique) has a matching database-level constraint; it fails when application code is the ONLY layer enforcing an invariant the schema itself stays silent on."
@@ -65,6 +66,7 @@ why = "Application-level validation only runs for requests that pass through it;
 
 [[option]]
 id = "application-code-is-the-sole-enforcement-layer-for-invariants"
+violates = true
 label = "Enforce required fields, valid ranges, and uniqueness only in application code; leave the schema permissive"
 directive = "Validate required fields, value ranges/enums, and uniqueness exclusively in application-layer code (model validations, request validators, service-layer checks), without adding matching NOT NULL/CHECK/UNIQUE constraints to the schema."
 why = "Rejected: application-only enforcement holds only for writes that go through the specific code path implementing the check. A migration, a bulk import, a second service, or a future code path that doesn't call the same validator all bypass it silently, and the resulting invalid state (a null where the app assumes a value, a duplicate where the app assumes uniqueness, an out-of-range value where the app assumes a fixed set) then has to be discovered and cleaned up after the fact, rather than having been impossible to write in the first place."

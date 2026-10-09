@@ -10,6 +10,7 @@ layer = "language"
 # hard check that never ran. Corrected to `structured` (evaluated by the semantic/AI audit
 # tier, not mechanically enforced) until a real gosec/Semgrep detector is wired.
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -36,6 +37,7 @@ why = "Parameterization sends SQL and values separately so a value can never be 
 
 [[option]]
 id = "interpolate-with-escaping"
+violates = true
 label = "build query strings with string concatenation and manual escaping"
 directive = "Dynamic values are formatted into the SQL string using concatenation or fmt.Sprintf with manual escaping or quoting rather than bound as parameters."
 why = "Reads naturally but is error-prone and incomplete; every site is a latent injection waiting for one unsanitized input."

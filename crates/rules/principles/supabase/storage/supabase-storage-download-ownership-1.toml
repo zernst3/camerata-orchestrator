@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:storage"
 layer = "platform"
 enforcement = "prose"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Whether a download/signed-URL handler validates the caller's entitlement to the SPECIFIC object path it was asked for is a semantic judgment over the handler's control flow, not a pattern match — so this rule routes to the prose tier: the handler body and the object-path source (a client-supplied id/path from params/body/query) are fed to Claude as evidence. Conformance holds when the handler confirms the requesting user owns, or is otherwise entitled to, the exact object identified by the client-supplied path before calling createSignedUrl/download; it fails when the handler passes that client-supplied value straight into the storage call with no ownership/membership check of its own."
@@ -67,6 +68,7 @@ why = "The object id/path is attacker-controlled the instant it comes from the r
 
 [[option]]
 id = "trust-the-storage-objects-rls-policy-alone"
+violates = true
 label = "Rely on the storage.objects RLS policy to gate who can sign/download which object; add no handler-level check"
 directive = "Do not add an application-level entitlement check in the download/signed-URL handler; treat the storage.objects RLS policy (SUPABASE-STORAGE-OBJECT-POLICY-1) as sufficient authorization for whatever object path the client supplies."
 why = "Rejected: a handler that constructs its storage client with a service_role key bypasses RLS entirely, so there is no policy evaluation happening on that call at all — this is the dominant real-world shape of this bug, and policy-only coverage misses it completely. Even with the anon/authenticated client, a policy scoped to a folder or bucket rather than an exact object still permits signing a URL for any object within that scope, which is broader than what a specific feature intends; the handler is the only place that knows which single object this particular request is supposed to be allowed to touch."

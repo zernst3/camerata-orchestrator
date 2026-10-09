@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go"
 layer = "language"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -32,6 +33,7 @@ why = "Avoiding globals eliminates race conditions and makes concurrency explici
 
 [[option]]
 id = "sync-globals-minimally"
+violates = true
 label = "store mutable state in globals but protect with locks"
 directive = "Global variables may be mutated if they are guarded by a lock (sync.Mutex at the file level or inside a synced wrapper)."
 why = "Still allows global state, increasing cognitive load; requires developers to remember to lock before every access."

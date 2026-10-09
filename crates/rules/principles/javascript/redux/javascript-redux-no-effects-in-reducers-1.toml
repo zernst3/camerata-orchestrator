@@ -4,6 +4,7 @@ tag = "stack"
 domain = "javascript:redux"
 layer = "library"
 enforcement = "structured"
+kind = "decision"
 default = true
 verification = "grounded"
 

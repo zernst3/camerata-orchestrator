@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:gorm"
 layer = "library"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -27,12 +28,14 @@ why = "Migrations are the source of truth for schema evolution; the database is 
 
 [[option]]
 id = "manual-sql-alters"
+violates = true
 label = "Schema changes are applied manually via direct SQL ALTER statements"
 directive = "Developers run SQL commands directly in the database to add columns, create indexes, etc., without corresponding migration code."
 why = "Quick for one-off changes; becomes untrackable and unreproducible at scale. New environments diverge; rollbacks are manual and error-prone."
 
 [[option]]
 id = "autoversion-only"
+violates = true
 label = "Only AutoMigrate is used; no explicit migration versioning"
 directive = "GORM's db.AutoMigrate(&User{}, &Profile{}) is called at startup; the schema is derived from and additively synced to the Go structs, with no separate migration files."
 why = "Convenient for rapid development; lacks version history and explicit control. Cannot roll back to a previous schema state if needed, and cannot express destructive changes (dropping or renaming a column) since AutoMigrate only adds."

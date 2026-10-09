@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 
 verification = "grounded"
@@ -29,6 +30,7 @@ why = "Works but requires consistent repetition in every action; the pattern is 
 
 [[option]]
 id = "no-model-validation"
+violates = true
 label = "No framework-level validation; services validate inputs themselves"
 directive = "Request parameters are accepted without Data Annotations or ModelState checks. Service methods validate their inputs and throw domain exceptions on invalid data, which the error handler maps to 400 responses."
 why = "Pushes validation inward, away from the HTTP boundary. The API surface no longer describes its own constraints; tooling cannot generate client-side validators from the schema; and invalid data travels deeper into the stack before rejection."

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over FOREIGN KEY declarations (REFERENCES clauses or the ORM's FK helper) for `ON DELETE CASCADE` where the REFERENCING table (the one holding the FK, deletion of whose row triggers the cascade) is a routine, user-mutable table (a session, a cart, a profile edit, anything a user or an automated job deletes in the ordinary course of the product) and the REFERENCED table's name or column shape suggests financial, audit, or historical semantics (invoices, payments, transactions, orders, ledger_entries, audit_log, charges, receipts, statements). Conformance holds when such a relationship uses `ON DELETE RESTRICT` (or `NO ACTION`, or a nullable FK with `ON DELETE SET NULL`) instead; a cascade whose target naming is ambiguous is `needs_review` rather than asserted."
@@ -65,6 +66,7 @@ why = "A cascading delete into a financial or audit table converts an everyday, 
 
 [[option]]
 id = "cascade-deletes-uniformly-regardless-of-referenced-table-semantics"
+violates = true
 label = "Apply ON DELETE CASCADE uniformly to every foreign key, regardless of what the referenced table represents"
 directive = "Use ON DELETE CASCADE as the default referential action for every foreign key relationship, including ones that reference financial, audit, or historical tables, without a naming-based or semantic carve-out."
 why = "Rejected: CASCADE is the correct default for genuinely dependent data, but applying it uniformly treats a financial or audit record as equally disposable as a comment or a cache row. The entire point of an audit or financial record is that it outlives the routine-course row that happened to reference it; a uniform cascade policy removes that guarantee silently, with no error at delete time pointing at what was actually destroyed."

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 
 verification = "grounded"
@@ -29,6 +30,7 @@ why = "Appropriate only for fully public, unauthenticated APIs (CDN-served stati
 
 [[option]]
 id = "no-cors-configured"
+violates = true
 label = "No CORS middleware configured; cross-origin requests blocked by default"
 directive = "No UseCors or AddCors is registered. All cross-origin requests are blocked by the browser's same-origin policy. Server-to-server requests (no browser, no CORS preflight) are unaffected."
 why = "Correct for an API that is consumed only server-to-server and never directly from a browser; wrong for any API that a browser-based frontend calls."

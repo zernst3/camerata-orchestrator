@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ci-cd"
 layer = "universal"
 enforcement = "mechanical"
+kind = "decision"
 # No adopted default: the cadence (when/how often the scan runs) is a project
 # decision — weekly CI job, per-PR, in-loop, or on-demand. Selecting this rule
 # forces a conscious cadence choice.

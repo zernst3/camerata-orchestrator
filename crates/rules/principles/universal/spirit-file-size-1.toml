@@ -4,6 +4,7 @@ tag = "universal"
 domain = "universal"
 layer = "universal"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 verification = "policy"
 
@@ -27,6 +28,7 @@ why = "Pre-AI, splitting had a real writing cost (boilerplate, imports, naming) 
 
 [[option]]
 id = "hand-maintained-files-are-allowed-to-grow-withou"
+violates = true
 label = "No size guideline for hand-maintained files"
 directive = "hand-maintained files are allowed to grow without a human-reading size guideline, and their size is whatever they end up at"
 why = "Allowing unbounded growth fails the human-comprehension axis the rule exists to protect: AI happily extends files, but humans reviewing or debugging those files bog down and lose orientation as they grow."

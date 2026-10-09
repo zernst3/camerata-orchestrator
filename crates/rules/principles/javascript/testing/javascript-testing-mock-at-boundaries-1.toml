@@ -4,6 +4,7 @@ tag = "stack"
 domain = "javascript:testing"
 layer = "language"
 enforcement = "structured"
+kind = "decision"
 default = true
 qualifies = "No ESLint rule enforces where mocks may or may not be placed. The jest/prefer-spy-on rule (eslint-plugin-jest) nudges toward spyOn over manual assignment, but it does not distinguish boundary mocks from domain mocks. Testing Library's guiding principle — 'the more your tests resemble the way your software is used, the more confidence they can give you' — operationalises as: mock only what you cannot control (external systems), not what you can control (your own code). Convention is enforced at PR review."
 verification = "grounded"

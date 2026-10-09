@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python:flask"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -23,12 +24,14 @@ why = "Marshmallow/pydantic schemas run a declared contract, produce typed Pytho
 
 [[option]]
 id = "manual-dict-access"
+violates = true
 label = "access request.json fields directly with .get() checks"
 directive = "Route handlers read fields with `request.json.get('field', default)` and validate presence and type with manual `if` checks before use."
 why = "Duplicates schema-validation work incompletely; each validation is ad-hoc and inconsistent; missing a check at one field introduces a bug silently."
 
 [[option]]
 id = "no-validation-trust-client"
+violates = true
 label = "pass request data directly to the model or database layer without validation"
 directive = "Route handlers pass `request.json` or individual fields directly to model constructors or service functions on the assumption the client sent the correct shape."
 why = "Every field is user-controlled; missing fields become None or raise KeyError, wrong types reach the database layer, and extra fields may overwrite unexpected columns."

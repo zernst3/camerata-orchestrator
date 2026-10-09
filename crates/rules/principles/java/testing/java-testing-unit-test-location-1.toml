@@ -4,6 +4,7 @@ tag = "stack"
 domain = "java:testing"
 layer = "language"
 enforcement = "prose"
+kind = "defect"
 default = true
 qualifies = "Enforced by Maven Surefire Plugin (picks up **/*Test.java, **/Test*.java, **/*Tests.java, **/*TestCase.java from src/test/java) and by IDE conventions. Conformance holds when every unit-test class lives under src/test/java/<same-package-path-as-production-class> and is named <ProductionClass>Test.java."
 verification = "grounded"
@@ -33,6 +34,7 @@ why = "Mirrors Maven conventions, enables Surefire auto-discovery, and gives tes
 
 [[option]]
 id = "separate-test-package"
+violates = true
 label = "src/test/java/<different-package>/ProductionClassTest.java"
 directive = "Test classes live in a different package from the class under test (e.g., com/example/test/service/UserServiceTest.java)."
 why = "Breaks package-private access, requires reflection or public exposure of internals to test them, diverges from Maven convention, and confuses contributors. Avoid unless the project predates Maven or has unusual constraints."

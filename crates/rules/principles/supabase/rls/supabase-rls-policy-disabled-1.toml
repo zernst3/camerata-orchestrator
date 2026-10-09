@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:rls"
 layer = "platform"
 enforcement = "architectural"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS-ENABLED-1: once a table's final RLS-enabled/disabled state and its final policy set are both known, this rule flags a table that has one or more CREATE POLICY statements in its history but whose replayed end-state has RLS disabled — the policies were authored but are silently inactive. Conformance holds when every table carrying at least one policy also has RLS enabled in the same end-state; it fails when policies exist over a table whose RLS is off. Carries the same repo-vs-production honesty caveat as SUPABASE-RLS-ENABLED-1."
@@ -61,6 +62,7 @@ why = "Policies-with-RLS-off is a distinct failure mode from bare missing-RLS: i
 
 [[option]]
 id = "fold-into-bare-missing-rls-finding"
+violates = true
 label = "Do not distinguish policy-exists-but-disabled from bare missing-RLS; report both as one finding type"
 directive = "Report any table with RLS disabled in its end-state as a single undifferentiated 'missing RLS' finding, whether or not policies exist for it."
 why = "Rejected: collapsing the two cases loses the highest-value signal in a vibe-coded audit — that the developer already wrote correct-looking policies and only needs RLS switched on, versus a table with no access-control thinking applied at all. The distinction changes the remediation instructions and materially changes how alarming the finding should read to a non-technical buyer."

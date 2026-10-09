@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -23,12 +24,14 @@ why = "Makes drift detection a one-click trace: from the entity to the schema au
 
 [[option]]
 id = "entity-files-carry-no-citation-of-the-source-of"
+violates = true
 label = "No citation of source-of-truth schema location"
 directive = "entity files carry no citation of the source-of-truth schema location, and the authority that defines the columns must be reverse-engineered when needed"
 why = "Forces drift checks to be reverse-engineered each time: reviewers cannot tell at a glance which migration or schema doc defines the columns they are reading, so every drift investigation starts from scratch rather than from a direct link."
 
 [[option]]
 id = "the-source-of-truth-schema-citation-lives-in-a-s"
+violates = true
 label = "Schema citation lives in separate docs file"
 directive = "the source-of-truth schema citation lives in a separate docs/ file or wiki page that lists the authority for each entity, rather than inside the entity file itself"
 why = "Drifts from the entity over time: updates to one almost never propagate to the other, and the docs page eventually contradicts the code it was meant to document, which is worse than no citation at all because it actively misleads."

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "fullstack"
 layer = "universal"
 enforcement = "structured"
+kind = "decision"
 default = true
 verification = "grounded"
 

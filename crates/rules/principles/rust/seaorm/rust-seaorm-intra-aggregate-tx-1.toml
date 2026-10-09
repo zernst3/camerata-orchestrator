@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust:seaorm"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = false
 verification = "grounded"
 
@@ -31,6 +32,7 @@ why = "Gives every transactional method one uniform signature, so there is a sin
 
 [[option]]
 id = "no-repository-transaction-boundaries"
+violates = true
 label = "No repository transaction boundaries at all"
 directive = "Repository methods do not provide transaction boundaries at all; intra-aggregate operations are redesigned as single writes, or callers are allowed to observe intermediate states between writes and reconcile after the fact."
 remediation = """

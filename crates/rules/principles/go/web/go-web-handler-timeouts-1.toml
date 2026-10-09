@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:web"
 layer = "framework"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -37,6 +38,7 @@ why = "Simplicity; trades per-operation timeout control for a single global dead
 
 [[option]]
 id = "no-timeouts"
+violates = true
 label = "No timeouts; handlers may block indefinitely"
 directive = "The server has no timeout configuration and handlers do not set deadlines; operations may take as long as they need."
 why = "Simplest to implement; high risk of goroutine leaks and server starvation if any handler blocks or is slow."

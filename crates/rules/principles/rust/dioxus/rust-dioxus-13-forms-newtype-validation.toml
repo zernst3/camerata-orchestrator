@@ -4,6 +4,7 @@ tag = "stack"
 domain = "rust:dioxus"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -43,6 +44,7 @@ why = "The exact failure mode this rule exists to prevent: the duplicated rule a
 
 [[option]]
 id = "form-fields-are-validated-only-on-the-server-the"
+violates = true
 label = "Server-only validation, no client-side checks"
 directive = "form fields are validated only on the server; the client submits whatever the user types and shows whatever error the server returns, with no client-side validation step"
 why = "Correctness-equivalent but loses inline-error UX: users receive no feedback until they submit, and if naively implemented produces a server round-trip per field interaction that degrades perceived responsiveness compared to inline validation against the domain constructor."

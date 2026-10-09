@@ -4,6 +4,7 @@ tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "policy"
 
@@ -40,12 +41,14 @@ why = "Simpler to apply uniformly (no per-table judgment required), but produces
 
 [[option]]
 id = "no-table-in-the-schema-carries-any-audit-columns"
+violates = true
 label = "No table carries any audit columns"
 directive = "no table in the schema carries any audit columns; provenance is reconstructed after the fact from logs or external systems"
 why = "Eliminates schema columns that consume storage and require migration hygiene, but loses the in-database attribution that admin workflows and incident reviews consume directly. Reconstructing who created or modified a row from external logs is slow, unreliable across log rotation boundaries, and unavailable to queries."
 
 [[option]]
 id = "the-audit-columns-are-written-by-orm-level-lifec"
+violates = true
 label = "Audit columns written by ORM lifecycle hooks"
 directive = "the audit columns are written by ORM-level lifecycle hooks rather than declared as explicit columns in the schema, so any write that bypasses the ORM leaves the audit data unset"
 why = "Keeps the audit logic in code where it can be unit-tested and changed without a schema migration, but any write that bypasses the ORM (data migrations, direct SQL maintenance, replication, bulk imports) silently leaves the audit columns NULL or stale, defeating the audit trail for exactly the high-risk operations it is meant to cover."

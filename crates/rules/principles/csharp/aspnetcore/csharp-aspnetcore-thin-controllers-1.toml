@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:aspnetcore"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 
 verification = "grounded"
@@ -29,6 +30,7 @@ why = "Inlining logic in controller actions avoids the extra file and indirectio
 
 [[option]]
 id = "no-repository-over-ef-core"
+violates = true
 label = "Services call EF Core's DbContext directly; no separate Repository abstraction layer"
 directive = "Controllers still delegate to a service layer for business logic, but the service layer calls the injected DbContext (via DbSet<T> and LINQ) directly rather than going through a hand-written Repository interface wrapping EF Core. This is orthogonal to the controller/service boundary: it does not change where business logic lives, only whether an additional repository abstraction sits between the service and DbContext."
 why = "DbContext already implements the Unit-of-Work and (via DbSet<T>) Repository-like patterns; a hand-rolled repository interface over EF Core often just re-exposes IQueryable with extra ceremony and no swappable-persistence benefit in practice, since most teams never actually swap out EF Core. Acceptable when the project has no concrete need to mock data access below the service layer (tests use an in-memory or SQLite provider instead) or to abstract over multiple storage backends; teams that do need that seam should keep an explicit repository interface."

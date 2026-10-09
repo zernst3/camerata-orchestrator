@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 
 verification = "grounded"
@@ -29,6 +30,7 @@ why = "Simpler to configure than a separate deployment step; races under concurr
 
 [[option]]
 id = "ensure-created-no-migrations"
+violates = true
 label = "Database.EnsureCreated() instead of migrations"
 directive = "Database.EnsureCreated() is called at startup to create the schema from the current model if the database does not exist. No migration files are generated or committed."
 why = "Creates the database schema from the model snapshot without any migration history; subsequent schema changes require dropping and recreating the database or manual SQL, since no migration can be applied to a database created this way. Appropriate only for throw-away test databases."

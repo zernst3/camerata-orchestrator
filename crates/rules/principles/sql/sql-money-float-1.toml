@@ -4,6 +4,7 @@ tag = "stack"
 domain = "sql"
 layer = "universal"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over CREATE TABLE / ALTER TABLE ADD COLUMN (and the ORM's equivalent column-type declaration) for a column whose name matches a money-shaped heuristic (amount, price, cost, fee, balance, total, subtotal, tax, charge, payout, salary, or a `_usd`/`_cents`-style currency suffix) typed as a floating-point representation (`real`, `float4`, `double precision`, `float8`, or an ORM's `Float`/`double` column type). Conformance holds when every such column uses `numeric`/`decimal` (or, for a well-understood integer-minor-units convention, an exact integer type representing cents/minor units) instead; it does not apply to columns that are genuinely non-monetary despite a superficially similar name (a `price_tier` enum-like integer, a `cost_estimate_confidence` ratio) — names this ambiguous are `needs_review`."
@@ -62,6 +63,7 @@ why = "PostgreSQL's own documentation names numeric as the correct type for mone
 
 [[option]]
 id = "use-floating-point-for-money-and-round-at-display-time"
+violates = true
 label = "Store money as real/double precision and round to two decimal places only when displaying it"
 directive = "Store monetary amounts in a floating-point column, applying rounding only in the presentation layer when the value is formatted for display, while keeping the underlying stored and computed values as floats."
 why = "Rejected: rounding at display time does nothing to fix accumulation error in STORED and COMPUTED values — a running balance updated by repeated float addition/subtraction drifts from the true value regardless of how it is later formatted, and an equality comparison against a float column can fail to match a value that is, to the cent, the same amount, purely because of binary floating-point representation. The bug lives in the arithmetic and the storage, not the display, so fixing only the display leaves the actual defect class (silently wrong totals, broken equality checks) fully intact."

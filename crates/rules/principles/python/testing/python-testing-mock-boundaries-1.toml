@@ -4,6 +4,7 @@ tag = "stack"
 domain = "python:testing"
 layer = "language"
 enforcement = "structured"
+kind = "decision"
 default = true
 qualifies = "Conformance holds when unittest.mock.patch or pytest monkeypatch targets the name as it is looked up by the code under test (e.g., patch('mymodule.requests.get') when mymodule does import requests), never the canonical definition path of the object; and when mocks are applied at external boundaries only (I/O, network, database, time, randomness) rather than to implementation details inside the unit. Fails when patch targets the wrong namespace (causing the real object to be called in production paths) or when mocks are used to stub out non-boundary internal functions."
 verification = "grounded"

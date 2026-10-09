@@ -4,6 +4,7 @@ tag = "stack"
 domain = "go:grpc"
 layer = "framework"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 
@@ -27,12 +28,14 @@ why = "gRPC interceptors are the idiomatic extension point; one implementation p
 
 [[option]]
 id = "per-handler-inline"
+violates = true
 label = "Each handler method re-implements authentication, logging, recovery inline"
 directive = "RPC handlers authenticate themselves by extracting metadata, perform logging inside the handler, recover from panics themselves."
 why = "Trades maintenance overhead and inconsistency for handler independence; requires each handler to redundantly implement cross-cutting concerns."
 
 [[option]]
 id = "hybrid-interceptor-handler"
+violates = true
 label = "Some concerns use interceptors, others are handled in-method"
 directive = "Logging and tracing use interceptors; authentication and error handling are implemented in individual handlers or a shared helper called from each handler."
 why = "Intermediate option; introduces inconsistency about which concerns are interceptor-based and which are not."

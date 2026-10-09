@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
+kind = "defect"
 default = true
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: the predicate is 'this application has NO code path — neither a webhook handler updating local state on provider-side events, nor a scheduled job comparing local payment/order status against the provider's API — capable of correcting local state after the initial synchronous charge call returns,' which requires surveying the whole integration (route handlers, scheduled jobs, background workers) for the PRESENCE of any such path, not a single file's content. This is an absence-of-a-mechanism check, which an AST/pattern scan over one file cannot establish; it is a project-wide architectural review. Conformance holds when at least one of (webhook-driven status updates, a scheduled reconciliation job) exists and covers the payment/order states the application tracks; it fails when the only place payment status is ever set is the initial synchronous response handler, with no later correction path."
 verification = "grounded"
@@ -63,6 +64,7 @@ why = "Payment providers ship both mechanisms (webhooks and a queryable status A
 
 [[option]]
 id = "trust-the-synchronous-response-as-final"
+violates = true
 label = "Treat the synchronous charge-call response as the final, permanent record of payment status"
 directive = "local order/payment status is set once, from the initial synchronous charge-call response, with no webhook handler and no scheduled job ever revisiting or correcting that value afterward"
 why = "Rejected: a payment provider's own documentation describes charge, subscription, and dispute state as capable of changing asynchronously after the initial call returns — a card can settle or fail later, a dispute can be filed weeks after the order shipped, a subscription can lapse on an unattended renewal. Treating the first response as permanent means the local record has no path to ever reflect any of those later events, so it silently diverges from the provider's own authoritative state with no mechanism to notice or correct it."

@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:storage"
 layer = "platform"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan for bucket-publicness declarations: `insert into storage.buckets (...) values (..., true, ...)` / `update storage.buckets set public = true` in migrations, and `createBucket(name, { public: true })` (or the dashboard-equivalent flag) in application code. A public bucket serves every object inside it to anyone holding or guessing the URL, with no auth check and no RLS evaluation for GET/download. Conformance holds when every public bucket is deliberately, reviewably public (avatars, public assets); it fails — flagged with `needs_review`, not an automatic critical — when a bucket holding what looks like private data (its name or referencing code suggests documents, uploads, invoices, etc.) is public, since public buckets are also a common and legitimate pattern this report must not cry wolf on."
@@ -66,6 +67,7 @@ why = "Public buckets are a legitimate, common Supabase pattern; naming every on
 
 [[option]]
 id = "flag-only-buckets-with-suspicious-names-as-critical"
+violates = true
 label = "Skip reporting on buckets with 'safe-sounding' names; flag only suspicious-named buckets, at critical severity"
 directive = "Apply a name-based allowlist/denylist heuristic (skip buckets named avatars/public-assets/media; flag buckets named documents/uploads/invoices as critical) and omit the rest from the report entirely."
 why = "Rejected: a name-based filter both under- and over-reports. A bucket literally named `avatars` can still contain user-uploaded private documents if the developer repurposed it; a bucket named `uploads` might genuinely be a public asset drop. Silently omitting buckets from the report (rather than naming all of them and flagging the ambiguous ones for review) also means a genuinely mis-scoped public bucket with an innocuous name never reaches the reader at all — the needs_review approach names every instance and lets a human make the actual call."

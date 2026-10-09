@@ -4,6 +4,7 @@ tag = "stack"
 domain = "javascript"
 layer = "language"
 enforcement = "mechanical"
+kind = "decision"
 default = true
 qualifies = "Enforced by the ESLint prefer-const rule, which fails the lint step on any let that is never reassigned after initialization. Conformance holds when prefer-const is configured at error severity and a never-reassigned let fails the build; it fails when the rule is absent or only warns."
 verification = "grounded"

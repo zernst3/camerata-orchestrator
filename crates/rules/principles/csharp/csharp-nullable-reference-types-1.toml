@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp"
 layer = "language"
 enforcement = "mechanical"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Enforced by the C# compiler when <Nullable>enable</Nullable> is set in the project file (.csproj). Conformance holds when nullable reference types are enabled globally (not just in files via #nullable) and the build treats warnings as errors."
 
@@ -25,6 +26,7 @@ why = "Nullable reference types catch null-reference bugs at compile time, elimi
 
 [[option]]
 id = "nullable-ref-types-disabled"
+violates = true
 label = "do not enable Nullable Reference Types; rely on runtime null checks"
 directive = "The project file does not set <Nullable>enable</Nullable>. Nullable reference types are disabled. The code uses the pre-C# 8.0 model where all reference types are implicitly nullable and null checks are manual and runtime."
 why = "Forgoes compile-time null safety; NullReferenceException bugs can only be caught at runtime, after deployment."

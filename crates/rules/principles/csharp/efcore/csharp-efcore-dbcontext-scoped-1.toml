@@ -4,6 +4,7 @@ tag = "stack"
 domain = "csharp:efcore"
 layer = "library"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 
 verification = "grounded"
@@ -29,6 +30,7 @@ why = "Produces data corruption under concurrent load: shared change tracker, st
 
 [[option]]
 id = "transient-dbcontext"
+violates = true
 label = "DbContext registered as Transient"
 directive = "DbContext is registered via AddTransient<AppDbContext>(), creating a new instance per injection site within a request."
 why = "Breaks transaction scope: two injection sites within the same request receive two independent change trackers. Changes made through one cannot participate in a transaction with the other. Inappropriate for any scenario that requires cross-service transactionality within a request."

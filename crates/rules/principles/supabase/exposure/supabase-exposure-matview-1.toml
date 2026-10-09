@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:exposure"
 layer = "platform"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a statement scan for CREATE MATERIALIZED VIEW targeting an API-exposed schema (public by default, or per SUPABASE-EXPOSURE-SCHEMAS-1's config parse). Postgres materialized views do not support Row Level Security at all — there is no policy mechanism to apply, so any exposed materialized view grants either full access to its contents or none. Conformance holds when materialized views are kept out of exposed schemas (moved to a non-exposed schema and accessed only through a RLS-capable wrapper, e.g. a security_invoker view or a function) or are deliberately, reviewably intended as fully public data."
@@ -56,6 +57,7 @@ why = "The finding is unconditional given the exposure fact — there is no RLS 
 
 [[option]]
 id = "ignore-materialized-views-treat-as-equivalent-to-regular-views"
+violates = true
 label = "Treat materialized views the same as ordinary views; rely on SUPABASE-RLS-VIEW-INVOKER-1's security_invoker check"
 directive = "Apply the security_invoker check to materialized views as if they were ordinary views, and skip a dedicated exposure rule."
 why = "Rejected: security_invoker is not a valid WITH-option for CREATE MATERIALIZED VIEW in Postgres — there is no RLS-equivalent mechanism to check for, so applying the ordinary-view rule would either silently no-op or produce a nonsensical finding. The exposure fact itself (materialized view + exposed schema) is the entire signal; a dedicated rule naming that structural limitation is the only correct treatment."

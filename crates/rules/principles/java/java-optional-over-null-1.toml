@@ -4,6 +4,7 @@ tag = "stack"
 domain = "java"
 layer = "language"
 enforcement = "prose"
+kind = "default_with_exceptions"
 default = true
 qualifies = "Enforced by code review and Checkstyle/SpotBugs rules that flag @Nullable return types and recommend Optional. IDEs can also hint that methods should return Optional instead of null."
 verification = "grounded"
@@ -28,6 +29,7 @@ why = "Optional makes absence explicit in the type system, forces callers to han
 
 [[option]]
 id = "return-null"
+violates = true
 label = "return null to indicate absence"
 directive = "Methods return null to indicate a missing or absent value. Callers must explicitly check for null before using the return value."
 why = "Common but error-prone; callers can forget null checks, leading to NullPointerException. The contract of 'might be null' is not enforced by the type system."

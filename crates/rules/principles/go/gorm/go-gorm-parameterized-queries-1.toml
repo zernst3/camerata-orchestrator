@@ -10,6 +10,7 @@ layer = "library"
 # `structured` (evaluated by the semantic/AI audit tier, not mechanically enforced) until a
 # real gosec/Semgrep detector is wired for GORM raw-SQL usage.
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -39,6 +40,7 @@ why = "Parameterized queries prevent SQL injection; the query builder is the idi
 
 [[option]]
 id = "string-interpolation"
+violates = true
 label = "Queries are built by string concatenation or fmt.Sprintf"
 directive = "Handlers or repositories build SQL queries by concatenating strings or using fmt.Sprintf with variables, e.g., fmt.Sprintf(\"SELECT * FROM users WHERE name = '%s'\", userName)."
 why = "Easy to code for simple cases; high risk of SQL injection if any input is user-controlled or untrusted. Often undetectable until an attacker exploits it."

@@ -10,6 +10,7 @@ layer = "language"
 # never ran. Corrected to `structured` (evaluated by the semantic/AI audit tier, not
 # mechanically enforced) until a real Roslyn-analyzer or Semgrep detector is wired.
 enforcement = "structured"
+kind = "defect"
 default = true
 qualifies = "Enforced by static analysis (Roslyn analyzers, Semgrep) that detect string concatenation or string interpolation in SQL queries flowing to execution. Conformance holds when the gate runs in CI and concatenated queries fail the build."
 
@@ -31,6 +32,7 @@ why = "Parameterization prevents SQL injection entirely by sending SQL and value
 
 [[option]]
 id = "string-concatenation-with-escaping"
+violates = true
 label = "build query strings by concatenating with manual escaping"
 directive = "Dynamic values are added to SQL strings via concatenation with custom escaping or quoting logic rather than parameterized binding."
 why = "Reads naturally but is fragile and error-prone; every site is a latent injection waiting for unsanitized input. Escaping is incomplete across database dialects and contexts."

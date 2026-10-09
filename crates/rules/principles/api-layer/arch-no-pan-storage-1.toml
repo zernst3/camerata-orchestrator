@@ -4,6 +4,7 @@ tag = "stack"
 domain = "api-layer"
 layer = "universal"
 enforcement = "mechanical"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Deterministically checkable IN PRINCIPLE (a column/field/log-statement naming or shape scan: field names matching card_number/cc_number/pan/cvv/cvc/card_cvc/track_data/track1/track2, or a string value matching a card-number shape — 13-19 digits optionally separated by spaces/dashes, passing a Luhn check), but Camerata does not ship this detector. Per the corrected channel guidance, every selected rule reaches the semantic/grounding pass regardless of a shipped detector, so this rule's absence of a wired scanner does not leave it unenforced — it is still read and reasoned about by the governed agent and by a human reviewer. Conformance holds when no column, variable, log statement, or serialized payload in the codebase holds a full PAN, CVV/CVC, or raw track data outside of the payment provider's own hosted fields/tokenization flow; it fails when any such value is captured by application code rather than being tokenized by the provider before it ever reaches the server."
@@ -63,6 +64,7 @@ why = "Modern payment providers' hosted-field/tokenization flow is the standard,
 
 [[option]]
 id = "accept-raw-card-data-server-side-and-pass-through"
+violates = true
 label = "Accept raw card details on a custom server-side form field and pass them through to the payment provider's charge API directly"
 directive = "the application's own endpoint accepts card_number/cvv/expiry fields in the request body, holds them in server-side memory/variables for the duration of the charge call, and forwards them to the payment provider's raw-charge API, without using the provider's hosted fields or client-side tokenization"
 why = "Rejected: the instant a raw PAN or CVV is read by application code, it is in scope for the application's own logs, error-reporting/APM tools, memory dumps, and any request-logging middleware already running — none of which were built with cardholder-data handling in mind, and PCI DSS's Requirement 3.3.1 prohibition on storing CVV/track data after authorization applies regardless of intent to discard it quickly. This also pulls the application into PCI DSS's most demanding self-assessment tier for a benefit (avoiding a UI swap to the provider's hosted fields) that does not justify the compliance and breach-exposure cost."

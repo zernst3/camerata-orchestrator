@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:exposure"
 layer = "platform"
 enforcement = "structured"
+kind = "defect"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a config scan: the `[api] schemas = [...]` list in supabase/config.toml (default `[\"public\", \"storage\", \"graphql_public\"]`, per Supabase's own CLI config reference). Any schema named beyond the default set widens the tables reachable through PostgREST. This rule's parse result feeds every other supabase/rls/* and supabase/exposure/* rule's exposed-schema set — it is the source of truth for 'is this table/view/function API-reachable' rather than any rule hardcoding `public`. Conformance holds when the schemas list is either the default or every additional schema listed has been deliberately reviewed for RLS coverage on its tables."
@@ -61,6 +62,7 @@ why = "A widened API surface via extra exposed schemas is a real, repo-detectabl
 
 [[option]]
 id = "hardcode-public-as-the-only-exposed-schema-everywhere"
+violates = true
 label = "Hardcode `public` as the only exposed schema in every RLS/exposure rule; do not parse [api] schemas"
 directive = "Skip parsing [api] schemas; every consuming rule assumes only the public schema is API-exposed."
 why = "Rejected: this produces false negatives on any project using Supabase's documented custom-schemas feature — a table in a legitimately-exposed second schema with no RLS would be silently skipped by every RLS rule in the group, which is a worse failure than the extra-schema finding itself. Parsing once and sharing the result is also simpler than re-deriving exposure logic independently in six different rules."

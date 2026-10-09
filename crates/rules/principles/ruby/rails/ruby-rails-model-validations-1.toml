@@ -4,6 +4,7 @@ tag = "stack"
 domain = "ruby:rails"
 layer = "framework"
 enforcement = "structured"
+kind = "default_with_exceptions"
 default = true
 verification = "grounded"
 
@@ -23,12 +24,14 @@ why = "Model validations fire on every `save` call regardless of the entry point
 
 [[option]]
 id = "controller-validation-only"
+violates = true
 label = "validate input in the controller (strong_parameters or ad-hoc checks) before passing to the model"
 directive = "Input rules are checked in the controller action (strong_parameters whitelisting, presence checks, format checks) rather than in `validates` declarations on the model."
 why = "Guards only the HTTP entry point; background jobs, rake tasks, migrations, and console commands bypass the controller entirely and write invalid data silently."
 
 [[option]]
 id = "client-side-validation-only"
+violates = true
 label = "rely on client-side (JavaScript) validation with no server-side guard"
 directive = "Validation is implemented primarily in JavaScript in the browser; the server trusts the client to send valid, well-formed data and performs little or no validation of its own."
 why = "Convenient for the happy path but offers zero protection against a forged or replayed request; an attacker who bypasses the client entirely writes unvalidated data straight to the model."

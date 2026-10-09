@@ -4,6 +4,7 @@ tag = "stack"
 domain = "supabase:storage"
 layer = "platform"
 enforcement = "structured"
+kind = "decision"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan over bucket-creation statements — `createBucket(name, { ... })` in application code and `insert into storage.buckets (...)` / `update storage.buckets set ...` in migrations — for the presence of both `fileSizeLimit`/`file_size_limit` and `allowedMimeTypes`/`allowed_mime_types`. Conformance holds when a bucket that application code uploads user-supplied content into declares both fields with a finite, non-default value; it fails when a write-accepting bucket is created with neither field set (both default to unlimited/unrestricted), or with only one of the two. A bucket that is read-only from the application's perspective (no upload call site writes to it) is out of scope for this rule."

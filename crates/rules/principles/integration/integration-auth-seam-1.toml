@@ -4,6 +4,7 @@ tag = "stack"
 domain = "integration"
 layer = "universal"
 enforcement = "mechanical"
+kind = "default_with_exceptions"
 default = false
 opt_in_only = true
 layer3_only = false
@@ -41,6 +42,7 @@ why = "Server-side authorization is a whole-system property, not a per-file one;
 
 [[option]]
 id = "no-auth-seam-check"
+violates = true
 label = "No cross-agent auth-seam check"
 directive = "the project does not reconcile UI-gated affordances against server-side endpoint guards on the assembled tree, so an affordance the UI hides behind a permission can map to a producer endpoint that enforces nothing, leaving the action open to any caller who bypasses the UI"
 why = "The UI hiding a button is not authorization; without the integration gate the open-endpoint-behind-a-hidden-button gap ships undetected, because each agent's diff is individually clean and only the seam is wrong."
