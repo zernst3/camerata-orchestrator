@@ -114,13 +114,34 @@ pub struct RuleLedgerEntry {
     /// overwhelming majority).
     #[serde(default)]
     pub coverage_note: Option<String>,
+    /// Pass-1 W2 (A5.4): `true` when the alternatives pass judged this rule's underlying
+    /// concern NOT APPLICABLE to this codebase at all (no evidence it exists here — e.g. no
+    /// pagination anywhere, no API versioning anywhere), requiring POSITIVE evidence to set
+    /// (`RuleRecommendation::applicable == false`, which `parse_alternative_recommendations`
+    /// already only ever produces from an explicit model claim or an absent-evidence
+    /// correction — never a default). This is its OWN outcome, distinct from "ran and found
+    /// nothing" — see [`Self::verified_clean`]'s doc comment for why `findings_emitted == 0`
+    /// alone is not enough to call a not-applicable rule healthy. Set via
+    /// [`ScanLedger::note_not_applicable_rule`] the same way [`Self::coverage_note`] is: queued
+    /// before the entry exists, consumed on every subsequent [`ScanLedger::record_rule`] call
+    /// for the same id. `false` for the overwhelming majority of rules (the ordinary "ran,
+    /// genuinely looked, found nothing" case).
+    #[serde(default)]
+    pub not_applicable: bool,
 }
 
 impl RuleLedgerEntry {
     /// The one predicate every "what's healthy" / scorecard "Clean" derivation must use
     /// instead of inferring cleanliness from mere selection.
+    ///
+    /// Pass-1 W2 (A5.4): a rule judged [`Self::not_applicable`] is NEVER verified-clean, even
+    /// when `ran && findings_emitted == 0` — "this rule's concern doesn't exist in this
+    /// codebase" is a DIFFERENT, honest claim from "this rule was checked and the codebase
+    /// complies with it," and folding the two together is exactly the silencing shape this
+    /// whole W2 pass exists to close (a `not_applicable` determination must never be
+    /// indistinguishable from a rule that genuinely ran and found nothing to report).
     pub fn verified_clean(&self) -> bool {
-        self.ran && self.findings_emitted == 0
+        self.ran && self.findings_emitted == 0 && !self.not_applicable
     }
 }
 
@@ -268,6 +289,13 @@ pub struct ScanLedger {
     /// meaningful to persist across a (de)serialize round-trip.
     #[serde(skip)]
     config_gated_pending: BTreeSet<String>,
+    /// Rule ids queued for [`RuleLedgerEntry::not_applicable`] via [`Self::
+    /// note_not_applicable_rule`], consumed by every subsequent [`Self::record_rule`] call for
+    /// the same id — same queue-then-settle shape as `config_gated_pending`, for the same
+    /// reason (the rule's `ran` fact is settled later than the not-applicable determination).
+    /// Transient scan-time plumbing only.
+    #[serde(skip)]
+    not_applicable_pending: BTreeSet<String>,
 }
 
 impl ScanLedger {
@@ -292,6 +320,15 @@ impl ScanLedger {
         self.config_gated_pending.insert(rule_id.into());
     }
 
+    /// Pass-1 W2 (A5.4): queue the "judged not applicable" disclosure for `rule_id`, consumed
+    /// by [`Self::record_rule`] on every call (past or future) for the same id — same
+    /// queue-then-settle shape as [`Self::note_config_gated_rule`]. Called from `onboard::
+    /// audit_repos`'s semantic-phase recording for every rule id a repo's `RuleRecommendation`
+    /// marked `applicable == false`, BEFORE the rule's `ran` fact is known for this call.
+    pub fn note_not_applicable_rule(&mut self, rule_id: impl Into<String>) {
+        self.not_applicable_pending.insert(rule_id.into());
+    }
+
     /// Record (or, for a rule already seen this scan — e.g. a multi-repo run — ACCUMULATE)
     /// one rule's outcome. Accumulation rule: `ran` is OR'd (one repo running it is enough to
     /// call it run), `skip_reason` is kept from the first not-run observation and cleared the
@@ -301,6 +338,13 @@ impl ScanLedger {
     /// an earlier one), the resulting entry's `coverage_note` is set to [`CONFIG_GATED_NOTE`]
     /// and stays set regardless of `ran` — see [`RuleLedgerEntry::coverage_note`]'s doc comment
     /// for why this is deliberately independent of the `ran`/`skip_reason` accumulation rules.
+    /// Likewise, if [`Self::note_not_applicable_rule`] was ever called for this `rule_id`, the
+    /// resulting entry's `not_applicable` is `true` and stays `true` for the rest of this scan
+    /// (OR-accumulated, same direction as `ran` — a determination that the concern is absent
+    /// from one repo in a multi-repo scan is still a genuine finding about THAT repo, and a
+    /// multi-repo scan's ledger is project-wide; this is a documented simplification, the same
+    /// one `ScanReport::recommendations`'s own doc comment already makes for the "last repo
+    /// wins" shape of the underlying recommendation).
     pub fn record_rule(
         &mut self,
         rule_id: impl Into<String>,
@@ -315,6 +359,7 @@ impl ScanLedger {
             .config_gated_pending
             .contains(&rule_id)
             .then(|| CONFIG_GATED_NOTE.to_string());
+        let not_applicable = self.not_applicable_pending.contains(&rule_id);
         self.rules
             .entry(rule_id.clone())
             .and_modify(|e| {
@@ -329,6 +374,7 @@ impl ScanLedger {
                 if coverage_note.is_some() {
                     e.coverage_note = coverage_note.clone();
                 }
+                e.not_applicable = e.not_applicable || not_applicable;
             })
             .or_insert(RuleLedgerEntry {
                 rule_id: rule_id.clone(),
@@ -338,6 +384,7 @@ impl ScanLedger {
                 files_evaluated,
                 findings_emitted,
                 coverage_note,
+                not_applicable,
             });
         self.rules.get(&rule_id).expect("just inserted")
     }
@@ -420,16 +467,18 @@ impl ScanLedger {
         findings_emitted: usize,
     ) -> &RuleLedgerEntry {
         let rule_id = rule_id.into();
-        let (tier, files_evaluated, existing_note) = self
+        let (tier, files_evaluated, existing_note, existing_not_applicable) = self
             .rules
             .get(&rule_id)
-            .map(|e| (e.tier, e.files_evaluated, e.coverage_note.clone()))
-            .unwrap_or((RuleTier::ExternalTool, 0, None));
+            .map(|e| (e.tier, e.files_evaluated, e.coverage_note.clone(), e.not_applicable))
+            .unwrap_or((RuleTier::ExternalTool, 0, None, false));
         let coverage_note = existing_note.or_else(|| {
             self.config_gated_pending
                 .contains(&rule_id)
                 .then(|| CONFIG_GATED_NOTE.to_string())
         });
+        let not_applicable =
+            existing_not_applicable || self.not_applicable_pending.contains(&rule_id);
         self.rules.insert(
             rule_id.clone(),
             RuleLedgerEntry {
@@ -440,6 +489,7 @@ impl ScanLedger {
                 files_evaluated,
                 findings_emitted,
                 coverage_note,
+                not_applicable,
             },
         );
         self.rules.get(&rule_id).expect("just inserted")
@@ -460,6 +510,21 @@ impl ScanLedger {
             .rules
             .values()
             .filter(|r| r.verified_clean())
+            .map(|r| r.rule_id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    /// Pass-1 W2 (A5.4): rule ids judged NOT APPLICABLE to this codebase (positive evidence
+    /// the concern is absent, never the default) — its OWN outcome bucket, distinct from
+    /// [`Self::healthy_rule_ids`] (which a `not_applicable` rule is EXCLUDED from — see
+    /// [`RuleLedgerEntry::verified_clean`]). Sorted for stable output.
+    pub fn not_applicable_rule_ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .rules
+            .values()
+            .filter(|r| r.not_applicable)
             .map(|r| r.rule_id.clone())
             .collect();
         ids.sort();
@@ -782,6 +847,81 @@ mod tests {
         assert!(!ledger
             .healthy_rule_ids()
             .contains(&"AI-SITE-DEFECT-1".to_string()));
+    }
+
+    // ── Pass-1 W2 (A5.4): "judged not applicable" is its own outcome ───────────────────────
+    // (`docs/plans/2026-10-09_audit-findings-tracker.md`)
+
+    /// req_a5_4: a rule recorded with `ran && findings_emitted == 0` AFTER
+    /// `note_not_applicable_rule` was queued for it is NEVER verified-clean / healthy — this is
+    /// its own outcome ("judged not applicable"), honestly distinct from "ran, genuinely
+    /// looked, found nothing."
+    ///
+    /// FAILS BEFORE THE FIX: before `not_applicable`/`note_not_applicable_rule` existed,
+    /// `verified_clean()` was exactly `ran && findings_emitted == 0` — this EXACT call sequence
+    /// (queue, then record with zero findings) would have made `healthy_rule_ids()` include the
+    /// rule, which is the silencing shape A5.4 closes: "no evidence this concern exists here"
+    /// read as "checked and compliant."
+    #[test]
+    fn req_a5_4_a_rule_judged_not_applicable_is_never_healthy_even_with_zero_findings() {
+        let mut ledger = ScanLedger::new();
+        ledger.note_not_applicable_rule("ARCH-API-VERSIONING-1");
+        ledger.record_rule(
+            "ARCH-API-VERSIONING-1",
+            RuleTier::Semantic,
+            true,
+            None,
+            5,
+            0,
+        );
+        let entry = ledger.rule("ARCH-API-VERSIONING-1").expect("recorded");
+        assert!(
+            entry.ran,
+            "the alternatives pass DID genuinely run and judge this rule"
+        );
+        assert_eq!(entry.findings_emitted, 0);
+        assert!(entry.not_applicable);
+        assert!(
+            !entry.verified_clean(),
+            "not_applicable must never read as verified-clean, even at zero findings"
+        );
+        assert!(
+            !ledger
+                .healthy_rule_ids()
+                .contains(&"ARCH-API-VERSIONING-1".to_string()),
+            "must never appear in the healthy/what's-healthy bucket"
+        );
+        assert!(
+            ledger
+                .not_applicable_rule_ids()
+                .contains(&"ARCH-API-VERSIONING-1".to_string()),
+            "must appear in its own not_applicable outcome bucket"
+        );
+    }
+
+    /// The positive twin: a rule recorded with `ran && findings_emitted == 0` WITHOUT ever
+    /// being queued as not-applicable is the ordinary, honest "genuinely ran and found
+    /// nothing" case — still verified-clean/healthy, proving the new field doesn't change
+    /// behavior for every rule that was never judged not-applicable at all (the overwhelming
+    /// majority).
+    #[test]
+    fn req_a5_4_a_rule_never_judged_not_applicable_with_zero_findings_stays_healthy() {
+        let mut ledger = ScanLedger::new();
+        ledger.record_rule(
+            "ARCH-API-VERSIONING-1",
+            RuleTier::Semantic,
+            true,
+            None,
+            5,
+            0,
+        );
+        let entry = ledger.rule("ARCH-API-VERSIONING-1").expect("recorded");
+        assert!(!entry.not_applicable);
+        assert!(entry.verified_clean());
+        assert!(ledger
+            .healthy_rule_ids()
+            .contains(&"ARCH-API-VERSIONING-1".to_string()));
+        assert!(ledger.not_applicable_rule_ids().is_empty());
     }
 
     #[test]
