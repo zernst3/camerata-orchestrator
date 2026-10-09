@@ -126,6 +126,82 @@ impl std::fmt::Display for EnforcementKind {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Rule kind (Pass-1 W2 — A5.1, `docs/plans/2026-10-09_audit-findings-tracker.md`)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// The THREE-WAY classification of how a multi-option rule's alternatives relate to the
+/// rule's underlying requirement — orthogonal to [`EnforcementKind`] (which classifies HOW a
+/// rule is emitted/enforced, not what its alternatives MEAN).
+///
+/// This is the direct fix for the shipped defect (A5, `ai_audit.rs` ~5885/~5921-5929): the
+/// alternatives pass used to pick whichever option the repo follows and REPLACE the rule's
+/// effective directive with it, so a repo that correctly follows the degenerate/absent form of
+/// a requirement reported ZERO findings — "consistently incorrect" read as "compliant" because
+/// the engine had no way to tell a genuine architectural alternative apart from the defect
+/// itself. `RuleKind` is that missing distinction:
+///
+/// - [`RuleKind::Defect`] — there is NO acceptable alternative anywhere; every option other
+///   than the correct one describes the absence or a degenerate form of the requirement
+///   (see [`RuleOption::violates`]). A `defect`-kind rule NEVER enters the alternatives pass —
+///   it behaves exactly like a single-directive rule, because there is nothing to decide among.
+/// - [`RuleKind::Decision`] — the alternatives genuinely hold EQUAL weight (e.g. API
+///   versioning scheme, ID representation, package-by-feature vs. package-by-layer). The only
+///   reportable condition is INCONSISTENCY across the codebase, never "the repo picked option
+///   B" by itself. No option on a `decision`-kind rule should carry `violates = true`.
+/// - [`RuleKind::DefaultWithExceptions`] — one option is correct UNLESS justified; deviating
+///   is a finding even when done consistently. Some non-default options may be legitimate,
+///   justified alternatives (`violates = false`); others may be the degenerate/absent form of
+///   the requirement wearing the same `[[option]]` shape (`violates = true`) — both can coexist
+///   on the same rule.
+///
+/// `serde(default)` deliberately does NOT exist here — see [`RuleToml::kind`]'s doc comment:
+/// an absent `kind` must not silently resolve to a permissive value. [`Rule::kind`] is
+/// `Option<RuleKind>`, and the corpus-load gate (`rules_missing_kind`, exercised by
+/// `req_a5_1_every_corpus_rule_declares_a_kind`) fails the build on any `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleKind {
+    /// No acceptable alternative anywhere — every non-correct option is the absence/degenerate
+    /// form of the requirement. Never enters the alternatives pass (see
+    /// [`is_defect_kind`](Rule::is_defect_kind)).
+    Defect,
+    /// Alternatives genuinely hold equal weight. Only cross-codebase INCONSISTENCY is
+    /// reportable; no option should carry `violates = true`.
+    Decision,
+    /// One option is correct unless justified; deviating is a finding even if done
+    /// consistently. May mix legitimate, justified alternatives with degenerate ones on the
+    /// same rule.
+    DefaultWithExceptions,
+}
+
+impl RuleKind {
+    /// The snake_case wire/TOML string for this kind. Inverse of [`RuleKind::from_tag`].
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RuleKind::Defect => "defect",
+            RuleKind::Decision => "decision",
+            RuleKind::DefaultWithExceptions => "default_with_exceptions",
+        }
+    }
+
+    /// Parse a kind from its snake_case wire/TOML string. Unknown strings return `None`.
+    pub fn from_tag(s: &str) -> Option<Self> {
+        match s {
+            "defect" => Some(RuleKind::Defect),
+            "decision" => Some(RuleKind::Decision),
+            "default_with_exceptions" => Some(RuleKind::DefaultWithExceptions),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for RuleKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // Verification status / provenance (rule grounding ladder)
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -370,6 +446,27 @@ struct RuleToml {
     /// folder-derived domain — see [`Rule::extra_domains`]. Absent → empty.
     #[serde(default)]
     extra_domains: Vec<String>,
+    /// The three-way rule-kind classification (Pass-1 W2, A5.1) — see [`RuleKind`]'s doc
+    /// comment. Deliberately `Option<RuleKind>` with NO `#[serde(default)]` resolving to a
+    /// concrete variant: an absent `kind` must not silently default to something permissive
+    /// (e.g. `Decision`, which would silently exempt an unclassified rule from ever emitting a
+    /// `violates` finding). `None` here is the normal result of a bare `#[serde(default)]`
+    /// clause (which must be present so a TOML lacking `kind` still parses instead of hard
+    /// erroring the whole corpus load) — the loader does not reject it; the CORPUS-LOAD GATE
+    /// does (`rules_missing_kind`, exercised by `req_a5_1_every_corpus_rule_declares_a_kind`),
+    /// failing the BUILD rather than silently shipping an unclassified rule.
+    #[serde(default)]
+    kind: Option<RuleKind>,
+    /// A ceiling on the severity this rule may ever export, e.g. `"high"` — see [`Rule::
+    /// max_severity`]'s doc comment and E2 (`docs/plans/2026-10-09_audit-findings-tracker.md`).
+    /// Free-form lowercase severity string (`"critical"` | `"high"` | `"medium"` | `"low"`),
+    /// matching the vocabulary `Finding::severity`/`report_export::normalize_severity` already
+    /// use elsewhere — NOT a new enum, for the same reason `Finding::severity` itself isn't
+    /// one (every severity comparison in this codebase already goes through a normalizing
+    /// string compare, not a typed enum). `None` (the overwhelming majority of rules) means no
+    /// ceiling — the rule's severity is whatever the floor/calibration pipeline produces.
+    #[serde(default)]
+    max_severity: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -433,6 +530,11 @@ struct OptionToml {
     /// `report_export::resolve_effort`) rather than fabricating a number.
     #[serde(default)]
     effort: Option<String>,
+    /// Pass-1 W2 (A5.4): whether CHOOSING this option describes the ABSENCE or a DEGENERATE
+    /// FORM of the rule's own requirement — see [`RuleOption::violates`]'s doc comment. Absent
+    /// → `false` (the overwhelming majority of options: a genuine, non-degenerate alternative).
+    #[serde(default)]
+    violates: bool,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -494,6 +596,23 @@ pub struct RuleOption {
     /// not yet authored for this option; the report then renders its pre-existing honest gap
     /// rather than fabricating a number.
     pub effort: Option<String>,
+    /// Pass-1 W2 (A5.4, `docs/plans/2026-10-09_audit-findings-tracker.md`): `true` when
+    /// CHOOSING this option describes the ABSENCE or a DEGENERATE FORM of the rule's own
+    /// requirement — this option IS the defect, authored as an `[[option]]` only because the
+    /// corpus convention pairs the rule's correct behavior with the behavior(s) it was
+    /// deliberately NOT adopting (e.g. `ARCH-IDEMPOTENCY-KEYS-1`'s `"the-api-does-no-server-
+    /// side-deduplication-at-all"` option). This is the load-bearing fix for the shipped
+    /// defect: the alternatives pass (`ai_audit::audit_repo`) must NEVER rewrite the rule's
+    /// effective directive to a `violates` option's directive, and must NEVER let a `violates`
+    /// selection silence the rule — selecting one emits a finding at the rule's own citation,
+    /// carrying its own remediation (via `Finding::evaluated_option_id`, resolved by
+    /// `report_export::resolve_fix` exactly like any other multi-option finding), regardless of
+    /// whether any chunk-level violation pass ALSO happens to flag the same site. `false`
+    /// (the default — see `OptionToml::violates`) for the overwhelming majority of options: a
+    /// genuine, non-degenerate alternative a project may legitimately adopt. A `decision`-kind
+    /// rule ([`RuleKind::Decision`]) should never mark any option `true` — see that variant's
+    /// doc comment.
+    pub violates: bool,
 }
 
 /// How a rule's escalation condition is handled when an agent's work meets it.
@@ -584,6 +703,22 @@ pub struct Rule {
     /// Empty for the overwhelming majority of rules. See `propose_corpus_rules`'s domain-match
     /// step, which treats `domain == d || extra_domains.contains(d)` as one match test.
     pub extra_domains: Vec<String>,
+    /// The three-way rule-kind classification (Pass-1 W2, A5.1) — see [`RuleKind`]'s doc
+    /// comment. `None` means this rule has not yet been classified; the corpus-load gate
+    /// (`rules_missing_kind`) fails the build on any such rule in the shipped corpus — `None`
+    /// is only ever seen on an in-progress/test-fixture rule, never a real corpus one at test
+    /// time. See [`Rule::kind`] / [`Rule::is_defect_kind`] for the accessors.
+    pub kind: Option<RuleKind>,
+    /// A ceiling on the severity this rule may ever export (E2, `docs/plans/
+    /// 2026-10-09_audit-findings-tracker.md`) — `report_export`'s severity pipeline clamps
+    /// DOWN to this value whenever the finding's own (possibly floor-raised) severity would
+    /// otherwise rank above it; it never RAISES a lower severity. `None` (the overwhelming
+    /// majority of rules) means no ceiling. Free-form lowercase string in the same vocabulary
+    /// `Finding::severity`/`report_export::normalize_severity` already use
+    /// (`"critical"`/`"high"`/`"medium"`/`"low"`) — the clamp itself is applied in
+    /// `camerata_server::report_export::clamp_to_rule_max_severity`, which reuses that crate's
+    /// own `severity_rank`/`normalize_severity` rather than duplicating the vocabulary here.
+    pub max_severity: Option<String>,
 }
 
 /// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`): a GENERAL mechanism for a
@@ -700,6 +835,27 @@ impl Rule {
     /// (Part B); carried here so the metadata is available.
     pub fn is_layer3_only(&self) -> bool {
         self.layer3_only
+    }
+
+    /// This rule's [`RuleKind`] classification (Pass-1 W2, A5.1). `None` means unclassified —
+    /// the corpus-load gate (`rules_missing_kind`) fails the build on any such rule in the
+    /// shipped corpus, so a `None` here at scan time can only come from a test fixture, never
+    /// a real corpus rule.
+    pub fn kind(&self) -> Option<RuleKind> {
+        self.kind
+    }
+
+    /// Whether this rule is [`RuleKind::Defect`] — "no acceptable alternative anywhere". A
+    /// `defect`-kind rule must NEVER enter the alternatives pass (A5.4): there is nothing to
+    /// decide among, so it is excluded from [`crate`]-external callers' "is this a multi-option
+    /// semantic rule eligible for the alternatives pass" predicate (`camerata_server::onboard::
+    /// audit::is_semantic_multi_option_rule`) even when it happens to carry `>= 2` options.
+    /// `false` for an unclassified (`kind == None`) rule — conservative: a rule with no kind
+    /// recorded is never treated as "definitely no alternative", it simply isn't eligible to
+    /// make that claim yet (the corpus-load gate is what actually prevents this case from
+    /// reaching a real scan).
+    pub fn is_defect_kind(&self) -> bool {
+        matches!(self.kind, Some(RuleKind::Defect))
     }
 }
 
@@ -855,6 +1011,8 @@ pub fn bare_rule(id: &str, domain: &str) -> Rule {
         layer3_only: false,
         stack_exceptions: Vec::new(),
         extra_domains: Vec::new(),
+        kind: None,
+        max_severity: None,
     }
 }
 
@@ -887,6 +1045,7 @@ pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
         finding_detail: None,
         escalation: None,
         effort: None,
+        violates: false,
     };
     let rule = Rule {
         id: RuleId(rule_id.to_owned()),
@@ -905,6 +1064,8 @@ pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
         layer3_only: false,
         stack_exceptions: Vec::new(),
         extra_domains: Vec::new(),
+        kind: None,
+        max_severity: None,
     };
     let mut set = RuleSet::default();
     set.push(rule);
@@ -1132,6 +1293,7 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
             finding_detail: o.finding_detail.filter(|s| !s.trim().is_empty()),
             escalation: o.escalation,
             effort: o.effort.filter(|s| !s.trim().is_empty()),
+            violates: o.violates,
         })
         .collect();
 
@@ -1162,7 +1324,62 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
         layer3_only: raw.layer3_only,
         stack_exceptions,
         extra_domains: raw.extra_domains,
+        kind: raw.kind,
+        max_severity: raw.max_severity.filter(|s| !s.trim().is_empty()),
     })
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Corpus-load gate (Pass-1 W2, item 4 — `docs/plans/2026-10-09_audit-findings-tracker.md`)
+// ────────────────────────────────────────────────────────────────────────────
+//
+// Mirrors the EXISTING precedent `camerata_server::mechanical_gate` set for the W1-item-4
+// "declares mechanical enforcement but has no wired detector" defect: a `#[cfg(test)]`-gated
+// (or CI-run) build-time test, not a runtime refusal — a scan must never refuse to run just
+// because a corpus rule is unclassified; see `rules_missing_kind`'s doc comment for why the
+// TOML-parse layer itself stays lenient (`RuleToml::kind: Option<RuleKind>` with no concrete
+// default) while THIS layer is the one that actually enforces the invariant, by failing the
+// BUILD.
+
+/// Every rule in `set` with NO `kind` classification at all (`Rule::kind() == None`). Sorted
+/// for stable, readable test output. A1 (`req_a5_1_every_corpus_rule_declares_a_kind`) asserts
+/// this is EMPTY for the real shipped corpus — any rule found here means someone added or
+/// edited a corpus TOML without classifying it, which the build must catch rather than let the
+/// rule silently default to "safe-looking" behavior at scan time.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn rules_missing_kind(set: &RuleSet) -> Vec<String> {
+    let mut offenders: Vec<String> = set
+        .iter()
+        .filter(|r| r.kind.is_none())
+        .map(|r| r.id.0.clone())
+        .collect();
+    offenders.sort();
+    offenders
+}
+
+/// Every [`RuleKind::DefaultWithExceptions`] rule in `set` that has options but NONE of them
+/// is marked `violates` — suspicious per item 4 of the W2 plan: a `default_with_exceptions`
+/// rule's whole point is that at least one non-default option is the degenerate/absent form of
+/// the requirement (that's the "exceptions" half of the name). A rule classified this way with
+/// zero `violates` options is either misclassified (it should be [`RuleKind::Decision`] —
+/// genuinely no option is degenerate) or under-authored (a `violates` flag was never set on
+/// the option that should carry one). Sorted for stable output. Does NOT fail the build by
+/// itself (unlike [`rules_missing_kind`]) — "suspicious" is a signal for human review during
+/// authoring/classification, not a hard invariant the way "every rule has A kind" is; callers
+/// that want it enforced (e.g. a classification-coverage test) assert on this directly.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn suspicious_default_with_exceptions_rules(set: &RuleSet) -> Vec<String> {
+    let mut offenders: Vec<String> = set
+        .iter()
+        .filter(|r| {
+            r.kind == Some(RuleKind::DefaultWithExceptions)
+                && !r.options.is_empty()
+                && !r.options.iter().any(|o| o.violates)
+        })
+        .map(|r| r.id.0.clone())
+        .collect();
+    offenders.sort();
+    offenders
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -1406,6 +1623,8 @@ mod tests {
             layer3_only: false,
             stack_exceptions: Vec::new(),
             extra_domains: Vec::new(),
+            kind: None,
+            max_severity: None,
         }
     }
 
@@ -1467,6 +1686,7 @@ mod tests {
                     finding_detail: o.finding_detail.filter(|s| !s.trim().is_empty()),
                     escalation: o.escalation,
                     effort: o.effort.filter(|s| !s.trim().is_empty()),
+                    violates: o.violates,
                 })
                 .collect(),
             verification: raw.verification,
@@ -1484,6 +1704,8 @@ mod tests {
                 })
                 .collect(),
             extra_domains: raw.extra_domains,
+            kind: raw.kind,
+            max_severity: raw.max_severity.filter(|s| !s.trim().is_empty()),
         }
     }
 
@@ -3439,5 +3661,193 @@ mod tests {
             );
         }
         assert_ids_unique_in_corpus(&set, &ids);
+    }
+
+    // ── Pass-1 W2: rule kind / violates / max_severity schema ──────────────────────────────
+    // (`docs/plans/2026-10-09_audit-findings-tracker.md`, A5.1 + the corpus-load gate)
+
+    /// req_a5_1: the three [`RuleKind`] variants round-trip through TOML in both directions —
+    /// the wire string parses to the right variant, and an ABSENT `kind` field parses to
+    /// `None` rather than silently defaulting to a permissive variant (the back-compat
+    /// requirement: `RuleToml::kind` has `#[serde(default)]` so the loader never hard-errors
+    /// on a pre-classification TOML, but the resulting `Rule::kind()` must stay `None`, never
+    /// resolve to e.g. `Decision`).
+    ///
+    /// FAILS BEFORE THE FIX: before this field existed at all, `kind = "defect"` in a TOML was
+    /// silently ignored by serde (unknown field, no `deny_unknown_fields`) and `Rule` had no
+    /// `kind` accessor to assert against — this test could not even be written. After the fix,
+    /// each of the three wire strings resolves to its variant and the absent case resolves to
+    /// `None`.
+    #[test]
+    fn req_a5_1_three_rule_kinds_round_trip_through_toml() {
+        for (wire, expected) in [
+            ("defect", RuleKind::Defect),
+            ("decision", RuleKind::Decision),
+            ("default_with_exceptions", RuleKind::DefaultWithExceptions),
+        ] {
+            let src = format!(
+                r#"
+                id = "KIND-ROUNDTRIP-1"
+                title = "Round trip"
+                enforcement = "structured"
+                domain = "rust"
+                kind = "{wire}"
+                "#
+            );
+            let rule = parse_rule(&src);
+            assert_eq!(
+                rule.kind(),
+                Some(expected),
+                "wire string {wire:?} must parse to {expected:?}"
+            );
+            assert_eq!(
+                rule.kind().unwrap().as_str(),
+                wire,
+                "as_str is the inverse of from_tag"
+            );
+        }
+
+        // Absent `kind` -> None, not a silent permissive default.
+        let no_kind_src = r#"
+            id = "KIND-ABSENT-1"
+            title = "No kind declared"
+            enforcement = "structured"
+            domain = "rust"
+            "#;
+        let rule = parse_rule(no_kind_src);
+        assert_eq!(
+            rule.kind(),
+            None,
+            "an absent `kind` must resolve to None, never silently to a concrete variant"
+        );
+        assert!(
+            !rule.is_defect_kind(),
+            "an unclassified rule is never defect-kind"
+        );
+    }
+
+    /// req_a5_1: `RuleOption::violates` round-trips — present-and-true, present-and-false, and
+    /// ABSENT (defaulting to `false`, never silently `true`).
+    ///
+    /// FAILS BEFORE THE FIX: `OptionToml`/`RuleOption` had no `violates` field at all before
+    /// this change — `violates = true` in an `[[option]]` block was silently dropped by serde
+    /// and there was no accessor to assert against.
+    #[test]
+    fn req_a5_1_violates_round_trips_through_toml() {
+        let src = r#"
+            id = "VIOLATES-ROUNDTRIP-1"
+            title = "Round trip"
+            enforcement = "structured"
+            domain = "rust"
+            kind = "default_with_exceptions"
+
+            [decision]
+            default = "good"
+
+            [[option]]
+            id = "good"
+            label = "The correct way"
+            directive = "do it right"
+            why = "because"
+
+            [[option]]
+            id = "bad"
+            label = "The degenerate way"
+            directive = "do nothing"
+            why = "rejected"
+            violates = true
+
+            [[option]]
+            id = "unspecified"
+            label = "No violates key at all"
+            directive = "do something else"
+            why = "also fine"
+            "#;
+        let rule = parse_rule(src);
+        let good = rule.options.iter().find(|o| o.id == "good").unwrap();
+        let bad = rule.options.iter().find(|o| o.id == "bad").unwrap();
+        let unspecified = rule.options.iter().find(|o| o.id == "unspecified").unwrap();
+        assert!(!good.violates, "explicit absence of the key must be false");
+        assert!(
+            bad.violates,
+            "an explicit `violates = true` must round-trip to true"
+        );
+        assert!(
+            !unspecified.violates,
+            "an option with no `violates` key at all defaults to false"
+        );
+    }
+
+    /// req_a5_1 (corpus-load gate, item 4): every rule in the REAL shipped corpus declares a
+    /// `kind`. This is the build-time gate — mirrors `camerata_server::mechanical_gate`'s
+    /// existing precedent for the W1-item-4 defect (a `#[cfg(test)]` assertion, not a runtime
+    /// refusal; see `rules_missing_kind`'s doc comment).
+    ///
+    /// FAILS BEFORE THE FIX: before the classification pass, zero corpus rules declared `kind`
+    /// at all (the field didn't exist) — `rules_missing_kind` would have returned all ~417 ids.
+    /// After classifying the whole corpus, it returns empty.
+    #[tokio::test]
+    async fn req_a5_1_every_corpus_rule_declares_a_kind() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return; // skip without the bundled corpus checked out
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let missing = rules_missing_kind(&set);
+        assert!(
+            missing.is_empty(),
+            "every corpus rule must declare `kind` (A5.1): {missing:?}"
+        );
+    }
+
+    /// Corpus-load gate companion (item 4): a `default_with_exceptions` rule with options but
+    /// NO option marked `violates` is suspicious — it is either misclassified (should be
+    /// `decision`) or under-authored. The real corpus must have zero of these: the
+    /// classification pass only ever assigned `default_with_exceptions` when at least one
+    /// option was marked `violates`.
+    #[tokio::test]
+    async fn req_a5_1_corpus_has_no_suspicious_default_with_exceptions_rules() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let suspicious = suspicious_default_with_exceptions_rules(&set);
+        assert!(
+            suspicious.is_empty(),
+            "a default_with_exceptions rule must have at least one `violates` option: {suspicious:?}"
+        );
+    }
+
+    /// A synthetic `default_with_exceptions` rule with options but no `violates` flag anywhere
+    /// IS flagged by `suspicious_default_with_exceptions_rules` — the positive-detection half
+    /// of the item-4 check (the corpus-level test above only proves the REAL corpus is clean;
+    /// this proves the detector itself actually fires on the shape it's meant to catch).
+    #[test]
+    fn suspicious_default_with_exceptions_detector_fires_on_the_defect_shape() {
+        let src = r#"
+            id = "SUSPICIOUS-1"
+            title = "Looks like default_with_exceptions but marks nothing violates"
+            enforcement = "structured"
+            domain = "rust"
+            kind = "default_with_exceptions"
+
+            [[option]]
+            id = "a"
+            label = "A"
+            directive = "do A"
+            why = "why"
+
+            [[option]]
+            id = "b"
+            label = "B"
+            directive = "do B"
+            why = "why"
+            "#;
+        let rule = parse_rule(src);
+        let mut set = RuleSet::default();
+        set.push(rule);
+        let suspicious = suspicious_default_with_exceptions_rules(&set);
+        assert_eq!(suspicious, vec!["SUSPICIOUS-1".to_string()]);
     }
 }
