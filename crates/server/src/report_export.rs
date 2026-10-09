@@ -478,6 +478,42 @@ pub(crate) fn normalize_severity(raw: &str) -> String {
     }
 }
 
+/// E2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): clamp `severity` DOWN to `rule_id`'s
+/// corpus-declared [`camerata_rules::Rule::max_severity`], when one is declared and `severity`
+/// currently ranks ABOVE it (a lower [`severity_rank`] number is more severe, so "above the
+/// ceiling" means `severity_rank(severity) < severity_rank(ceiling)`). Never RAISES a severity
+/// that already ranks at or below the ceiling — this is a ceiling, not a floor, and applying it
+/// is always safe regardless of how `severity` got to its current value (a model's own
+/// judgment, the D5 severity floor, the D6/D7 severity ceiling rules — ALL of those run
+/// upstream, inside `ai_audit.rs`, before a finding ever reaches this export layer; this is the
+/// LAST clamp, applied once per finding at the single choke-point every exporter (the PDF's
+/// `build_report_json`, the xlsx/`findings.json` `partition_rows`) already shares for severity
+/// normalization, so "no report may exceed it" holds for every artifact, not just one).
+///
+/// `rule_id` is resolved through [`corpus_rule_for`] (not a bare `corpus.get_by_id`), so an
+/// external-tool/preview finding whose `rule_id` is the TOOL's own id (e.g. a Semgrep rule
+/// name) still resolves to the grounded corpus rule that may carry a ceiling. Absent corpus,
+/// absent rule, or absent `max_severity` all degrade to a no-op — the overwhelming majority of
+/// findings have no ceiling to apply.
+pub(crate) fn clamp_to_rule_max_severity(
+    severity: String,
+    rule_id: &str,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> String {
+    let Some(rule) = corpus_rule_for(rule_id, corpus) else {
+        return severity;
+    };
+    let Some(raw_ceiling) = rule.max_severity.as_deref() else {
+        return severity;
+    };
+    let ceiling = normalize_severity(raw_ceiling);
+    if severity_rank(&severity) < severity_rank(&ceiling) {
+        ceiling
+    } else {
+        severity
+    }
+}
+
 /// C4-R1: the pipeline-wide null-location safety net. No finding above `informational` (any
 /// normalized severity other than `"info"`) may ship with BOTH an empty `path` AND `line == 0`
 /// — that combination means nothing concrete was ever established for the location this
@@ -3304,6 +3340,11 @@ pub fn build_report_json(
         // — matrix bucketing, curated findings, the scorecard — sees the ALREADY-downgraded
         // severity and can never independently re-derive the pre-downgrade one.
         let severity = downgrade_unlocated_above_informational(severity, f);
+        // E2: the rule's own `max_severity` ceiling, applied last so it wins over everything
+        // upstream (the model's own call, the D5 floor, the D6/D7 ceiling rules, and the
+        // unlocated-above-informational downgrade just above) — see
+        // `clamp_to_rule_max_severity`'s doc comment.
+        let severity = clamp_to_rule_max_severity(severity, &f.rule_id, corpus);
         live.push((f, disposition, reason, severity));
     }
     let review_state = if auditor_touched_any_finding {
@@ -4892,6 +4933,117 @@ mod tests {
         assert_eq!(json.scorecard.rows[0].critical, 1);
         assert_eq!(json.scorecard.rows[0].low, 0);
         assert_eq!(json.curated_findings[0].sites[0].severity, "critical");
+    }
+
+    // ── E2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): a rule's `max_severity`
+    // ceiling, applied LAST — never exceeded by any report, never raising a lower severity ──
+
+    /// A single-rule corpus with `max_severity` set AND a real, authored default option — so
+    /// the finding has a resolvable fix and is NOT diverted to the `held` bucket by the C5-8
+    /// "action-tier row with no fix to show at all" gate, which would otherwise make
+    /// `curated_findings` empty for reasons unrelated to what this test is proving.
+    fn ruleset_with_max_severity(rule_id: &str, max_severity: &str) -> camerata_rules::RuleSet {
+        let mut rule = camerata_rules::bare_rule(rule_id, "test-fixture");
+        rule.max_severity = Some(max_severity.to_string());
+        rule.default_option = Some("default".to_string());
+        rule.options = vec![camerata_rules::RuleOption {
+            id: "default".to_string(),
+            label: "Default".to_string(),
+            directive: "do the right thing".to_string(),
+            why: "because".to_string(),
+            remediation: Some("Fix the thing.".to_string()),
+            finding_headline: None,
+            finding_detail: None,
+            escalation: None,
+            effort: None,
+            violates: false,
+        }];
+        let mut set = camerata_rules::RuleSet::default();
+        set.push(rule);
+        set
+    }
+
+    /// req_e2: a rule declaring `max_severity = "high"` never exports `critical`, even when
+    /// the finding's own (pre-export) severity is already `"critical"` — standing in for "a
+    /// severity floor would otherwise raise it" (D5's floor runs upstream in `ai_audit.rs`,
+    /// before a finding ever reaches this export layer; a finding arriving here already at
+    /// `critical` is exactly what a floor-raise looks like by the time this layer sees it).
+    ///
+    /// FAILS BEFORE THE FIX: before `Rule::max_severity`/`clamp_to_rule_max_severity` existed,
+    /// there was no corpus field to read a ceiling from at all — this exact finding would have
+    /// exported as `critical` unconditionally (see the sibling
+    /// `severity_casing_drift_is_normalized_not_silently_demoted_to_low` test just above, which
+    /// pins today's un-clamped `critical` behavior for a rule with no ceiling).
+    #[test]
+    fn req_e2_max_severity_clamps_a_critical_finding_down_to_the_declared_ceiling() {
+        let corpus = ruleset_with_max_severity("CEILING-1", "high");
+        let f = finding("CEILING-1", "a.rs", 1, "critical");
+        let report = report_with(vec![f], vec!["CEILING-1"]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        assert_eq!(
+            json.curated_findings[0].sites[0].severity, "high",
+            "a max_severity=\"high\" rule must never export critical"
+        );
+        assert_eq!(json.scorecard.rows[0].critical, 0, "{:?}", json.scorecard);
+        assert_eq!(
+            json.matrix.do_now.len(),
+            0,
+            "critical-only do_now must be empty: {:?}",
+            json.matrix
+        );
+    }
+
+    /// req_e2: the ceiling is a CEILING, not a floor — a finding already BELOW the declared
+    /// `max_severity` must never be raised up to it.
+    #[test]
+    fn req_e2_max_severity_never_raises_a_lower_severity_up_to_the_ceiling() {
+        let corpus = ruleset_with_max_severity("CEILING-1", "high");
+        let f = finding("CEILING-1", "a.rs", 1, "low");
+        let report = report_with(vec![f], vec!["CEILING-1"]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        assert_eq!(
+            json.curated_findings[0].sites[0].severity, "low",
+            "max_severity must never RAISE a severity that already ranks below it"
+        );
+    }
+
+    /// req_e2, pure unit coverage of the clamp function itself (independent of the full
+    /// `build_report_json` pipeline): no ceiling declared is a no-op.
+    #[test]
+    fn req_e2_clamp_to_rule_max_severity_is_a_noop_when_the_rule_has_no_ceiling() {
+        let mut rule = camerata_rules::bare_rule("NO-CEILING-1", "test-fixture");
+        rule.max_severity = None;
+        let mut set = camerata_rules::RuleSet::default();
+        set.push(rule);
+        assert_eq!(
+            clamp_to_rule_max_severity("critical".to_string(), "NO-CEILING-1", Some(&set)),
+            "critical"
+        );
+    }
+
+    /// req_e2, pure unit coverage: an unknown corpus (`None`) or an unknown rule id both
+    /// degrade to a no-op rather than panicking or fabricating a ceiling.
+    #[test]
+    fn req_e2_clamp_to_rule_max_severity_degrades_gracefully_with_no_corpus_or_unknown_rule() {
+        assert_eq!(
+            clamp_to_rule_max_severity("critical".to_string(), "ANY-RULE-1", None),
+            "critical"
+        );
+        let set = ruleset_with_max_severity("CEILING-1", "high");
+        assert_eq!(
+            clamp_to_rule_max_severity("critical".to_string(), "SOME-OTHER-RULE-1", Some(&set)),
+            "critical"
+        );
     }
 
     // ── Item 1: defect headline, not the rule's invariant title ────────────────

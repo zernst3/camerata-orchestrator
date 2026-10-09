@@ -60,10 +60,10 @@ use crate::dep_audit::DEP_AUDIT_RULE_ID;
 use crate::onboard::ScanReport;
 use crate::report_export::{
     bucket_title, category_for, category_for_finding, citation_for_finding, classify,
-    client_headline_and_detail, disposition_label, effective_bucket, effort_hours_bounds,
-    finding_key, hedge_confidence, is_hedged, normalize_severity, provenance_tier_rank,
-    resolve_citation, resolve_effort, resolve_fix, sanitize_report_findings, title_for_finding,
-    Disposition, DispositionWire, ReportOptions,
+    clamp_to_rule_max_severity, client_headline_and_detail, disposition_label, effective_bucket,
+    effort_hours_bounds, finding_key, hedge_confidence, is_hedged, normalize_severity,
+    provenance_tier_rank, resolve_citation, resolve_effort, resolve_fix, sanitize_report_findings,
+    title_for_finding, Disposition, DispositionWire, ReportOptions,
 };
 
 // ── Row model (the intermediate shape shared by every findings-style sheet) ────────
@@ -277,7 +277,12 @@ fn partition_rows(
 
         let wire = dispositions.get(&finding_key(f));
         let is_fp = wire.map(|d| d.state.as_str()) == Some("FalsePositive");
-        let severity = normalize_severity(&f.severity);
+        // E2: the rule's own `max_severity` ceiling — applied here too so the xlsx/findings.json
+        // artifacts can never disagree with the PDF on a capped rule (see
+        // `clamp_to_rule_max_severity`'s doc comment; `report_export::build_report_json` applies
+        // the SAME clamp to the SAME vocabulary over the SAME corpus).
+        let severity =
+            clamp_to_rule_max_severity(normalize_severity(&f.severity), &f.rule_id, corpus);
         // C4-P2: `category_for_finding`/`title_for_finding` (not the bare rule-id-only
         // `category_for` / a raw corpus-or-rule_id join) — an AI-tier finding with no corpus
         // entry of its own gets its real semantic category and, when the P3 class fallback
@@ -2197,6 +2202,7 @@ mod tests {
             finding_detail: Some(detail.to_string()),
             escalation: None,
             effort: None,
+            violates: false,
         }];
         rule.default_option = Some("default".to_string());
         let mut set = camerata_rules::RuleSet::default();
