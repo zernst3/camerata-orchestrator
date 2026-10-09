@@ -136,6 +136,17 @@ pub struct MergedRow {
 /// that did NOT survive as its own output row. Any row not covered by one of these buckets
 /// becomes `unaccounted` in the resulting [`StageLedgerEntry`] — see
 /// [`ScanLedger::record_stage`].
+///
+/// W1 (Pass-1 seal fix): a stage can also GAIN rows (the scan-time external-tool preview
+/// merge, the dependency audit, the evidence-of-violation gate all APPEND findings rather
+/// than remove them) — `added` is the symmetric counterpart of `other` for that direction:
+/// `(label, count)` naming honestly WHY `rows_out` exceeds `rows_in`. Before this, the ledger
+/// could only account for row LOSSES (`rows_in >= rows_out` was baked into every call site
+/// that reduces a `Vec<Finding>`); a stage that added rows had nowhere to disclose them, so
+/// the two real injection points this fixes (the preview merge in `merge_scan_preview`, and
+/// the evidence gate in `report_export::apply_evidence_gate`) ran OUTSIDE the ledger's view
+/// entirely. See [`ScanLedger::record_stage`]'s doc comment for the now-bidirectional
+/// reconciliation this enables.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StageAccounting {
     pub merged_into: Vec<MergedRow>,
@@ -148,9 +159,17 @@ pub struct StageAccounting {
     /// using this never masks a real integrity gap; it just names the bucket honestly instead
     /// of forcing it into a wrong-shaped one.
     pub other: Vec<(String, usize)>,
+    /// `(label, count)` of rows this stage ADDED (`rows_out > rows_in`) — e.g.
+    /// `("external_tool_preview_findings", 6)` or `("evidence_gate_synthesized", 2)`. Counted
+    /// toward [`Self::added_total`], never [`Self::accounted`] (the two totals reconcile
+    /// opposite directions — see [`ScanLedger::record_stage`]).
+    #[serde(default)]
+    pub added: Vec<(String, usize)>,
 }
 
 impl StageAccounting {
+    /// Total of every named REMOVAL-side disposition — reconciles against `rows_in -
+    /// rows_out` (a stage that shrank the row set).
     pub fn accounted(&self) -> usize {
         self.merged_into.len()
             + self.routed_held
@@ -159,19 +178,35 @@ impl StageAccounting {
             + self.other.iter().map(|(_, n)| n).sum::<usize>()
     }
 
+    /// Total of every named ADDITION-side disposition — reconciles against `rows_out -
+    /// rows_in` (a stage that grew the row set). See [`Self::added`]'s doc comment.
+    pub fn added_total(&self) -> usize {
+        self.added.iter().map(|(_, n)| n).sum::<usize>()
+    }
+
     pub fn push_merge(&mut self, rule_id: impl Into<String>, target_rule_id: impl Into<String>) {
         self.merged_into.push(MergedRow {
             rule_id: rule_id.into(),
             target_rule_id: target_rule_id.into(),
         });
     }
+
+    /// Disclose `count` rows this stage ADDED under `label` — the addition-side counterpart
+    /// of `other`'s escape hatch. See [`Self::added`]'s doc comment.
+    pub fn push_added(&mut self, label: impl Into<String>, count: usize) {
+        self.added.push((label.into(), count));
+    }
 }
 
-/// One pipeline stage's row-accounting for a single instrumented pass. The invariant:
-/// `rows_in == rows_out + merged_into.len() + routed_held + routed_informational + deduped +
-/// other-total + unaccounted`. `unaccounted` is computed by [`ScanLedger::record_stage`] as
-/// the remainder — never supplied directly — so an instrumentation site cannot accidentally
-/// claim a clean reconciliation it didn't actually prove.
+/// One pipeline stage's row-accounting for a single instrumented pass. The invariant (now
+/// bidirectional — W1 Pass-1 seal fix):
+/// `rows_in + added_total == rows_out + accounted_total + unaccounted`,
+/// i.e. a stage may EITHER shrink the row set (`rows_in > rows_out`, explained by
+/// `merged_into`/`routed_held`/`routed_informational`/`deduped`/`other`) OR grow it
+/// (`rows_out > rows_in`, explained by `added`) — never both reconciling loosely. `unaccounted`
+/// is computed by [`ScanLedger::record_stage`] as the remainder in WHICHEVER direction applies
+/// — never supplied directly — so an instrumentation site cannot accidentally claim a clean
+/// reconciliation it didn't actually prove.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageLedgerEntry {
     pub stage: String,
@@ -182,6 +217,10 @@ pub struct StageLedgerEntry {
     pub routed_informational: usize,
     pub deduped: usize,
     pub other: Vec<(String, usize)>,
+    /// See [`StageAccounting::added`]'s doc comment. `#[serde(default)]` so a persisted
+    /// pre-W1-Pass-1 ledger (no stage ever recorded an addition) still deserializes.
+    #[serde(default)]
+    pub added: Vec<(String, usize)>,
     pub unaccounted: usize,
 }
 
@@ -190,18 +229,28 @@ impl StageLedgerEntry {
         self.unaccounted == 0
     }
 
-    /// W2: the total of every NAMED disposition this entry recorded (merged + held +
-    /// informational + deduped + the `other` escape-hatch buckets) — i.e. `rows_in - rows_out`
-    /// minus whatever `unaccounted` already had to absorb. Mirrors [`StageAccounting::accounted`]
-    /// but over the already-reconciled, persisted entry, so a caller (or test) can state the
-    /// `rows_in == rows_out + accounted_total() + unaccounted` identity explicitly instead of
-    /// only checking `unaccounted == 0`.
+    /// W2: the total of every NAMED REMOVAL-side disposition this entry recorded (merged +
+    /// held + informational + deduped + the `other` escape-hatch buckets) — i.e. `rows_in -
+    /// rows_out` minus whatever `unaccounted` already had to absorb, when this stage shrank the
+    /// row set. Mirrors [`StageAccounting::accounted`] but over the already-reconciled,
+    /// persisted entry, so a caller (or test) can state the `rows_in == rows_out +
+    /// accounted_total() + unaccounted` identity explicitly instead of only checking
+    /// `unaccounted == 0`. Zero (not meaningful) for a stage that grew the row set instead —
+    /// see [`Self::added_total`] for that direction.
     pub fn accounted_total(&self) -> usize {
         self.merged_into.len()
             + self.routed_held
             + self.routed_informational
             + self.deduped
             + self.other.iter().map(|(_, n)| n).sum::<usize>()
+    }
+
+    /// The ADDITION-side counterpart of [`Self::accounted_total`]: the total of every named
+    /// reason this stage's `rows_out` exceeded its `rows_in` (e.g. the external-tool preview
+    /// merge's net-new findings, or the evidence gate's synthesized advisory rows). Zero for a
+    /// stage that shrank or left the row set unchanged.
+    pub fn added_total(&self) -> usize {
+        self.added.iter().map(|(_, n)| n).sum::<usize>()
     }
 }
 
@@ -293,11 +342,17 @@ impl ScanLedger {
         self.rules.get(&rule_id).expect("just inserted")
     }
 
-    /// Record one stage's row accounting, computing `unaccounted` as the remainder of
-    /// `rows_in - rows_out` not explained by `accounting`. Multiple entries for the SAME
-    /// stage name are allowed (e.g. one per repo in a multi-repo scan) — each is reconciled
-    /// independently. Returns the freshly-pushed entry so the caller can immediately check
-    /// `is_integral()` / build a runtime disclosure (see [`stage_disclosure`]).
+    /// Record one stage's row accounting, computing `unaccounted` as the remainder NOT
+    /// explained by `accounting`, in WHICHEVER direction `rows_in`/`rows_out` actually moved:
+    /// `rows_in > rows_out` (a stage that shrank the row set) reconciles against
+    /// `accounting.accounted()` exactly as before; `rows_out > rows_in` (a stage that GREW the
+    /// row set — W1 Pass-1 seal fix) reconciles against `accounting.added_total()` instead. A
+    /// stage can never owe both directions at once (one of `rows_in.saturating_sub(rows_out)` /
+    /// `rows_out.saturating_sub(rows_in)` is always zero), so `unaccounted` is simply whichever
+    /// side's shortfall is nonzero. Multiple entries for the SAME stage name are allowed (e.g.
+    /// one per repo in a multi-repo scan) — each is reconciled independently. Returns the
+    /// freshly-pushed entry so the caller can immediately check `is_integral()` / build a
+    /// runtime disclosure (see [`stage_disclosure`]).
     pub fn record_stage(
         &mut self,
         stage: impl Into<String>,
@@ -306,8 +361,12 @@ impl ScanLedger {
         accounting: StageAccounting,
     ) -> &StageLedgerEntry {
         let lost = rows_in.saturating_sub(rows_out);
+        let gained = rows_out.saturating_sub(rows_in);
         let accounted = accounting.accounted();
-        let unaccounted = lost.saturating_sub(accounted);
+        let added_total = accounting.added_total();
+        let unaccounted_loss = lost.saturating_sub(accounted);
+        let unaccounted_gain = gained.saturating_sub(added_total);
+        let unaccounted = unaccounted_loss + unaccounted_gain;
         self.stages.push(StageLedgerEntry {
             stage: stage.into(),
             rows_in,
@@ -317,6 +376,7 @@ impl ScanLedger {
             routed_informational: accounting.routed_informational,
             deduped: accounting.deduped,
             other: accounting.other,
+            added: accounting.added,
             unaccounted,
         });
         self.stages.last().expect("just pushed")
@@ -440,6 +500,28 @@ impl ScanLedger {
     pub fn total_unaccounted(&self) -> usize {
         self.stages.iter().map(|s| s.unaccounted).sum()
     }
+}
+
+/// Convenience for the common "this stage only ever adds rows, all under ONE label" shape —
+/// e.g. the scan-time external-tool preview merge (`crate::merge_scan_preview`) and the
+/// dependency audit, both of which strictly APPEND findings and never remove any. Equivalent to
+/// building a [`StageAccounting`] with a single `push_added(label, rows_out - rows_in)` and
+/// calling [`ScanLedger::record_stage`] directly. Deliberately a NO-OP (records nothing) when
+/// `rows_out <= rows_in` — the common case when a pass finds nothing new this run — so a scan
+/// with no additions doesn't accumulate a zero-sized stage entry for every repo it touches.
+pub fn record_addition_stage(
+    ledger: &mut ScanLedger,
+    stage: impl Into<String>,
+    rows_in: usize,
+    rows_out: usize,
+    label: &str,
+) {
+    if rows_out <= rows_in {
+        return;
+    }
+    let mut acc = StageAccounting::default();
+    acc.push_added(label, rows_out - rows_in);
+    ledger.record_stage(stage, rows_in, rows_out, acc);
 }
 
 /// A runtime disclosure for one stage's integrity gap, or `None` when the stage reconciled
@@ -754,6 +836,66 @@ mod tests {
         assert_eq!(entry.unaccounted, 2);
         assert!(!entry.is_integral());
         assert_eq!(ledger.total_unaccounted(), 2);
+    }
+
+    // ── req_c1: additions are accounted exactly as deletions already are ───────────────────
+    // (docs/plans/2026-10-09_audit-findings-tracker.md, requirement C1 — the ledger used to be
+    // able to represent ONLY a stage that shrinks the row set; a stage that APPENDS findings
+    // (the scan-time external-tool preview merge, the evidence-of-violation gate) had no bucket
+    // at all, so the two real defects this fixes ran entirely outside the ledger's view. These
+    // tests pin the new, symmetric `added`/`added_total` machinery directly, independent of the
+    // scan-pipeline/export-level req_c1 integration test in `report_export.rs`.)
+
+    /// A stage that GROWS the row set with every added row disclosed via `push_added` must
+    /// reconcile to zero unaccounted — the direct mirror of
+    /// `a_fully_explained_stage_has_zero_unaccounted` for the addition direction.
+    #[test]
+    fn req_c1_a_stage_that_adds_rows_with_a_disclosed_reason_is_fully_accounted() {
+        let mut ledger = ScanLedger::new();
+        let mut acc = StageAccounting::default();
+        acc.push_added("external_tool_preview_findings", 6);
+        // 40 rows in, 46 out: 6 NEW rows, all disclosed.
+        let entry = ledger.record_stage("external-tool-preview-merge", 40, 46, acc);
+        assert_eq!(
+            entry.unaccounted, 0,
+            "every added row must be accounted: {entry:?}"
+        );
+        assert!(entry.is_integral());
+        assert_eq!(entry.added_total(), 6);
+        assert_eq!(ledger.total_unaccounted(), 0);
+    }
+
+    /// The core integrity check for the addition direction: a stage whose `rows_out` exceeds
+    /// `rows_in` with NO disclosed reason must produce `unaccounted > 0` — the exact shape of
+    /// the shipped defect (rows appended after the row set should have been final, with nothing
+    /// in the ledger ever noticing).
+    #[test]
+    fn req_c1_a_stage_that_adds_rows_with_no_disclosed_reason_is_unaccounted() {
+        let mut ledger = ScanLedger::new();
+        let acc = StageAccounting::default(); // nothing explained
+        let entry = ledger.record_stage("evidence-gate-synthesis", 40, 42, acc); // 2 rows appeared
+        assert_eq!(entry.unaccounted, 2);
+        assert!(!entry.is_integral());
+        assert_eq!(entry.added_total(), 0);
+        assert_eq!(ledger.total_unaccounted(), 2);
+    }
+
+    /// A stage can only owe ONE direction at a time: a stage recorded as a pure addition never
+    /// has removal-side accounting (`accounted_total`) nonzero, and vice versa — pinning that
+    /// the two totals are genuinely independent, not aliases of each other.
+    #[test]
+    fn req_c1_added_total_and_accounted_total_are_independent_axes() {
+        let mut ledger = ScanLedger::new();
+        let mut acc = StageAccounting::default();
+        acc.push_added("evidence_gate_synthesized", 3);
+        let entry = ledger.record_stage("evidence-gate-synthesis", 10, 13, acc);
+        assert_eq!(entry.added_total(), 3);
+        assert_eq!(
+            entry.accounted_total(),
+            0,
+            "an addition-only stage must not also report removal-side accounting"
+        );
+        assert_eq!(entry.unaccounted, 0);
     }
 
     /// W2: the semantic/AI tier's own accounting identity, stated as an explicit arithmetic
