@@ -12835,5 +12835,408 @@ mod export_invariants_gate {
             .iter()
             .any(|r| r.rule_id == "SEC-NO-HARDCODED-SECRETS-1"));
     }
+    // ── Pass-1 W1: the seal (docs/plans/2026-10-09_audit-findings-tracker.md) ─────────────
+    //
+    // C1 — every row the engine produces reaches the reader; nothing may be added after the
+    //      row set is final.
+    // D1 — the PDF, the spreadsheet and the JSON contain exactly the same rows.
+    // D2 — every count printed anywhere is computed over that same set of rows.
+    //
+    // The shipped defect (verified by two independent audits): `apply_evidence_gate` (then
+    // `inject_evidence_gate_findings`) ran INSIDE `build_report_json` against a CLONED report
+    // that silently shadowed the function's own parameter — `xlsx_export::build_workbook` /
+    // `build_findings_export` read the ORIGINAL, un-injected `ScanReport` directly, so the PDF
+    // rendered N+K rows while `findings.json`/the xlsx rendered N. The fix moves the gate
+    // upstream of `ScanReport::seal` (see that method's doc comment for the full pipeline
+    // order) and changes all three exporters to take `&SealedReport`.
+    //
+    // CRITICAL FIXTURE NOTE: the standing `export_invariants_gate` fixture above
+    // (`build_fixture`) sets `recommendations: HashMap::new()` via `report_with`, which makes
+    // the evidence gate return early — that is EXACTLY why this bug shipped undetected. The
+    // fixture below deliberately populates `recommendations` so the gate actually fires, and
+    // `req_d1_the_seal_fixture_actually_exercises_the_evidence_gate_and_preview_merge` below
+    // asserts `k > 0` directly, so this cannot silently regress to a no-op.
 
+    /// Build one report whose evidence gate AND external-tool preview merge BOTH fire, run
+    /// through the exact same scan-pipeline steps `onboard_audit`/`onboard_audit_start`
+    /// (`crates/server/src/lib.rs`) apply in production — a simulated
+    /// `external-tool-preview-merge` ledger stage (standing in for `merge_scan_preview`, which
+    /// mutates `report.findings` in place before this point in the real pipeline), then
+    /// [`apply_evidence_gate`], then [`crate::onboard::ScanReport::seal`] — never the other
+    /// order. Returns `(sealed, k)` where `k` is how many rows the evidence gate actually
+    /// synthesized, so callers can assert `k > 0` per the CRITICAL fixture note above.
+    async fn build_seal_fixture() -> (crate::onboard::SealedReport, usize) {
+        let mut f_floor = finding(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "demo/portal",
+            "apps/api/src/config.rs",
+            10,
+            "critical",
+        );
+        f_floor.snippet = "const API_KEY = \"abcdef1234567890ab\";".to_string();
+
+        // Simulates `merge_scan_preview` having already appended a scan-time external-tool
+        // finding to `report.findings` BEFORE the evidence gate / seal run, exactly as the real
+        // pipeline orders it (see `crate::merge_scan_preview`'s doc comment).
+        let mut f_preview = finding(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "demo/portal",
+            "apps/api/src/db.rs",
+            22,
+            "high",
+        );
+        f_preview.preview_tool = Some("semgrep".to_string());
+
+        let mut report = report_with(
+            vec![f_floor, f_preview],
+            vec![
+                "SEC-NO-HARDCODED-SECRETS-1",
+                "SEC-NO-RAW-SQL-CONCAT-1",
+                "ARCH-EXPLICIT-TX-1",
+            ],
+        );
+
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        ledger.record_rule(
+            "SEC-NO-HARDCODED-SECRETS-1",
+            crate::scan_ledger::RuleTier::Deterministic,
+            true,
+            None,
+            40,
+            1,
+        );
+        ledger.record_rule(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            true,
+            None,
+            40,
+            1,
+        );
+        // The zero-finding, multi-option rule the evidence gate will flag.
+        ledger.record_rule(
+            "ARCH-EXPLICIT-TX-1",
+            crate::scan_ledger::RuleTier::Semantic,
+            true,
+            None,
+            10,
+            0,
+        );
+        report.ledger = ledger;
+
+        // The external-tool-preview-merge ledger stage the real pipeline records in
+        // `merge_scan_preview` (`lib.rs`): 1 row in (the floor finding), 2 out (the preview
+        // finding net-added) — see `crate::scan_ledger::record_addition_stage`.
+        crate::scan_ledger::record_addition_stage(
+            &mut report.ledger,
+            "external-tool-preview-merge",
+            1,
+            2,
+            "external_tool_preview_findings",
+        );
+
+        report.recommendations.insert(
+            "ARCH-EXPLICIT-TX-1".to_string(),
+            crate::ai_audit::RuleRecommendation {
+                rule_id: "ARCH-EXPLICIT-TX-1".to_string(),
+                recommended_option_id: "some-option".to_string(),
+                recommendation_reasoning: "the model's pick".to_string(),
+                hallucinated: false,
+                operator_chosen: false,
+                evidence: Some(
+                    "src/orders/service.rs:142 — three sequential writes with no transaction"
+                        .to_string(),
+                ),
+                applicable: true,
+            },
+        );
+
+        let rows_before_gate = report.findings.len();
+        apply_evidence_gate(&mut report);
+        let k = report.findings.len() - rows_before_gate;
+
+        (report.seal(), k)
+    }
+
+    /// Guards the fixture itself against silently regressing to a no-op (the CRITICAL fixture
+    /// note above): the evidence gate must actually synthesize at least one row, and the
+    /// external-tool-preview-merge ledger stage must actually be present with a nonzero
+    /// addition — otherwise every test below would pass vacuously.
+    #[tokio::test]
+    async fn req_d1_the_seal_fixture_actually_exercises_the_evidence_gate_and_preview_merge() {
+        let (sealed, k) = build_seal_fixture().await;
+        assert!(
+            k > 0,
+            "fixture precondition failed: the evidence gate produced zero rows, so this \
+             fixture cannot prove anything about the gate's cross-artifact behavior — see the \
+             CRITICAL fixture note"
+        );
+        let preview_stage = sealed
+            .ledger
+            .stages()
+            .iter()
+            .find(|s| s.stage == "external-tool-preview-merge")
+            .expect("the preview-merge stage must be present in the fixture");
+        assert!(
+            preview_stage.added_total() > 0,
+            "fixture precondition failed: the external-tool preview merge must have added at \
+             least one row: {preview_stage:?}"
+        );
+    }
+
+    /// req_d1: the PDF (via `build_report_json`), the spreadsheet (`build_workbook`) and the
+    /// machine-readable sibling (`build_findings_export`) must contain EXACTLY the same rows —
+    /// both by COUNT and by IDENTITY (rule_id, repo, path, line) — when built from one sealed
+    /// report whose evidence gate AND external-tool preview merge both fired. Before the fix,
+    /// the PDF's row set (via the clone-shadowed `inject_evidence_gate_findings`) held N+K rows
+    /// while `findings.json`/the xlsx held only N; this asserts the gap is fully closed.
+    #[tokio::test]
+    async fn req_d1_pdf_findings_json_and_xlsx_contain_exactly_the_same_rows() {
+        let (sealed, k) = build_seal_fixture().await;
+        assert!(
+            k > 0,
+            "fixture must exercise the evidence gate — see the dedicated guard test"
+        );
+
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let json = build_report_json(&sealed, &HashMap::new(), Some(&corpus), &empty_opts());
+        let workbook =
+            xlsx_export::build_workbook(&sealed, &HashMap::new(), Some(&corpus), &empty_opts())
+                .expect("the workbook must build");
+        let findings_export = xlsx_export::build_findings_export(
+            &sealed,
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+
+        // The PDF's row-identity set: every FindingRefJson across all six matrix buckets (the
+        // full `code_findings` partition — do_now/do_next/plan/accepted/informational/held).
+        let mut pdf_ids: std::collections::BTreeSet<(String, String, String, usize)> =
+            std::collections::BTreeSet::new();
+        for bucket in [
+            &json.matrix.do_now,
+            &json.matrix.do_next,
+            &json.matrix.plan,
+            &json.matrix.accepted,
+            &json.matrix.informational,
+            &json.matrix.held,
+        ] {
+            for f in bucket {
+                pdf_ids.insert((f.rule_id.clone(), f.repo.clone(), f.path.clone(), f.line));
+            }
+        }
+
+        // `findings.json`'s row-identity set — read via `serde_json::Value` since
+        // `xlsx_export::FindingRow`'s fields are private to that module (same convention
+        // `all_client_text_fields` above already uses for this exact type).
+        let findings_export_value =
+            serde_json::to_value(&findings_export).expect("FindingsExport must serialize");
+        let mut findings_json_ids: std::collections::BTreeSet<(String, String, String, usize)> =
+            std::collections::BTreeSet::new();
+        for row in findings_export_value["findings"].as_array().expect("must be an array") {
+            findings_json_ids.insert((
+                row["rule_id"].as_str().expect("rule_id").to_string(),
+                row["repo"].as_str().expect("repo").to_string(),
+                row["path"].as_str().expect("path").to_string(),
+                row["line"].as_u64().expect("line") as usize,
+            ));
+        }
+
+        assert_eq!(
+            pdf_ids.len(),
+            findings_json_ids.len(),
+            "the PDF and findings.json must render the SAME NUMBER of rows: pdf={} \
+             findings_json={} (pdf={pdf_ids:#?}, findings_json={findings_json_ids:#?})",
+            pdf_ids.len(),
+            findings_json_ids.len(),
+        );
+        assert_eq!(
+            pdf_ids, findings_json_ids,
+            "the PDF and findings.json must render the IDENTICAL row-identity set"
+        );
+        // Both the evidence-gate-synthesized row and the external-tool-preview row must
+        // actually be present in BOTH artifacts — not merely equal-sized by coincidence.
+        assert!(
+            pdf_ids.iter().any(|(rid, ..)| rid == "ARCH-EXPLICIT-TX-1"),
+            "the evidence-gate-synthesized row must reach the PDF: {pdf_ids:#?}"
+        );
+        assert!(
+            findings_json_ids.iter().any(|(rid, ..)| rid == "ARCH-EXPLICIT-TX-1"),
+            "the evidence-gate-synthesized row must reach findings.json: {findings_json_ids:#?}"
+        );
+        assert!(
+            pdf_ids.iter().any(|(rid, ..)| rid == "SEC-NO-RAW-SQL-CONCAT-1"),
+            "the external-tool-preview row must reach the PDF: {pdf_ids:#?}"
+        );
+        assert!(
+            findings_json_ids.iter().any(|(rid, ..)| rid == "SEC-NO-RAW-SQL-CONCAT-1"),
+            "the external-tool-preview row must reach findings.json: {findings_json_ids:#?}"
+        );
+
+        // The xlsx: proven via its shared-strings pool (the same technique invariants 1/2 at
+        // the top of this module already use) rather than parsing worksheet XML relationships —
+        // both rule ids, including the evidence-gate-synthesized one, must appear somewhere in
+        // the workbook's text, proving it was ALSO exported there, not just in findings.json.
+        let shared_strings = workbook_shared_string_texts(&workbook_shared_strings_xml(&workbook));
+        let joined = shared_strings.join("\n");
+        assert!(
+            joined.contains("ARCH-EXPLICIT-TX-1"),
+            "the evidence-gate-synthesized row's rule id must appear in the xlsx"
+        );
+        assert!(
+            joined.contains("SEC-NO-RAW-SQL-CONCAT-1"),
+            "the external-tool-preview row's rule id must appear in the xlsx"
+        );
+    }
+
+    /// req_d2: every count printed anywhere (the executive summary's `candidates_reviewed`, the
+    /// cover's severity totals, and the hedge/held-for-review counts) must reconcile against the
+    /// SAME sealed row set — never computed over a set an exporter did not actually render.
+    #[tokio::test]
+    async fn req_d2_candidates_reviewed_cover_totals_and_hedge_counts_reconcile_against_the_sealed_set(
+    ) {
+        let (sealed, k) = build_seal_fixture().await;
+        assert!(
+            k > 0,
+            "fixture must exercise the evidence gate — see the dedicated guard test"
+        );
+
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+
+        let total_rows = sealed.findings.len();
+        let json = build_report_json(&sealed, &HashMap::new(), Some(&corpus), &empty_opts());
+
+        // `candidates_reviewed` must equal the sealed set's total row count exactly — no
+        // disposition in this fixture excludes anything as a false positive, and there are no
+        // dependency-audit rows.
+        assert_eq!(
+            json.executive_summary.candidates_reviewed, total_rows,
+            "candidates_reviewed must equal the sealed report's own finding count"
+        );
+        assert_eq!(json.executive_summary.excluded_false_positive, 0);
+        assert_eq!(json.executive_summary.dependency_advisories, 0);
+
+        // The cover's severity strip must tally exactly the same total as candidates_reviewed
+        // (same identity `rows_in_json_equal_rendered_blocks_across_curated_and_held_for_review`
+        // asserts for the standing fixture above — restated here against THIS sealed set).
+        let cover_total = json.cover.stats.critical
+            + json.cover.stats.high
+            + json.cover.stats.medium
+            + json.cover.stats.low;
+        assert_eq!(
+            cover_total, total_rows,
+            "the cover severity strip must reconcile against the sealed row count exactly: \
+             cover_total={cover_total} total_rows={total_rows}"
+        );
+
+        // Hedge count: the evidence-gate-synthesized row carries `needs_review: true` /
+        // `confidence: needs-review`, so it must land in the `held` bucket, and the executive
+        // summary's `held_for_review` reconciling count must include it.
+        assert!(
+            json.matrix.held.iter().any(|f| f.rule_id == "ARCH-EXPLICIT-TX-1"),
+            "the evidence-gate row must be a hedge (held bucket): {:?}",
+            json.matrix.held
+        );
+        let held_for_review_total = json.matrix.informational.len() + json.matrix.held.len();
+        assert_eq!(
+            json.executive_summary.held_for_review, held_for_review_total,
+            "held_for_review must equal informational.len() + held.len() over the sealed set"
+        );
+        assert!(
+            json.executive_summary.held_for_review >= 1,
+            "at least the evidence-gate row must be held for review"
+        );
+
+        // findings.json's `summary` is REUSED verbatim from the PDF's own `executive_summary`
+        // (never independently recomputed — see `build_findings_export`'s doc comment), so it
+        // is the SAME shared helper by construction; pin that explicitly so a future change
+        // that makes it recompute its own summary independently is caught here.
+        let findings_export = xlsx_export::build_findings_export(
+            &sealed,
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+        assert_eq!(
+            findings_export.summary.candidates_reviewed, total_rows,
+            "findings.json's summary must reconcile against the same sealed row count"
+        );
+        assert_eq!(
+            findings_export.summary.held_for_review, held_for_review_total,
+            "findings.json's summary must report the SAME held-for-review count as the PDF, \
+             never its own independently-recomputed one"
+        );
+    }
+
+    /// req_c1: the final row count must equal the last ledger stage's `rows_out`, and the
+    /// ledger must account for row ADDITIONS (the external-tool-preview-merge and
+    /// evidence-gate-synthesis stages) exactly as it already accounts for deletions (every
+    /// pre-existing merge stage) — `total_unaccounted() == 0` across the whole scan.
+    #[tokio::test]
+    async fn req_c1_final_row_count_equals_last_ledger_stage_rows_out_additions_are_accounted() {
+        let (sealed, k) = build_seal_fixture().await;
+        assert!(
+            k > 0,
+            "fixture must exercise the evidence gate — see the dedicated guard test"
+        );
+
+        let stages = sealed.ledger.stages();
+        assert!(
+            stages.len() >= 2,
+            "fixture must record at least the preview-merge AND the \
+             evidence-gate-synthesis stages: {stages:#?}"
+        );
+
+        let last_stage = stages
+            .last()
+            .expect("at least one stage was just asserted present");
+        assert_eq!(
+            last_stage.stage, "evidence-gate-synthesis",
+            "the evidence gate must be the LAST row-adding pass before the seal: {stages:#?}"
+        );
+        assert_eq!(
+            last_stage.rows_out,
+            sealed.findings.len(),
+            "the final row count must equal the last ledger stage's rows_out exactly"
+        );
+
+        // Both addition-side stages must have disclosed their additions — the ledger's
+        // addition-accounting is real, not merely present-but-empty.
+        let preview_stage = stages
+            .iter()
+            .find(|s| s.stage == "external-tool-preview-merge")
+            .expect("preview-merge stage must be present");
+        assert!(
+            preview_stage.added_total() > 0,
+            "preview merge must disclose its additions"
+        );
+        assert!(
+            last_stage.added_total() > 0,
+            "evidence gate must disclose its additions"
+        );
+        assert_eq!(
+            last_stage.added_total(),
+            k,
+            "the evidence-gate stage's disclosed addition count must equal the actual number of \
+             synthesized rows"
+        );
+
+        // Fully reconciled: not one row, in either direction, is unaccounted anywhere in the
+        // scan — the ledger genuinely explains every row it has ever seen appear or vanish.
+        assert_eq!(
+            sealed.ledger.total_unaccounted(),
+            0,
+            "a fully-instrumented scan must leave zero unaccounted rows, in either direction: \
+             {:#?}",
+            sealed.ledger.stages()
+        );
+    }
 }
