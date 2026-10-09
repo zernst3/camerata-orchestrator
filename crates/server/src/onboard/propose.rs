@@ -589,6 +589,7 @@ pub async fn propose_corpus_rules(
                     label: o.label.clone(),
                     directive: o.directive.clone(),
                     why: o.why.clone(),
+                    violates: o.violates,
                 })
                 .collect();
             let enforcement = r.enforcement.as_str();

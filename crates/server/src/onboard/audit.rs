@@ -392,10 +392,19 @@ pub(crate) fn is_ci_tier_rule(id: &str, corpus: Option<&camerata_rules::RuleSet>
 /// answer. Shared by the main scan's per-repo alternative-set construction
 /// ([`build_rule_alternatives`]) and the `rescan-alternatives` endpoint, so the two paths can
 /// never drift on which rules are eligible.
+///
+/// Pass-1 W2 (A5.4): a [`camerata_rules::RuleKind::Defect`]-kind rule is ALSO excluded here,
+/// regardless of its option count — "no acceptable alternative anywhere" means there is nothing
+/// to decide among; a defect-kind rule's directive must never be rewritten to one of its own
+/// options (one of which, by construction, describes the defect itself). This is a SEPARATE
+/// exclusion from the three above (gate-armed / CI-tier / governance): those exist because a
+/// deterministic detector or the fixed `[[option]]` shape itself makes offering a wording choice
+/// moot; this one exists because the rule's own semantics say there is no legitimate choice.
 pub(crate) fn is_semantic_multi_option_rule(rule: &camerata_rules::Rule) -> bool {
     let id = rule.id.0.as_str();
     rule.options.len() >= 2
         && !rule.enforcement.is_ci_enforced()
+        && !rule.is_defect_kind()
         && camerata_gateway::lookup_arm(id).is_none()
         && is_code_auditable_rule(id)
 }
@@ -436,6 +445,7 @@ pub(crate) fn build_rule_alternatives<'a>(
                 label: o.label.clone(),
                 directive: o.directive.clone(),
                 why: o.why.clone(),
+                violates: o.violates,
             })
             .collect();
         let selected_option_id = chosen_options

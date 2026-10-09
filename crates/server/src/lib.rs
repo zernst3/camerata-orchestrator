@@ -4270,6 +4270,7 @@ async fn rescan_alternatives_handler(
                         label: o.label.clone(),
                         directive: o.directive.clone(),
                         why: o.why.clone(),
+                        violates: o.violates,
                     })
                     .collect();
                 if !options.iter().any(|o| &o.id == opt_id) {

@@ -730,6 +730,7 @@ mod tests {
             label: id.to_string(),
             directive: directive.to_string(),
             why: String::new(),
+            violates: false,
         }
     }
 

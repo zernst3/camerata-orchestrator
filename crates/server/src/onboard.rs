@@ -374,6 +374,13 @@ pub struct RuleOptionView {
     /// Why this alternative — the rationale shown in the rule-detail view.
     #[serde(default)]
     pub why: String,
+    /// Pass-1 W2 (A5.4): mirrors [`camerata_rules::RuleOption::violates`] — `true` when
+    /// choosing this option describes the absence/degenerate form of the rule's requirement.
+    /// Carried through to the alternatives-pass view (`crate::ai_audit::RuleAlternatives`) so
+    /// `audit_repo` can tell a genuine alternative apart from the defect wearing the same
+    /// `[[option]]` shape. Absent/default `false` for every pre-existing construction site.
+    #[serde(default)]
+    pub violates: bool,
 }
 
 /// One authoritative source backing a rule's grounding, mirrored from
@@ -1626,6 +1633,23 @@ pub async fn audit_repos(
                                     std::collections::HashMap::new();
                                 for f in &ai_findings {
                                     *ai_counts.entry(f.rule_id.clone()).or_insert(0) += 1;
+                                }
+                                // Pass-1 W2 (A5.4): a rule this repo's alternatives pass judged
+                                // NOT APPLICABLE (positive evidence the concern is absent here)
+                                // must be recorded as its OWN outcome, never folded into
+                                // "verified clean" just because `emitted` below happens to be
+                                // zero (it always is — `audit_repo`'s P7 hard filter already
+                                // strips any finding under a not-applicable rule id). Queued
+                                // BEFORE the `record_rule` loop immediately below, which is
+                                // what actually settles `ran`/`findings_emitted` for each id —
+                                // same queue-then-settle ordering `note_config_gated_rule`
+                                // already uses, for the same reason.
+                                for rec in &repo_recs {
+                                    if !rec.applicable {
+                                        pipeline_ledger.note_not_applicable_rule(
+                                            rec.rule_id.to_ascii_uppercase(),
+                                        );
+                                    }
                                 }
                                 for (rid, _) in &semantic {
                                     let emitted = ai_counts.remove(rid).unwrap_or(0);
@@ -4599,7 +4623,82 @@ mod tests {
             layer3_only: false,
             stack_exceptions: Vec::new(),
             extra_domains: Vec::new(),
+            kind: None,
+            max_severity: None,
         }
+    }
+
+    /// A synthetic rule shaped to be eligible for the alternatives pass on every axis EXCEPT
+    /// `kind`: >= 2 options, `Structured` (not CI-tier) enforcement, no registered gateway arm
+    /// (a synthetic id never matches one), and a code-auditable id (no `ORCH-`/`SPIRIT-`/
+    /// `PROC-` prefix). Used to isolate the `kind`-based exclusion (A5.4) from the three
+    /// PRE-EXISTING exclusions `is_semantic_multi_option_rule` already had.
+    fn make_multi_option_rule(
+        id: &str,
+        kind: Option<camerata_rules::RuleKind>,
+    ) -> camerata_rules::Rule {
+        let opt = |oid: &str| camerata_rules::RuleOption {
+            id: oid.to_string(),
+            label: oid.to_string(),
+            directive: format!("do it the {oid} way"),
+            why: "why".to_string(),
+            remediation: None,
+            finding_headline: None,
+            finding_detail: None,
+            escalation: None,
+            effort: None,
+            violates: false,
+        };
+        camerata_rules::Rule {
+            id: camerata_core::RuleId(id.to_string()),
+            title: "Test multi-option rule".to_string(),
+            enforcement: camerata_rules::EnforcementKind::Structured,
+            domain: "test-fixture".to_string(),
+            summary: "A test rule with two options.".to_string(),
+            decision_question: None,
+            decision_why: None,
+            options: vec![opt("opt-a"), opt("opt-b")],
+            default_option: Some("opt-a".to_string()),
+            verification: camerata_rules::Verification::Grounded,
+            sources: Vec::new(),
+            verified: None,
+            opt_in_only: false,
+            layer3_only: false,
+            stack_exceptions: Vec::new(),
+            extra_domains: Vec::new(),
+            kind,
+            max_severity: None,
+        }
+    }
+
+    /// req_a5_4: a `defect`-kind rule must NEVER enter the alternatives pass, regardless of its
+    /// option count — "no acceptable alternative anywhere" (A5.1) means there is nothing to
+    /// decide among, so offering the model a choice is never correct for this kind.
+    ///
+    /// FAILS BEFORE THE FIX: before `RuleKind`/`Rule::is_defect_kind` existed,
+    /// `is_semantic_multi_option_rule` had no way to exclude a rule on this basis at all — ANY
+    /// rule with >= 2 options, not gate-armed, not CI-tier, and code-auditable was eligible,
+    /// defect-kind or not; `make_multi_option_rule`'s shape (two options, `Structured`
+    /// enforcement, a synthetic unregistered id) would have returned `true` regardless of
+    /// `kind`. The positive twin (a `decision`-kind rule, same shape otherwise) proves this is
+    /// a `kind`-specific exclusion, not an accidental tightening that also excludes legitimate
+    /// multi-option rules.
+    #[test]
+    fn req_a5_4_defect_kind_rule_is_excluded_from_the_alternatives_pass() {
+        let defect_rule =
+            make_multi_option_rule("TEST-DEFECT-1", Some(camerata_rules::RuleKind::Defect));
+        assert!(
+            !is_semantic_multi_option_rule(&defect_rule),
+            "a defect-kind rule must never be eligible for the alternatives pass"
+        );
+
+        let decision_rule =
+            make_multi_option_rule("TEST-DECISION-1", Some(camerata_rules::RuleKind::Decision));
+        assert!(
+            is_semantic_multi_option_rule(&decision_rule),
+            "the identical shape, decision-kind instead, must still be eligible — the \
+             exclusion is kind-specific, not an accidental broader tightening"
+        );
     }
 
     /// Replicate the proposed-rule mapping logic for a single Rule + a single repo

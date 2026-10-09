@@ -5747,6 +5747,92 @@ async fn run_routed_passes(
 ///
 /// ### Batch mode
 ///
+/// Pass-1 W2 (A5.4, `docs/plans/2026-10-09_audit-findings-tracker.md`): decide what happens
+/// to `effective_selected`'s directive entry for `rule_id`, given the OPTION that was DECIDED
+/// for this rule this scan (forced by the operator, or model-recommended) — and, when that
+/// option is the degenerate/absent form of the requirement, build the finding that must be
+/// emitted instead of silently rewriting the directive to match it.
+///
+/// This is the single chokepoint both of `audit_repo`'s alternatives-block branches (the
+/// operator-forced loop and the model-recommendation loop) route through, so the two paths can
+/// never drift on what selecting a `violates` option actually does — the exact shape of the
+/// shipped defect this closes (`ai_audit.rs` ~5885 / ~5921-5929, pre-fix) rewrote the directive
+/// UNCONDITIONALLY for both paths.
+///
+/// - `option.violates == false` (the overwhelming majority of decisions: a genuine,
+///   non-degenerate alternative): rewrites `effective_selected`'s directive entry for `rule_id`
+///   to `option.directive`, exactly as before this fix — the per-chunk violation pass then
+///   judges conformance against the newly-adopted directive. Returns `None` (no finding is
+///   built here; any violation is the per-chunk pass's job, as always).
+/// - `option.violates == true`: the directive is LEFT UNTOUCHED — `effective_selected` is not
+///   modified at all, so the per-chunk pass keeps checking the rule's own pre-existing
+///   directive (the project's actually-selected/default option), which means OTHER sites that
+///   also happen to follow the defect can still be independently flagged by that pass. This
+///   function's own return value is the GUARANTEED floor: a `Finding` carrying the rule's own
+///   citation (`rule_id`) and remediation — `evaluated_option_id` is set to the violating
+///   option's id, which `report_export::resolve_fix` already resolves into that option's
+///   authored remediation text, exactly like any other multi-option finding; no remediation
+///   text is duplicated here. Severity anchors at `"high"` (a confirmed, evidence-backed
+///   determination that the repo follows the rule's own named defect, not a hedge) — a rule
+///   author who judges that too aggressive for a specific rule can cap it via `max_severity`
+///   (E2), which `report_export`/`xlsx_export` apply at export regardless of this anchor.
+///   `located`/`path`/`line` come from `evidence` via `report_export::parse_evidence_citation`
+///   when present (always true for a model-sourced recommendation — `parse_alternative_
+///   recommendations` already forces `applicable = false` on any unevidenced claim, so this
+///   function is never reached for one); an operator-forced pick carries no evidence by
+///   design, so `located = false` there, and the pipeline's own unlocated-above-informational
+///   safety net (`report_export::downgrade_unlocated_above_informational`) correctly demotes
+///   that one shape to `info` rather than asserting an unverifiable "high" with nothing to
+///   point at.
+fn apply_alternative_decision(
+    effective_selected: &mut [(String, String)],
+    repo: &str,
+    rule_id: &str,
+    option: &RuleOptionView,
+    recommendation_reasoning: &str,
+    evidence: Option<&str>,
+) -> Option<Finding> {
+    if !option.violates {
+        if let Some(entry) = effective_selected
+            .iter_mut()
+            .find(|(id, _)| id.eq_ignore_ascii_case(rule_id))
+        {
+            entry.1 = option.directive.clone();
+        }
+        return None;
+    }
+    let (path, line, located) = match evidence {
+        Some(ev) if !ev.trim().is_empty() => {
+            let (p, l) = crate::report_export::parse_evidence_citation(ev);
+            (p, l, true)
+        }
+        _ => (String::new(), 0, false),
+    };
+    let snippet = evidence
+        .filter(|e| !e.trim().is_empty())
+        .map(|e| e.chars().take(200).collect::<String>())
+        .unwrap_or_else(|| option.label.clone());
+    Some(Finding {
+        repo: repo.to_string(),
+        path,
+        line,
+        rule_id: rule_id.to_string(),
+        severity: "high".to_string(),
+        snippet,
+        detail: format!(
+            "This codebase was judged to follow \"{}\" for {rule_id} — {}. This option is the \
+             absence/degenerate form of the rule's own requirement (marked `violates` in the \
+             corpus), so it is reported as a defect rather than treated as a satisfied \
+             alternative, even though the rule's own alternatives pass genuinely decided this \
+             is what the repo does. {}",
+            option.label, option.why, recommendation_reasoning
+        ),
+        located,
+        evaluated_option_id: Some(option.id.clone()),
+        ..Finding::default()
+    })
+}
+
 /// The Batch execution path ([`run_passes_batch`]) does not yet apply per-rule routing — it
 /// submits every rule against every file as a single Anthropic Message Batch. Routing for the
 /// batch path is a follow-up (tracked in `docs/decisions/2026-06-20_rule_routing_wiring.md`).
@@ -5841,6 +5927,17 @@ pub async fn audit_repo(
     // W6: any pass that fails/times out for this repo, captured so the export can disclose it
     // explicitly instead of only logging to stderr. See `FailedPass`'s doc comment.
     let mut failed_passes: Vec<FailedPass> = Vec::new();
+    // Pass-1 W2 (A5.4): one `Finding` per rule whose DECIDED option (forced or model-
+    // recommended) is marked `violates` — see `apply_alternative_decision`'s doc comment. These
+    // are spliced into the finding set AFTER calibration (below, past the P7 not-applicable
+    // filter) rather than fed through the per-chunk violation prompt or the LLM calibration
+    // round-trip: the decision that the repo follows the defect option has ALREADY been made,
+    // by this same alternatives pass: re-asking a second model call to "confirm" it would be
+    // redundant spend for no new information, and this emission is the GUARANTEED floor the
+    // rule must never fall below regardless of whether any other pass also catches the same
+    // site independently (over-telling a duplicate row is explicitly preferred over the
+    // silent-zero defect this whole mechanism exists to fix).
+    let mut violates_findings: Vec<Finding> = Vec::new();
     if !alternatives.is_empty() {
         let (forced_alts, ask_alts): (Vec<RuleAlternatives>, Vec<RuleAlternatives>) = alternatives
             .iter()
@@ -5878,11 +5975,15 @@ pub async fn audit_repo(
                 applicable: true,
             });
             if let Some(opt) = a.options.iter().find(|o| o.id == final_id) {
-                if let Some(entry) = effective_selected
-                    .iter_mut()
-                    .find(|(id, _)| id.eq_ignore_ascii_case(&a.rule_id))
-                {
-                    entry.1 = opt.directive.clone();
+                if let Some(f) = apply_alternative_decision(
+                    &mut effective_selected,
+                    repo,
+                    &a.rule_id,
+                    opt,
+                    "Operator-selected option for a targeted rescan.",
+                    None,
+                ) {
+                    violates_findings.push(f);
                 }
             }
         }
@@ -5921,11 +6022,15 @@ pub async fn audit_repo(
                         if let Some(opt) =
                             a.options.iter().find(|o| o.id == rec.recommended_option_id)
                         {
-                            if let Some(entry) = effective_selected
-                                .iter_mut()
-                                .find(|(id, _)| id.eq_ignore_ascii_case(&a.rule_id))
-                            {
-                                entry.1 = opt.directive.clone();
+                            if let Some(f) = apply_alternative_decision(
+                                &mut effective_selected,
+                                repo,
+                                &a.rule_id,
+                                opt,
+                                &rec.recommendation_reasoning,
+                                rec.evidence.as_deref(),
+                            ) {
+                                violates_findings.push(f);
                             }
                         }
                     }
@@ -6229,6 +6334,28 @@ pub async fn audit_repo(
         stage_samples.push(crate::scan_ledger::StageSample {
             stage: "ai-calibration".to_string(),
             rows_in: pre_calibration_len,
+            rows_out,
+            accounting: acc,
+        });
+    }
+    // Pass-1 W2 (A5.4): splice in the `violates`-option findings AFTER calibration (so this
+    // scan never spends a second LLM round re-confirming a determination the alternatives pass
+    // already made) and BEFORE the `evaluated_option_id` blanket-tag below, so each one still
+    // gets that tag applied (redundantly-but-harmlessly, since `apply_alternative_decision`
+    // already set it) rather than needing a parallel code path. Recorded as its own ADDITION-
+    // side ledger stage (`StageAccounting::push_added`) — the exact precedent `report_export::
+    // apply_evidence_gate`'s `"evidence-gate-synthesis"` stage set for the W1 seal fix: a row
+    // appended after the row set would otherwise have been considered final must disclose
+    // itself, never silently grow the finding count.
+    if !violates_findings.is_empty() {
+        let rows_in = verified.len();
+        verified.extend(violates_findings);
+        let rows_out = verified.len();
+        let mut acc = crate::scan_ledger::StageAccounting::default();
+        acc.push_added("violates_option_emitted", rows_out - rows_in);
+        stage_samples.push(crate::scan_ledger::StageSample {
+            stage: "violates-option-emission".to_string(),
+            rows_in,
             rows_out,
             accounting: acc,
         });
@@ -11152,16 +11279,32 @@ mod tests {
                     label: "Option A".to_string(),
                     directive: "Do it the A way.".to_string(),
                     why: "A is simple.".to_string(),
+                    violates: false,
                 },
                 RuleOptionView {
                     id: "opt-b".to_string(),
                     label: "Option B".to_string(),
                     directive: "Do it the B way.".to_string(),
                     why: "B is scalable.".to_string(),
+                    violates: false,
                 },
             ],
             selected_option_id: selected.map(str::to_string),
         }
+    }
+
+    /// req_a5_4 fixture: the SAME two-option shape as [`two_option_alternatives`], except
+    /// `opt-b` is marked `violates: true` — a genuine `default_with_exceptions`/`defect`-shaped
+    /// rule whose non-default option IS the degenerate/absent form of the requirement (e.g.
+    /// `ARCH-IDEMPOTENCY-KEYS-1`'s "no deduplication at all" option). Used by the tests proving
+    /// A5.4: selecting this option must emit a finding and must NOT rewrite the directive.
+    fn two_option_alternatives_opt_b_violates(
+        rule_id: &str,
+        selected: Option<&str>,
+    ) -> RuleAlternatives {
+        let mut alt = two_option_alternatives(rule_id, selected);
+        alt.options[1].violates = true;
+        alt
     }
 
     #[test]
@@ -11646,6 +11789,184 @@ mod tests {
                 "{rule_id}'s finding must be tagged under its recommended option"
             );
         }
+    }
+
+    // ---- Pass-1 W2 (A5.4): the alternatives pass may never silence a rule -----------------
+    // (`docs/plans/2026-10-09_audit-findings-tracker.md`)
+
+    /// req_a5_4: selecting an option marked `violates` must NOT rewrite the rule's effective
+    /// directive, and must emit a `Finding` carrying the rule's citation (`rule_id`) and
+    /// remediation (`evaluated_option_id`, which `report_export::resolve_fix` resolves).
+    ///
+    /// FAILS BEFORE THE FIX: before this change, `apply_alternative_decision` didn't exist —
+    /// both of `audit_repo`'s alternatives branches unconditionally rewrote the directive to
+    /// ANY decided option's text (`entry.1 = opt.directive.clone()`, with no `violates` check
+    /// at all) and never built a finding. Run against that shape, this test's first assertion
+    /// (`entry.1` unchanged) would fail — the directive WOULD have been rewritten to opt-b's —
+    /// and the second assertion (`Some(finding)`) would fail too, since nothing was ever
+    /// returned.
+    #[test]
+    fn req_a5_4_violates_option_does_not_rewrite_directive_and_emits_a_finding() {
+        let mut effective_selected =
+            vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
+        let alt = two_option_alternatives_opt_b_violates("MULTI-RULE-1", Some("opt-a"));
+        let opt_b = alt.options.iter().find(|o| o.id == "opt-b").unwrap();
+        assert!(
+            opt_b.violates,
+            "fixture sanity: opt-b must be the violates option"
+        );
+
+        let finding = apply_alternative_decision(
+            &mut effective_selected,
+            "me/api",
+            "MULTI-RULE-1",
+            opt_b,
+            "the repo consistently does it the B way",
+            Some("src/lib.rs:42 - does it the B way with no exception handling"),
+        );
+
+        assert_eq!(
+            effective_selected[0].1, "Do it the A way.",
+            "a violates option must NEVER rewrite the rule's effective directive"
+        );
+        let f = finding.expect("a violates option must emit a finding");
+        assert_eq!(
+            f.rule_id, "MULTI-RULE-1",
+            "the finding carries the rule's own citation"
+        );
+        assert_eq!(
+            f.evaluated_option_id.as_deref(),
+            Some("opt-b"),
+            "remediation resolution (report_export::resolve_fix) keys off this"
+        );
+        assert_eq!(f.path, "src/lib.rs");
+        assert_eq!(f.line, 42);
+        assert!(f.located);
+    }
+
+    /// req_a5_4 positive twin: a genuine `decision`-shaped pick — the SAME two-option shape,
+    /// but the selected option is NOT marked `violates` — rewrites the directive exactly as
+    /// before this fix, and emits NO defect finding. Proves the fix is additive (it only
+    /// changes behavior for a `violates` option) rather than a blanket behavior change that
+    /// would also break the ordinary, non-defect multi-option case.
+    #[test]
+    fn req_a5_4_non_violates_option_rewrites_directive_and_emits_no_defect() {
+        let mut effective_selected =
+            vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
+        let alt = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
+        let opt_b = alt.options.iter().find(|o| o.id == "opt-b").unwrap();
+        assert!(
+            !opt_b.violates,
+            "fixture sanity: opt-b is a genuine alternative here"
+        );
+
+        let finding = apply_alternative_decision(
+            &mut effective_selected,
+            "me/api",
+            "MULTI-RULE-1",
+            opt_b,
+            "the repo consistently does it the B way",
+            Some("src/lib.rs:42 - does it the B way"),
+        );
+
+        assert_eq!(
+            effective_selected[0].1, "Do it the B way.",
+            "a genuine alternative DOES rewrite the directive, same as before this fix"
+        );
+        assert!(
+            finding.is_none(),
+            "a non-violates option must never emit a defect finding"
+        );
+    }
+
+    /// req_a5_4, end-to-end through `audit_repo`: a rule whose alternatives pass DECIDES the
+    /// repo follows the `violates` option emits a finding EVEN THOUGH the stub's canned
+    /// per-chunk violation response is empty (`"findings": []`) — proving the emission comes
+    /// from the alternatives-decision mechanism itself, not from the ordinary per-chunk
+    /// violation pass independently noticing the same thing. The finding is then fed through
+    /// the SAME ledger `record_rule` call `onboard::audit_repos` makes for every semantic rule,
+    /// proving the rule is NEVER reported healthy (`ScanLedger::healthy_rule_ids`).
+    ///
+    /// FAILS BEFORE THE FIX: pre-fix, the chosen option's directive was rewritten to the
+    /// violating option's own directive, the per-chunk pass then checked conformance against
+    /// THAT (the repo trivially "conforms" to its own already-adopted defect), the canned
+    /// per-chunk response contributes zero findings, and `findings` would be empty for this
+    /// rule — which is the exact silent-healthy shape A5 describes.
+    #[tokio::test]
+    async fn req_a5_4_audit_repo_emits_a_finding_for_a_violates_option_and_ledger_never_calls_it_healthy(
+    ) {
+        let canned = r#"{
+            "recommendations": [
+                {"rule_id": "MULTI-RULE-1", "recommended_option_id": "opt-b", "recommendation_reasoning": "the repo does it the B way everywhere", "evidence": "src/lib.rs:1 - no exception handling at all"}
+            ],
+            "findings": [],
+            "proposed_rules": []
+        }"#;
+        let llm = StubCompleter {
+            text: canned.to_string(),
+        };
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "fn handler() { old pattern here; }\n".to_string(),
+        )];
+        let selected = vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
+        let alternatives = vec![two_option_alternatives_opt_b_violates(
+            "MULTI-RULE-1",
+            Some("opt-a"),
+        )];
+        let (findings, _proposed, recs, _failed, _stage_samples) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            &alternatives,
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("stub completer never errors");
+
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].recommended_option_id, "opt-b");
+
+        let f = findings
+            .iter()
+            .find(|f| f.rule_id == "MULTI-RULE-1")
+            .expect(
+                "a violates-option decision must emit a finding even with an empty canned \
+                 per-chunk response",
+            );
+        assert_eq!(f.evaluated_option_id.as_deref(), Some("opt-b"));
+
+        // Replicate the EXACT ledger recording `onboard::audit_repos`'s semantic-phase loop
+        // performs for every pre-declared semantic rule id, using this real `audit_repo`
+        // output — the production code path's own invariant, not a hand-waved assertion.
+        let mut ledger = crate::scan_ledger::ScanLedger::new();
+        let emitted = findings
+            .iter()
+            .filter(|f| f.rule_id == "MULTI-RULE-1")
+            .count();
+        ledger.record_rule(
+            "MULTI-RULE-1",
+            crate::scan_ledger::RuleTier::Semantic,
+            true,
+            None,
+            files.len(),
+            emitted,
+        );
+        assert!(
+            !ledger
+                .healthy_rule_ids()
+                .contains(&"MULTI-RULE-1".to_string()),
+            "a rule whose selected option is marked violates must NEVER be reported healthy"
+        );
     }
 
     // ---- W2: no-vanishing merge guarantee ------------------------------------------------

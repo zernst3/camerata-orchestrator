@@ -1210,6 +1210,8 @@ mod tests {
             layer3_only: layer3,
             stack_exceptions: Vec::new(),
             extra_domains: Vec::new(),
+            kind: None,
+            max_severity: None,
         }
     }
 
