@@ -1,0 +1,16 @@
+# FIXTURE (crates/server/tests/self_measurement_parity_e2e.rs): DATA, not a workspace member —
+# same role as its sibling fixture's manifest.
+#
+# SHAPE 4 — A REPO WHERE A TOOL TIER LEGITIMATELY DOES NOT APPLY. This repo is Rust-only: not
+# one .js/.ts/.jsx/.tsx file anywhere. The eslint tier therefore CANNOT run here, and that is
+# CORRECT behaviour, not a defect — the H1 distinction the integrity gate must honour ("a rule
+# that does not run because it is irrelevant to the scanned stack is CORRECT; a rule that could
+# never run for ANY stack is a DEFECT").
+#
+# A harness with only violation fixtures proves the gate fires. This one proves the gate does
+# NOT fire when it shouldn't, which is the half that decides whether anyone keeps the gate
+# switched on.
+[package]
+name = "self-measurement-tier-na-fixture"
+version = "0.0.0"
+edition = "2021"
