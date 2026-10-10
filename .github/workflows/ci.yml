@@ -34,7 +34,25 @@ jobs:
       - name: Clippy gate (deny all warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Gate 3: the test suite must pass.
+      # Gate 3: SELF-MEASUREMENT (W6 / I1 + I2). Runs BEFORE the full suite, deliberately.
+      #
+      # Every defect on docs/plans/2026-10-09_audit-findings-tracker.md was found by paying
+      # for an external graded run against benchmark repos while this very suite stayed green.
+      # The engine had elaborate honesty machinery and no self-measurement machinery. These
+      # are the checks that would have caught them: artifact parity across the PDF, the
+      # workbook and findings.json; row conservation at every pipeline stage; no silent
+      # non-execution of a rule, pass or tool tier.
+      #
+      # It runs first because it is seconds long and because its failures are the expensive
+      # kind — a graded sweep of four repos costs roughly $26 and four hours. Failing here
+      # fails the build before anyone spends that. Deterministic, no network, no model calls.
+      #
+      # These tests also run again inside the workspace suite below; the duplication is the
+      # point, so the signal is named rather than buried among ~1900 other tests.
+      - name: Self-measurement gate (parity, conservation, non-execution)
+        run: ./scripts/self-measurement.sh
+
+      # Gate 4: the test suite must pass.
       - name: Test gate
         run: cargo test --workspace --locked
 
