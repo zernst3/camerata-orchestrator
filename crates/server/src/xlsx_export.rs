@@ -59,8 +59,8 @@ use serde::Serialize;
 use crate::dep_audit::DEP_AUDIT_RULE_ID;
 use crate::onboard::ScanReport;
 use crate::report_export::{
-    bucket_title, category_for, category_for_finding, citation_for_finding, classify,
-    clamp_to_rule_max_severity, client_headline_and_detail, disposition_label, effective_bucket,
+    bucket_title, category_for, category_for_finding, citation_for_finding, clamp_deviation_severity,
+    classify, clamp_to_rule_max_severity, client_headline_and_detail, disposition_label, effective_bucket,
     effort_hours_bounds, finding_key, hedge_confidence, is_hedged, normalize_severity,
     provenance_tier_rank, resolve_citation, resolve_effort, resolve_fix, sanitize_report_findings,
     title_for_finding, Disposition, DispositionWire, ReportOptions,
@@ -153,6 +153,15 @@ pub struct FindingRow {
     is_fp: bool,
     /// The auditor's FP reason (`DispositionWire.reason`), populated only when `is_fp`.
     fp_reason: String,
+    /// Pass-1 W3 (A5.6): what this row IS — flattened
+    /// [`camerata_api_types::audit::KindOnWire`], so `findings.json` (which serializes this
+    /// struct verbatim) carries a flat `"kind"` discriminator plus the variant's payload
+    /// fields (a Deviation's numerator/denominator/convention) on EVERY row; an absent kind
+    /// renders the explicit `"unspecified"` tag, never a silent `"defect"`. The grader reads
+    /// findings.json — a kind that reached only the PDF would be the exact B2 defect class
+    /// that produced the hearth 0/12 result.
+    #[serde(flatten)]
+    kind: camerata_api_types::audit::KindOnWire,
 }
 
 /// One row of the `Dependencies` sheet — the `DEP_AUDIT_RULE_ID` carve-out, same as the
@@ -283,6 +292,11 @@ fn partition_rows(
         // the SAME clamp to the SAME vocabulary over the SAME corpus).
         let severity =
             clamp_to_rule_max_severity(normalize_severity(&f.severity), &f.rule_id, corpus);
+        // A5.2: the deviation ceiling (default medium, per-rule authored escape hatch) —
+        // the SAME clamp `report_export::build_report_json` applies at its partition, so the
+        // xlsx/findings.json artifacts can never disagree with the PDF on a deviation's
+        // severity. Kind-gated; a Defect under the same rule is untouched.
+        let severity = clamp_deviation_severity(severity, f, corpus);
         // C4-P2: `category_for_finding`/`title_for_finding` (not the bare rule-id-only
         // `category_for` / a raw corpus-or-rule_id join) — an AI-tier finding with no corpus
         // entry of its own gets its real semantic category and, when the P3 class fallback
@@ -409,6 +423,7 @@ fn partition_rows(
             fix,
             is_fp,
             fp_reason,
+            kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
         });
     }
 
@@ -654,7 +669,7 @@ impl Formats {
 
 // ── The ~21(+2)-column findings schema (All Findings / category sheets / False Positives) ──
 
-const HEADERS: [&str; 23] = [
+const HEADERS: [&str; 24] = [
     "Severity",
     "Headline",
     "Repo",
@@ -680,11 +695,16 @@ const HEADERS: [&str; 23] = [
     // (matches the PDF's fix_for_this_finding-first ordering).
     "Fix (specific to this finding)",
     "Recommended Fix",
+    // Pass-1 W3 (A5.6): the row's kind tag (defect / deviation / convention_observed /
+    // no_convention / not_assessed / unspecified). Appended LAST deliberately — a minimal,
+    // correct carry of the new field; the real worksheet redesign (per-kind sheets etc.) is
+    // Pass 3 work and must not be pre-empted here.
+    "Kind",
 ];
 
-const WIDTHS: [f64; 23] = [
+const WIDTHS: [f64; 24] = [
     10.0, 50.0, 18.0, 40.0, 7.0, 28.0, 16.0, 10.0, 30.0, 9.0, 16.0, 12.0, 12.0, 16.0, 16.0, 34.0,
-    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0,
+    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0, 20.0,
 ];
 
 /// Columns that wrap (matches the design's wrap-column list, plus the Fix-specific and
@@ -758,6 +778,10 @@ fn write_finding_row(
         row.fix.as_deref().unwrap_or(""),
         &fmts.cell(bg, true, false),
     )?;
+    // A5.6: the row's kind tag — the SAME wire discriminator findings.json serializes
+    // (`KindOnWire::tag`, "unspecified" when the producer never assigned one), never a
+    // re-derivation.
+    ws.write_string_with_format(r, 23, row.kind.tag(), &fmts.cell(bg, false, false))?;
 
     Ok(())
 }
@@ -783,7 +807,7 @@ fn write_findings_sheet(
         ws.write_string_with_format(0, c as u16, *h, &fmts.header)?;
     }
     if fp_reason_col {
-        ws.write_string_with_format(0, 23, "FP Reason", &fmts.header)?;
+        ws.write_string_with_format(0, 24, "FP Reason", &fmts.header)?;
     }
     ws.set_row_height(0, 28)?;
 
@@ -791,7 +815,7 @@ fn write_findings_sheet(
         ws.set_column_width(c as u16, *w)?;
     }
     if fp_reason_col {
-        ws.set_column_width(23, 40.0)?;
+        ws.set_column_width(24, 40.0)?;
     }
 
     for (i, row) in rows.iter().enumerate() {
@@ -806,12 +830,12 @@ fn write_findings_sheet(
             } else {
                 None
             };
-            ws.write_string_with_format(r, 23, &row.fp_reason, &fmts.cell(bg, true, false))?;
+            ws.write_string_with_format(r, 24, &row.fp_reason, &fmts.cell(bg, true, false))?;
         }
     }
 
     let last_row = rows.len() as u32;
-    let last_col: u16 = if fp_reason_col { 23 } else { 22 };
+    let last_col: u16 = if fp_reason_col { 24 } else { 23 };
     ws.autofilter(0, 0, last_row, last_col)?;
     ws.set_freeze_panes(1, 0)?;
 
@@ -1577,16 +1601,20 @@ mod tests {
 
     #[test]
     fn header_schema_matches_the_design_column_order() {
-        assert_eq!(HEADERS.len(), 23);
+        // Pass-1 W3 (A5.6): 23 -> 24 — the Kind column is appended LAST (a deliberate
+        // data-structure change this test adapts to; tracker test-discipline exception (a)).
+        assert_eq!(HEADERS.len(), 24);
         assert_eq!(HEADERS[0], "Severity");
         // P2: the specific fix comes BEFORE the generic Recommended Fix — same
         // primary-then-secondary ordering as the PDF template.
         assert_eq!(HEADERS[21], "Fix (specific to this finding)");
         assert_eq!(HEADERS[22], "Recommended Fix");
+        assert_eq!(HEADERS[23], "Kind");
         assert_eq!(HEADERS.len(), WIDTHS.len());
     }
 
     // ── Workbook magic + basic shape ────────────────────────────────────────────
+
 
     #[test]
     fn build_workbook_returns_a_valid_xlsx_with_pk_magic() {
@@ -1956,6 +1984,233 @@ mod tests {
     }
 
     // ── `findings.json` (product export, machine-readable sibling of the workbook) ─────
+
+    // ── Pass-1 W3 (A5.6/A5.2): the kind must survive to findings.json, losslessly ────────
+
+    fn kinded(mut f: Finding, kind: camerata_api_types::audit::FindingKind) -> Finding {
+        f.kind = Some(kind);
+        f
+    }
+
+    /// req A5.6 — THE W3 end-to-end guarantee: every one of the five kinds (plus the
+    /// legacy/unspecified case) reaches `findings.json` INTACT — flat `"kind"` discriminator
+    /// and, for a Deviation, the full structured sentence (numerator / denominator /
+    /// observed-majority convention) — because findings.json is the grader's input ("the
+    /// JSON is just the data structure"); a kind that reached only the PDF would be the
+    /// exact B2 defect class behind the hearth 0/12 result.
+    ///
+    /// FAILS BEFORE THE FIX: `FindingRow` had no kind field, so no `"kind"` key existed in
+    /// findings.json at all (verified by the pre-W3 tree: `grep FindingKind crates/` was
+    /// empty), and every assertion below had nothing to read.
+    #[test]
+    fn req_a5_6_every_kind_survives_to_findings_json_losslessly() {
+        use camerata_api_types::audit::{
+            ConventionObservedKind, DeviationKind, FindingKind, NoConventionKind,
+            NotAssessedKind, NotAssessedReason, ObservedOptionUsage,
+        };
+        let rows = vec![
+            kinded(finding("SEC-1", "a.rs", 1, "critical"), FindingKind::Defect),
+            kinded(
+                finding("ARCH-API-VERSIONING-1", "b.rs", 2, "medium"),
+                FindingKind::Deviation(DeviationKind {
+                    deviating_sites: 2,
+                    assessed_sites: Some(47),
+                    convention_option_id: Some("versioned".to_string()),
+                    convention_label: "URI-versioned endpoints".to_string(),
+                }),
+            ),
+            kinded(
+                finding("ARCH-PAGINATION-1", "c.rs", 3, "info"),
+                FindingKind::ConventionObserved(ConventionObservedKind {
+                    convention_option_id: "cursor".to_string(),
+                    convention_label: "Cursor pagination".to_string(),
+                }),
+            ),
+            kinded(
+                finding("ARCH-ERROR-SHAPE-1", "", 0, "info"),
+                FindingKind::NoConvention(NoConventionKind {
+                    observed_options: vec![
+                        ObservedOptionUsage {
+                            option_id: "rfc7807".to_string(),
+                            label: "RFC 7807 problem+json".to_string(),
+                            sites: Some(3),
+                        },
+                        ObservedOptionUsage {
+                            option_id: "ad-hoc".to_string(),
+                            label: "Ad-hoc error bodies".to_string(),
+                            sites: Some(2),
+                        },
+                    ],
+                }),
+            ),
+            kinded(
+                finding("RUST-NO-UNWRAP-1", "", 0, "info"),
+                FindingKind::NotAssessed(NotAssessedKind {
+                    reason: NotAssessedReason::NoFilesMatched,
+                    reason_detail: "no rust files matched this scan's file set".to_string(),
+                }),
+            ),
+            // A legacy row whose producer predates the taxonomy: kind stays None.
+            finding("LEGACY-1", "z.rs", 9, "high"),
+        ];
+        let report = report_with(rows, vec![]);
+        let json = crate::report_export::build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &empty_opts(),
+        );
+        let export = build_findings_export(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &json,
+            &HashMap::new(),
+        );
+        let v = serde_json::to_value(&export).expect("findings.json serializes");
+        let rows = v["findings"].as_array().expect("findings array");
+        assert_eq!(rows.len(), 6, "all six rows ship");
+        let row_for = |rule: &str| -> &serde_json::Value {
+            rows.iter()
+                .find(|r| r["rule_id"] == rule)
+                .unwrap_or_else(|| panic!("no findings.json row for {rule}"))
+        };
+
+        assert_eq!(row_for("SEC-1")["kind"], "defect");
+
+        let dev = row_for("ARCH-API-VERSIONING-1");
+        assert_eq!(dev["kind"], "deviation");
+        assert_eq!(dev["deviating_sites"], 2, "numerator is structured, on the row");
+        assert_eq!(dev["assessed_sites"], 47, "denominator is structured, on the row");
+        assert_eq!(dev["convention_option_id"], "versioned");
+        assert_eq!(
+            dev["convention_label"], "URI-versioned endpoints",
+            "the observed majority convention is renderable without parsing prose"
+        );
+
+        let conv = row_for("ARCH-PAGINATION-1");
+        assert_eq!(conv["kind"], "convention_observed");
+        assert_eq!(conv["convention_option_id"], "cursor");
+
+        let nc = row_for("ARCH-ERROR-SHAPE-1");
+        assert_eq!(nc["kind"], "no_convention");
+        let observed = nc["observed_options"].as_array().expect("observed_options");
+        assert_eq!(observed.len(), 2);
+        assert_eq!(observed[0]["option_id"], "rfc7807");
+        assert_eq!(observed[0]["sites"], 3);
+
+        let na = row_for("RUST-NO-UNWRAP-1");
+        assert_eq!(na["kind"], "not_assessed");
+        assert_eq!(na["reason"], "no_files_matched");
+
+        let legacy = row_for("LEGACY-1");
+        assert_eq!(
+            legacy["kind"], "unspecified",
+            "an absent kind must surface explicitly in findings.json"
+        );
+        assert_ne!(legacy["kind"], "defect", "never silently a defect");
+    }
+
+    /// req A5.2 — the xlsx/findings.json twin of the PDF-side deviation ceiling: a deviation
+    /// arriving at `high` exports at `medium` here too (same clamp, same corpus), while a
+    /// defect under the same rule keeps `high`. FAILS BEFORE THE FIX: with
+    /// `clamp_deviation_severity` absent from `partition_rows`, both exported `high`.
+    #[test]
+    fn req_a5_2_findings_json_caps_a_deviation_at_medium_but_not_a_defect() {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let mut rule = camerata_rules::bare_rule("DEV-RULE-1", "test-fixture");
+        rule.default_option = Some("default".to_string());
+        rule.options = vec![camerata_rules::RuleOption {
+            id: "default".to_string(),
+            label: "Default".to_string(),
+            directive: "do the right thing".to_string(),
+            why: "because".to_string(),
+            remediation: Some("Fix the thing.".to_string()),
+            finding_headline: None,
+            finding_detail: None,
+            escalation: None,
+            effort: None,
+            violates: false,
+        }];
+        let mut corpus = camerata_rules::RuleSet::default();
+        corpus.push(rule);
+
+        let dev = kinded(
+            finding("DEV-RULE-1", "a.rs", 1, "high"),
+            FindingKind::Deviation(DeviationKind {
+                deviating_sites: 1,
+                assessed_sites: None,
+                convention_option_id: Some("default".to_string()),
+                convention_label: "Default".to_string(),
+            }),
+        );
+        let defect = kinded(finding("DEV-RULE-1", "b.rs", 2, "high"), FindingKind::Defect);
+        let report = report_with(vec![dev, defect], vec![]);
+        let json = crate::report_export::build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let export = build_findings_export(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &json,
+            &HashMap::new(),
+        );
+        let v = serde_json::to_value(&export).unwrap();
+        let sev_of = |path: &str| -> String {
+            v["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["path"] == path)
+                .unwrap_or_else(|| panic!("no row for {path}"))["severity"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(sev_of("a.rs"), "medium", "deviation capped at the default ceiling");
+        assert_eq!(sev_of("b.rs"), "high", "defect under the same rule untouched");
+    }
+
+    /// req A5.6 — minimal workbook render: the All Findings sheet carries a `Kind` column
+    /// whose cell is the same stable wire tag findings.json serializes (no layout redesign —
+    /// that is Pass 3 work).
+    #[test]
+    fn req_a5_6_kind_column_renders_in_the_all_findings_sheet() {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let dev = kinded(
+            finding("DEV-RULE-1", "a.rs", 1, "medium"),
+            FindingKind::Deviation(DeviationKind {
+                deviating_sites: 2,
+                assessed_sites: Some(5),
+                convention_option_id: None,
+                convention_label: "observed majority".to_string(),
+            }),
+        );
+        let legacy = finding("LEGACY-1", "b.rs", 2, "high");
+        let report = report_with(vec![dev, legacy], vec![]);
+        let bytes =
+            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        // Cell text is written via the shared-strings table, so that's where a rendered
+        // header/cell string is observable in the raw xlsx.
+        let shared = read_zip_entry(&bytes, "xl/sharedStrings.xml");
+        assert!(shared.contains(">Kind<"), "the Kind header must render");
+        assert!(
+            shared.contains(">deviation<"),
+            "the deviation tag must render in a cell"
+        );
+        assert!(
+            shared.contains(">unspecified<"),
+            "a legacy row renders the explicit unspecified tag"
+        );
+        // And the schema itself pins the column: last column, stable position.
+        assert_eq!(HEADERS[23], "Kind");
+    }
+
+
 
     /// `findings_export.findings` must have the same length as the "All Findings" sheet
     /// (sheet2.xml — Index is sheet1) actually written into the xlsx: both are built from
