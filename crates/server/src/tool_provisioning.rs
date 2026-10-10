@@ -933,6 +933,22 @@ mod tests {
         assert!(semgrep_is_provisioned(&venv).await);
     }
 
+    /// Lay down the NON-binary half of a provisioned eslint workspace: every
+    /// required package, and a workspace config byte-identical to the bundled
+    /// asset. The stub-binary tests below need this because
+    /// [`eslint_is_provisioned`] deliberately no longer accepts a bare binary as
+    /// proof of provisioning — see its doc comment for the write-once defect that
+    /// change closes.
+    fn stub_eslint_packages_and_config(ws: &Path) {
+        for pkg in ESLINT_NPM_PACKAGES {
+            let dir = ws.join("node_modules").join(pkg);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("package.json"), "{}").unwrap();
+        }
+        let asset = std::fs::read(bundled_eslint_config_src()).unwrap();
+        std::fs::write(eslint_config_path(ws), asset).unwrap();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn stub_eslint_binary_is_provisioned() {
@@ -946,6 +962,7 @@ mod tests {
         tokio::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
             .await
             .unwrap();
+        stub_eslint_packages_and_config(&ws);
         assert!(eslint_is_provisioned(&ws).await);
     }
 
@@ -1019,6 +1036,7 @@ mod tests {
             tokio::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755))
                 .await
                 .unwrap();
+            stub_eslint_packages_and_config(&ws);
             let r1 = ensure_eslint(&tooling).await;
             assert!(r1.is_ok());
             let r2 = ensure_eslint(&tooling).await;
