@@ -1,0 +1,979 @@
+//! W6 / I2 — the PRE-FLIGHT INTEGRITY GATE.
+//!
+//! > **I1 + I2 ABSOLUTELY AGREED** — self-measurement is a V1 requirement, not a nice-to-have.
+//! > Zach's added rationale: these two also **prevent overspending on tokens** by catching
+//! > regressions before an external graded run.
+//! >
+//! > — `docs/plans/2026-10-09_audit-findings-tracker.md`
+//!
+//! # The problem this exists to solve
+//!
+//! Every defect in that tracker — architecture rules silenced, rows injected into the PDF
+//! only, `findings.json` contradicting itself, a merge losing rows, a whole tool tier never
+//! running — was found by paying for an external graded run against benchmark repos. The
+//! in-repo suite was green throughout. The engine has elaborate HONESTY machinery
+//! ([`crate::scan_ledger::ScanLedger`], [`crate::ai_audit::FailedPass`]) and no
+//! SELF-MEASUREMENT machinery: the ledger records everything needed to notice a degraded
+//! scan, and then a human reads the summary and eyeballs it.
+//!
+//! This module turns that reading into a VERDICT with an exit code. A graded sweep of four
+//! repos costs roughly $26 and four hours of wall clock; anything the gate catches first is
+//! money and time not spent.
+//!
+//! # The distinction the gate must honour (H1)
+//!
+//! > **H1 AGREED, with a sharpening** — every rule must be CAPABLE of running. A rule that
+//! > does not run because it is irrelevant to the scanned stack is CORRECT. A rule that could
+//! > never run for ANY stack is a DEFECT.
+//!
+//! So "did not run" alone can never be the trigger. The skip must be JUSTIFIED. A Python rule
+//! that did not run against a Rust repo is the gate working as intended; the Semgrep taint
+//! layer with 41 rules that never ran for any repo in any code path is the gate's whole
+//! reason to exist. [`SkipClass`] is where that line is drawn, and it is drawn on the
+//! `skip_reason` the pipeline already writes — the gate adds no new recording obligation,
+//! because a gate that needs new instrumentation to work is a gate that silently passes until
+//! someone remembers to instrument.
+//!
+//! # Fail-closed on the UNRECOGNISED case
+//!
+//! [`SkipClass::classify`] maps a skip reason to justified or defect. An unrecognised reason
+//! is a DEFECT, never a pass. This is the single most important design decision in the module
+//! and it is deliberately the inconvenient direction: a new skip reason added elsewhere in the
+//! pipeline will fail this gate until someone classifies it. The alternative — unknown reasons
+//! pass — reproduces the exact failure mode W6 exists to close, where a pipeline change
+//! quietly widens the set of things that can go wrong without anything noticing. A false alarm
+//! costs one classification; a false pass costs a $26 graded sweep.
+
+use std::collections::{BTreeMap, HashSet};
+
+use serde::{Deserialize, Serialize};
+
+use crate::scan_ledger::{RuleTier, ScanLedger, NO_WIRED_DETECTOR_REASON};
+
+/// Why a rule did not run, reduced to the only question the gate asks: was the skip
+/// JUSTIFIED (correct behaviour, disclose and move on) or is it a DEFECT (something that
+/// should have run did not)?
+///
+/// See the module doc comment for H1, the decision this encodes, and for why
+/// [`Self::Unrecognised`] is a defect rather than a pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipClass {
+    /// The rule's concern is irrelevant to what was scanned: no file of its language, the
+    /// rule was not armed for this repo, the stack has no such construct. H1's CORRECT case.
+    NotApplicableToStack,
+    /// A disclosed SCOPE choice by the operator: AI review was not requested this run, the
+    /// deterministic scan deselected it, this tier was turned off. Honest and intended — but
+    /// note [`IntegrityGateOptions::require_semantic_tier`], because "AI review was off" is
+    /// justified for a cheap smoke scan and a BLOCKER before a graded run that grades the
+    /// semantic tier.
+    ScopedOut,
+    /// The rule declares mechanical/architectural enforcement and nothing anywhere evaluates
+    /// it — [`NO_WIRED_DETECTOR_REASON`]. H1's DEFECT case: it could never run for ANY stack.
+    NoWiredDetector,
+    /// The rule's backing tool was invoked and FAILED (wholesale, or for this rule). The C11
+    /// shape: eslint aborted on every repo and 8 rules fell to NOT RUN. A defect — the tool
+    /// was supposed to run and did not.
+    ToolFailed,
+    /// A skip reason this module does not recognise. A DEFECT by construction — see the
+    /// module doc comment's fail-closed section.
+    Unrecognised,
+}
+
+impl SkipClass {
+    /// `true` when this class is correct behaviour rather than something to fix.
+    pub fn is_justified(&self) -> bool {
+        matches!(self, SkipClass::NotApplicableToStack | SkipClass::ScopedOut)
+    }
+
+    /// Classify a `skip_reason` string.
+    ///
+    /// Matching is substring-based and case-insensitive against the reasons the pipeline
+    /// actually writes. That is a lexical test, which this repo has learned to distrust (C3's
+    /// six-phrase substring scan is on the tracker precisely for being one) — so two
+    /// properties keep it honest:
+    ///
+    /// 1. It fails CLOSED. A reason matching nothing is [`SkipClass::Unrecognised`], a defect.
+    ///    A lexical miss therefore raises an alarm; it cannot silence one. This is the
+    ///    opposite polarity from C3, where a lexical miss silently dropped a finding.
+    /// 2. The defect phrases are checked FIRST, so a reason that contains both a
+    ///    justified-sounding phrase and a failure phrase (a real shape — the tool-failure
+    ///    reason embeds the whole `CoverageNote` message, which can mention languages and
+    ///    files) classifies as the defect.
+    ///
+    /// [`NO_WIRED_DETECTOR_REASON`] is matched against the shared constant rather than a
+    /// retyped phrase, so a wording edit at the producer cannot decouple the two.
+    pub fn classify(skip_reason: Option<&str>) -> SkipClass {
+        // No reason at all is not a justification. `excluded_rules()` substitutes the
+        // placeholder "did not run this scan", which is a restatement, not a reason.
+        let Some(reason) = skip_reason else {
+            return SkipClass::Unrecognised;
+        };
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return SkipClass::Unrecognised;
+        }
+        let lower = reason.to_ascii_lowercase();
+
+        // ── Defect phrases first. See property 2 above. ──────────────────────────────────
+        if lower.contains(&NO_WIRED_DETECTOR_REASON.to_ascii_lowercase()) {
+            return SkipClass::NoWiredDetector;
+        }
+        // `reconcile_external_tool_ledger` writes "<pass label> did not run: <reason>" for
+        // both a hard tool failure and a never-invoked tool. The embedded `CoverageNote`
+        // phrasing ("could not preview", "produced no output") and the never-invoked phrasing
+        // ("was never invoked for any scanned repo") both land here.
+        const TOOL_FAILURE_PHRASES: [&str; 5] = [
+            "could not preview",
+            "produced no output",
+            "was never invoked",
+            "did not run:",
+            "provisioning",
+        ];
+        if TOOL_FAILURE_PHRASES.iter().any(|p| lower.contains(p)) {
+            return SkipClass::ToolFailed;
+        }
+
+        // ── Justified phrases. ───────────────────────────────────────────────────────────
+        const NOT_APPLICABLE_PHRASES: [&str; 6] = [
+            "no matching files",
+            "not armed",
+            "no supported language",
+            "not applicable",
+            "language not present",
+            "no files of this",
+        ];
+        if NOT_APPLICABLE_PHRASES.iter().any(|p| lower.contains(p)) {
+            return SkipClass::NotApplicableToStack;
+        }
+        const SCOPED_OUT_PHRASES: [&str; 5] = [
+            "not requested this run",
+            "deselected",
+            "gated off",
+            "not selected",
+            "excluded by configuration",
+        ];
+        if SCOPED_OUT_PHRASES.iter().any(|p| lower.contains(p)) {
+            return SkipClass::ScopedOut;
+        }
+
+        SkipClass::Unrecognised
+    }
+}
+
+/// One thing the gate found wrong, with enough detail to act on without re-running the scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrityFailure {
+    /// Stable machine-readable code (`unjustified_skip`, `dark_tier`, `unaccounted_rows`,
+    /// `empty_ledger`, `tier_absent`). Stable so a wrapper script can branch on it.
+    pub code: String,
+    /// What is wrong, in one line, naming the specific rule / tier / stage.
+    pub detail: String,
+}
+
+/// What the gate requires BEYOND structural integrity. These are the questions whose right
+/// answer depends on what the upcoming run is for, so they are the operator's call rather
+/// than this module's — a cheap smoke scan legitimately has the semantic tier off, and a
+/// graded run that grades the semantic tier legitimately must not.
+#[derive(Debug, Clone)]
+pub struct IntegrityGateOptions {
+    /// Tiers that MUST have at least one rule that ran. A tier listed here with zero rules
+    /// recorded, or with rules recorded but none that ran, is a `dark_tier` failure.
+    ///
+    /// This is the assertion that would have caught the headline defect: a whole Semgrep taint
+    /// layer with 41 rules never ran, for any repo, in any code path, and nothing said a word.
+    pub required_tiers: Vec<RuleTier>,
+    /// When `true`, [`SkipClass::ScopedOut`] stops counting as justified. Set this before a
+    /// graded run: "AI/semantic review not requested this run" is an honest disclosure and a
+    /// completely unacceptable state in which to spend $26 grading the semantic tier.
+    pub require_semantic_tier: bool,
+}
+
+impl Default for IntegrityGateOptions {
+    /// The PRE-GRADED-RUN default, deliberately the strict one: a scoped-out tier is a
+    /// blocker, and three of the four engines must have actually run.
+    ///
+    /// The default is strict because of who calls this and when. The gate's whole purpose is
+    /// to be the last thing that runs before money is spent, so a default that lets a degraded
+    /// scan through is a default that does nothing. An operator running a cheap smoke scan can
+    /// relax it explicitly; nobody relaxes it by accident.
+    ///
+    /// # Why [`RuleTier::Architectural`] is NOT required by default
+    ///
+    /// Requiring it would violate the very H1 distinction this gate exists to honour, one
+    /// level up. That tier's membership is whatever `mechanical_gate::detector_channel`
+    /// resolves to `arch_checker` / `gateway_rule_registry`, which in practice is dominated by
+    /// stack-specific checkers (the Supabase migration-replay family). A Rust-only repo
+    /// legitimately records zero of them, exactly as a Rust-only repo legitimately runs no
+    /// Python rule. Requiring it would make the gate cry wolf on correct scans, and a gate
+    /// that cries wolf gets disabled — which costs more than the defect it was guarding.
+    ///
+    /// The other three are required because each must run for ANY repo:
+    ///
+    /// - `Deterministic` — the content floor runs unconditionally over every file.
+    /// - `ExternalTool` — this is the 41-rule dark-taint-layer defect's own tier. Making it
+    ///   required by default is the whole point: that layer never ran, for any repo, in any
+    ///   code path, and nothing said a word.
+    /// - `Semantic` — a graded run grades the semantic tier.
+    fn default() -> Self {
+        Self {
+            required_tiers: vec![
+                RuleTier::Deterministic,
+                RuleTier::ExternalTool,
+                RuleTier::Semantic,
+            ],
+            require_semantic_tier: true,
+        }
+    }
+}
+
+impl IntegrityGateOptions {
+    /// The RELAXED profile for a cheap local smoke scan: structural integrity only. Every
+    /// stage must still reconcile and no rule may be skipped for an unrecognised or failure
+    /// reason, but no tier is required to have run and a disclosed scope choice ("AI review
+    /// not requested this run") stays justified.
+    ///
+    /// Never use this before a graded run — it cannot catch a dark tier, which is the single
+    /// most expensive thing the gate is for.
+    pub fn smoke() -> Self {
+        Self {
+            required_tiers: Vec::new(),
+            require_semantic_tier: false,
+        }
+    }
+}
+
+/// The gate's verdict.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntegrityVerdict {
+    /// Everything wrong. Empty ⇔ [`Self::passed`].
+    pub failures: Vec<IntegrityFailure>,
+    /// Justified skips, by class, with the rule ids — reported, never a failure. Present so
+    /// the gate's output is auditable: "47 rules skipped" with no breakdown is the eyeballing
+    /// this module replaces.
+    pub justified_skips: BTreeMap<SkipClass, Vec<String>>,
+    /// Per-tier `(rules_recorded, rules_that_ran, findings_emitted)`, in
+    /// [`RuleTier::all`] order. The coverage picture, so a PASS is still informative.
+    pub tier_summary: Vec<TierSummary>,
+}
+
+/// One tier's coverage facts. See [`IntegrityVerdict::tier_summary`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TierSummary {
+    pub tier: RuleTier,
+    pub family_label: String,
+    pub rules_recorded: usize,
+    pub rules_ran: usize,
+    pub findings_emitted: usize,
+}
+
+impl IntegrityVerdict {
+    /// `true` when nothing is wrong. The gate's exit code is `0` on `true`, `1` on `false`.
+    pub fn passed(&self) -> bool {
+        self.failures.is_empty()
+    }
+
+    /// The process exit code this verdict implies: `0` pass, `1` fail. Named rather than
+    /// inlined at the call site so the exit semantics are testable without spawning a process.
+    pub fn exit_code(&self) -> i32 {
+        if self.passed() {
+            0
+        } else {
+            1
+        }
+    }
+}
+
+/// Run the gate over a completed scan's ledger.
+///
+/// Pure: no I/O, no clock, no model call. Given the same ledger it returns the same verdict,
+/// so the gate itself can never be the flaky thing that blocks a run.
+///
+/// Four failure families, each tied to a specific shipped defect:
+///
+/// 1. `empty_ledger` — a ledger with nothing in it. The scan did not happen, or did not
+///    record that it happened; either way there is nothing to be confident about.
+/// 2. `tier_absent` / `dark_tier` — a required tier with no rules recorded, or with rules but
+///    none that ran. The Semgrep-taint-layer defect.
+/// 3. `unjustified_skip` — a rule that did not run for a reason that is not a justification
+///    (H1). The C11 and no-wired-detector defects.
+/// 4. `unaccounted_rows` — a pipeline stage whose rows do not reconcile. The merge-data-loss
+///    defects: an over-merge is observationally identical to a detection miss, so the only
+///    place it can be caught is the stage arithmetic.
+pub fn evaluate(ledger: &ScanLedger, opts: &IntegrityGateOptions) -> IntegrityVerdict {
+    let mut failures: Vec<IntegrityFailure> = Vec::new();
+    let mut justified_skips: BTreeMap<SkipClass, Vec<String>> = BTreeMap::new();
+
+    // ── 1. An empty ledger is never a pass. ──────────────────────────────────────────────
+    if ledger.is_empty() {
+        failures.push(IntegrityFailure {
+            code: "empty_ledger".to_string(),
+            detail: "the ledger recorded no rules and no stages — either no scan ran, or the \
+                     scan did not record that it ran. A gate cannot confirm a scan it has no \
+                     evidence of."
+                .to_string(),
+        });
+    }
+
+    // ── 2. Tier coverage. ────────────────────────────────────────────────────────────────
+    let mut tier_summary = Vec::new();
+    // `HashSet` rather than `BTreeSet`: `RuleTier` is `Hash` but deliberately not
+    // `Ord` (there is no meaningful order over engines), and this gate must not reach into
+    // `scan_ledger` to add a derive it does not otherwise need.
+    let required: HashSet<RuleTier> = opts.required_tiers.iter().copied().collect();
+    for tier in RuleTier::all() {
+        let rules: Vec<_> = ledger.rules().filter(|r| r.tier == tier).collect();
+        let rules_ran = rules.iter().filter(|r| r.ran).count();
+        let findings_emitted: usize = rules.iter().map(|r| r.findings_emitted).sum();
+        tier_summary.push(TierSummary {
+            tier,
+            family_label: tier.family_label().to_string(),
+            rules_recorded: rules.len(),
+            rules_ran,
+            findings_emitted,
+        });
+
+        if !required.contains(&tier) {
+            continue;
+        }
+        if rules.is_empty() {
+            failures.push(IntegrityFailure {
+                code: "tier_absent".to_string(),
+                detail: format!(
+                    "no rule at all was recorded for the `{}` tier ({}) — this engine never \
+                     ran, and a tier that records nothing is indistinguishable from a tier \
+                     that ran and found nothing",
+                    tier_key(tier),
+                    tier.family_label(),
+                ),
+            });
+        } else if rules_ran == 0 {
+            failures.push(IntegrityFailure {
+                code: "dark_tier".to_string(),
+                detail: format!(
+                    "all {} rule(s) recorded for the `{}` tier ({}) were skipped — NOT ONE \
+                     ran this scan",
+                    rules.len(),
+                    tier_key(tier),
+                    tier.family_label(),
+                ),
+            });
+        }
+    }
+
+    // ── 3. Per-rule skip justification (H1). ─────────────────────────────────────────────
+    for rule in ledger.rules() {
+        if rule.ran {
+            continue;
+        }
+        let class = SkipClass::classify(rule.skip_reason.as_deref());
+        let treat_as_justified =
+            class.is_justified() && !(opts.require_semantic_tier && class == SkipClass::ScopedOut);
+
+        if treat_as_justified {
+            justified_skips
+                .entry(class)
+                .or_default()
+                .push(rule.rule_id.clone());
+            continue;
+        }
+        failures.push(IntegrityFailure {
+            code: "unjustified_skip".to_string(),
+            detail: format!(
+                "{} did not run, and its reason is not a justification [{}]: {}",
+                rule.rule_id,
+                skip_class_key(class),
+                rule.skip_reason
+                    .as_deref()
+                    .unwrap_or("(no reason recorded)"),
+            ),
+        });
+    }
+    for ids in justified_skips.values_mut() {
+        ids.sort();
+    }
+
+    // ── 4. Stage row reconciliation. ─────────────────────────────────────────────────────
+    for stage in ledger.stages() {
+        if stage.unaccounted == 0 {
+            continue;
+        }
+        failures.push(IntegrityFailure {
+            code: "unaccounted_rows".to_string(),
+            detail: format!(
+                "stage `{}` does not reconcile: {} row(s) have no recorded disposition \
+                 (rows_in={} rows_out={} accounted={} added={})",
+                stage.stage,
+                stage.unaccounted,
+                stage.rows_in,
+                stage.rows_out,
+                stage.accounted_total(),
+                stage.added_total(),
+            ),
+        });
+    }
+
+    // Stable output: a gate that reorders its own findings between runs is a gate whose
+    // output nobody can diff.
+    failures.sort_by(|a, b| (&a.code, &a.detail).cmp(&(&b.code, &b.detail)));
+
+    IntegrityVerdict {
+        failures,
+        justified_skips,
+        tier_summary,
+    }
+}
+
+/// Short stable key for a tier, for machine-readable gate output.
+fn tier_key(tier: RuleTier) -> &'static str {
+    match tier {
+        RuleTier::Deterministic => "deterministic",
+        RuleTier::Architectural => "architectural",
+        RuleTier::ExternalTool => "external_tool",
+        RuleTier::Semantic => "semantic",
+    }
+}
+
+/// Short stable key for a skip class, for machine-readable gate output.
+fn skip_class_key(class: SkipClass) -> &'static str {
+    match class {
+        SkipClass::NotApplicableToStack => "not_applicable_to_stack",
+        SkipClass::ScopedOut => "scoped_out",
+        SkipClass::NoWiredDetector => "no_wired_detector",
+        SkipClass::ToolFailed => "tool_failed",
+        SkipClass::Unrecognised => "unrecognised",
+    }
+}
+
+/// Render a verdict as the operator-facing report the gate prints. Deterministic and
+/// diff-friendly.
+pub fn render(verdict: &IntegrityVerdict) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+
+    out.push_str("PRE-FLIGHT INTEGRITY GATE\n");
+    out.push_str("=========================\n\n");
+
+    out.push_str("Coverage by engine:\n");
+    for t in &verdict.tier_summary {
+        let _ = writeln!(
+            out,
+            "  {:<52} recorded={:<5} ran={:<5} findings={}",
+            t.family_label, t.rules_recorded, t.rules_ran, t.findings_emitted,
+        );
+    }
+    out.push('\n');
+
+    if verdict.justified_skips.is_empty() {
+        out.push_str("Justified skips: none\n\n");
+    } else {
+        out.push_str("Justified skips (correct behaviour, reported for audit):\n");
+        for (class, ids) in &verdict.justified_skips {
+            let _ = writeln!(out, "  [{}] {} rule(s)", skip_class_key(*class), ids.len());
+            for id in ids {
+                let _ = writeln!(out, "      {id}");
+            }
+        }
+        out.push('\n');
+    }
+
+    if verdict.passed() {
+        out.push_str(
+            "VERDICT: PASS — every required engine ran, every skip is justified, and every \
+             stage reconciles.\n",
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "VERDICT: FAIL — {} integrity problem(s). Do NOT spend a graded run on this scan.\n",
+            verdict.failures.len(),
+        );
+        for f in &verdict.failures {
+            let _ = writeln!(out, "  [{}] {}", f.code, f.detail);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scan_ledger::StageAccounting;
+
+    // ── req_i2: the pre-flight integrity gate ────────────────────────────────────────────
+    //
+    // `docs/plans/2026-10-09_audit-findings-tracker.md`, requirement I2. Each test below
+    // names the shipped defect it would have caught. Every one of those defects was found by
+    // a PAID external graded run while the in-repo suite was green; these are the assertions
+    // that make the next one free.
+
+    /// A ledger describing a healthy scan: every required engine ran, nothing skipped,
+    /// every stage reconciled.
+    fn healthy_ledger() -> ScanLedger {
+        let mut l = ScanLedger::new();
+        l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 10, 1);
+        l.record_rule("TAINT-SQLI-1", RuleTier::ExternalTool, true, None, 10, 2);
+        l.record_rule("AI-ADVISORY-1", RuleTier::Semantic, true, None, 10, 0);
+        let mut acc = StageAccounting::default();
+        acc.push_merge("AI-ADVISORY-DUP-1", "SEC-FLOOR-1");
+        l.record_stage("cross-family-merge", 4, 3, acc);
+        l
+    }
+
+    #[test]
+    fn req_i2_a_healthy_scan_passes_and_exits_zero() {
+        let verdict = evaluate(&healthy_ledger(), &IntegrityGateOptions::default());
+        assert!(
+            verdict.passed(),
+            "a healthy scan must pass: {:#?}",
+            verdict.failures
+        );
+        assert_eq!(verdict.exit_code(), 0);
+        assert!(render(&verdict).contains("VERDICT: PASS"));
+    }
+
+    /// req_i2, THE HEADLINE DEFECT: a whole tool tier that never ran must FAIL the gate.
+    ///
+    /// > A whole Semgrep taint layer with 41 rules never ran, for any repo, in any code
+    /// > path, and nothing said a word.
+    ///
+    /// Two shapes, both of which actually occurred and neither of which anything noticed:
+    /// the tier recorded rules but ran none, and the tier recorded nothing at all.
+    #[test]
+    fn req_i2_a_tier_that_recorded_rules_but_ran_none_fails_as_a_dark_tier() {
+        let mut l = ScanLedger::new();
+        l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 10, 0);
+        l.record_rule("AI-ADVISORY-1", RuleTier::Semantic, true, None, 10, 0);
+        // 41 taint rules selected; not one of them ran.
+        for i in 0..41 {
+            l.record_rule(
+                format!("TAINT-{i}"),
+                RuleTier::ExternalTool,
+                false,
+                Some("the commodity taint pass did not run: semgrep provisioning failed".into()),
+                0,
+                0,
+            );
+        }
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(!verdict.passed());
+        assert_eq!(verdict.exit_code(), 1);
+        assert!(
+            verdict.failures.iter().any(|f| f.code == "dark_tier"),
+            "a tier where NOT ONE rule ran must be reported as dark: {:#?}",
+            verdict.failures
+        );
+        assert!(render(&verdict).contains("Do NOT spend a graded run"));
+    }
+
+    #[test]
+    fn req_i2_a_required_tier_that_recorded_nothing_at_all_fails_as_absent() {
+        let mut l = ScanLedger::new();
+        l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 10, 0);
+        l.record_rule("AI-ADVISORY-1", RuleTier::Semantic, true, None, 10, 0);
+        // Nothing whatsoever recorded for ExternalTool.
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(!verdict.passed());
+        let absent: Vec<&IntegrityFailure> = verdict
+            .failures
+            .iter()
+            .filter(|f| f.code == "tier_absent")
+            .collect();
+        assert_eq!(absent.len(), 1, "{:#?}", verdict.failures);
+        assert!(
+            absent[0].detail.contains("external_tool"),
+            "must name the dark tier: {}",
+            absent[0].detail
+        );
+    }
+
+    /// req_i2 + H1: the distinction the gate MUST honour. A rule that did not run because it
+    /// is irrelevant to the scanned stack is CORRECT and must not fail the gate — otherwise
+    /// the gate cries wolf on every correct scan and gets switched off.
+    #[test]
+    fn req_i2_h1_a_rule_irrelevant_to_the_scanned_stack_is_a_justified_skip_not_a_failure() {
+        let mut l = healthy_ledger();
+        l.record_rule(
+            "PYTHON-PARAMETERIZED-SQL-1",
+            RuleTier::Deterministic,
+            false,
+            Some("no matching files".to_string()),
+            0,
+            0,
+        );
+        l.record_rule(
+            "VUE-COMPONENT-API-STYLE-1",
+            RuleTier::Deterministic,
+            false,
+            Some("not armed for this repo".to_string()),
+            0,
+            0,
+        );
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(
+            verdict.passed(),
+            "an irrelevant-to-stack skip is CORRECT behaviour: {:#?}",
+            verdict.failures
+        );
+        let justified = verdict
+            .justified_skips
+            .get(&SkipClass::NotApplicableToStack)
+            .expect("both skips must be reported as justified");
+        assert_eq!(
+            justified,
+            &vec![
+                "PYTHON-PARAMETERIZED-SQL-1".to_string(),
+                "VUE-COMPONENT-API-STYLE-1".to_string()
+            ],
+            "a justified skip is still REPORTED — unreported is how eyeballing starts"
+        );
+        assert!(render(&verdict).contains("not_applicable_to_stack"));
+    }
+
+    /// req_i2 + H1's sharpening: a rule that could never run for ANY stack is a DEFECT.
+    #[test]
+    fn req_i2_h1_a_rule_with_no_wired_detector_is_never_a_justified_skip() {
+        let mut l = healthy_ledger();
+        l.record_rule(
+            "RUBY-FROZEN-STRING-LITERAL-1",
+            RuleTier::Deterministic,
+            false,
+            Some(format!(
+                "declares mechanical enforcement but has {NO_WIRED_DETECTOR_REASON}"
+            )),
+            0,
+            0,
+        );
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(!verdict.passed());
+        assert!(
+            verdict.failures.iter().any(|f| f.code == "unjustified_skip"
+                && f.detail.contains("RUBY-FROZEN-STRING-LITERAL-1")
+                && f.detail.contains("no_wired_detector")),
+            "{:#?}",
+            verdict.failures
+        );
+        assert!(
+            verdict.justified_skips.is_empty(),
+            "a no-detector rule must never be filed as justified"
+        );
+    }
+
+    /// req_i2 + C11: the gate must FAIL on a tool-tier wholesale failure rather than letting
+    /// it degrade quietly to "not run". This is the exact ledger state the broken eslint pass
+    /// produced — `reconcile_external_tool_ledger` wrote this skip_reason verbatim.
+    ///
+    /// Note it fails as `unjustified_skip` even though the ExternalTool tier as a whole is NOT
+    /// dark (semgrep ran and found things): a partially dead tier is still a defect, and the
+    /// tier-level check alone would have missed it.
+    #[test]
+    fn req_i2_c11_an_eslint_wholesale_failure_fails_the_gate_rather_than_degrading_quietly() {
+        let mut l = healthy_ledger();
+        for id in ["JS-EQEQEQ-1", "JS-NO-VAR-1", "TS-NO-EXPLICIT-ANY-1"] {
+            l.record_rule(
+                id,
+                RuleTier::ExternalTool,
+                false,
+                Some(
+                    "the eslint preview pass did not run: Could not preview 10 rule(s) with \
+                     eslint: EOF while parsing a value at line 1 column 0. It enforces once \
+                     wired into CI."
+                        .to_string(),
+                ),
+                0,
+                0,
+            );
+        }
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(!verdict.passed(), "C11 must fail the gate");
+        let tool_failures: Vec<&IntegrityFailure> = verdict
+            .failures
+            .iter()
+            .filter(|f| f.code == "unjustified_skip" && f.detail.contains("tool_failed"))
+            .collect();
+        assert_eq!(
+            tool_failures.len(),
+            3,
+            "every rule the failed tier was supposed to cover must be named: {:#?}",
+            verdict.failures
+        );
+        assert!(
+            !verdict
+                .failures
+                .iter()
+                .any(|f| f.code == "dark_tier" || f.code == "tier_absent"),
+            "the tier is only PARTIALLY dead (semgrep ran) — the per-rule check is what \
+             catches this, which is why both checks exist: {:#?}",
+            verdict.failures
+        );
+    }
+
+    /// req_i2 + C5: a stage that loses a row with no recorded disposition must fail. Three
+    /// separate merge data-loss bugs shipped silently because an over-merge is
+    /// observationally identical to a detection miss — the stage arithmetic is the only place
+    /// it is visible at all.
+    #[test]
+    fn req_i2_c5_a_stage_that_does_not_reconcile_fails_the_gate() {
+        let mut l = healthy_ledger();
+        l.record_stage("ai-location-merge", 12, 9, StageAccounting::default());
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(!verdict.passed());
+        let f = verdict
+            .failures
+            .iter()
+            .find(|f| f.code == "unaccounted_rows")
+            .expect("a lossy stage must be reported");
+        assert!(f.detail.contains("ai-location-merge"), "{}", f.detail);
+        assert!(
+            f.detail.contains('3'),
+            "must name the number of vanished rows: {}",
+            f.detail
+        );
+    }
+
+    /// req_i2 + B1/B2/B3: the ADDITION direction. Rows appended with no disclosed reason —
+    /// the defect that put rows in the PDF only and made findings.json contradict itself —
+    /// must fail the gate too, not just row losses.
+    #[test]
+    fn req_i2_b2_a_stage_that_adds_rows_with_no_disclosed_reason_fails_the_gate() {
+        let mut l = healthy_ledger();
+        l.record_stage(
+            "evidence-gate-synthesis",
+            40,
+            43,
+            StageAccounting::default(),
+        );
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(!verdict.passed());
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|f| f.code == "unaccounted_rows"
+                    && f.detail.contains("evidence-gate-synthesis")),
+            "{:#?}",
+            verdict.failures
+        );
+    }
+
+    /// req_i2: an addition that IS disclosed reconciles and must not fail — the obvious
+    /// over-correction guard for the test above.
+    #[test]
+    fn req_i2_a_disclosed_addition_reconciles_and_passes() {
+        let mut l = healthy_ledger();
+        let mut acc = StageAccounting::default();
+        acc.push_added("external_tool_preview_findings", 3);
+        l.record_stage("external-tool-preview-merge", 40, 43, acc);
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(verdict.passed(), "{:#?}", verdict.failures);
+    }
+
+    /// req_i2, FAIL-CLOSED: an UNRECOGNISED skip reason is a defect, never a pass.
+    ///
+    /// This is the module's most important property. It is deliberately the inconvenient
+    /// direction: a new skip reason added anywhere in the pipeline fails this gate until
+    /// someone classifies it. The alternative — unknown reasons pass — is exactly the failure
+    /// mode W6 exists to close, where a pipeline change quietly widens the set of things that
+    /// can go wrong and nothing notices.
+    #[test]
+    fn req_i2_an_unrecognised_skip_reason_fails_closed() {
+        let mut l = healthy_ledger();
+        l.record_rule(
+            "SOME-NEW-RULE-1",
+            RuleTier::Deterministic,
+            false,
+            Some("the frobnicator was unavailable".to_string()),
+            0,
+            0,
+        );
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(
+            !verdict.passed(),
+            "an unclassified skip reason must never pass the gate"
+        );
+        assert!(
+            verdict
+                .failures
+                .iter()
+                .any(|f| f.detail.contains("unrecognised")),
+            "{:#?}",
+            verdict.failures
+        );
+    }
+
+    /// req_i2: and a rule with NO skip reason at all is likewise a defect — "did not run,
+    /// reason unknown" is the state the ledger was built to make impossible.
+    #[test]
+    fn req_i2_a_skip_with_no_reason_recorded_fails_closed() {
+        let mut l = healthy_ledger();
+        l.record_rule("MYSTERY-1", RuleTier::Deterministic, false, None, 0, 0);
+        let verdict = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(!verdict.passed());
+        assert!(verdict
+            .failures
+            .iter()
+            .any(|f| f.detail.contains("MYSTERY-1") && f.detail.contains("no reason recorded")));
+    }
+
+    /// req_i2: an empty ledger is never a pass. A gate that green-lights "no evidence a scan
+    /// happened" is worse than no gate, because it manufactures confidence.
+    #[test]
+    fn req_i2_an_empty_ledger_never_passes() {
+        let verdict = evaluate(&ScanLedger::new(), &IntegrityGateOptions::default());
+        assert!(!verdict.passed());
+        assert!(verdict.failures.iter().any(|f| f.code == "empty_ledger"));
+    }
+
+    /// req_i2: `require_semantic_tier` is the operator's call, and it changes the verdict.
+    /// "AI/semantic review not requested this run" is an honest disclosure and a perfectly
+    /// fine state for a cheap smoke scan — and a complete blocker before spending $26 grading
+    /// the semantic tier. Both readings are correct; which one applies is not this module's
+    /// decision to make silently.
+    #[test]
+    fn req_i2_a_scoped_out_semantic_tier_is_justified_for_a_smoke_scan_and_a_blocker_before_grading(
+    ) {
+        let mut l = ScanLedger::new();
+        l.record_rule("SEC-FLOOR-1", RuleTier::Deterministic, true, None, 10, 1);
+        l.record_rule("TAINT-SQLI-1", RuleTier::ExternalTool, true, None, 10, 0);
+        l.record_rule(
+            "AI-ADVISORY-1",
+            RuleTier::Semantic,
+            false,
+            Some("AI/semantic review not requested this run".to_string()),
+            0,
+            0,
+        );
+
+        let smoke = evaluate(&l, &IntegrityGateOptions::smoke());
+        assert!(
+            smoke.passed(),
+            "a disclosed scope choice is fine for a smoke scan: {:#?}",
+            smoke.failures
+        );
+        assert!(smoke
+            .justified_skips
+            .get(&SkipClass::ScopedOut)
+            .is_some_and(|ids| ids.contains(&"AI-ADVISORY-1".to_string())));
+
+        let graded = evaluate(&l, &IntegrityGateOptions::default());
+        assert!(
+            !graded.passed(),
+            "the same ledger must BLOCK a graded run that grades the semantic tier"
+        );
+        assert!(
+            graded
+                .failures
+                .iter()
+                .any(|f| f.code == "dark_tier" && f.detail.contains("semantic")),
+            "{:#?}",
+            graded.failures
+        );
+    }
+
+    /// req_i2: the tier summary is populated even on a PASS, and covers every engine —
+    /// including one with zero rules — so a passing gate is still informative rather than a
+    /// bare green tick.
+    #[test]
+    fn req_i2_the_verdict_reports_every_engine_even_on_a_pass() {
+        let verdict = evaluate(&healthy_ledger(), &IntegrityGateOptions::default());
+        assert_eq!(verdict.tier_summary.len(), RuleTier::all().len());
+        let rendered = render(&verdict);
+        for tier in RuleTier::all() {
+            assert!(
+                rendered.contains(tier.family_label()),
+                "every engine must appear in the report, including empty ones: {rendered}"
+            );
+        }
+        let det = verdict
+            .tier_summary
+            .iter()
+            .find(|t| t.tier == RuleTier::Deterministic)
+            .expect("deterministic summary");
+        assert_eq!(det.rules_recorded, 1);
+        assert_eq!(det.rules_ran, 1);
+        assert_eq!(det.findings_emitted, 1);
+    }
+
+    /// req_i2: the classifier checks DEFECT phrases first, so a tool-failure reason that also
+    /// happens to mention languages or files cannot launder itself into a justified skip. The
+    /// real `reconcile_external_tool_ledger` reason embeds a whole `CoverageNote` message, so
+    /// this overlap is a real shape, not a hypothetical.
+    #[test]
+    fn req_i2_a_reason_containing_both_a_failure_and_a_justified_phrase_classifies_as_the_failure()
+    {
+        let class = SkipClass::classify(Some(
+            "the eslint preview pass did not run: Could not preview 3 rule(s) with eslint: \
+             no matching files were readable",
+        ));
+        assert_eq!(
+            class,
+            SkipClass::ToolFailed,
+            "a failure that mentions files must not be laundered into a stack justification"
+        );
+        assert!(!class.is_justified());
+    }
+
+    /// req_i2: the classifier's whole table, pinned. A wording change at any producer that
+    /// drops out of these phrase sets lands in `Unrecognised` and fails the gate loudly —
+    /// which is the intended, fail-closed consequence.
+    #[test]
+    fn req_i2_skip_reason_classification_table() {
+        for (reason, want) in [
+            ("no matching files", SkipClass::NotApplicableToStack),
+            ("not armed for this repo", SkipClass::NotApplicableToStack),
+            (
+                "no supported language was present",
+                SkipClass::NotApplicableToStack,
+            ),
+            (
+                "AI/semantic review not requested this run",
+                SkipClass::ScopedOut,
+            ),
+            (
+                "deterministic scan deselected for this run",
+                SkipClass::ScopedOut,
+            ),
+            ("gated off", SkipClass::ScopedOut),
+            (
+                "the commodity taint pass did not run: semgrep was never invoked for any \
+                 scanned repo this scan",
+                SkipClass::ToolFailed,
+            ),
+            (
+                "the eslint preview pass did not run: eslint provisioning: npm install failed",
+                SkipClass::ToolFailed,
+            ),
+            ("did not run this scan", SkipClass::Unrecognised),
+            ("", SkipClass::Unrecognised),
+        ] {
+            assert_eq!(
+                SkipClass::classify(Some(reason)),
+                want,
+                "classification of {reason:?}"
+            );
+        }
+        assert_eq!(SkipClass::classify(None), SkipClass::Unrecognised);
+        assert_eq!(
+            SkipClass::classify(Some(&format!("has {NO_WIRED_DETECTOR_REASON}"))),
+            SkipClass::NoWiredDetector
+        );
+    }
+
+    /// req_i2: the gate is PURE — same ledger in, same verdict out, byte for byte. A gate
+    /// whose own output wobbles between runs is a gate nobody can diff or trust to block on.
+    #[test]
+    fn req_i2_the_verdict_is_deterministic_and_its_failures_are_stably_ordered() {
+        let mut l = healthy_ledger();
+        l.record_rule("ZZZ-1", RuleTier::Deterministic, false, None, 0, 0);
+        l.record_rule("AAA-1", RuleTier::Deterministic, false, None, 0, 0);
+        l.record_stage("lossy", 5, 3, StageAccounting::default());
+        let a = evaluate(&l, &IntegrityGateOptions::default());
+        let b = evaluate(&l, &IntegrityGateOptions::default());
+        assert_eq!(a, b, "the gate must be deterministic");
+        assert_eq!(render(&a), render(&b));
+        let codes: Vec<&str> = a.failures.iter().map(|f| f.code.as_str()).collect();
+        let mut sorted = codes.clone();
+        sorted.sort_unstable();
+        assert_eq!(codes, sorted, "failures must be stably ordered: {codes:?}");
+    }
+}

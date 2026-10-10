@@ -106,6 +106,10 @@ pub mod workspace;
 /// "verified clean" and a row that vanishes between pipeline stages can never go
 /// unnoticed. See the module doc comment and `docs/plans/` for the defects this closes.
 pub mod scan_ledger;
+/// W6 / I2: the PRE-FLIGHT INTEGRITY GATE — turns the `scan_ledger` summary a human used to
+/// eyeball into a verdict with an exit code, so a silently degraded scan is caught before a
+/// graded run is paid for rather than after. See the module doc comment.
+pub mod integrity_gate;
 /// W1 item 4: corpus-level build gate — every rule declaring `enforcement = "mechanical"`
 /// must resolve to a real wired detector. See the module doc comment.
 mod mechanical_gate;
