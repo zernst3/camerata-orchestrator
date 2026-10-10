@@ -113,6 +113,37 @@ impl FindingKind {
     }
 }
 
+/// The exporters' ALWAYS-PRESENT wire rendering of an `Option<FindingKind>` (Pass-1 W3,
+/// A5.6's backfill rule): a known kind serializes exactly as the kind itself (internally
+/// tagged, flat payload), while an ABSENT kind serializes as `{"kind": "unspecified"}` — the
+/// `kind` key is therefore present on EVERY exported row, so a consumer can never confuse "a
+/// legacy/unmapped row" with "a defect" (or with a row whose producer simply forgot the
+/// field). Designed to be `#[serde(flatten)]`ed into an export row struct; serialize-only by
+/// design (exports are write-only artifacts).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KindOnWire(pub Option<FindingKind>);
+
+impl KindOnWire {
+    /// The row's wire tag — the kind's own tag, or [`UNSPECIFIED_KIND_TAG`].
+    pub fn tag(&self) -> &'static str {
+        FindingKind::tag_or_unspecified(self.0.as_ref())
+    }
+}
+
+impl Serialize for KindOnWire {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match &self.0 {
+            Some(kind) => kind.serialize(serializer),
+            None => {
+                use serde::ser::SerializeMap;
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("kind", UNSPECIFIED_KIND_TAG)?;
+                map.end()
+            }
+        }
+    }
+}
+
 /// Payload of [`FindingKind::Deviation`] — the structured sentence. All counts are
 /// GROUP-level (per rule, across the whole scan), repeated verbatim on every deviating row
 /// for that rule, so any single row suffices to render "N of M sites deviate from
@@ -361,6 +392,39 @@ mod tests {
         };
         let v = serde_json::to_value(&none_row).unwrap();
         assert!(v.get("kind").is_none());
+    }
+
+    /// req A5.6 export contract: `KindOnWire` keeps the `kind` key present on EVERY row —
+    /// a known kind flattens as itself; an absent kind flattens as the explicit
+    /// `"unspecified"` tag (never silently missing, never `"defect"`).
+    #[test]
+    fn req_a5_6_kind_on_wire_always_emits_a_kind_key() {
+        #[derive(Serialize)]
+        struct Row {
+            severity: String,
+            #[serde(flatten)]
+            kind: KindOnWire,
+        }
+        let known = serde_json::to_value(Row {
+            severity: "high".to_string(),
+            kind: KindOnWire(Some(FindingKind::Deviation(DeviationKind {
+                deviating_sites: 2,
+                assessed_sites: Some(47),
+                convention_option_id: Some("versioned".to_string()),
+                convention_label: "URI-versioned endpoints".to_string(),
+            }))),
+        })
+        .unwrap();
+        assert_eq!(known["kind"], "deviation");
+        assert_eq!(known["deviating_sites"], 2);
+
+        let legacy = serde_json::to_value(Row {
+            severity: "high".to_string(),
+            kind: KindOnWire(None),
+        })
+        .unwrap();
+        assert_eq!(legacy["kind"], "unspecified", "absent kind must be explicit on the wire");
+        assert_ne!(legacy["kind"], "defect");
     }
 
     /// The tags are the serde discriminators — `tag()` can never drift from the wire.

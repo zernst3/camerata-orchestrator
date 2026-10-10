@@ -514,6 +514,47 @@ pub(crate) fn clamp_to_rule_max_severity(
     }
 }
 
+/// A5.2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): the severity ceiling for a
+/// CONSISTENCY DEVIATION. The default a deviation may never exceed, absent an authored
+/// per-rule escape hatch — the owner's driver is FORWARD DRIFT COST ("consistency issues
+/// would be a problem moving forward with new features moreso than the existing code"), so
+/// the default cap sits at `medium`, and a rule whose decision domain genuinely compounds
+/// (where drift is expensive) raises it by AUTHORING `deviation_ceiling = "high"` in the
+/// corpus — an authoring-time structured field, never a prose-scanning runtime heuristic.
+pub(crate) const DEVIATION_DEFAULT_CEILING: &str = "medium";
+
+/// A5.2: clamp a [`camerata_api_types::audit::FindingKind::Deviation`] row's severity DOWN
+/// to its rule's authored `deviation_ceiling`, defaulting to
+/// [`DEVIATION_DEFAULT_CEILING`] when the rule authors none. A no-op for every other kind
+/// (a Defect under the same rule is untouched) and for a row with no kind at all (a
+/// legacy/unspecified row is NOT assumed to be a deviation). Like
+/// [`clamp_to_rule_max_severity`] this is a ceiling, never a floor — it cannot raise — and
+/// it is applied at the same export choke-points (the PDF's `build_report_json` partition
+/// and the xlsx/`findings.json` `partition_rows`), so every artifact agrees. The kind is a
+/// STRUCTURED field set at emission (`ai_audit::assign_deviation_kinds`); nothing here
+/// inspects prose.
+pub(crate) fn clamp_deviation_severity(
+    severity: String,
+    f: &Finding,
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> String {
+    if !matches!(
+        f.kind,
+        Some(camerata_api_types::audit::FindingKind::Deviation(_))
+    ) {
+        return severity;
+    }
+    let ceiling = corpus_rule_for(&f.rule_id, corpus)
+        .and_then(|r| r.deviation_ceiling.as_deref())
+        .map(normalize_severity)
+        .unwrap_or_else(|| DEVIATION_DEFAULT_CEILING.to_string());
+    if severity_rank(&severity) < severity_rank(&ceiling) {
+        ceiling
+    } else {
+        severity
+    }
+}
+
 /// C4-R1: the pipeline-wide null-location safety net. No finding above `informational` (any
 /// normalized severity other than `"info"`) may ship with BOTH an empty `path` AND `line == 0`
 /// — that combination means nothing concrete was ever established for the location this
@@ -787,6 +828,12 @@ pub struct FindingRefJson {
     /// selection, and every skipped row still ships normally wherever `do_now`/the matrix already
     /// placed it; nothing is dropped.
     pub root_cause_keys: Vec<String>,
+    /// Pass-1 W3 (A5.6): what this row IS — flattened
+    /// [`camerata_api_types::audit::KindOnWire`], so the serialized row carries a flat
+    /// `"kind"` discriminator (plus the variant's payload fields as siblings) on EVERY row;
+    /// an absent kind renders the explicit `"unspecified"` tag, never a silent `"defect"`.
+    #[serde(flatten)]
+    pub kind: camerata_api_types::audit::KindOnWire,
 }
 
 /// The severity×effort action matrix — the money page. Cell membership is driven by the
@@ -1029,6 +1076,11 @@ pub struct CuratedSiteJson {
     /// `do_now`; `fix` (the rule's own authored remediation) still renders as the primary Fix
     /// line, so the row never ships with no fix at all.
     pub fix_for_this_finding: Option<String>,
+    /// Pass-1 W3 (A5.6): what this site's row IS — same flattened always-present kind wire
+    /// as [`FindingRefJson::kind`], so the PDF's own data carries the taxonomy losslessly
+    /// too (the PDF renders what it already renders; Pass 2/3 own presentation).
+    #[serde(flatten)]
+    pub kind: camerata_api_types::audit::KindOnWire,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2780,6 +2832,7 @@ fn finding_ref(
         root_cause_keys: crate::ai_audit::root_cause_credential_identities(f)
             .into_iter()
             .collect(),
+        kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
     }
 }
 
@@ -3255,6 +3308,9 @@ pub fn apply_evidence_gate(report: &mut crate::onboard::ScanReport) {
             needs_review: true,
             confidence: Some("needs-review".to_string()),
             located: true,
+            // A5.6: the gate's claim is that the rule's own requirement is negated — an
+            // objective-fault claim (held for review), never a consistency observation.
+            kind: Some(camerata_api_types::audit::FindingKind::Defect),
             ..Finding::default()
         });
     }
@@ -3345,6 +3401,10 @@ pub fn build_report_json(
         // unlocated-above-informational downgrade just above) — see
         // `clamp_to_rule_max_severity`'s doc comment.
         let severity = clamp_to_rule_max_severity(severity, &f.rule_id, corpus);
+        // A5.2: the deviation ceiling (default medium, per-rule authored escape hatch) —
+        // kind-gated, so a Defect under the same rule is untouched. See
+        // `clamp_deviation_severity`'s doc comment.
+        let severity = clamp_deviation_severity(severity, f, corpus);
         live.push((f, disposition, reason, severity));
     }
     let review_state = if auditor_touched_any_finding {
@@ -3723,6 +3783,7 @@ pub fn build_report_json(
                         }
                     },
                     fix_for_this_finding: f.fix_specific.clone(),
+                    kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
                 }
             })
             .collect();
@@ -4933,6 +4994,192 @@ mod tests {
         assert_eq!(json.scorecard.rows[0].critical, 1);
         assert_eq!(json.scorecard.rows[0].low, 0);
         assert_eq!(json.curated_findings[0].sites[0].severity, "critical");
+    }
+
+
+    // ── Pass-1 W3 (A5.2/A5.6): the deviation ceiling + the kind on the PDF wire ──────────
+
+    /// A deviation-kind finding under `rule_id` — exactly what
+    /// `ai_audit::assign_deviation_kinds` emits for a rule decided to a non-violates option.
+    fn deviation_finding(rule_id: &str, path: &str, line: usize, severity: &str) -> Finding {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let mut f = finding(rule_id, path, line, severity);
+        f.kind = Some(FindingKind::Deviation(DeviationKind {
+            deviating_sites: 2,
+            assessed_sites: Some(47),
+            convention_option_id: Some("default".to_string()),
+            convention_label: "Default".to_string(),
+        }));
+        f
+    }
+
+    /// Same single-rule corpus as [`ruleset_with_max_severity`], but authoring the A5.2
+    /// `deviation_ceiling` escape hatch instead of the E2 `max_severity` ceiling.
+    fn ruleset_with_deviation_ceiling(
+        rule_id: &str,
+        ceiling: Option<&str>,
+    ) -> camerata_rules::RuleSet {
+        let mut rule = camerata_rules::bare_rule(rule_id, "test-fixture");
+        // max_severity "critical" = effectively no E2 clamp; isolate the deviation clamp.
+        rule.max_severity = Some("critical".to_string());
+        rule.deviation_ceiling = ceiling.map(str::to_string);
+        rule.default_option = Some("default".to_string());
+        rule.options = vec![camerata_rules::RuleOption {
+            id: "default".to_string(),
+            label: "Default".to_string(),
+            directive: "do the right thing".to_string(),
+            why: "because".to_string(),
+            remediation: Some("Fix the thing.".to_string()),
+            finding_headline: None,
+            finding_detail: None,
+            escalation: None,
+            effort: None,
+            violates: false,
+        }];
+        let mut set = camerata_rules::RuleSet::default();
+        set.push(rule);
+        set
+    }
+
+    /// req A5.2: a consistency deviation caps at `medium` BY DEFAULT (no authored ceiling) —
+    /// the forward-drift-cost default — while a Defect under the SAME rule at the same
+    /// severity is untouched, and a legacy row with NO kind is never treated as a deviation.
+    /// FAILS BEFORE THE FIX: `clamp_deviation_severity` did not exist; a deviation-kind
+    /// finding arriving at `high` exported `high` unconditionally.
+    #[test]
+    fn req_a5_2_deviation_severity_caps_at_medium_by_default() {
+        let corpus = ruleset_with_deviation_ceiling("DEV-RULE-1", None);
+        let dev = deviation_finding("DEV-RULE-1", "a.rs", 1, "high");
+        assert_eq!(
+            clamp_deviation_severity("high".to_string(), &dev, Some(&corpus)),
+            "medium"
+        );
+        // Never a floor: a low deviation stays low.
+        assert_eq!(
+            clamp_deviation_severity("low".to_string(), &dev, Some(&corpus)),
+            "low"
+        );
+        // A Defect under the same rule is untouched.
+        let mut defect = finding("DEV-RULE-1", "a.rs", 2, "high");
+        defect.kind = Some(camerata_api_types::audit::FindingKind::Defect);
+        assert_eq!(
+            clamp_deviation_severity("high".to_string(), &defect, Some(&corpus)),
+            "high"
+        );
+        // A legacy row (no kind) is NOT assumed to be a deviation.
+        let legacy = finding("DEV-RULE-1", "a.rs", 3, "high");
+        assert_eq!(
+            clamp_deviation_severity("high".to_string(), &legacy, Some(&corpus)),
+            "high"
+        );
+        // No corpus at all -> the default ceiling still applies to a deviation (the cap is a
+        // pipeline default, not a corpus privilege).
+        assert_eq!(
+            clamp_deviation_severity("critical".to_string(), &dev, None),
+            "medium"
+        );
+    }
+
+    /// req A5.2 escape hatch: a rule authoring `deviation_ceiling = "high"` lets a genuinely
+    /// problematic deviation reach `high` — and the ceiling still caps `critical`.
+    /// FAILS BEFORE THE FIX: no `deviation_ceiling` corpus field existed to author.
+    #[test]
+    fn req_a5_2_authored_deviation_ceiling_lets_a_deviation_reach_high() {
+        let corpus = ruleset_with_deviation_ceiling("DEV-RULE-1", Some("high"));
+        let dev = deviation_finding("DEV-RULE-1", "a.rs", 1, "high");
+        assert_eq!(
+            clamp_deviation_severity("high".to_string(), &dev, Some(&corpus)),
+            "high",
+            "the authored escape hatch must let a deviation reach high"
+        );
+        assert_eq!(
+            clamp_deviation_severity("critical".to_string(), &dev, Some(&corpus)),
+            "high",
+            "the authored ceiling is still a ceiling"
+        );
+    }
+
+    /// req A5.2 END-TO-END through `build_report_json`: a deviation arriving at `high` lands
+    /// in the artifact at `medium` (matrix row AND curated site agree), while a defect under
+    /// the same rule keeps `high`. FAILS BEFORE THE FIX: both exported `high`.
+    #[test]
+    fn req_a5_2_report_json_caps_a_deviation_at_medium_but_not_a_defect() {
+        let corpus = ruleset_with_deviation_ceiling("DEV-RULE-1", None);
+        let dev = deviation_finding("DEV-RULE-1", "a.rs", 1, "high");
+        let mut defect = finding("DEV-RULE-1", "b.rs", 2, "high");
+        defect.kind = Some(camerata_api_types::audit::FindingKind::Defect);
+        let report = report_with(vec![dev, defect], vec!["DEV-RULE-1"]);
+        let json = build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        );
+        let sev_of = |path: &str| -> String {
+            [
+                &json.matrix.do_now,
+                &json.matrix.do_next,
+                &json.matrix.plan,
+                &json.matrix.accepted,
+                &json.matrix.informational,
+                &json.matrix.held,
+            ]
+            .iter()
+            .flat_map(|v| v.iter())
+            .find(|r| r.path == path)
+            .unwrap_or_else(|| panic!("no matrix row for {path}"))
+            .severity
+            .clone()
+        };
+        assert_eq!(sev_of("a.rs"), "medium", "deviation capped");
+        assert_eq!(sev_of("b.rs"), "high", "defect untouched");
+    }
+
+    /// req A5.6: the PDF's own data rows carry the kind LOSSLESSLY — a deviation matrix row
+    /// serializes the flat `"kind": "deviation"` discriminator plus the full structured
+    /// sentence (numerator/denominator/convention), and a legacy row with no kind serializes
+    /// the explicit `"unspecified"` tag, never `"defect"` and never a missing key.
+    /// FAILS BEFORE THE FIX: `FindingRefJson` had no kind field at all.
+    #[test]
+    fn req_a5_6_report_json_rows_carry_kind_and_legacy_renders_unspecified() {
+        let dev = deviation_finding("DEV-RULE-1", "a.rs", 1, "high");
+        let legacy = finding("LEGACY-RULE-1", "b.rs", 2, "high");
+        let report = report_with(vec![dev, legacy], vec!["DEV-RULE-1", "LEGACY-RULE-1"]);
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let v = serde_json::to_value(&json.matrix).expect("matrix serializes");
+        let rows: Vec<&serde_json::Value> = ["do_now", "do_next", "plan", "accepted", "informational", "held"]
+            .iter()
+            .flat_map(|b| v[*b].as_array().into_iter().flatten())
+            .collect();
+        let row_for = |path: &str| -> &serde_json::Value {
+            rows.iter()
+                .find(|r| r["path"] == path)
+                .unwrap_or_else(|| panic!("no serialized matrix row for {path}"))
+        };
+        let dev_row = row_for("a.rs");
+        assert_eq!(dev_row["kind"], "deviation");
+        assert_eq!(dev_row["deviating_sites"], 2);
+        assert_eq!(dev_row["assessed_sites"], 47);
+        assert_eq!(dev_row["convention_label"], "Default");
+        let legacy_row = row_for("b.rs");
+        assert_eq!(
+            legacy_row["kind"], "unspecified",
+            "an absent kind must surface explicitly, never silently"
+        );
+        assert_ne!(legacy_row["kind"], "defect");
+        // The curated sites carry it too.
+        let curated = serde_json::to_value(&json.curated_findings).expect("curated serializes");
+        let kinds: Vec<String> = curated
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|g| g["sites"].as_array().into_iter().flatten())
+            .map(|s| s["kind"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            kinds.iter().any(|k| k == "deviation") || kinds.iter().any(|k| k == "unspecified"),
+            "curated sites must serialize a kind key: {kinds:?}"
+        );
     }
 
     // ── E2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): a rule's `max_severity`
