@@ -31,7 +31,7 @@
 //! subset of map errors (an `[imports]` entry naming an undeclared layer; the exact same glob
 //! string declared under two different layers) without needing any real files at all.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -69,6 +69,18 @@ pub struct ArchitectureConfig {
 
     #[serde(default)]
     pub helpers: Option<HelpersConfig>,
+
+    /// `true` when this map was INFERRED from the repo's own directory layout by
+    /// [`infer_architecture_config`] rather than authored in `.camerata/architecture.toml`
+    /// (Pass-1 W4, finding A4). Never read from or written to TOML — `serde(skip)` — because
+    /// it is a provenance fact about how the value was produced, not part of the schema.
+    ///
+    /// Checkers MUST branch on this: an inferred map is positive evidence about the repo's
+    /// structure, but it is not a policy the project signed up to, so a verdict derived from
+    /// it has to be weaker and narrower than one derived from an authored map. See
+    /// [`crate::import_boundary_checker`]'s module doc for exactly what it narrows to.
+    #[serde(skip)]
+    pub inferred: bool,
 }
 
 /// `[db]` — arms `ARCH-STRICT-LAYERING-1` and hardens `ARCH-HANDLER-NO-DB-1`.
@@ -262,11 +274,266 @@ pub fn architecture_config_from_files(
     }
 }
 
+// ─── inference (Pass-1 W4, finding A4) ───────────────────────────────────────────────────
+//
+// A4: the only four `ARCH-*` rules with real static analysis were gated on the SCANNED repo
+// carrying a `.camerata/architecture.toml`, so they were switched off on every repo Camerata
+// has ever audited. A brownfield client repo will never have that file — it is OUR config
+// format — so "the operator will write one" is not a real answer for a brownfield audit, which
+// is the product.
+//
+// The replacement is inference from the repo's own layout, under three hard constraints:
+//
+// 1. POSITIVE EVIDENCE ONLY. Inference returns `None` unless at least two DISTINCT canonical
+//    layers each own at least one real source file. A repo with no recognisable layering gets
+//    no inferred map and the checkers abstain exactly as before — correct under requirement
+//    H1 ("a rule that does not run because it is irrelevant to the scanned stack is CORRECT").
+// 2. HIGH-CONFIDENCE TOKENS ONLY. The directory-segment vocabulary below deliberately excludes
+//    overloaded names — `api` (as often a client for a REMOTE api as a handler layer), `views`
+//    (handlers in Django, templates in Rails), `models` (domain in Django, ORM rows
+//    elsewhere), `types`, `store`, `lib`, `utils`. A token earns its place only if its meaning
+//    is stable across ecosystems.
+// 3. THE INFERRED `[imports]` MAP IS PERMISSIVE. Every layer may import itself and everything
+//    BELOW it; only UPWARD edges are denied. Guessing a project's full allow-list would flood
+//    a brownfield repo with hundreds of findings against a map nobody authored, which is worse
+//    than the silence it replaced. An upward edge (a repository importing a handler, a domain
+//    type importing a service) is dependency inversion and is a real defect regardless of
+//    project taste, so it is the one verdict an inferred map can support honestly.
+//
+// What inference deliberately does NOT enable: `ARCH-STRICT-LAYERING-1` (both facets need
+// `[db].handles`, and inferring DB-client markers means substring-matching a keyword list
+// against import specifiers and receiver names — exactly the lexical-keyword-list shape the
+// 2026-10-09 review explicitly banned) and `ARCH-API-DTOS-1` (opt-in by its own TOML's
+// `default = false`; absent an opt-in it is irrelevant, not orphaned). Both stay config-gated,
+// and both still reach the semantic tier, which as of W4 excludes nothing.
+
+/// The canonical layers inference can recognise, ordered from the transport boundary DOWN to
+/// pure data, together with the directory-segment tokens that identify each. The ORDER is
+/// load-bearing: it defines "below", and therefore which import edges are upward.
+///
+/// Matching is on a whole path SEGMENT, case-insensitively — `src/repositories/user.rs` hits
+/// `repositories`, while `src/repository_helpers.rs` does not. See the §2 constraint above for
+/// why the vocabulary is this short.
+pub const INFERRED_LAYER_TOKENS: &[(&str, &[&str])] = &[
+    ("handlers", &["handlers", "controllers", "routes", "endpoints", "resolvers"]),
+    ("services", &["services", "usecases", "use_cases", "interactors"]),
+    ("repositories", &["repositories", "repository", "repos", "dao", "persistence"]),
+    ("domain", &["domain", "entities"]),
+];
+
+/// The index of `layer` in [`INFERRED_LAYER_TOKENS`], i.e. how close it sits to the transport
+/// boundary (0 = closest). `None` for any layer name inference did not produce — an AUTHORED
+/// config's layer names are arbitrary by design (the schema never hardcodes
+/// "handlers"/"services"), so there is no canonical rank for them and callers must not invent
+/// one.
+pub fn inferred_layer_rank(layer: &str) -> Option<usize> {
+    INFERRED_LAYER_TOKENS.iter().position(|(name, _)| *name == layer)
+}
+
+/// Whether `path` has a whole segment equal (case-insensitively) to `token`.
+fn path_has_segment(path: &str, token: &str) -> bool {
+    path.split('/').any(|seg| seg.eq_ignore_ascii_case(token))
+}
+
+/// Infer a boundary map from a repo's own directory layout, for a repo with no authored
+/// `.camerata/architecture.toml`. See the section doc above for the three constraints this
+/// obeys; `None` whenever the evidence is too thin to support any verdict (fewer than two
+/// distinct layers with real files), which is the common case and is not an error.
+///
+/// Only files whose extension the extractor layer understands count as evidence — a layer
+/// "found" solely because of a `docs/domain/README.md` is not a code layer.
+pub fn infer_architecture_config(files: &[(String, String)]) -> Option<ArchitectureConfig> {
+    // layer name -> the tokens that actually matched at least one real source file.
+    let mut matched: BTreeMap<&'static str, BTreeSet<&'static str>> = BTreeMap::new();
+    for (path, _) in files {
+        if crate::extract::lang_for_path(path).is_none() {
+            continue;
+        }
+        for (layer, tokens) in INFERRED_LAYER_TOKENS {
+            for token in *tokens {
+                if path_has_segment(path, token) {
+                    matched.entry(*layer).or_default().insert(*token);
+                }
+            }
+        }
+    }
+    if matched.len() < 2 {
+        return None;
+    }
+    let layers: BTreeMap<String, Vec<String>> = matched
+        .iter()
+        .map(|(layer, tokens)| {
+            let globs = tokens.iter().map(|t| format!("**/{t}/**")).collect();
+            ((*layer).to_string(), globs)
+        })
+        .collect();
+    // Permissive, upward-deny-only: each layer may import itself and everything below it,
+    // restricted to the layers actually present in THIS repo.
+    let present: Vec<&'static str> = INFERRED_LAYER_TOKENS
+        .iter()
+        .map(|(l, _)| *l)
+        .filter(|l| matched.contains_key(l))
+        .collect();
+    let imports: BTreeMap<String, Vec<String>> = present
+        .iter()
+        .enumerate()
+        .map(|(i, layer)| {
+            let allowed = present[i..].iter().map(|l| (*l).to_string()).collect();
+            ((*layer).to_string(), allowed)
+        })
+        .collect();
+    Some(ArchitectureConfig {
+        version: 1,
+        layers,
+        imports,
+        // Left unset on purpose: see the section doc's "what inference deliberately does NOT
+        // enable". `db` would require a DB-client keyword list; `dtos` is opt-in by rule
+        // design; `authz`/`helpers` are project-specific exemption maps with no layout signal.
+        db: None,
+        dtos: None,
+        authz: None,
+        helpers: None,
+        inferred: true,
+    })
+}
+
+/// The authored map for `files` if there is one, else an inferred one, else `None`. The single
+/// entry point every config-gated checker should use so there is ONE code path rather than a
+/// parallel "inferred checker". A malformed authored config is treated as absent (the module
+/// doc's standing contract) and does NOT fall through to inference — a broken map the operator
+/// wrote is a config error to surface, not an invitation to guess.
+pub fn architecture_config_or_inferred(files: &[(String, String)]) -> Option<ArchitectureConfig> {
+    match architecture_config_from_files(files) {
+        Ok(Some(cfg)) => Some(cfg),
+        Ok(None) => infer_architecture_config(files),
+        Err(_) => None,
+    }
+}
+
 // ─── tests ───────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── req_a4: layer-map inference (Pass-1 W4) ─────────────────────────────────────────────
+
+    fn infer(pairs: &[&str]) -> Option<ArchitectureConfig> {
+        let files: Vec<(String, String)> =
+            pairs.iter().map(|p| ((*p).to_string(), String::new())).collect();
+        infer_architecture_config(&files)
+    }
+
+    /// req_a4: inference needs POSITIVE EVIDENCE — at least two DISTINCT canonical layers, each
+    /// owning at least one real source file. One layer proves nothing about direction, so it
+    /// yields no map and the checkers abstain (requirement H1: irrelevant is CORRECT).
+    ///
+    /// FAILS BEFORE THE FIX: `infer_architecture_config` did not exist; there was no path from
+    /// a repo with no `.camerata/architecture.toml` to any layer map at all.
+    #[test]
+    fn req_a4_inference_requires_two_distinct_layers_with_real_source_files() {
+        assert!(infer(&["src/controllers/a.rs", "src/controllers/b.rs"]).is_none());
+        assert!(infer(&["src/main.rs", "src/util.rs"]).is_none());
+        let cfg = infer(&["src/controllers/a.rs", "src/repositories/b.rs"])
+            .expect("two distinct layers is sufficient evidence");
+        assert!(cfg.inferred);
+        assert_eq!(cfg.layers.len(), 2, "{:?}", cfg.layers);
+        assert_eq!(cfg.layers.get("handlers").map(Vec::as_slice), Some(&["**/controllers/**".to_string()][..]));
+    }
+
+    /// req_a4: only files the extractor layer understands count as evidence. A `domain` layer
+    /// "found" solely because of a markdown file under `docs/domain/` is not a code layer.
+    #[test]
+    fn req_a4_inference_only_counts_real_source_files() {
+        assert!(infer(&["src/controllers/a.rs", "docs/domain/overview.md"]).is_none());
+        assert!(infer(&["src/controllers/a.rs", "src/domain/order.rs"]).is_some());
+    }
+
+    /// req_a4: the inferred `[imports]` map is PERMISSIVE — every layer may import itself and
+    /// everything BELOW it; only upward edges are denied. Guessing a project's real allow-list
+    /// would flood a brownfield repo against a policy nobody authored.
+    #[test]
+    fn req_a4_inferred_imports_map_denies_only_upward_edges() {
+        let cfg = infer(&[
+            "src/controllers/a.rs",
+            "src/services/b.rs",
+            "src/repositories/c.rs",
+            "src/domain/d.rs",
+        ])
+        .expect("four layers");
+        let handlers = cfg.imports.get("handlers").expect("handlers key");
+        for below in ["handlers", "services", "repositories", "domain"] {
+            assert!(handlers.iter().any(|l| l == below), "handlers -> {below}: {handlers:?}");
+        }
+        // The bottom layer may import only itself.
+        assert_eq!(cfg.imports.get("domain").map(Vec::as_slice), Some(&["domain".to_string()][..]));
+        // A repository may NOT import a handler (the one verdict inference supports).
+        let repos = cfg.imports.get("repositories").expect("repositories key");
+        assert!(!repos.iter().any(|l| l == "handlers"), "{repos:?}");
+        assert!(!repos.iter().any(|l| l == "services"), "{repos:?}");
+    }
+
+    /// req_a4: the token vocabulary deliberately excludes overloaded directory names —
+    /// `api` (as often a client for a REMOTE api as a handler layer), `views` (handlers in
+    /// Django, templates in Rails), `models`, `types`, `store`, `lib`, `utils`. A repo laid out
+    /// only with those must NOT produce an inferred map.
+    #[test]
+    fn req_a4_inference_ignores_overloaded_directory_names() {
+        assert!(infer(&[
+            "src/api/client.ts",
+            "src/views/home.ts",
+            "src/models/user.ts",
+            "src/types/index.ts",
+            "src/store/slice.ts",
+            "src/lib/helper.ts",
+            "src/utils/fmt.ts",
+        ])
+        .is_none());
+    }
+
+    /// req_a4: the layer ORDER is load-bearing (it defines "below"), and ranks exist ONLY for
+    /// inferred layer names — an authored config's layer names are arbitrary by design, so
+    /// callers must never invent a rank for them.
+    #[test]
+    fn req_a4_inferred_layer_rank_orders_boundary_to_data_and_is_none_for_authored_names() {
+        let ranks: Vec<usize> = ["handlers", "services", "repositories", "domain"]
+            .iter()
+            .map(|l| inferred_layer_rank(l).expect("canonical layer"))
+            .collect();
+        assert_eq!(ranks, vec![0, 1, 2, 3]);
+        assert_eq!(inferred_layer_rank("my-bespoke-layer"), None);
+    }
+
+    /// req_a4: `architecture_config_or_inferred` prefers an AUTHORED map, falls back to
+    /// inference when there is none, and treats a MALFORMED authored map as an error to
+    /// surface — never as an invitation to guess at one.
+    #[test]
+    fn req_a4_or_inferred_prefers_authored_and_refuses_to_guess_past_a_malformed_one() {
+        let layered = vec![
+            ("src/controllers/a.rs".to_string(), String::new()),
+            ("src/repositories/b.rs".to_string(), String::new()),
+        ];
+        let inferred = architecture_config_or_inferred(&layered).expect("inferred");
+        assert!(inferred.inferred);
+
+        let mut authored = layered.clone();
+        authored.push((ARCHITECTURE_CONFIG_PATH.to_string(), EXAMPLE_TOML.to_string()));
+        let real = architecture_config_or_inferred(&authored).expect("authored");
+        assert!(!real.inferred, "an authored map must never be marked inferred");
+
+        let mut broken = layered.clone();
+        broken.push((ARCHITECTURE_CONFIG_PATH.to_string(), "not ==== toml".to_string()));
+        assert!(architecture_config_or_inferred(&broken).is_none());
+    }
+
+    /// req_a4: `inferred` is pure provenance and never crosses the TOML boundary — a config
+    /// file cannot declare itself inferred, and serialising an inferred map does not leak the
+    /// flag into the schema.
+    #[test]
+    fn req_a4_the_inferred_flag_never_round_trips_through_toml() {
+        let parsed = parse_str("version = 1\ninferred = true\n", "test").expect("parses");
+        assert!(!parsed.inferred, "an authored TOML must not be able to claim `inferred`");
+    }
 
     const EXAMPLE_TOML: &str = r#"
 version = 1

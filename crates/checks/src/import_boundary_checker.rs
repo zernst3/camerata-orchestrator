@@ -29,6 +29,25 @@
 //! candidate (per-rule-id `config_unsatisfied_for` granularity) for a later pass — not fixed
 //! here, per this pass's explicit framing as a config presence/absence gate.
 //!
+//! # A4: inference replaces the all-or-nothing config gate (Pass-1 W4)
+//!
+//! The gate above meant `check` returned ZERO findings for any repo without
+//! `.camerata/architecture.toml` — which is every brownfield client repo, since that file is
+//! Camerata's own config format. `check` now falls back to
+//! [`crate::architecture_config::architecture_config_or_inferred`], a layer map derived from
+//! the repo's own directory layout under positive evidence (see that module's inference
+//! section for the three constraints). An inferred map enables exactly ONE facet,
+//! `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1`, narrowed to UPWARD edges and softened to `medium` with
+//! the inference stated in the message. `ARCH-API-DTOS-1` (opt-in by its own TOML) and
+//! `ARCH-STRICT-LAYERING-1` (needs `[db].handles`, which could only be inferred by
+//! substring-matching a DB-client keyword list) stay authored-config-only.
+//!
+//! [`ArchChecker::config_unsatisfied_for`] still answers on the AUTHORED config alone, on
+//! purpose: it feeds the ledger's detector-channel credit, and an inferred verdict must not be
+//! recorded as the config-confirmed deterministic check the rule's enforcement tier promises.
+//! The honest outcome for an inferred run is what the ledger already models — a `coverage_note`
+//! plus a semantic read, now with real deterministic findings alongside instead of silence.
+//!
 //! # Why `[db].tx_flow_control_in` is ALSO exempted from the import facet
 //!
 //! The rule TOML's own directive carves out "transaction flow control belongs in services" —
@@ -50,9 +69,12 @@
 
 use std::collections::HashSet;
 
-use crate::arch_checker::{matches_any_glob, ArchChecker, ArchViolation, RepoView, SEVERITY_HIGH};
+use crate::arch_checker::{
+    matches_any_glob, ArchChecker, ArchViolation, RepoView, SEVERITY_HIGH, SEVERITY_MEDIUM,
+};
 use crate::architecture_config::{
-    architecture_config_from_files, ArchitectureConfig, DbConfig, ARCHITECTURE_CONFIG_PATH,
+    architecture_config_from_files, architecture_config_or_inferred, inferred_layer_rank,
+    ArchitectureConfig, DbConfig, ARCHITECTURE_CONFIG_PATH,
 };
 use crate::extract;
 use crate::extract::resolver::{self, ResolvedImport};
@@ -93,11 +115,14 @@ impl ArchChecker for ImportBoundaryChecker {
     }
 
     fn check(&self, repo: &RepoView<'_>) -> Vec<ArchViolation> {
-        let cfg = match architecture_config_from_files(repo.files) {
-            Ok(Some(cfg)) => cfg,
-            // Absent OR malformed: abstain entirely (D3) — zero deterministic findings, and
-            // `config_unsatisfied_for` (below) keeps every rule id LLM-advisory-eligible.
-            _ => return Vec::new(),
+        // A4 (Pass-1 W4): fall back to a map INFERRED from the repo's own layout when there is
+        // no authored `.camerata/architecture.toml`. A brownfield client repo will never carry
+        // that file — it is Camerata's own config format — so abstaining on its absence meant
+        // these rules were switched off on literally every repo this product has audited.
+        // Still `None` (and still a full abstain) when the authored config is malformed, or
+        // when the repo shows too little layering evidence to support any verdict.
+        let Some(cfg) = architecture_config_or_inferred(repo.files) else {
+            return Vec::new();
         };
 
         let mut out = Vec::new();
@@ -105,10 +130,16 @@ impl ArchChecker for ImportBoundaryChecker {
 
         for edge in &graph {
             check_cross_boundary(&cfg, edge, &mut out);
-            check_api_dtos(&cfg, edge, &mut out);
+            // Both of the other facets are AUTHORED-CONFIG-ONLY by design; see the module
+            // doc's "what inference deliberately does not enable".
+            if !cfg.inferred {
+                check_api_dtos(&cfg, edge, &mut out);
+            }
         }
 
-        check_strict_layering_import_facet(&cfg, repo.files, &mut out);
+        if !cfg.inferred {
+            check_strict_layering_import_facet(&cfg, repo.files, &mut out);
+        }
 
         out
     }
@@ -129,6 +160,10 @@ impl ArchChecker for ImportBoundaryChecker {
 /// schema's own semantics are "any edge not explicitly listed is forbidden," so a missing key
 /// denies everything, including same-layer imports, unless the project explicitly lists
 /// itself as its own allowed target.
+///
+/// (A4) Under an INFERRED map the verdict is narrowed to UPWARD edges and softened to
+/// `medium`, and the message says the map was inferred and from what. An authored map keeps
+/// today's behaviour exactly: every edge not in the allow-list, at `high`.
 fn check_cross_boundary(cfg: &ArchitectureConfig, edge: &ResolvedImport, out: &mut Vec<ArchViolation>) {
     let (Ok(Some(from_layer)), Ok(Some(to_layer))) =
         (cfg.layer_for_path(&edge.from_file), cfg.layer_for_path(&edge.to_file))
@@ -137,6 +172,41 @@ fn check_cross_boundary(cfg: &ArchitectureConfig, edge: &ResolvedImport, out: &m
     };
     let allowed: &[String] = cfg.imports.get(from_layer).map(|v| v.as_slice()).unwrap_or(&[]);
     if allowed.iter().any(|l| l.as_str() == to_layer) {
+        return;
+    }
+    if cfg.inferred {
+        // Belt-and-braces: the inferred `[imports]` map is already permissive enough that only
+        // an upward edge can reach here, but this makes the narrowing explicit at the point of
+        // judgement rather than only implied by how the map was built — so a future change to
+        // the inferred map cannot silently widen what an inferred verdict covers.
+        let (Some(from_rank), Some(to_rank)) =
+            (inferred_layer_rank(from_layer), inferred_layer_rank(to_layer))
+        else {
+            return;
+        };
+        if to_rank >= from_rank {
+            return;
+        }
+        out.push(ArchViolation {
+            rule_id: RULE_NO_CROSS_BOUNDARY_IMPORTS.to_string(),
+            file: edge.from_file.clone(),
+            line: edge.line,
+            object: Some(edge.specifier.clone()),
+            severity: SEVERITY_MEDIUM,
+            message: format!(
+                "\"{}\" (layer \"{from_layer}\") imports \"{}\" (layer \"{to_layer}\") via `{}` \
+                 — an UPWARD dependency: \"{to_layer}\" sits closer to the transport boundary \
+                 than \"{from_layer}\", so the lower layer depends on the higher one \
+                 (ARCH-NO-CROSS-BOUNDARY-IMPORTS-1). NOTE: this repo has no \
+                 `.camerata/architecture.toml`, so the layer map was INFERRED from its own \
+                 directory layout ({}); only unambiguous upward edges are reported, and an \
+                 authored map would let Camerata check the project's actual allowed edges.",
+                edge.from_file,
+                edge.to_file,
+                edge.specifier,
+                describe_inferred_layers(cfg)
+            ),
+        });
         return;
     }
     let allowed_desc = if allowed.is_empty() { "(nothing)".to_string() } else { allowed.join(", ") };
@@ -152,6 +222,17 @@ fn check_cross_boundary(cfg: &ArchitectureConfig, edge: &ResolvedImport, out: &m
             edge.from_file, edge.to_file, edge.specifier
         ),
     });
+}
+
+/// `handlers -> src/controllers/**, services -> src/services/**` — the evidence an inferred
+/// verdict rests on, named in the finding so a reader can check the inference themselves
+/// instead of taking it on trust.
+fn describe_inferred_layers(cfg: &ArchitectureConfig) -> String {
+    cfg.layers
+        .iter()
+        .map(|(layer, globs)| format!("{layer} -> {}", globs.join(", ")))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// `ARCH-API-DTOS-1`: `edge`'s source file matches `[dtos].controllers` and its target matches
@@ -296,6 +377,133 @@ domain       = []
     fn with_config(mut extra: Vec<(&str, &str)>) -> Vec<(String, String)> {
         extra.push((ARCHITECTURE_CONFIG_PATH, LAYERED_CONFIG));
         files(extra)
+    }
+
+    // ── req_a4: the config-gated checkers work on a repo with no .camerata/architecture.toml ──
+    //
+    // A4 (docs/plans/2026-10-09_audit-findings-tracker.md): these rules were gated on the
+    // SCANNED repo carrying `.camerata/architecture.toml`, so `check()` returned
+    // `Vec::new()` on every repo Camerata has ever audited. A brownfield client repo will never
+    // carry that file — it is Camerata's own config format. Every test below returned ZERO
+    // findings before the fix, because the whole function short-circuited on `Ok(None)`.
+
+    /// req_a4: an UPWARD dependency (a repository importing a handler) is reported on a repo
+    /// with NO authored config, from a layer map inferred from the repo's own layout.
+    ///
+    /// FAILS BEFORE THE FIX: `check()` began `let cfg = match architecture_config_from_files(..)
+    /// { Ok(Some(cfg)) => cfg, _ => return Vec::new() }`, so this returned `[]`.
+    #[test]
+    fn req_a4_an_upward_edge_is_reported_with_no_architecture_toml() {
+        let f = files(vec![
+            (
+                "src/repositories/orders_repo.rs",
+                "use crate::controllers::orders::Ctx;\n\npub struct OrdersRepo;\n",
+            ),
+            ("src/controllers/orders.rs", "pub struct Ctx;\n"),
+        ]);
+        let vs = ImportBoundaryChecker.check(&view(&f));
+        let hits: Vec<_> =
+            vs.iter().filter(|v| v.rule_id == RULE_NO_CROSS_BOUNDARY_IMPORTS).collect();
+        assert_eq!(hits.len(), 1, "{vs:#?}");
+        assert_eq!(hits[0].file, "src/repositories/orders_repo.rs");
+        // An inferred verdict is deliberately weaker than a config-confirmed one, and says so.
+        assert_eq!(hits[0].severity, SEVERITY_MEDIUM, "{}", hits[0].message);
+        assert!(hits[0].message.contains("INFERRED"), "{}", hits[0].message);
+        assert!(hits[0].message.contains("UPWARD"), "{}", hits[0].message);
+        // The evidence the inference rests on is named in the finding, not taken on trust.
+        assert!(hits[0].message.contains("**/controllers/**"), "{}", hits[0].message);
+    }
+
+    /// req_a4: the inferred map is PERMISSIVE downward. A handler importing a repository
+    /// directly — flagged `high` under the authored `LAYERED_CONFIG`, which does not allow
+    /// that edge — is NOT flagged under inference, because no inferred map can know whether
+    /// this project intends to allow it. Guessing the allow-list would flood a brownfield repo
+    /// with findings against a policy nobody authored.
+    #[test]
+    fn req_a4_a_downward_edge_is_not_reported_under_an_inferred_map() {
+        let f = files(vec![
+            (
+                "src/controllers/orders.rs",
+                "use crate::repositories::orders_repo::OrdersRepo;\n\npub fn f(_r: &OrdersRepo) {}\n",
+            ),
+            ("src/repositories/orders_repo.rs", "pub struct OrdersRepo;\n"),
+        ]);
+        let vs = ImportBoundaryChecker.check(&view(&f));
+        assert!(
+            vs.is_empty(),
+            "an inferred map must not judge downward edges — only unambiguous upward ones: {vs:#?}"
+        );
+    }
+
+    /// req_a4: a repo with no recognisable layering gets no inferred map and the checker
+    /// abstains completely — requirement H1's "a rule that does not run because it is
+    /// irrelevant to the scanned stack is CORRECT". Inference must never manufacture a verdict
+    /// out of thin evidence.
+    #[test]
+    fn req_a4_a_flat_repo_with_no_layering_evidence_yields_nothing() {
+        let f = files(vec![
+            ("src/main.rs", "mod util;\nfn main() {}\n"),
+            ("src/util.rs", "pub fn helper() {}\n"),
+        ]);
+        assert!(ImportBoundaryChecker.check(&view(&f)).is_empty());
+    }
+
+    /// req_a4: the two facets inference deliberately does NOT enable stay authored-config-only.
+    /// `ARCH-API-DTOS-1` is opt-in by its own TOML (`default = false`) and
+    /// `ARCH-STRICT-LAYERING-1` needs `[db].handles`, which could only be inferred by
+    /// substring-matching a DB-client keyword list — the lexical-keyword-list shape the
+    /// 2026-10-09 review explicitly banned.
+    #[test]
+    fn req_a4_dtos_and_strict_layering_facets_stay_authored_config_only() {
+        let f = files(vec![
+            (
+                "src/controllers/orders.ts",
+                "import { Order } from '../domain/order';\nimport { db } from 'prisma';\n\
+                 export const h = () => db.query();\n",
+            ),
+            ("src/domain/order.ts", "export class Order {}\n"),
+            ("src/services/order_service.ts", "export const s = 1;\n"),
+        ]);
+        let vs = ImportBoundaryChecker.check(&view(&f));
+        for v in &vs {
+            assert_ne!(v.rule_id, RULE_API_DTOS, "{v:#?}");
+            assert_ne!(v.rule_id, RULE_STRICT_LAYERING, "{v:#?}");
+        }
+    }
+
+    /// req_a4 (no regression): an AUTHORED config keeps today's behaviour exactly — full
+    /// allow-list semantics and `high` severity, with no "INFERRED" caveat anywhere. The
+    /// inference path must be strictly additive.
+    #[test]
+    fn req_a4_an_authored_config_keeps_high_severity_and_full_allow_list_semantics() {
+        let f = with_config(vec![
+            (
+                "src/routes/orders.rs",
+                "use crate::repositories::orders_repo::OrdersRepo;\n\npub fn f(_r: &OrdersRepo) {}\n",
+            ),
+            ("src/repositories/orders_repo.rs", "pub struct OrdersRepo;\n"),
+        ]);
+        let vs = ImportBoundaryChecker.check(&view(&f));
+        let hits: Vec<_> =
+            vs.iter().filter(|v| v.rule_id == RULE_NO_CROSS_BOUNDARY_IMPORTS).collect();
+        assert_eq!(hits.len(), 1, "{vs:#?}");
+        assert_eq!(hits[0].severity, SEVERITY_HIGH);
+        assert!(!hits[0].message.contains("INFERRED"), "{}", hits[0].message);
+    }
+
+    /// req_a4: a MALFORMED authored config never falls through to inference. A broken map the
+    /// operator wrote is a config error to surface, not an invitation to guess at one.
+    #[test]
+    fn req_a4_a_malformed_authored_config_never_falls_through_to_inference() {
+        let f = files(vec![
+            (ARCHITECTURE_CONFIG_PATH, "this is not valid toml ===\n"),
+            (
+                "src/repositories/orders_repo.rs",
+                "use crate::controllers::orders::Ctx;\n\npub struct OrdersRepo;\n",
+            ),
+            ("src/controllers/orders.rs", "pub struct Ctx;\n"),
+        ]);
+        assert!(ImportBoundaryChecker.check(&view(&f)).is_empty());
     }
 
     // ── ARCH-NO-CROSS-BOUNDARY-IMPORTS-1: Rust fixture ─────────────────────────
