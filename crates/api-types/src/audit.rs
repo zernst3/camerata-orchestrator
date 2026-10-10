@@ -383,6 +383,20 @@ mod tests {
         assert_eq!(v["detail"], "2 deviating endpoints", "row's own field untouched");
         let back: Row = serde_json::from_value(v).unwrap();
         assert_eq!(back, row);
+        // (2b) a legacy row with a STRAY unknown key and no `kind` tag: the flatten
+        // remainder is non-empty, which is the one shape where `Option<FindingKind>` could
+        // plausibly error instead of yielding None — pinned here so the behavior is a
+        // conscious contract, not an accident. (Load paths that deserialize persisted
+        // reports are fail-soft `.ok()` readers, but the contract still matters.)
+        let stray: Result<Row, _> =
+            serde_json::from_str(r#"{"severity":"high","detail":"d","line":3,"bogus":true}"#);
+        match stray {
+            Ok(row) => assert_eq!(row.kind, None, "stray keys must not conjure a kind"),
+            Err(e) => panic!(
+                "a legacy row with an unknown sibling key must still deserialize (kind=None), \
+                 got: {e}"
+            ),
+        }
         // (3) None emits no kind key.
         let none_row = Row {
             severity: "low".to_string(),
