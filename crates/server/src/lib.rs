@@ -4293,6 +4293,8 @@ async fn rescan_alternatives_handler(
                         rule_id: rid.clone(),
                         options,
                         selected_option_id,
+                        // A5.3: same corpus-kind threading as build_rule_alternatives.
+                        kind: rule.kind(),
                     },
                 );
             }
@@ -16601,6 +16603,7 @@ mod tests {
                         operator_chosen: false,
                         evidence: Some("src/lib.rs:1 — test evidence".to_string()),
                         applicable: true,
+                        ..Default::default()
                     },
                 )
             })

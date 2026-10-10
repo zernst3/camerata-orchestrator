@@ -54,6 +54,15 @@ pub struct RuleAlternatives {
     /// for). Used both as the "currently selected" marker shown to the model and as the
     /// fail-soft fallback when the model's answer can't be trusted.
     pub selected_option_id: Option<String>,
+    /// Pass-1 W3 (A5.3/A5.6): the rule's corpus [`camerata_rules::RuleKind`], carried into the
+    /// alternatives pass so the "no convention adopted" outcome can be honored STRUCTURALLY for
+    /// pure [`camerata_rules::RuleKind::Decision`] rules only — a `default_with_exceptions`
+    /// rule has an externally-correct default, so an inconsistent codebase is still judged
+    /// against that default rather than excused into a no-convention row. `None` (a corpus
+    /// rule predating classification, or a test fixture) is treated like
+    /// non-`Decision`: the no-convention outcome is NOT honored, failing safe toward the
+    /// pre-existing judge-against-the-pick behavior.
+    pub kind: Option<camerata_rules::RuleKind>,
 }
 
 /// A named audit pass that failed or timed out for a repo — e.g. the alternative-
@@ -122,6 +131,32 @@ pub struct RuleRecommendation {
     /// claim is validated against `evidence` before being trusted.
     #[serde(default = "default_recommendation_applicable")]
     pub applicable: bool,
+    /// Pass-1 W3 (A5.3): `true` when the model judged that this rule's concern APPLIES but the
+    /// codebase is INCONSISTENT with no clear majority — no convention has been adopted. Only
+    /// ever set for a [`camerata_rules::RuleKind::Decision`] rule (the parser refuses it for
+    /// any other kind — see [`parse_alternative_recommendations`]), and only when the claim is
+    /// backed by a validated observed-usage breakdown or a real evidence citation. The caller
+    /// (`audit_repo`) must then (a) DROP the rule from the directive set the violation passes
+    /// check, (b) hard-filter any stray finding under it, and (c) synthesize exactly ONE
+    /// `FindingKind::NoConvention` row — never N violations.
+    #[serde(default)]
+    pub no_convention: bool,
+    /// Pass-1 W3 (A5.3/A5.6): the validated per-option observed-usage breakdown behind a
+    /// `no_convention` outcome — each entry's `option_id` was checked against the rule's REAL
+    /// options at parse time (an invented id is dropped, never carried) and its `label` is the
+    /// AUTHORED option label, not model prose. Site counts are the model's own structured
+    /// numbers (`Option<usize>` — absent means observed-but-not-counted, never fabricated).
+    /// Empty for every normal (conventional) recommendation.
+    #[serde(default)]
+    pub observed_options: Vec<camerata_api_types::audit::ObservedOptionUsage>,
+    /// Pass-1 W3 (A5.2/A5.6): the model's structured count of how many sites this rule's
+    /// decision applies to in this codebase (`"sites_total"` in the recommendation JSON) — the
+    /// DENOMINATOR of the deviation sentence ("2 of 47 endpoints"). `None` when the model gave
+    /// no count or a non-positive one; consumers must then render the numerator alone rather
+    /// than fabricate. Never used for severity, bucketing, or any gating decision — display
+    /// honesty only.
+    #[serde(default)]
+    pub assessed_sites: Option<usize>,
 }
 
 /// Serde default for [`RuleRecommendation::applicable`] — see that field's doc comment.
@@ -141,6 +176,9 @@ impl Default for RuleRecommendation {
             hallucinated: false,
             operator_chosen: false,
             evidence: None,
+            no_convention: false,
+            observed_options: Vec::new(),
+            assessed_sites: None,
             applicable: true,
         }
     }
@@ -2101,6 +2139,18 @@ best-practice fit given the stack and code you can see. You are free to keep the
 currently-selected option, or pick a different one; ground the choice in the actual code, not
 a coin flip.
 
+ALSO count, for each applicable rule, how many sites in the code you can see the rule's
+decision applies to (e.g. how many API endpoints for a versioning rule) and report that number
+as `"sites_total"`. Count only what you can actually see; if you cannot count honestly, omit
+the field entirely — never guess a number.
+
+Some rules are marked `[PURE DECISION — "no convention" is a valid answer]`. For ONLY those
+rules: if the codebase genuinely uses SEVERAL of the listed options with NO clear majority, do
+not force a pick — set `"no_convention": true` and report what you actually saw in
+`"observed_options"`: one entry per option you saw in use, with the option id copied verbatim
+from that rule's own list and, when you can count honestly, how many sites use it. A rule
+without that marker must ALWAYS get a single recommended option when applicable.
+
 CRITICAL RULE — never assert an unevidenced convention: you must NEVER say a codebase has
 "adopted" a pattern, or describe ANY convention as already in use, unless you cite the EXACT
 `path:line` where that is true. If you cannot cite a real file:line, either say the rule is not
@@ -2116,12 +2166,18 @@ Return ONLY a JSON object, no prose, no markdown fences, in EXACTLY this shape:
       "applicable": true,
       "recommended_option_id": "EXACT option id from THAT rule's own list, copied verbatim",
       "evidence": "path/to/file.ext:42 — one short phrase on what's there",
-      "recommendation_reasoning": "1-3 sentences grounded in the codebase evidence you saw"
+      "recommendation_reasoning": "1-3 sentences grounded in the codebase evidence you saw",
+      "sites_total": 47,
+      "no_convention": false,
+      "observed_options": [{"option_id": "EXACT option id", "sites": 2}]
     }
   ]
 }
 When `"applicable"` is `false`, omit `"recommended_option_id"` and `"evidence"` (or leave them
 empty) — there is nothing to recommend against for a concern that doesn't apply here.
+`"sites_total"` is optional — include it only when you could honestly count. Omit
+`"no_convention"`/`"observed_options"` entirely except for the one case described above (a
+marked PURE-DECISION rule with no clear majority).
 
 Include exactly one entry per rule listed, even when you are keeping the currently-selected
 option or marking it not applicable. NEVER invent an option id that was not listed for that
@@ -2137,7 +2193,15 @@ unevidenced applicability claim will be discarded and treated as not applicable.
 fn build_alternatives_block(alternatives: &[RuleAlternatives]) -> String {
     let mut b = String::from("Rules to decide (pick ONE option id per rule):\n\n");
     for a in alternatives {
-        b.push_str(&format!("- [{}]\n", a.rule_id));
+        // A5.3: only a PURE decision rule may honestly answer "no convention adopted" — a
+        // default_with_exceptions rule has an externally-correct default, so the model is
+        // never offered the escape for it (and the parser refuses it even if volunteered).
+        let marker = if a.kind == Some(camerata_rules::RuleKind::Decision) {
+            " [PURE DECISION — \"no convention\" is a valid answer]"
+        } else {
+            ""
+        };
+        b.push_str(&format!("- [{}]{marker}\n", a.rule_id));
         for o in &a.options {
             let marker = if a.selected_option_id.as_deref() == Some(o.id.as_str()) {
                 " [CURRENTLY SELECTED]"
@@ -2180,9 +2244,48 @@ fn fallback_recommendations(alternatives: &[RuleAlternatives], reason: &str) -> 
                 // the currently-selected option) rather than silently dropping the rule.
                 evidence: None,
                 applicable: true,
+                no_convention: false,
+                observed_options: Vec::new(),
+                assessed_sites: None,
             })
         })
         .collect()
+}
+
+/// Parse one recommendation entry's OPTIONAL `observed_options` array into validated
+/// [`camerata_api_types::audit::ObservedOptionUsage`] records (Pass-1 W3, A5.3). Fail-soft
+/// and structurally validating, like [`parse_finding_captures`]:
+/// - absent / non-array -> empty;
+/// - an entry whose `option_id` is not one of THIS rule's real options -> dropped (an
+///   invented option id is never carried anywhere);
+/// - duplicate option ids -> first entry wins;
+/// - `label` always comes from the AUTHORED option (never model prose);
+/// - `sites` only when a positive integer was given (`None` = observed, not counted).
+fn parse_observed_options(
+    r: &serde_json::Value,
+    options: &[RuleOptionView],
+) -> Vec<camerata_api_types::audit::ObservedOptionUsage> {
+    let Some(arr) = r["observed_options"].as_array() else {
+        return Vec::new();
+    };
+    let mut out: Vec<camerata_api_types::audit::ObservedOptionUsage> = Vec::new();
+    for entry in arr {
+        let Some(raw_id) = entry["option_id"].as_str().map(str::trim) else {
+            continue;
+        };
+        let Some(opt) = options.iter().find(|o| o.id == raw_id) else {
+            continue;
+        };
+        if out.iter().any(|u| u.option_id == opt.id) {
+            continue;
+        }
+        out.push(camerata_api_types::audit::ObservedOptionUsage {
+            option_id: opt.id.clone(),
+            label: opt.label.clone(),
+            sites: entry["sites"].as_u64().filter(|n| *n > 0).map(|n| n as usize),
+        });
+    }
+    out
 }
 
 /// A non-blank `evidence` string after trimming, or `None`. Shared by the "does this entry
@@ -2280,7 +2383,44 @@ pub fn parse_alternative_recommendations(
                         (Some(true), None) => (false, None, true),
                         (Some(false), _) => (false, None, false),
                     };
-                if !applicable {
+                // Pass-1 W3: the model's structured site count (`"sites_total"`) — the
+                // deviation sentence's DENOMINATOR. Display honesty only; a missing or
+                // non-positive count is `None`, never a fabricated number.
+                let assessed_sites =
+                    r["sites_total"].as_u64().filter(|n| *n > 0).map(|n| n as usize);
+                // Pass-1 W3 (A5.3): the no-convention outcome. STRUCTURALLY gated: honored
+                // only for a pure `Decision`-kind rule (see `RuleAlternatives::kind`) AND only
+                // when the claim is backed by a validated observed-usage breakdown or a real
+                // evidence citation — an unbacked "no convention" from the model is corrected
+                // (flagged `hallucinated`, judged against an option exactly as before), so a
+                // lazy model answer can never silently drop a rule's violation coverage.
+                let observed_options = parse_observed_options(r, &a.options);
+                let no_convention_claimed =
+                    r.get("no_convention").and_then(|v| v.as_bool()).unwrap_or(false);
+                if applicable
+                    && no_convention_claimed
+                    && a.kind == Some(camerata_rules::RuleKind::Decision)
+                    && (!observed_options.is_empty() || evidence.is_some())
+                {
+                    out.push(RuleRecommendation {
+                        rule_id: a.rule_id.clone(),
+                        // Kept only so the field is never a meaningless empty string; a
+                        // no-convention rule is never judged against ANY option (audit_repo
+                        // drops it from the directive set and hard-filters strays).
+                        recommended_option_id: fallback_id(),
+                        recommendation_reasoning: reasoning,
+                        hallucinated: false,
+                        operator_chosen: false,
+                        evidence,
+                        applicable: true,
+                        no_convention: true,
+                        observed_options,
+                        assessed_sites,
+                    });
+                    continue;
+                }
+                let refused_no_convention = applicable && no_convention_claimed;
+                let rec = if !applicable {
                     // NOT APPLICABLE — there is no option to validate (an explicit, honest
                     // "this concern doesn't apply here" answer names no option at all, and the
                     // evidence-corrected case's `raw_id`/`raw_evidence`, if any, are moot: the
@@ -2309,6 +2449,9 @@ pub fn parse_alternative_recommendations(
                         operator_chosen: false,
                         evidence,
                         applicable,
+                        no_convention: false,
+                        observed_options: Vec::new(),
+                        assessed_sites: None,
                     }
                 } else if !raw_id.is_empty() && real_ids.contains(raw_id.as_str()) {
                     RuleRecommendation {
@@ -2319,6 +2462,9 @@ pub fn parse_alternative_recommendations(
                         operator_chosen: false,
                         evidence,
                         applicable,
+                        no_convention: false,
+                        observed_options: Vec::new(),
+                        assessed_sites,
                     }
                 } else if raw_id.is_empty() {
                     RuleRecommendation {
@@ -2331,6 +2477,9 @@ pub fn parse_alternative_recommendations(
                         operator_chosen: false,
                         evidence,
                         applicable,
+                        no_convention: false,
+                        observed_options: Vec::new(),
+                        assessed_sites,
                     }
                 } else {
                     RuleRecommendation {
@@ -2345,8 +2494,28 @@ pub fn parse_alternative_recommendations(
                         operator_chosen: false,
                         evidence,
                         applicable,
+                        no_convention: false,
+                        observed_options: Vec::new(),
+                        assessed_sites,
                     }
+                };
+                // Pass-1 W3 (A5.3): the model volunteered "no convention" where the outcome
+                // is not available (not a pure decision rule / no backing at all). The claim
+                // is CORRECTED, visibly: the rule keeps being judged against an option
+                // exactly as before, and the entry is flagged so the UI can show the model's
+                // answer was overridden rather than silently re-interpreted.
+                let mut rec = rec;
+                if refused_no_convention {
+                    rec.hallucinated = true;
+                    rec.recommendation_reasoning = format!(
+                        "The model answered \"no convention adopted\" for a rule where that \
+                         outcome is not available (only a pure decision-kind rule with an \
+                         observed-usage breakdown or evidence can make that claim); judging \
+                         against an option as usual instead. Model reasoning was: {}",
+                        rec.recommendation_reasoning
+                    );
                 }
+                rec
             }
             None => RuleRecommendation {
                 rule_id: a.rule_id.clone(),
@@ -2360,6 +2529,9 @@ pub fn parse_alternative_recommendations(
                 // concern is inapplicable. Fail open (keep checking) exactly as before P7.
                 evidence: None,
                 applicable: true,
+                no_convention: false,
+                observed_options: Vec::new(),
+                assessed_sites: None,
             },
         };
         out.push(rec);
@@ -5546,6 +5718,11 @@ async fn run_routed_passes(
     concurrency: usize,
     batch_size: usize,
     meter: Option<&UsageMeter>,
+    // Pass-1 W3 (A5.6, `NotAssessed`): every (rule_id, note) whose routing group matched ZERO
+    // files this scan — the rule was ARMED but nothing was ever judged against it. Collected
+    // for the caller (`audit_repo`) to synthesize one honest `not_assessed` row per rule,
+    // rather than leaving "never evaluated" indistinguishable from "assessed and clean".
+    skipped_rules: &mut Vec<(String, String)>,
 ) -> (
     Vec<Finding>,
     Vec<ProposedRule>,
@@ -5662,7 +5839,17 @@ async fn run_routed_passes(
             .collect();
 
         if group_files.is_empty() {
-            // No files match this language group in this repo — nothing to audit.
+            // No files match this language group in this repo — nothing was audited for these
+            // rules. W3: record each armed rule so the caller emits a `not_assessed` honesty
+            // row (A5.6) instead of silently skipping.
+            let note = match &group.scope {
+                Scope::Language(lang) => {
+                    format!("no {lang} files matched this scan's file set")
+                }
+                Scope::All => "no files matched this scan's file set".to_string(),
+            };
+            skipped_rules
+                .extend(group.rules.iter().map(|(id, _)| (id.clone(), note.clone())));
             continue;
         }
 
@@ -5838,8 +6025,280 @@ fn apply_alternative_decision(
         ),
         located,
         evaluated_option_id: Some(option.id.clone()),
+        // A5.6: the repo was judged to follow the rule's own named degenerate form — an
+        // objective fault (the owner's Defect definition names this exact path), never a
+        // consistency deviation.
+        kind: Some(camerata_api_types::audit::FindingKind::Defect),
         ..Finding::default()
     })
+}
+
+/// Pass-1 W3 (A5.6/A5.2): reclassify every finding judged under a multi-option rule's
+/// DECIDED, non-`violates` option as a [`FindingKind::Deviation`] — a consistency violation
+/// against the convention the codebase was judged to follow — carrying the owner's canonical
+/// sentence as structure: numerator (deviating sites), optional denominator (the model's
+/// structured `sites_total`, display honesty only), and the observed convention's AUTHORED
+/// option identity.
+///
+/// - The NUMERATOR is computed structurally right here (never model-counted): every surviving
+///   row keyed to the rule counts one site, plus every absorbed merge site
+///   (`Finding::also_locations`) that was originally flagged under the rule. A same-location
+///   demotion into another row's `also_matches` is deliberately NOT counted (it has no site
+///   record of its own) — the count can under-tell, never over-tell.
+/// - The DENOMINATOR is `rec.assessed_sites` only when it is at least the numerator we
+///   actually counted; a model count smaller than reality is dropped to `None` rather than
+///   rendered as a nonsense "3 of 2 sites".
+/// - A rule whose decided option is `violates` is SKIPPED: its rows are defects (A5.4), not
+///   consistency deviations. A `no_convention`/not-applicable recommendation is skipped too
+///   (those rules have no decided convention to deviate from; their rows were hard-filtered).
+///
+/// Severity note (A5.2): this function does NOT touch severity. The deviation severity cap
+/// (default `medium`, per-rule `deviation_ceiling` escape hatch) is applied at the export
+/// choke-points (`report_export::clamp_deviation_severity`), the same layer the E2
+/// `max_severity` clamp already lives at, so every artifact agrees.
+pub(crate) fn assign_deviation_kinds(
+    findings: &mut [Finding],
+    recommendations: &[RuleRecommendation],
+    alternatives: &[RuleAlternatives],
+) {
+    use camerata_api_types::audit::{DeviationKind, FindingKind};
+    for rec in recommendations {
+        if !rec.applicable || rec.no_convention {
+            continue;
+        }
+        let Some(alt) = alternatives
+            .iter()
+            .find(|a| a.rule_id.eq_ignore_ascii_case(&rec.rule_id))
+        else {
+            continue;
+        };
+        let Some(opt) = alt
+            .options
+            .iter()
+            .find(|o| o.id == rec.recommended_option_id)
+        else {
+            continue;
+        };
+        if opt.violates {
+            // A5.4: the repo follows the rule's own named defect — every row under this rule
+            // is (and stays) a Defect, never a consistency deviation.
+            continue;
+        }
+        let deviating_sites: usize = findings
+            .iter()
+            .map(|f| {
+                let own = usize::from(f.rule_id.eq_ignore_ascii_case(&rec.rule_id));
+                let absorbed = f
+                    .also_locations
+                    .iter()
+                    .filter(|l| l.rule_id.eq_ignore_ascii_case(&rec.rule_id))
+                    .count();
+                own + absorbed
+            })
+            .sum();
+        if deviating_sites == 0 {
+            continue;
+        }
+        let assessed_sites = rec.assessed_sites.filter(|total| *total >= deviating_sites);
+        for f in findings
+            .iter_mut()
+            .filter(|f| f.rule_id.eq_ignore_ascii_case(&rec.rule_id))
+        {
+            f.kind = Some(FindingKind::Deviation(DeviationKind {
+                deviating_sites,
+                assessed_sites,
+                convention_option_id: Some(opt.id.clone()),
+                convention_label: opt.label.clone(),
+            }));
+        }
+    }
+}
+
+/// Pass-1 W3 (A5.5): one [`FindingKind::ConventionObserved`] row per multi-option rule the
+/// scan decided a genuine (non-`violates`) option for and found ZERO trace of a violation
+/// under — the codebase consistently follows the convention. This set SHIPS in the product:
+/// the audit derives the decisions, governance later enforces them.
+///
+/// "Zero trace" is deliberately the BROAD check: no surviving row keyed to the rule, no row
+/// listing it in `also_matches` (a same-location demotion), and no absorbed merge site
+/// (`also_locations`) originally flagged under it — a convention is only claimed "observed
+/// with zero violations" when literally nothing in the final row set evidences one.
+///
+/// Informational by construction: severity `info`, routed to the informational bucket by the
+/// existing severity machinery; `located` only when the recommendation carried a real
+/// evidence citation (always true for a model-sourced recommendation; an operator-forced
+/// pick carries none by design).
+pub(crate) fn conventions_observed_findings(
+    repo: &str,
+    findings: &[Finding],
+    recommendations: &[RuleRecommendation],
+    alternatives: &[RuleAlternatives],
+) -> Vec<Finding> {
+    use camerata_api_types::audit::{ConventionObservedKind, FindingKind};
+    let mut out = Vec::new();
+    for rec in recommendations {
+        if !rec.applicable || rec.no_convention {
+            continue;
+        }
+        let Some(alt) = alternatives
+            .iter()
+            .find(|a| a.rule_id.eq_ignore_ascii_case(&rec.rule_id))
+        else {
+            continue;
+        };
+        let Some(opt) = alt
+            .options
+            .iter()
+            .find(|o| o.id == rec.recommended_option_id)
+        else {
+            continue;
+        };
+        if opt.violates {
+            continue;
+        }
+        let any_trace = findings.iter().any(|f| {
+            f.rule_id.eq_ignore_ascii_case(&rec.rule_id)
+                || f.also_matches
+                    .iter()
+                    .any(|m| m.eq_ignore_ascii_case(&rec.rule_id))
+                || f.also_locations
+                    .iter()
+                    .any(|l| l.rule_id.eq_ignore_ascii_case(&rec.rule_id))
+        });
+        if any_trace {
+            continue;
+        }
+        let (path, line, located) = match rec.evidence.as_deref() {
+            Some(ev) if !ev.trim().is_empty() => {
+                let (p, l) = crate::report_export::parse_evidence_citation(ev);
+                (p, l, true)
+            }
+            _ => (String::new(), 0, false),
+        };
+        let snippet: String = rec
+            .evidence
+            .clone()
+            .unwrap_or_else(|| opt.label.clone())
+            .chars()
+            .take(200)
+            .collect();
+        out.push(Finding {
+            repo: repo.to_string(),
+            path,
+            line,
+            rule_id: rec.rule_id.clone(),
+            severity: "info".to_string(),
+            snippet,
+            detail: format!(
+                "The codebase consistently follows \"{}\" for {} — zero violations were \
+                 observed this scan. Reported so the convention can be adopted as an explicit \
+                 decision and enforced going forward. {}",
+                opt.label, rec.rule_id, rec.recommendation_reasoning
+            ),
+            located,
+            evaluated_option_id: Some(opt.id.clone()),
+            kind: Some(FindingKind::ConventionObserved(ConventionObservedKind {
+                convention_option_id: opt.id.clone(),
+                convention_label: opt.label.clone(),
+            })),
+            ..Finding::default()
+        });
+    }
+    out
+}
+
+/// Pass-1 W3 (A5.3): exactly ONE [`FindingKind::NoConvention`] informational row per rule
+/// whose recommendation says "no convention adopted" — NEVER N violations. The one-row
+/// guarantee is structural, in three layers:
+/// 1. the rule was dropped from the directive set before any violation pass ran
+///    (`audit_repo`'s recommendation loop), so no chunk is ever asked about it;
+/// 2. the post-calibration hard filter dropped any finding the model free-associated under
+///    it anyway (`no_convention_rule_filtered`);
+/// 3. this function keys on the per-rule recommendation record and dedupes by rule id, so N
+///    rows for one rule cannot be synthesized even from a malformed recommendations vec.
+pub(crate) fn no_convention_findings(
+    repo: &str,
+    recommendations: &[RuleRecommendation],
+) -> Vec<Finding> {
+    use camerata_api_types::audit::{FindingKind, NoConventionKind};
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for rec in recommendations {
+        if !rec.no_convention || !rec.applicable {
+            continue;
+        }
+        if !seen.insert(rec.rule_id.to_ascii_uppercase()) {
+            continue;
+        }
+        let split: String = rec
+            .observed_options
+            .iter()
+            .map(|o| match o.sites {
+                Some(n) => format!("{} ({} site{})", o.label, n, if n == 1 { "" } else { "s" }),
+                None => o.label.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(" / ");
+        out.push(Finding {
+            repo: repo.to_string(),
+            path: String::new(),
+            line: 0,
+            rule_id: rec.rule_id.clone(),
+            severity: "info".to_string(),
+            snippet: if split.is_empty() {
+                "no convention adopted".to_string()
+            } else {
+                split
+            },
+            detail: format!(
+                "No convention has been adopted for {}: the codebase is inconsistent with no \
+                 clear majority among the rule's alternatives. One informational row is \
+                 reported instead of per-site violations — adopting one option is the \
+                 decision to make; future drift then becomes an enforceable deviation. {}",
+                rec.rule_id, rec.recommendation_reasoning
+            ),
+            located: false,
+            kind: Some(FindingKind::NoConvention(NoConventionKind {
+                observed_options: rec.observed_options.clone(),
+            })),
+            ..Finding::default()
+        });
+    }
+    out
+}
+
+/// Pass-1 W3 (A5.6): one [`FindingKind::NotAssessed`] honesty row per rule that was ARMED
+/// for this scan but never evaluated because its routing group matched zero files (see
+/// `run_routed_passes`'s `skipped_rules` out-param). Distinguishable, by structured kind,
+/// from "assessed and clean" — the exact distinction the owner's taxonomy demands.
+pub(crate) fn not_assessed_findings(repo: &str, skipped: &[(String, String)]) -> Vec<Finding> {
+    use camerata_api_types::audit::{FindingKind, NotAssessedKind, NotAssessedReason};
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for (rule_id, note) in skipped {
+        if !seen.insert(rule_id.to_ascii_uppercase()) {
+            continue;
+        }
+        out.push(Finding {
+            repo: repo.to_string(),
+            path: String::new(),
+            line: 0,
+            rule_id: rule_id.clone(),
+            severity: "info".to_string(),
+            snippet: note.clone(),
+            detail: format!(
+                "{rule_id} was armed for this scan but could not be evaluated: {note}. \
+                 Reported as not-assessed rather than silently reading as clean."
+            ),
+            located: false,
+            kind: Some(FindingKind::NotAssessed(NotAssessedKind {
+                reason: NotAssessedReason::NoFilesMatched,
+                reason_detail: note.clone(),
+            })),
+            ..Finding::default()
+        });
+    }
+    out
 }
 
 /// The Batch execution path ([`run_passes_batch`]) does not yet apply per-rule routing — it
@@ -5982,6 +6441,11 @@ pub async fn audit_repo(
                 // decided the rule applies (that's what forcing a choice for it means).
                 evidence: None,
                 applicable: true,
+                // An operator's forced pick IS the convention decision — never no-convention,
+                // and no model counting happened on this path.
+                no_convention: false,
+                observed_options: Vec::new(),
+                assessed_sites: None,
             });
             if let Some(opt) = a.options.iter().find(|o| o.id == final_id) {
                 if let Some(f) = apply_alternative_decision(
@@ -6028,6 +6492,20 @@ pub async fn audit_repo(
                                 .retain(|(id, _)| !id.eq_ignore_ascii_case(&a.rule_id));
                             continue;
                         }
+                        if rec.no_convention {
+                            // Pass-1 W3 (A5.3): no convention adopted — the codebase is
+                            // inconsistent with no clear majority, so judging per-site
+                            // violations against ANY pick would fabricate N violations out of
+                            // an unmade decision. Sever the per-site path structurally: the
+                            // rule leaves the directive set (so no chunk pass ever asks about
+                            // it), the post-calibration hard filter below drops any stray
+                            // finding the model free-associates under it anyway, and exactly
+                            // ONE informational `no_convention` row is synthesized from this
+                            // recommendation (see `no_convention_findings`).
+                            effective_selected
+                                .retain(|(id, _)| !id.eq_ignore_ascii_case(&a.rule_id));
+                            continue;
+                        }
                         if let Some(opt) =
                             a.options.iter().find(|o| o.id == rec.recommended_option_id)
                         {
@@ -6064,6 +6542,12 @@ pub async fn audit_repo(
     // rule-batches × file-chunks run concurrently; Batch = one Anthropic Message Batch at
     // 50% discount, reassembled by custom_id.
     let (concurrency, batch_size) = mode.tuning();
+
+    // Pass-1 W3 (A5.6): rules whose routing group matched zero files — see
+    // `run_routed_passes`'s `skipped_rules` doc comment. The Batch execution path applies no
+    // per-rule routing yet (every rule runs against every file), so it can never skip a rule
+    // this way and contributes nothing here — a documented asymmetry, not a gap.
+    let mut skipped_rules: Vec<(String, String)> = Vec::new();
 
     // ── Rule-routing plan ───────────────────────────────────────────────────────────
     // Group `effective_selected` rules by scope so each language group only audits its own
@@ -6142,6 +6626,7 @@ pub async fn audit_repo(
             concurrency,
             batch_size,
             meter,
+            &mut skipped_rules,
         )
         .await
     };
@@ -6315,6 +6800,8 @@ pub async fn audit_repo(
     // guarantee — it also catches the rare case where a model free-associates a violation
     // under that rule id anyway (the prompt's "flag any other genuine issues you find"
     // catch-all), whether cited under the bare adopted id or the `AI-` invented-name prefix.
+    let mut dropped_not_applicable = 0usize;
+    let mut dropped_no_convention = 0usize;
     if !recommendations.is_empty() {
         let not_applicable: std::collections::HashSet<String> = recommendations
             .iter()
@@ -6322,23 +6809,51 @@ pub async fn audit_repo(
             .map(|r| r.rule_id.to_ascii_uppercase())
             .collect();
         if !not_applicable.is_empty() {
+            let before = verified.len();
             verified.retain(|f| {
                 let bare = f.rule_id.trim_start_matches("AI-").to_ascii_uppercase();
                 !not_applicable.contains(&bare)
             });
+            dropped_not_applicable = before.saturating_sub(verified.len());
+        }
+        // Pass-1 W3 (A5.3): the no-convention twin of the P7 filter above, with its own
+        // accounting label. Dropping the rule from `effective_selected` upstream stops the
+        // prompts from asking about it; THIS is the structural guarantee that no stray
+        // free-associated finding under a no-convention rule can ever ship as a violation —
+        // exactly ONE informational row (synthesized below, AFTER this filter) represents
+        // the rule instead.
+        let no_convention: std::collections::HashSet<String> = recommendations
+            .iter()
+            .filter(|r| r.no_convention)
+            .map(|r| r.rule_id.to_ascii_uppercase())
+            .collect();
+        if !no_convention.is_empty() {
+            let before = verified.len();
+            verified.retain(|f| {
+                let bare = f.rule_id.trim_start_matches("AI-").to_ascii_uppercase();
+                !no_convention.contains(&bare)
+            });
+            dropped_no_convention = before.saturating_sub(verified.len());
         }
     }
     // W1: calibration itself never drops a row (see this block's own doc comment above); the
-    // ONLY row-count reduction between `pre_calibration_len` and here is the P7
-    // not-applicable filter just above, so that is the one explicit disposition this stage
-    // accounts for.
+    // ONLY row-count reductions between `pre_calibration_len` and here are the P7
+    // not-applicable filter and the A5.3 no-convention filter just above, so those are the
+    // explicit dispositions this stage accounts for.
     {
         let rows_out = verified.len();
         let mut acc = crate::scan_ledger::StageAccounting::default();
-        let dropped = pre_calibration_len.saturating_sub(rows_out);
-        if dropped > 0 {
-            acc.other
-                .push(("not_applicable_rule_filtered".to_string(), dropped));
+        if dropped_not_applicable > 0 {
+            acc.other.push((
+                "not_applicable_rule_filtered".to_string(),
+                dropped_not_applicable,
+            ));
+        }
+        if dropped_no_convention > 0 {
+            acc.other.push((
+                "no_convention_rule_filtered".to_string(),
+                dropped_no_convention,
+            ));
         }
         stage_samples.push(crate::scan_ledger::StageSample {
             stage: "ai-calibration".to_string(),
@@ -6377,6 +6892,10 @@ pub async fn audit_repo(
     if !recommendations.is_empty() {
         let by_rule: std::collections::HashMap<&str, &str> = recommendations
             .iter()
+            // W3 (A5.3): a no-convention rule was judged against NO option — its
+            // `recommended_option_id` is a shape-filling fallback, never an evaluation
+            // target, so it must not blanket-tag anything.
+            .filter(|r| !r.no_convention)
             .map(|r| (r.rule_id.as_str(), r.recommended_option_id.as_str()))
             .collect();
         for f in verified.iter_mut() {
@@ -6384,6 +6903,43 @@ pub async fn audit_repo(
                 f.evaluated_option_id = Some((*id).to_string());
             }
         }
+    }
+    // ── Pass-1 W3 (A5.6): kind assignment + the three informational emissions ─────────
+    // Runs strictly AFTER the hard filters and the violates-option splice, so (a) every row
+    // that will ship is present to be classified, and (b) the zero-violation check behind
+    // `convention_observed` sees the final row set. Each synthesized emission is recorded as
+    // its own ADDITION-side ledger stage — the exact precedent the A5.4 violates-option
+    // splice set: a row appended after the set would otherwise be final must disclose
+    // itself, never silently grow the finding count.
+    assign_deviation_kinds(&mut verified, &recommendations, alternatives);
+    for (stage, rows) in [
+        (
+            "convention-observed-emission",
+            conventions_observed_findings(repo, &verified, &recommendations, alternatives),
+        ),
+        (
+            "no-convention-emission",
+            no_convention_findings(repo, &recommendations),
+        ),
+        (
+            "not-assessed-emission",
+            not_assessed_findings(repo, &skipped_rules),
+        ),
+    ] {
+        if rows.is_empty() {
+            continue;
+        }
+        let rows_in = verified.len();
+        verified.extend(rows);
+        let rows_out = verified.len();
+        let mut acc = crate::scan_ledger::StageAccounting::default();
+        acc.push_added(stage, rows_out - rows_in);
+        stage_samples.push(crate::scan_ledger::StageSample {
+            stage: stage.to_string(),
+            rows_in,
+            rows_out,
+            accounting: acc,
+        });
     }
     Ok((
         verified,
@@ -11302,6 +11858,9 @@ mod tests {
                 },
             ],
             selected_option_id: selected.map(str::to_string),
+            // Fixtures default to a pure decision rule — the kind under which every
+            // alternatives-pass outcome (including no-convention) is reachable.
+            kind: Some(camerata_rules::RuleKind::Decision),
         }
     }
 
@@ -11979,6 +12538,509 @@ mod tests {
                 .contains(&"MULTI-RULE-1".to_string()),
             "a rule whose selected option is marked violates must NEVER be reported healthy"
         );
+    }
+
+
+    // ---- Pass-1 W3: the five-kind taxonomy at emission (A5.2/A5.3/A5.5/A5.6) -------------
+
+    /// Minimal deviation-shaped finding fixture: an AI-tier row under `rule`, as it looks
+    /// right before `assign_deviation_kinds` runs (kind = Defect, exactly what
+    /// `parse_ai_findings` stamps at parse time).
+    fn deviation_fixture(rule: &str, path: &str, line: usize) -> Finding {
+        Finding {
+            repo: "me/api".to_string(),
+            path: path.to_string(),
+            line,
+            rule_id: rule.to_string(),
+            severity: "high".to_string(),
+            snippet: "the odd one out".to_string(),
+            detail: "does not follow the majority pattern".to_string(),
+            kind: Some(camerata_api_types::audit::FindingKind::Defect),
+            ..Finding::default()
+        }
+    }
+
+    fn deviation_rec(rule: &str, option: &str, assessed_sites: Option<usize>) -> RuleRecommendation {
+        RuleRecommendation {
+            rule_id: rule.to_string(),
+            recommended_option_id: option.to_string(),
+            recommendation_reasoning: "the repo does it the A way nearly everywhere".to_string(),
+            evidence: Some("src/a.rs:1 — the A pattern".to_string()),
+            applicable: true,
+            assessed_sites,
+            ..Default::default()
+        }
+    }
+
+    /// req A5.6: a Deviation row carries the owner's canonical sentence as STRUCTURE —
+    /// numerator (deviating sites, computed from rows + absorbed merge sites), denominator
+    /// (the recommendation's structured sites_total), and the observed majority convention
+    /// as AUTHORED option identity. Verified failing before `assign_deviation_kinds` existed:
+    /// every AI row stayed `Defect` (the parse-time stamp), so the kind assertion below had
+    /// nothing to match.
+    #[test]
+    fn req_a5_6_deviation_carries_numerator_and_denominator() {
+        let mut findings = vec![
+            deviation_fixture("MULTI-RULE-1", "src/a.rs", 10),
+            {
+                // A merged row that ABSORBED one more site under the same rule — the
+                // numerator must count it (2 rows + 1 absorbed = 3 deviating sites).
+                let mut f = deviation_fixture("MULTI-RULE-1", "src/b.rs", 20);
+                f.also_locations.push(MergedLocation {
+                    repo: "me/api".to_string(),
+                    path: "src/c.rs".to_string(),
+                    line: 30,
+                    rule_id: "MULTI-RULE-1".to_string(),
+                    snippet: "third site".to_string(),
+                    consequence: false,
+                });
+                f
+            },
+            // An unrelated rule's row must be untouched.
+            deviation_fixture("OTHER-RULE-9", "src/z.rs", 5),
+        ];
+        let recs = vec![deviation_rec("MULTI-RULE-1", "opt-a", Some(47))];
+        let alts = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
+        assign_deviation_kinds(&mut findings, &recs, &alts);
+
+        use camerata_api_types::audit::FindingKind;
+        for f in findings.iter().filter(|f| f.rule_id == "MULTI-RULE-1") {
+            match &f.kind {
+                Some(FindingKind::Deviation(d)) => {
+                    assert_eq!(d.deviating_sites, 3, "2 rows + 1 absorbed site");
+                    assert_eq!(d.assessed_sites, Some(47));
+                    assert_eq!(d.convention_option_id.as_deref(), Some("opt-a"));
+                    assert_eq!(d.convention_label, "Option A", "AUTHORED label, never prose");
+                }
+                other => panic!("expected Deviation, got {other:?}"),
+            }
+        }
+        assert_eq!(
+            findings
+                .iter()
+                .find(|f| f.rule_id == "OTHER-RULE-9")
+                .unwrap()
+                .kind,
+            Some(FindingKind::Defect),
+            "a rule with no recommendation keeps its Defect kind"
+        );
+    }
+
+    /// req A5.2/A5.6 honesty: a model denominator SMALLER than the structurally-counted
+    /// numerator is dropped to None (render the numerator alone), never shipped as a
+    /// nonsense "3 of 2 sites". Verified failing before the `filter(total >= numerator)`
+    /// guard by removing it: assessed_sites came through as Some(1).
+    #[test]
+    fn req_a5_2_deviation_denominator_below_numerator_is_dropped_not_rendered() {
+        let mut findings = vec![
+            deviation_fixture("MULTI-RULE-1", "src/a.rs", 10),
+            deviation_fixture("MULTI-RULE-1", "src/b.rs", 20),
+        ];
+        let recs = vec![deviation_rec("MULTI-RULE-1", "opt-a", Some(1))];
+        let alts = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
+        assign_deviation_kinds(&mut findings, &recs, &alts);
+        match &findings[0].kind {
+            Some(camerata_api_types::audit::FindingKind::Deviation(d)) => {
+                assert_eq!(d.deviating_sites, 2);
+                assert_eq!(
+                    d.assessed_sites, None,
+                    "a denominator below the counted numerator must be dropped, not rendered"
+                );
+            }
+            other => panic!("expected Deviation, got {other:?}"),
+        }
+    }
+
+    /// req A5.4 × A5.6: rows under a rule whose DECIDED option is flagged `violates` are
+    /// defects — `assign_deviation_kinds` must never relabel them as consistency deviations.
+    #[test]
+    fn req_a5_6_violates_option_rows_stay_defect_never_deviation() {
+        let mut findings = vec![deviation_fixture("MULTI-RULE-1", "src/a.rs", 10)];
+        let recs = vec![deviation_rec("MULTI-RULE-1", "opt-b", Some(10))];
+        let alts = vec![two_option_alternatives_opt_b_violates(
+            "MULTI-RULE-1",
+            Some("opt-a"),
+        )];
+        assign_deviation_kinds(&mut findings, &recs, &alts);
+        assert_eq!(
+            findings[0].kind,
+            Some(camerata_api_types::audit::FindingKind::Defect),
+            "a violates-option decision marks the repo as following the rule's own named \
+             defect — its rows are Defects, never Deviations"
+        );
+    }
+
+    /// req A5.3: "no convention adopted" is ONE informational row per rule, enforced
+    /// structurally — even a malformed recommendations vec carrying TWO no-convention
+    /// entries for one rule yields exactly one row. Verified failing by removing the
+    /// per-rule dedup: two rows came out.
+    #[test]
+    fn req_a5_3_no_convention_findings_emit_exactly_one_row_per_rule() {
+        use camerata_api_types::audit::ObservedOptionUsage;
+        let mk = |sites: Option<usize>| RuleRecommendation {
+            rule_id: "MULTI-RULE-1".to_string(),
+            recommended_option_id: "opt-a".to_string(),
+            recommendation_reasoning: "used both ways with no majority".to_string(),
+            applicable: true,
+            no_convention: true,
+            observed_options: vec![
+                ObservedOptionUsage {
+                    option_id: "opt-a".to_string(),
+                    label: "Option A".to_string(),
+                    sites,
+                },
+                ObservedOptionUsage {
+                    option_id: "opt-b".to_string(),
+                    label: "Option B".to_string(),
+                    sites: Some(2),
+                },
+            ],
+            ..Default::default()
+        };
+        // Malformed on purpose: the same rule twice.
+        let rows = no_convention_findings("me/api", &[mk(Some(3)), mk(Some(9))]);
+        assert_eq!(rows.len(), 1, "ONE row per rule, never N");
+        let f = &rows[0];
+        assert_eq!(f.rule_id, "MULTI-RULE-1");
+        assert_eq!(f.severity, "info");
+        assert!(!f.located);
+        match &f.kind {
+            Some(camerata_api_types::audit::FindingKind::NoConvention(nc)) => {
+                assert_eq!(nc.observed_options.len(), 2);
+                assert_eq!(nc.observed_options[0].option_id, "opt-a");
+                assert_eq!(nc.observed_options[0].sites, Some(3));
+            }
+            other => panic!("expected NoConvention, got {other:?}"),
+        }
+    }
+
+    /// req A5.3 structural gate at PARSE time: the no-convention outcome is honored only for
+    /// a pure Decision-kind rule AND only when backed by a validated observed-usage
+    /// breakdown or real evidence; anything else is corrected (flagged `hallucinated`,
+    /// judged against an option exactly as before). Verified failing before the gate
+    /// existed: the raw claim would have been invisible (field unparsed) or, once parsed
+    /// naively, honored for every kind.
+    #[test]
+    fn req_a5_3_parse_refuses_no_convention_for_non_decision_or_unbacked_claims() {
+        // NOTE: the claim carries a real evidence citation — P7's evidence-gates-
+        // applicability check runs FIRST and downgrades ANY unevidenced `applicable: true`
+        // to not-applicable, no-convention claims included (case (c) below proves that).
+        let raw = r#"{"recommendations": [
+            {"rule_id": "MULTI-RULE-1", "applicable": true, "no_convention": true,
+             "evidence": "src/lib.rs:1 — both patterns in one file",
+             "observed_options": [{"option_id": "opt-a", "sites": 3},
+                                   {"option_id": "opt-b", "sites": 2},
+                                   {"option_id": "not-a-real-option", "sites": 9}],
+             "recommendation_reasoning": "even split"}
+        ]}"#;
+
+        // (a) Decision-kind + validated breakdown -> honored; the invented option id is
+        // dropped from the breakdown, never carried.
+        let decision = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
+        let recs = parse_alternative_recommendations(raw, &decision);
+        assert_eq!(recs.len(), 1);
+        assert!(recs[0].no_convention, "decision-kind + breakdown must be honored");
+        assert!(!recs[0].hallucinated);
+        assert_eq!(
+            recs[0]
+                .observed_options
+                .iter()
+                .map(|o| o.option_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["opt-a", "opt-b"],
+            "an observed option id must be one of the rule's REAL options"
+        );
+        assert_eq!(recs[0].observed_options[0].label, "Option A", "authored label");
+
+        // (b) The SAME answer for a default_with_exceptions rule -> refused, corrected.
+        let mut dwe = two_option_alternatives("MULTI-RULE-1", Some("opt-a"));
+        dwe.kind = Some(camerata_rules::RuleKind::DefaultWithExceptions);
+        let recs = parse_alternative_recommendations(raw, &[dwe]);
+        assert!(
+            !recs[0].no_convention,
+            "a default_with_exceptions rule has an externally-correct default — the \
+             no-convention escape must never be honored for it"
+        );
+        assert!(recs[0].hallucinated, "the correction must be visible, never silent");
+
+        // (c) Decision-kind but NOTHING backing the claim (no breakdown, no evidence) ->
+        // refused: a bare \"no convention\" can never silently drop a rule's coverage.
+        let raw_unbacked = r#"{"recommendations": [
+            {"rule_id": "MULTI-RULE-1", "applicable": true, "no_convention": true,
+             "recommendation_reasoning": "trust me"}
+        ]}"#;
+        let decision = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
+        let recs = parse_alternative_recommendations(raw_unbacked, &decision);
+        assert!(!recs[0].no_convention);
+        assert!(recs[0].hallucinated);
+    }
+
+    /// req A5.2/A5.6: `sites_total` is read as a STRUCTURED field off the recommendation
+    /// JSON (the deviation sentence's denominator) — zero/absent/negative-shaped values are
+    /// None, never fabricated.
+    #[test]
+    fn req_a5_2_parse_reads_sites_total_as_structured_denominator() {
+        let alts = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
+        let raw = r#"{"recommendations": [
+            {"rule_id": "MULTI-RULE-1", "applicable": true, "recommended_option_id": "opt-a",
+             "evidence": "src/a.rs:1 — the A pattern", "sites_total": 47,
+             "recommendation_reasoning": "A everywhere"}
+        ]}"#;
+        let recs = parse_alternative_recommendations(raw, &alts);
+        assert_eq!(recs[0].assessed_sites, Some(47));
+
+        let raw_zero = r#"{"recommendations": [
+            {"rule_id": "MULTI-RULE-1", "applicable": true, "recommended_option_id": "opt-a",
+             "evidence": "src/a.rs:1 — the A pattern", "sites_total": 0,
+             "recommendation_reasoning": "A everywhere"}
+        ]}"#;
+        let recs = parse_alternative_recommendations(raw_zero, &alts);
+        assert_eq!(recs[0].assessed_sites, None, "a zero count is no count");
+    }
+
+    /// req A5.5: a decided, genuine (non-violates) convention with ZERO trace of a
+    /// violation ships as ONE informational convention_observed row — and any trace at all
+    /// (an own row, an also_matches demotion, or an absorbed merge site) suppresses it.
+    /// Verified failing before `conventions_observed_findings` existed: zero-violation
+    /// rules produced no row of any kind (the A5.5 ship-the-convention-set requirement had
+    /// no carrier).
+    #[test]
+    fn req_a5_5_convention_observed_emitted_only_when_zero_trace() {
+        use camerata_api_types::audit::FindingKind;
+        let recs = vec![deviation_rec("MULTI-RULE-1", "opt-a", Some(12))];
+        let alts = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
+
+        // Zero trace -> exactly one informational row carrying the authored option.
+        let rows = conventions_observed_findings("me/api", &[], &recs, &alts);
+        assert_eq!(rows.len(), 1);
+        let f = &rows[0];
+        assert_eq!(f.severity, "info");
+        assert_eq!(f.rule_id, "MULTI-RULE-1");
+        assert_eq!((f.path.as_str(), f.line, f.located), ("src/a.rs", 1, true));
+        match &f.kind {
+            Some(FindingKind::ConventionObserved(c)) => {
+                assert_eq!(c.convention_option_id, "opt-a");
+                assert_eq!(c.convention_label, "Option A");
+            }
+            other => panic!("expected ConventionObserved, got {other:?}"),
+        }
+
+        // An own row under the rule -> suppressed.
+        let own = vec![deviation_fixture("MULTI-RULE-1", "src/x.rs", 2)];
+        assert!(conventions_observed_findings("me/api", &own, &recs, &alts).is_empty());
+
+        // A same-location demotion (also_matches) -> suppressed too.
+        let mut other_rule = deviation_fixture("OTHER-RULE-9", "src/x.rs", 2);
+        other_rule.also_matches.push("MULTI-RULE-1".to_string());
+        assert!(
+            conventions_observed_findings("me/api", &[other_rule], &recs, &alts).is_empty(),
+            "a violation absorbed into another row is still a violation — never claim \
+             zero-violation consistency over it"
+        );
+    }
+
+    /// req A5.3 END-TO-END through `audit_repo`: a no-convention outcome yields exactly ONE
+    /// informational row for the rule — even when the model ALSO free-associates per-site
+    /// findings under that rule in the violation passes. Verified failing before the fix by
+    /// disabling the honored-no-convention branch in `parse_alternative_recommendations`
+    /// (the pre-fix behavior): the canned per-chunk findings shipped as 2 violation rows.
+    #[tokio::test]
+    async fn req_a5_3_audit_repo_no_convention_yields_one_informational_row_never_n() {
+        let canned = r#"{
+            "recommendations": [
+                {"rule_id": "MULTI-RULE-1", "applicable": true, "no_convention": true,
+                 "observed_options": [{"option_id": "opt-a", "sites": 3},
+                                       {"option_id": "opt-b", "sites": 2}],
+                 "evidence": "src/lib.rs:1 — both patterns in one file",
+                 "recommendation_reasoning": "three sites do A, two do B — no majority"}
+            ],
+            "findings": [
+                {"rule": "MULTI-RULE-1", "severity": "high", "title": "does it the B way",
+                 "path": "src/lib.rs", "line": 1, "code": "fn handler() { b_way(); }",
+                 "detail": "stray per-site claim the hard filter must drop"},
+                {"rule": "MULTI-RULE-1", "severity": "high", "title": "does it the A way",
+                 "path": "src/other.rs", "line": 2, "code": "fn other() { a_way(); }",
+                 "detail": "second stray per-site claim"}
+            ],
+            "proposed_rules": []
+        }"#;
+        let llm = StubCompleter {
+            text: canned.to_string(),
+        };
+        let files = vec![
+            (
+                "src/lib.rs".to_string(),
+                "fn handler() { b_way(); }\n".to_string(),
+            ),
+            (
+                "src/other.rs".to_string(),
+                "fn other() { a_way(); }\n".to_string(),
+            ),
+        ];
+        let selected = vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
+        let alternatives = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
+        let (findings, _proposed, recs, _failed, stage_samples) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            &alternatives,
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("stub completer never errors");
+
+        assert!(recs.iter().any(|r| r.no_convention));
+        let under_rule: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.rule_id == "MULTI-RULE-1")
+            .collect();
+        assert_eq!(
+            under_rule.len(),
+            1,
+            "ONE informational row, never N violations: {under_rule:?}"
+        );
+        let f = under_rule[0];
+        assert_eq!(f.severity, "info");
+        match &f.kind {
+            Some(camerata_api_types::audit::FindingKind::NoConvention(nc)) => {
+                assert_eq!(nc.observed_options.len(), 2);
+            }
+            other => panic!("expected NoConvention, got {other:?}"),
+        }
+        // The strays were dropped VISIBLY (accounted), and the one row was added VISIBLY.
+        assert!(stage_samples.iter().any(|s| s.stage == "ai-calibration"
+            && s.accounting
+                .other
+                .iter()
+                .any(|(label, n)| label == "no_convention_rule_filtered" && *n == 2)));
+        assert!(stage_samples
+            .iter()
+            .any(|s| s.stage == "no-convention-emission"));
+    }
+
+    /// req A5.5 END-TO-END through `audit_repo`: a decided convention with zero violations
+    /// ships ONE convention_observed row (the derived decision set ships in the product).
+    /// Verified failing before the fix: the pre-W3 pipeline returned ZERO rows for this
+    /// exact input (nothing carried a zero-violation convention).
+    #[tokio::test]
+    async fn req_a5_5_audit_repo_ships_convention_observed_for_a_clean_decided_rule() {
+        let canned = r#"{
+            "recommendations": [
+                {"rule_id": "MULTI-RULE-1", "applicable": true,
+                 "recommended_option_id": "opt-a", "sites_total": 12,
+                 "evidence": "src/lib.rs:1 — the A pattern",
+                 "recommendation_reasoning": "A everywhere, consistently"}
+            ],
+            "findings": [],
+            "proposed_rules": []
+        }"#;
+        let llm = StubCompleter {
+            text: canned.to_string(),
+        };
+        let files = vec![(
+            "src/lib.rs".to_string(),
+            "fn handler() { a_way(); }\n".to_string(),
+        )];
+        let selected = vec![("MULTI-RULE-1".to_string(), "Do it the A way.".to_string())];
+        let alternatives = vec![two_option_alternatives("MULTI-RULE-1", Some("opt-a"))];
+        let (findings, _proposed, _recs, _failed, stage_samples) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            &alternatives,
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("stub completer never errors");
+
+        let rows: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.rule_id == "MULTI-RULE-1")
+            .collect();
+        assert_eq!(rows.len(), 1, "exactly one convention_observed row");
+        match &rows[0].kind {
+            Some(camerata_api_types::audit::FindingKind::ConventionObserved(c)) => {
+                assert_eq!(c.convention_option_id, "opt-a");
+            }
+            other => panic!("expected ConventionObserved, got {other:?}"),
+        }
+        assert!(stage_samples
+            .iter()
+            .any(|s| s.stage == "convention-observed-emission"));
+    }
+
+    /// req A5.6 END-TO-END through `audit_repo`: a rule ARMED for a language with no
+    /// matching files ships ONE not_assessed honesty row — never silently reads as clean.
+    /// Verified failing before the fix: the routing loop's `continue` skipped the group
+    /// with no trace, so this exact input returned zero findings.
+    #[tokio::test]
+    async fn req_a5_6_audit_repo_emits_not_assessed_for_armed_rule_with_no_matching_files() {
+        let llm = StubCompleter {
+            text: r#"{"findings": [], "proposed_rules": []}"#.to_string(),
+        };
+        // A RUST-scoped rule armed against a repo with only Python files.
+        let files = vec![("app.py".to_string(), "print('hello')\n".to_string())];
+        let selected = vec![(
+            "RUST-NO-UNWRAP-1".to_string(),
+            "Never unwrap in handlers.".to_string(),
+        )];
+        let (findings, _proposed, _recs, _failed, stage_samples) = audit_repo(
+            &llm,
+            "me/api",
+            &files,
+            &selected,
+            &[],
+            &std::collections::HashMap::new(),
+            None,
+            None,
+            ScanMode::Parallel,
+            false,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("stub completer never errors");
+
+        let rows: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.rule_id == "RUST-NO-UNWRAP-1")
+            .collect();
+        assert_eq!(rows.len(), 1, "one honesty row per armed-but-unevaluated rule");
+        let f = rows[0];
+        assert_eq!(f.severity, "info");
+        match &f.kind {
+            Some(camerata_api_types::audit::FindingKind::NotAssessed(na)) => {
+                assert_eq!(
+                    na.reason,
+                    camerata_api_types::audit::NotAssessedReason::NoFilesMatched
+                );
+                assert!(!na.reason_detail.is_empty());
+            }
+            other => panic!("expected NotAssessed, got {other:?}"),
+        }
+        assert!(stage_samples
+            .iter()
+            .any(|s| s.stage == "not-assessed-emission"));
     }
 
     // ---- W2: no-vanishing merge guarantee ------------------------------------------------

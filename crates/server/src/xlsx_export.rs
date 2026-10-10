@@ -1696,6 +1696,7 @@ mod tests {
                 operator_chosen: false,
                 evidence: Some("src/api/list_users.rs:42 — cursor already threaded".to_string()),
                 applicable: true,
+                ..Default::default()
             },
         );
         report.recommendations.insert(
@@ -1709,6 +1710,7 @@ mod tests {
                 operator_chosen: false,
                 evidence: None,
                 applicable: false,
+                ..Default::default()
             },
         );
         let bytes =

@@ -460,6 +460,9 @@ pub(crate) fn build_rule_alternatives<'a>(
             rule_id: upper,
             options,
             selected_option_id,
+            // A5.3: the corpus kind rides along so the alternatives pass can offer (and the
+            // parser honor) the no-convention outcome for pure decision rules only.
+            kind: rule.kind(),
         });
     }
     out

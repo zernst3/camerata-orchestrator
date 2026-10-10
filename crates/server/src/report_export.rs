@@ -12855,6 +12855,7 @@ mod export_invariants_gate {
                     operator_chosen: false,
                     evidence: Some(evidence.to_string()),
                     applicable: true,
+                    ..Default::default()
                 },
             );
             // Pass-1 W1 seal fix (exception (a) — a deliberate code/data-structure change this
@@ -12933,6 +12934,7 @@ mod export_invariants_gate {
                         .to_string(),
                 ),
                 applicable: true,
+                ..Default::default()
             },
         );
         // Pass-1 W1 seal fix (exception (a), same as the negative-case test above): the gate
@@ -13100,6 +13102,7 @@ mod export_invariants_gate {
                         .to_string(),
                 ),
                 applicable: true,
+                ..Default::default()
             },
         );
 
