@@ -891,19 +891,34 @@ impl Rule {
 
     /// Whether this rule is AUTO-RECOMMENDED in the onboarding scan PROPOSAL.
     ///
-    /// A rule is auto-recommended (pre-checked / pre-selected) iff it is
-    /// `Grounded` or `Verified` — i.e. it is backed by an authoritative source
-    /// that was machine-verified or human-confirmed. `Draft` and `NeedsRecheck`
-    /// rules are still *listed* in the proposal so the architect can review and
-    /// opt in, but they are NOT pre-checked because they carry unreduced AI risk.
+    /// A rule is auto-recommended (pre-checked / pre-selected) iff it is `Grounded`,
+    /// `Verified`, or `Policy`. `Draft` and `NeedsRecheck` rules are still *listed* in the
+    /// proposal so the architect can review and opt in, but they are NOT pre-checked —
+    /// `Draft` because it is unreviewed AI output carrying unreduced AI risk, `NeedsRecheck`
+    /// because its human confirmation is known-stale and wants re-confirming.
     ///
     /// The distinction matters for the UI: `is_auto_recommended = true` means the
     /// checkbox is ticked by default; `false` means the row is visible but the
-    /// checkbox is unchecked.
+    /// checkbox is unchecked. It also decides which rules an UNATTENDED scan runs at all
+    /// (`camerata_cli::inspect_cmd::curated_rule_selection` selects exactly the
+    /// auto-recommended set), which is why the set has to be right and not merely tidy.
+    ///
+    /// # Why `Policy` belongs here (Pass-1 W4, finding A8)
+    ///
+    /// [`Verification::Policy`] is a statement about PROVENANCE — "this rule encodes a
+    /// deliberate project decision and cites no external authority" — and nothing at all
+    /// about whether the rule is correct, checkable, or worth running. Excluding it from
+    /// auto-recommendation conflated the two and silently disarmed 17 shipped rules on every
+    /// repo, among them `SPIRIT-FILE-SIZE-1` (A8) and every `PROC-*` governance rule the
+    /// product is explicitly about. A rule that can never arm for ANY repo is a defect under
+    /// requirement H1 regardless of how honest its provenance label is, and
+    /// `rules_disarmed_by_verification` now fails the build on exactly that condition.
+    /// `is_grounded`/`is_shippable` deliberately still return `false` for `Policy`: those
+    /// answer the provenance question, and that answer has not changed.
     pub fn is_auto_recommended(&self) -> bool {
         matches!(
             self.verification,
-            Verification::Grounded | Verification::Verified
+            Verification::Grounded | Verification::Verified | Verification::Policy
         )
     }
 }
@@ -1352,6 +1367,36 @@ pub fn rules_missing_kind(set: &RuleSet) -> Vec<String> {
         .iter()
         .filter(|r| r.kind.is_none())
         .map(|r| r.id.0.clone())
+        .collect();
+    offenders.sort();
+    offenders
+}
+
+/// Every rule in `set` whose [`Verification`] value makes it UNSELECTABLE on every repo —
+/// i.e. `!Rule::is_auto_recommended()`, which is what an unattended scan's rule selection
+/// (`camerata_cli::inspect_cmd::curated_rule_selection`) filters on. Sorted for stable output.
+///
+/// This is the verification half of requirement H1 (Pass-1 W4,
+/// `docs/plans/2026-10-09_audit-findings-tracker.md`): "every rule must be CAPABLE of running.
+/// A rule that does not run because it is irrelevant to the scanned stack is CORRECT. A rule
+/// that could never run for ANY stack is a DEFECT." A `verification` value is a REPO-INDEPENDENT
+/// fact, so a rule disarmed by it is disarmed everywhere, forever — exactly the defect class
+/// H1 names, and exactly what shipped as findings A7 (`UI-UTC-DATES-1` omitted `verification`
+/// entirely, defaulted to [`Verification::Draft`], and had never armed on any repo — while
+/// being the only `ui` rule with a shipped deterministic detector) and A8
+/// (`SPIRIT-FILE-SIZE-1`, disarmed by `verification = "policy"`).
+///
+/// `req_h1_no_corpus_rule_is_disarmed_by_its_verification_value` asserts this is EMPTY for the
+/// real shipped corpus, so a rule authored (or edited) into an unarmable verification state
+/// fails the BUILD instead of quietly contributing nothing to every scan. Same build-time-gate
+/// philosophy as [`rules_missing_kind`]: the TOML-parse layer stays lenient, this layer
+/// enforces.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn rules_disarmed_by_verification(set: &RuleSet) -> Vec<String> {
+    let mut offenders: Vec<String> = set
+        .iter()
+        .filter(|r| !r.is_auto_recommended())
+        .map(|r| format!("{} ({})", r.id.0, r.verification().as_str()))
         .collect();
     offenders.sort();
     offenders
@@ -3817,6 +3862,72 @@ mod tests {
             suspicious.is_empty(),
             "a default_with_exceptions rule must have at least one `violates` option: {suspicious:?}"
         );
+    }
+
+    /// req_h1 (Pass-1 W4, `docs/plans/2026-10-09_audit-findings-tracker.md`): no rule in the
+    /// REAL shipped corpus may sit at a [`Verification`] value that makes it unselectable on
+    /// every repo. A `verification` value is repo-independent, so a rule disarmed by it is
+    /// disarmed EVERYWHERE — the exact "could never run for ANY stack" defect H1 names.
+    ///
+    /// FAILS BEFORE THE FIX: `rules_disarmed_by_verification` returned 21 ids — the 17
+    /// `verification = "policy"` rules (including `SPIRIT-FILE-SIZE-1`, finding A8) plus the 4
+    /// that omitted the field entirely and therefore defaulted to `draft`
+    /// (`UI-UTC-DATES-1` — finding A7 — `GO-HANDLER-SERVICE-REPOSITORY-1`,
+    /// `JAVASCRIPT-ANGULAR-SMART-PRESENTATIONAL-PATTERN-1`, `RUST-DIOXUS-1`). Verified by
+    /// running this test on unmodified HEAD before touching either `is_auto_recommended` or
+    /// the four TOMLs.
+    #[tokio::test]
+    async fn req_h1_no_corpus_rule_is_disarmed_by_its_verification_value() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return; // skip without the bundled corpus checked out
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let disarmed = rules_disarmed_by_verification(&set);
+        assert!(
+            disarmed.is_empty(),
+            "H1: every corpus rule must be CAPABLE of being selected; these are disarmed on \
+             every repo by their verification value alone: {disarmed:?}"
+        );
+    }
+
+    /// req_h1/req_a8: the positive-detection half of the gate above — a `draft` rule IS
+    /// reported by `rules_disarmed_by_verification`, and a `policy` rule is NOT (A8's fix:
+    /// `policy` is a provenance statement, never a disarm). Without this, the corpus-level
+    /// test could pass vacuously if `rules_disarmed_by_verification` were ever weakened to
+    /// return nothing.
+    #[test]
+    fn req_h1_disarmed_by_verification_detector_fires_on_draft_and_spares_policy() {
+        let mut set = RuleSet::default();
+        let mut draft = bare_rule("DRAFT-1", "rust");
+        draft.verification = Verification::Draft;
+        let mut policy = bare_rule("POLICY-1", "rust");
+        policy.verification = Verification::Policy;
+        let mut grounded = bare_rule("GROUNDED-1", "rust");
+        grounded.verification = Verification::Grounded;
+        set.push(draft);
+        set.push(policy);
+        set.push(grounded);
+        assert_eq!(
+            rules_disarmed_by_verification(&set),
+            vec!["DRAFT-1 (draft)".to_string()],
+            "only `draft` (and `needs_recheck`) disarm; `policy` and `grounded` must not"
+        );
+    }
+
+    /// req_a8: `Verification::Policy` is auto-recommended (so a policy rule can arm), while
+    /// still NOT being grounded/shippable — the two questions are deliberately separate, and
+    /// conflating them is what disarmed `SPIRIT-FILE-SIZE-1` and 16 other rules.
+    #[test]
+    fn req_a8_policy_is_auto_recommended_but_still_not_grounded() {
+        let mut r = bare_rule("POLICY-1", "universal");
+        r.verification = Verification::Policy;
+        assert!(
+            r.is_auto_recommended(),
+            "a policy rule must be selectable — provenance is not reliability"
+        );
+        assert!(!r.is_grounded(), "policy still cites no external authority");
+        assert!(!r.is_shippable(), "policy is still not at-least-grounded");
     }
 
     /// A synthetic `default_with_exceptions` rule with options but no `violates` flag anywhere

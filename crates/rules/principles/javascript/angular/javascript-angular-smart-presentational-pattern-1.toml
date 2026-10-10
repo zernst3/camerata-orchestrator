@@ -6,6 +6,7 @@ layer = "framework"
 enforcement = "structured"
 kind = "decision"
 default = true
+verification = "policy"
 
 [decision]
 question = "What position does the project take on: Components follow the smart (container) vs. presentational pattern?"

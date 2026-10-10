@@ -6,6 +6,7 @@ layer = "framework"
 enforcement = "structured"
 kind = "decision"
 default = false
+verification = "policy"
 
 [decision]
 question = "How is the UI crate organized: split by file role (views/components/hooks/contexts/services), grouped into feature folders, kept flat at the crate root, or driven by a file-based routing convention?"
