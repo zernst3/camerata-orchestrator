@@ -22,6 +22,7 @@ use std::path::PathBuf;
 
 use camerata::acceptance::{run_acceptance, AcceptanceResult};
 use camerata::inspect_cmd::{self, InspectArgs};
+use camerata::integrity_gate_cmd::{self, GateProfile, IntegrityGateArgs, EXIT_GATE_UNAVAILABLE};
 use camerata_client::{Client, ClientError};
 use camerata_core::Decision;
 use camerata_server::llm::ProjectBackend;
@@ -150,6 +151,22 @@ enum Command {
         #[arg(long)]
         verbose: bool,
     },
+
+    /// W6 / I2: the PRE-FLIGHT INTEGRITY GATE. Evaluate a scan ledger written by
+    /// `camerata inspect` and exit non-zero if anything that should have run did not —
+    /// run this BEFORE paying for a graded sweep. Exit 0 pass, 1 fail, 2 the gate
+    /// itself could not run. See `camerata::integrity_gate_cmd`'s module doc comment.
+    IntegrityGate {
+        /// The persisted ledger, written by `camerata inspect` to
+        /// `<repo>/.camerata-scan-ledger.json`.
+        #[arg(long)]
+        ledger: PathBuf,
+        /// `graded` (default) requires every engine that must run for any repo to have
+        /// actually run and treats a scoped-out semantic tier as a blocker; `smoke`
+        /// checks structural integrity only and CANNOT catch a dark tier.
+        #[arg(long, default_value = "graded", value_parser = integrity_gate_cmd::parse_profile)]
+        profile: GateProfile,
+    },
 }
 
 /// `--backend`'s `value_parser`: `ProjectBackend` lives in `camerata-api-types`, a foreign
@@ -249,6 +266,26 @@ async fn main() -> anyhow::Result<()> {
                 verbose,
             })
             .await
+        }
+        Command::IntegrityGate { ledger, profile } => {
+            run_integrity_gate_cmd(IntegrityGateArgs { ledger, profile })
+        }
+    }
+}
+
+/// `integrity-gate`'s handler. THREE exit codes, and the third is the point: `0` the scan is
+/// trustworthy, `1` it is degraded, `2` the gate could not run at all. Conflating `2` with
+/// `0` would reintroduce the silent degradation this gate exists to catch, inside the gate
+/// itself — so an unreadable ledger exits 2 and says so, and never looks like a pass.
+fn run_integrity_gate_cmd(args: IntegrityGateArgs) -> anyhow::Result<()> {
+    match integrity_gate_cmd::run_integrity_gate(&args) {
+        Ok(verdict) => {
+            println!("{}", integrity_gate_cmd::format_verdict(&verdict));
+            std::process::exit(verdict.exit_code());
+        }
+        Err(e) => {
+            eprintln!("camerata integrity-gate: {e}");
+            std::process::exit(EXIT_GATE_UNAVAILABLE);
         }
     }
 }

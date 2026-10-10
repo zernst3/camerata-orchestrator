@@ -212,6 +212,39 @@ fn save_manifest(repo: &Path, manifest: &ScanManifest) {
     }
 }
 
+/// Where the completed scan's pipeline-integrity ledger is persisted:
+/// `<repo>/.camerata-scan-ledger.json`. Sits alongside [`manifest_cache_path`] and is
+/// likewise disposable and not meant to be committed.
+///
+/// # Why this file exists (W6 / I2)
+///
+/// Before this, a `ScanLedger` lived only in memory: `render_ledger_summary` printed a
+/// human-readable digest and the ledger itself was dropped with the process. So the one
+/// artifact that records whether everything which was SUPPOSED to run actually ran could not
+/// be re-examined, diffed against a previous scan, or checked by anything other than a person
+/// reading the digest at the moment it scrolled past. `camerata integrity-gate` reads this
+/// file. A ledger is a few kB of JSON; the scan that produced it is dollars and hours.
+pub fn ledger_path(repo: &Path) -> PathBuf {
+    repo.join(".camerata-scan-ledger.json")
+}
+
+/// Best-effort save of the completed scan's ledger. A persistence failure never fails the
+/// inspection — but unlike the scan cache (whose absence costs one full re-scan) the absence
+/// of this file makes `camerata integrity-gate` exit `2` (gate unavailable) rather than `0`,
+/// so a silent write failure can never read as a passing gate.
+fn save_ledger(repo: &Path, ledger: &camerata_server::scan_ledger::ScanLedger) {
+    let Ok(bytes) = serde_json::to_vec_pretty(ledger) else {
+        return;
+    };
+    if let Err(e) = std::fs::write(ledger_path(repo), bytes) {
+        eprintln!(
+            "camerata inspect: could not persist the pipeline-integrity ledger at {}: {e} \
+             (`camerata integrity-gate` will report itself unavailable rather than passing)",
+            ledger_path(repo).display()
+        );
+    }
+}
+
 /// Build the product-export ZIP bytes for `report`, via the EXACT SAME `report_export` /
 /// `xlsx_export` / zip-assembly functions the `POST /api/projects/:id/product-export` HTTP
 /// handler (`export_product`) calls, in the same order, with the same "nothing manually
@@ -433,6 +466,11 @@ pub async fn run_inspect_with_key_presence(
     // reconciled, even though the summary itself is only surfaced via the returned
     // `InspectOutcome`, never written into the export.
     let ledger_summary = render_ledger_summary(&report.ledger, &report.failed_passes, args.verbose);
+
+    // W6 / I2: persist the ledger at the SAME point the summary is computed — fully
+    // reconciled, before sealing — so `camerata integrity-gate` evaluates exactly the facts
+    // this run's summary describes, never a different snapshot. See `ledger_path`.
+    save_ledger(&args.repo, &report.ledger);
 
     // Pass-1 W1 seal fix: THE sealing point — every row-adding pass above has already run, and
     // every exporter the rest of this function calls now takes `&SealedReport`, never
