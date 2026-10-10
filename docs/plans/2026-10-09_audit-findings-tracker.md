@@ -57,6 +57,46 @@ Legend: `[ ]` awaiting Zach · `[x] DECIDED` · `[~] PARTIAL` (decided in princi
 
 ---
 
+## GRADER UPGRADE — v2 shipped 2026-10-09 (prompt), ONE BLOCKER REMAINS
+
+`~/Documents/Repos/Camerata tests/_grader/GRADER_PROMPT.md` is now **v2**. It grades four axes instead
+of two, per Zach's decision that "the answer key should be abided by but the grader also needs to grade
+on presentation":
+
+1. **QUEUE** (unchanged from v1) — detection, severity, ranking. The axis that stops the loop.
+2. **KIND** (new) — is each row the right KIND of statement? A planted defect reported as
+   `ConventionObserved` or `NoConvention` is **NOT a hit**; it is a named KIND FAULT. A safe pattern
+   reported as `ConventionObserved` is correct and must NOT be penalised. Every `Deviation` must state
+   its denominator. `NotAssessed` is honesty, never penalised for being present.
+3. **PRESENTATION** (new) — per artifact, against that artifact's own standard. PDF is the summary and
+   **omitting rows is not a PDF fault**; xlsx is the detail surface and a missing row IS a fault; JSON
+   is graded on internal consistency. Coverage must be concise (G3), and an exhaustive coverage dump is
+   itself a presentation fault.
+4. **PRODUCT** (unchanged from v1) — generated content curation does not rewrite.
+
+Also added: **artifact parity is its own verdict**, stated explicitly even when clean. A row in one
+artifact and absent from another is a PARITY FAULT by name, never silently absorbed as a hit or a miss.
+That is the exact blindness that let hearth score 0/12 on a class while three rows for it existed in
+the PDF only. Scorecard entries now record `grader: v2`; QUEUE is the only axis comparable to pre-v2 runs.
+
+### [ ] BLOCKER — `grade.py` is not kind-aware and will FLATTER the engine
+The deterministic scorer matches a planted defect on **text plus severity** and picks the best hit by
+severity (`quality()`); it never reads a row's kind, and it reads only `findings.json` (never the xlsx
+or the PDF, so it cannot see presentation or parity — that part is correctly the LLM grader's job).
+
+Consequence: **once `FindingKind` ships, a planted defect emitted as `ConventionObserved` will still
+score as a HIT in `grade.py`.** That is precisely the worst defect this engine has had — the
+alternatives pass treating a planted defect as the codebase's chosen convention — scored as a success.
+The LLM grader is instructed to override the scorer on this axis and say so, but a deterministic scorer
+biased in the engine's favour is not acceptable as the number of record.
+
+Fix is one small change, deliberately deferred: `grade.py` must read the kind field and emit a kind
+fault. **It is deferred only because W3 has not yet fixed the field's name**, and guessing it is how
+this codebase accumulated its lexical heuristics in the first place. Do this the moment W3 reports,
+and before any measured run.
+
+---
+
 ## AUDIT A — architecture coverage
 
 ### [x] A5 — DECIDED (2026-10-09): architecture rules are decision rules, not defect detectors
