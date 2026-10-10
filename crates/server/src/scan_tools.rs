@@ -262,6 +262,117 @@ pub fn selector_for_linter(linter: &str) -> Option<String> {
 /// A note that the preview could not be produced for a tool — surfaced as a
 /// benign info-severity preview finding rather than swallowed (never a false
 /// clean). Pulled out so the caller and tests share one shape.
+/// The npm PACKAGE that must be present in the provisioned eslint workspace for
+/// `selector`'s plugin namespace to resolve, or `None` when `selector` is a CORE
+/// eslint rule (`eqeqeq`, `no-var`) that needs nothing beyond eslint itself.
+///
+/// # Why this check exists (W6 / C11)
+///
+/// `--rule '{"@typescript-eslint/no-explicit-any": "error"}'` is not a per-rule
+/// risk: an unregistered namespace is a FATAL CONFIG ERROR that aborts the entire
+/// eslint invocation ("A configuration object specifies rule X, but could not find
+/// plugin Y"), writing nothing to stdout. One unprovisioned plugin therefore takes
+/// down the preview for every OTHER selected rule in the same run, including the
+/// plain core rules that would have worked. Partitioning the selectors up front
+/// (see [`partition_eslint_selectors`]) turns that into a disclosed gap for the one
+/// affected rule instead of a silent zero for all of them.
+///
+/// The package name follows eslint's own plugin-naming convention
+/// (`naming.normalizePackageName`), so it is derived rather than table-driven — a
+/// corpus rule citing a plugin Camerata has never heard of still gets the right
+/// answer instead of being mistaken for a core rule:
+///
+/// - `eqeqeq`                             → `None` (core)
+/// - `react-hooks/exhaustive-deps`        → `eslint-plugin-react-hooks`
+/// - `@typescript-eslint/no-explicit-any` → `@typescript-eslint/eslint-plugin`
+/// - `@scope/foo/some-rule`               → `@scope/eslint-plugin-foo`
+pub fn eslint_plugin_package_for_selector(selector: &str) -> Option<String> {
+    let parts: Vec<&str> = selector.split('/').filter(|s| !s.is_empty()).collect();
+    if selector.starts_with('@') {
+        match parts.len() {
+            // `@scope` alone is not a rule id at all; nothing to resolve.
+            0 | 1 => None,
+            // `@scope/rule` — the namespace IS the scope, package `@scope/eslint-plugin`.
+            2 => Some(format!("{}/eslint-plugin", parts[0])),
+            // `@scope/plugin/rule` — package `@scope/eslint-plugin-<plugin>`.
+            _ => Some(format!("{}/eslint-plugin-{}", parts[0], parts[1])),
+        }
+    } else if parts.len() >= 2 {
+        Some(format!("eslint-plugin-{}", parts[0]))
+    } else {
+        // No namespace separator: a core eslint rule.
+        None
+    }
+}
+
+/// `true` when `package` is installed in the provisioned eslint workspace's
+/// `node_modules`. Probes `package.json` rather than the directory so a
+/// half-removed package (empty dir left behind by an interrupted `npm install`)
+/// reads as ABSENT — the conservative direction, since a present-but-broken
+/// package is the fatal case we are avoiding.
+fn eslint_package_present(workspace: &Path, package: &str) -> bool {
+    workspace
+        .join("node_modules")
+        .join(package)
+        .join("package.json")
+        .exists()
+}
+
+/// Split eslint rule selectors into the ones that can safely be handed to
+/// `--rule` for this provisioned workspace, and the ones whose plugin package is
+/// missing — returned as `(runnable, unresolvable)` where each `unresolvable`
+/// entry is `(selector, missing_package)`.
+///
+/// See [`eslint_plugin_package_for_selector`] for why an unresolvable selector
+/// must be withheld rather than attempted.
+pub fn partition_eslint_selectors(
+    selectors: &[String],
+    workspace: &Path,
+) -> (Vec<String>, Vec<(String, String)>) {
+    let mut runnable = Vec::new();
+    let mut unresolvable = Vec::new();
+    for sel in selectors {
+        match eslint_plugin_package_for_selector(sel) {
+            None => runnable.push(sel.clone()),
+            Some(pkg) if eslint_package_present(workspace, &pkg) => runnable.push(sel.clone()),
+            Some(pkg) => unresolvable.push((sel.clone(), pkg)),
+        }
+    }
+    (runnable, unresolvable)
+}
+
+/// The exact `--format` value Camerata passes to eslint: one of eslint's own
+/// BUILT-IN formatter names, shipped inside the `eslint` package.
+///
+/// This is a named constant rather than an inline string so the C11 regression
+/// test can assert the invariant directly: the formatter must never again be an
+/// npm PACKAGE name, because eslint resolves a non-built-in `--format` relative
+/// to its cwd — the scanned repo — where Camerata's tooling packages do not
+/// exist. See [`parse_eslint_json`]'s doc comment for the post-mortem.
+pub const ESLINT_FORMATTER: &str = "json";
+
+/// Build the full eslint argument vector for one scan invocation: the bundled
+/// flat config, the built-in JSON formatter, one `--rule` override per runnable
+/// selector, and `.` as the target.
+///
+/// Pure and separated from [`run_one_tool`]'s I/O purely so the invariant "we
+/// never pass an npm formatter package" is assertable in a unit test instead of
+/// only observable by running a real eslint against a real provisioned workspace.
+pub fn eslint_args(config_path: &str, runnable_selectors: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "--config".to_string(),
+        config_path.to_string(),
+        "--format".to_string(),
+        ESLINT_FORMATTER.to_string(),
+    ];
+    for sel in runnable_selectors {
+        args.push("--rule".to_string());
+        args.push(format!("{{\"{sel}\": \"error\"}}"));
+    }
+    args.push(".".to_string());
+    args
+}
+
 pub fn note_finding(repo: &str, tool: &str, message: impl Into<String>) -> Finding {
     Finding {
         repo: repo.to_string(),
@@ -549,6 +660,116 @@ pub fn parse_sarif(repo: &str, tool: ScanTool, json: &str) -> anyhow::Result<Vec
     Ok(out)
 }
 
+/// How many files eslint reported, and how many of them it could not PARSE —
+/// returned alongside the findings by [`parse_eslint_json`] so the caller can tell
+/// "ran and found nothing" apart from "ran, but could not read a single file".
+///
+/// The second case is a real silent-degradation shape: with the TypeScript parser
+/// missing (see `assets/eslint/camerata.config.mjs`'s note 2 for the path bug that
+/// caused exactly this), eslint happily processes every `.ts` file and reports a
+/// `fatal` parse error for each, with ZERO rule findings. Exit status, stdout
+/// validity and finding count are all indistinguishable from a genuinely clean
+/// TypeScript repo. Counting it is the only way to notice.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EslintRunShape {
+    pub files_reported: usize,
+    pub files_unparseable: usize,
+}
+
+impl EslintRunShape {
+    /// `true` when eslint reported at least one file and could not parse ANY of
+    /// them — the "ran but read nothing" shape described on the struct. A run with
+    /// zero files reported is NOT this shape (that is an ordinary "no matching
+    /// files", already disclosed elsewhere).
+    pub fn read_nothing(&self) -> bool {
+        self.files_reported > 0 && self.files_unparseable == self.files_reported
+    }
+}
+
+/// Parse `eslint --format json` into preview [`Finding`]s.
+///
+/// # Why the BUILT-IN json formatter and not SARIF (W6 / C11)
+///
+/// The eslint arm used to request `--format @microsoft/eslint-formatter-sarif` and
+/// feed the result to [`parse_sarif`]. That formatter is an npm package, and eslint
+/// resolves a non-built-in `--format` name relative to its own **cwd** — which, for
+/// a scan, is the SCANNED REPO, not Camerata's provisioned tooling workspace where
+/// the package actually lives. Resolution therefore failed on every repo, eslint
+/// fell back to its built-in formatter directory, the import failed there too, and
+/// it exited 2 having written the explanation to stderr and NOTHING to stdout. The
+/// resulting `serde_json` error — `EOF while parsing a value at line 1 column 0` —
+/// is the C11 symptom, and it was never an eslint-config problem at all.
+///
+/// `json` is one of eslint's BUILT-IN formatters, shipped inside the eslint package
+/// itself. It needs no module resolution from any cwd, so the entire failure class
+/// is gone rather than worked around. It also carries two things SARIF drops: the
+/// per-file `fatal` flag (see [`EslintRunShape`]) and the full file list, including
+/// files with no findings.
+///
+/// Shape: a flat array of per-file objects, `{ filePath, messages: [ { ruleId,
+/// severity, message, line } ] }`, where `severity` is `2` (error) or `1` (warning)
+/// and a `ruleId` of `null` marks a message eslint produced on its own behalf (a
+/// parse error, or an unused-disable-directive report) rather than a rule firing.
+/// Those are counted, never emitted as findings — a parse error is not a finding
+/// about the client's code, and attributing one to a rule id would be a fabrication.
+pub fn parse_eslint_json(repo: &str, json: &str) -> anyhow::Result<(Vec<Finding>, EslintRunShape)> {
+    let v: serde_json::Value = serde_json::from_str(json)?;
+    let mut out = Vec::new();
+    let mut shape = EslintRunShape::default();
+    let Some(files) = v.as_array() else {
+        return Ok((out, shape));
+    };
+    for file in files {
+        shape.files_reported += 1;
+        let path = file
+            .get("filePath")
+            .and_then(|p| p.as_str())
+            .unwrap_or("(repo)");
+        let messages = file
+            .get("messages")
+            .and_then(|m| m.as_array())
+            .map(|a| a.as_slice())
+            .unwrap_or(&[]);
+        let mut fatal_here = false;
+        for msg in messages {
+            // `fatal: true` is eslint's own parse failure for this file.
+            if msg.get("fatal").and_then(|f| f.as_bool()).unwrap_or(false) {
+                fatal_here = true;
+                continue;
+            }
+            // A null/absent ruleId is eslint speaking for itself, not a rule
+            // finding — never fabricate a rule id for it.
+            let Some(rule_id) = msg.get("ruleId").and_then(|r| r.as_str()) else {
+                continue;
+            };
+            let severity = match msg.get("severity").and_then(|s| s.as_u64()) {
+                Some(2) => "error",
+                Some(1) => "warning",
+                _ => "warning",
+            };
+            let message = msg
+                .get("message")
+                .and_then(|m| m.as_str())
+                .unwrap_or("")
+                .to_string();
+            let line = msg.get("line").and_then(|l| l.as_u64()).unwrap_or(0) as usize;
+            out.push(preview_finding(
+                repo,
+                ScanTool::Eslint,
+                path,
+                line,
+                rule_id,
+                &norm_severity(severity),
+                &message,
+            ));
+        }
+        if fatal_here {
+            shape.files_unparseable += 1;
+        }
+    }
+    Ok((out, shape))
+}
+
 /// Parse `ruff check --output-format json` into preview [`Finding`]s. Ruff emits a
 /// flat JSON array of diagnostics: `code`, `message`, `filename`, `location.row`.
 pub fn parse_ruff_json(repo: &str, json: &str) -> anyhow::Result<Vec<Finding>> {
@@ -802,6 +1023,19 @@ pub fn is_in_repo_scope(repo_root: &Path, finding_path: &str) -> bool {
 /// an error — linters exit non-zero when they find issues, which is the normal
 /// "there are findings" signal.
 ///
+/// # Why stderr is RETURNED, not dropped (W6 / C11)
+///
+/// This used to discard stderr entirely. That is how the eslint preview could
+/// fail wholesale on every repo for months while the only diagnostic anyone ever
+/// saw was `EOF while parsing a value at line 1 column 0` — a `serde_json` error
+/// about an EMPTY stdout, which says nothing about WHY the tool produced nothing.
+/// The actual explanation (`There was a problem loading formatter: …`) was written
+/// to stderr and thrown away one stack frame below the code that reported the
+/// useless error. A tool that exits without usable output is exactly the moment
+/// its stderr becomes the only evidence that exists, so the third element of the
+/// returned tuple carries it to whoever builds the failure message
+/// (see [`tool_output_error`]).
+///
 /// When `on_progress` is `Some`, stdout is READ LINE BY LINE and the callback is
 /// fired on every line received. This keeps `last_activity_ms` fresh while a tool
 /// like `cargo clippy` compiles a big repo (the rivet fix): the compile phase
@@ -817,8 +1051,8 @@ async fn run_capture_stdout(
     program: &str,
     args: &[&str],
     on_progress: Option<&HeartbeatFn>,
-) -> std::io::Result<(String, bool)> {
-    use tokio::io::{AsyncBufReadExt, BufReader};
+) -> std::io::Result<(String, bool, String)> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
     match on_progress {
         None => {
@@ -830,12 +1064,14 @@ async fn run_capture_stdout(
                 .output()
                 .await?;
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-            Ok((stdout, out.status.success()))
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            Ok((stdout, out.status.success(), stderr))
         }
         Some(cb) => {
             // Streaming path: read stdout line-by-line, firing the heartbeat on
-            // every line.  Stderr is captured separately (piped but not streamed)
-            // so it doesn't interleave with the JSON stdout the parsers expect.
+            // every line.  Stderr is captured separately (piped, read to the end
+            // AFTER stdout closes) so it doesn't interleave with the JSON stdout
+            // the parsers expect but is still available as failure evidence.
             let mut child = tokio::process::Command::new(program)
                 .args(args)
                 .current_dir(dir)
@@ -845,6 +1081,7 @@ async fn run_capture_stdout(
                 .spawn()?;
 
             let stdout = child.stdout.take().expect("stdout is piped");
+            let mut err_pipe = child.stderr.take();
             let mut lines = BufReader::new(stdout).lines();
             let mut accumulated = String::new();
 
@@ -854,15 +1091,77 @@ async fn run_capture_stdout(
                 accumulated.push('\n');
             }
 
-            // Drain stderr (ignored for content; only the exit status matters for
-            // the "is non-zero exit an error" judgement in the caller).
-            let _ = child.stderr.take();
+            // Read stderr to EOF rather than dropping the pipe. Best-effort: a
+            // read failure must never turn a successful tool run into an error,
+            // so it degrades to an empty string.
+            let mut stderr = String::new();
+            if let Some(pipe) = err_pipe.as_mut() {
+                let _ = pipe.read_to_string(&mut stderr).await;
+            }
 
             let status = child.wait().await?;
-            Ok((accumulated, status.success()))
+            Ok((accumulated, status.success(), stderr))
         }
     }
 }
+
+/// The error a tool run produces when its output could not be turned into
+/// findings — built so the message names the EVIDENCE rather than only the
+/// symptom (W6 / C11; see [`run_capture_stdout`]'s doc comment for the failure
+/// this exists to make legible).
+///
+/// Three cases, in the order they matter to whoever reads the resulting
+/// `CoverageNote`:
+///
+/// 1. **Empty stdout.** The tool produced nothing at all, which is never a valid
+///    "clean" result for a tool invoked with a JSON output format — every JSON
+///    formatter emits at least `[]`. The parse error (`EOF while parsing a value
+///    at line 1 column 0`) is a tautology here, so it is replaced with the plain
+///    statement plus the first lines of stderr, which is where the real cause
+///    lives.
+/// 2. **Non-empty stdout that would not parse.** Report the parse error AND the
+///    stderr tail: a tool can write a warning banner to stderr and still emit
+///    truncated JSON.
+/// 3. **Parsed fine.** Not an error; this function is never called.
+///
+/// `stderr` is truncated to [`STDERR_EVIDENCE_LIMIT`] bytes because this string
+/// lands in a client-visible coverage note, not a log file.
+fn tool_output_error(
+    tool: ScanTool,
+    stdout: &str,
+    stderr: &str,
+    parse_error: Option<&anyhow::Error>,
+) -> anyhow::Error {
+    let evidence = stderr.trim();
+    let evidence: String = if evidence.is_empty() {
+        "(the tool wrote nothing to stderr either)".to_string()
+    } else {
+        evidence.chars().take(STDERR_EVIDENCE_LIMIT).collect()
+    };
+    if stdout.trim().is_empty() {
+        anyhow::anyhow!(
+            "{} produced NO output at all (exit without a result document, which a JSON \
+             output format never does on a successful run). Tool stderr: {evidence}",
+            tool.name(),
+        )
+    } else {
+        match parse_error {
+            Some(e) => anyhow::anyhow!(
+                "could not parse {} output ({e}). Tool stderr: {evidence}",
+                tool.name(),
+            ),
+            None => anyhow::anyhow!(
+                "could not parse {} output. Tool stderr: {evidence}",
+                tool.name(),
+            ),
+        }
+    }
+}
+
+/// Byte cap on the stderr excerpt embedded in a [`CoverageNote`] by
+/// [`tool_output_error`]. Enough for a node/python stack-trace header (which is
+/// where the cause is), short enough that a note stays readable.
+const STDERR_EVIDENCE_LIMIT: usize = 600;
 
 /// When set (to any non-empty value), the `Semgrep` arm of [`run_one_tool`] fails
 /// IMMEDIATELY with a `CoverageNote`-producing error, skipping provisioning and every
@@ -967,9 +1266,14 @@ pub async fn run_scan_tools<'r>(
             jstore.det_tool_running(jid, tool.name());
         }
         let produced = match run_one_tool(repo, dir, tool, &rules, lookup, on_progress.clone()).await {
-            Ok(mut fs) => {
+            Ok((mut fs, mut gaps)) => {
                 let n = fs.len();
                 findings.append(&mut fs);
+                // A tool can RUN and still have covered less than was selected —
+                // disclose those partial gaps alongside the findings rather than
+                // letting a withheld rule read as checked-and-clean. See
+                // `run_one_tool`'s doc comment.
+                coverage_notes.append(&mut gaps);
                 n
             }
             Err(e) => {
@@ -1013,6 +1317,13 @@ pub async fn run_scan_tools<'r>(
 /// `JobStore::touch_activity`. The combined effect: even a completely quiet compile
 /// keeps `last_activity_ms` updated, so the stall-detection idle counter stays low
 /// and the UI banner never false-fires for a legitimately busy tool.
+/// Returns `(findings, partial_gaps)`. `partial_gaps` is non-empty when the tool
+/// RAN but could not cover part of what was selected — today: an eslint rule whose
+/// plugin package is absent from the provisioned workspace, and an eslint run that
+/// could not parse any file it read. These are disclosed as [`CoverageNote`]s by
+/// the caller exactly like a whole-tool failure, because the alternative (dropping
+/// them) is the silencing shape W6 exists to close: a rule that was selected,
+/// withheld, and never mentioned reads as "checked and clean".
 async fn run_one_tool<'r>(
     repo: &str,
     dir: &Path,
@@ -1020,7 +1331,7 @@ async fn run_one_tool<'r>(
     rules: &[&SelectedRule],
     lookup: &(dyn Fn(&str) -> Option<&'r Rule> + Send + Sync),
     on_progress: Option<HeartbeatFn>,
-) -> anyhow::Result<Vec<Finding>> {
+) -> anyhow::Result<(Vec<Finding>, Vec<CoverageNote>)> {
     // Start the build-dir mtime probe for the duration of this tool run.
     // Targets the `target/` subdirectory of the repo root (cargo's default output
     // dir). The probe is best-effort: if `target/` doesn't exist (non-Rust repo),
@@ -1066,21 +1377,29 @@ async fn run_one_tool<'r>(
             let rules_dir = tool_provisioning::bundled_semgrep_rules_dir();
             let rules_str = rules_dir.to_string_lossy().into_owned();
             let bin_str = semgrep_bin.to_string_lossy().into_owned();
-            let (stdout, _ok) = run_capture_stdout(
+            let (stdout, _ok, stderr) = run_capture_stdout(
                 dir,
                 &bin_str,
                 &["--sarif", "--config", &rules_str, "--quiet", "."],
                 on_progress.as_ref(),
             )
             .await?;
-            parse_sarif(repo, ScanTool::Semgrep, &stdout)
+            match parse_sarif(repo, ScanTool::Semgrep, &stdout) {
+                Ok(fs) => Ok((fs, Vec::new())),
+                Err(e) => Err(tool_output_error(
+                    ScanTool::Semgrep,
+                    &stdout,
+                    &stderr,
+                    Some(&e),
+                )),
+            }
         }
         ScanTool::Ruff => {
             if selectors.is_empty() {
                 anyhow::bail!("no ruff rule codes derived from the selection");
             }
             let select = selectors.join(",");
-            let (stdout, _ok) = run_capture_stdout(
+            let (stdout, _ok, stderr) = run_capture_stdout(
                 dir,
                 "ruff",
                 &[
@@ -1094,7 +1413,10 @@ async fn run_one_tool<'r>(
                 on_progress.as_ref(),
             )
             .await?;
-            parse_ruff_json(repo, &stdout)
+            match parse_ruff_json(repo, &stdout) {
+                Ok(fs) => Ok((fs, Vec::new())),
+                Err(e) => Err(tool_output_error(ScanTool::Ruff, &stdout, &stderr, Some(&e))),
+            }
         }
         ScanTool::Clippy => {
             // Camerata-supplied config: warn on exactly the selected lints via
@@ -1117,20 +1439,34 @@ async fn run_one_tool<'r>(
                 args.push(lint);
             }
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let (stdout, _ok) =
+            let (stdout, _ok, stderr) =
                 run_capture_stdout(dir, "cargo", &arg_refs, on_progress.as_ref()).await?;
-            parse_clippy_json(repo, &stdout)
+            match parse_clippy_json(repo, &stdout) {
+                Ok(fs) => Ok((fs, Vec::new())),
+                Err(e) => Err(tool_output_error(
+                    ScanTool::Clippy,
+                    &stdout,
+                    &stderr,
+                    Some(&e),
+                )),
+            }
         }
         ScanTool::Eslint => {
             if selectors.is_empty() {
                 anyhow::bail!("no eslint rule ids derived from the selection");
             }
-            // Camerata auto-provisions eslint + the SARIF formatter into a
-            // stable node_modules workspace so the user never needs to install
-            // it manually.  We use the bundled flat config as the base and
-            // override individual rules to "error" via `--rule`.  `--no-eslintrc`
-            // is replaced by `--no-ignore` + an explicit `--config` pointing at
+            // Camerata auto-provisions eslint into a stable node_modules
+            // workspace so the user never needs to install it manually. We use
+            // the bundled flat config as the base and override individual rules
+            // to "error" via `--rule`, with an explicit `--config` pointing at
             // the bundled flat config (eslint v9 flat-config style).
+            //
+            // `--format json` is eslint's BUILT-IN formatter, deliberately not an
+            // npm formatter package: eslint resolves a non-built-in formatter name
+            // relative to its own cwd, which here is the SCANNED REPO, so the
+            // previous `--format @microsoft/eslint-formatter-sarif` could never
+            // resolve and aborted every run with an empty stdout. See
+            // [`parse_eslint_json`]'s doc comment for the full C11 post-mortem.
             let tooling_dir = tool_provisioning::tooling_dir().ok_or_else(|| {
                 anyhow::anyhow!("could not resolve Camerata data dir for tool provisioning")
             })?;
@@ -1141,21 +1477,62 @@ async fn run_one_tool<'r>(
             let config_path = tool_provisioning::eslint_config_path(&workspace);
             let bin_str = eslint_bin.to_string_lossy().into_owned();
             let config_str = config_path.to_string_lossy().into_owned();
-            let mut args: Vec<String> = vec![
-                "--config".into(),
-                config_str,
-                "--format".into(),
-                "@microsoft/eslint-formatter-sarif".into(),
-            ];
-            for sel in &selectors {
-                args.push("--rule".into());
-                args.push(format!("{{\"{sel}\": \"error\"}}"));
+
+            // Withhold any selector whose plugin package is absent — handing one
+            // to `--rule` is fatal to the WHOLE invocation, not just that rule.
+            // Each withheld selector becomes its own disclosed gap.
+            let (runnable, unresolvable) = partition_eslint_selectors(&selectors, &workspace);
+            let mut gaps: Vec<CoverageNote> = unresolvable
+                .iter()
+                .map(|(sel, pkg)| CoverageNote {
+                    tool: ScanTool::Eslint.name().to_string(),
+                    message: format!(
+                        "Could not preview the eslint rule `{sel}`: its plugin package \
+                         `{pkg}` is not installed in Camerata's eslint workspace, so eslint \
+                         cannot resolve the rule. Every OTHER selected eslint rule was still \
+                         previewed. It enforces once wired into CI."
+                    ),
+                })
+                .collect();
+            if runnable.is_empty() {
+                anyhow::bail!(
+                    "none of the {} selected eslint rule(s) could be resolved: every one needs \
+                     a plugin package that is not installed in Camerata's eslint workspace",
+                    selectors.len(),
+                );
             }
-            args.push(".".into());
+
+            let args = eslint_args(&config_str, &runnable);
             let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            let (stdout, _ok) =
+            let (stdout, _ok, stderr) =
                 run_capture_stdout(dir, &bin_str, &arg_refs, on_progress.as_ref()).await?;
-            parse_sarif(repo, ScanTool::Eslint, &stdout)
+            match parse_eslint_json(repo, &stdout) {
+                Ok((fs, shape)) => {
+                    // "Read every file and could not parse a single one" is a
+                    // zero-coverage run wearing a clean run's clothes — exit 0,
+                    // valid JSON, no findings. Never leave it undisclosed.
+                    if shape.read_nothing() {
+                        gaps.push(CoverageNote {
+                            tool: ScanTool::Eslint.name().to_string(),
+                            message: format!(
+                                "eslint could not PARSE any of the {} file(s) it read, so none \
+                                 of the {} selected rule(s) was actually evaluated — a parser \
+                                 for this repo's sources is missing from Camerata's eslint \
+                                 workspace. These rules enforce once wired into CI.",
+                                shape.files_reported,
+                                runnable.len(),
+                            ),
+                        });
+                    }
+                    Ok((fs, gaps))
+                }
+                Err(e) => Err(tool_output_error(
+                    ScanTool::Eslint,
+                    &stdout,
+                    &stderr,
+                    Some(&e),
+                )),
+            }
         }
     }
     // Apply the repo-scope filter uniformly across ALL tools (clippy, ruff,
@@ -1164,9 +1541,9 @@ async fn run_one_tool<'r>(
     // output under `target/`, generated files, and bundled dist directories.
     // The filter is pure and applied here once rather than per-parser so new
     // tool arms inherit it automatically.
-    .map(|mut findings| {
+    .map(|(mut findings, gaps)| {
         findings.retain(|f| is_in_repo_scope(dir, &f.path));
-        findings
+        (findings, gaps)
     })
 }
 
@@ -2444,7 +2821,7 @@ mod tests {
         // `echo` outputs exactly 3 lines; printf packs them separated by newlines.
         // We use `sh -c 'printf ...'` for portability across test environments.
         let dir = std::env::temp_dir();
-        let (stdout, ok) = run_capture_stdout(
+        let (stdout, ok, _stderr) = run_capture_stdout(
             &dir,
             "sh",
             &["-c", "printf 'line1\\nline2\\nline3\\n'"],
@@ -2471,7 +2848,7 @@ mod tests {
     #[tokio::test]
     async fn run_capture_stdout_no_progress_still_works() {
         let dir = std::env::temp_dir();
-        let (stdout, ok) = run_capture_stdout(
+        let (stdout, ok, _stderr) = run_capture_stdout(
             &dir,
             "sh",
             &["-c", "printf 'hello\\nworld\\n'"],
@@ -2483,6 +2860,392 @@ mod tests {
         assert!(ok);
         assert!(stdout.contains("hello"));
         assert!(stdout.contains("world"));
+    }
+
+    // ── req_c11: the eslint preview failed WHOLESALE, at zero coverage and nonzero cost ──
+    //
+    // `docs/plans/2026-10-09_audit-findings-tracker.md`, C11 / Fable priority #4:
+    //
+    //   > The ESLint preview pass FAILED WHOLESALE on these runs: `Could not preview 10
+    //   > rule(s) with eslint: EOF while parsing a value at line 1 column 0`.
+    //
+    // Root cause, reproduced directly against the real provisioned workspace before any code
+    // changed: `EOF while parsing a value at line 1 column 0` is `serde_json` on an EMPTY
+    // string, and eslint's stdout was empty because
+    // `--format @microsoft/eslint-formatter-sarif` names an npm PACKAGE. eslint resolves a
+    // non-built-in `--format` with `ModuleResolver.resolve(pkg, path.join(cwd, "…"))` where
+    // cwd is the SCANNED REPO — not Camerata's tooling workspace, the only place that package
+    // is installed. Resolution failed, eslint fell back to its built-in formatter directory,
+    // the import failed there too, and it exited 2 having written
+    // `There was a problem loading formatter: …` to stderr and NOTHING to stdout.
+    //
+    // `run_capture_stdout` then discarded that stderr, so the only evidence that ever reached
+    // an operator was a parse error about column 0 of an empty document.
+    //
+    // These tests pin each link of that chain separately, so a regression names its own cause.
+
+    /// req_c11: the formatter Camerata asks for must be a BUILT-IN eslint formatter, never an
+    /// npm package name. This is the single assertion that would have prevented C11 outright.
+    ///
+    /// FAILS BEFORE THE FIX: the arm passed the literal
+    /// `"@microsoft/eslint-formatter-sarif"`, which is a package name (it contains a `/` and
+    /// an `@` scope) and is not in eslint's built-in set.
+    #[test]
+    fn req_c11_eslint_formatter_is_built_in_never_an_npm_package_name() {
+        // eslint's built-in formatters, as shipped inside the `eslint` package itself. Any
+        // name outside this set is resolved as a module relative to eslint's CWD.
+        const BUILT_IN: [&str; 4] = ["json", "stylish", "html", "json-with-metadata"];
+        assert!(
+            BUILT_IN.contains(&ESLINT_FORMATTER),
+            "`{ESLINT_FORMATTER}` is not one of eslint's built-in formatters, so eslint will \
+             try to resolve it as an npm module relative to the SCANNED REPO — the exact C11 \
+             failure. Built-ins: {BUILT_IN:?}"
+        );
+        assert!(
+            !ESLINT_FORMATTER.contains('/') && !ESLINT_FORMATTER.contains('@'),
+            "a `/` or `@` in the formatter name means it is a package specifier, not a \
+             built-in: {ESLINT_FORMATTER}"
+        );
+
+        let args = eslint_args("/tmp/camerata.config.mjs", &["eqeqeq".to_string()]);
+        let fmt_pos = args
+            .iter()
+            .position(|a| a == "--format")
+            .expect("eslint must always be given an explicit --format");
+        assert_eq!(args[fmt_pos + 1], ESLINT_FORMATTER);
+        assert!(
+            !args.iter().any(|a| a.contains("eslint-formatter")),
+            "no argument may name an eslint formatter PACKAGE: {args:?}"
+        );
+    }
+
+    /// req_c11: the full argument vector's shape — config, built-in formatter, one `--rule`
+    /// override per selector, and the `.` target last.
+    #[test]
+    fn req_c11_eslint_args_carry_the_config_and_one_rule_override_per_selector() {
+        let selectors = vec![
+            "eqeqeq".to_string(),
+            "react-hooks/exhaustive-deps".to_string(),
+        ];
+        let args = eslint_args("/cfg/camerata.config.mjs", &selectors);
+        assert_eq!(args.first().map(String::as_str), Some("--config"));
+        assert_eq!(args.get(1).map(String::as_str), Some("/cfg/camerata.config.mjs"));
+        assert_eq!(args.last().map(String::as_str), Some("."));
+        assert_eq!(
+            args.iter().filter(|a| *a == "--rule").count(),
+            2,
+            "one --rule per selector: {args:?}"
+        );
+        assert!(args.iter().any(|a| a == r#"{"eqeqeq": "error"}"#), "{args:?}");
+        assert!(
+            args.iter()
+                .any(|a| a == r#"{"react-hooks/exhaustive-deps": "error"}"#),
+            "{args:?}"
+        );
+    }
+
+    /// req_c11: an EMPTY stdout must be reported as "the tool produced no output", with the
+    /// tool's own stderr as the evidence — never as a bare JSON parse position.
+    ///
+    /// FAILS BEFORE THE FIX: the `Err` arm formatted the raw `serde_json` error, producing
+    /// exactly `Could not preview 10 rule(s) with eslint: EOF while parsing a value at line 1
+    /// column 0`, and stderr had already been dropped by `run_capture_stdout`, so the real
+    /// cause was unrecoverable from the note. This test asserts the inverse of that string.
+    #[test]
+    fn req_c11_an_empty_stdout_error_names_the_tool_stderr_not_a_parse_position() {
+        let parse_err = serde_json::from_str::<serde_json::Value>("")
+            .err()
+            .map(anyhow::Error::from)
+            .expect("the empty string must be a serde_json error");
+        assert!(
+            parse_err.to_string().contains("EOF while parsing"),
+            "sanity: this is the C11 symptom string: {parse_err}"
+        );
+
+        let stderr = "There was a problem loading formatter: \
+                      /x/node_modules/eslint/lib/cli-engine/formatters/@microsoft/\
+                      eslint-formatter-sarif.js";
+        let err = tool_output_error(ScanTool::Eslint, "", stderr, Some(&parse_err));
+        let msg = err.to_string();
+
+        assert!(
+            !msg.contains("EOF while parsing"),
+            "an empty stdout must not be reported as a JSON parse position — that is a \
+             tautology that hides the cause: {msg}"
+        );
+        assert!(
+            msg.contains("produced NO output"),
+            "must state plainly that the tool emitted nothing: {msg}"
+        );
+        assert!(
+            msg.contains("problem loading formatter"),
+            "must carry the tool's own stderr as the evidence: {msg}"
+        );
+        assert!(msg.contains("eslint"), "must name the tool: {msg}");
+    }
+
+    /// req_c11 companion: a NON-empty stdout that will not parse keeps the parse error (it is
+    /// genuinely informative there) and still appends the stderr evidence.
+    #[test]
+    fn req_c11_an_unparseable_non_empty_stdout_keeps_the_parse_error_and_adds_stderr() {
+        let parse_err = serde_json::from_str::<serde_json::Value>("{\"truncated\":")
+            .err()
+            .map(anyhow::Error::from)
+            .expect("truncated JSON must be a serde_json error");
+        let err = tool_output_error(
+            ScanTool::Eslint,
+            "{\"truncated\":",
+            "warning: heap limit reached",
+            Some(&parse_err),
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("could not parse"), "{msg}");
+        assert!(msg.contains("heap limit reached"), "{msg}");
+    }
+
+    /// req_c11: stderr is RETURNED by `run_capture_stdout`, on both the buffered and the
+    /// streaming path — it used to be dropped on the floor, which is why C11 was diagnosable
+    /// only by re-running eslint by hand outside Camerata.
+    #[tokio::test]
+    async fn req_c11_run_capture_stdout_returns_stderr_on_both_paths() {
+        use camerata_agent::HeartbeatFn;
+        use std::sync::Arc;
+
+        let dir = std::env::temp_dir();
+        let script = "printf 'out\\n'; printf 'the real cause\\n' >&2; exit 2";
+
+        let (stdout, ok, stderr) = run_capture_stdout(&dir, "sh", &["-c", script], None)
+            .await
+            .expect("sh should be on PATH");
+        assert!(!ok, "the script exits 2");
+        assert!(stdout.contains("out"));
+        assert!(
+            stderr.contains("the real cause"),
+            "buffered path must return stderr: {stderr:?}"
+        );
+
+        let cb: HeartbeatFn = Arc::new(|| {});
+        let (stdout, ok, stderr) = run_capture_stdout(&dir, "sh", &["-c", script], Some(&cb))
+            .await
+            .expect("sh should be on PATH");
+        assert!(!ok);
+        assert!(stdout.contains("out"));
+        assert!(
+            stderr.contains("the real cause"),
+            "streaming path must return stderr too: {stderr:?}"
+        );
+    }
+
+    /// req_c11: the plugin-package derivation follows eslint's own naming convention, so a
+    /// corpus rule citing a plugin Camerata has never heard of is still classified correctly
+    /// rather than mistaken for a core rule (which would hand it to `--rule` and abort the
+    /// whole invocation).
+    #[test]
+    fn req_c11_eslint_plugin_package_is_derived_from_the_selector_namespace() {
+        assert_eq!(eslint_plugin_package_for_selector("eqeqeq"), None);
+        assert_eq!(eslint_plugin_package_for_selector("no-var"), None);
+        assert_eq!(
+            eslint_plugin_package_for_selector("react-hooks/exhaustive-deps").as_deref(),
+            Some("eslint-plugin-react-hooks")
+        );
+        assert_eq!(
+            eslint_plugin_package_for_selector("jest/no-focused-tests").as_deref(),
+            Some("eslint-plugin-jest")
+        );
+        assert_eq!(
+            eslint_plugin_package_for_selector("@typescript-eslint/no-explicit-any").as_deref(),
+            Some("@typescript-eslint/eslint-plugin")
+        );
+        assert_eq!(
+            eslint_plugin_package_for_selector("@angular-eslint/prefer-inject").as_deref(),
+            Some("@angular-eslint/eslint-plugin")
+        );
+        assert_eq!(
+            eslint_plugin_package_for_selector("@scope/someplugin/some-rule").as_deref(),
+            Some("@scope/eslint-plugin-someplugin")
+        );
+        // A plugin nobody wired still resolves to a package name, never to `None`.
+        assert_eq!(
+            eslint_plugin_package_for_selector("brand-new-plugin/a-rule").as_deref(),
+            Some("eslint-plugin-brand-new-plugin")
+        );
+    }
+
+    /// req_c11: the SECOND wholesale-abort path. A selector whose plugin package is absent
+    /// from the provisioned workspace must be WITHHELD from `--rule` (where it would be a
+    /// fatal config error killing every other rule in the same run) and disclosed, while
+    /// every resolvable selector still runs.
+    ///
+    /// Verified against the real eslint 9.39.4 in the provisioned workspace before writing
+    /// this: `--rule '{"@typescript-eslint/no-explicit-any":"error"}'` with that plugin
+    /// absent exits 2 with `A configuration object specifies rule …, but could not find
+    /// plugin …` and an empty stdout — indistinguishable at the call site from the formatter
+    /// failure above.
+    #[test]
+    fn req_c11_a_selector_whose_plugin_package_is_absent_is_withheld_not_handed_to_eslint() {
+        let ws = tempfile::TempDir::new().expect("tempdir");
+        let present = ws
+            .path()
+            .join("node_modules")
+            .join("eslint-plugin-react-hooks");
+        std::fs::create_dir_all(&present).expect("mkdir");
+        std::fs::write(present.join("package.json"), "{}").expect("write");
+
+        let selectors = vec![
+            "eqeqeq".to_string(),                               // core: always runnable
+            "react-hooks/exhaustive-deps".to_string(),           // plugin present
+            "@typescript-eslint/no-explicit-any".to_string(),    // plugin ABSENT
+            "jest/no-focused-tests".to_string(),                 // plugin ABSENT
+        ];
+        let (runnable, unresolvable) = partition_eslint_selectors(&selectors, ws.path());
+
+        assert_eq!(
+            runnable,
+            vec![
+                "eqeqeq".to_string(),
+                "react-hooks/exhaustive-deps".to_string()
+            ],
+            "a core rule and a provisioned plugin's rule must still run"
+        );
+        let missing: Vec<&str> = unresolvable.iter().map(|(s, _)| s.as_str()).collect();
+        assert_eq!(
+            missing,
+            vec![
+                "@typescript-eslint/no-explicit-any",
+                "jest/no-focused-tests"
+            ],
+            "an absent plugin's rule must be withheld, never attempted"
+        );
+        assert_eq!(
+            unresolvable[0].1, "@typescript-eslint/eslint-plugin",
+            "the withheld entry must name the package that would fix it"
+        );
+    }
+
+    /// req_c11: an empty directory marker (an interrupted `npm install`) counts as ABSENT —
+    /// the conservative direction, since a present-but-broken package is the fatal case.
+    #[test]
+    fn req_c11_a_package_dir_without_a_package_json_counts_as_absent() {
+        let ws = tempfile::TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(ws.path().join("node_modules").join("eslint-plugin-jest"))
+            .expect("mkdir");
+        let (runnable, unresolvable) =
+            partition_eslint_selectors(&["jest/no-focused-tests".to_string()], ws.path());
+        assert!(runnable.is_empty());
+        assert_eq!(unresolvable.len(), 1);
+    }
+
+    /// req_c11: `parse_eslint_json` over REAL `eslint --format json` output (captured verbatim
+    /// from eslint 9.39.4 driving the bundled config over a two-violation fixture): both rule
+    /// findings are ingested with the right path, line, rule id and severity mapping, and the
+    /// run shape reports a fully-parseable repo.
+    #[test]
+    fn req_c11_parse_eslint_json_ingests_real_eslint_output() {
+        let raw = r#"[
+          {
+            "filePath": "/repo/app.js",
+            "messages": [
+              {"ruleId":"eqeqeq","severity":2,"message":"Expected '===' and instead saw '=='.","line":2,"column":9},
+              {"ruleId":"no-console","severity":1,"message":"Unexpected console statement.","line":2,"column":18},
+              {"ruleId":"no-var","severity":2,"message":"Unexpected var, use let or const instead.","line":3,"column":3}
+            ],
+            "errorCount":2,"fatalErrorCount":0,"warningCount":1
+          },
+          {
+            "filePath": "/repo/clean.js",
+            "messages": [],
+            "errorCount":0,"fatalErrorCount":0,"warningCount":0
+          }
+        ]"#;
+        let (findings, shape) = parse_eslint_json("me/web", raw).expect("must parse");
+
+        assert_eq!(findings.len(), 3, "{findings:?}");
+        assert_eq!(shape.files_reported, 2);
+        assert_eq!(shape.files_unparseable, 0);
+        assert!(!shape.read_nothing());
+
+        let eq = findings
+            .iter()
+            .find(|f| f.rule_id == "eqeqeq")
+            .expect("eqeqeq finding");
+        assert_eq!(eq.path, "/repo/app.js");
+        assert_eq!(eq.line, 2);
+        assert_eq!(eq.repo, "me/web");
+        assert_eq!(eq.severity, "high", "eslint severity 2 (error) maps to high");
+        assert!(eq.preview);
+        assert_eq!(eq.preview_tool.as_deref(), Some("eslint"));
+
+        let console = findings
+            .iter()
+            .find(|f| f.rule_id == "no-console")
+            .expect("no-console finding");
+        assert_eq!(
+            console.severity, "medium",
+            "eslint severity 1 (warning) maps to medium"
+        );
+    }
+
+    /// req_c11: a `fatal` parse error is NEVER emitted as a finding (it is not a statement
+    /// about the client's code, and attributing it to a rule id would be a fabrication), and
+    /// a run where EVERY file failed to parse is reported as `read_nothing` — a zero-coverage
+    /// run that is otherwise indistinguishable from a clean one (exit 0, valid JSON, no
+    /// findings). This is the shape the broken TypeScript-parser path produced.
+    #[test]
+    fn req_c11_a_run_that_could_not_parse_any_file_is_read_nothing_and_emits_no_findings() {
+        let raw = r#"[
+          {"filePath":"/repo/a.ts","messages":[{"ruleId":null,"fatal":true,"severity":2,"message":"Parsing error: Unexpected token :","line":1,"column":12}],"errorCount":1,"fatalErrorCount":1},
+          {"filePath":"/repo/b.ts","messages":[{"ruleId":null,"fatal":true,"severity":2,"message":"Parsing error: Unexpected token :","line":3,"column":4}],"errorCount":1,"fatalErrorCount":1}
+        ]"#;
+        let (findings, shape) = parse_eslint_json("me/web", raw).expect("must parse");
+        assert!(
+            findings.is_empty(),
+            "a parse error is not a finding about the client's code: {findings:?}"
+        );
+        assert_eq!(shape.files_reported, 2);
+        assert_eq!(shape.files_unparseable, 2);
+        assert!(
+            shape.read_nothing(),
+            "every file unreadable must be reported as a zero-coverage run"
+        );
+    }
+
+    /// req_c11: a PARTIALLY unparseable repo is NOT `read_nothing` — the rules that did
+    /// evaluate genuinely evaluated, so claiming total failure would be its own false
+    /// statement. Guards against the obvious over-correction.
+    #[test]
+    fn req_c11_a_partially_unparseable_run_is_not_read_nothing() {
+        let raw = r#"[
+          {"filePath":"/repo/a.ts","messages":[{"ruleId":null,"fatal":true,"severity":2,"message":"Parsing error"}]},
+          {"filePath":"/repo/b.js","messages":[{"ruleId":"no-var","severity":2,"message":"Unexpected var.","line":1}]}
+        ]"#;
+        let (findings, shape) = parse_eslint_json("me/web", raw).expect("must parse");
+        assert_eq!(findings.len(), 1);
+        assert_eq!(shape.files_reported, 2);
+        assert_eq!(shape.files_unparseable, 1);
+        assert!(!shape.read_nothing());
+    }
+
+    /// req_c11: eslint's "nothing matched / clean" output is the literal `[]`, which must
+    /// parse to zero findings and a zero-file shape — explicitly NOT `read_nothing` (there
+    /// was nothing to read, which is an ordinary disclosed outcome, not a degradation).
+    #[test]
+    fn req_c11_an_empty_eslint_result_array_is_clean_not_a_degradation() {
+        let (findings, shape) = parse_eslint_json("me/web", "[]").expect("must parse");
+        assert!(findings.is_empty());
+        assert_eq!(shape.files_reported, 0);
+        assert!(!shape.read_nothing());
+    }
+
+    /// req_c11: and the actual C11 input — an EMPTY string — must still be an `Err`, so the
+    /// caller builds a `CoverageNote` rather than reporting a clean preview. The fix changes
+    /// the MESSAGE (see `req_c11_an_empty_stdout_error_names_the_tool_stderr_not_a_parse_
+    /// position`), never the fail-closed posture.
+    #[test]
+    fn req_c11_empty_eslint_stdout_is_an_error_never_a_clean_preview() {
+        assert!(
+            parse_eslint_json("me/web", "").is_err(),
+            "empty stdout must never be ingested as a clean result"
+        );
     }
 
     // ── W3: commodity-class taint layer — shape-variant SQLi corpus ──────────────────────
@@ -2633,7 +3396,7 @@ def get_user_safe_constant():
             config.display()
         );
 
-        let (stdout, _ok) = run_capture_stdout(
+        let (stdout, _ok, _stderr) = run_capture_stdout(
             dir.path(),
             "semgrep",
             &[
@@ -2752,5 +3515,124 @@ export function Thing({ id }) {
             "a real missing-dependency violation must produce a real eslint finding: \
              findings={findings:?} notes={notes:?}"
         );
+    }
+    /// Best-effort probe for a provisioned Camerata eslint workspace — the eslint BINARY and
+    /// the bundled flat config, nothing more (unlike
+    /// `cached_eslint_workspace_with_react_hooks_plugin`, this test needs no plugin: it uses
+    /// CORE eslint rules precisely so it exercises the formatter/plumbing axis in isolation).
+    fn cached_eslint_workspace() -> Option<std::path::PathBuf> {
+        let tooling = tool_provisioning::tooling_dir()?;
+        let workspace = tool_provisioning::eslint_workspace_dir(&tooling);
+        if !tool_provisioning::eslint_bin(&workspace).exists() {
+            return None;
+        }
+        if !tool_provisioning::eslint_config_path(&workspace).exists() {
+            return None;
+        }
+        Some(workspace)
+    }
+
+    /// req_c11, THE DECISIVE LIVE PROOF: against the real eslint binary in the real
+    /// provisioned workspace, over a repo with two planted CORE-rule violations:
+    ///
+    /// 1. The OLD argument vector (`--format @microsoft/eslint-formatter-sarif`) produces an
+    ///    EMPTY stdout and a non-zero exit — reproducing C11's
+    ///    `EOF while parsing a value at line 1 column 0` exactly, from first principles, with
+    ///    no mocking anywhere. If this half ever stops reproducing, the assertion says so
+    ///    rather than silently passing.
+    /// 2. The NEW argument vector ([`eslint_args`], built-in `json` formatter) over the SAME
+    ///    workspace, SAME config and SAME repo produces real findings for both planted
+    ///    violations.
+    ///
+    /// Same-process, same-fixture, one variable changed. Skips (never fails) when no Camerata
+    /// eslint workspace is cached on this machine — it never provisions over the network.
+    #[tokio::test]
+    async fn req_c11_live_eslint_json_formatter_finds_what_the_npm_sarif_formatter_could_not() {
+        let Some(workspace) = cached_eslint_workspace() else {
+            eprintln!(
+                "skipping req_c11_live_eslint_json_formatter_finds_what_the_npm_sarif_\
+                 formatter_could_not: no cached Camerata eslint workspace on this machine"
+            );
+            return;
+        };
+        let bin = tool_provisioning::eslint_bin(&workspace);
+        let bin_str = bin.to_string_lossy().into_owned();
+        let config_str = tool_provisioning::eslint_config_path(&workspace)
+            .to_string_lossy()
+            .into_owned();
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(
+            dir.path().join("app.js"),
+            "export function f(a, b) {\n  if (a == b) { return 1; }\n  var x = 2;\n  return x;\n}\n",
+        )
+        .expect("write fixture");
+
+        // Two CORE eslint rules, both present in the bundled config, both genuinely violated
+        // by the fixture above — so neither half of this test can fail for a plugin reason.
+        let selectors = vec!["eqeqeq".to_string(), "no-var".to_string()];
+
+        // ── 1. The OLD invocation: the npm SARIF formatter package. ──────────────────────
+        let mut old_args: Vec<String> = vec![
+            "--config".to_string(),
+            config_str.clone(),
+            "--format".to_string(),
+            "@microsoft/eslint-formatter-sarif".to_string(),
+        ];
+        for sel in &selectors {
+            old_args.push("--rule".to_string());
+            old_args.push(format!("{{\"{sel}\": \"error\"}}"));
+        }
+        old_args.push(".".to_string());
+        let old_refs: Vec<&str> = old_args.iter().map(|s| s.as_str()).collect();
+        let (old_stdout, old_ok, old_stderr) =
+            run_capture_stdout(dir.path(), &bin_str, &old_refs, None)
+                .await
+                .expect("eslint must spawn");
+
+        assert!(
+            old_stdout.trim().is_empty(),
+            "C11 must still reproduce: the npm formatter package cannot resolve from the \
+             scanned repo's cwd, so eslint writes NOTHING to stdout. Got {} bytes: {old_stdout}",
+            old_stdout.len()
+        );
+        assert!(!old_ok, "that invocation exits non-zero");
+        assert!(
+            parse_eslint_json("me/web", &old_stdout).is_err(),
+            "the empty stdout is what produced C11's parse error"
+        );
+        assert!(
+            old_stderr.to_lowercase().contains("formatter"),
+            "the real cause is on stderr, which Camerata used to discard: {old_stderr}"
+        );
+
+        // ── 2. The NEW invocation: eslint's built-in json formatter. ─────────────────────
+        let new_args = eslint_args(&config_str, &selectors);
+        let new_refs: Vec<&str> = new_args.iter().map(|s| s.as_str()).collect();
+        let (new_stdout, _new_ok, new_stderr) =
+            run_capture_stdout(dir.path(), &bin_str, &new_refs, None)
+                .await
+                .expect("eslint must spawn");
+
+        assert!(
+            !new_stdout.trim().is_empty(),
+            "the built-in formatter needs no module resolution and must always emit a \
+             document. stderr: {new_stderr}"
+        );
+        let (findings, shape) =
+            parse_eslint_json("me/web", &new_stdout).expect("built-in json output must parse");
+        assert!(
+            !shape.read_nothing(),
+            "the fixture is plain JS; eslint must have parsed it: {shape:?}"
+        );
+        for rule in ["eqeqeq", "no-var"] {
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| f.rule_id == rule && f.path.contains("app.js")),
+                "the planted `{rule}` violation must surface as a real preview finding — this \
+                 is the coverage C11 cost us entirely. findings={findings:?}"
+            );
+        }
     }
 }

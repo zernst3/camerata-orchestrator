@@ -14,31 +14,46 @@
  * plugin under the namespace its rules are addressed by — `--rule` can only
  * resolve `"react-hooks/exhaustive-deps": "error"` if something has already
  * registered the `react-hooks` plugin here; it does not install plugins on
- * its own.
+ * its own.  (That `--rule` CAN see a plugin registered in a DIFFERENT config
+ * object of this same array is verified behaviour, not an assumption: eslint
+ * turns `--rule` into its own `files`-less config object and the flat-config
+ * merge unions the plugin namespaces per file.  The failure mode this file's
+ * own history exhibited — "could not find plugin '@typescript-eslint'" — was
+ * always an ABSENT PACKAGE, never a merge-visibility problem.)
  *
- * Every plugin import below is wrapped in its own try/catch and dynamically
- * imported, exactly like the TypeScript parser below: a partial or offline
- * `npm install` (see `tool_provisioning::ensure_eslint`) must degrade that ONE
- * plugin's rules gracefully (silently unavailable, `--rule` warns and no-ops
- * rather than erroring the whole config out) rather than taking down every
- * OTHER rule's preview for the whole scan.
+ * Every plugin AND the TypeScript parser below is loaded by BARE SPECIFIER
+ * inside its own try/catch.  Two reasons, both load-bearing:
+ *
+ *  1. A partial or offline `npm install` (see `tool_provisioning::ensure_eslint`)
+ *     must degrade that ONE plugin's rules gracefully rather than taking down
+ *     every OTHER rule's preview for the whole scan.
+ *
+ *  2. Bare specifiers are resolved by node walking up from THIS FILE's own
+ *     directory, which is the provisioned workspace root that owns
+ *     `node_modules/`.  The previous revision hand-built a path instead —
+ *     `new URL("../node_modules/@typescript-eslint/parser/dist/index.js",
+ *     import.meta.url).pathname` — which was wrong twice over: `../` from a
+ *     file AT the workspace root resolves to the workspace's PARENT (the
+ *     `tooling/` dir, which has no `node_modules`), and `.pathname`
+ *     percent-encodes the space in macOS's `Application Support`, so the
+ *     resulting path could not open even at the right level.  The TypeScript
+ *     parser therefore never loaded on any platform, and every `.ts`/`.tsx`
+ *     file was silently parsed by the JS-only default parser.  A bare
+ *     specifier cannot express either mistake.
  */
 
-// eslint-disable-next-line no-undef
-const tsParserPath = new URL("../node_modules/@typescript-eslint/parser/dist/index.js", import.meta.url).pathname;
-
+// The TypeScript parser, so `.ts`/`.tsx`/`.mts`/`.cts` sources parse at all.
+// Absent parser => eslint's default JS-only parser => every TS file reports a
+// fatal parse error instead of real findings. See note 2 above.
 let tsParser;
 try {
-  // Dynamic import so the config is valid even when the TS parser is absent.
-  const mod = await import(tsParserPath);
+  const mod = await import("@typescript-eslint/parser");
   tsParser = mod.default ?? mod;
 } catch {
   tsParser = undefined;
 }
 
-// Plugin packages, dynamically imported by bare specifier (resolved via this
-// file's own node_modules, provisioned by `tool_provisioning::ensure_eslint`).
-// Each is independently optional — see the module doc comment above.
+// Plugin packages, each independently optional — see note 1 above.
 
 let tsEslintPlugin;
 try {
@@ -81,7 +96,11 @@ const config = [
     plugins: {
       // Only registered when the corresponding package actually provisioned —
       // an absent plugin here means its rules are simply never previewable
-      // this run, surfaced as a graceful CoverageNote, never a crash.
+      // this run, surfaced as a graceful CoverageNote, never a crash. The Rust
+      // side performs the SAME presence check before it hands a namespaced
+      // rule to `--rule` (see `scan_tools::eslint_plugin_package_for_selector`),
+      // because an unregistered namespace reaching `--rule` is fatal to the
+      // WHOLE run, not just to that rule.
       ...(tsEslintPlugin ? { "@typescript-eslint": tsEslintPlugin } : {}),
       ...(reactHooksPlugin ? { "react-hooks": reactHooksPlugin } : {}),
       ...(jestPlugin ? { jest: jestPlugin } : {}),
