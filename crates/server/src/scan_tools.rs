@@ -1415,7 +1415,12 @@ async fn run_one_tool<'r>(
             .await?;
             match parse_ruff_json(repo, &stdout) {
                 Ok(fs) => Ok((fs, Vec::new())),
-                Err(e) => Err(tool_output_error(ScanTool::Ruff, &stdout, &stderr, Some(&e))),
+                Err(e) => Err(tool_output_error(
+                    ScanTool::Ruff,
+                    &stdout,
+                    &stderr,
+                    Some(&e),
+                )),
             }
         }
         ScanTool::Clippy => {
@@ -2848,14 +2853,10 @@ mod tests {
     #[tokio::test]
     async fn run_capture_stdout_no_progress_still_works() {
         let dir = std::env::temp_dir();
-        let (stdout, ok, _stderr) = run_capture_stdout(
-            &dir,
-            "sh",
-            &["-c", "printf 'hello\\nworld\\n'"],
-            None,
-        )
-        .await
-        .expect("sh should be on PATH");
+        let (stdout, ok, _stderr) =
+            run_capture_stdout(&dir, "sh", &["-c", "printf 'hello\\nworld\\n'"], None)
+                .await
+                .expect("sh should be on PATH");
 
         assert!(ok);
         assert!(stdout.contains("hello"));
@@ -2929,14 +2930,20 @@ mod tests {
         ];
         let args = eslint_args("/cfg/camerata.config.mjs", &selectors);
         assert_eq!(args.first().map(String::as_str), Some("--config"));
-        assert_eq!(args.get(1).map(String::as_str), Some("/cfg/camerata.config.mjs"));
+        assert_eq!(
+            args.get(1).map(String::as_str),
+            Some("/cfg/camerata.config.mjs")
+        );
         assert_eq!(args.last().map(String::as_str), Some("."));
         assert_eq!(
             args.iter().filter(|a| *a == "--rule").count(),
             2,
             "one --rule per selector: {args:?}"
         );
-        assert!(args.iter().any(|a| a == r#"{"eqeqeq": "error"}"#), "{args:?}");
+        assert!(
+            args.iter().any(|a| a == r#"{"eqeqeq": "error"}"#),
+            "{args:?}"
+        );
         assert!(
             args.iter()
                 .any(|a| a == r#"{"react-hooks/exhaustive-deps": "error"}"#),
@@ -3092,10 +3099,10 @@ mod tests {
         std::fs::write(present.join("package.json"), "{}").expect("write");
 
         let selectors = vec![
-            "eqeqeq".to_string(),                               // core: always runnable
-            "react-hooks/exhaustive-deps".to_string(),           // plugin present
-            "@typescript-eslint/no-explicit-any".to_string(),    // plugin ABSENT
-            "jest/no-focused-tests".to_string(),                 // plugin ABSENT
+            "eqeqeq".to_string(),                             // core: always runnable
+            "react-hooks/exhaustive-deps".to_string(),        // plugin present
+            "@typescript-eslint/no-explicit-any".to_string(), // plugin ABSENT
+            "jest/no-focused-tests".to_string(),              // plugin ABSENT
         ];
         let (runnable, unresolvable) = partition_eslint_selectors(&selectors, ws.path());
 
@@ -3171,7 +3178,10 @@ mod tests {
         assert_eq!(eq.path, "/repo/app.js");
         assert_eq!(eq.line, 2);
         assert_eq!(eq.repo, "me/web");
-        assert_eq!(eq.severity, "high", "eslint severity 2 (error) maps to high");
+        assert_eq!(
+            eq.severity, "high",
+            "eslint severity 2 (error) maps to high"
+        );
         assert!(eq.preview);
         assert_eq!(eq.preview_tool.as_deref(), Some("eslint"));
 
