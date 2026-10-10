@@ -398,6 +398,7 @@ mod tests {
     fn finding(rule: &str) -> Finding {
         Finding {
             repo: "me/api".into(),
+            kind: None,
             path: "src/x.rs".into(),
             line: 1,
             rule_id: rule.into(),

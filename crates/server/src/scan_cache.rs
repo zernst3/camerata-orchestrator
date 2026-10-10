@@ -354,6 +354,7 @@ mod tests {
     fn finding(repo: &str, path: &str, rule: &str) -> Finding {
         Finding {
             repo: repo.to_string(),
+            kind: None,
             path: path.to_string(),
             line: 1,
             rule_id: rule.to_string(),

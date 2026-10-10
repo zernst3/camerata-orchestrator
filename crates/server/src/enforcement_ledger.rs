@@ -483,6 +483,7 @@ mod tests {
         let ledger = EnforcementLedger::none();
         let findings = vec![crate::onboard::Finding {
             repo: "owner/repo".to_string(),
+            kind: None,
             path: "src/db.py".to_string(),
             line: 42,
             rule_id: "SEC-NO-HARDCODED-SECRETS-1".to_string(),
@@ -551,6 +552,7 @@ mod tests {
             // Active floor finding → should be recorded (no panic).
             crate::onboard::Finding {
                 repo: "owner/repo".to_string(),
+                kind: None,
                 path: "src/db.py".to_string(),
                 line: 42,
                 rule_id: "SEC-NO-HARDCODED-SECRETS-1".to_string(),
@@ -576,6 +578,7 @@ mod tests {
             // Suppressed finding → skipped silently (no panic).
             crate::onboard::Finding {
                 repo: "owner/repo".to_string(),
+                kind: None,
                 path: "src/legacy.py".to_string(),
                 line: 7,
                 rule_id: "SEC-NO-HARDCODED-SECRETS-1".to_string(),
@@ -601,6 +604,7 @@ mod tests {
             // Non-floor rule → skipped silently (no panic).
             crate::onboard::Finding {
                 repo: "owner/repo".to_string(),
+                kind: None,
                 path: "src/some.rs".to_string(),
                 line: 1,
                 rule_id: "ARCH-NO-GOD-STRUCT-1".to_string(),

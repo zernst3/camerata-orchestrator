@@ -23946,6 +23946,7 @@ mod tests {
             excluded_mechanical_rules: Vec::new(),
             findings: vec![crate::onboard::Finding {
                 repo: "owner/repo".to_string(),
+                kind: None,
                 path: "src/main.rs".to_string(),
                 line: 42,
                 rule_id: rule_id.to_string(),

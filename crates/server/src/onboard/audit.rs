@@ -270,6 +270,8 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                         fix_specific: None,
                         // The deterministic floor never runs through calibration.
                         calibration_rationale: None,
+                        // A5.6: a deterministic content-rule hit is an objective fault.
+                        kind: Some(camerata_api_types::audit::FindingKind::Defect),
                     });
                 }
             }
@@ -326,6 +328,8 @@ pub fn audit_content(repo: &str, path: &str, content: &str) -> Vec<Finding> {
                 fix_specific: None,
                 // The deterministic floor never runs through calibration.
                 calibration_rationale: None,
+                // A5.6: a deterministic content-rule hit is an objective fault.
+                kind: Some(camerata_api_types::audit::FindingKind::Defect),
             });
         }
     }
@@ -547,6 +551,8 @@ pub(crate) fn classify_repo_findings(
             also_locations: Vec::new(),
             fix_specific: None,
             calibration_rationale: None,
+            // A5.6: a reason-less waiver is an objective fault (the un-auditable hole).
+            kind: Some(camerata_api_types::audit::FindingKind::Defect),
         });
     }
 }

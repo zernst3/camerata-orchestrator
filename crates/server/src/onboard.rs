@@ -230,6 +230,18 @@ pub struct Finding {
     /// rather than it being a per-run model whim.
     #[serde(default)]
     pub calibration_rationale: Option<String>,
+    /// Pass-1 W3 (A5.6): what this row IS — the five-kind taxonomy
+    /// ([`camerata_api_types::audit::FindingKind`]: `defect` / `deviation` /
+    /// `convention_observed` / `no_convention` / `not_assessed`), set EXPLICITLY by whatever
+    /// produced the row (the deterministic floor, the architectural checkers, tool previews,
+    /// the dependency audit, and every `crate::ai_audit` emission path), never derived
+    /// downstream from prose. Flattened: the wire carries one flat `"kind"` discriminator plus
+    /// the variant's payload fields as siblings of this struct's own fields. `None` ONLY for a
+    /// report persisted before this field existed (serde back-compat) or an emission path the
+    /// backfill missed — exporters surface that as the explicit `"unspecified"` tag
+    /// ([`camerata_api_types::audit::UNSPECIFIED_KIND_TAG`]), NEVER as a silent `defect`.
+    #[serde(default, flatten)]
+    pub kind: Option<camerata_api_types::audit::FindingKind>,
 }
 
 /// One evidence site absorbed into a merged finding's [`Finding::also_locations`] during
@@ -298,6 +310,10 @@ impl Default for Finding {
             also_locations: Vec::new(),
             fix_specific: None,
             calibration_rationale: None,
+            // A blank finding has no producer yet, so it has no kind yet — every PRODUCTION
+            // emission path must set one explicitly (A5.6's backfill rule); `None` surviving
+            // to an export surfaces as the explicit "unspecified" tag, never a silent defect.
+            kind: None,
         }
     }
 }
@@ -876,14 +892,52 @@ impl SelectedRule {
 }
 
 /// The SEMANTIC (LLM-audited) rule set `audit_repos` hands to `ai_audit::audit_repo` for one
-/// repo: every rule in `selected` that applies to `spec`, minus ONLY governance/process rules
-/// (`is_code_auditable_rule`) — see `audit_repos`'s top-level doc comment for the W4 root-cause
-/// fix this encodes. Extracted as its own pure, independently-testable function (rather than
-/// left inline in `audit_repos`'s per-repo loop) specifically so a unit test can assert the W4
-/// regression directly: a selected rule whose corpus `enforcement` is CI-tier
-/// (`mechanical`/`architectural`) — or that already has a deterministic gate arm / registered
-/// architectural checker — is NOT excluded here. This function does not even look at
-/// enforcement tier or detector registration at all anymore; that IS the fix.
+/// repo: EVERY rule in `selected` that applies to `spec`. No other filter, of any kind.
+///
+/// # Why there are no exclusions left (Pass-1 W4)
+///
+/// Zach, 2026-10-09: *"Every single rule should be included in the AI semantic scan, even if
+/// they're deterministic. It gets a second pair of eyes on the deterministic scans."* Three
+/// separate exclusions have been removed from this function over two passes, each of which had
+/// a plausible-sounding rationale and each of which silently produced rules that NOTHING
+/// evaluated:
+///
+/// 1. **CI-tier enforcement** (removed earlier in W4) — "a `mechanical`/`architectural`
+///    declaration means a deterministic gate already covers it" conflated "deterministically
+///    checkable IN PRINCIPLE" with "actually checked on THIS repo". A rule like strict layering
+///    needs a repo-specific layer map no generic detector ships with, so declaring it
+///    `mechanical` bought it no detector AND no model read either.
+/// 2. **An existing gate arm / registered architectural checker** (removed earlier in W4) —
+///    same error one level down, and it is also the exact coverage the owner's "second pair of
+///    eyes" instruction asks for: a detector answering one facet of a rule is not a reason to
+///    stop looking at the others.
+/// 3. **Governance/process id prefixes** `ORCH-`/`SPIRIT-`/`PROC-` (removed here, finding A8)
+///    — this one was a blanket LEXICAL gate, and it is why `SPIRIT-FILE-SIZE-1` was doubly
+///    disarmed: excluded from selection by `verification = "policy"` AND, had it ever been
+///    selected, excluded from the only tier that could evaluate it by its id prefix. File size
+///    is a plain observable fact about source files; so is "the PR template asks for a
+///    concurrency story" (`PROC-PR-CONCURRENCY-1`, whose subject IS a file in the repo), and so
+///    is a UI rendering an action the viewer cannot perform (`PROC-HIDE-DEAD-END-1`). Calling
+///    all 32 of them "not code" because of three id prefixes was never true, and the cost of
+///    being wrong was total: a prefix-excluded rule with no detector was checked by nothing at
+///    all while the report called it clean.
+///
+/// A rule whose subject genuinely leaves no trace in the file set (e.g. a commit-message
+/// convention) returns nothing from the model. That is the CORRECT outcome and it is cheap —
+/// not a reason to pre-emptively ban a whole prefix. Token cost of removing exclusion 3,
+/// measured against the real corpus for a TypeScript/React/Next/Supabase stack: the selected
+/// rule list goes from 153 to 185 rules, ~19.7k → ~23.6k prompt tokens (+3.9k, +20% of the
+/// rule-list section and far less of the whole prompt, which also carries file contents). No
+/// batching is needed, and none was introduced — see the W4 report for the full arithmetic.
+///
+/// `is_code_auditable_rule` still exists and is still used, by `is_semantic_multi_option_rule`
+/// — "should the model be asked to pick among this rule's directive WORDINGS" is a different
+/// question from "should the model look at this rule at all", and the answer to the first can
+/// legitimately stay no.
+///
+/// Kept as its own pure, independently-testable function (rather than inline in `audit_repos`'s
+/// per-repo loop) specifically so the regression tests can assert each removed exclusion
+/// directly.
 pub(crate) fn semantic_rule_ids_for_repo(
     selected: &[SelectedRule],
     spec: &str,
@@ -891,7 +945,6 @@ pub(crate) fn semantic_rule_ids_for_repo(
     selected
         .iter()
         .filter(|r| r.applies_to(spec))
-        .filter(|r| is_code_auditable_rule(&r.id))
         .map(|r| (r.id.clone(), r.directive.clone()))
         .collect()
 }
@@ -2182,20 +2235,71 @@ mod tests {
         );
     }
 
-    /// The one exclusion that DOES survive: a governance/process rule (`ORCH-`/`SPIRIT-`/
-    /// `PROC-`) is still filtered out of the code-audit prompt, CI-tier or not — auditing
-    /// application source against a fleet-process rule is a category error, not a coverage gap.
+    /// req_a8 / "every rule reaches the AI scan" (Pass-1 W4): the LAST exclusion is gone too.
+    /// A governance/process rule (`ORCH-`/`SPIRIT-`/`PROC-`) now reaches the code-audit prompt
+    /// alongside everything else.
+    ///
+    /// SUPERSEDES the previous expectation of this test (which asserted the prefix exclusion
+    /// survived, on the "auditing source against a fleet-process rule is a category error"
+    /// reasoning). Zach, 2026-10-09: *"Every single rule should be included in the AI semantic
+    /// scan, even if they're deterministic. It gets a second pair of eyes on the deterministic
+    /// scans."* The old reasoning was also factually wrong for the rules it banned —
+    /// `SPIRIT-FILE-SIZE-1` is about file sizes and `PROC-PR-CONCURRENCY-1` is about a file in
+    /// `.github/` — and it was the second half of finding A8's double disarm.
     #[test]
-    fn semantic_rule_set_still_excludes_governance_process_rules() {
-        let selected = vec![sel("ORCH-TRACK-AI-SPEND-1", &[]), sel("ARCH-STRICT-LAYERING-1", &[])];
+    fn req_a8_semantic_rule_set_no_longer_excludes_governance_process_rules() {
+        let selected = vec![
+            sel("ORCH-TRACK-AI-SPEND-1", &[]),
+            sel("SPIRIT-FILE-SIZE-1", &[]),
+            sel("PROC-PR-CONCURRENCY-1", &[]),
+            sel("ARCH-STRICT-LAYERING-1", &[]),
+        ];
         let semantic = semantic_rule_ids_for_repo(&selected, "acme/api");
-        assert!(
-            !semantic.iter().any(|(id, _)| id == "ORCH-TRACK-AI-SPEND-1"),
-            "a governance/process rule must stay out of the code-audit prompt: {semantic:?}"
+        for id in [
+            "ORCH-TRACK-AI-SPEND-1",
+            "SPIRIT-FILE-SIZE-1",
+            "PROC-PR-CONCURRENCY-1",
+            "ARCH-STRICT-LAYERING-1",
+        ] {
+            assert!(
+                semantic.iter().any(|(got, _)| got == id),
+                "{id} must reach the model's rule set — no prefix may exclude a rule from the \
+                 only tier that can evaluate it: {semantic:?}"
+            );
+        }
+    }
+
+    /// req_a8 (the general statement): `semantic_rule_ids_for_repo` applies NO filter other
+    /// than per-repo applicability. Asserted over a deliberately adversarial selection drawn
+    /// from every id family in the corpus, so a future "small, obviously safe" exclusion
+    /// (another prefix, an enforcement tier, a detector check) fails here instead of silently
+    /// re-creating the A8 shape.
+    #[test]
+    fn req_a8_semantic_rule_set_filters_on_nothing_but_repo_applicability() {
+        let ids = [
+            "ORCH-MODEL-TIERING-1",
+            "SPIRIT-ROBUSTNESS-1",
+            "PROC-HIDE-DEAD-END-1",
+            "PROCESS-BRANCH-NAMING-1",
+            "SEC-NO-HARDCODED-SECRETS-1",
+            "SUPABASE-RLS-ENABLED-1",
+            "ARCH-HANDLER-NO-DB-1",
+            "UI-UTC-DATES-1",
+            "RUBY-FROZEN-STRING-LITERAL-1",
+        ];
+        let selected: Vec<SelectedRule> = ids.iter().map(|id| sel(id, &[])).collect();
+        let semantic = semantic_rule_ids_for_repo(&selected, "acme/api");
+        assert_eq!(
+            semantic.len(),
+            ids.len(),
+            "every applicable selected rule must reach the model: got {semantic:?}"
         );
+
+        // The ONE filter that is real: a rule bound to a sibling repo does not apply here.
+        let scoped = vec![sel("SPIRIT-FILE-SIZE-1", &["acme/other"])];
         assert!(
-            semantic.iter().any(|(id, _)| id == "ARCH-STRICT-LAYERING-1"),
-            "a normal code rule in the same selection must still pass: {semantic:?}"
+            semantic_rule_ids_for_repo(&scoped, "acme/api").is_empty(),
+            "per-repo binding is still honored"
         );
     }
 
@@ -3357,6 +3461,7 @@ mod tests {
         ];
         let mk = |path: &str, line: usize, rule: &str, snip: &str| Finding {
             repo: "me/api".into(),
+            kind: None,
             path: path.into(),
             line,
             rule_id: rule.into(),
@@ -3397,6 +3502,7 @@ mod tests {
         let findings = vec![
             Finding {
                 repo: "me/api".into(),
+                kind: None,
                 path: "a.rs".into(),
                 line: 3,
                 rule_id: "SEC-NO-HARDCODED-SECRETS-1".into(),
@@ -3421,6 +3527,7 @@ mod tests {
             },
             Finding {
                 repo: "me/web".into(),
+                kind: None,
                 path: "b.tsx".into(),
                 line: 7,
                 rule_id: "ARCH-NO-SECRETS-IN-URL-1".into(),
@@ -3466,6 +3573,7 @@ mod tests {
     fn finding_for(repo: &str, path: &str, line: usize, rule_id: &str) -> Finding {
         Finding {
             repo: repo.to_string(),
+            kind: None,
             path: path.to_string(),
             line,
             rule_id: rule_id.to_string(),
@@ -3614,6 +3722,7 @@ mod tests {
     fn tech_debt_csv_escapes_special_fields_correctly() {
         let f = Finding {
             repo: "me/api".into(),
+            kind: None,
             path: "src/tricky,path.rs".into(),
             line: 1,
             rule_id: "RULE-1".into(),

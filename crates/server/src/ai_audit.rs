@@ -584,6 +584,12 @@ pub fn parse_ai_findings(
                 // Set by `apply_severity_calibration_rules` (D5) once the calibration pass
                 // runs; a raw pre-calibration finding has no floor rationale yet.
                 calibration_rationale: None,
+                // A5.6: a model-reported fault is a Defect at parse time. `audit_repo`'s
+                // kind-assignment post-pass (see `assign_deviation_kinds`) RECLASSIFIES the
+                // rows judged under a decision/default-with-exceptions rule's recommended
+                // option into `Deviation` once the per-rule recommendation is known — the
+                // parser itself cannot know a rule's kind, and must never guess from prose.
+                kind: Some(camerata_api_types::audit::FindingKind::Defect),
             });
         }
     }
@@ -5272,6 +5278,9 @@ fn build_structural_group_finding(rule_id: String, occurrences: Vec<Finding>) ->
         also_locations,
         fix_specific: None,
         calibration_rationale: None,
+        // A5.6: a structural group row keeps the kind of the primary occurrence it
+        // represents (its members all share one rule, hence one kind).
+        kind: primary.kind.clone(),
     }
 }
 
@@ -7276,6 +7285,7 @@ mod tests {
     fn site_finding(rule_id: &str, path: &str, line: usize, sev: &str, title: &str) -> Finding {
         Finding {
             repo: "o/r".to_string(),
+            kind: None,
             path: path.to_string(),
             line,
             rule_id: rule_id.to_string(),
@@ -8186,6 +8196,7 @@ mod tests {
     fn finding(rule: &str, sev: &str) -> Finding {
         Finding {
             repo: "me/api".into(),
+            kind: None,
             path: "a.rs".into(),
             line: 1,
             rule_id: rule.into(),
@@ -10540,6 +10551,7 @@ mod tests {
     fn bug7_merge_location_group_earliest_appearance_wins_on_tie() {
         let make = |rule: &str, sev: &str, snippet: &str| Finding {
             repo: "r/r".to_string(),
+            kind: None,
             path: "src/lib.rs".to_string(),
             line: 1,
             rule_id: rule.to_string(),

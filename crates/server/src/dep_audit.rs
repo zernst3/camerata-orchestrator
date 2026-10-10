@@ -203,6 +203,8 @@ pub fn parse_osv_json(
                     path: lockfile_rel.clone(),
                     line: 0,
                     rule_id: DEP_AUDIT_RULE_ID.to_string(),
+                    // A5.6: a known vulnerable dependency is an objective fault.
+                    kind: Some(camerata_api_types::audit::FindingKind::Defect),
                     severity,
                     snippet: coord,
                     detail,
