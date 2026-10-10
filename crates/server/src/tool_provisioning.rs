@@ -235,9 +235,35 @@ fn bundled_eslint_config_src() -> PathBuf {
 }
 
 /// Probe whether eslint is already provisioned and healthy.
+///
+/// # Why the binary probe alone is NOT the health check (W6 / C11)
+///
+/// This used to ask one question — "does the eslint binary answer `--version`" —
+/// and [`ensure_eslint`] returned early on a `true`. That made the provisioned
+/// workspace a WRITE-ONCE artifact: every package later added to
+/// [`ESLINT_NPM_PACKAGES`], and every subsequent edit to the bundled flat config,
+/// silently never reached a machine that had provisioned even once. Observed
+/// directly on the author's machine while diagnosing C11: 3 of the 6 required
+/// packages missing and a flat config four months stale, on a workspace that
+/// passed this probe. The consequence was not a degraded preview but a
+/// WHOLESALE-ABORTED one — an unregistered plugin namespace reaching `--rule` is
+/// a fatal eslint config error, so the three missing plugin packages zeroed every
+/// selected eslint rule including the core ones.
+///
+/// So the probe now covers the whole provisioned state: the binary answers, EVERY
+/// required package is installed, and the workspace's config is byte-identical to
+/// the bundled asset. Anything else re-provisions. The cost of a false negative is
+/// one `npm install --prefer-offline`; the cost of a false positive is a silently
+/// dead tool tier.
 pub async fn eslint_is_provisioned(workspace: &Path) -> bool {
     let bin = eslint_bin(workspace);
     if !bin.exists() {
+        return false;
+    }
+    if !eslint_packages_installed(workspace) {
+        return false;
+    }
+    if !eslint_config_is_current(workspace) {
         return false;
     }
     match tokio::process::Command::new(&bin)
@@ -247,6 +273,34 @@ pub async fn eslint_is_provisioned(workspace: &Path) -> bool {
         .await
     {
         Ok(out) => out.status.success(),
+        Err(_) => false,
+    }
+}
+
+/// `true` when every package in [`ESLINT_NPM_PACKAGES`] is present in the
+/// workspace's `node_modules`. Probes each package's `package.json` rather than
+/// its directory, so a half-removed package reads as absent.
+fn eslint_packages_installed(workspace: &Path) -> bool {
+    let node_modules = workspace.join("node_modules");
+    ESLINT_NPM_PACKAGES
+        .iter()
+        .all(|pkg| node_modules.join(pkg).join("package.json").exists())
+}
+
+/// `true` when the workspace's copy of the flat config is byte-identical to the
+/// bundled asset. A content comparison rather than an mtime one: the asset ships
+/// inside the binary, so its mtime on disk says nothing about which Camerata
+/// build wrote the workspace copy.
+///
+/// Returns `true` when the bundled asset cannot be read at all — a packaging
+/// problem must not put provisioning into a re-install loop on every scan.
+fn eslint_config_is_current(workspace: &Path) -> bool {
+    let src = bundled_eslint_config_src();
+    let Ok(want) = std::fs::read(&src) else {
+        return true;
+    };
+    match std::fs::read(eslint_config_path(workspace)) {
+        Ok(have) => have == want,
         Err(_) => false,
     }
 }
@@ -266,19 +320,25 @@ pub async fn eslint_is_provisioned(workspace: &Path) -> bool {
 ///   `JAVASCRIPT-REACT-RULES-OF-HOOKS-1`'s detector).
 /// - `eslint-plugin-jest` — supplies the `jest/*` rules the testing-domain corpus
 ///   rules ground against (`no-conditional-expect`, `no-disabled-tests`, …).
-/// - `@microsoft/eslint-formatter-sarif` — the SARIF output formatter the
-///   scan pass requests via `--format @microsoft/eslint-formatter-sarif`.
+///
+/// `@microsoft/eslint-formatter-sarif` was REMOVED (W6 / C11). The scan pass now
+/// asks for eslint's BUILT-IN `json` formatter, because eslint resolves a
+/// non-built-in `--format` relative to its cwd — the scanned repo — so a formatter
+/// installed here could never be found, and the pass aborted with an empty stdout
+/// on every repo. See `scan_tools::parse_eslint_json`'s doc comment. Installing it
+/// now would be pure cost: nothing requests it.
 ///
 /// Every package here must also be REGISTERED in the bundled flat config
 /// (`assets/eslint/camerata.config.mjs`'s `plugins` field) — installing a plugin
-/// without registering it leaves `--rule` unable to resolve its namespace.
+/// without registering it leaves `--rule` unable to resolve its namespace. And
+/// every package here is checked for PRESENCE by [`eslint_is_provisioned`], so
+/// adding one to this list is enough to make existing workspaces re-provision.
 const ESLINT_NPM_PACKAGES: &[&str] = &[
     "eslint",
     "@typescript-eslint/parser",
     "@typescript-eslint/eslint-plugin",
     "eslint-plugin-react-hooks",
     "eslint-plugin-jest",
-    "@microsoft/eslint-formatter-sarif",
 ];
 
 /// Ensure eslint (and its companion packages) are provisioned in the tooling
@@ -724,6 +784,113 @@ mod tests {
         let ws = tmp.path().join("eslint");
         let cfg = eslint_config_path(&ws);
         assert!(cfg.starts_with(&ws));
+    }
+
+    // ── req_c11: the health probe covers the whole provisioned state ──────────
+    //
+    // The probe used to ask only "does the binary answer --version", which made
+    // the workspace write-once: packages added to ESLINT_NPM_PACKAGES later, and
+    // every edit to the bundled flat config, never reached a machine that had
+    // provisioned once. Observed live while diagnosing C11 — 3 of 6 packages
+    // missing and a four-month-stale config, on a workspace this probe called
+    // healthy. See `eslint_is_provisioned`'s doc comment.
+
+    /// Build a workspace that looks fully provisioned to the probe's sub-checks:
+    /// every required package present, config byte-identical to the asset.
+    fn fully_provisioned_workspace() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        let ws = tmp.path();
+        for pkg in ESLINT_NPM_PACKAGES {
+            let dir = ws.join("node_modules").join(pkg);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("package.json"), "{}").unwrap();
+        }
+        let asset = std::fs::read(bundled_eslint_config_src()).unwrap();
+        std::fs::write(eslint_config_path(ws), asset).unwrap();
+        tmp
+    }
+
+    /// req_c11: every required package present ⇒ the package sub-check passes.
+    #[test]
+    fn req_c11_a_workspace_with_every_required_package_passes_the_package_check() {
+        let tmp = fully_provisioned_workspace();
+        assert!(eslint_packages_installed(tmp.path()));
+    }
+
+    /// req_c11: the exact observed defect — a workspace missing a package that was
+    /// added to `ESLINT_NPM_PACKAGES` after it was provisioned must re-provision.
+    ///
+    /// FAILS BEFORE THE FIX: `eslint_is_provisioned` never looked at `node_modules`
+    /// at all, so this workspace was indistinguishable from a complete one.
+    #[test]
+    fn req_c11_a_workspace_missing_one_required_package_must_reprovision() {
+        for missing in ESLINT_NPM_PACKAGES {
+            let tmp = fully_provisioned_workspace();
+            std::fs::remove_dir_all(tmp.path().join("node_modules").join(missing)).unwrap();
+            assert!(
+                !eslint_packages_installed(tmp.path()),
+                "a workspace missing `{missing}` must not read as provisioned — that is how \
+                 three plugin packages stayed missing for months and zeroed the whole pass"
+            );
+        }
+    }
+
+    /// req_c11: a package DIRECTORY with no `package.json` (an interrupted
+    /// `npm install`) counts as absent — the conservative direction.
+    #[test]
+    fn req_c11_a_package_dir_without_a_manifest_counts_as_absent() {
+        let tmp = fully_provisioned_workspace();
+        let dir = tmp.path().join("node_modules").join(ESLINT_NPM_PACKAGES[0]);
+        std::fs::remove_file(dir.join("package.json")).unwrap();
+        assert!(!eslint_packages_installed(tmp.path()));
+    }
+
+    /// req_c11: the config sub-check is a CONTENT comparison against the bundled
+    /// asset, so a workspace carrying an older copy re-provisions.
+    ///
+    /// FAILS BEFORE THE FIX: `ensure_eslint` only ever copied the config on the
+    /// install path, and the probe short-circuited before reaching it, so a stale
+    /// config was permanent.
+    #[test]
+    fn req_c11_a_stale_workspace_config_must_reprovision_but_a_current_one_must_not() {
+        let tmp = fully_provisioned_workspace();
+        assert!(
+            eslint_config_is_current(tmp.path()),
+            "a byte-identical copy of the bundled asset is current"
+        );
+
+        std::fs::write(
+            eslint_config_path(tmp.path()),
+            "export default [];\n// an older Camerata's config\n",
+        )
+        .unwrap();
+        assert!(
+            !eslint_config_is_current(tmp.path()),
+            "a workspace config that differs from the shipped asset must re-provision"
+        );
+    }
+
+    /// req_c11: an ABSENT workspace config re-provisions (it is not "current").
+    #[test]
+    fn req_c11_an_absent_workspace_config_must_reprovision() {
+        let tmp = fully_provisioned_workspace();
+        std::fs::remove_file(eslint_config_path(tmp.path())).unwrap();
+        assert!(!eslint_config_is_current(tmp.path()));
+    }
+
+    /// req_c11: the SARIF formatter package is no longer installed — nothing
+    /// requests it, so installing it would be pure cost. Also guards the inverse
+    /// regression: re-adding it would reintroduce the temptation to pass it to
+    /// `--format`, which is the C11 defect itself.
+    #[test]
+    fn req_c11_the_npm_sarif_formatter_is_no_longer_provisioned() {
+        assert!(
+            !ESLINT_NPM_PACKAGES
+                .iter()
+                .any(|p| p.contains("eslint-formatter")),
+            "no eslint formatter PACKAGE may be provisioned; the scan pass uses eslint's \
+             built-in `json` formatter: {ESLINT_NPM_PACKAGES:?}"
+        );
     }
 
     // ── probe logic (absent binary → not provisioned) ─────────────────────────
