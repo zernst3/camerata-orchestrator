@@ -1594,6 +1594,7 @@ mod tests {
             extra_domains: Vec::new(),
             kind: None,
             max_severity: None,
+            deviation_ceiling: None,
         }
     }
 

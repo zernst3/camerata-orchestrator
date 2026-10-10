@@ -467,6 +467,13 @@ struct RuleToml {
     /// ceiling — the rule's severity is whatever the floor/calibration pipeline produces.
     #[serde(default)]
     max_severity: Option<String>,
+    /// A5.2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): the severity ceiling for a
+    /// CONSISTENCY DEVIATION reported under this rule — see [`Rule::deviation_ceiling`]'s doc
+    /// comment. Same free-form lowercase severity vocabulary as `max_severity`. `None` (the
+    /// overwhelming majority) means the pipeline's default deviation ceiling (`"medium"`)
+    /// applies.
+    #[serde(default)]
+    deviation_ceiling: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -719,6 +726,17 @@ pub struct Rule {
     /// `camerata_server::report_export::clamp_to_rule_max_severity`, which reuses that crate's
     /// own `severity_rank`/`normalize_severity` rather than duplicating the vocabulary here.
     pub max_severity: Option<String>,
+    /// A5.2 (`docs/plans/2026-10-09_audit-findings-tracker.md`): the severity ceiling for a
+    /// CONSISTENCY DEVIATION (`FindingKind::Deviation`) reported under this rule. Deviations
+    /// cap at `"medium"` BY DEFAULT — the cost of inconsistency is forward drift on future
+    /// features, not current risk — but a rule whose drift cost is genuinely high can author
+    /// `deviation_ceiling = "high"` as the structured escape hatch (an authoring-time judgment
+    /// about the rule's decision domain, never a prose-scanning runtime heuristic). `None`
+    /// means the pipeline default (`"medium"`) applies; the clamp itself lives in
+    /// `camerata_server::report_export::clamp_deviation_severity` and applies ONLY to rows
+    /// whose kind is `Deviation` — defects under the same rule are untouched by this field.
+    /// Same free-form lowercase severity vocabulary as `max_severity`, for the same reason.
+    pub deviation_ceiling: Option<String>,
 }
 
 /// P7 (`docs/plans/2026-09-29_codebase-inspection-hardening.md`): a GENERAL mechanism for a
@@ -1028,6 +1046,7 @@ pub fn bare_rule(id: &str, domain: &str) -> Rule {
         extra_domains: Vec::new(),
         kind: None,
         max_severity: None,
+        deviation_ceiling: None,
     }
 }
 
@@ -1081,6 +1100,7 @@ pub fn ruleset_with_unauthored_rule(rule_id: &str) -> RuleSet {
         extra_domains: Vec::new(),
         kind: None,
         max_severity: None,
+        deviation_ceiling: None,
     };
     let mut set = RuleSet::default();
     set.push(rule);
@@ -1341,6 +1361,7 @@ async fn load_one(path: &Path, corpus_dir: &Path) -> Result<Rule, RulesError> {
         extra_domains: raw.extra_domains,
         kind: raw.kind,
         max_severity: raw.max_severity.filter(|s| !s.trim().is_empty()),
+        deviation_ceiling: raw.deviation_ceiling.filter(|s| !s.trim().is_empty()),
     })
 }
 
@@ -1670,6 +1691,7 @@ mod tests {
             extra_domains: Vec::new(),
             kind: None,
             max_severity: None,
+            deviation_ceiling: None,
         }
     }
 
@@ -1751,6 +1773,7 @@ mod tests {
             extra_domains: raw.extra_domains,
             kind: raw.kind,
             max_severity: raw.max_severity.filter(|s| !s.trim().is_empty()),
+            deviation_ceiling: raw.deviation_ceiling.filter(|s| !s.trim().is_empty()),
         }
     }
 
