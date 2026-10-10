@@ -60,10 +60,29 @@ impl RuleTier {
     /// (`crates/cli/src/inspect_cmd.rs::render_ledger_summary`) to group rules the way an
     /// operator actually reasons about coverage ("did the taint pass run at all?") rather than
     /// by raw enum name.
+    ///
+    /// # Every label names an ENGINE, never a rule family (Pass-1 W4, finding A3)
+    ///
+    /// [`RuleTier`] is an ENGINE axis — "which thing evaluated this rule" — so a label that
+    /// reads as a rule-family name is a false claim about the rows underneath it.
+    /// `RuleTier::Architectural` used to be labelled "Architectural checks", which a reader
+    /// inevitably takes as "the `ARCH-*` rules". It is not: membership is decided purely by
+    /// `mechanical_gate::detector_channel` resolving to `arch_checker` or
+    /// `gateway_rule_registry`, and on every benchmark repo that resolved to eight Supabase
+    /// migration-replay rules (`SUPABASE-RLS-*`, `SUPABASE-FUNC-SEARCH-PATH-1`) which the
+    /// external grader scores as *security* findings — while the four genuine `ARCH-*` static
+    /// analysers were switched off for want of a `.camerata/architecture.toml` (finding A4,
+    /// fixed separately). So the family header claimed an architecture-coverage story the rows
+    /// could not support.
+    ///
+    /// Fixed by naming the engine: "Deterministic static-analysis / migration-replay
+    /// checkers". `req_a3_no_tier_family_label_borrows_a_corpus_rule_family_name` is the gate
+    /// — no word in any tier label may be (or begin with) a corpus rule-id family prefix, so
+    /// the next label that reaches for a rule family's name fails the build.
     pub fn family_label(&self) -> &'static str {
         match self {
             RuleTier::Deterministic => "Deterministic platform/floor checks",
-            RuleTier::Architectural => "Architectural checks",
+            RuleTier::Architectural => "Deterministic static-analysis / migration-replay checkers",
             RuleTier::ExternalTool => "External-tool / taint (Semgrep, etc.)",
             RuleTier::Semantic => "Semantic / advisory tier",
         }
@@ -698,6 +717,84 @@ impl ScanLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── req_a3: a tier family label names an ENGINE, never a rule family ─────────────────
+    //
+    // `RuleTier` is an engine axis, so a label that reads as a rule-family name is a false
+    // claim about the rows underneath it. "Architectural checks" read as "the ARCH-* rules"
+    // while in practice resolving to eight Supabase migration-replay rules the grader scores
+    // as security (finding A3). The gate below is mechanical: no word in any tier label may be
+    // (or begin with) a corpus rule-id family prefix.
+
+    /// Every rule-id FAMILY PREFIX in the real shipped corpus — the token before the first
+    /// `-`, uppercased (`ARCH`, `SEC`, `SUPABASE`, `RUST`, `ORCH`, `PROC`, `TESTING`, ...).
+    /// Returns `None` when the bundled corpus isn't checked out so the gate skips rather than
+    /// fails, matching the other corpus-backed gates.
+    async fn corpus_rule_family_prefixes() -> Option<std::collections::BTreeSet<String>> {
+        let path = camerata_rules::corpus_path();
+        if !path.exists() {
+            return None;
+        }
+        let (set, _errs) = camerata_rules::load_corpus_lenient(&path).await;
+        Some(
+            set.iter()
+                .filter_map(|r| r.id.0.split('-').next().map(str::to_ascii_uppercase))
+                .filter(|p| p.len() >= 2)
+                .collect(),
+        )
+    }
+
+    /// req_a3 (Pass-1 W4): no [`RuleTier::family_label`] may borrow a corpus rule-id family
+    /// name. A tier groups by WHICH ENGINE RAN, so a family header naming a rule family
+    /// promises membership the tier does not control and, in the shipped case, did not have.
+    ///
+    /// FAILS BEFORE THE FIX: `RuleTier::Architectural`'s label was "Architectural checks", and
+    /// `ARCHITECTURAL` begins with the corpus family prefix `ARCH` — the assertion reported
+    /// `Architectural ("Architectural checks"): word "Architectural" borrows rule family
+    /// "ARCH"`. Verified by running this test against the pre-rename label.
+    #[tokio::test]
+    async fn req_a3_no_tier_family_label_borrows_a_corpus_rule_family_name() {
+        let Some(prefixes) = corpus_rule_family_prefixes().await else {
+            return;
+        };
+        let mut offenders: Vec<String> = Vec::new();
+        for tier in RuleTier::all() {
+            let label = tier.family_label();
+            for word in label.split(|c: char| !c.is_ascii_alphabetic()) {
+                if word.len() < 2 {
+                    continue;
+                }
+                let upper = word.to_ascii_uppercase();
+                if let Some(hit) = prefixes.iter().find(|p| upper.starts_with(p.as_str())) {
+                    offenders.push(format!(
+                        "{tier:?} ({label:?}): word {word:?} borrows rule family {hit:?}"
+                    ));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "A3: a RuleTier family label groups by ENGINE and must not read as a rule family — \
+             the rows under it are decided by detector_channel, not by rule id: {offenders:#?}"
+        );
+    }
+
+    /// req_a3 (the fact that made the old label a lie, pinned so it cannot change silently):
+    /// the rule ids a registered `ArchChecker` answers are NOT predominantly `ARCH-*`. If a
+    /// future pass makes the `ARCH-*` static analysers the bulk of this tier, this test is
+    /// where that shows up and the label can be revisited deliberately rather than by vibe.
+    #[test]
+    fn req_a3_the_architectural_tier_is_not_populated_only_by_arch_rules() {
+        let ids = camerata_checks::arch_checker::all_checker_rule_ids();
+        assert!(!ids.is_empty(), "sanity: checkers are registered");
+        let non_arch: Vec<&&str> = ids.iter().filter(|id| !id.starts_with("ARCH-")).collect();
+        assert!(
+            !non_arch.is_empty(),
+            "A3: if EVERY registered checker rule id became ARCH-*, the old \
+             \"Architectural checks\" label would finally be true and this test should be \
+             revisited together with family_label: {ids:?}"
+        );
+    }
 
     // ── Rule-level ───────────────────────────────────────────────────────────────────────
 

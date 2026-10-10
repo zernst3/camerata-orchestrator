@@ -325,10 +325,28 @@ mod tests {
             .await
             .expect("corpus must load cleanly");
         let offenders = mechanical_rules_missing_detector(&corpus);
-        let orphaned: Vec<&String> = offenders
+        // ADAPTED in Pass-1 W4 (A8) to a deliberate code change this test must follow: the
+        // governance/process prefix exclusion it used to measure against
+        // (`!is_code_auditable_rule(id)`) NO LONGER EXISTS —
+        // `onboard::semantic_rule_ids_for_repo` now filters on nothing but per-repo
+        // applicability. Keeping the old predicate would have left this vacuously green while
+        // measuring a filter that is gone, so it now drives the REAL semantic rule-set function
+        // end-to-end: every detector-less mechanical rule, selected project-level, must come
+        // back out of the semantic set for an arbitrary repo.
+        let selected: Vec<crate::onboard::SelectedRule> = offenders
             .iter()
-            .filter(|id| !crate::onboard::audit::is_code_auditable_rule(id))
+            .map(|id| crate::onboard::SelectedRule {
+                id: id.clone(),
+                directive: id.clone(),
+                repos: Vec::new(),
+            })
             .collect();
+        let reached: std::collections::HashSet<String> =
+            crate::onboard::semantic_rule_ids_for_repo(&selected, "acme/api")
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect();
+        let orphaned: Vec<&String> = offenders.iter().filter(|id| !reached.contains(*id)).collect();
         assert!(
             orphaned.is_empty(),
             "mechanical-enforcement rule(s) with NO wired deterministic detector AND NOT \
