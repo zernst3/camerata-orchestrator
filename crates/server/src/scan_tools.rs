@@ -374,6 +374,7 @@ pub fn eslint_args(config_path: &str, runnable_selectors: &[String]) -> Vec<Stri
 }
 
 pub fn note_finding(repo: &str, tool: &str, message: impl Into<String>) -> Finding {
+    let message = message.into();
     Finding {
         repo: repo.to_string(),
         path: "(scan preview)".to_string(),
@@ -381,11 +382,19 @@ pub fn note_finding(repo: &str, tool: &str, message: impl Into<String>) -> Findi
         rule_id: format!("PREVIEW-NOTE-{}", tool.to_ascii_uppercase()),
         severity: "info".to_string(),
         snippet: String::new(),
-        detail: message.into(),
+        detail: message.clone(),
         // Info notes are not enforced — keep them out of the active/enforced set.
         status: "suppressed-baseline".to_string(),
         preview: true,
         preview_tool: Some(tool.to_string()),
+        // A5.6: "the tool could not run" is an honesty row, structurally distinguishable
+        // from both a fault and "assessed and clean".
+        kind: Some(camerata_api_types::audit::FindingKind::NotAssessed(
+            camerata_api_types::audit::NotAssessedKind {
+                reason: camerata_api_types::audit::NotAssessedReason::ToolFailed,
+                reason_detail: message,
+            },
+        )),
         ..Finding::default()
     }
 }
@@ -921,6 +930,8 @@ fn preview_finding(
         status: "suppressed-baseline".to_string(),
         preview: true,
         preview_tool: Some(tool.name().to_string()),
+        // A5.6: an external tool's reported violation is an objective fault.
+        kind: Some(camerata_api_types::audit::FindingKind::Defect),
         ..Finding::default()
     }
 }

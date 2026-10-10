@@ -119,6 +119,8 @@ pub fn arch_violation_to_finding(repo: &str, violation: &ArchViolation) -> Findi
         preview: true,
         preview_tool: Some(ARCH_PREVIEW_TOOL.to_string()),
         captures,
+        // A5.6: a deterministic architectural-checker violation is an objective fault.
+        kind: Some(camerata_api_types::audit::FindingKind::Defect),
         ..Finding::default()
     }
 }
