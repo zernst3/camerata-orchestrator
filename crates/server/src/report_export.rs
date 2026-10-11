@@ -3315,6 +3315,130 @@ pub(crate) fn parse_evidence_citation(evidence: &str) -> (String, usize) {
 /// exactly why this defect shipped undetected; see the `req_d1`/`req_d2`/`req_c1` fixtures below
 /// for ones that deliberately populate it and assert `K > 0`.
 pub fn apply_evidence_gate(report: &mut crate::onboard::ScanReport) {
+    apply_zero_finding_evidence_check(report);
+    apply_sites_vs_rows_check(report);
+}
+
+/// The marker sentence every [`apply_sites_vs_rows_check`] shortfall row's `detail` begins
+/// with — also the gate's own idempotency key (a rule already carrying a shortfall row is
+/// never checked again, so the gate can never ratchet).
+const SITES_VS_ROWS_SHORTFALL_PREFIX: &str =
+    "Site count integrity: the evaluation for this rule established";
+
+/// W7 (C2) — the sites-vs-rows integrity check, exporting shortfalls as HELD rows (never a
+/// refused export).
+///
+/// The original C2 defect: the zero-finding evidence check below skips any rule with >= 1
+/// finding, so an N-sites-but-1-row shortfall was never checked at ANY N — on one graded
+/// fixture the recommendation pass wrote down the planted site, the coverage evidence named
+/// both relevant sites, and "Findings this run" was 1, with nothing anywhere comparing the
+/// two numbers.
+///
+/// The check uses the STRUCTURED fields only (per the review: never re-derive counts from
+/// prose): a `FindingKind::Deviation` payload carries the GROUP-level `deviating_sites`
+/// numerator, computed structurally when the kind was stamped
+/// (`ai_audit::assign_deviation_kinds`: surviving rows plus absorbed merge sites). Later
+/// passes (cross-scan grouping, preview merges) can still lose sites AFTER that stamp — and a
+/// site lost after the stamp is exactly the "recall loss to over-merge looks like a detection
+/// miss" shape. So, pre-seal: for every rule whose rows claim `deviating_sites == N`, count
+/// the sites actually REPRESENTED (rows under the rule + `also_locations` entries under it);
+/// a shortfall becomes ONE held, needs-review row stating both numbers — visible to the
+/// curator and the client, never a dropped row and never an aborted export.
+fn apply_sites_vs_rows_check(report: &mut crate::onboard::ScanReport) {
+    use camerata_api_types::audit::FindingKind;
+    // claimed deviating_sites per rule (group-level, identical on every row of the rule by
+    // construction — max is a safe reconciliation if they ever diverge), plus whether the
+    // rule already carries a shortfall row from a previous invocation.
+    let mut claimed: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    let mut already_disclosed: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    for f in &report.findings {
+        if let Some(FindingKind::Deviation(d)) = &f.kind {
+            let e = claimed.entry(f.rule_id.to_ascii_uppercase()).or_insert(0);
+            *e = (*e).max(d.deviating_sites);
+        }
+        if f.detail.starts_with(SITES_VS_ROWS_SHORTFALL_PREFIX) {
+            already_disclosed.insert(f.rule_id.to_ascii_uppercase());
+        }
+    }
+    if claimed.is_empty() {
+        return;
+    }
+    let mut synthetic: Vec<Finding> = Vec::new();
+    for (rule_key, n_claimed) in &claimed {
+        if already_disclosed.contains(rule_key) {
+            continue;
+        }
+        let represented: usize = report
+            .findings
+            .iter()
+            .map(|f| {
+                usize::from(f.rule_id.eq_ignore_ascii_case(rule_key))
+                    + f.also_locations
+                        .iter()
+                        .filter(|l| l.rule_id.eq_ignore_ascii_case(rule_key))
+                        .count()
+            })
+            .sum();
+        if represented >= *n_claimed {
+            continue;
+        }
+        let missing = n_claimed - represented;
+        // Anchor the disclosure on the rule's first surviving row (same repo/file family);
+        // the missing sites' own locations are exactly what was lost, so line 0 is honest.
+        let Some(anchor) = report
+            .findings
+            .iter()
+            .find(|f| f.rule_id.eq_ignore_ascii_case(rule_key))
+        else {
+            continue;
+        };
+        synthetic.push(Finding {
+            repo: anchor.repo.clone(),
+            path: anchor.path.clone(),
+            line: 0,
+            rule_id: anchor.rule_id.clone(),
+            severity: "medium".to_string(),
+            snippet: format!(
+                "{n_claimed} deviating site(s) established; {represented} represented in this \
+                 report"
+            ),
+            detail: format!(
+                "{SITES_VS_ROWS_SHORTFALL_PREFIX} {n_claimed} deviating site(s) for this \
+                 rule, but only {represented} of them {} represented in this report's rows \
+                 and merged-site records. The remaining {missing} {} not individually listed \
+                 — held for a human reviewer rather than silently omitted.",
+                if represented == 1 { "is" } else { "are" },
+                if missing == 1 { "site is" } else { "sites are" },
+            ),
+            needs_review: true,
+            confidence: Some("needs-review".to_string()),
+            located: false,
+            // The shortfall row belongs to the same deviation group it reconciles — carry
+            // the group's own structured payload so the numerator/denominator stay on the
+            // wire (A5.6), rather than inventing a new kind for an honesty row.
+            kind: anchor.kind.clone(),
+            ..Finding::default()
+        });
+    }
+    if synthetic.is_empty() {
+        return;
+    }
+    let rows_in = report.findings.len();
+    let added = synthetic.len();
+    report.findings.extend(synthetic);
+    let rows_out = report.findings.len();
+    let mut acc = crate::scan_ledger::StageAccounting::default();
+    acc.push_added("sites_vs_rows_shortfall_disclosed", added);
+    report
+        .ledger
+        .record_stage("sites-vs-rows-gate", rows_in, rows_out, acc);
+}
+
+/// The ORIGINAL evidence gate (Defect 4): the zero-finding half. See
+/// [`apply_evidence_gate`]'s doc comment — this is its body, split out when W7 added the
+/// sites-vs-rows check so each half keeps its own no-op early return.
+fn apply_zero_finding_evidence_check(report: &mut crate::onboard::ScanReport) {
     if report.recommendations.is_empty() {
         return;
     }
@@ -13357,6 +13481,151 @@ mod export_invariants_gate {
             .iter()
             .any(|r| r.rule_id == "SEC-NO-HARDCODED-SECRETS-1"));
     }
+
+    // ── Pass-1 W7 (C2): the sites-vs-rows integrity check ─────────────────────────────────
+
+    /// req_c2: an N-sites-but-M-rows shortfall is checked at EVERY N — including rules with
+    /// >= 1 finding, which the zero-finding evidence check deliberately skips (the original
+    /// C2 defect: "the recommendation pass wrote down the planted site and nothing used
+    /// it"). A rule whose rows claim `deviating_sites == 3` (the structured, group-level
+    /// numerator stamped at kind assignment) while only 1 site is represented must export a
+    /// HELD row stating both numbers — never a dropped site, never a refused export.
+    #[tokio::test]
+    async fn req_c2_a_sites_vs_rows_shortfall_exports_a_held_row_never_a_refused_export() {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let mut f = finding(
+            "ARCH-API-VERSIONING-1",
+            "demo/portal",
+            "src/api/routes.rs",
+            42,
+            "medium",
+        );
+        // The group-level claim, stamped structurally by assign_deviation_kinds BEFORE later
+        // passes could lose sites. This fixture simulates exactly that loss: 3 claimed, one
+        // row, no absorbed also_locations entries.
+        f.kind = Some(FindingKind::Deviation(DeviationKind {
+            deviating_sites: 3,
+            assessed_sites: Some(47),
+            convention_option_id: Some("versioned".to_string()),
+            convention_label: "URI-versioned endpoints".to_string(),
+        }));
+        let mut report = report_with(vec![f], vec!["ARCH-API-VERSIONING-1"]);
+        let rows_before = report.findings.len();
+        apply_evidence_gate(&mut report);
+        assert_eq!(
+            report.findings.len(),
+            rows_before + 1,
+            "the shortfall must synthesize exactly one disclosure row"
+        );
+        let held = report
+            .findings
+            .iter()
+            .find(|f| f.needs_review && f.line == 0)
+            .expect("the shortfall row must exist");
+        assert_eq!(held.rule_id, "ARCH-API-VERSIONING-1");
+        assert_eq!(held.confidence.as_deref(), Some("needs-review"));
+        assert!(
+            held.detail.contains('3') && held.detail.contains('1'),
+            "the disclosure must state both the claimed and the represented count: {}",
+            held.detail
+        );
+        // The row carries the deviation group's own structured payload (A5.6).
+        assert!(
+            matches!(&held.kind, Some(FindingKind::Deviation(d)) if d.deviating_sites == 3),
+            "{:?}",
+            held.kind
+        );
+        // Accounted in the ledger as an addition-side stage, same as the evidence gate.
+        assert!(
+            report
+                .ledger
+                .stages()
+                .iter()
+                .any(|s| s.stage == "sites-vs-rows-gate" && s.unaccounted == 0),
+            "{:#?}",
+            report.ledger.stages()
+        );
+        // And downstream it is HELD — outside every action tier — not an action row and not
+        // a refused export.
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let in_held = json.matrix.held.iter().any(|r| r.line == 0 && r.rule_id == "ARCH-API-VERSIONING-1");
+        let in_informational = json
+            .matrix
+            .informational
+            .iter()
+            .any(|r| r.line == 0 && r.rule_id == "ARCH-API-VERSIONING-1");
+        assert!(
+            in_held || in_informational,
+            "the shortfall row must land in a held-for-review bucket, never an action tier: \
+             held={:?} informational={:?}",
+            json.matrix.held,
+            json.matrix.informational
+        );
+    }
+
+    /// req_c2: no shortfall, no row — a rule whose claimed deviating sites are fully
+    /// represented (rows + absorbed `also_locations`) is untouched, and the gate is
+    /// idempotent (a second invocation adds nothing on a report already carrying its
+    /// disclosure).
+    #[tokio::test]
+    async fn req_c2_no_shortfall_adds_nothing_and_the_gate_is_idempotent() {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let deviation_kind = Some(FindingKind::Deviation(DeviationKind {
+            deviating_sites: 2,
+            assessed_sites: None,
+            convention_option_id: None,
+            convention_label: "observed majority".to_string(),
+        }));
+        let mut fully_represented = finding(
+            "ARCH-API-VERSIONING-1",
+            "demo/portal",
+            "src/api/routes.rs",
+            42,
+            "medium",
+        );
+        fully_represented.kind = deviation_kind.clone();
+        fully_represented.also_locations = vec![crate::onboard::MergedLocation {
+            repo: "demo/portal".to_string(),
+            path: "src/api/users.rs".to_string(),
+            line: 7,
+            rule_id: "ARCH-API-VERSIONING-1".to_string(),
+            snippet: "router.get(\"/users\", ...)".to_string(),
+            consequence: false,
+        }];
+        let mut report = report_with(vec![fully_represented], vec!["ARCH-API-VERSIONING-1"]);
+        let rows_before = report.findings.len();
+        apply_evidence_gate(&mut report);
+        assert_eq!(
+            report.findings.len(),
+            rows_before,
+            "2 claimed, 2 represented: nothing to disclose"
+        );
+
+        // Idempotency on a genuine shortfall: running the gate twice adds exactly one row.
+        let mut short = finding(
+            "ARCH-API-VERSIONING-1",
+            "demo/portal",
+            "src/api/routes.rs",
+            42,
+            "medium",
+        );
+        short.kind = Some(FindingKind::Deviation(DeviationKind {
+            deviating_sites: 3,
+            assessed_sites: None,
+            convention_option_id: None,
+            convention_label: "observed majority".to_string(),
+        }));
+        let mut report = report_with(vec![short], vec!["ARCH-API-VERSIONING-1"]);
+        apply_evidence_gate(&mut report);
+        let after_first = report.findings.len();
+        apply_evidence_gate(&mut report);
+        assert_eq!(
+            report.findings.len(),
+            after_first,
+            "a second invocation must not ratchet more disclosure rows"
+        );
+    }
+
     // ── Pass-1 W1: the seal (docs/plans/2026-10-09_audit-findings-tracker.md) ─────────────
     //
     // C1 — every row the engine produces reaches the reader; nothing may be added after the
