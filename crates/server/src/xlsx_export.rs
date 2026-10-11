@@ -46,10 +46,32 @@
 //! rule appears in Coverage regardless of cap). So [`build_workbook`] runs its OWN partition
 //! pass over `report.findings`, reusing only the low-level pure functions above — never the
 //! already-curated `AuditReportJson` type.
+//!
+//! # Pass 3 — the workbook is partitioned by KIND, not flattened onto one sheet
+//! The workbook was designed on a BINARY premise: a row is a violation or it is not. An
+//! inspection now returns five kinds of statement with genuinely different payloads
+//! ([`camerata_api_types::audit::FindingKind`]), and W3 carried them here by appending a
+//! single `Kind` column to the one findings sheet — a correct minimal carry, explicitly
+//! deferring the redesign to Pass 3. This is that redesign, and its rule is: a row renders
+//! where ITS OWN columns mean something, and in exactly one place.
+//!
+//! | Kind | Sheet | Why there |
+//! |---|---|---|
+//! | `Defect`, `Deviation`, absent kind | **All Findings** (+ per-area views) | something is wrong at a site. An ABSENT kind lands here deliberately: an unmapped emission path must surface among the accusing rows, never be filed into an informational tab. |
+//! | `Deviation` (again, per RULE) | **Deviations** | the deviation payload is GROUP-level by construction (`deviating_sites` / `assessed_sites` repeat verbatim on every row of the rule). One row per rule states "N of M sites deviate from <convention>" from columns, instead of repeating the same two numbers down N rows. NOT a filtered duplicate of All Findings — a different grain. |
+//! | `ConventionObserved`, `NoConvention` | **Conventions** | nothing is wrong at a site. This is the derived decision set (A5.5) that becomes the client's `AGENTS.md`, so it is a shipped deliverable, not filler. |
+//! | `NotAssessed` | **Coverage** | "armed but not evaluable" is a coverage disclosure, not a finding. It gets honest billing next to the tool-coverage gaps and the never-run rules, not equal billing with defects. |
+//!
+//! Row conservation across that partition is a test, not a hope:
+//! `req_pass3_every_exported_row_lands_on_exactly_one_sheet`. It is also what keeps the
+//! self-measurement parity harness honest — that harness requires every `findings.json` row's
+//! headline to appear verbatim somewhere in the workbook, so a kind whose sheet forgot to
+//! render a headline column would be a PARITY FAULT, by name.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use anyhow::Context;
+use camerata_api_types::audit::{FindingKind, NotAssessedReason};
 use rust_xlsxwriter::{
     Color, ConditionalFormatText, ConditionalFormatTextRule, Format, FormatAlign, Workbook,
     Worksheet, XlsxError,
@@ -587,6 +609,314 @@ fn sanitize_sheet_name(name: &str, used: &mut HashSet<String>) -> String {
     }
 }
 
+// ── Pass 3: the kind partition (which sheet a row's own columns make sense on) ─────────
+
+/// Which worksheet a row belongs on, decided by its KIND and nothing else. See the module
+/// doc comment's table for the rationale per kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KindSheet {
+    /// Something is wrong at a site: `Defect`, `Deviation`, and — deliberately — a row whose
+    /// producer assigned NO kind at all.
+    Findings,
+    /// `ConventionObserved` / `NoConvention`: what the codebase does, with nothing wrong.
+    Conventions,
+    /// `NotAssessed`: armed but not evaluable. A coverage disclosure, so it renders in the
+    /// Coverage sheet's own "could not complete" section.
+    Coverage,
+}
+
+/// The ONE kind→sheet decision, so no sheet writer re-derives it and two of them can never
+/// disagree (which would either duplicate a row or lose it entirely).
+fn kind_sheet(row: &FindingRow) -> KindSheet {
+    match &row.kind.0 {
+        // An absent kind is NOT a synonym for `Defect` on the wire (A5.6), but for ROUTING it
+        // must land with the accusing rows: the honest failure mode for an unmapped emission
+        // path is "visible in the wrong tab", never "quietly filed as an observation".
+        None | Some(FindingKind::Defect) | Some(FindingKind::Deviation(_)) => KindSheet::Findings,
+        Some(FindingKind::ConventionObserved(_)) | Some(FindingKind::NoConvention(_)) => {
+            KindSheet::Conventions
+        }
+        Some(FindingKind::NotAssessed(_)) => KindSheet::Coverage,
+    }
+}
+
+/// A rule's human-readable title, or its id when the corpus has no entry (an AI-tier rule id,
+/// a synthetic/test rule). The ONE place that fallback is decided, shared by the Coverage,
+/// Deviations and Conventions sheets.
+fn rule_title(rule_id: &str, corpus: Option<&camerata_rules::RuleSet>) -> String {
+    corpus
+        .and_then(|c| c.get_by_id(rule_id))
+        .map(|r| r.title.clone())
+        .unwrap_or_else(|| rule_id.to_string())
+}
+
+/// `path:line` for a row's own site plus every merge-absorbed site, with a consequence site
+/// labeled exactly as the findings sheet's "Also found at" column labels it. Client-facing:
+/// no raw rule ids (each absorbed site's own rule identity travels in `findings.json`'s
+/// `also_locations` entries, which is where a machine consumer reads it).
+fn site_locations(row: &FindingRow) -> Vec<String> {
+    let mut out = Vec::with_capacity(1 + row.also_locations.len());
+    if !row.path.is_empty() {
+        out.push(format!("{}:{}", row.path, row.line));
+    }
+    for l in &row.also_locations {
+        if l.consequence {
+            out.push(format!("{}:{} (also affected)", l.path, l.line));
+        } else {
+            out.push(format!("{}:{}", l.path, l.line));
+        }
+    }
+    out
+}
+
+/// One row of the `Deviations` sheet — ONE row per RULE, not per site.
+///
+/// The deviation payload is group-level by construction ([`camerata_api_types::audit::
+/// DeviationKind`]: "All counts are GROUP-level (per rule, across the whole scan), repeated
+/// verbatim on every deviating row for that rule"). Rendering it per site repeats the same
+/// two numbers down N rows and still leaves the reader to work out that they are the same
+/// group. At rule grain the owner's canonical sentence — "2 of 47 sites deviate from
+/// URI-versioned endpoints" — is three adjacent columns, with no prose to parse.
+struct DeviationGroupRow {
+    category: String,
+    rule_title: String,
+    rule_id: String,
+    /// The convention the codebase itself predominantly follows, verbatim from the payload
+    /// (authored corpus text, never model prose).
+    convention_label: String,
+    /// NUMERATOR. The structured `deviating_sites` from the payload, floored at the number of
+    /// sites this workbook actually lists for the group — a group that is ON this sheet
+    /// because sites deviate can never render "0 deviating" (the C6 discipline: a check that
+    /// fired must never render clean).
+    deviating_sites: usize,
+    /// DENOMINATOR, or `None` when the producer could not count honestly. Rendered as an
+    /// explicit "not counted", never as 0 and never fabricated.
+    assessed_sites: Option<usize>,
+    worst_severity: String,
+    /// Every deviating `path:line` the workbook knows about, absorbed merge sites included.
+    locations: Vec<String>,
+    /// The rule's authored, client-facing remediation — one convention, one fix. Blank when
+    /// the rule has no authored remediation (never fabricated).
+    recommended_fix: String,
+}
+
+/// Group the Deviation rows by rule into the `Deviations` sheet's rows. Sorted worst-severity
+/// first, then most-deviating-sites, then rule id, so the sheet is deterministic and diffable.
+fn build_deviation_groups(
+    rows: &[&FindingRow],
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<DeviationGroupRow> {
+    let mut by_rule: BTreeMap<String, Vec<&FindingRow>> = BTreeMap::new();
+    for row in rows {
+        if matches!(row.kind.0, Some(FindingKind::Deviation(_))) {
+            by_rule.entry(row.rule_id.clone()).or_default().push(row);
+        }
+    }
+
+    let mut out: Vec<DeviationGroupRow> = by_rule
+        .into_iter()
+        .map(|(rule_id, group)| {
+            let mut declared_numerator = 0usize;
+            let mut assessed_sites: Option<usize> = None;
+            let mut convention_label = String::new();
+            for row in &group {
+                if let Some(FindingKind::Deviation(d)) = &row.kind.0 {
+                    declared_numerator = declared_numerator.max(d.deviating_sites);
+                    if assessed_sites.is_none() {
+                        assessed_sites = d.assessed_sites;
+                    }
+                    if convention_label.is_empty() {
+                        convention_label = d.convention_label.clone();
+                    }
+                }
+            }
+            let locations: Vec<String> = group.iter().flat_map(|r| site_locations(r)).collect();
+            // Sites this workbook can actually point at (own site + absorbed merge sites).
+            let sites_represented: usize = group.iter().map(|r| r.site_count).sum();
+            let worst_severity = worst_severity_label(&group);
+            let recommended_fix = group
+                .iter()
+                .find_map(|r| r.fix.clone())
+                .unwrap_or_default();
+            DeviationGroupRow {
+                category: group[0].category.clone(),
+                rule_title: rule_title(&rule_id, corpus),
+                rule_id,
+                convention_label,
+                deviating_sites: declared_numerator.max(sites_represented),
+                assessed_sites,
+                worst_severity,
+                locations,
+                recommended_fix,
+            }
+        })
+        .collect();
+
+    out.sort_by(|a, b| {
+        (
+            severity_rank(&a.worst_severity.to_ascii_lowercase()),
+            std::cmp::Reverse(a.deviating_sites),
+            &a.rule_id,
+        )
+            .cmp(&(
+                severity_rank(&b.worst_severity.to_ascii_lowercase()),
+                std::cmp::Reverse(b.deviating_sites),
+                &b.rule_id,
+            ))
+    });
+    out
+}
+
+/// One row of the `Conventions` sheet — the derived decision set (A5.5). A shipped
+/// deliverable: the audit derives the client's conventions and this is the sheet those
+/// conventions are read off, so it answers "what does our codebase already do well and
+/// consistently" and "where have we never decided" in the same table.
+struct ConventionRow {
+    /// 0 = a convention IS followed consistently, 1 = none adopted. Sorts the "doing well"
+    /// block first, because that is this sheet's headline job.
+    rank: u8,
+    category: String,
+    rule_title: String,
+    rule_id: String,
+    /// Plain-language state, never a wire tag (`convention_observed` is our taxonomy, not the
+    /// client's vocabulary).
+    status: String,
+    /// The convention followed, or blank when none has been adopted.
+    convention_label: String,
+    /// For "no convention adopted": the authored options the codebase was actually seen
+    /// using, with per-option site counts where the producer counted them. Blank when the
+    /// producer established the split without enumerating it (the Detail cell explains).
+    patterns_in_use: String,
+    /// The row's own client-facing headline, verbatim. Load-bearing for artifact parity: the
+    /// self-measurement harness requires every exported row's headline to appear in the
+    /// workbook, so moving these rows off the findings sheet obliges this column to exist.
+    headline: String,
+    detail: String,
+    sites: usize,
+    also_found_at: String,
+}
+
+fn build_convention_rows(
+    rows: &[&FindingRow],
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<ConventionRow> {
+    let mut out: Vec<ConventionRow> = rows
+        .iter()
+        .filter_map(|row| {
+            let (rank, status, convention_label, patterns_in_use) = match &row.kind.0 {
+                Some(FindingKind::ConventionObserved(c)) => (
+                    0u8,
+                    "Followed consistently — no exceptions found".to_string(),
+                    c.convention_label.clone(),
+                    String::new(),
+                ),
+                Some(FindingKind::NoConvention(n)) => (
+                    1u8,
+                    "No single convention adopted".to_string(),
+                    String::new(),
+                    n.observed_options
+                        .iter()
+                        .map(|o| match o.sites {
+                            Some(1) => format!("{} (1 site)", o.label),
+                            Some(n) => format!("{} ({n} sites)", o.label),
+                            None => o.label.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                _ => return None,
+            };
+            Some(ConventionRow {
+                rank,
+                category: row.category.clone(),
+                rule_title: rule_title(&row.rule_id, corpus),
+                rule_id: row.rule_id.clone(),
+                status,
+                convention_label,
+                patterns_in_use,
+                headline: row.headline.clone(),
+                detail: row.detail.clone(),
+                sites: row.site_count,
+                also_found_at: site_locations(row)
+                    .into_iter()
+                    .skip(1)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        (a.rank, &a.category, &a.rule_title, &a.rule_id).cmp(&(
+            b.rank,
+            &b.category,
+            &b.rule_title,
+            &b.rule_id,
+        ))
+    });
+    out
+}
+
+/// One row of the Coverage sheet's "could not complete" section — a [`FindingKind::
+/// NotAssessed`] row. Honesty, not a finding: a rule that was armed and could not be
+/// evaluated must be distinguishable from one that was assessed and found clean.
+struct NotAssessedRow {
+    rule_title: String,
+    rule_id: String,
+    /// The structured reason in client language. The payload's `reason_detail` is the
+    /// PRODUCER's verbatim diagnostic ("eslint exited 2") and is deliberately NOT rendered —
+    /// G3: a client-facing coverage statement is a concise sentence, never an internal
+    /// diagnostic dump. The machine-readable reason and detail both reach `findings.json`.
+    why: String,
+    /// The row's own client-facing headline, verbatim (parity — see [`ConventionRow`]).
+    headline: String,
+    detail: String,
+}
+
+/// The client-facing sentence for each structured non-assessment reason. Never the wire tag:
+/// `pass_failed` names an internal pipeline stage, which is exactly the vocabulary that must
+/// not reach a client's cell.
+fn not_assessed_reason_label(reason: NotAssessedReason) -> &'static str {
+    match reason {
+        NotAssessedReason::PassFailed => "This check did not complete during the inspection",
+        NotAssessedReason::NoFilesMatched => "No files in this codebase were in scope for it",
+        NotAssessedReason::ToolFailed => "An external analysis tool it depends on could not run",
+        NotAssessedReason::ModelDeclined => "The inspection reached no judgement on it",
+    }
+}
+
+fn build_not_assessed_rows(
+    rows: &[&FindingRow],
+    corpus: Option<&camerata_rules::RuleSet>,
+) -> Vec<NotAssessedRow> {
+    let mut out: Vec<NotAssessedRow> = rows
+        .iter()
+        .filter_map(|row| match &row.kind.0 {
+            Some(FindingKind::NotAssessed(na)) => Some(NotAssessedRow {
+                rule_title: rule_title(&row.rule_id, corpus),
+                rule_id: row.rule_id.clone(),
+                why: not_assessed_reason_label(na.reason).to_string(),
+                headline: row.headline.clone(),
+                detail: row.detail.clone(),
+            }),
+            _ => None,
+        })
+        .collect();
+    out.sort_by(|a, b| (&a.rule_title, &a.rule_id).cmp(&(&b.rule_title, &b.rule_id)));
+    out
+}
+
+/// The client-facing label for how a rule was checked, from its citation kind. The raw kinds
+/// (`grounded` / `preview` / `advisory`) are OUR taxonomy; the words here are the ones the
+/// Index sheet's own Provenance legend already defines, so the workbook speaks one vocabulary
+/// and no cell leaks an internal token.
+fn how_checked_label(citation_kind: &str) -> &'static str {
+    match citation_kind {
+        "grounded" => "Deterministic",
+        "preview" => "Preview",
+        _ => "AI-advisory",
+    }
+}
+
 fn build_coverage_rows(
     report: &ScanReport,
     rows: &[FindingRow],
@@ -597,10 +927,7 @@ fn build_coverage_rows(
         .audited_rule_ids
         .iter()
         .map(|rid| {
-            let title = corpus
-                .and_then(|c| c.get_by_id(rid))
-                .map(|r| r.title.clone())
-                .unwrap_or_else(|| rid.clone());
+            let title = rule_title(rid, corpus);
             let category = category_for(rid, corpus);
             let citation = resolve_citation(rid, None, corpus);
             // W7 (C6): count every way this rule's hits are represented, not PRIMARIES only.
@@ -967,6 +1294,189 @@ fn write_dependencies_sheet(
     Ok(())
 }
 
+/// The `Deviations` sheet — one row per RULE, stating the consistency sentence from columns.
+///
+/// This is the sheet the owner's canonical example has to be readable off: "2 of 47 sites
+/// deviate from *URI-versioned endpoints*". Numerator, denominator and convention are three
+/// adjacent columns; "Where" lists the sites, absorbed merge sites included, so an over-merge
+/// cannot hide behind a single `path:line` (C5).
+fn write_deviations_sheet(
+    wb: &mut Workbook,
+    name: &str,
+    groups: &[DeviationGroupRow],
+    fmts: &Formats,
+) -> Result<(), XlsxError> {
+    let ws = wb.add_worksheet();
+    ws.set_name(name)?;
+    let _ = ws.set_tab_color(Color::from("#E0B400"));
+
+    let headers = [
+        "Area",
+        "What was checked",
+        "Convention your codebase follows",
+        "Sites deviating",
+        "Sites assessed",
+        "Highest severity",
+        "Where",
+        "Recommended fix",
+        "Rule ID",
+    ];
+    for (c, h) in headers.iter().enumerate() {
+        ws.write_string_with_format(0, c as u16, *h, &fmts.header)?;
+    }
+    ws.set_row_height(0, 28)?;
+    for (c, w) in [16.0, 46.0, 40.0, 15.0, 15.0, 16.0, 44.0, 50.0, 28.0]
+        .iter()
+        .enumerate()
+    {
+        ws.set_column_width(c as u16, *w)?;
+    }
+
+    if groups.is_empty() {
+        // An empty STRUCTURAL tab says "we looked and found none"; a missing tab says "we
+        // never looked". Never let the absence of a section read as the absence of the check.
+        ws.write_string(
+            1,
+            0,
+            "No consistency deviations were identified in this inspection.",
+        )?;
+        ws.set_freeze_panes(1, 0)?;
+        return Ok(());
+    }
+
+    for (i, g) in groups.iter().enumerate() {
+        let r = (i + 1) as u32;
+        let bg: Option<&str> = if i % 2 == 1 { Some("#F9FAFB") } else { None };
+        ws.write_string_with_format(r, 0, &g.category, &fmts.cell(bg, false, false))?;
+        ws.write_string_with_format(r, 1, &g.rule_title, &fmts.cell(bg, true, false))?;
+        ws.write_string_with_format(r, 2, &g.convention_label, &fmts.cell(bg, true, false))?;
+        ws.write_number_with_format(r, 3, g.deviating_sites as f64, &fmts.cell(bg, false, false))?;
+        // An unknown denominator renders as an explicit words-not-number cell. Writing 0 (or
+        // repeating the numerator) would fabricate a denominator the producer refused to
+        // claim, which is the one thing `assessed_sites: None` exists to prevent.
+        match g.assessed_sites {
+            Some(n) => ws.write_number_with_format(r, 4, n as f64, &fmts.cell(bg, false, false))?,
+            None => ws.write_string_with_format(r, 4, "not counted", &fmts.cell(bg, false, false))?,
+        };
+        ws.write_string_with_format(
+            r,
+            5,
+            &g.worst_severity,
+            &fmts.severity_cell(&g.worst_severity.to_ascii_lowercase()),
+        )?;
+        ws.write_string_with_format(
+            r,
+            6,
+            g.locations.join("\n"),
+            &fmts.cell(bg, true, false),
+        )?;
+        ws.write_string_with_format(r, 7, &g.recommended_fix, &fmts.cell(bg, true, false))?;
+        ws.write_string_with_format(r, 8, &g.rule_id, &fmts.cell(bg, false, false))?;
+    }
+
+    ws.autofilter(0, 0, groups.len() as u32, 8)?;
+    ws.set_freeze_panes(1, 0)?;
+    Ok(())
+}
+
+/// The `Conventions` sheet — the derived decision set (A5.5), which is a shipped feature and
+/// not filler: these are the conventions that become the client's `AGENTS.md`.
+///
+/// Two statements share the sheet because a client reads them together: "this is what you do
+/// consistently" and "here you have never decided". The followed-consistently block sorts
+/// first, since answering "what does our codebase already do well" is this sheet's headline
+/// job.
+fn write_conventions_sheet(
+    wb: &mut Workbook,
+    name: &str,
+    rows: &[ConventionRow],
+    fmts: &Formats,
+) -> Result<(), XlsxError> {
+    let ws = wb.add_worksheet();
+    ws.set_name(name)?;
+    let _ = ws.set_tab_color(Color::from("#27AE60"));
+
+    let headers = [
+        "Area",
+        "What was checked",
+        "Status",
+        "Convention your codebase follows",
+        "Patterns in use",
+        "What we observed",
+        "Detail",
+        "Sites",
+        "Also found at",
+        "Rule ID",
+    ];
+    for (c, h) in headers.iter().enumerate() {
+        ws.write_string_with_format(0, c as u16, *h, &fmts.header)?;
+    }
+    ws.set_row_height(0, 28)?;
+    for (c, w) in [16.0, 46.0, 36.0, 40.0, 34.0, 50.0, 60.0, 8.0, 36.0, 28.0]
+        .iter()
+        .enumerate()
+    {
+        ws.set_column_width(c as u16, *w)?;
+    }
+
+    if rows.is_empty() {
+        ws.write_string(
+            1,
+            0,
+            "This inspection derived no codebase conventions. A convention is reported here \
+             only when the codebase follows one consistently, or when it demonstrably has none.",
+        )?;
+        ws.set_freeze_panes(1, 0)?;
+        return Ok(());
+    }
+
+    for (i, row) in rows.iter().enumerate() {
+        let r = (i + 1) as u32;
+        let bg: Option<&str> = if i % 2 == 1 { Some("#F9FAFB") } else { None };
+        ws.write_string_with_format(r, 0, &row.category, &fmts.cell(bg, false, false))?;
+        ws.write_string_with_format(r, 1, &row.rule_title, &fmts.cell(bg, true, false))?;
+        ws.write_string_with_format(r, 2, &row.status, &fmts.cell(bg, true, false))?;
+        ws.write_string_with_format(r, 3, &row.convention_label, &fmts.cell(bg, true, false))?;
+        ws.write_string_with_format(r, 4, &row.patterns_in_use, &fmts.cell(bg, true, false))?;
+        ws.write_string_with_format(r, 5, &row.headline, &fmts.cell(bg, true, false))?;
+        ws.write_string_with_format(r, 6, &row.detail, &fmts.cell(bg, true, false))?;
+        ws.write_number_with_format(r, 7, row.sites as f64, &fmts.cell(bg, false, false))?;
+        ws.write_string_with_format(r, 8, &row.also_found_at, &fmts.cell(bg, true, false))?;
+        ws.write_string_with_format(r, 9, &row.rule_id, &fmts.cell(bg, false, false))?;
+    }
+
+    ws.autofilter(0, 0, rows.len() as u32, 9)?;
+    ws.set_freeze_panes(1, 0)?;
+    Ok(())
+}
+
+/// One concise, client-facing line summarising what this inspection actually checked (G3:
+/// "coverage IS client-facing, but concise and useful, not exhaustive. A one-line summary,
+/// written for a client, never an internal diagnostic dump"). The per-rule table below it is
+/// the audit trail — the xlsx is the detail surface, where a missing row is a fault — but a
+/// client should not have to count 400 rows to learn what happened.
+fn coverage_summary_line(coverage_rows: &[CoverageRow], not_assessed: usize) -> String {
+    let total = coverage_rows.len();
+    let with_findings = coverage_rows
+        .iter()
+        .filter(|r| r.findings_count > 0)
+        .count();
+    let clean = total.saturating_sub(with_findings);
+    let mut line = format!(
+        "We checked {total} rule{} against this codebase: {with_findings} found something to \
+         look at, {clean} were checked and found clean.",
+        if total == 1 { "" } else { "s" }
+    );
+    if not_assessed > 0 {
+        line.push_str(&format!(
+            " A further {not_assessed} could not be evaluated this scan and {} named below, \
+             with the reason.",
+            if not_assessed == 1 { "is" } else { "are" }
+        ));
+    }
+    line
+}
+
 #[allow(clippy::too_many_arguments)]
 fn write_coverage_sheet(
     wb: &mut Workbook,
@@ -976,46 +1486,70 @@ fn write_coverage_sheet(
     rules_applied: &[RulesAppliedRow],
     tool_coverage_notes: &[String],
     rules_not_run: &[(String, String)],
+    not_assessed: &[NotAssessedRow],
     fmts: &Formats,
 ) -> Result<(), XlsxError> {
     let ws = wb.add_worksheet();
     ws.set_name(name)?;
     let _ = ws.set_tab_color(Color::from("#6B7280"));
 
+    // The one-line client summary comes FIRST, above the table it summarises.
+    ws.write_string_with_format(0, 0, "Coverage", &fmts.section_title)?;
+    ws.write_string(1, 0, coverage_summary_line(coverage_rows, not_assessed.len()))?;
+    const HEADER_ROW: u32 = 3;
+
     let headers = [
+        "Area",
+        "What was checked",
+        "Result",
+        "How we checked it",
+        "Standard cited",
         "Rule ID",
-        "Title",
-        "Category",
-        "Citation Kind",
-        "Citation Label",
-        "Findings this run",
     ];
     for (c, h) in headers.iter().enumerate() {
-        ws.write_string_with_format(0, c as u16, *h, &fmts.header)?;
+        ws.write_string_with_format(HEADER_ROW, c as u16, *h, &fmts.header)?;
     }
-    ws.set_row_height(0, 28)?;
-    for (c, w) in [28.0, 60.0, 16.0, 14.0, 40.0, 16.0].iter().enumerate() {
+    ws.set_row_height(HEADER_ROW, 28)?;
+    for (c, w) in [16.0, 60.0, 20.0, 18.0, 40.0, 28.0].iter().enumerate() {
         ws.set_column_width(c as u16, *w)?;
     }
 
     for (i, row) in coverage_rows.iter().enumerate() {
-        let r = (i + 1) as u32;
-        ws.write_string_with_format(r, 0, &row.rule_id, &fmts.cell(None, false, false))?;
-        ws.write_string_with_format(r, 1, &row.title, &fmts.cell(None, true, false))?;
-        ws.write_string_with_format(r, 2, &row.category, &fmts.cell(None, false, false))?;
-        ws.write_string_with_format(r, 3, &row.citation_kind, &fmts.cell(None, false, false))?;
-        ws.write_string_with_format(r, 4, &row.citation_label, &fmts.cell(None, true, false))?;
-        let count_fmt = if row.findings_count == 0 {
-            fmts.cell(Some("#ECFDF5"), false, false)
+        let r = HEADER_ROW + 1 + i as u32;
+        // A "Result" cell in words, not a bare integer: a client reading "0" has to guess
+        // whether the rule was clean or never ran, and those are different statements — the
+        // never-ran case is disclosed in its own section below, by name.
+        let (result, result_fmt) = if row.findings_count == 0 {
+            (
+                "Clean — nothing found".to_string(),
+                fmts.cell(Some("#ECFDF5"), false, false),
+            )
         } else {
-            fmts.cell(None, false, false)
+            (
+                format!(
+                    "{} site{} found",
+                    row.findings_count,
+                    if row.findings_count == 1 { "" } else { "s" }
+                ),
+                fmts.cell(None, false, false),
+            )
         };
-        ws.write_number_with_format(r, 5, row.findings_count as f64, &count_fmt)?;
+        ws.write_string_with_format(r, 0, &row.category, &fmts.cell(None, false, false))?;
+        ws.write_string_with_format(r, 1, &row.title, &fmts.cell(None, true, false))?;
+        ws.write_string_with_format(r, 2, &result, &result_fmt)?;
+        ws.write_string_with_format(
+            r,
+            3,
+            how_checked_label(&row.citation_kind),
+            &fmts.cell(None, false, false),
+        )?;
+        ws.write_string_with_format(r, 4, &row.citation_label, &fmts.cell(None, true, false))?;
+        ws.write_string_with_format(r, 5, &row.rule_id, &fmts.cell(None, false, false))?;
     }
 
-    let last_row = coverage_rows.len() as u32;
-    ws.autofilter(0, 0, last_row, 5)?;
-    ws.set_freeze_panes(1, 0)?;
+    let last_row = HEADER_ROW + coverage_rows.len() as u32;
+    ws.autofilter(HEADER_ROW, 0, last_row, 5)?;
+    ws.set_freeze_panes(HEADER_ROW + 1, 0)?;
 
     let mut next_r = last_row + 2;
 
@@ -1080,6 +1614,37 @@ fn write_coverage_sheet(
         next_r += 1;
         for note in tool_coverage_notes {
             ws.write_string(next_r, 0, note)?;
+            next_r += 1;
+        }
+        next_r += 1;
+    }
+
+    // Pass 3: `NotAssessed` rows — armed, but not evaluable. They belong HERE and not on the
+    // findings sheet: "we could not check this" is a coverage statement, and giving it equal
+    // billing with a defect both overstates it and buries the defects. It is still an
+    // EXPORTED ROW (it reaches findings.json), so this section renders each row's own
+    // headline verbatim — that is what keeps artifact parity true after the kind partition.
+    if !not_assessed.is_empty() {
+        ws.write_string_with_format(
+            next_r,
+            0,
+            "Checks we could not complete this scan",
+            &fmts.section_title,
+        )?;
+        next_r += 1;
+        for (c, h) in ["What was checked", "Why", "What we observed", "Detail", "Rule ID"]
+            .iter()
+            .enumerate()
+        {
+            ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
+        }
+        next_r += 1;
+        for row in not_assessed {
+            ws.write_string_with_format(next_r, 0, &row.rule_title, &fmts.cell(None, true, false))?;
+            ws.write_string_with_format(next_r, 1, &row.why, &fmts.cell(None, true, false))?;
+            ws.write_string_with_format(next_r, 2, &row.headline, &fmts.cell(None, true, false))?;
+            ws.write_string_with_format(next_r, 3, &row.detail, &fmts.cell(None, true, false))?;
+            ws.write_string_with_format(next_r, 4, &row.rule_id, &fmts.cell(None, false, false))?;
             next_r += 1;
         }
         next_r += 1;
@@ -1244,6 +1809,60 @@ fn write_index_sheet(
     ws.write_number_with_format(r, 5, totals.iter().sum::<usize>() as f64, &fmts.bold)?;
     r += 2;
 
+    // ── Statement types: which of the five kinds this inspection returned ──────────
+    // Pass 3. An inspection no longer returns one kind of statement, and a client opening a
+    // multi-tab workbook needs to know, in one glance, which tab holds what and how much is
+    // in it. The counts are over the SAME `live_rows` set the category matrix above uses, so
+    // this block and that matrix always total the same number.
+    ws.write_string_with_format(r, 0, "Statement types", &fmts.section_title)?;
+    r += 1;
+    let mut defects = 0usize;
+    let mut deviations = 0usize;
+    let mut conventions_followed = 0usize;
+    let mut no_convention = 0usize;
+    let mut not_assessed = 0usize;
+    let mut unclassified = 0usize;
+    for row in live_rows {
+        match &row.kind.0 {
+            Some(FindingKind::Defect) => defects += 1,
+            Some(FindingKind::Deviation(_)) => deviations += 1,
+            Some(FindingKind::ConventionObserved(_)) => conventions_followed += 1,
+            Some(FindingKind::NoConvention(_)) => no_convention += 1,
+            Some(FindingKind::NotAssessed(_)) => not_assessed += 1,
+            None => unclassified += 1,
+        }
+    }
+    for (label, count, where_to_look) in [
+        ("Defects", defects, "All Findings"),
+        (
+            "Deviations from your own conventions",
+            deviations,
+            "Deviations (one row per convention), All Findings (one row per site)",
+        ),
+        (
+            "Conventions followed consistently",
+            conventions_followed,
+            "Conventions",
+        ),
+        ("No convention adopted", no_convention, "Conventions"),
+        ("Not assessed this scan", not_assessed, "Coverage"),
+    ] {
+        ws.write_string(r, 0, label)?;
+        ws.write_number(r, 1, count as f64)?;
+        ws.write_string(r, 2, where_to_look)?;
+        r += 1;
+    }
+    // Shown ONLY when non-zero, so that when it appears it means something: a row whose
+    // producer assigned no kind is an unmapped emission path, and A5.6's backfill rule is
+    // that such a row is surfaced as a gap rather than silently counted as a defect.
+    if unclassified > 0 {
+        ws.write_string_with_format(r, 0, "Unclassified", &fmts.bold)?;
+        ws.write_number_with_format(r, 1, unclassified as f64, &fmts.bold)?;
+        ws.write_string(r, 2, "All Findings")?;
+        r += 1;
+    }
+    r += 1;
+
     // ── Disposition summary (must reconcile with the PDF's own numbers exactly) ─────
     // C3-6: `informational` is counted here too (it wasn't before — the old `_ => {}` arm
     // silently dropped a held-for-review row from every count) and `open` mirrors
@@ -1378,8 +1997,33 @@ pub fn build_workbook(
     let live_rows: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
     let fp_rows: Vec<&FindingRow> = rows.iter().filter(|r| r.is_fp).collect();
 
+    // Pass 3: the kind partition. `live_rows` stays the WHOLE non-FP set — the Index's
+    // category matrix and disposition summary reconcile against the PDF's executive summary
+    // and must keep counting every row. It is the SHEETS that partition.
+    let findings_rows: Vec<&FindingRow> = live_rows
+        .iter()
+        .copied()
+        .filter(|r| kind_sheet(r) == KindSheet::Findings)
+        .collect();
+    let convention_sheet_rows: Vec<&FindingRow> = live_rows
+        .iter()
+        .copied()
+        .filter(|r| kind_sheet(r) == KindSheet::Conventions)
+        .collect();
+    let coverage_kind_rows: Vec<&FindingRow> = live_rows
+        .iter()
+        .copied()
+        .filter(|r| kind_sheet(r) == KindSheet::Coverage)
+        .collect();
+    let deviation_groups = build_deviation_groups(&findings_rows, corpus);
+    let convention_rows = build_convention_rows(&convention_sheet_rows, corpus);
+    let not_assessed_rows = build_not_assessed_rows(&coverage_kind_rows, corpus);
+
+    // Per-area views are views of the FINDINGS set, not of every statement: an area tab that
+    // mixed "you consistently use cursor pagination" into the same list as a critical
+    // injection is the flattening Pass 3 exists to undo.
     let mut by_category: BTreeMap<String, Vec<&FindingRow>> = BTreeMap::new();
-    for r in &live_rows {
+    for r in &findings_rows {
         by_category.entry(r.category.clone()).or_default().push(*r);
     }
     let mut category_plan: Vec<(String, Vec<&FindingRow>)> = by_category.into_iter().collect();
@@ -1397,8 +2041,29 @@ pub fn build_workbook(
     sheet_plan.push(SheetSummary {
         display_name: "All Findings".to_string(),
         sheet_name: all_findings_name.clone(),
-        count: live_rows.len(),
-        worst_severity: worst_severity_label(&live_rows),
+        count: findings_rows.len(),
+        worst_severity: worst_severity_label(&findings_rows),
+    });
+
+    let deviations_name = sanitize_sheet_name("Deviations", &mut used_names);
+    sheet_plan.push(SheetSummary {
+        display_name: "Deviations".to_string(),
+        sheet_name: deviations_name.clone(),
+        count: deviation_groups.len(),
+        worst_severity: deviation_groups
+            .first()
+            .map(|g| g.worst_severity.clone())
+            .unwrap_or_else(|| "Clean".to_string()),
+    });
+
+    let conventions_name = sanitize_sheet_name("Conventions", &mut used_names);
+    sheet_plan.push(SheetSummary {
+        display_name: "Conventions".to_string(),
+        sheet_name: conventions_name.clone(),
+        count: convention_rows.len(),
+        // A convention observation is informational by construction (it ships at `info` and
+        // nothing is wrong at a site), so a severity column here would be a column of noise.
+        worst_severity: String::new(),
     });
 
     let mut category_sheets: Vec<(String, Vec<&FindingRow>, String)> = Vec::new();
@@ -1465,8 +2130,14 @@ pub fn build_workbook(
         &fmts,
     )
     .context("writing the Index sheet")?;
-    write_findings_sheet(&mut wb, &all_findings_name, &live_rows, &fmts, false, None)
+    // ORDER MATTERS: "All Findings" must stay the SECOND worksheet added (sheet2.xml) —
+    // several cross-artifact equality tests read specific cells out of that entry by name.
+    write_findings_sheet(&mut wb, &all_findings_name, &findings_rows, &fmts, false, None)
         .context("writing the All Findings sheet")?;
+    write_deviations_sheet(&mut wb, &deviations_name, &deviation_groups, &fmts)
+        .context("writing the Deviations sheet")?;
+    write_conventions_sheet(&mut wb, &conventions_name, &convention_rows, &fmts)
+        .context("writing the Conventions sheet")?;
     for (sanitized, rows_for_cat, color) in &category_sheets {
         write_findings_sheet(
             &mut wb,
@@ -1503,6 +2174,7 @@ pub fn build_workbook(
         &rules_applied_rows,
         &tool_coverage_notes,
         &rules_not_run,
+        &not_assessed_rows,
         &fmts,
     )
     .context("writing the Coverage sheet")?;
