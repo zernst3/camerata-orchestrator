@@ -1463,9 +1463,10 @@ fn coverage_summary_line(coverage_rows: &[CoverageRow], not_assessed: usize) -> 
         .count();
     let clean = total.saturating_sub(with_findings);
     let mut line = format!(
-        "We checked {total} rule{} against this codebase: {with_findings} found something to \
-         look at, {clean} were checked and found clean.",
-        if total == 1 { "" } else { "s" }
+        "We checked {total} rule{} against this codebase. {with_findings} found something to \
+         look at; the other {clean} {} checked and found clean.",
+        if total == 1 { "" } else { "s" },
+        if clean == 1 { "was" } else { "were" }
     );
     if not_assessed > 0 {
         line.push_str(&format!(
@@ -2376,6 +2377,112 @@ mod tests {
             .find("</t>")
             .unwrap_or_else(|| panic!("malformed <t> in shared string {idx}: {entry}"));
         after_t_open[..t_close].to_string()
+    }
+
+    /// The `xl/worksheets/sheetN.xml` entry backing a worksheet NAME. `rust_xlsxwriter`
+    /// writes sheets in add order and `xl/workbook.xml` declares them in that same order, so
+    /// the Nth declared name is `sheetN.xml`. Resolving by NAME rather than hard-coding an
+    /// index means a sheet inserted ahead of the one under test cannot silently repoint an
+    /// assertion at the wrong sheet — which is precisely the failure mode a multi-sheet
+    /// restructure introduces.
+    fn sheet_entry_for(bytes: &[u8], sheet_name: &str) -> String {
+        let wb = read_zip_entry(bytes, "xl/workbook.xml");
+        let names: Vec<String> = wb
+            .split("<sheet name=\"")
+            .skip(1)
+            .map(|c| {
+                c[..c.find('"').expect("a declared sheet name is quoted")].to_string()
+            })
+            .collect();
+        let idx = names
+            .iter()
+            .position(|n| n == sheet_name)
+            .unwrap_or_else(|| panic!("no worksheet named {sheet_name:?}; have {names:?}"));
+        format!("xl/worksheets/sheet{}.xml", idx + 1)
+    }
+
+    /// Every shared-string VALUE actually referenced by cells on ONE worksheet.
+    ///
+    /// The shared-strings pool is workbook-wide, so a pool-level `contains` cannot tell which
+    /// SHEET a string landed on. "This row must be on Conventions and NOT among the findings"
+    /// and "no internal vocabulary may reach a client-facing cell on this sheet" are both
+    /// per-sheet claims, and a pool-level check would pass vacuously on either.
+    fn sheet_cell_strings(bytes: &[u8], sheet_name: &str) -> Vec<String> {
+        let sheet_xml = read_zip_entry(bytes, &sheet_entry_for(bytes, sheet_name));
+        let shared_xml = read_zip_entry(bytes, "xl/sharedStrings.xml");
+        let unescape = |s: &str| {
+            s.replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replace("&amp;", "&")
+        };
+        let pool: Vec<String> = shared_xml
+            .split("<si>")
+            .skip(1)
+            .filter_map(|si| {
+                // Mirrors `cell_text`: within an `<si>` chunk the first `>` closes the
+                // `<t ...>` open tag (which may carry `xml:space="preserve"`).
+                let start = si.find('>')? + 1;
+                let end = si[start..].find("</t>")? + start;
+                Some(unescape(&si[start..end]))
+            })
+            .collect();
+        let mut out = Vec::new();
+        for chunk in sheet_xml.split("t=\"s\"").skip(1) {
+            let Some(v_at) = chunk.find("<v>") else {
+                continue;
+            };
+            let v_start = v_at + 3;
+            let Some(v_len) = chunk[v_start..].find("</v>") else {
+                continue;
+            };
+            if let Ok(i) = chunk[v_start..v_start + v_len].parse::<usize>() {
+                if let Some(s) = pool.get(i) {
+                    out.push(s.clone());
+                }
+            }
+        }
+        out
+    }
+
+    /// One NUMERIC cell's value on a named worksheet. `cell_text` resolves shared strings and
+    /// panics on a number; a numerator/denominator column is written with
+    /// `write_number_with_format` precisely so it stays a number in Excel, so it needs its own
+    /// reader. Asserts the cell is NOT a shared string, which is itself the claim for a
+    /// count column.
+    fn cell_number(bytes: &[u8], sheet_name: &str, cell_ref: &str) -> f64 {
+        let sheet_xml = read_zip_entry(bytes, &sheet_entry_for(bytes, sheet_name));
+        let marker = format!("r=\"{cell_ref}\"");
+        let start = sheet_xml
+            .find(&marker)
+            .unwrap_or_else(|| panic!("cell {cell_ref} not found on {sheet_name}: {sheet_xml}"));
+        let tail = &sheet_xml[start..];
+        let end = tail
+            .find("</c>")
+            .unwrap_or_else(|| panic!("cell {cell_ref} has no closing </c>: {tail}"));
+        let cell = &tail[..end];
+        assert!(
+            !cell.contains("t=\"s\""),
+            "cell {cell_ref} on {sheet_name} is a shared string, not a number: {cell}"
+        );
+        let v_start = cell
+            .find("<v>")
+            .unwrap_or_else(|| panic!("cell {cell_ref} has no <v>: {cell}"))
+            + 3;
+        let v_end = cell[v_start..]
+            .find("</v>")
+            .unwrap_or_else(|| panic!("cell {cell_ref}'s <v> is unclosed: {cell}"))
+            + v_start;
+        cell[v_start..v_end]
+            .parse()
+            .unwrap_or_else(|e| panic!("cell {cell_ref} is not numeric ({e}): {cell}"))
+    }
+
+    /// The number of DATA rows on a named worksheet (every `<row ` minus its header row).
+    fn sheet_data_row_count(bytes: &[u8], sheet_name: &str) -> usize {
+        let sheet_xml = read_zip_entry(bytes, &sheet_entry_for(bytes, sheet_name));
+        sheet_xml.matches("<row ").count().saturating_sub(1)
     }
 
     // ── Header schema is stable and in order ───────────────────────────────────
@@ -4447,5 +4554,768 @@ mod tests {
         let row = serde_json::to_value(&export.findings[0]).unwrap();
         assert_eq!(row["site_count"], 1);
         assert_eq!(row["also_locations"].as_array().unwrap().len(), 0);
+    }
+
+    // ── Pass 3 (CLIENT DELIVERABLES): the workbook is partitioned by KIND ─────────────────
+    //
+    // Zach: "Excel = the meat and potatoes. Needs rethinking: separate worksheets for
+    // findings, conventions, deviations, coverage. This is where the specifics live."
+    //
+    // Every test below asserts on the WORKBOOK BYTES, per sheet, not on a Rust row vector —
+    // a sheet writer that early-returns, or a row routed to no sheet at all, must fail here
+    // and not in a client's hands.
+
+    /// A fixture carrying ALL FIVE kinds plus a legacy (kind-less) row — the only shape that
+    /// can exercise the partition. Headlines are distinct per rule so a per-row presence
+    /// check is meaningful.
+    fn all_five_kinds() -> Vec<Finding> {
+        use camerata_api_types::audit::{
+            ConventionObservedKind, DeviationKind, FindingKind, NoConventionKind, NotAssessedKind,
+            NotAssessedReason, ObservedOptionUsage,
+        };
+        vec![
+            kinded(
+                finding("SEC-INJECTION-1", "src/orders.rs", 10, "critical"),
+                FindingKind::Defect,
+            ),
+            kinded(
+                finding("ARCH-API-VERSIONING-1", "src/api/users.rs", 4, "medium"),
+                FindingKind::Deviation(DeviationKind {
+                    deviating_sites: 2,
+                    assessed_sites: Some(47),
+                    convention_option_id: Some("versioned".to_string()),
+                    convention_label: "URI-versioned endpoints".to_string(),
+                }),
+            ),
+            kinded(
+                finding("ARCH-PAGINATION-1", "src/api/list.rs", 7, "info"),
+                FindingKind::ConventionObserved(ConventionObservedKind {
+                    convention_option_id: "cursor".to_string(),
+                    convention_label: "Cursor pagination".to_string(),
+                }),
+            ),
+            kinded(
+                finding("ARCH-ERROR-SHAPE-1", "src/api/errors.rs", 1, "info"),
+                FindingKind::NoConvention(NoConventionKind {
+                    observed_options: vec![
+                        ObservedOptionUsage {
+                            option_id: "rfc7807".to_string(),
+                            label: "RFC 7807 problem+json".to_string(),
+                            sites: Some(3),
+                        },
+                        ObservedOptionUsage {
+                            option_id: "ad-hoc".to_string(),
+                            label: "Ad-hoc error bodies".to_string(),
+                            sites: Some(1),
+                        },
+                    ],
+                }),
+            ),
+            kinded(
+                finding("JS-NO-EVAL-1", "src/legacy.js", 2, "info"),
+                FindingKind::NotAssessed(NotAssessedKind {
+                    reason: NotAssessedReason::ToolFailed,
+                    reason_detail: "eslint exited 2: spawn ENOENT in the scanned repo"
+                        .to_string(),
+                }),
+            ),
+            // Producer predates the taxonomy / was missed by the backfill.
+            finding("LEGACY-UNMAPPED-1", "src/old.rs", 9, "high"),
+        ]
+    }
+
+    /// req_pass3: EVERY row `findings.json` exports lands on exactly ONE of the three kind
+    /// destinations — All Findings, Conventions, or Coverage's "could not complete" section.
+    ///
+    /// The restructure's entire risk lives here. Before Pass 3 every non-FP row went to one
+    /// sheet, so conservation was trivially true; routing five kinds to three destinations
+    /// makes both "lands nowhere" and "lands twice" reachable, and either is a PARITY FAULT
+    /// by name (the grader's own verdict, and the exact blindness behind the hearth 0/12
+    /// result) rather than a cosmetic slip. Keyed on each row's HEADLINE, which is row-specific
+    /// prose — the same identity the self-measurement parity harness uses.
+    ///
+    /// FAILS BEFORE THE CHANGE: there was no Conventions sheet and no Coverage not-assessed
+    /// section, so `sheet_entry_for("Conventions")` had no sheet to resolve. Re-verified
+    /// against the flattened behaviour by routing every kind to `KindSheet::Findings`: the
+    /// convention/not-assessed rows then land on All Findings as well, and the "exactly one
+    /// destination" count reads 1 for rows that should be on Conventions — caught as
+    /// `found on 0 of the three` for the Conventions rows under the empty-sheet note.
+    #[test]
+    fn req_pass3_every_exported_row_lands_on_exactly_one_sheet() {
+        let mut rows = all_five_kinds();
+        let fp = finding("SEC-FP-1", "src/fixture.rs", 3, "high");
+        let mut dispositions = HashMap::new();
+        dispositions.insert(finding_key(&fp), wire("FalsePositive", "test fixture code"));
+        rows.push(fp);
+
+        let report = report_with(rows, vec![]);
+        let json = crate::report_export::build_report_json(
+            &report.clone().seal(),
+            &dispositions,
+            None,
+            &empty_opts(),
+        );
+        let export = build_findings_export(
+            &report.clone().seal(),
+            &dispositions,
+            None,
+            &json,
+            &HashMap::new(),
+        );
+        let bytes =
+            build_workbook(&report.clone().seal(), &dispositions, None, &empty_opts()).unwrap();
+
+        let headlines: Vec<String> = export
+            .findings
+            .iter()
+            .map(|r| r.headline.clone())
+            .collect();
+        assert_eq!(
+            headlines.len(),
+            6,
+            "the FP is excluded; all six kinded rows must still export"
+        );
+        let distinct: HashSet<&String> = headlines.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            headlines.len(),
+            "the fixture's headlines must be distinct or a per-row presence check is vacuous: \
+             {headlines:#?}"
+        );
+
+        let destinations = ["All Findings", "Conventions", "Coverage"];
+        let cells: Vec<Vec<String>> = destinations
+            .iter()
+            .map(|s| sheet_cell_strings(&bytes, s))
+            .collect();
+        for headline in &headlines {
+            let hits: Vec<&str> = destinations
+                .iter()
+                .zip(cells.iter())
+                .filter(|(_, c)| c.iter().any(|s| s == headline))
+                .map(|(name, _)| *name)
+                .collect();
+            assert_eq!(
+                hits.len(),
+                1,
+                "row {headline:?} must appear on EXACTLY ONE of {destinations:?}, found on \
+                 {hits:?}. Zero means the row reached no artifact surface (a parity fault); \
+                 two means the kind partition double-counts it."
+            );
+        }
+
+        // And the partition's arithmetic, independently: the two row-shaped sheets plus the
+        // not-assessed section must account for every exported row, with nothing left over.
+        let findings_sheet = sheet_data_row_count(&bytes, "All Findings");
+        let conventions_sheet = sheet_data_row_count(&bytes, "Conventions");
+        assert_eq!(findings_sheet, 3, "defect + deviation + unmapped");
+        assert_eq!(conventions_sheet, 2, "convention observed + no convention");
+        assert_eq!(
+            findings_sheet + conventions_sheet + 1,
+            headlines.len(),
+            "the one not-assessed row is the remainder; if this drifts, a kind is being \
+             dropped or duplicated"
+        );
+    }
+
+    /// req_pass3: the Deviations sheet states its NUMERATOR and DENOMINATOR as numbers in
+    /// their own columns, beside the convention label — so "2 of 47 sites deviate from
+    /// URI-versioned endpoints" is readable off three adjacent cells with no prose parsing.
+    ///
+    /// FAILS BEFORE THE CHANGE: there was no Deviations sheet. The structured numbers reached
+    /// `findings.json` (W3) and the workbook carried neither them nor the convention label in
+    /// any column — a reader had to find the two numbers inside the `Detail` sentence, which
+    /// is exactly the prose-parsing the structured payload exists to abolish. Re-verified by
+    /// reverting the two count columns to a single rendered sentence: `cell_number` then
+    /// fails its own "this cell is a number, not a shared string" assertion.
+    #[test]
+    fn req_pass3_deviation_sheet_states_numerator_and_denominator() {
+        let report = report_with(all_five_kinds(), vec![]);
+        let bytes =
+            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+
+        let entry = sheet_entry_for(&bytes, "Deviations");
+        assert_eq!(
+            cell_text(&bytes, &entry, "C2"),
+            "URI-versioned endpoints",
+            "the convention the codebase follows is its own column, verbatim from the \
+             authored corpus option"
+        );
+        assert_eq!(
+            cell_number(&bytes, "Deviations", "D2"),
+            2.0,
+            "numerator: sites deviating"
+        );
+        assert_eq!(
+            cell_number(&bytes, "Deviations", "E2"),
+            47.0,
+            "denominator: sites assessed"
+        );
+
+        let headers = sheet_cell_strings(&bytes, "Deviations");
+        for h in [
+            "Convention your codebase follows",
+            "Sites deviating",
+            "Sites assessed",
+        ] {
+            assert!(
+                headers.iter().any(|s| s == h),
+                "the Deviations sheet must carry the {h:?} column: {headers:#?}"
+            );
+        }
+
+        // One row per RULE, not per site: the payload's counts are group-level, so a per-site
+        // sheet would repeat 2 and 47 down N rows and still leave the grouping implicit.
+        assert_eq!(
+            sheet_data_row_count(&bytes, "Deviations"),
+            1,
+            "the fixture has one deviating rule, so the sheet has one row"
+        );
+    }
+
+    /// req_pass3: a deviation whose producer could not count the denominator renders an
+    /// explicit "not counted" — never 0, and never the numerator repeated.
+    ///
+    /// `assessed_sites: None` exists to mean "the producer could not count honestly"
+    /// ([`camerata_api_types::audit::DeviationKind`]); writing 0 there would fabricate the one
+    /// number it refuses to claim, and "2 of 0" is worse than no denominator at all.
+    ///
+    /// FAILS BEFORE THE CHANGE: no sheet rendered a denominator in any form.
+    #[test]
+    fn req_pass3_deviation_without_a_denominator_says_not_counted_never_zero() {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let dev = kinded(
+            finding("ARCH-API-VERSIONING-1", "src/api/users.rs", 4, "medium"),
+            FindingKind::Deviation(DeviationKind {
+                deviating_sites: 2,
+                assessed_sites: None,
+                convention_option_id: None,
+                convention_label: "the pattern used elsewhere in this codebase".to_string(),
+            }),
+        );
+        let report = report_with(vec![dev], vec![]);
+        let bytes =
+            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+
+        let entry = sheet_entry_for(&bytes, "Deviations");
+        assert_eq!(
+            cell_text(&bytes, &entry, "E2"),
+            "not counted",
+            "an uncountable denominator must say so in words"
+        );
+        assert_eq!(
+            cell_number(&bytes, "Deviations", "D2"),
+            2.0,
+            "the numerator is still a real number"
+        );
+    }
+
+    /// req_pass3 (the C6 discipline, extended to the new sheet): a deviation group that is ON
+    /// this sheet because sites deviate can never render "0 deviating".
+    ///
+    /// C6 was a real shipped bug of exactly this shape — a rule that found something and lost
+    /// it in a merge rendered green. The same hole exists for a producer that fills the
+    /// payload's `deviating_sites` with 0 (or never fills it) while the row set plainly holds
+    /// deviating sites, so the numerator is floored at the sites the workbook actually lists.
+    ///
+    /// FAILS BEFORE THE CHANGE: taking the payload's number verbatim renders 0, and the
+    /// sheet tells a client there are no deviating sites on a row that exists because there
+    /// are. Verified red by removing the `.max(sites_represented)` floor in
+    /// `build_deviation_groups`.
+    #[test]
+    fn req_pass3_deviation_group_can_never_render_zero_deviating_sites() {
+        use camerata_api_types::audit::{DeviationKind, FindingKind};
+        let dev = kinded(
+            finding("ARCH-API-VERSIONING-1", "src/api/users.rs", 4, "medium"),
+            FindingKind::Deviation(DeviationKind {
+                // The producer never counted — the structural numerator is absent/zero.
+                deviating_sites: 0,
+                assessed_sites: Some(47),
+                convention_option_id: None,
+                convention_label: "URI-versioned endpoints".to_string(),
+            }),
+        );
+        let report = report_with(vec![dev], vec![]);
+        let (rows, _dep) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        let live: Vec<&FindingRow> = rows.iter().filter(|r| !r.is_fp).collect();
+        let groups = build_deviation_groups(&live, None);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            groups[0].deviating_sites, 1,
+            "a group with one listed deviating site must never report 0"
+        );
+
+        let bytes =
+            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        assert_eq!(cell_number(&bytes, "Deviations", "D2"), 1.0);
+    }
+
+    /// req_pass3: the Conventions sheet reports the two convention statements DISTINCTLY and
+    /// in client language — "followed consistently" with the convention named, and "no single
+    /// convention adopted" with the patterns actually in use and their site counts — and
+    /// neither statement appears among the findings.
+    ///
+    /// This sheet is a shipped feature, not filler (A5.5): the audit derives the client's
+    /// conventions and these become their `AGENTS.md`. A client must be able to read it and
+    /// see what their codebase already does well and consistently.
+    ///
+    /// FAILS BEFORE THE CHANGE: these rows sat on the one findings sheet, interleaved by
+    /// severity with real defects, with the raw wire tag `convention_observed` in a `Kind`
+    /// cell as the only indication of what they were, and the convention label reachable
+    /// nowhere in the workbook at all (it lived only in `findings.json`'s payload).
+    #[test]
+    fn req_pass3_conventions_sheet_reports_followed_and_no_convention_distinctly() {
+        let report = report_with(all_five_kinds(), vec![]);
+        let bytes =
+            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+
+        let conventions = sheet_cell_strings(&bytes, "Conventions");
+        let has = |needle: &str| conventions.iter().any(|s| s == needle);
+        assert!(
+            has("Followed consistently — no exceptions found"),
+            "the zero-violation statement must read as plain language: {conventions:#?}"
+        );
+        assert!(
+            has("Cursor pagination"),
+            "the convention the codebase follows must be named: {conventions:#?}"
+        );
+        assert!(
+            has("No single convention adopted"),
+            "the no-convention statement must be distinct from the followed one"
+        );
+        // The observed split is ONE cell (one line per option), so this is a containment
+        // check on that cell rather than a whole-cell equality like the others.
+        assert!(
+            conventions.iter().any(|s| s
+                .contains("RFC 7807 problem+json (3 sites)")
+                && s.contains("Ad-hoc error bodies (1 site)")),
+            "the observed split must be enumerated with per-option site counts, one option \
+             per line in the 'Patterns in use' cell: {conventions:#?}"
+        );
+        assert!(
+            !conventions.iter().any(|s| s.contains("convention_observed")
+                || s.contains("no_convention")),
+            "no raw wire tag may reach a client-facing cell: {conventions:#?}"
+        );
+
+        // And they are NOT among the findings: a client scanning "what is wrong" must not
+        // read "you consistently use cursor pagination" in the same list as an injection.
+        let findings = sheet_cell_strings(&bytes, "All Findings");
+        assert!(
+            !findings.iter().any(|s| s == "Cursor pagination"),
+            "a convention observation must not render on the findings sheet"
+        );
+    }
+
+    /// req_pass3: a `NotAssessed` row renders on COVERAGE, with its reason in client
+    /// language — and never among the findings, and never carrying the producer's own
+    /// diagnostic.
+    ///
+    /// "Armed but not evaluable" is honesty about coverage, not an accusation: giving it equal
+    /// billing with a defect both overstates it and buries the defects. It is still an
+    /// exported row, so the section renders the row's own headline verbatim, which is what
+    /// keeps artifact parity true across the partition.
+    ///
+    /// G3 is the other half: the payload's `reason_detail` is the producer's verbatim
+    /// diagnostic ("eslint exited 2: spawn ENOENT…") and must not reach the client — the same
+    /// discipline W7 applied to the tool-coverage disclosures.
+    ///
+    /// FAILS BEFORE THE CHANGE: the row sat on the findings sheet with the tag
+    /// `not_assessed`, and the Coverage sheet had no section for it.
+    #[test]
+    fn req_pass3_not_assessed_renders_on_coverage_not_among_the_findings() {
+        let report = report_with(all_five_kinds(), vec![]);
+        let json = crate::report_export::build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &empty_opts(),
+        );
+        let export = build_findings_export(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &json,
+            &HashMap::new(),
+        );
+        let bytes =
+            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+
+        let na_headline = export
+            .findings
+            .iter()
+            .find(|r| r.rule_id == "JS-NO-EVAL-1")
+            .map(|r| r.headline.clone())
+            .expect("the not-assessed row must still be exported");
+
+        let coverage = sheet_cell_strings(&bytes, "Coverage");
+        assert!(
+            coverage.iter().any(|s| s == "Checks we could not complete this scan"),
+            "Coverage must carry the not-assessed section: {coverage:#?}"
+        );
+        assert!(
+            coverage
+                .iter()
+                .any(|s| s == "An external analysis tool it depends on could not run"),
+            "the structured reason must render in client language, not as `tool_failed`: \
+             {coverage:#?}"
+        );
+        assert!(
+            coverage.iter().any(|s| *s == na_headline),
+            "the row's own headline must render verbatim or artifact parity breaks: \
+             {na_headline:?} not in {coverage:#?}"
+        );
+        assert!(
+            !coverage.iter().any(|s| s.contains("not_assessed")
+                || s.contains("tool_failed")),
+            "no raw wire tag in a client-facing cell: {coverage:#?}"
+        );
+
+        let findings = sheet_cell_strings(&bytes, "All Findings");
+        assert!(
+            !findings.iter().any(|s| *s == na_headline),
+            "a not-assessed row must not take equal billing with the defects"
+        );
+
+        // The producer's own diagnostic reaches `findings.json` (machine-readable) and NO
+        // cell of the workbook.
+        let shared = read_zip_entry(&bytes, "xl/sharedStrings.xml");
+        assert!(
+            !shared.contains("ENOENT") && !shared.contains("eslint exited 2"),
+            "the producer's raw diagnostic must not reach the client-facing workbook (G3)"
+        );
+        let na_json = serde_json::to_value(
+            export
+                .findings
+                .iter()
+                .find(|r| r.rule_id == "JS-NO-EVAL-1")
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(na_json["reason"], "tool_failed");
+        assert!(
+            na_json["reason_detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("ENOENT"),
+            "the diagnostic is not lost — it stays in the machine-readable export: {na_json}"
+        );
+    }
+
+    /// req_pass3 / req_g3: Coverage opens with ONE concise, client-facing summary line, and
+    /// its "how we checked" cells speak the Index legend's vocabulary rather than our own
+    /// internal citation-kind tokens.
+    ///
+    /// Zach's G3 ruling: "coverage IS client-facing, but concise and useful, not exhaustive.
+    /// A one-line summary, written for a client, never an internal diagnostic dump."
+    ///
+    /// FAILS BEFORE THE CHANGE, two ways, both verified: (1) the sheet opened directly on a
+    /// header row with no summary of any kind — `We checked …` appeared nowhere; (2) the
+    /// `Citation Kind` column wrote `row.citation_kind` verbatim, so `grounded` — a token from
+    /// our own taxonomy that appears in no legend and in no other cell of this workbook — was
+    /// rendered straight into a client-facing cell.
+    #[tokio::test]
+    async fn req_pass3_coverage_opens_with_a_concise_client_summary_and_no_internal_taxonomy() {
+        // The REAL corpus, because "no internal taxonomy leaks" is only a meaningful claim
+        // over rules that actually resolve a grounded citation — the leak was the raw
+        // `grounded` token, and a corpus-less fixture can never produce one.
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let f = finding("SUPABASE-RLS-ENABLED-1", "supabase/migrations/1.sql", 3, "critical");
+        let report = report_with(
+            vec![f],
+            vec!["SUPABASE-RLS-ENABLED-1", "SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        let bytes = build_workbook(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        )
+        .unwrap();
+
+        let coverage = sheet_cell_strings(&bytes, "Coverage");
+        let summary = coverage
+            .iter()
+            .find(|s| s.starts_with("We checked "))
+            .unwrap_or_else(|| {
+                panic!("Coverage must open with a one-line client summary: {coverage:#?}")
+            });
+        assert!(
+            summary.contains("2 rules") && summary.contains("found clean"),
+            "the summary must actually say what was checked and what came back clean: \
+             {summary:?}"
+        );
+        assert_eq!(
+            coverage.iter().filter(|s| s.starts_with("We checked ")).count(),
+            1,
+            "ONE line, not a paragraph per rule — G3's whole point"
+        );
+
+        // A result cell reads as a statement, not a bare integer a client has to interpret.
+        assert!(
+            coverage.iter().any(|s| s == "Clean — nothing found"),
+            "a clean rule must say so in words: {coverage:#?}"
+        );
+        assert!(
+            coverage.iter().any(|s| s == "1 site found"),
+            "a rule that fired must say how many sites: {coverage:#?}"
+        );
+
+        // No internal taxonomy: `grounded`/`advisory` are our citation kinds, not a client's
+        // vocabulary, and the Index legend defines these words instead.
+        assert!(
+            coverage.iter().any(|s| s == "Deterministic"),
+            "how-we-checked must use the legend's own vocabulary: {coverage:#?}"
+        );
+        for leak in ["grounded", "advisory", "Citation Kind"] {
+            assert!(
+                !coverage.iter().any(|s| s == leak),
+                "{leak:?} is internal vocabulary and must not reach a Coverage cell: \
+                 {coverage:#?}"
+            );
+        }
+    }
+
+    /// req_pass3 (C5 across the restructure): absorbed merge sites stay visible on the NEW
+    /// sheets too.
+    ///
+    /// C5 was a shipped defect — an absorbed site reached no artifact, so an over-merge was
+    /// observationally identical to a detection miss. W7 fixed it for the findings sheet with
+    /// the "Sites" and "Also found at" columns. Moving rows to new sheets re-opens exactly
+    /// that hole for every row that moved, so the Deviations sheet's "Where" column and the
+    /// Conventions sheet's "Sites"/"Also found at" columns are asserted here directly.
+    ///
+    /// FAILS BEFORE THE CHANGE: neither sheet existed, so an absorbed site under a deviation
+    /// or a convention row had no column on any sheet that could show it.
+    #[test]
+    fn req_pass3_absorbed_merge_sites_stay_visible_on_the_new_sheets() {
+        use camerata_api_types::audit::{
+            ConventionObservedKind, DeviationKind, FindingKind,
+        };
+        let loc = |line: usize, consequence: bool| crate::onboard::MergedLocation {
+            repo: "owner/repo".to_string(),
+            path: "src/api/users.rs".to_string(),
+            line,
+            rule_id: "ARCH-API-VERSIONING-1".to_string(),
+            snippet: "router.get(\"/users\", …)".to_string(),
+            consequence,
+        };
+        let mut dev = kinded(
+            finding("ARCH-API-VERSIONING-1", "src/api/users.rs", 4, "medium"),
+            FindingKind::Deviation(DeviationKind {
+                deviating_sites: 3,
+                assessed_sites: Some(47),
+                convention_option_id: None,
+                convention_label: "URI-versioned endpoints".to_string(),
+            }),
+        );
+        dev.also_locations = vec![loc(18, false), loc(31, true)];
+
+        let mut conv = kinded(
+            finding("ARCH-PAGINATION-1", "src/api/list.rs", 7, "info"),
+            FindingKind::ConventionObserved(ConventionObservedKind {
+                convention_option_id: "cursor".to_string(),
+                convention_label: "Cursor pagination".to_string(),
+            }),
+        );
+        conv.also_locations = vec![crate::onboard::MergedLocation {
+            repo: "owner/repo".to_string(),
+            path: "src/api/search.rs".to_string(),
+            line: 22,
+            rule_id: "ARCH-PAGINATION-1".to_string(),
+            snippet: "cursor".to_string(),
+            consequence: false,
+        }];
+
+        let report = report_with(vec![dev, conv], vec![]);
+        let bytes =
+            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+
+        let where_cell = cell_text(&bytes, &sheet_entry_for(&bytes, "Deviations"), "G2");
+        for site in ["src/api/users.rs:4", "src/api/users.rs:18"] {
+            assert!(
+                where_cell.contains(site),
+                "the Deviations sheet must name every deviating site, missing {site}: \
+                 {where_cell:?}"
+            );
+        }
+        assert!(
+            where_cell.contains("src/api/users.rs:31 (also affected)"),
+            "a consequence site must be labeled, same wording as the findings sheet: \
+             {where_cell:?}"
+        );
+        assert!(
+            !where_cell.contains("ARCH-API-VERSIONING-1"),
+            "this cell is client-facing: no raw rule ids (C4-P4): {where_cell:?}"
+        );
+        assert_eq!(
+            cell_number(&bytes, "Deviations", "D2"),
+            3.0,
+            "all three sites count toward the numerator, absorbed ones included"
+        );
+
+        assert_eq!(
+            cell_number(&bytes, "Conventions", "H2"),
+            2.0,
+            "the Conventions sheet's Sites column counts the absorbed site too"
+        );
+        let also = cell_text(&bytes, &sheet_entry_for(&bytes, "Conventions"), "I2");
+        assert_eq!(
+            also, "src/api/search.rs:22",
+            "the Conventions sheet must keep the 'Also found at' column C5 added"
+        );
+    }
+
+    /// req_pass3: the four named worksheets are STRUCTURAL — they exist even when a scan
+    /// produced nothing for them, each saying so in a line a client can read.
+    ///
+    /// A vanishing tab reads as "we never looked"; an empty tab with a sentence reads as "we
+    /// looked and there was none". The latter is the only honest one, and it is the same
+    /// reason Dependencies and False Positives already render when empty.
+    ///
+    /// FAILS BEFORE THE CHANGE: `name="Deviations"` and `name="Conventions"` did not exist in
+    /// any workbook, empty or not.
+    #[test]
+    fn req_pass3_the_four_named_sheets_exist_even_when_a_scan_finds_nothing() {
+        let report = report_with(vec![], vec![]);
+        let bytes = build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts())
+            .expect("a zero-finding scan must still export");
+        let workbook_xml = read_zip_entry(&bytes, "xl/workbook.xml");
+        for name in [
+            "Index",
+            "All Findings",
+            "Deviations",
+            "Conventions",
+            "Coverage",
+        ] {
+            assert!(
+                workbook_xml.contains(&format!("name=\"{name}\"")),
+                "the {name} sheet must exist even on an empty scan: {workbook_xml}"
+            );
+        }
+        assert!(
+            sheet_cell_strings(&bytes, "Deviations")
+                .iter()
+                .any(|s| s == "No consistency deviations were identified in this inspection."),
+            "an empty Deviations sheet must say so rather than look broken"
+        );
+        assert!(
+            sheet_cell_strings(&bytes, "Conventions")
+                .iter()
+                .any(|s| s.starts_with("This inspection derived no codebase conventions.")),
+            "an empty Conventions sheet must say so rather than look broken"
+        );
+    }
+
+    /// req_pass3: no internal pipeline vocabulary reaches a cell on any of the new
+    /// client-facing sheets.
+    ///
+    /// Merge, dedup, ledger, pass names and bucket identifiers are how WE talk about the
+    /// engine. A client reads this workbook. Checked per SHEET (the shared-strings pool is
+    /// workbook-wide, so a pool-level check could not make this claim about a sheet).
+    ///
+    /// FAILS BEFORE THE CHANGE for `grounded` on the Coverage sheet (the `Citation Kind`
+    /// column wrote the raw citation kind), which is why that token is in the list.
+    #[tokio::test]
+    async fn req_pass3_no_internal_pipeline_vocabulary_on_the_client_facing_sheets() {
+        // The REAL corpus and real audited rule ids, deliberately: a corpus-less fixture
+        // resolves every citation to "advisory", so the `grounded` leak the Coverage sheet
+        // actually had would be UNREACHABLE and this test would pass vacuously on the
+        // unfixed code. Verified: with the raw citation-kind cell restored, this test goes
+        // red on `grounded` only because of this corpus.
+        let corpus_path = camerata_rules::corpus_path();
+        let (corpus, errors) = camerata_rules::load_corpus_lenient(&corpus_path).await;
+        assert!(errors.is_empty(), "corpus must load cleanly: {errors:?}");
+        let report = report_with(
+            all_five_kinds(),
+            vec!["SUPABASE-RLS-ENABLED-1", "SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        let bytes = build_workbook(
+            &report.clone().seal(),
+            &HashMap::new(),
+            Some(&corpus),
+            &empty_opts(),
+        )
+        .unwrap();
+
+        const FORBIDDEN: [&str; 12] = [
+            "merge",
+            "merged",
+            "dedup",
+            "ledger",
+            "do_now",
+            "do_next",
+            "grounded",
+            "convention_observed",
+            "no_convention",
+            "not_assessed",
+            "pass_failed",
+            "also_locations",
+        ];
+        for sheet in ["Deviations", "Conventions", "Coverage"] {
+            for cell in sheet_cell_strings(&bytes, sheet) {
+                let lower = cell.to_ascii_lowercase();
+                for token in FORBIDDEN {
+                    assert!(
+                        !lower.contains(token),
+                        "the {sheet} sheet leaks internal vocabulary {token:?} into a \
+                         client-facing cell: {cell:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// req_pass3: the Index orients a client across the new tabs — it counts each of the five
+    /// kinds and names the sheet each lives on, and it surfaces an UNCLASSIFIED row as its own
+    /// visible line rather than folding it into the defect count.
+    ///
+    /// A5.6's backfill rule is that an absent kind is surfaced as a gap, never silently
+    /// counted as a defect. With five kinds across four tabs, the place that rule has to hold
+    /// is the one sheet a client opens first.
+    ///
+    /// FAILS BEFORE THE CHANGE: the Index had no statement-type block at all, so a client
+    /// opening the workbook had no way to learn that an inspection now returns five different
+    /// kinds of statement, let alone which tab held which.
+    #[test]
+    fn req_pass3_index_counts_the_statement_kinds_and_surfaces_unclassified_rows() {
+        let report = report_with(all_five_kinds(), vec![]);
+        let bytes =
+            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let index = sheet_cell_strings(&bytes, "Index");
+        for label in [
+            "Statement types",
+            "Defects",
+            "Deviations from your own conventions",
+            "Conventions followed consistently",
+            "No convention adopted",
+            "Not assessed this scan",
+            "Unclassified",
+        ] {
+            assert!(
+                index.iter().any(|s| s == label),
+                "the Index must carry the {label:?} line: {index:#?}"
+            );
+        }
+
+        // And `Unclassified` appears ONLY when there is one, so that its presence means
+        // something rather than being a permanent zero a reader learns to skip.
+        let clean = report_with(
+            vec![kinded(
+                finding("SEC-INJECTION-1", "src/orders.rs", 10, "critical"),
+                camerata_api_types::audit::FindingKind::Defect,
+            )],
+            vec![],
+        );
+        let clean_bytes =
+            build_workbook(&clean.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        assert!(
+            !sheet_cell_strings(&clean_bytes, "Index")
+                .iter()
+                .any(|s| s == "Unclassified"),
+            "with every row kinded, the Unclassified line must not render"
+        );
     }
 }
