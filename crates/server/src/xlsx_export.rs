@@ -153,6 +153,19 @@ pub struct FindingRow {
     is_fp: bool,
     /// The auditor's FP reason (`DispositionWire.reason`), populated only when `is_fp`.
     fp_reason: String,
+    /// Pass-1 W7 (C5): every evidence site a merge ABSORBED into this row
+    /// (`Finding::also_locations`, verbatim). Before W7 this field reached NO artifact, so a
+    /// row representing three detected sites exported as one line at one `path:line` — an
+    /// over-merge was observationally identical to a detection miss (tracker C5: the client
+    /// was told there is one site; there were three; the other two reached no artifact).
+    /// Serialized into `findings.json` and rendered in the workbook's "Also found at"
+    /// column, so every absorbed site is observable in the detail artifacts.
+    also_locations: Vec<crate::onboard::MergedLocation>,
+    /// Pass-1 W7 (C5): the total number of distinct evidence sites this row represents —
+    /// its own `path:line` plus every absorbed `also_locations` entry. `1` for an un-merged
+    /// row. The single number that makes "one row, N sites" impossible to misread as "one
+    /// row, one site".
+    site_count: usize,
     /// Pass-1 W3 (A5.6): what this row IS — flattened
     /// [`camerata_api_types::audit::KindOnWire`], so `findings.json` (which serializes this
     /// struct verbatim) carries a flat `"kind"` discriminator plus the variant's payload
@@ -423,6 +436,8 @@ fn partition_rows(
             fix,
             is_fp,
             fp_reason,
+            also_locations: f.also_locations.clone(),
+            site_count: 1 + f.also_locations.len(),
             kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
         });
     }
@@ -669,7 +684,7 @@ impl Formats {
 
 // ── The ~21(+2)-column findings schema (All Findings / category sheets / False Positives) ──
 
-const HEADERS: [&str; 24] = [
+const HEADERS: [&str; 26] = [
     "Severity",
     "Headline",
     "Repo",
@@ -700,16 +715,21 @@ const HEADERS: [&str; 24] = [
     // correct carry of the new field; the real worksheet redesign (per-kind sheets etc.) is
     // Pass 3 work and must not be pre-empted here.
     "Kind",
+    // Pass-1 W7 (C5): how many distinct evidence sites this row represents (its own
+    // path:line plus every absorbed merge site), and the absorbed sites themselves — the
+    // columns that make a merged row say "3 sites" instead of silently reading as one.
+    "Sites",
+    "Also found at",
 ];
 
-const WIDTHS: [f64; 24] = [
+const WIDTHS: [f64; 26] = [
     10.0, 50.0, 18.0, 40.0, 7.0, 28.0, 16.0, 10.0, 30.0, 9.0, 16.0, 12.0, 12.0, 16.0, 16.0, 34.0,
-    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0, 20.0,
+    30.0, 24.0, 18.0, 55.0, 70.0, 45.0, 45.0, 20.0, 8.0, 44.0,
 ];
 
 /// Columns that wrap (matches the design's wrap-column list, plus the Fix-specific and
-/// Recommended-Fix columns at the end).
-const WRAP_COLS: [u16; 7] = [1, 8, 15, 16, 20, 21, 22];
+/// Recommended-Fix columns at the end, and W7's "Also found at" site list).
+const WRAP_COLS: [u16; 8] = [1, 8, 15, 16, 20, 21, 22, 25];
 const SNIPPET_COL: u16 = 19;
 const NEEDS_REVIEW_COL: u16 = 12;
 
@@ -782,6 +802,24 @@ fn write_finding_row(
     // (`KindOnWire::tag`, "unspecified" when the producer never assigned one), never a
     // re-derivation.
     ws.write_string_with_format(r, 23, row.kind.tag(), &fmts.cell(bg, false, false))?;
+    // W7 (C5): the site count plus every absorbed site, rendered as `path:line` (one per
+    // line; a consequence site — no independently-fixable code of its own — is labeled). No
+    // raw rule ids here: this cell is client-facing, and each absorbed site's own rule
+    // identity already travels in findings.json's `also_locations` entries.
+    ws.write_number_with_format(r, 24, row.site_count as f64, &fmts.cell(bg, false, false))?;
+    let also_found_at = row
+        .also_locations
+        .iter()
+        .map(|l| {
+            if l.consequence {
+                format!("{}:{} (also affected)", l.path, l.line)
+            } else {
+                format!("{}:{}", l.path, l.line)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    ws.write_string_with_format(r, 25, &also_found_at, &fmts.cell(bg, true, false))?;
 
     Ok(())
 }
@@ -807,7 +845,7 @@ fn write_findings_sheet(
         ws.write_string_with_format(0, c as u16, *h, &fmts.header)?;
     }
     if fp_reason_col {
-        ws.write_string_with_format(0, 24, "FP Reason", &fmts.header)?;
+        ws.write_string_with_format(0, 26, "FP Reason", &fmts.header)?;
     }
     ws.set_row_height(0, 28)?;
 
@@ -815,7 +853,7 @@ fn write_findings_sheet(
         ws.set_column_width(c as u16, *w)?;
     }
     if fp_reason_col {
-        ws.set_column_width(24, 40.0)?;
+        ws.set_column_width(26, 40.0)?;
     }
 
     for (i, row) in rows.iter().enumerate() {
@@ -830,12 +868,12 @@ fn write_findings_sheet(
             } else {
                 None
             };
-            ws.write_string_with_format(r, 24, &row.fp_reason, &fmts.cell(bg, true, false))?;
+            ws.write_string_with_format(r, 26, &row.fp_reason, &fmts.cell(bg, true, false))?;
         }
     }
 
     let last_row = rows.len() as u32;
-    let last_col: u16 = if fp_reason_col { 24 } else { 23 };
+    let last_col: u16 = if fp_reason_col { 26 } else { 25 };
     ws.autofilter(0, 0, last_row, last_col)?;
     ws.set_freeze_panes(1, 0)?;
 
@@ -1603,13 +1641,17 @@ mod tests {
     fn header_schema_matches_the_design_column_order() {
         // Pass-1 W3 (A5.6): 23 -> 24 — the Kind column is appended LAST (a deliberate
         // data-structure change this test adapts to; tracker test-discipline exception (a)).
-        assert_eq!(HEADERS.len(), 24);
+        // Pass-1 W7 (C5): 24 -> 26 — the Sites + "Also found at" columns append after Kind
+        // (same exception (a): absorbed merge sites must be observable in the workbook).
+        assert_eq!(HEADERS.len(), 26);
         assert_eq!(HEADERS[0], "Severity");
         // P2: the specific fix comes BEFORE the generic Recommended Fix — same
         // primary-then-secondary ordering as the PDF template.
         assert_eq!(HEADERS[21], "Fix (specific to this finding)");
         assert_eq!(HEADERS[22], "Recommended Fix");
         assert_eq!(HEADERS[23], "Kind");
+        assert_eq!(HEADERS[24], "Sites");
+        assert_eq!(HEADERS[25], "Also found at");
         assert_eq!(HEADERS.len(), WIDTHS.len());
     }
 
@@ -3449,5 +3491,109 @@ mod tests {
             titles.is_empty(),
             "an unresolvable also_matches id must be dropped, not shown raw: {titles:?}"
         );
+    }
+
+    /// req_c5: a merged row's absorbed evidence sites (`Finding::also_locations`) reach
+    /// `findings.json` verbatim, together with an explicit `site_count` — before W7 neither
+    /// field was exported anywhere, so a row representing three detected sites was
+    /// observationally identical to a single-site row (tracker C5: an over-merge was
+    /// indistinguishable from a detection miss in every client artifact).
+    #[test]
+    fn req_c5_absorbed_sites_are_observable_in_findings_json() {
+        let mut f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
+        f.also_locations = vec![
+            crate::onboard::MergedLocation {
+                repo: "owner/repo".to_string(),
+                path: "src/orders.rs".to_string(),
+                line: 24,
+                rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+                snippet: "let q = format!(\"SELECT ... {}\", id);".to_string(),
+                consequence: false,
+            },
+            crate::onboard::MergedLocation {
+                repo: "owner/repo".to_string(),
+                path: "src/orders.rs".to_string(),
+                line: 41,
+                rule_id: "SEC-NO-RAW-SQL-CONCAT-1".to_string(),
+                snippet: "let q = \"DELETE ...\".to_string() + &id;".to_string(),
+                consequence: true,
+            },
+        ];
+        let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
+        let json = crate::report_export::build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &empty_opts(),
+        );
+        let export = build_findings_export(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &json,
+            &HashMap::new(),
+        );
+        let row = serde_json::to_value(&export.findings[0]).unwrap();
+        assert_eq!(
+            row["site_count"], 3,
+            "one own site + two absorbed sites must read as 3, got: {row}"
+        );
+        let locs = row["also_locations"]
+            .as_array()
+            .expect("findings.json rows must carry an also_locations array");
+        assert_eq!(locs.len(), 2);
+        assert_eq!(locs[0]["path"], "src/orders.rs");
+        assert_eq!(locs[0]["line"], 24);
+        assert_eq!(locs[1]["line"], 41);
+        assert_eq!(locs[1]["consequence"], true);
+
+        // The workbook renders the same sites in the "Also found at" column (path:line,
+        // client-facing — no raw rule ids), with the consequence site labeled.
+        let xlsx = build_workbook(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &empty_opts(),
+        )
+        .unwrap();
+        let shared = read_zip_entry(&xlsx, "xl/sharedStrings.xml");
+        assert!(
+            shared.contains("src/orders.rs:24"),
+            "the workbook must name the absorbed site src/orders.rs:24"
+        );
+        assert!(
+            shared.contains("src/orders.rs:41 (also affected)"),
+            "the workbook must label the consequence site"
+        );
+
+        // And the PDF's own data (the report JSON) carries the same multiplicity on the
+        // curated site, so no artifact under-reports the site count relative to another.
+        let site = &json.curated_findings[0].sites[0];
+        assert_eq!(site.site_count, 3);
+        assert_eq!(site.also_locations.len(), 2);
+    }
+
+    /// req_c5: an un-merged row reads `site_count == 1` with an empty `also_locations` —
+    /// the C5 export must never inflate a single-site row into a multi-site claim.
+    #[test]
+    fn req_c5_unmerged_row_site_count_is_exactly_one() {
+        let f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
+        let report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
+        let json = crate::report_export::build_report_json(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &empty_opts(),
+        );
+        let export = build_findings_export(
+            &report.clone().seal(),
+            &HashMap::new(),
+            None,
+            &json,
+            &HashMap::new(),
+        );
+        let row = serde_json::to_value(&export.findings[0]).unwrap();
+        assert_eq!(row["site_count"], 1);
+        assert_eq!(row["also_locations"].as_array().unwrap().len(), 0);
     }
 }

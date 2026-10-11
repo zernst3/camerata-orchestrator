@@ -738,20 +738,19 @@ async fn req_i1_the_i2_gate_and_this_harness_agree_on_the_same_scan() {
     );
 }
 
-// ═══ INV-2, FULL FORM — KNOWN RED, and that is the finding ══════════════════════════════════
+// ═══ INV-2, FULL FORM — fixed by Pass-1 W7 (C5) ═════════════════════════════════════════════
 
 /// req_i1 / INV-2 full form: **a merge may absorb a row ONLY IF the absorption is OBSERVABLE
 /// in some artifact.**
 ///
-/// # THIS TEST IS CURRENTLY RED. It documents a LIVE defect. Do not "fix" it by weakening it.
+/// # History: written RED by W6, turned GREEN by W7 (C5)
 ///
-/// `#[ignore]`d so it does not block CI for a defect this workstream is explicitly scoped out
-/// of ("Do not work on the finding data model, the rule corpus, severity calibration, or merge
-/// identity"). Run it deliberately:
-///
-/// ```text
-/// cargo test -p camerata-server --test self_measurement_parity_e2e -- --ignored
-/// ```
+/// W6 wrote this `#[ignore]`d and deliberately representation-agnostic, documenting the live
+/// C5 defect for the workstream that owned merge identity. W7 fixed it by exporting
+/// `Finding::also_locations` (verbatim) plus a `site_count` field on every row of
+/// `findings.json` / the workbook's "Sites" + "Also found at" columns / the report JSON's
+/// curated sites — so every absorbed site now reaches the artifacts and the assertion below
+/// passes through its `also_locations` arm.
 ///
 /// # What it measures, with the numbers this fixture produces
 ///
@@ -762,25 +761,22 @@ async fn req_i1_the_i2_gate_and_this_harness_agree_on_the_same_scan() {
 /// - detects all three (`cross-family-merge` records `rows_in: 3`),
 /// - absorbs two into the third (`merged_into` carries both, so `unaccounted == 0` and the
 ///   WEAKER conservation invariant above legitimately passes),
-/// - and exports ONE row, at one line, with `also_matches: ""`, no `also_locations` field, and
-///   a headline that says "Your `src/orders.rs` file builds a SQL query…" in the singular.
+/// - and (since W7) exports ONE row whose `also_locations` array carries BOTH absorbed
+///   sites and whose `site_count` reads 3. Before W7 it exported one line with
+///   `also_matches: ""`, no `also_locations` field, and a singular headline — the other two
+///   sites reached no artifact at all, tracker C5 exactly: *"`also_locations` reaches no
+///   artifact; over-merge is indistinguishable from a miss."*
 ///
-/// So the client is told there is one site. There are three. The other two reach no artifact
-/// at all, which is tracker C5 exactly: *"`also_locations` reaches no artifact; over-merge is
-/// indistinguishable from a miss."*
+/// `unaccounted == 0` was satisfied throughout — the ledger was internally honest — and the
+/// client-facing artifacts still under-reported by two thirds. An in-repo suite that only
+/// checks the ledger's own arithmetic cannot see that, and did not. The external grader
+/// could, and charged $26 to say so.
 ///
-/// This is the precise reason W6 exists. `unaccounted == 0` is satisfied — the ledger is
-/// internally honest — and the client-facing artifacts still under-report by two thirds. An
-/// in-repo suite that only checks the ledger's own arithmetic cannot see that, and did not. The
-/// external grader could, and charged $26 to say so.
-///
-/// It goes GREEN when an absorbed site becomes visible in some artifact — `also_locations`
-/// reaching the exporters, a site count on the row, or a pluralised headline. Any of those
-/// satisfies it; the assertion deliberately accepts whichever the owning workstream chooses,
-/// because it asserts the PROPERTY (observability) rather than a particular representation.
+/// The assertion deliberately accepts ANY observable representation — an `also_locations`
+/// entry, an `also_matches` entry, or an explicit site count — because it asserts the
+/// PROPERTY (observability), not a particular field. W7 chose `also_locations` +
+/// `site_count` on every exported row.
 #[tokio::test]
-#[ignore = "KNOWN RED: documents live defect C5 — an absorbed merge row reaches no artifact. \
-            Merge identity is explicitly outside W6's scope; run with --ignored to measure it."]
 async fn req_i1_c5_an_absorbed_row_must_be_observable_in_some_artifact() {
     let art = scan_and_export("self_measurement_parity_repo", "e2e/parity").await;
 

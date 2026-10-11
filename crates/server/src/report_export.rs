@@ -1076,6 +1076,17 @@ pub struct CuratedSiteJson {
     /// `do_now`; `fix` (the rule's own authored remediation) still renders as the primary Fix
     /// line, so the row never ships with no fix at all.
     pub fix_for_this_finding: Option<String>,
+    /// Pass-1 W7 (C5): every evidence site a merge ABSORBED into this row
+    /// (`Finding::also_locations`, verbatim) — carried in the PDF's own data so the three
+    /// artifacts describe the same site multiplicity. Before W7 this reached NO artifact:
+    /// a row representing three detected sites exported as one line at one `path:line`, so
+    /// an over-merge was observationally identical to a detection miss (tracker C5). The
+    /// template does not render it yet (the PDF is the summary — Pass 3 owns presentation);
+    /// the data is here so it CAN, and so the report JSON is complete.
+    pub also_locations: Vec<crate::onboard::MergedLocation>,
+    /// Pass-1 W7 (C5): total distinct evidence sites this row represents — its own
+    /// `path:line` plus every `also_locations` entry. `1` for an un-merged row.
+    pub site_count: usize,
     /// Pass-1 W3 (A5.6): what this site's row IS — same flattened always-present kind wire
     /// as [`FindingRefJson::kind`], so the PDF's own data carries the taxonomy losslessly
     /// too (the PDF renders what it already renders; Pass 2/3 own presentation).
@@ -3783,6 +3794,9 @@ pub fn build_report_json(
                         }
                     },
                     fix_for_this_finding: f.fix_specific.clone(),
+                    // W7 (C5): the absorbed sites, verbatim — see the field's doc comment.
+                    also_locations: f.also_locations.clone(),
+                    site_count: 1 + f.also_locations.len(),
                     kind: camerata_api_types::audit::KindOnWire(f.kind.clone()),
                 }
             })
