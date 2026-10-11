@@ -370,3 +370,69 @@ code that confidently thinks it is meeting the requirement while doing nothing.
 - **B5** — under-evidenced by the independent review. "Do not build on it."
 - **C10** — STRUCK as wrong. The three criticals are three distinct rules in three distinct files.
 - **New rules for uncovered classes** — banned until the mid-layer stops eating existing recall.
+
+---
+
+# W5 RESULT — E2/C8 severity ceilings, and four questions for Zach (2026-10-11)
+
+**The brief was confirmed exactly.** At `2799284`: **0 of 417** rules declared `max_severity`, 0
+declared `deviation_ceiling`, and all four `req_e2_*` tests passed anyway. Both mechanisms were
+fully inert while fully "tested" — the clearest instance yet of the thing Zach named.
+
+| | count |
+|---|---|
+| Rules whose prose already authored an explicit upper bound | 11 |
+| Transcribed to `max_severity` | 11 |
+| `deviation_ceiling = "high"` authored (architectural spine only) | 7 |
+| Handed back as genuinely ambiguous | 25 |
+| Rule `kind` fields changed | **0** (the hold is intact) |
+
+**Discipline applied:** a ceiling was authored ONLY where the prose carries an explicit upper-bound
+construction ("not an automatic critical", "capped low (owner directive)", "regardless of the model's
+proposed severity", "a lower severity than [sibling]", or an explicitly rejected higher-severity
+option). The much larger class that merely names one severity for one failure mode ("Flag as high
+severity: …") was NOT transcribed, because that phrasing is ambiguous between a bound and a per-branch
+floor, and over-reach silently caps real findings with nothing to catch it. Under-reach is recoverable;
+over-reach is a silent regression.
+
+**Architectural win worth recording:** the three observability caps previously existed ONLY as a
+hard-coded rule-id list inside `ai_audit`/`report_export` (`is_observability_convention_class`). The
+same intent is now a declaration at the authoring site. A rule-id list in engine code became corpus data.
+
+**A latent trap the new gate closes:** `report_export::normalize_severity` maps every unrecognized
+string to `"low"`. So `max_severity = "critcal"` would neither error nor no-op — it would silently
+become the *harshest* ceiling in the vocabulary and cap every finding of that rule at low. Same class
+as the inert mechanism. It now fails the build, alongside two anti-inertness gates (the corpus must
+declare at least one of each ceiling) and a test that inlines the 58 held rule ids so the hold survives
+edits to the plan doc.
+
+## [ ] W5-Q1 — the sharpest one: two SECURITY DEFINER rules
+`SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1` and `SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1` both state a
+flat "**Severity is High.**" Their folder sibling `SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1` explicitly
+authors "**High by default; Critical when** the same function is GRANTed …". Same folder, same hand —
+that deliberate three-way contrast reads as a bound.
+
+**Not authored, deliberately.** These are IDOR-in-the-database and privileged-write-with-no-authz,
+genuinely critical-class. A wrong `high` cap here is exactly the silent regression no test would catch.
+One word settles both.
+
+## [ ] W5-Q2 — is a single named severity a ceiling or a floor? (23 rules)
+Does "Flag as high severity: …" bound the rule, or just tell the detector what to emit while leaving
+calibration free to raise it? **One answer settles all 23.** They are the `SQL-*`, `SUPABASE-AUTH-*`,
+`SUPABASE-REALTIME-*`, `SUPABASE-STORAGE-*` and `ARCH-SERVER-COMPUTED-AMOUNT-1` set listed in W5's report.
+
+## [ ] W5-Q3 — the ~20 per-stack `deviation_ceiling` mirrors
+The `high` deviation ceiling went on the universal architectural spine only (layering, repo-returns-
+domain, service DI, explicit transactions, structured errors, fetch-then-authorize, Rust crate errors).
+The ~20 per-stack re-litigations of the same domains (`JAVA-SPRING-LAYERED-ARCHITECTURE-1`,
+`JAVASCRIPT-EXPRESS-THIN-CONTROLLERS-1`, `CSHARP-ASPNETCORE-AUTHORIZE-ATTRIBUTE-1`,
+`PYTHON-FLASK-ERROR-HANDLERS-1`, …) did not. Should they inherit it? Judged a question, not an inference.
+
+## [ ] W5-Q4 — incidental, and it indicts the older tests
+A test helper reading `curated_findings[0].sites[0]` — the shape **every pre-existing `req_e2_*` test
+uses** — *panics* on the observability rules, because `is_informational` routes that class out of every
+action bucket by rule identity, so the group renders under `held_for_review_findings`.
+
+So a ceiling test reading only `curated_findings` is structurally blind to precisely the rules whose cap
+is most emphatically authored. W5's own helper scans both sections. Worth deciding whether the older
+tests should be widened the same way.
