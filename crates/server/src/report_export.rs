@@ -1254,6 +1254,46 @@ pub const AUDIT_REPORT_DISCLAIMER: &str =
 /// list, which both sections render as nothing (no fabricated "everything ran cleanly"
 /// claim needed — the absence of a disclosure IS the claim, because every real gap here is
 /// always disclosed when one exists).
+/// W7 (G1/G3): one concise, client-facing disclosure line per NON-dependency tool whose
+/// coverage notes record incomplete coverage this scan. Before W7, only `tool ==
+/// "osv-scanner"` notes were exported (into the dependency snapshot); semgrep/eslint/ruff/
+/// clippy notes reached the UI and the ledger but NO client artifact, so a whole tool tier
+/// could fail and the client's PDF/xlsx/JSON said nothing — the ESLint wholesale failure
+/// (C11's cost side) was invisible to a client even when disclosed internally.
+///
+/// G3 is the owner's constraint and this function's shape: coverage IS client-facing, but
+/// **concise and useful, not exhaustive** — ONE line per affected tool, written for a client,
+/// never the notes' own internal diagnostics (tool exit codes, config paths, per-rule
+/// repetition). The full per-note detail stays where it already lives: the UI and the ledger.
+/// Rendered via the existing `failed_passes` channel (executive summary + methodology in the
+/// PDF/JSON — no template change) and as the Coverage sheet's "Tool coverage notes" section.
+pub(crate) fn tool_coverage_disclosures(
+    notes: &[crate::onboard::CoverageNote],
+) -> Vec<String> {
+    let tools: std::collections::BTreeSet<&str> = notes
+        .iter()
+        .filter(|n| n.tool != "osv-scanner")
+        .map(|n| n.tool.as_str())
+        .collect();
+    tools
+        .into_iter()
+        .map(|tool| {
+            if tool == "unrouted" {
+                // Not a tool name a client would recognize: these notes mean "a selected
+                // check had no scan-time tool available at all".
+                "Some selected checks had no scan-time preview tool available this run; \
+                 they are not reflected in this report and enforce once wired into CI."
+                    .to_string()
+            } else {
+                format!(
+                    "The {tool} static-analysis checks did not fully run this scan; \
+                     anything they would have reported is not reflected in this report."
+                )
+            }
+        })
+        .collect()
+}
+
 fn failed_pass_disclosures(failed_passes: &[crate::ai_audit::FailedPass]) -> Vec<String> {
     failed_passes
         .iter()
@@ -4196,6 +4236,11 @@ pub fn build_report_json(
             },
         ));
     }
+    // W7 (G1/G3): non-dependency tool-coverage gaps reach the client artifacts — one concise
+    // line per affected tool, through the SAME failed_passes channel the template already
+    // renders in both the executive summary and the methodology. See
+    // `tool_coverage_disclosures`'s doc comment for the honesty hole this closes.
+    failed_pass_notes.extend(tool_coverage_disclosures(&report.coverage_notes));
     let (narrative, is_override) = match &opts.executive_summary_override {
         Some(text) if !text.trim().is_empty() => (text.clone(), true),
         _ => (
@@ -8530,6 +8575,68 @@ mod tests {
         let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
         assert_eq!(json.dependency_snapshot.coverage_notes.len(), 1);
         assert!(json.dependency_snapshot.coverage_notes[0].contains("network unavailable"));
+    }
+
+    /// req_g1 (W7): a NON-dependency tool's coverage gap reaches the client artifacts.
+    /// Before W7, only `osv-scanner` notes were exported anywhere; a wholesale eslint/
+    /// semgrep/ruff/clippy failure reached the UI and the ledger but no PDF/xlsx/JSON — a
+    /// whole tool tier could fail and the client's artifacts said nothing (the ESLint
+    /// failure was invisible to a client even when disclosed internally).
+    #[test]
+    fn req_g1_non_osv_tool_coverage_gap_is_disclosed_in_summary_and_methodology() {
+        let mut report = report_with(vec![], vec![]);
+        report.coverage_notes = vec![
+            CoverageNote {
+                tool: "eslint".to_string(),
+                message: "Could not preview 12 rule(s) with eslint: spawn ENOENT at \
+                          /internal/path/node_modules/.bin/eslint. It enforces once wired \
+                          into CI."
+                    .to_string(),
+            },
+            CoverageNote {
+                tool: "eslint".to_string(),
+                message: "Could not preview 3 rule(s) with eslint: exit code 2.".to_string(),
+            },
+            CoverageNote {
+                tool: "osv-scanner".to_string(),
+                message: "dependency audit did not run: network unavailable".to_string(),
+            },
+        ];
+        let json = build_report_json(&report.clone().seal(), &HashMap::new(), None, &empty_opts());
+        let eslint_lines = |notes: &[String]| {
+            notes
+                .iter()
+                .filter(|n| n.contains("eslint"))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let summary_lines = eslint_lines(&json.executive_summary.failed_passes);
+        let methodology_lines = eslint_lines(&json.methodology.failed_passes);
+        assert_eq!(
+            summary_lines.len(),
+            1,
+            "exactly ONE concise line per affected tool (G3: concise and useful, never an \
+             exhaustive dump): {:?}",
+            json.executive_summary.failed_passes
+        );
+        assert_eq!(methodology_lines, summary_lines);
+        // G3: client language, never the notes' internal diagnostics.
+        assert!(
+            !summary_lines[0].contains("ENOENT") && !summary_lines[0].contains("/internal/path"),
+            "the disclosure must not dump internal diagnostics: {:?}",
+            summary_lines[0]
+        );
+        // The osv note stays where it already lived (the dependency snapshot), not duplicated
+        // into the tool lines.
+        assert!(
+            !json
+                .executive_summary
+                .failed_passes
+                .iter()
+                .any(|n| n.contains("osv-scanner")),
+            "osv-scanner notes belong to the dependency snapshot, not the tool lines: {:?}",
+            json.executive_summary.failed_passes
+        );
     }
 
     // ── Executive summary override ─────────────────────────────────────────────

@@ -974,6 +974,8 @@ fn write_coverage_sheet(
     coverage_rows: &[CoverageRow],
     excluded_mechanical_rules: &[String],
     rules_applied: &[RulesAppliedRow],
+    tool_coverage_notes: &[String],
+    rules_not_run: &[(String, String)],
     fmts: &Formats,
 ) -> Result<(), XlsxError> {
     let ws = wb.add_worksheet();
@@ -1065,6 +1067,39 @@ fn write_coverage_sheet(
         let ra_last_row = next_r.saturating_sub(1);
         if ra_last_row > ra_header_row {
             ws.autofilter(ra_header_row, 0, ra_last_row, 3)?;
+        }
+        next_r += 1;
+    }
+
+    // W7 (G1/G3): non-dependency tool-coverage gaps — the SAME concise client-facing lines
+    // the PDF/JSON carry in `failed_passes` (see `report_export::tool_coverage_disclosures`).
+    // Before W7 only osv-scanner notes reached any artifact (on the Dependencies sheet), so
+    // a failed semgrep/eslint/ruff/clippy tier was invisible to a client here too.
+    if !tool_coverage_notes.is_empty() {
+        ws.write_string_with_format(next_r, 0, "Tool coverage notes", &fmts.section_title)?;
+        next_r += 1;
+        for note in tool_coverage_notes {
+            ws.write_string(next_r, 0, note)?;
+            next_r += 1;
+        }
+        next_r += 1;
+    }
+
+    // W7 (G2): rules the ledger confirms did NOT run this scan, with the recorded reason —
+    // the detail-surface sibling of the report JSON's `rules_not_run` section, so the
+    // workbook (the meat-and-potatoes artifact) never implies a never-run rule was
+    // checked-and-clean.
+    if !rules_not_run.is_empty() {
+        ws.write_string_with_format(next_r, 0, "Rules not run this scan", &fmts.section_title)?;
+        next_r += 1;
+        for (c, h) in ["Rule ID", "Reason"].iter().enumerate() {
+            ws.write_string_with_format(next_r, c as u16, *h, &fmts.header)?;
+        }
+        next_r += 1;
+        for (rid, reason) in rules_not_run {
+            ws.write_string_with_format(next_r, 0, rid, &fmts.cell(None, false, false))?;
+            ws.write_string_with_format(next_r, 1, reason, &fmts.cell(None, true, false))?;
+            next_r += 1;
         }
     }
 
@@ -1448,12 +1483,26 @@ pub fn build_workbook(
     write_findings_sheet(&mut wb, &fp_name, &fp_rows, &fmts, true, Some("#6B7280"))
         .context("writing the False Positives sheet")?;
     let rules_applied_rows = build_rules_applied_rows(report, corpus);
+    // W7 (G1/G3): the same concise per-tool coverage lines the PDF/JSON disclose through
+    // `failed_passes` — never the notes' raw internal diagnostics.
+    let tool_coverage_notes =
+        crate::report_export::tool_coverage_disclosures(&report.coverage_notes);
+    // W7 (G2): every rule the ledger confirms did not run, sorted for a stable sheet.
+    let mut rules_not_run: Vec<(String, String)> = report
+        .ledger
+        .excluded_rules()
+        .into_iter()
+        .map(|(id, reason)| (id.to_string(), reason.to_string()))
+        .collect();
+    rules_not_run.sort();
     write_coverage_sheet(
         &mut wb,
         &coverage_name,
         &coverage_rows,
         &report.excluded_mechanical_rules,
         &rules_applied_rows,
+        &tool_coverage_notes,
+        &rules_not_run,
         &fmts,
     )
     .context("writing the Coverage sheet")?;
@@ -3658,6 +3707,49 @@ mod tests {
         assert!(
             demoted.findings_count > 0,
             "a same-location demotion must still count as the rule having fired"
+        );
+    }
+
+    /// req_g1/req_g2 (W7): the workbook's Coverage sheet discloses non-dependency tool
+    /// coverage gaps (one concise client-facing line per tool — G3) and names every rule the
+    /// ledger confirms did not run. Before W7 the workbook carried neither: only osv-scanner
+    /// notes reached it (Dependencies sheet), and ledger-excluded rules reached the report
+    /// JSON only.
+    #[test]
+    fn req_g1_g2_coverage_sheet_discloses_tool_gaps_and_rules_not_run() {
+        let f = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/a.rs", 3, "high");
+        let mut report = report_with(vec![f], vec!["SEC-NO-RAW-SQL-CONCAT-1"]);
+        report.coverage_notes = vec![crate::onboard::CoverageNote {
+            tool: "eslint".to_string(),
+            message: "Could not preview 12 rule(s) with eslint: spawn ENOENT.".to_string(),
+        }];
+        report.ledger.record_rule(
+            "JS-SOME-NEVER-RUN-RULE-1",
+            crate::scan_ledger::RuleTier::ExternalTool,
+            false,
+            Some("preview tool failed to start".to_string()),
+            0,
+            0,
+        );
+        let bytes =
+            build_workbook(&report.clone().seal(), &HashMap::new(), None, &empty_opts()).unwrap();
+        let shared = read_zip_entry(&bytes, "xl/sharedStrings.xml");
+        assert!(
+            shared.contains("Tool coverage notes"),
+            "the Coverage sheet must carry the tool-coverage section"
+        );
+        assert!(
+            shared.contains("The eslint static-analysis checks did not fully run this scan"),
+            "the disclosure must name the tool in client language"
+        );
+        assert!(
+            !shared.contains("ENOENT"),
+            "the raw internal diagnostic must not reach the workbook (G3)"
+        );
+        assert!(
+            shared.contains("Rules not run this scan")
+                && shared.contains("JS-SOME-NEVER-RUN-RULE-1"),
+            "a ledger-excluded rule must be named on the Coverage sheet"
         );
     }
 
