@@ -5,6 +5,10 @@ domain = "supabase:storage"
 layer = "platform"
 enforcement = "structured"
 kind = "decision"
+# E2 ceiling, transcribed from this rule's own prose: "Write/delete matches are high severity;
+# read-only matches are medium with `needs_review`, mirroring the RLS-permissive-true severity
+# split" — a fully enumerated split whose top is high, mirroring a rule that rejects critical.
+max_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by the same policy-predicate scan machinery as SUPABASE-RLS-PERMISSIVE-TRUE-1, specialized to storage.objects: a policy on storage.objects with USING (true) / WITH CHECK (true), or with no owner/folder scoping (no predicate referencing auth.uid() = owner, or a bucket_id + folder-prefix check) targeting anon or public, is flagged — with the finding naming the specific BUCKET (extracted from the policy's bucket_id predicate) rather than a generic table. Write/delete matches are high severity; read-only matches are medium with `needs_review`, mirroring the RLS-permissive-true severity split. Conformance holds when every storage.objects policy scopes write/delete operations to the resource's owner or an equivalent folder/ownership predicate."

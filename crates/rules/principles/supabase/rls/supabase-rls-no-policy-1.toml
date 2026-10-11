@@ -5,6 +5,10 @@ domain = "supabase:rls"
 layer = "platform"
 enforcement = "architectural"
 kind = "decision"
+# E2 ceiling, transcribed from this rule's own prose: "Medium severity — this is an
+# availability/architecture smell, not a direct exposure, so it is a lower severity than the
+# missing-RLS and policy-disabled findings."
+max_severity = "medium"
 default = true
 verification = "grounded"
 qualifies = "Enforced by the same migration-timeline replay pass as SUPABASE-RLS-ENABLED-1: for a table whose replayed end-state has RLS enabled but has zero CREATE POLICY statements anywhere in its history, Postgres denies ALL access to anon/authenticated roles (RLS enabled with no policy is deny-by-default). Conformance holds when every RLS-enabled table has at least one policy; a zero-policy table is either a broken feature or a sign the application reads that table exclusively via the service_role key, which bypasses RLS entirely. Medium severity — this is an availability/architecture smell, not a direct exposure, so it is a lower severity than the missing-RLS and policy-disabled findings."

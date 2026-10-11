@@ -5,6 +5,9 @@ domain = "supabase:realtime"
 layer = "platform"
 enforcement = "prose"
 kind = "defect"
+# E2 ceiling, transcribed from this rule's own prose: "Flag as medium-to-high severity (scaled
+# by how sensitive the extra field is)" — an explicitly bounded range topping out at high.
+max_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Whether a Presence payload includes more identity than the feature genuinely needs is a judgment call over what the UI consuming the presence state actually does with it, not a pattern match — so this rule routes to prose: the object passed to `channel.track(...)` and the UI code reading `presenceState()` are fed to Claude with the question: does this feature need the fields included (an avatar/display name for a 'who's online' list), or does it include more identity than that (a raw email address, a full legal name, an internal user id meant to stay server-side) for no functional reason? Conformance holds when the tracked payload is limited to what the consuming UI displays or needs; it fails when a payload includes PII the feature never renders or uses, broadcast to every other subscriber on the channel merely because it was convenient to pass the whole user object to track()."

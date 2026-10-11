@@ -5,6 +5,11 @@ domain = "supabase:storage"
 layer = "platform"
 enforcement = "structured"
 kind = "defect"
+# E2 ceiling, transcribed from this rule's own prose (finding C8): "flagged with
+# `needs_review`, not an automatic critical", and again "`needs_review`, not an automatic
+# critical" — the conforming failure mode is an explicit high-severity needs_review row, and
+# the rejected option is literally "flag only suspicious-named buckets, at critical severity".
+max_severity = "high"
 default = true
 verification = "grounded"
 qualifies = "Enforced by a scan for bucket-publicness declarations: `insert into storage.buckets (...) values (..., true, ...)` / `update storage.buckets set public = true` in migrations, and `createBucket(name, { public: true })` (or the dashboard-equivalent flag) in application code. A public bucket serves every object inside it to anyone holding or guessing the URL, with no auth check and no RLS evaluation for GET/download. Conformance holds when every public bucket is deliberately, reviewably public (avatars, public assets); it fails — flagged with `needs_review`, not an automatic critical — when a bucket holding what looks like private data (its name or referencing code suggests documents, uploads, invoices, etc.) is public, since public buckets are also a common and legitimate pattern this report must not cry wolf on."

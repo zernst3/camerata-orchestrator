@@ -5,6 +5,11 @@ domain = "universal"
 layer = "universal"
 enforcement = "architectural"
 kind = "decision"
+# E2 ceiling, transcribed from this rule's own prose: "deliberately CAPPED LOW (owner
+# directive)"; "forces every finding of this rule to severity Low ... regardless of what
+# severity the model itself proposes"; "caps its severity at [low]". Previously enforced only
+# by a hard-coded rule-id class in ai_audit/report_export; now declared where it was authored.
+max_severity = "low"
 default = true
 verification = "grounded"
 qualifies = "SEMANTIC, opinion-shaped, and deliberately CAPPED LOW (owner directive): whether a given empty catch/except/rescue block or ignored error value is a real defect or a deliberate, locally-justified no-op is a repo-relative judgment call Camerata cannot verify mechanically — unlike CSHARP-NO-SWALLOWED-EXCEPTIONS-1 (a C#-specific, full-severity, MECHANICALLY enforced rule backed by real Roslyn/Sonar analyzers, which remains authoritative wherever it applies), this rule has no shipped detector and reaches the codebase only through the semantic/AI audit pass. Camerata's own severity-ceiling pass (see `ai_audit`'s D8 observability cap, and `report_export::is_informational`'s structural bypass of its own severity invariant for this exact rule-id class) forces every finding of this rule to severity Low and routes it OUT of every action bucket (do_now/do_next/plan) regardless of what severity the model itself proposes — this class must never occupy an action tier on its own. Conformance holds when every catch/except/rescue block that does not rethrow or return the error upward, and every explicit error-value check (Go's `if err != nil`, Rust's `Err(e)` match arm) that does not propagate it, either calls the project's logger with the error or carries an inline comment explicitly justifying the silence; it is flagged when a block is empty (or equivalent to empty: a bare `pass`, a comment-only body, a `_ = err`/discarded binding with no accompanying log call or justification comment)."
