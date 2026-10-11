@@ -545,3 +545,33 @@ This is also the safe direction: `SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1` is 
 `SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1` is a privileged write with no authorization check. Both are
 genuinely critical-class, and a `high` cap would have silently downgraded them with no test to notice.
 Flagged for Zach to override if he meant to distinguish Q1 from Q2.
+
+## [x] W5-Q3 DECIDED — the per-stack mirrors MATCH the architectural spine
+Zach: *"yes these should match."*
+
+So the ~20 per-stack re-litigations of layering / error-contract / auth / transactions inherit the same
+`deviation_ceiling = "high"` as the 7 universal architectural rules. Rationale he endorsed: severity must
+describe the PROBLEM, not which rule happened to fire. Without this, a Java repo with broken layering
+caps at medium under `JAVA-SPRING-LAYERED-ARCHITECTURE-1` while an unmirrored stack reaches high under
+`ARCH-STRICT-LAYERING-1` — identical defect, different severity, decided by corpus filing.
+
+Routed to W8 (it holds `crates/rules/principles/**`). Each mirror must be matched to the spine rule it
+mirrors, not blanket-assigned: a per-stack rule that does NOT correspond to one of the 7 gets nothing.
+
+## [x] W5-Q4 DECIDED — widen the old severity tests to scan both report sections
+Zach: *"yes, widen these tests."*
+
+Every pre-existing `req_e2_*` test reads only `curated_findings`, so it is structurally blind to the
+observability rules — `is_informational` routes that class out of every action bucket by rule identity,
+rendering the group under `held_for_review_findings`. A test reading one section *panics* rather than
+failing cleanly, and the rules it cannot see are precisely the three whose cap is most emphatically
+authored ("CAPPED LOW (owner directive)").
+
+This is **test blindness, not a behaviour change** — the tests were giving false assurance. Authorized
+under exception (a); the commit must state it. W5's own helper already scans both sections and is the
+pattern to follow. Routed to W8 (it holds `report_export.rs`).
+
+**Still open for Zach:** the 58 rule classifications (paused at his request), W7-Q1 (the PDF
+`rules_not_run` line), W7-Q2 (an owner for the C1 traceability collision in `scan_ledger.rs`), R1
+(repo-wide `cargo fmt`), R2 (formatter directive as a custom rule), and sign-off on the `crates/llm`
+credential-test edit (assertions byte-identical, only the env mutation serialized).
