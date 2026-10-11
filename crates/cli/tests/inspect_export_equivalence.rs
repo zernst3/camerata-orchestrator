@@ -30,6 +30,27 @@
 //!      boundary. `normalize_generated_at` blanks that one pattern out of any UTF-8 leaf
 //!      entry before comparing, so this test asserts on everything the product actually
 //!      controls and nothing it doesn't.
+//!   3. `typst` stamps the compiled PDF's own Info dict with `/CreationDate` and `/ModDate`,
+//!      and the trailer's `/ID` with a content-and-time-derived identifier. The compile
+//!      invocation sets neither `SOURCE_DATE_EPOCH` nor `--creation-timestamp`, so the PDF
+//!      embeds the real clock at second precision.
+//!   4. `rust_xlsxwriter` writes `dcterms:created` / `dcterms:modified` into the workbook's
+//!      `docProps/core.xml` at second precision, with no document properties set to pin them.
+//!
+//! Sources 3 and 4 were UNHANDLED until 2026-10-11, and this comment previously asserted the
+//! opposite — that nothing but the two cases above varied call-to-call. Both fired: Pass 3's
+//! three added worksheets widened the gap between the two generations enough to straddle a
+//! second boundary roughly one run in four. Note what 1's own wording conceded all along:
+//! "usually land in the same 2-second bucket, but aren't guaranteed to." A test that is
+//! usually right is a test that teaches you to rerun until green.
+//!
+//! WORTH FIXING AT THE SOURCE, NOT DONE HERE: setting `SOURCE_DATE_EPOCH` on the `typst`
+//! invocation and pinning the workbook's `DocProperties` creation datetime to the SCAN time
+//! (already present in the report data) would make both artifacts byte-reproducible. That is
+//! arguably more correct for a client deliverable too — the metadata would say when the audit
+//! ran rather than when the bytes were serialized — and it would let the product prove two
+//! exports are the same report. It is a change to client-facing metadata, so it is routed
+//! rather than taken here.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -166,17 +187,81 @@ fn generated_at_pattern() -> &'static regex::Regex {
     })
 }
 
-/// Normalize a leaf entry's bytes before comparison: text (UTF-8) entries get the volatile
-/// "generated at" timestamp blanked out; binary entries (a compiled PDF's own internal
-/// structure, for instance) are returned as-is — nothing else in this test's fixture varies
-/// call-to-call, so an unnormalized binary mismatch is a REAL equivalence failure, not noise.
+/// Wall-clock stamps that a GENERATED artifact writes into its own bytes, matched on RAW BYTES
+/// rather than UTF-8 text because a compiled PDF is binary and still carries a creation date.
+///
+/// These are sources 3 and 4 in this file's module doc comment. Both were unhandled, and the
+/// previous version of this function asserted the opposite — that binary entries could not vary
+/// call-to-call, so a binary mismatch was necessarily real. That claim was false, and both holes
+/// fired: a full-suite run reported the `.pdf` entry mismatching, and a rerun of the same
+/// unchanged tree reported `-findings.xlsx::docProps/core.xml` instead. A test whose failing
+/// entry changes between runs on identical code is measuring the clock, not the product.
+fn volatile_byte_patterns() -> &'static Vec<regex::bytes::Regex> {
+    static RES: std::sync::OnceLock<Vec<regex::bytes::Regex>> = std::sync::OnceLock::new();
+    RES.get_or_init(|| {
+        [
+            // 3a. The PDF's ENTIRE XMP metadata packet, as one unit.
+            //
+            //     This is deliberately a whole-packet rule rather than a list of volatile
+            //     fields, and that choice is the point. Chasing fields individually went
+            //     `xmp:ModifyDate` -> `xmp:CreateDate` -> `xmpMM:InstanceID` -> `xmpMM:DocumentID`,
+            //     each discovered only when it happened to straddle a second boundary on some
+            //     run, each "fixed" by adding one more pattern. That is lexical whack-a-mole:
+            //     the same method, and the same failure mode, as the credential keyword list
+            //     and the evidence gate's six phrases that this codebase's own audit findings
+            //     (B6, C3) condemn. The category is the right unit: an XMP packet is generated
+            //     document-identity metadata (timestamps, instance and document ids, producer
+            //     string) and contains no product content, so none of it is what this test
+            //     asserts about.
+            //
+            //     The tradeoff, stated so it is a decision and not an oversight: a drift that
+            //     appeared ONLY inside XMP would be invisible here. That is accepted because
+            //     every value XMP carries about the report itself (title, producer) is also
+            //     carried in the Info dict and the document body, which are still compared.
+            r"(?s)<\?xpacket begin.*?<\?xpacket end[^>]*\?>",
+            r"(?s)<x:xmpmeta.*?</x:xmpmeta>",
+            // 3b. PDF date strings outside XMP, i.e. the Info dict: `(D:20261011002156Z)`,
+            //     `(D:20261011002156-04'00')`. Keyed on the `D:` form itself rather than on
+            //     `/CreationDate`, so an Info-dict key this test has not seen is still covered.
+            r"D:\d{14}(?:[Zz]|[+-]\d{2}'?\d{2}'?)?",
+            // 3c. The PDF trailer's file identifier, which writers derive from content AND time.
+            //
+            //     Both PDF string forms, because the spec permits either and typst uses the
+            //     literal form: `/ID[(DxEpGydYvZsZCAMLKCl0sw==)(DxEpGydYvZsZCAMLKCl0sw==)]`.
+            //     An earlier version of this pattern accepted only hex `<...>` strings and so
+            //     never matched a single real export.
+            r"/ID ?\[\s*(?:<[0-9A-Fa-f]*>|\([^)]*\))\s*(?:<[0-9A-Fa-f]*>|\([^)]*\))\s*\]",
+            // 4. ISO-8601 instants, for `rust_xlsxwriter`'s `dcterms:created` and
+            //    `dcterms:modified` in the workbook's `docProps/core.xml` — which is NOT an XMP
+            //    packet, so 3a does not reach it. The offset is optional and may be `Z` or
+            //    numeric; an earlier version required a literal `Z` and silently missed every
+            //    local-time stamp.
+            r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:?\d{2})?",
+        ]
+        .iter()
+        .map(|p| regex::bytes::Regex::new(p).expect("a volatile-field pattern must be valid regex"))
+        .collect()
+    })
+}
+
+/// Normalize a leaf entry's bytes before comparison, neutralizing every known wall-clock stamp
+/// and nothing else.
+///
+/// Byte-level patterns run FIRST so they reach binary entries too; the human-readable
+/// "generated at" cell is then blanked from UTF-8 entries. Anything that survives this and still
+/// differs is a REAL equivalence failure: the CLI export path has drifted from the server
+/// product-export path, which is the only thing this test exists to catch.
 fn normalize_leaf(bytes: &[u8]) -> Vec<u8> {
-    match std::str::from_utf8(bytes) {
+    let mut out = bytes.to_vec();
+    for re in volatile_byte_patterns() {
+        out = re.replace_all(&out, &b"<volatile>"[..]).into_owned();
+    }
+    match std::str::from_utf8(&out) {
         Ok(text) => generated_at_pattern()
             .replace_all(text, "<generated-at>")
             .into_owned()
             .into_bytes(),
-        Err(_) => bytes.to_vec(),
+        Err(_) => out,
     }
 }
 
@@ -245,10 +330,91 @@ async fn cli_export_assembly_matches_the_server_product_export_path_byte_for_byt
         let server_bytes = server_entries
             .get(name)
             .unwrap_or_else(|| panic!("server export is missing entry {name:?}"));
-        assert_eq!(
-            cli_bytes, server_bytes,
-            "entry {name:?} must be byte-for-byte identical between the CLI inspect export \
-             and the server product-export path"
-        );
+        assert_entry_bytes_eq(name, cli_bytes, server_bytes);
     }
+}
+
+/// Proof that [`normalize_leaf`] neutralizes wall-clock noise WITHOUT neutralizing real content.
+///
+/// This exists because the normalization grew four rules deep, one of which blanks an entire XMP
+/// packet. Each rule widens what the equivalence test is willing to ignore, and a normalization
+/// wide enough to pass anything would turn the whole test green and meaningless -- the same
+/// failure class as a guard test that cannot fail, and as the E2 ceiling that was fully tested
+/// and completely inert. So: every volatile form must normalize away, and a one-character
+/// difference in product content must still survive.
+#[test]
+fn normalization_neutralizes_clock_noise_and_nothing_else() {
+    // Two "exports" generated a second apart: every volatile form differs, content is identical.
+    let a = b"<x:xmpmeta><xmp:CreateDate>2026-10-11T08:49:30-04:00</xmp:CreateDate>\
+               <xmpMM:InstanceID>AAAA==</xmpMM:InstanceID></x:xmpmeta>\
+               /Info(D:20261011084930-04'00')/ID[(AAAA==)(AAAA==)]\
+               <dcterms:created>2026-10-11T08:49:30Z</dcterms:created>\
+               Critical: hardcoded service-role key. generated at 2026-10-11 08:49 UTC";
+    let b = b"<x:xmpmeta><xmp:CreateDate>2026-10-11T08:49:31-04:00</xmp:CreateDate>\
+               <xmpMM:InstanceID>ZZZZ==</xmpMM:InstanceID></x:xmpmeta>\
+               /Info(D:20261011084931-04'00')/ID[(ZZZZ==)(ZZZZ==)]\
+               <dcterms:created>2026-10-11T08:49:31Z</dcterms:created>\
+               Critical: hardcoded service-role key. generated at 2026-10-11 08:49 UTC";
+    assert_ne!(
+        a.to_vec(),
+        b.to_vec(),
+        "the fixture must actually differ before normalization, or this test proves nothing"
+    );
+    assert_eq!(
+        normalize_leaf(a),
+        normalize_leaf(b),
+        "every volatile form (XMP packet, PDF date, trailer /ID, ISO-8601 instant) must normalize \
+         away -- if this fails, the equivalence test will flake again"
+    );
+
+    // Same volatile values, ONE character of real content changed: must still differ.
+    let c = b"<x:xmpmeta><xmp:CreateDate>2026-10-11T08:49:30-04:00</xmp:CreateDate></x:xmpmeta>\
+               High: hardcoded service-role key.";
+    let d = b"<x:xmpmeta><xmp:CreateDate>2026-10-11T08:49:30-04:00</xmp:CreateDate></x:xmpmeta>\
+               High: hardcoded service-role keys.";
+    assert_ne!(
+        normalize_leaf(c),
+        normalize_leaf(d),
+        "normalization must NOT swallow a real content difference -- an equivalence test that \
+         cannot fail is worse than no equivalence test, because it manufactures confidence"
+    );
+}
+
+/// Compare one entry's bytes, and on mismatch report the FIRST differing offset with a readable
+/// window around it.
+///
+/// A bare `assert_eq!` on two multi-megabyte `Vec<u8>` prints thousands of integers from the
+/// start of each — identical prefixes, telling you nothing about where or why they diverge. That
+/// is how sources 3 and 4 in the module doc comment stayed unhandled while the test flaked: the
+/// failure was unreadable, so it read as noise. The window below is what makes an unhandled
+/// wall-clock stamp self-identifying.
+fn assert_entry_bytes_eq(name: &str, left: &[u8], right: &[u8]) {
+    if left == right {
+        return;
+    }
+    let first_diff = left
+        .iter()
+        .zip(right)
+        .position(|(a, b)| a != b)
+        .unwrap_or_else(|| left.len().min(right.len()));
+    let start = first_diff.saturating_sub(60);
+    let window = |b: &[u8]| {
+        let end = (first_diff + 60).min(b.len());
+        String::from_utf8_lossy(&b[start.min(b.len())..end]).replace(['\n', '\r'], "·")
+    };
+    panic!(
+        "entry {name:?} must be byte-for-byte identical between the CLI inspect export and the \
+         server product-export path.\n\
+         lengths: cli={} server={}\n\
+         first difference at byte {first_diff}\n\
+         cli    …{}…\n\
+         server …{}…\n\
+         If the window shows a date or a time, it is an unhandled wall-clock stamp and belongs \
+         in `volatile_byte_patterns`, NOT a real equivalence failure. Anything else is real \
+         drift between the two export paths.",
+        left.len(),
+        right.len(),
+        window(left),
+        window(right),
+    );
 }
