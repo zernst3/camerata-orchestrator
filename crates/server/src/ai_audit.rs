@@ -5031,11 +5031,47 @@ fn enclosing_block(content: &str, line: usize) -> Option<(usize, usize)> {
     best
 }
 
-/// True when `a` and `b` fall inside the same innermost brace block of `content`.
+/// W7 (B7): the blank-line-delimited STANZA containing 1-based `line` — the natural
+/// "construct" of brace-free content (a SQL statement, a TOML table, a YAML mapping block, an
+/// `.env` section). Returns the stanza's `(start_line, end_line)`, or `None` when `line` is
+/// out of range or falls ON a blank line (a blank line belongs to no stanza).
+fn enclosing_stanza(content: &str, line: usize) -> Option<(usize, usize)> {
+    let lines: Vec<&str> = content.lines().collect();
+    if line == 0 || line > lines.len() || lines[line - 1].trim().is_empty() {
+        return None;
+    }
+    let mut start = line;
+    while start > 1 && !lines[start - 2].trim().is_empty() {
+        start -= 1;
+    }
+    let mut end = line;
+    while end < lines.len() && !lines[end].trim().is_empty() {
+        end += 1;
+    }
+    Some((start, end))
+}
+
+/// True when `a` and `b` fall inside the same innermost brace block of `content` — or, W7
+/// (B7), inside the same blank-line-delimited stanza when the content carries NO braces at
+/// all. Before B7 this was unconditionally false for brace-free content, so `.env`, `.sql`,
+/// `.toml` and `.yaml` could never satisfy any in-construct merge signal — a blind spot over
+/// exactly the file types config and migration defects live in. The stanza fallback is
+/// deliberately scoped to FULLY brace-free content: in a brace-bearing file, "no enclosing
+/// block" genuinely means top-level, which is not a construct (two unrelated top-level items
+/// must not read as one), and YAML/TOML carrying inline `{...}` flow syntax conservatively
+/// keeps the old semantics too.
 fn same_construct(content: &str, a: usize, b: usize) -> bool {
     match enclosing_block(content, a) {
         Some((s, e)) => b >= s && b <= e,
-        None => false,
+        None => {
+            if content.contains('{') {
+                return false;
+            }
+            match enclosing_stanza(content, a) {
+                Some((s, e)) => b >= s && b <= e,
+                None => false,
+            }
+        }
     }
 }
 
@@ -5637,8 +5673,13 @@ pub fn merge_semantic_groups(findings: Vec<Finding>, files: &[(String, String)])
         let content = by_path.get(f.path.as_str()).copied();
         let mut placed = false;
         for g in groups.iter_mut() {
-            // Compare against the group's seed (first member) — a stable, deterministic anchor.
-            if semantic_pair_merges(&g[0], &f, content) {
+            // W7 (B8): compare against EVERY member of the group, not only its seed. The
+            // seed-only form made membership non-transitive and order-dependent: on the
+            // measured corpus, 13 of 32 same-rule/same-file/same-severity pairs were blocked
+            // by NOTHING in the predicate — only by neither side happening to be the other's
+            // seed. Groups are still formed greedily in first-seen order (deterministic),
+            // and every wrong-fusion guard still applies per PAIR inside the predicate.
+            if g.iter().any(|m| semantic_pair_merges(m, &f, content)) {
                 g.push(f.clone());
                 placed = true;
                 break;
@@ -14584,6 +14625,65 @@ mod tests {
             primary_rank(&defect, 2, 1),
             primary_rank(&conv, 2, 0)
         );
+    }
+
+    // ── Pass-1 W7: B7 (brace-free construct blindness) + B8 (seed-only clustering) ──
+
+    /// req_b7: `same_construct` was false for ALL brace-free content, so `.env`, `.sql`,
+    /// `.toml`, `.yaml` could never satisfy the in-construct merge signals — a blind spot
+    /// over exactly the file types config and migration defects live in. For content with no
+    /// braces at all, the blank-line-delimited stanza is the construct.
+    #[test]
+    fn req_b7_brace_free_content_falls_back_to_the_blank_line_stanza() {
+        let sql = "CREATE TABLE orders (\n  id uuid PRIMARY KEY,\n  total numeric\n);\n\
+                   \n\
+                   CREATE POLICY orders_read ON orders\n  USING (true);\n";
+        // Lines 1-4 are one statement stanza; line 5 is blank; lines 6-7 are another.
+        assert!(
+            same_construct(sql, 1, 3),
+            "two lines inside one brace-free statement stanza share a construct"
+        );
+        assert!(
+            !same_construct(sql, 1, 6),
+            "lines in different stanzas (across the blank line) do not"
+        );
+        assert!(same_construct(sql, 6, 7));
+        // Brace-BEARING content keeps the pre-W7 semantics exactly: no enclosing brace block
+        // means top-level, which is NOT a construct — the fallback must never apply there.
+        let rust = "use std::fmt;\nconst A: u8 = 1;\nfn f() {\n    body();\n}\n";
+        assert!(
+            !same_construct(rust, 1, 2),
+            "top-level lines in a brace-bearing file are not one construct"
+        );
+    }
+
+    /// req_b8: clustering compared each finding against the group's SEED only, so membership
+    /// was non-transitive and order-dependent — 13 of 32 same-rule/same-file/same-severity
+    /// pairs on the measured corpus were blocked by NOTHING in the predicate, only by not
+    /// happening to be the seed's own pair. A finding that pair-merges with ANY member joins
+    /// the group.
+    #[test]
+    fn req_b8_a_finding_that_merges_with_any_member_joins_the_group_not_only_the_seed() {
+        // A(10, high) seeds; B(14, high) joins via A (in-window, same rule). C(18, medium)
+        // pair-merges with B (in-window, same rule) but NOT with A (8 lines apart, different
+        // severity — no signal fires). Seed-only clustering split C into its own row.
+        let a = site_finding("SEC-NO-RAW-SQL-CONCAT-1", "src/db.rs", 10, "high", "");
+        let b = site_finding("SEC-NO-RAW-SQL-CONCAT-1", "src/db.rs", 14, "high", "");
+        let c = site_finding("SEC-NO-RAW-SQL-CONCAT-1", "src/db.rs", 18, "medium", "");
+        // Sanity: the pairwise facts this fixture is built on.
+        assert!(semantic_pair_merges(&a, &b, None));
+        assert!(semantic_pair_merges(&b, &c, None));
+        assert!(
+            !semantic_pair_merges(&a, &c, None),
+            "A and C alone must NOT pair-merge, or this test is not exercising B8"
+        );
+        let out = merge_semantic_groups(vec![a, b, c], &[]);
+        assert_eq!(
+            out.len(),
+            1,
+            "C pair-merges with member B and must join the group: {out:?}"
+        );
+        assert_eq!(out[0].also_locations.len(), 2, "both absorbed sites preserved");
     }
 
     /// req_c4 (non-regression): a genuinely SHARED full object is still identity evidence —
