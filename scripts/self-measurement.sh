@@ -10,13 +10,14 @@
 #
 # What it runs:
 #   1. I1 — the synthetic golden-fixture parity harness (artifact parity, row conservation,
-#      no silent non-execution), end to end through the real pipeline.
+#      no silent non-execution), end to end through the real pipeline. Since Pass-1 W7 fixed
+#      C5 (absorbed merge sites now reach every artifact as `also_locations` + `site_count`),
+#      the once-#[ignore]d C5 observability assertion runs here by DEFAULT and must be green.
 #   2. I2 — the pre-flight integrity gate's own unit suite, both halves (engine + CLI).
 #   3. The C11 eslint regression suite.
 #
-# What it does NOT run: the `#[ignore]`d C5 observability assertion, which is KNOWN RED and
-# documents a live defect owned by another workstream. Measure it deliberately with
-# `--include-known-red`.
+# `--include-known-red` is kept for the next deliberately-red measurement; today there are no
+# #[ignore]d tests in the harness, so it adds nothing.
 #
 # No network, no model calls, no scan of a real repo. Nothing here can cost money.
 
@@ -46,8 +47,8 @@ cargo test -p camerata-server --lib req_c11
 
 if [ "$INCLUDE_KNOWN_RED" -eq 1 ]; then
   echo
-  echo "── KNOWN RED: C5 absorbed-row observability (expected to FAIL) ───────────────"
-  echo "   This documents a live defect. A failure here is the measurement, not a break."
+  echo "── KNOWN RED: deliberately-#[ignore]d measurements (failures ARE the data) ───"
+  echo "   (none exist today — C5 was fixed by W7 and its assertion runs by default)"
   cargo test -p camerata-server --test self_measurement_parity_e2e -- --ignored || true
 fi
 
