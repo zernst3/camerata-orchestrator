@@ -4253,9 +4253,53 @@ fn confidence_rank(c: Option<&str>) -> u8 {
     }
 }
 
+/// W7: whether a finding is an ACTIONABLE statement (a `Defect`, a `Deviation`, or a legacy
+/// row whose producer never assigned a kind — which the exporters surface as `unspecified`
+/// and which is overwhelmingly the defect-shaped legacy population) as opposed to an
+/// INFORMATIONAL one (`ConventionObserved` / `NoConvention` / `NotAssessed`). `1` for
+/// actionable, `0` for informational. The FIRST key of [`primary_rank`], so an informational
+/// row can never win primacy over a defect it co-grouped with, whatever its origin/severity —
+/// and the discriminant [`kinds_merge_compatible`] uses to stop such a group forming at all.
+fn kind_actionability_rank(f: &Finding) -> u8 {
+    match &f.kind {
+        Some(k) if k.is_informational() => 0,
+        _ => 1,
+    }
+}
+
+/// W7: whether two findings make MERGE-COMPATIBLE kinds of statement. A merge that absorbs a
+/// `Defect` into a `ConventionObserved` primary — or vice versa — is a correctness bug with a
+/// name now that `FindingKind` exists: the absorbed row's statement (there IS a fault / the
+/// codebase consistently does X) disappears from the report entirely. The rule:
+///
+/// - an informational row never merges with an actionable one, in either direction;
+/// - two informational rows merge only when they are the SAME rule making the SAME kind of
+///   statement (informational rows are one-per-rule by construction — A5.3/A5.5 — so
+///   anything else fusing is two different statements collapsing);
+/// - two actionable rows (Defect/Deviation/legacy-unspecified) merge exactly as before.
+fn kinds_merge_compatible(a: &Finding, b: &Finding) -> bool {
+    let a_informational = kind_actionability_rank(a) == 0;
+    let b_informational = kind_actionability_rank(b) == 0;
+    if a_informational != b_informational {
+        return false;
+    }
+    if a_informational {
+        use camerata_api_types::audit::FindingKind;
+        return a.rule_id == b.rule_id
+            && FindingKind::tag_or_unspecified(a.kind.as_ref())
+                == FindingKind::tag_or_unspecified(b.kind.as_ref());
+    }
+    true
+}
+
 /// The shared primary-selection ranking for BOTH merge passes (design point 3, reordered by
 /// C5-1 — see `docs/plans/2026-09-29_codebase-inspection-hardening.md` P1 for the original and
 /// the REG-1/REG-2 work item for this reordering). Higher tuples win via `max_by_key`. Order:
+/// (0) W7: kind actionability ([`kind_actionability_rank`]) — an actionable row
+/// (Defect/Deviation/legacy) beats an informational one unconditionally, so a defect can
+/// never be hidden under a `ConventionObserved`/`NoConvention`/`NotAssessed` primary (the
+/// [`kinds_merge_compatible`] guards should keep such a group from ever forming; this key is
+/// the belt-and-braces if one does);
 /// (1) `FindingClass` — Security beats Hygiene unconditionally, independent of everything else,
 /// so a structural/style row can never absorb and hide a security defect (the P1 regression);
 /// (2) rule specificity via `origin_rank` — Deterministic beats AdoptedAi beats InventedAi.
@@ -4270,8 +4314,9 @@ fn confidence_rank(c: Option<&str>) -> u8 {
 /// (now only a tiebreak within one class+origin tier — e.g. two deterministic members, or two AI
 /// members); (4) confidence (a "needs-review" flag ranks last); (5) earliest appearance, the
 /// final deterministic tiebreak so output never depends on hash/iteration order.
-fn primary_rank(f: &Finding, group_len: usize, index: usize) -> (u8, u8, u8, u8, usize) {
+fn primary_rank(f: &Finding, group_len: usize, index: usize) -> (u8, u8, u8, u8, u8, usize) {
     (
+        kind_actionability_rank(f),
         class_rank(finding_class(f)),
         origin_rank(finding_origin(f)),
         severity_rank(&f.severity),
@@ -4436,7 +4481,13 @@ pub(crate) fn merge_by_location(
         // predicate (Bug 4) reuses it rather than recomputing — an absence-type stance finding
         // (line 0 / description-not-code snippet) is exactly the low-tier noise to down-bucket.
         f.located = located;
-        let key = if located {
+        // W7: an INFORMATIONAL-kind row (ConventionObserved / NoConvention / NotAssessed) is
+        // always kept SOLO — it is one-per-rule by construction (A5.3/A5.5) and makes a
+        // different kind of statement than a co-located defect, so location-merging it either
+        // absorbs a defect into an informational primary or erases the informational
+        // statement under a defect. Both are W7 correctness bugs by name.
+        let informational = kind_actionability_rank(&f) == 0;
+        let key = if located && !informational {
             (f.path.clone(), f.line, 0)
         } else {
             solo += 1;
@@ -5097,6 +5148,13 @@ const DESCRIPTION_OVERLAP_THRESHOLD: f64 = 0.5;
 ///      RLS-missing rule firing once for `orders` and once for `profiles`) stays two rows.
 /// Every wrong-fusion guard still applies on top of whichever signal fired.
 fn semantic_pair_merges(a: &Finding, b: &Finding, content: Option<&str>) -> bool {
+    // W7: kind compatibility is checked before ANY merge signal — a Defect/Deviation and an
+    // informational row (ConventionObserved / NoConvention / NotAssessed) make different
+    // kinds of statement, and no amount of proximity/prose/rule-id identity may fuse them.
+    // See `kinds_merge_compatible`.
+    if !kinds_merge_compatible(a, b) {
+        return false;
+    }
     let in_window = a.path == b.path
         && a.line != 0
         && b.line != 0
@@ -5407,7 +5465,11 @@ pub fn group_structural_needs_review(findings: Vec<Finding>) -> Vec<Finding> {
     let mut rest = Vec::with_capacity(findings.len());
     for f in findings {
         let severity = crate::report_export::normalize_severity(&f.severity);
+        // W7: an informational-kind row (one per rule by construction — A5.3/A5.5) is never
+        // folded into the structural group either; grouping it with same-rule defect rows
+        // would collapse two different kinds of statement into one grouped row.
         let is_structural_needs_review = f.status == "active"
+            && kind_actionability_rank(&f) != 0
             && f.category.as_deref() == Some("arch-conformance")
             && f.confidence.as_deref() == Some("needs-review")
             && !matches!(severity.as_str(), "critical" | "high");
@@ -14425,6 +14487,102 @@ mod tests {
             out.len(),
             2,
             "two sites whose detectors captured different objects must stay two rows: {out:?}"
+        );
+    }
+
+    // ── Pass-1 W7: kind-aware merge — a Defect must never fuse with an informational row ──
+
+    /// req_w7_kind: an informational row (ConventionObserved / NoConvention / NotAssessed)
+    /// must never be absorbed into a Defect row by the semantic merge, and vice versa — a
+    /// merge that absorbs a `Defect` into a `ConventionObserved` primary (or the reverse) is
+    /// a correctness bug with a name now that `FindingKind` exists. The two rows make
+    /// different KINDS of statement; collapsing them loses one of the statements entirely.
+    #[test]
+    fn req_w7_kind_informational_row_never_fuses_with_a_defect_row_in_the_semantic_merge() {
+        use camerata_api_types::audit::{ConventionObservedKind, FindingKind};
+        let mut defect = site_finding("ARCH-API-VERSIONING-1", "src/api.rs", 10, "high", "");
+        defect.kind = Some(FindingKind::Defect);
+        let mut conv = site_finding("ARCH-API-VERSIONING-1", "src/api.rs", 12, "info", "");
+        conv.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
+            convention_option_id: "versioned".to_string(),
+            convention_label: "URI-versioned endpoints".to_string(),
+        }));
+        // Same rule id, same file, 2 lines apart: signal (d) fires, both deterministic
+        // (same_rule_adjacent exempts the det+det guard), no objects to conflict — before
+        // the kind guard this pair merged unconditionally.
+        let out = merge_semantic_groups(vec![defect, conv], &[]);
+        assert_eq!(
+            out.len(),
+            2,
+            "a defect and an informational convention statement are different KINDS of \
+             statement and must both survive: {out:?}"
+        );
+        let tags: std::collections::BTreeSet<&str> = out
+            .iter()
+            .map(|f| camerata_api_types::audit::FindingKind::tag_or_unspecified(f.kind.as_ref()))
+            .collect();
+        assert!(tags.contains("defect") && tags.contains("convention_observed"));
+    }
+
+    /// req_w7_kind: the same guard at the LOCATION merge — an informational row co-located
+    /// with a defect row (same path, same line, both citing real code) stays its own row.
+    #[test]
+    fn req_w7_kind_informational_row_never_fuses_with_a_defect_row_at_the_same_location() {
+        use camerata_api_types::audit::{FindingKind, NoConventionKind};
+        let content = "line one\nlet q = build_query(user_input);\nline three\n";
+        let files = vec![("src/api.rs".to_string(), content.to_string())];
+        let mut defect = site_finding(
+            "SEC-NO-RAW-SQL-CONCAT-1",
+            "src/api.rs",
+            2,
+            "high",
+            "let q = build_query(user_input);",
+        );
+        defect.kind = Some(FindingKind::Defect);
+        let mut nc = site_finding(
+            "ARCH-API-VERSIONING-1",
+            "src/api.rs",
+            2,
+            "info",
+            "let q = build_query(user_input);",
+        );
+        nc.kind = Some(FindingKind::NoConvention(NoConventionKind {
+            observed_options: vec![],
+        }));
+        let out = merge_by_location(vec![defect, nc], &files);
+        assert_eq!(
+            out.len(),
+            2,
+            "co-location must not fuse an informational statement into a defect: {out:?}"
+        );
+    }
+
+    /// req_w7_kind: `primary_rank` is kind-aware — an actionable row (Defect/Deviation, or a
+    /// legacy row with no kind) always outranks an informational row for primacy, even when
+    /// the informational row would win on every pre-existing key (deterministic origin vs an
+    /// AI-tier defect). Belt-and-braces behind the merge guards above: should a mixed-kind
+    /// group ever form again, the defect can still never be hidden under an informational
+    /// primary.
+    #[test]
+    fn req_w7_kind_primary_rank_never_lets_an_informational_row_outrank_a_defect() {
+        use camerata_api_types::audit::{ConventionObservedKind, FindingKind};
+        // AI-tier defect: adopted corpus rule id + calibration confidence, medium severity.
+        let mut defect = site_finding("ARCH-API-VERSIONING-1", "src/api.rs", 10, "medium", "");
+        defect.kind = Some(FindingKind::Defect);
+        defect.confidence = Some("high".to_string());
+        // Deterministic informational row: no confidence (origin ranks HIGHER), info severity.
+        let mut conv = site_finding("ARCH-API-VERSIONING-1", "src/api.rs", 12, "info", "");
+        conv.kind = Some(FindingKind::ConventionObserved(ConventionObservedKind {
+            convention_option_id: "versioned".to_string(),
+            convention_label: "URI-versioned endpoints".to_string(),
+        }));
+        assert!(
+            primary_rank(&defect, 2, 1) > primary_rank(&conv, 2, 0),
+            "an AI-tier Defect must outrank a deterministic informational row — before W7, \
+             origin decided first and the ConventionObserved row won primacy: defect={:?} \
+             conv={:?}",
+            primary_rank(&defect, 2, 1),
+            primary_rank(&conv, 2, 0)
         );
     }
 
