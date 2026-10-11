@@ -135,6 +135,13 @@ const REGISTRY: &[(&str, Coverage)] = &[
     ("H1", Required(&["req_h1", "req_a6"])),
     ("I1", Required(&["req_i1"])),
     ("I2", Required(&["req_i2"])),
+    // ── Pass 3 — CLIENT DELIVERABLES ───────────────────────────────────────────────────────────
+    // Zach's three-pass sequence: "PDF = the summary ... Excel = the meat and potatoes. Needs
+    // rethinking: separate worksheets for findings, conventions, deviations, coverage ... JSON =
+    // just the data structure." Only the Excel half is a code requirement: the PDF is "already
+    // correct in shape; leave it alone" and the JSON is "fine as-is; no work needed", so neither
+    // has a behaviour to assert that is not already covered elsewhere.
+    ("PASS3", Required(&["req_pass3"])),
     // ── Routed operational decisions ───────────────────────────────────────────────────────────
     ("R1", Exempt("the repo-wide `cargo fmt` decision is a topology-level change routed to Zach. \
                    Not a testable product behaviour.")),
