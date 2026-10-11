@@ -86,11 +86,9 @@ const REGISTRY: &[(&str, Coverage)] = &[
     ("B6", Exempt("the credential keyword list is BANNED as a fix surface. The review: 'the detector \
                    that matched the secret already KNOWS its identity and should emit it as a \
                    structured capture.' Covered by the structured-identity work, not by a list.")),
-    ("B7", InFlight("W7: `same_construct` is false for brace-free content, blinding `in_construct` \
-                     over .env/.sql/.toml/.yaml.")),
-    ("B8", InFlight("W7: clustering compares each finding only against a group's SEED, so it is \
-                     non-transitive and order-dependent.")),
-    ("B9", InFlight("W7: `structural_objects` registers the prose abbreviation 'e.g' as an object.")),
+    ("B7", Required(&["req_b7"])),
+    ("B8", Required(&["req_b8"])),
+    ("B9", Required(&["req_b9"])),
     ("B10", Required(&["req_d1"])),
     ("B11", Required(&["req_d1"])),
     // ── AUDIT C — severity, decoys, ranking ────────────────────────────────────────────────────
@@ -102,19 +100,14 @@ const REGISTRY: &[(&str, Coverage)] = &[
                       are untraceable to the requirement they actually serve. Fix: rename them to \
                       the conservation requirement they belong to. Not done here because \
                       report_export.rs is held by a concurrent workstream.")),
-    ("C2", InFlight("W7: the evidence gate skips any rule with >= 1 finding, so an N-sites-but-1-row \
-                     shortfall is never checked at any N.")),
+    ("C2", Required(&["req_c2"])),
     ("C3", Exempt("`evidence_negates_requirement`'s six-phrase substring scan is on the review's \
                    watch list: 'Do NOT tune the evidence gate's six phrases; fixing A5 at the corpus \
                    demotes it to belt-and-braces.' A5.4 landed, so it is now the backstop it should \
                    always have been.")),
-    ("C4", InFlight("W7: `objects_conflict` requires DISJOINT object sets, so one shared container \
-                     token defeats the veto entirely.")),
-    ("C5", InFlight("W7: an absorbed row reaches no artifact, making over-merge observationally \
-                     identical to a detection miss. MEASURED by W6's harness (3 sites detected, 2 \
-                     absorbed, 1 exported) and held by a red #[ignore]d test.")),
-    ("C6", InFlight("W7: the xlsx Coverage sheet counts primaries only, so a merged-away rule \
-                     renders green and 'clean'.")),
+    ("C4", Required(&["req_c4"])),
+    ("C5", Required(&["req_c5", "req_i1_c5"])),
+    ("C6", Required(&["req_c6"])),
     ("C7", Exempt("the D5 severity floor reads model prose and is class-blind and raise-only. \
                    Deliberately deferred on the review's judgement that once structured identity and \
                    the severity ceiling land, 'most layers become DELETABLE, not rewritable.' \
@@ -134,9 +127,11 @@ const REGISTRY: &[(&str, Coverage)] = &[
                     (it would fail trivially today and teach nothing)'.")),
     // ── Owner-decided requirement groups ───────────────────────────────────────────────────────
     ("E2", Required(&["req_e2"])),
-    ("G3", InFlight("coverage must be client-facing but concise. Partly addressed by W7's coverage \
-                     honesty work; no test asserts the CONCISENESS half, which is the part Zach \
-                     actually specified.")),
+    // G3's tests carry W7's `req_g1`/`req_g1_g2` ids (the coverage-honesty group); the
+    // conciseness half Zach specified is asserted directly — exactly ONE line per affected
+    // tool, and never the notes' internal diagnostics. Same recorded-indirection pattern as
+    // B1/B4 -> `req_d1`/`req_d2` above.
+    ("G3", Required(&["req_g1"])),
     ("H1", Required(&["req_h1", "req_a6"])),
     ("I1", Required(&["req_i1"])),
     ("I2", Required(&["req_i2"])),
