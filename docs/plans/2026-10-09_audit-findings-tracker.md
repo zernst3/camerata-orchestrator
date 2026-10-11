@@ -515,3 +515,33 @@ assertion and expected value is byte-identical; only the env mutation is seriali
 worth doing at all: this entire effort now rests on build gates, and a gate is worthless if a green run
 cannot be trusted. An intermittent failure in unrelated code teaches everyone to re-run until green,
 which is exactly how a real regression gets waved through.
+
+---
+
+# ZACH'S RULINGS — 2026-10-11
+
+## [x] W5-Q2 DECIDED — a single named severity is a **FLOOR**, not a ceiling
+Zach: *"Floor, it's the minimum rating."*
+
+So "Flag as high severity: …" in a rule's prose means **at least high**, and calibration may raise it.
+Consequences:
+
+1. The 23 ambiguous rules correctly received **no** `max_severity`. W5's under-reach was right.
+2. **This opens a real, symmetric gap.** We built the ceiling half (`max_severity`) and there is **no
+   structured floor**. The only existing floor is `severity_calibration_floor` (the D5 floor), which
+   decides severity by scanning the MODEL'S ENGLISH PROSE against a phrase table — finding C7, which
+   was deliberately deferred. Zach's ruling makes that the live gap: **23 rules author a minimum
+   severity in prose the pipeline cannot read.** That is C8's complaint exactly, but for floors.
+   → New workstream **W8**: a structured `min_severity`, mirroring `max_severity`, with the same
+   corpus-load gate and the same anti-inertness test. C7 becomes relevant again, not deferred.
+
+## [x] W5-Q1 RESOLVED BY W5-Q2 — the two SECURITY DEFINER rules keep NO ceiling
+The floor reading is coherent across all three rules in that folder:
+`SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1`'s "High by default; **Critical when** GRANTed …" is a floor of
+high with an explicitly named escalation; the two flat "Severity is High." rules are floors of high with
+no escalation named, which does not forbid one. No ceiling on any of them.
+
+This is also the safe direction: `SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1` is IDOR-in-the-database and
+`SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1` is a privileged write with no authorization check. Both are
+genuinely critical-class, and a `high` cap would have silently downgraded them with no test to notice.
+Flagged for Zach to override if he meant to distinguish Q1 from Q2.
