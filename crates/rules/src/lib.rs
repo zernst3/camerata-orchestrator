@@ -1448,6 +1448,128 @@ pub fn suspicious_default_with_exceptions_rules(set: &RuleSet) -> Vec<String> {
     offenders
 }
 
+/// The COMPLETE severity vocabulary a corpus-authored ceiling ([`Rule::max_severity`],
+/// [`Rule::deviation_ceiling`]) may use, most severe first. Mirrors the vocabulary
+/// `camerata_server::report_export::normalize_severity` recognizes; this list exists so the
+/// corpus can be GATED against it at build time without the rules crate depending on the
+/// server crate.
+pub const CEILING_SEVERITY_VOCABULARY: [&str; 5] = ["critical", "high", "medium", "low", "info"];
+
+/// Rank of a ceiling value within [`CEILING_SEVERITY_VOCABULARY`] — lower is MORE severe, the
+/// same direction as `camerata_server::report_export::severity_rank`. `None` for a value
+/// outside the vocabulary, which is precisely what [`rules_with_invalid_severity_ceiling`]
+/// reports rather than silently coercing.
+fn ceiling_rank(sev: &str) -> Option<u8> {
+    CEILING_SEVERITY_VOCABULARY
+        .iter()
+        .position(|v| *v == sev)
+        .map(|i| i as u8)
+}
+
+/// Every rule in `set` whose authored severity ceiling is INVALID, as
+/// `"<id> (<field> = \"<value>\": <reason>)"`. Sorted for stable output. Three defect shapes:
+///
+/// 1. `max_severity` outside [`CEILING_SEVERITY_VOCABULARY`] (a typo, or an unknown severity
+///    name).
+/// 2. `deviation_ceiling` outside the same vocabulary.
+/// 3. `deviation_ceiling` ranking MORE severe than the same rule's `max_severity` — incoherent
+///    and unreachable: `max_severity` is applied to every row of the rule including its
+///    deviations, so a deviation ceiling above it can never be the binding constraint and
+///    states an intent the pipeline will never honour.
+///
+/// Why this has to be a BUILD gate rather than a runtime tolerance: the clamp resolves a
+/// ceiling through `report_export::normalize_severity`, whose fall-through arm maps every
+/// UNRECOGNIZED string to `"low"`. So `max_severity = "critcal"` does not fail, and does not
+/// no-op — it silently becomes the MOST restrictive ceiling in the vocabulary and caps every
+/// finding of that rule at `low`. A silently-typo'd ceiling is therefore the same class of
+/// defect as the inert mechanism E2 shipped with (a field that confidently appears to say one
+/// thing while doing another), and it is caught here, by failing the build, for the same
+/// reason [`rules_missing_kind`] is.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn rules_with_invalid_severity_ceiling(set: &RuleSet) -> Vec<String> {
+    let mut offenders: Vec<String> = Vec::new();
+    for r in set.iter() {
+        let max_rank = match r.max_severity.as_deref() {
+            None => None,
+            Some(v) => match ceiling_rank(v) {
+                Some(rank) => Some(rank),
+                None => {
+                    offenders.push(format!(
+                        "{} (max_severity = {v:?}: not a severity; valid values are {:?})",
+                        r.id.0, CEILING_SEVERITY_VOCABULARY
+                    ));
+                    continue;
+                }
+            },
+        };
+        let dev_rank = match r.deviation_ceiling.as_deref() {
+            None => None,
+            Some(v) => match ceiling_rank(v) {
+                Some(rank) => Some(rank),
+                None => {
+                    offenders.push(format!(
+                        "{} (deviation_ceiling = {v:?}: not a severity; valid values are {:?})",
+                        r.id.0, CEILING_SEVERITY_VOCABULARY
+                    ));
+                    continue;
+                }
+            },
+        };
+        if let (Some(max), Some(dev)) = (max_rank, dev_rank) {
+            if dev < max {
+                offenders.push(format!(
+                    "{} (deviation_ceiling = {:?} ranks ABOVE max_severity = {:?}: unreachable, \
+                     since max_severity clamps this rule's deviations too)",
+                    r.id.0,
+                    r.deviation_ceiling.as_deref().unwrap_or_default(),
+                    r.max_severity.as_deref().unwrap_or_default(),
+                ));
+            }
+        }
+    }
+    offenders.sort();
+    offenders
+}
+
+/// Every rule in `set` that declares a [`Rule::max_severity`] ceiling, as `"<id> (<value>)"`.
+/// Sorted for stable output. Used by the anti-inertness gate
+/// (`req_e2_the_corpus_actually_declares_severity_ceilings`): E2's mechanism shipped complete
+/// and fully unit-tested against a corpus in which this returned EMPTY for all 417 rules, so
+/// every `req_e2_*` test passed while the requirement did nothing. A non-empty result is the
+/// only thing that makes those tests mean anything about real rules.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn rules_declaring_max_severity(set: &RuleSet) -> Vec<String> {
+    let mut found: Vec<String> = set
+        .iter()
+        .filter_map(|r| {
+            r.max_severity
+                .as_deref()
+                .map(|c| format!("{} ({c})", r.id.0))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
+/// Every rule in `set` that declares a [`Rule::deviation_ceiling`] escape hatch, as
+/// `"<id> (<value>)"`. Sorted. The A5.2 counterpart to [`rules_declaring_max_severity`], and
+/// inert for the identical reason until at least one rule authors one: with none authored,
+/// `clamp_deviation_severity` pins EVERY deviation at the `"medium"` default, so "must be able
+/// to reach HIGH when genuinely problematic" was unsatisfiable by construction.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn rules_declaring_deviation_ceiling(set: &RuleSet) -> Vec<String> {
+    let mut found: Vec<String> = set
+        .iter()
+        .filter_map(|r| {
+            r.deviation_ceiling
+                .as_deref()
+                .map(|c| format!("{} ({c})", r.id.0))
+        })
+        .collect();
+    found.sort();
+    found
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Rule-subset selection (pure — RUST-PURE-STATE-TRANSITIONS-1)
 // ────────────────────────────────────────────────────────────────────────────
@@ -3983,5 +4105,301 @@ mod tests {
         set.push(rule);
         let suspicious = suspicious_default_with_exceptions_rules(&set);
         assert_eq!(suspicious, vec!["SUSPICIOUS-1".to_string()]);
+    }
+
+    // ── Pass-1 W5: E2 / A5.2 severity ceilings are AUTHORED, not merely implemented ────────
+
+    /// req_e2 (anti-inertness gate): the REAL shipped corpus actually declares severity
+    /// ceilings. E2 says "rules may declare a maximum severity; no report may exceed it" —
+    /// a prior workstream shipped the whole mechanism (`Rule::max_severity`,
+    /// `report_export::clamp_to_rule_max_severity`, four passing `req_e2_*` unit tests) against
+    /// a corpus where NOT ONE of 417 rules declared a ceiling. Every test passed; the
+    /// requirement did nothing. This is the test that distinguishes those two states.
+    ///
+    /// FAILS BEFORE THE FIX: verified on unmodified HEAD (2799284) —
+    /// `grep -rl '^max_severity' crates/rules/principles/ | wc -l` returned 0 of 417, so
+    /// `rules_declaring_max_severity` returned an EMPTY vec and this assertion failed. It
+    /// passes only once real rules carry transcribed ceilings.
+    #[tokio::test]
+    async fn req_e2_the_corpus_actually_declares_severity_ceilings() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return; // skip without the bundled corpus checked out
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let declared = rules_declaring_max_severity(&set);
+        assert!(
+            !declared.is_empty(),
+            "E2 is INERT: not one corpus rule declares `max_severity`, so \
+             `clamp_to_rule_max_severity` can never clamp anything and every `req_e2_*` unit \
+             test passes vacuously. Ceilings authored in rule PROSE (finding C8) must be \
+             transcribed into the structured field."
+        );
+    }
+
+    /// req_a5_2 (anti-inertness gate): the REAL shipped corpus actually declares at least one
+    /// `deviation_ceiling`. Same defect class as the test above: with none authored,
+    /// `clamp_deviation_severity` pins every `Deviation` row at the `"medium"` default, so
+    /// A5.2's "must be able to reach HIGH when genuinely problematic" was unsatisfiable by
+    /// construction no matter how problematic the deviation.
+    ///
+    /// FAILS BEFORE THE FIX: verified on unmodified HEAD (2799284) —
+    /// `grep -rl deviation_ceiling crates/rules/principles/ | wc -l` returned 0.
+    #[tokio::test]
+    async fn req_a5_2_the_corpus_actually_declares_deviation_ceilings() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let declared = rules_declaring_deviation_ceiling(&set);
+        assert!(
+            !declared.is_empty(),
+            "A5.2's escape hatch is INERT: no corpus rule declares `deviation_ceiling`, so \
+             every consistency deviation clamps at the `medium` default and none can ever \
+             reach high."
+        );
+    }
+
+    /// req_e2 (corpus-load gate): every ceiling the real corpus declares is a VALID severity,
+    /// and no rule's `deviation_ceiling` ranks above its own `max_severity`. This is the
+    /// build-time gate, same philosophy as `req_a5_1_every_corpus_rule_declares_a_kind`.
+    ///
+    /// Why it has teeth: `report_export::normalize_severity`'s fall-through arm maps any
+    /// unrecognized string to `"low"`, so a typo'd `max_severity = "critcal"` silently becomes
+    /// the HARSHEST possible ceiling instead of erroring or no-opping. Without this gate a
+    /// one-character authoring slip would cap every finding of that rule at `low`, invisibly.
+    #[tokio::test]
+    async fn req_e2_corpus_declares_only_valid_severity_ceilings() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let invalid = rules_with_invalid_severity_ceiling(&set);
+        assert!(
+            invalid.is_empty(),
+            "every authored `max_severity`/`deviation_ceiling` must be a valid severity and \
+             internally coherent: {invalid:?}"
+        );
+    }
+
+    /// req_e2 (positive detection): the gate above actually FIRES on each of the three defect
+    /// shapes it claims to catch — a typo'd `max_severity`, a typo'd `deviation_ceiling`, and a
+    /// `deviation_ceiling` ranking above the rule's own `max_severity`. Without this, the
+    /// corpus-level gate could pass vacuously if the detector were ever weakened, which is the
+    /// exact failure mode this whole workstream exists to close.
+    #[test]
+    fn req_e2_invalid_severity_ceiling_detector_fires_on_typos_and_incoherence() {
+        let mut set = RuleSet::default();
+
+        let mut typo_max = bare_rule("TYPO-MAX-1", "rust");
+        typo_max.max_severity = Some("critcal".to_string());
+        set.push(typo_max);
+
+        let mut typo_dev = bare_rule("TYPO-DEV-1", "rust");
+        typo_dev.deviation_ceiling = Some("hgih".to_string());
+        set.push(typo_dev);
+
+        let mut incoherent = bare_rule("INCOHERENT-1", "rust");
+        incoherent.max_severity = Some("medium".to_string());
+        incoherent.deviation_ceiling = Some("critical".to_string());
+        set.push(incoherent);
+
+        // Valid shapes that must NOT be reported: a coherent pair, a ceiling-free rule, and a
+        // deviation ceiling EQUAL to max_severity (binding, not unreachable).
+        let mut ok_pair = bare_rule("OK-PAIR-1", "rust");
+        ok_pair.max_severity = Some("high".to_string());
+        ok_pair.deviation_ceiling = Some("medium".to_string());
+        set.push(ok_pair);
+        set.push(bare_rule("OK-NONE-1", "rust"));
+        let mut ok_equal = bare_rule("OK-EQUAL-1", "rust");
+        ok_equal.max_severity = Some("high".to_string());
+        ok_equal.deviation_ceiling = Some("high".to_string());
+        set.push(ok_equal);
+
+        let offenders = rules_with_invalid_severity_ceiling(&set);
+        assert_eq!(
+            offenders.len(),
+            3,
+            "exactly the three defect shapes must be reported, got {offenders:?}"
+        );
+        assert!(
+            offenders.iter().any(|o| o.starts_with("TYPO-MAX-1 (")),
+            "a typo'd max_severity must be caught, not coerced to low: {offenders:?}"
+        );
+        assert!(
+            offenders.iter().any(|o| o.starts_with("TYPO-DEV-1 (")),
+            "a typo'd deviation_ceiling must be caught: {offenders:?}"
+        );
+        assert!(
+            offenders.iter().any(|o| o.starts_with("INCOHERENT-1 (")),
+            "a deviation_ceiling above max_severity is unreachable: {offenders:?}"
+        );
+    }
+
+    /// req_e2: the authored ceilings parse out of the REAL corpus TOMLs with the exact values
+    /// their prose states — the transcription half of the requirement. Named rules rather than
+    /// a count, so a later edit that drops one fails here with the rule's own id.
+    ///
+    /// FAILS BEFORE THE FIX: every `max_severity`/`deviation_ceiling` lookup below returned
+    /// `None` on unmodified HEAD (2799284) — no corpus TOML carried either field.
+    #[tokio::test]
+    async fn req_e2_named_rules_carry_the_ceilings_their_prose_authored() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let ceiling = |id: &str| -> Option<String> {
+            set.iter()
+                .find(|r| r.id.0 == id)
+                .and_then(|r| r.max_severity.clone())
+        };
+        // "needs_review, not an automatic critical" / "high-severity ... not an automatic
+        // critical" / rejects "unconditionally at critical severity".
+        for id in [
+            "SUPABASE-STORAGE-PUBLIC-BUCKET-1",
+            "SUPABASE-EXPOSURE-MATVIEW-1",
+            "SUPABASE-AUTH-EDGE-JWT-1",
+            "SUPABASE-RLS-PERMISSIVE-TRUE-1",
+            "SUPABASE-STORAGE-OBJECT-POLICY-1",
+            "SUPABASE-REALTIME-PRESENCE-IDENTITY-1",
+        ] {
+            assert_eq!(
+                ceiling(id).as_deref(),
+                Some("high"),
+                "{id}'s prose bounds it at high"
+            );
+        }
+        // "a lower severity than the missing-RLS findings" / rejects "the same tier as the
+        // security-relevant RLS findings".
+        for id in ["SUPABASE-RLS-NO-POLICY-1", "SUPABASE-RLS-INITPLAN-1"] {
+            assert_eq!(
+                ceiling(id).as_deref(),
+                Some("medium"),
+                "{id}'s prose bounds it at medium"
+            );
+        }
+        // "deliberately CAPPED LOW (owner directive)" / "force this rule's findings to
+        // severity Low ... regardless of the model's proposed severity".
+        for id in [
+            "ARCH-OBSERVABILITY-SILENT-FAILURE-1",
+            "ARCH-OBSERVABILITY-LOG-CONSISTENCY-1",
+            "ARCH-OBSERVABILITY-CORRELATION-ID-1",
+        ] {
+            assert_eq!(
+                ceiling(id).as_deref(),
+                Some("low"),
+                "{id}'s prose caps it at low"
+            );
+        }
+        // A5.2 forward-drift escape hatches.
+        let dev = |id: &str| -> Option<String> {
+            set.iter()
+                .find(|r| r.id.0 == id)
+                .and_then(|r| r.deviation_ceiling.clone())
+        };
+        for id in [
+            "ARCH-STRICT-LAYERING-1",
+            "ARCH-REPO-RETURNS-DOMAIN-1",
+            "ARCH-SERVICE-DI-1",
+            "ARCH-EXPLICIT-TX-1",
+            "ARCH-STRUCTURED-ERRORS-1",
+            "ARCH-FETCH-THEN-AUTHORIZE-1",
+            "RUST-DOMAIN-6",
+        ] {
+            assert_eq!(
+                dev(id).as_deref(),
+                Some("high"),
+                "{id}'s decision domain compounds forward drift (A5.2)"
+            );
+        }
+    }
+
+    /// HARD CONSTRAINT check: no rule in the `NEEDS OWNER DECISION (58 rules)` hold list
+    /// (`docs/plans/2026-10-09_rule-kind-classification.md`) carries a `deviation_ceiling`.
+    /// Authoring one presumes the kind classification the owner explicitly paused ("pause the
+    /// rule review for me for when I can sit down and look at these"). Transcribing an explicit
+    /// prose `max_severity` on a held rule IS permitted — that is his own authored intent — so
+    /// this gate deliberately checks only the deviation field.
+    #[tokio::test]
+    async fn req_a5_7_no_held_rule_carries_an_inferred_deviation_ceiling() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        // The 58 rules whose classification review is ON HOLD.
+        const HELD: [&str; 58] = [
+            "ARCH-OBSERVABILITY-CORRELATION-ID-1",
+            "ARCH-OBSERVABILITY-SILENT-FAILURE-1",
+            "ARCH-PARALLEL-INDEPENDENT-1",
+            "ARCH-SERVER-CLIENT-PROJECTION-1",
+            "ARCH-TRUNK-SYNC-1",
+            "CICD-BUILD-PROVENANCE-1",
+            "CICD-DEPENDENCY-AUDIT-1",
+            "CSHARP-TESTING-MOCK-AT-BOUNDARY-1",
+            "CSHARP-TESTING-SEPARATE-UNIT-PROJECT-1",
+            "GO-ACCEPT-INTERFACES-RETURN-STRUCTS-1",
+            "GO-HANDLER-SERVICE-REPOSITORY-1",
+            "GO-TESTING-COLOCATED-TEST-FILES-1",
+            "INTEGRATION-EVENT-WIRING-1",
+            "JAVA-TESTING-MOCK-BOUNDARIES-1",
+            "JAVASCRIPT-NEST-INTERCEPTORS-CROSS-CUTTING-1",
+            "JAVASCRIPT-REACT-EXHAUSTIVE-DEPS-1",
+            "JAVASCRIPT-VUE-STORE-PINIA-SHARED-STATE-1",
+            "PROC-MIGRATION-ROLE-GRANTS-1",
+            "PROCESS-ADO-LINK-1",
+            "PROCESS-BRANCH-NAMING-1",
+            "PROCESS-COMMIT-DOC-1",
+            "PROCESS-CONVENTIONAL-COMMIT-1",
+            "PYTHON-DJANGO-FAT-MODEL-SERVICE-1",
+            "PYTHON-DJANGO-FORMS-SERIALIZERS-VALIDATE-1",
+            "PYTHON-FLASK-SERVICE-LAYER-1",
+            "PYTHON-SERVICE-LAYER-1",
+            "PYTHON-TESTING-MOCK-BOUNDARIES-1",
+            "RUBY-CONCERNS-JUDICIOUSLY-1",
+            "RUBY-FROZEN-STRING-LITERAL-1",
+            "RUBY-RAILS-SKINNY-CONTROLLERS-1",
+            "RUBY-TESTING-INTEGRATION-LOCATION-1",
+            "RUBY-TESTING-UNIT-FILE-LOCATION-1",
+            "RUST-SEAORM-RAW-SQL-ESCAPE-1",
+            "SEC-NO-COMMAND-INJECTION-1",
+            "SEC-NO-PRIVATE-KEY-1",
+            "SEC-NO-VENDOR-TOKEN-1",
+            "SPIRIT-ROBUSTNESS-1",
+            "SQL-PRIVILEGED-WRITE-AUDIT-1",
+            "SUPABASE-AUTH-EMAIL-CONFIRMATION-1",
+            "SUPABASE-AUTH-GETSESSION-SERVER-1",
+            "SUPABASE-AUTH-MFA-PRIVILEGED-1",
+            "SUPABASE-AUTH-REDIRECT-ALLOWLIST-1",
+            "SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1",
+            "SUPABASE-FUNC-DYNAMIC-SQL-INJECTION-1",
+            "SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1",
+            "SUPABASE-FUNC-SEARCH-PATH-1",
+            "SUPABASE-KEY-SERVICE-ROLE-CLIENT-1",
+            "SUPABASE-RLS-DISABLED-NOT-RESTORED-1",
+            "SUPABASE-RLS-INITPLAN-1",
+            "SUPABASE-RLS-NO-POLICY-1",
+            "SUPABASE-RLS-PERMISSIVE-TRUE-1",
+            "SUPABASE-RLS-USER-METADATA-1",
+            "SUPABASE-STORAGE-KEY-SANITIZATION-1",
+            "SUPABASE-STORAGE-OBJECT-POLICY-1",
+            "SUPABASE-STORAGE-SIGNED-URL-1",
+            "SUPABASE-STORAGE-UPLOAD-CONSTRAINTS-1",
+            "TESTING-AS-DOCUMENTATION-1",
+            "UI-QUERY-LIBRARY-1",
+        ];
+        let set = load_corpus(path).await.expect("corpus loads");
+        let violations: Vec<String> = set
+            .iter()
+            .filter(|r| HELD.contains(&r.id.0.as_str()) && r.deviation_ceiling.is_some())
+            .map(|r| r.id.0.clone())
+            .collect();
+        assert!(
+            violations.is_empty(),
+            "a rule on the owner's 58-rule classification hold list must not carry an inferred \
+             `deviation_ceiling`: {violations:?}"
+        );
     }
 }
