@@ -603,7 +603,29 @@ fn build_coverage_rows(
                 .unwrap_or_else(|| rid.clone());
             let category = category_for(rid, corpus);
             let citation = resolve_citation(rid, None, corpus);
-            let findings_count = rows.iter().filter(|r| !r.is_fp && &r.rule_id == rid).count();
+            // W7 (C6): count every way this rule's hits are represented, not PRIMARIES only.
+            // Before W7 this counted surviving primary rows alone, so a rule whose every row
+            // was absorbed by a merge (its id demoted to another row's `also_matches`, its
+            // site preserved in `also_locations`) rendered 0 — green, "clean" — and a rule
+            // that found something and lost it was indistinguishable from a rule that found
+            // nothing. Sites first (one per primary row + one per absorbed `also_locations`
+            // entry under this rule); when the rule left no site record at all, same-location
+            // `also_matches` demotions still count, so a fired rule can never read clean.
+            let primary_rows = rows.iter().filter(|r| !r.is_fp && &r.rule_id == rid).count();
+            let absorbed_sites = report
+                .findings
+                .iter()
+                .flat_map(|f| f.also_locations.iter())
+                .filter(|l| &l.rule_id == rid)
+                .count();
+            let mut findings_count = primary_rows + absorbed_sites;
+            if findings_count == 0 {
+                findings_count = report
+                    .findings
+                    .iter()
+                    .filter(|f| f.also_matches.iter().any(|m| m == rid))
+                    .count();
+            }
             CoverageRow {
                 rule_id: rid.clone(),
                 title,
@@ -3571,6 +3593,72 @@ mod tests {
         let site = &json.curated_findings[0].sites[0];
         assert_eq!(site.site_count, 3);
         assert_eq!(site.also_locations.len(), 2);
+    }
+
+    /// req_c6: a rule that FIRED and was merged away as a group member must never render
+    /// "0 / clean" on the Coverage sheet. Before W7, `build_coverage_rows` counted PRIMARY
+    /// rows only, so a rule whose every row was absorbed into another rule's primary (its id
+    /// demoted to `also_matches`, its site preserved in `also_locations`) read as green,
+    /// zero-findings coverage — a rule that found something and lost it rendered exactly
+    /// like a rule that found nothing.
+    #[test]
+    fn req_c6_a_rule_merged_away_as_a_member_never_renders_clean_on_the_coverage_sheet() {
+        let mut primary = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
+        primary.also_matches = vec!["SEC-NO-HARDCODED-SECRETS-1".to_string()];
+        primary.also_locations = vec![crate::onboard::MergedLocation {
+            repo: "owner/repo".to_string(),
+            path: "src/orders.rs".to_string(),
+            line: 12,
+            rule_id: "SEC-NO-HARDCODED-SECRETS-1".to_string(),
+            snippet: "let key = \"sk_live_...\";".to_string(),
+            consequence: false,
+        }];
+        let report = report_with(
+            vec![primary],
+            vec!["SEC-NO-RAW-SQL-CONCAT-1", "SEC-NO-HARDCODED-SECRETS-1"],
+        );
+        let (rows, _deps) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        let coverage = build_coverage_rows(&report, &rows, None);
+        let absorbed_rule = coverage
+            .iter()
+            .find(|c| c.rule_id == "SEC-NO-HARDCODED-SECRETS-1")
+            .expect("the absorbed rule must still have a coverage row");
+        assert!(
+            absorbed_rule.findings_count > 0,
+            "a rule that fired and was absorbed by a merge must never read 0/clean — the C6 \
+             shape: {}",
+            absorbed_rule.findings_count
+        );
+        // The surviving primary's own count covers its own site plus its absorbed same-rule
+        // sites (none here), unchanged.
+        let primary_rule = coverage
+            .iter()
+            .find(|c| c.rule_id == "SEC-NO-RAW-SQL-CONCAT-1")
+            .unwrap();
+        assert_eq!(primary_rule.findings_count, 1);
+    }
+
+    /// req_c6: a same-location demotion (an `also_matches` entry with NO site record of its
+    /// own) still counts — the weaker of the two absorption shapes must also never render
+    /// clean.
+    #[test]
+    fn req_c6_a_same_location_demotion_also_never_renders_clean() {
+        let mut primary = finding("SEC-NO-RAW-SQL-CONCAT-1", "src/orders.rs", 10, "high");
+        primary.also_matches = vec!["ARCH-NO-DIRECT-DB-1".to_string()];
+        let report = report_with(
+            vec![primary],
+            vec!["SEC-NO-RAW-SQL-CONCAT-1", "ARCH-NO-DIRECT-DB-1"],
+        );
+        let (rows, _deps) = partition_rows(&report, &HashMap::new(), None, &HashMap::new());
+        let coverage = build_coverage_rows(&report, &rows, None);
+        let demoted = coverage
+            .iter()
+            .find(|c| c.rule_id == "ARCH-NO-DIRECT-DB-1")
+            .unwrap();
+        assert!(
+            demoted.findings_count > 0,
+            "a same-location demotion must still count as the rule having fired"
+        );
     }
 
     /// req_c5: an un-merged row reads `site_count == 1` with an empty `also_locations` —
