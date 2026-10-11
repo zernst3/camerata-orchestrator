@@ -436,3 +436,82 @@ action bucket by rule identity, so the group renders under `held_for_review_find
 So a ceiling test reading only `curated_findings` is structurally blind to precisely the rules whose cap
 is most emphatically authored. W5's own helper scans both sections. Worth deciding whether the older
 tests should be widened the same way.
+
+---
+
+# W7 RESULT — structured merge identity + coverage honesty (2026-10-11)
+
+**The review's prescription was followed literally: structured identity, never keyword-list
+adjustment.** `CREDENTIAL_IDENTIFIER_KEYWORDS` and the six evidence-gate phrases are **byte-identical**
+to before. Confirmed, because the temptation to tune them is what produced the last two cycles.
+
+## What changed, by mechanism
+
+**C4 — the veto that could not veto.** `objects_conflict` now consults **detector captures first**:
+two findings whose `Finding::captures` are both non-empty and disjoint are a structured
+different-things proof. The positive signal (`shared_captured_object`) already exempted a pair, so
+captures are now the identity signal in **both** directions. Prose survives only as a fallback, and
+there it is **container-blind**: a shared parent token (`public` beside `public.orders`) is no longer
+identity evidence, so two tables in one schema conflict again.
+
+**B9 — fixed as a class, not a blacklist.** `dotted_run_is_identifier` requires an alphabetic segment
+of 3+ chars, so `e.g` / `i.e` / `U.S` / version strings stop registering as objects while
+`public.orders` and `module.spec.ts` still do. The finding was "`e.g` is an object"; the defect was
+"the extractor reads English."
+
+**C5 — SOLVED and verified by a test written before the fix, by a different agent.**
+Representation chosen: `also_locations` reaching the exporters verbatim, plus a `site_count` field on
+every row. Rejected the pluralised headline because that is presentation and belongs to Pass 2/3,
+while the other two are lossless structured data any consumer can use. Reaches `findings.json`, the
+workbook ("Sites" + "Also found at"), and the PDF's **data** (template untouched per Pass 3).
+`req_i1_c5_an_absorbed_row_must_be_observable_in_some_artifact` is **un-ignored and green**; it was run
+red first, reproducing W6's documented `0 of 2 absorptions observable`.
+
+**`primary_rank` was NOT kind-aware** — confirmed. A deterministic `ConventionObserved` row could
+outrank an AI-tier `Defect` and absorb it. That is W3's data model and W7's merge interacting to
+*delete a real violation into a compliment*. Fixed at three layers plus `kind_actionability_rank` as
+`primary_rank`'s first key.
+
+**C2 — the sites-vs-rows gate.** `apply_sites_vs_rows_check` runs pre-seal, reconciling the structural
+`deviating_sites` numerator against sites actually represented. A shortfall becomes **one held
+needs-review row stating both numbers**, ledger-accounted as its own addition stage, idempotent.
+**Never a refused export**, per Fable's instruction.
+
+**C6 / G1 / G3 — coverage honesty.** The Coverage sheet counts primaries **plus** absorbed sites, and a
+rule with zero site records still counts its `also_matches` demotions, so a fired rule can never render
+clean. Non-osv tool failures now emit **one concise client-facing line per tool** (never the internal
+diagnostics, and that is tested) through the existing `failed_passes` channel the PDF already renders —
+so the honesty reaches the client with **no template change**. The ESLint failure would now be visible
+to a client; before, a whole tool tier could fail silently.
+
+**B7 / B8.** `same_construct` falls back to the blank-line stanza for fully brace-free content, so
+`.env` / `.sql` / `.toml` / `.yaml` stop being a blind spot; brace-bearing files keep old semantics
+exactly. Clustering now joins on **any member** rather than only the group seed, fixing the
+non-transitivity that blocked 13 of 32 eligible pairs.
+
+## [ ] W7-Q1 — `rules_not_run` and the PDF template
+W7's answer: **an omission, but correctly left alone.** The template renders `failed_passes` and
+`whats_healthy` but never references `rules_not_run`. Given Pass 3's "the PDF is the summary; leave it
+alone", no template change was made. **Proposal for Zach**, consistent with PDF-as-summary — one
+Methodology line, a count rather than a table:
+`#if d.rules_not_run.len() > 0 [N selected rule(s) did not run this scan; each is named with its reason in the data export.]`
+The data already reaches the report JSON and now the workbook.
+
+## [ ] W7-Q2 — the C1 traceability collision needs an owner
+The mis-named `req_c1_*` accounting tests live partly in `scan_ledger.rs`, which was not W7's to touch.
+They must be renamed to the conservation requirement they actually serve. Until then C1 reads as
+covered while having no tests, and the accounting tests are untraceable to their real requirement.
+
+## RESOLVED WITHOUT A RULING — the flaky credential tests
+Three `resolve_*` tests in `crates/llm/src/credentials.rs` mutated the process-global
+`CAMERATA_GITHUB_TOKEN` while the harness ran them in parallel threads. Each passed in isolation; one
+failed intermittently under `--workspace`, and W7 hit it twice in three runs.
+
+Fixed with a mutex plus an `EnvVarGuard` restoring the prior value in `Drop`, so a failing assertion
+cannot unwind and leave the variable set for the next test. Verified over 12 consecutive runs.
+
+**Flagged explicitly because it edits existing tests and is neither exception (a) nor (b).** Every
+assertion and expected value is byte-identical; only the env mutation is serialized. The reason it was
+worth doing at all: this entire effort now rests on build gates, and a gate is worthless if a green run
+cannot be trusted. An intermittent failure in unrelated code teaches everyone to re-run until green,
+which is exactly how a real regression gets waved through.
