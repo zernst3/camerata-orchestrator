@@ -139,6 +139,12 @@ const REGISTRY: &[(&str, Coverage)] = &[
     // whose severity bound is most emphatically authored. Fixed in place under test-discipline
     // exception (a) — the widened tests keep their own `req_e2` ids, so this entry records the
     // ruling rather than claiming a separate test prefix.
+    // W5-Q3, ruled 2026-10-11: "yes these should match." The ~20 per-stack mirrors of the
+    // universal architectural spine inherit the spine rule's `deviation_ceiling = "high"`,
+    // because severity must describe the PROBLEM rather than which rule happened to fire.
+    // Asserted per-mirror (never by folder) with an attribution control, so a blanket
+    // assignment fails the gate.
+    ("W5-Q3", Required(&["req_w5_q3"])),
     ("W5-Q4", Required(&["req_e2", "req_w8"])),
     // G3's tests carry W7's `req_g1`/`req_g1_g2` ids (the coverage-honesty group); the
     // conciseness half Zach specified is asserted directly — exactly ONE line per affected

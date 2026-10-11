@@ -4699,6 +4699,118 @@ mod tests {
         }
     }
 
+    /// req_w5_q3: every per-stack MIRROR of the universal architectural spine carries the same
+    /// `deviation_ceiling = "high"` the spine rule carries. Zach, 2026-10-11: *"yes these
+    /// should match."*
+    ///
+    /// The defect this closes: a Java repo with broken layering capped at `medium` under
+    /// `JAVA-SPRING-LAYERED-ARCHITECTURE-1` while a repo on an unmirrored stack reached `high`
+    /// under `ARCH-STRICT-LAYERING-1`. Identical defect, different severity, decided purely by
+    /// which rule happened to fire. Severity must describe the problem, not the corpus filing.
+    ///
+    /// The mapping is asserted per-mirror, never as a count or a folder pattern, because the
+    /// ruling's own constraint is that a per-stack rule which does not correspond to one of the
+    /// seven spine rules gets NOTHING. Four spine rules have mirrors in the shipped corpus; two
+    /// (`ARCH-FETCH-THEN-AUTHORIZE-1`, `RUST-DOMAIN-6`) have none that is unambiguous, and
+    /// `ARCH-REPO-RETURNS-DOMAIN-1`'s only mirror is on the owner's classification hold list —
+    /// all three are recorded in W8's report rather than guessed at here.
+    ///
+    /// FAILS BEFORE THE FIX: every lookup below returned `None` on `d94c463`; only the seven
+    /// spine rules declared a `deviation_ceiling`.
+    #[tokio::test]
+    async fn req_w5_q3_every_per_stack_mirror_inherits_its_spine_rules_deviation_ceiling() {
+        let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
+        if !path.exists() {
+            return;
+        }
+        let set = load_corpus(path).await.expect("corpus loads");
+        let ceiling = |id: &str| -> Option<String> {
+            set.iter()
+                .find(|r| r.id.0 == id)
+                .unwrap_or_else(|| panic!("{id} must exist in the corpus"))
+                .deviation_ceiling
+                .clone()
+        };
+
+        // (spine rule, its per-stack mirrors). Both sides are asserted, so this also fails if
+        // a spine rule ever LOSES its ceiling and the mirrors silently out-rank their origin.
+        const SPINE_AND_MIRRORS: [(&str, &[&str]); 4] = [
+            (
+                "ARCH-STRICT-LAYERING-1",
+                &[
+                    "JAVA-SPRING-LAYERED-ARCHITECTURE-1",
+                    "JAVA-SPRING-THIN-CONTROLLERS-1",
+                    "JAVASCRIPT-EXPRESS-THIN-CONTROLLERS-1",
+                    "JAVASCRIPT-NEST-THIN-CONTROLLERS-DELEGATE-1",
+                    "CSHARP-ASPNETCORE-THIN-CONTROLLERS-1",
+                    "RUST-AXUM-HANDLERS-THIN-DELEGATE-1",
+                ],
+            ),
+            (
+                "ARCH-SERVICE-DI-1",
+                &[
+                    "JAVA-SPRING-CONSTRUCTOR-INJECTION-1",
+                    "JAVASCRIPT-NEST-MODULES-PROVIDERS-DI-1",
+                    "RUST-AXUM-STATE-SHARED-DEPS-1",
+                ],
+            ),
+            (
+                "ARCH-EXPLICIT-TX-1",
+                &[
+                    "JAVA-SPRING-TRANSACTIONAL-SERVICE-LAYER-1",
+                    "RUST-DOMAIN-7",
+                    "RUST-SEAORM-INTRA-AGGREGATE-TX-1",
+                ],
+            ),
+            (
+                "ARCH-STRUCTURED-ERRORS-1",
+                &[
+                    "PYTHON-FLASK-ERROR-HANDLERS-1",
+                    "JAVASCRIPT-EXPRESS-CENTRAL-ERROR-HANDLER-1",
+                    "GO-WEB-STRUCTURED-ERROR-RESPONSES-1",
+                    "RUST-AXUM-TYPED-ERROR-RESPONSE-1",
+                ],
+            ),
+        ];
+        for (spine, mirrors) in SPINE_AND_MIRRORS {
+            assert_eq!(
+                ceiling(spine).as_deref(),
+                Some("high"),
+                "{spine} is the spine rule the mirrors below inherit from; without its own \
+                 ceiling the inheritance has no origin"
+            );
+            for mirror in mirrors {
+                assert_eq!(
+                    ceiling(mirror).as_deref(),
+                    Some("high"),
+                    "{mirror} mirrors {spine}; W5-Q3 says the identical defect may not cap \
+                     lower just because a per-stack rule fired instead of the general one"
+                );
+            }
+        }
+
+        // CONTROL (attribution): a per-stack rule in the SAME folders as several mirrors, that
+        // does NOT re-litigate any of the seven spine rules, must carry NO ceiling. Without
+        // this the test would also pass if someone blanket-assigned `high` to every framework
+        // rule, which is precisely what the ruling's own constraint forbids.
+        for id in [
+            // Spring, but about config binding and N+1 fetching, not layering/DI/tx/errors.
+            "JAVA-SPRING-CONFIGURATION-PROPERTIES-1",
+            "JAVA-SPRING-NO-NPLUS1-FETCH-JOIN-1",
+            // Axum, but about timeouts and middleware placement.
+            "RUST-AXUM-TIMEOUT-LIMITS-1",
+            // Express, but about security headers.
+            "JAVASCRIPT-EXPRESS-SECURITY-HEADERS-1",
+        ] {
+            assert_eq!(
+                ceiling(id),
+                None,
+                "{id} does not re-litigate any of the seven spine rules, so W5-Q3 gives it \
+                 nothing; a ceiling here means the mirrors were blanket-assigned by folder"
+            );
+        }
+    }
+
     /// HARD CONSTRAINT check (W8's mirror of
     /// `req_a5_7_no_held_rule_carries_an_inferred_deviation_ceiling`): a rule on the owner's
     /// 58-rule classification hold list may carry a `min_severity` ONLY when that floor was
