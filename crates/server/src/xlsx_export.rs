@@ -84,7 +84,8 @@ use crate::report_export::{
     bucket_title, category_for, category_for_finding, citation_for_finding, clamp_deviation_severity,
     classify, clamp_to_rule_max_severity, client_headline_and_detail, disposition_label, effective_bucket,
     effort_hours_bounds, finding_key, hedge_confidence, is_hedged, normalize_severity,
-    provenance_tier_rank, resolve_citation, resolve_effort, resolve_fix, sanitize_report_findings,
+    provenance_tier_rank, raise_to_rule_min_severity, resolve_citation, resolve_effort, resolve_fix,
+    sanitize_report_findings,
     title_for_finding, Disposition, DispositionWire, ReportOptions,
 };
 
@@ -325,8 +326,15 @@ fn partition_rows(
         // artifacts can never disagree with the PDF on a capped rule (see
         // `clamp_to_rule_max_severity`'s doc comment; `report_export::build_report_json` applies
         // the SAME clamp to the SAME vocabulary over the SAME corpus).
-        let severity =
-            clamp_to_rule_max_severity(normalize_severity(&f.severity), &f.rule_id, corpus);
+        // W8 (W5-Q2, "Floor, it's the minimum rating"): the rule's own `min_severity` FLOOR —
+        // applied here too, and FIRST, so the xlsx/findings.json artifacts can never disagree
+        // with the PDF on a floored rule. Exactly the relative position
+        // `report_export::build_report_json`'s partition uses: floor first, every ceiling
+        // after. See `raise_to_rule_min_severity`'s doc comment for the kind/location
+        // preconditions (the location one is why this is safe here even though this partition
+        // does not apply the C4-R1 unlocated downgrade).
+        let severity = raise_to_rule_min_severity(normalize_severity(&f.severity), f, corpus);
+        let severity = clamp_to_rule_max_severity(severity, &f.rule_id, corpus);
         // A5.2: the deviation ceiling (default medium, per-rule authored escape hatch) —
         // the SAME clamp `report_export::build_report_json` applies at its partition, so the
         // xlsx/findings.json artifacts can never disagree with the PDF on a deviation's
