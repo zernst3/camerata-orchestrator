@@ -5,6 +5,10 @@ domain = "api-layer"
 layer = "universal"
 enforcement = "architectural"
 kind = "default_with_exceptions"
+# A5.2 forward-drift escape hatch: a half-converted error envelope means every future endpoint
+# re-decides its error shape and every consumer must handle both, so the cost of the
+# inconsistency is paid again by each new feature on both sides of the contract.
+deviation_ceiling = "high"
 default = true
 qualifies = "Deterministically checkable, but no off-the-shelf linter rule enforces it: it requires a custom CI gate — a contract test that hits representative failure paths and validates each error body against the project's envelope schema (a top-level error object with a stable code, a human message, and optional details), optionally paired with a project-configured static check that handlers throw typed errors and route through the single error-rendering middleware rather than writing ad hoc bodies. No generic linter knows the project's envelope shape. Conformance holds when such a gate runs in CI and a handler that returns a bare string or an empty body fails it; it fails when error shapes vary per endpoint with no shared renderer."
 verification = "grounded"
