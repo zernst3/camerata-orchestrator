@@ -947,3 +947,296 @@ direct grep confirming all ten files carried zero `deviation_ceiling` lines at b
   now false and would mislead the next agent) and this section was added. No source file outside
   `crates/rules/` was touched; `A5.7` stays `Exempt` in the traceability registry because the `kind`
   hold is genuinely still in force.
+
+---
+
+# W10 RESULT — the mirror sweep is complete across the whole corpus (2026-10-11)
+
+Zach, 2026-10-11: *"Extend it. Consider this directive, get all the rules consistent in this sense,
+you have the green light for ALL instances of this."*
+
+W8 matched 16 mirrors, W9 added 10 under a narrow five-rule authorization. W10 swept all 417 rules
+**by decided axis, never by name or folder**, and found **three** further genuine mirrors. Total
+authored ceilings: **36** (7 spine + 16 W8 + 10 W9 + 3 W10). Six of the seven spine concepts now
+have a matched mirror set; the seventh has no mirror in the corpus to match.
+
+| spine rule | mirrors added by W10 | held? | live? |
+|---|---|---|---|
+| `ARCH-STRICT-LAYERING-1` | `JAVASCRIPT-ANGULAR-TYPED-HTTPCLIENT-1` | no | yes |
+| `ARCH-STRUCTURED-ERRORS-1` | `GO-GRPC-STATUS-CODES-CORRECT-1` | no | **no — `kind = "defect"`** |
+| `ARCH-REPO-RETURNS-DOMAIN-1` | `RUST-SEAORM-RAW-SQL-ESCAPE-1` | **yes** | yes |
+
+## The method, and why it matters more than the result
+
+Each spine rule's decided axis was stated in one sentence from its own `[decision]` block and option
+set, then the corpus was swept for rules deciding **that same axis in a stack-specific vocabulary** —
+by phrase sweeps over option directives (`service locator`, `composition root`, `transaction`,
+`error envelope`, `machine-readable`, `persistence representation`, `row type`, `per-resource`,
+`ownership check`, `crate boundary`, `anyhow`) plus a full read of all 417 rule titles, kinds and
+option labels with their `violates` flags. The decisive signal, as predicted: **a true mirror names,
+as its own violating option, the very option the spine rule rejects.**
+
+### Per spine rule
+
+**1. `ARCH-STRICT-LAYERING-1`** — *axis: whether business logic and data-access calls are confined to
+designated layers, or may happen anywhere.* Mirrors: the 11 already matched, plus
+`JAVASCRIPT-ANGULAR-TYPED-HTTPCLIENT-1`. The corpus asserts that last equivalence **itself**: the
+rule's own `why` says "The pattern parallels the Express backend rule: route handlers delegate to a
+service layer; Angular components delegate to a service layer", and
+`JAVASCRIPT-EXPRESS-THIN-CONTROLLERS-1` is already a matched mirror. Its rejected option (components
+inject `HttpClient` and handle request, response and error inline) is the spine's "DB access can
+happen from any layer regardless of role" with the presentation layer doing its own data access.
+
+Ruled out: `JAVASCRIPT-ANGULAR-SMART-PRESENTATIONAL-PATTERN-1` (decides responsibility distribution
+*among* components; both options keep a service layer); `JAVA-PACKAGE-BY-FEATURE-1` and
+`GO-PACKAGE-BOUNDARIES-CLEAR-1` (namespace and import-graph axes — the latter mirrors
+`ARCH-NO-CROSS-BOUNDARY-IMPORTS-1`, which carries no ceiling); `RUST-HEADLESS-CORE-1` (separates the
+*renderer*, `default = false`, authors no position); `ARCH-REPO-PER-AGGREGATE-1` (granularity of the
+abstraction, and universal, not per-stack); `JAVASCRIPT-NEXT-DUAL-API-1` (runtime axis);
+`CSHARP-ASPNETCORE-MINIMAL-API-VS-CONTROLLERS-1` (W9's ruling, preserved).
+
+`ARCH-HANDLER-NO-DB-1` and `ARCH-NO-CROSS-BOUNDARY-IMPORTS-1` deserve their own line: the spine rule
+names them explicitly as "two narrower, mechanically-precise checks that each enforce one facet of
+it". They are **universal siblings, not per-stack mirrors**, so they fall outside the directive as
+worded — but they are the closest thing to a counter-example in the corpus, and if Zach reads
+"all instances" as including them, `ARCH-HANDLER-NO-DB-1` is one word (it is `kind = "defect"`, so
+the ceiling would be inert).
+
+**2. `ARCH-SERVICE-DI-1`** — *axis: how a class obtains its dependencies — an abstraction injected at
+a composition root, a concrete it builds itself, or a global locator it resolves from.* **No new
+mirrors.** The five matched are complete.
+
+Ruled out: `RUST-DIOXUS-4` (the strongest near-miss — "provided at or near the app root" vs. "global
+statics" reads exactly like the spine rule, but the thing provided is cross-tree UI *state* and every
+rationale is re-render scope, not abstraction-vs-concrete or test substitution);
+`JAVA-SMALL-INTERFACES-1` (interface granularity by cohesion, and its own `why` explicitly disclaims
+the DI rationale — "not mockability"); `CSHARP-ASPNETCORE-OPTIONS-PATTERN-1` (all three options inject
+*something*; the axis is typed-POCO vs. string-keyed config); `CSHARP-EFCORE-DBCONTEXT-SCOPED-1`
+(DI *lifetime*, same reasoning W9 applied to `PYTHON-FASTAPI-DI-SESSION-1`);
+`GO-NO-GOROUTINE-GLOBALS-1` (thread-safety of globals); `GO-ACCEPT-INTERFACES-RETURN-STRUCTS-1`
+(signature convention); the test-double rules (`RUST-TESTING-5`,
+`GO-TESTING-MOCK-AT-INTERFACE-BOUNDARY-1`) — test-scoped.
+
+**3. `ARCH-EXPLICIT-TX-1`** — *axis: who owns the transaction lifecycle for a multi-write unit of work
+and how the handle reaches the data-access code.* **No new mirrors.** The six matched are complete; a
+`grep` for `transaction` across all 417 rules returns nothing else on this axis
+(`SQL-PRIVILEGED-WRITE-AUDIT-1` and `ARCH-WEBHOOK-EVENT-DEDUP-1` both merely *require* a transaction
+for a different purpose).
+
+**4. `ARCH-STRUCTURED-ERRORS-1`** — *axis: does every error response carry a stable machine-readable
+discriminator the client can branch on, in one consistent shape across endpoints.* Mirrors: the four
+already matched, plus `GO-GRPC-STATUS-CODES-CORRECT-1`. gRPC fixes the envelope at the protocol level
+(status + message — which is the spine rule's own legitimate "status code only, no body" option), so
+the **code is** the error contract there. Both of its violating options are spine-rejected positions:
+"all errors are returned as INTERNAL, the error message contains the full detail" is the rejected
+"plain string error responses ... clients are expected to pattern-match on the human-readable
+wording", and "status codes are assigned inconsistently across handlers" is the rejected
+"each endpoint defines its own custom error response shape". Its `why` restates the spine rule's
+rationale almost verbatim: clients rely on the code for retry and recovery, never on the wording.
+`GO-WEB-STRUCTURED-ERROR-RESPONSES-1` already covers this stack's HTTP transport; this is the same
+commitment on its RPC transport.
+
+Ruled out: `ARCH-NO-LEAKY-ERROR-DETAILS-1` — **its own title rules it out**, "regardless of the
+envelope shape"; `JAVA-EXCEPTION-HANDLING-1`, `CSHARP-NO-SWALLOWED-EXCEPTIONS-1`,
+`PYTHON-NO-BARE-EXCEPT-1`, `ARCH-OBSERVABILITY-SILENT-FAILURE-1`, `GO-ERRORS-MUST-BE-CHECKED-1`,
+`GO-ERROR-WRAPPING-WITH-FMT-W-1` (all internal catch/propagate, never what the client receives);
+`CSHARP-ASPNETCORE-MIDDLEWARE-ORDERING-1` and `CSHARP-ASPNETCORE-MODEL-VALIDATION-1` (W9's rulings,
+preserved). **W9-Q3 stands unchanged**: Java, C# and Ruby still have no rule governing an API error
+body's shape, so there is nothing to author a ceiling on.
+
+**5. `ARCH-REPO-RETURNS-DOMAIN-1`** — *axis: what type crosses the repository boundary — a domain type
+produced by a mapping step inside the repository, or the persistence library's row/entity type.*
+Mirror: `RUST-SEAORM-RAW-SQL-ESCAPE-1`, closing **W9-Q2**. Its title names the seam ("... at the
+repository boundary"), its adopted directive states the spine commitment verbatim ("only typed domain
+types cross the trait boundary"), and its rejected option — repository methods "return the framework's
+raw result-set or row types directly through the repository trait surface" — is the spine's own
+rejected "return the persistence library's row or entity type directly, with no translation ... at the
+boundary". Zach verified this mapping himself before directing it.
+
+Ruled out, and this one is load-bearing: `JAVA-SPRING-DTO-BOUNDARY-1`,
+`PYTHON-FASTAPI-PYDANTIC-MODELS-1` and `RUST-ENTITIES-2` all guard the **HTTP/serialization**
+boundary, so they mirror **`ARCH-API-DTOS-1`** — a different spine rule, which carries **no ceiling**.
+That is a principled reason rather than a judgement call: capping them would silently promote a second
+spine concept. `RUST-ENTITIES-2` is the sharpest case (its directive "forces every API response
+through an explicit DTO plus mapper"). Also out: `RUST-MAPPER-1` and `RUST-ENTITIES-13` (crate
+placement), `ARCH-SERVER-CLIENT-PROJECTION-1` / `ARCH-RESPONSE-FIELD-PROJECTION-1` (client boundary),
+`CSHARP-EFCORE-ASNOTRACKING-1` (change tracking).
+
+**6. `ARCH-FETCH-THEN-AUTHORIZE-1`** — *axis: the ORDER of per-resource authorization relative to the
+fetch, and whether the passed check is encoded in a type.* **Still zero mirrors**, and W8-Q2's
+reasoning survives a deliberate re-examination under the broader direction: the five declarative-auth
+rules (`JAVA-SPRING-METHOD-SECURITY-1`, `CSHARP-ASPNETCORE-AUTHORIZE-ATTRIBUTE-1`,
+`JAVASCRIPT-NEST-GUARDS-FOR-AUTH-1`, `PYTHON-FASTAPI-AUTH-DEPENDENCY-1`,
+`PYTHON-FLASK-AUTH-ON-PROTECTED-ROUTES-1`) decide **where authorization is declared**, and their
+adopted option — an annotation, guard or decorator firing *before the method body* — is nearer the
+spine rule's **rejected** `request-only-authz` than its adopted `fetch-then-authorize`. Three of the
+five are about *authentication*, not per-resource authorization, at all.
+
+Two further near-misses, both genuinely closer and both still out: `ARCH-REFUND-AUTHORIZATION-1`
+rejects "a general 'can issue refunds' permission, with no per-charge ownership check", which *is* the
+spine's request-only option — but it is a universal payments-domain `defect` rule, a narrower instance
+rather than a per-stack re-litigation, and its axis also carries the refundable-amount bound.
+`SUPABASE-FUNC-DEFINER-CROSS-TENANT-READ-1` and `SUPABASE-FUNC-PRIVILEGED-NO-AUTHZ-1` are
+IDOR-in-the-database and per-resource by nature — **but W5-Q1 deliberately left them uncapped because
+they are critical-class, so a `high` ceiling would DOWNGRADE them.** Authoring one there would
+contradict a settled ruling and cause real harm. Named here so nobody "completes the set" into that
+trap later.
+
+**7. `RUST-DOMAIN-6`** — *axis: how a crate's public-boundary typed error enums are organized, by
+failure category or by module/aggregate.* **Still zero mirrors.** No other stack's corpus governs
+crate-boundary error-type organization; a sweep for `error enum`, `typed enum`, `exhaustive match`,
+`crate boundary`, `anyhow`, `Box<dyn Error>` returns only `RUST-DOMAIN-4`, `RUST-ENTITIES-12` (pgEnum
+mapping) and `RUST-DIOXUS-7` (unrelated). See W10-Q2 for `RUST-DOMAIN-4`.
+
+## [ ] W10-Q1 — the `kind` disagreements across all 29 spine/mirror pairs
+
+**20 of 29 pairs disagree on `kind`.** Not one `kind` was touched; the 58-rule review stays paused.
+They split cleanly into two classes, and conflating them would be the mistake.
+
+**Class A — 17 pairs, `decision` vs. `default_with_exceptions`. Behaviourally benign, semantically
+real.** Both kinds are non-defect, so both enter the alternatives pass and emit deviation rows; the
+ceiling bites identically on either. What differs is what the rule *claims*: `default_with_exceptions`
+says the spine position is the adopted default with named carve-outs, `decision` says it is one of
+several equally-live options. The pattern is systematic and points one way:
+
+| spine | spine `kind` | mirrors agreeing | mirrors disagreeing |
+|---|---|---|---|
+| `ARCH-STRICT-LAYERING-1` | `default_with_exceptions` | 2 of 12 | 10 (all `decision`) |
+| `ARCH-SERVICE-DI-1` | `default_with_exceptions` | 3 of 5 | 1 `decision`, 1 `defect` |
+| `ARCH-EXPLICIT-TX-1` | `decision` | 2 of 6 | 3 `default_with_exceptions`, 1 `defect` |
+| `ARCH-STRUCTURED-ERRORS-1` | `default_with_exceptions` | 2 of 5 | 2 `decision`, 1 `defect` |
+| `ARCH-REPO-RETURNS-DOMAIN-1` | `default_with_exceptions` | 0 of 1 | 1 `decision` |
+
+My reading: **layering is the one worth a decision.** The universal layer says strict layering is the
+default and a deviation is an exception, while 10 of its 12 per-stack re-litigations say it is an open
+choice. That is the same "severity decided by which rule fired" asymmetry one level up — it decides
+whether the finding is framed to the client as *a deviation from an adopted default* or as *one
+legitimate option among several*. The transaction row is the mirror image and arguably the more
+defensible one: the spine rule is `decision` (four genuine postures) while three stack rules are
+`default_with_exceptions` (at the stack level, "wrap multi-writes" really is the default). The rest I
+read as corpus-authoring drift rather than intent.
+
+**Class B — 3 pairs where the mirror is `defect` and the spine is not. This is the material one.**
+
+| pair | the tension |
+|---|---|
+| `ARCH-EXPLICIT-TX-1` / `RUST-SQLX-TRANSACTIONS-MULTI-WRITE-1` | per-call implicit transactions: a **choosable option** at the universal layer, a **fault** at the stack layer |
+| `ARCH-SERVICE-DI-1` / `JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1` | constructor-parameter injection is `violates = true` here, while the spine rule's *adopted* option is injection at the composition root |
+| `ARCH-STRUCTURED-ERRORS-1` / `GO-GRPC-STATUS-CODES-CORRECT-1` | "status code only, no body" is a legitimate spine option; gRPC's whole contract lives there and the stack rule treats mis-assignment as a defect |
+
+The brief named the first. **My reading on it: correct, and for the reason suggested — the axes
+genuinely differ.** `ARCH-EXPLICIT-TX-1` decides *where the boundary is owned* (service vs. ambient vs.
+annotation vs. per-call), and "per-call short transactions" is a coherent posture for a codebase with
+no cross-aggregate units of work. `RUST-SQLX-TRANSACTIONS-MULTI-WRITE-1` fires only once a code path
+*already performs multiple writes*, and at that point atomicity is not a posture, it is correctness —
+its own `why` names partial state with dangling references and no rollback path. A project may
+legitimately choose per-call transactions; it may not choose a half-applied multi-write. Same words,
+different predicate.
+
+**The third is correct for the same shape of reason** (choosing the wrong code from a fixed vocabulary
+is a mapping error, not an envelope posture), **but the second is the one I would flag as a genuine
+coherence bug.** `JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1` marks *constructor-parameter
+injection* as `violates = true`, which is not merely a stricter reading of the spine rule — it is
+`ARCH-SERVICE-DI-1`'s **adopted** option declared a violation, on the grounds that Angular now prefers
+`inject()`. A framework-ergonomics preference has been encoded with the same flag the corpus uses for
+architectural faults. Nothing about it is dangerous today (the rule is `defect`, so it emits no
+deviation rows), but if it is ever reclassified it will report a project following the universal spine
+rule as violating the stack rule.
+
+## [ ] W10-Q2 — `RUST-DOMAIN-4` is the spine rule's PARENT, and that is the one asymmetry left
+
+`RUST-DOMAIN-6`'s own `why` says it "assumes `rust-domain-4-errors-via-thiserror`'s default ... and
+addresses the narrower, separate question of how the variants within that enum are organized — it is
+not an alternative to rust-domain-4". So `RUST-DOMAIN-4` is upstream of a spine rule, not a mirror of
+one. Both can fire on the same code — "the crate returns `anyhow::Error` at its public boundary" is a
+bad option under `RUST-DOMAIN-4` *and* a named boundary failure under `RUST-DOMAIN-6` — and today that
+caps at `medium` under the parent and `high` under the child.
+
+**Not authored, deliberately.** A ceiling on `RUST-DOMAIN-4` would *extend the spine set from seven to
+eight*, which is a different decision from "mirrors match their spine", and W8 and W9 both treated
+same-stack siblings as out of scope. **One word settles it if Zach wants it**, exactly as it did for
+the other six. Pinned as a near-miss control in `req_w5_q3_*` so the ruling cannot drift silently.
+
+## [ ] W10-Q3 — `RUST-DOMAIN-6`'s `violates` flags are INVERTED, and it is a spine rule
+
+Found while reading spine/mirror pairs. **Not fixed — out of W10's scope (ceilings only), and it
+changes behaviour.** In `rust-domain-6-shared-repository-error.toml`, `violates = true` sits on the two
+options the rule's own `why` calls the legitimate organizational choices:
+
+- `errors-are-category-scoped-one-shared-enum-per-f` → `violates = true`
+- `each-function-or-aggregate-defines-its-own-error` → `violates = true`
+
+and is **absent** from all three the same `why` calls "boundary failures ... the options to avoid":
+the single grab-bag enum, re-exporting the driver's error type, and `Box<dyn Error>`/`anyhow`. The
+`remediation` blocks confirm the polarity is flipped wholesale: options 1 and 2 tell you to *move to*
+them, while options 3-5 tell you to *consolidate into* them. Compare `ARCH-STRICT-LAYERING-1`, where
+`violates = true` sits on "No layer separation" and nowhere else.
+
+Consequence: a Rust crate that organizes its boundary errors correctly is reported as violating
+`RUST-DOMAIN-6`, and one returning `anyhow::Error` from every public function is not — **and the
+ceiling authored on this rule is bounding the wrong rows.** The same class exists at least twice more
+(`RUST-DOMAIN-3` flags "Newtype validated strings", its own adopted position; `ARCH-CURSOR-PAGINATION-1`
+flags "paginate by opaque cursor"), so this is worth a dedicated polarity audit rather than three
+one-off fixes. **Highest-value finding in W10 after the sweep itself.**
+
+## [ ] W10-Q4 — three per-stack COVERAGE gaps, same class as W9-Q3
+
+No rule exists to author a ceiling on, so these are rule-coverage gaps, not ceiling gaps:
+
+- **`ARCH-EXPLICIT-TX-1`** has mirrors for Java/Spring, C#/EFCore, Go/GORM and three Rust libraries.
+  **Python, Ruby and JS/TS have no transaction rule at all** — a Django or Rails or Express repo with
+  a non-atomic multi-write is caught only by the universal rule, if at all.
+- **`ARCH-SERVICE-DI-1`** has no Python, Go or Ruby mirror.
+- **`ARCH-STRUCTURED-ERRORS-1`** has no Java, C# or Ruby mirror (W9-Q3, unchanged).
+
+New rules remain banned in this effort, so all three are recorded rather than filled. Zach's call.
+
+## The two guard tests, neither weakened
+
+- **`req_a5_7_no_held_rule_carries_an_inferred_deviation_ceiling`.** The allow-list was renamed
+  `AUTHORIZED_BY_OWNER_DIRECTION` and became `[(&str, &str); 6]` — **each id now carries the spine
+  rule it mirrors**, so the pairing is reviewable without opening six files. The new W10 direction is
+  quoted verbatim in the doc comment, alongside an explicit statement that it was read as *"every held
+  rule that is a genuine per-stack mirror"* and **deliberately not** loosened into a predicate such as
+  "any held rule may carry a ceiling" — which the broader wording would have superficially licensed
+  and which would have made the test unable to fail. All three anti-rot assertions are preserved
+  (allow-listed id must be held, must carry a ceiling, must carry `high`), and a **fourth was added**:
+  the spine rule each exemption claims to inherit from must itself carry the ceiling, so an exemption
+  cannot survive as a bare carve-out wearing a justification. The other **52** held rules are still
+  blocked.
+- **`req_w5_q3_every_per_stack_mirror_inherits_its_spine_rules_deviation_ceiling`.** Gained a fifth
+  spine entry (`ARCH-REPO-RETURNS-DOMAIN-1`) and the three new pairs. Still asserts **both** sides of
+  every pair. The four same-folder controls are untouched, and **three more were added** — one in each
+  folder W10 touched (`JAVASCRIPT-ANGULAR-ONPUSH-CHANGE-DETECTION-1`,
+  `GO-GRPC-PROTO-GENERATED-IMMUTABLE-1`, `RUST-ENTITIES-4`) — because without them a
+  blanket-by-folder assignment would have started passing again in exactly the folders this round
+  widened. A **second control block** now pins all 15 near-misses with the reason each was ruled out,
+  so reversing one of W8's, W9's or W10's judgement calls requires deliberately editing that list.
+
+Test-discipline **exception (a)** for both: a deliberate data change they must adapt to. No other test
+was edited. Neither was weakened; both gained assertions.
+
+## Verification
+
+Both guards run RED against the real corpus first, by `git stash push -- crates/rules/principles/` at
+`b814dd2` and re-running:
+
+- `req_w5_q3_*`: `assertion left == right failed: JAVASCRIPT-ANGULAR-TYPED-HTTPCLIENT-1 mirrors
+  ARCH-STRICT-LAYERING-1 ... left: None, right: Some("high")`
+- `req_a5_7_*`: `... each allow-listed held rule must carry its spine rule's own deviation_ceiling =
+  "high" ... ["RUST-SEAORM-RAW-SQL-ESCAPE-1 (mirror of ARCH-REPO-RETURNS-DOMAIN-1) = None"]` — the
+  fourth anti-rot assertion catching the missing data.
+
+Then green with the data restored. **The guard was proved to still BLOCK** by temporarily authoring a
+`deviation_ceiling = "high"` on `SUPABASE-STORAGE-SIGNED-URL-1` (held, unnamed, not a mirror of
+anything — W9 used `SPIRIT-ROBUSTNESS-1`, so a different rule was chosen on purpose) and observing
+`req_a5_7_*` red naming it, then reverting from a byte-identical copy (sha256 confirmed,
+`git diff` on that file empty).
+
+`rustfmt --edition 2024 --check` on `crates/rules/src/lib.rs` reports the **same 15 pre-existing
+diffs, all at or below line 4670**, before and after — W10's additions carry zero new formatter debt.
+No formatter was ever run in its mutating form.
+
+## Touched outside `crates/rules/**`
+- This document only. No source file outside `crates/rules/` was touched; `A5.7` stays `Exempt` in the
+  traceability registry because the `kind` hold is genuinely still in force.
