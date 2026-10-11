@@ -4712,11 +4712,23 @@ mod tests {
     /// ruling's own constraint is that a per-stack rule which does not correspond to one of the
     /// seven spine rules gets NOTHING. Four spine rules have mirrors in the shipped corpus; two
     /// (`ARCH-FETCH-THEN-AUTHORIZE-1`, `RUST-DOMAIN-6`) have none that is unambiguous, and
-    /// `ARCH-REPO-RETURNS-DOMAIN-1`'s only mirror is on the owner's classification hold list —
-    /// all three are recorded in W8's report rather than guessed at here.
+    /// `ARCH-REPO-RETURNS-DOMAIN-1`'s only mirror is on the owner's classification hold list and
+    /// was NOT covered by his W9 direction — all three are recorded in the plan's report rather
+    /// than guessed at here.
+    ///
+    /// W9, 2026-10-11 completed the mirror set across three spine concepts that were still
+    /// internally inconsistent, on the owner's direction that *"they all must be consistent, so
+    /// make it so"*: the five `ARCH-STRICT-LAYERING-1` mirrors W8-Q3 had identified but left
+    /// unauthored because they sit on the 58-rule classification hold (see
+    /// `req_a5_7_no_held_rule_carries_an_inferred_deviation_ceiling`, which now carries that
+    /// authorization as an explicit allow-list), plus the `ARCH-SERVICE-DI-1` and
+    /// `ARCH-EXPLICIT-TX-1` mirrors W8 simply never matched. Before it, a Python or Ruby or Go
+    /// repo with broken layering still capped at `medium` while Java, C#, JS and Rust reached
+    /// `high` — the exact asymmetry this requirement exists to remove, merely relocated.
     ///
     /// FAILS BEFORE THE FIX: every lookup below returned `None` on `d94c463`; only the seven
-    /// spine rules declared a `deviation_ceiling`.
+    /// spine rules declared a `deviation_ceiling`. The ten pairs W9 added returned `None` on
+    /// `2d80e2f`, proved by reverting `crates/rules/principles/` to that commit and re-running.
     #[tokio::test]
     async fn req_w5_q3_every_per_stack_mirror_inherits_its_spine_rules_deviation_ceiling() {
         let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
@@ -4744,6 +4756,14 @@ mod tests {
                     "JAVASCRIPT-NEST-THIN-CONTROLLERS-DELEGATE-1",
                     "CSHARP-ASPNETCORE-THIN-CONTROLLERS-1",
                     "RUST-AXUM-HANDLERS-THIN-DELEGATE-1",
+                    // W9: the five W8-Q3 mirrors. All five are on the 58-rule classification
+                    // hold, and the owner's W9 direction authorizes the ceiling (not the `kind`)
+                    // specifically so this set stops being internally inconsistent.
+                    "GO-HANDLER-SERVICE-REPOSITORY-1",
+                    "PYTHON-DJANGO-FAT-MODEL-SERVICE-1",
+                    "PYTHON-FLASK-SERVICE-LAYER-1",
+                    "PYTHON-SERVICE-LAYER-1",
+                    "RUBY-RAILS-SKINNY-CONTROLLERS-1",
                 ],
             ),
             (
@@ -4752,6 +4772,11 @@ mod tests {
                     "JAVA-SPRING-CONSTRUCTOR-INJECTION-1",
                     "JAVASCRIPT-NEST-MODULES-PROVIDERS-DI-1",
                     "RUST-AXUM-STATE-SHARED-DEPS-1",
+                    // W9: neither is held — W8 simply never matched them. Both re-litigate how
+                    // a class obtains its dependencies, and both reject an option the spine
+                    // rule rejects (the service locator; manual `new` past the DI container).
+                    "CSHARP-DEPENDENCY-INJECTION-CONSTRUCTOR-1",
+                    "JAVASCRIPT-ANGULAR-DI-CONSTRUCTOR-OR-INJECT-1",
                 ],
             ),
             (
@@ -4760,6 +4785,12 @@ mod tests {
                     "JAVA-SPRING-TRANSACTIONAL-SERVICE-LAYER-1",
                     "RUST-DOMAIN-7",
                     "RUST-SEAORM-INTRA-AGGREGATE-TX-1",
+                    // W9: none is held — W8 simply never matched them. Each re-litigates the
+                    // same transactional-ownership contract, and each names as its violating
+                    // option the spine rule's own rejected per-call short transaction.
+                    "CSHARP-EFCORE-EXPLICIT-TRANSACTIONS-1",
+                    "GO-GORM-TRANSACTIONS-MULTI-WRITE-1",
+                    "RUST-SQLX-TRANSACTIONS-MULTI-WRITE-1",
                 ],
             ),
             (
@@ -4960,12 +4991,42 @@ mod tests {
         );
     }
 
-    /// HARD CONSTRAINT check: no rule in the `NEEDS OWNER DECISION (58 rules)` hold list
-    /// (`docs/plans/2026-10-09_rule-kind-classification.md`) carries a `deviation_ceiling`.
-    /// Authoring one presumes the kind classification the owner explicitly paused ("pause the
-    /// rule review for me for when I can sit down and look at these"). Transcribing an explicit
-    /// prose `max_severity` on a held rule IS permitted — that is his own authored intent — so
-    /// this gate deliberately checks only the deviation field.
+    /// HARD CONSTRAINT check: a rule in the `NEEDS OWNER DECISION (58 rules)` hold list
+    /// (`docs/plans/2026-10-09_rule-kind-classification.md`) may carry a `deviation_ceiling`
+    /// ONLY where the owner named it himself. INFERRING one is still banned, because inferring
+    /// presumes the kind classification he explicitly paused ("pause the rule review for me for
+    /// when I can sit down and look at these"). Transcribing an explicit prose `max_severity` on
+    /// a held rule IS permitted — that is his own authored intent — so this gate deliberately
+    /// checks only the deviation field.
+    ///
+    /// W9, 2026-10-11 — the allow-list below exists because of this direction, verbatim:
+    ///
+    /// > "Lift the hold and ensure all are consistent here, regardless of any holds or locks in
+    /// > place, you can make individual changes based on what I direct. In this case, I direct
+    /// > that they all must be consistent, so make it so."
+    ///
+    /// Read NARROWLY and on purpose. It authorizes the `deviation_ceiling` on the five textbook
+    /// `ARCH-STRICT-LAYERING-1` mirrors that W8-Q3 identified and then refused to author, and
+    /// nothing else. **The hold on `kind` is NOT lifted**: no held rule's `kind` was touched, and
+    /// `A5.7` therefore stays `Exempt` in the traceability registry.
+    ///
+    /// Why a ceiling on a held rule is safe where a `kind` edit would not be: all five ship as
+    /// `kind = "decision"`, so they ALREADY emit deviation rows today, and a ceiling only BOUNDS
+    /// rows that already exist. It presumes nothing about the paused classification. If the owner
+    /// later reclassifies one as `defect`, the ceiling becomes dead config — a `defect`-kind rule
+    /// never enters the alternatives pass ([`Rule::is_defect_kind`]) so it emits no deviations —
+    /// rather than wrong behaviour.
+    ///
+    /// The guard stays an explicit ALLOW-LIST rather than a loosened predicate, so it keeps doing
+    /// the one job it was built for: a ceiling cannot reach any OTHER held rule without a later
+    /// agent deliberately editing this list, which is a reviewable act rather than a silent one.
+    /// Three anti-rot assertions back it up — every allow-listed id must really be on the hold
+    /// list, must really carry a ceiling, and must carry the spine rule's own `high` — so the
+    /// list cannot decay into a blanket exemption at an arbitrary severity.
+    ///
+    /// FAILS BEFORE THE W9 CHANGE in the direction that matters: adding a `deviation_ceiling` to
+    /// any held rule outside `AUTHORIZED_BY_W9_DIRECTION` still reds this test. Proved by
+    /// temporarily authoring one on `SPIRIT-ROBUSTNESS-1` and observing the failure.
     #[tokio::test]
     async fn req_a5_7_no_held_rule_carries_an_inferred_deviation_ceiling() {
         let path = std::path::Path::new(DEFAULT_CORPUS_PATH);
@@ -5033,16 +5094,72 @@ mod tests {
             "TESTING-AS-DOCUMENTATION-1",
             "UI-QUERY-LIBRARY-1",
         ];
+        // The ONLY held rules the owner's W9 direction authorizes a `deviation_ceiling` on: the
+        // five `ARCH-STRICT-LAYERING-1` mirrors W8-Q3 named and then left unauthored. Each is an
+        // unambiguous re-litigation of that spine rule by its own title and directive, and each
+        // records the spine rule AND this authorization in a comment above its own
+        // `deviation_ceiling` line, so the TOML explains itself without this test.
+        //
+        // Adding an id here is the ONLY way to let a ceiling onto a held rule. Do not add one
+        // without a direction from the owner naming that rule, quoted at the point of the edit.
+        const AUTHORIZED_BY_W9_DIRECTION: [&str; 5] = [
+            "GO-HANDLER-SERVICE-REPOSITORY-1",
+            "PYTHON-DJANGO-FAT-MODEL-SERVICE-1",
+            "PYTHON-FLASK-SERVICE-LAYER-1",
+            "PYTHON-SERVICE-LAYER-1",
+            "RUBY-RAILS-SKINNY-CONTROLLERS-1",
+        ];
         let set = load_corpus(path).await.expect("corpus loads");
+        // The gate proper: every held rule OTHER than the five he named must still carry nothing.
         let violations: Vec<String> = set
             .iter()
-            .filter(|r| HELD.contains(&r.id.0.as_str()) && r.deviation_ceiling.is_some())
+            .filter(|r| {
+                HELD.contains(&r.id.0.as_str())
+                    && r.deviation_ceiling.is_some()
+                    && !AUTHORIZED_BY_W9_DIRECTION.contains(&r.id.0.as_str())
+            })
             .map(|r| r.id.0.clone())
             .collect();
         assert!(
             violations.is_empty(),
             "a rule on the owner's 58-rule classification hold list must not carry an inferred \
-             `deviation_ceiling`: {violations:?}"
+             `deviation_ceiling` — only the ones his W9 direction named may carry one, and these \
+             were not among them: {violations:?}"
+        );
+        // ANTI-ROT 1: the allow-list may only name rules that are actually on the hold list, or
+        // it is quietly exempting rules the hold never covered in the first place.
+        let not_held: Vec<&str> = AUTHORIZED_BY_W9_DIRECTION
+            .iter()
+            .copied()
+            .filter(|id| !HELD.contains(id))
+            .collect();
+        assert!(
+            not_held.is_empty(),
+            "the W9 allow-list may only name rules that are actually on the hold list: \
+             {not_held:?}"
+        );
+        // ANTI-ROT 2 + 3: every allow-listed id must still carry a ceiling, and specifically the
+        // spine rule's own `high`. Without this the list could decay into a standing exemption at
+        // any severity for five rules nobody is still authoring.
+        let wrong: Vec<String> = AUTHORIZED_BY_W9_DIRECTION
+            .iter()
+            .copied()
+            .filter_map(|id| {
+                let ceiling = set
+                    .iter()
+                    .find(|r| r.id.0 == id)
+                    .unwrap_or_else(|| panic!("{id} must exist in the corpus"))
+                    .deviation_ceiling
+                    .clone();
+                (ceiling.as_deref() != Some("high")).then(|| format!("{id} = {ceiling:?}"))
+            })
+            .collect();
+        assert!(
+            wrong.is_empty(),
+            "the W9 direction was that the per-stack mirror set be CONSISTENT, so each \
+             allow-listed held rule must carry `ARCH-STRICT-LAYERING-1`'s own \
+             `deviation_ceiling = \"high\"`; remove the id from the allow-list rather than \
+             leaving a blanket exemption behind: {wrong:?}"
         );
     }
 }

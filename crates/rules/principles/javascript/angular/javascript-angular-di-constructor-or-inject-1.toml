@@ -5,6 +5,21 @@ domain = "javascript:angular"
 layer = "framework"
 enforcement = "structured"
 kind = "defect"
+# A5.2 forward-drift escape hatch, INHERITED from ARCH-SERVICE-DI-1 per Zach's W5-Q3 ruling
+# ("yes these should match"): severity must describe the PROBLEM, not which rule happened to
+# fire. Without this, a repo on this stack caps the identical architectural defect at medium
+# while an unmirrored stack reaches high under the general rule. This rule mirrors
+# ARCH-SERVICE-DI-1 because it re-litigates the same question (how a class obtains its
+# dependencies), and its forbidden pattern — manual `new` instantiation that bypasses the DI
+# container entirely — is the spine rule's own rejected "services construct their own concrete
+# repositories" option in Angular form.
+#
+# NOTE, and it is why this line is cheap rather than risky: this rule is `kind = "defect"`, so
+# it never enters the alternatives pass (`Rule::is_defect_kind`) and therefore emits NO
+# deviation rows today, which makes the ceiling inert as shipped. It is authored anyway so the
+# per-stack mirror set is internally consistent per the owner's W9 direction, and so the bound
+# is already correct if this rule is ever reclassified to a deviation-producing kind.
+deviation_ceiling = "high"
 default = true
 verification = "grounded"
 
